@@ -9,8 +9,9 @@ const IUnknown = com.IUnknown;
 pub const DXGI_FORMAT = enum(u32) {
     UNKNOWN = 0,
     R32G32B32A32_FLOAT = 2,
-    R32_UINT = 42,
     R8G8B8A8_UNORM = 28,
+    R32_UINT = 42,
+    R8_UNORM = 61,
     B8G8R8A8_UNORM = 87,
     _,
 };
