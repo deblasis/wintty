@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 const Config = @import("Config.zig");
 const HelpStrings = @import("HelpStrings.zig");
+const HlslStep = @import("HlslStep.zig");
 const MetallibStep = @import("MetallibStep.zig");
 const UnicodeTables = @import("UnicodeTables.zig");
 const GhosttyFrameData = @import("GhosttyFrameData.zig");
@@ -14,6 +15,7 @@ config: *const Config,
 
 options: *std.Build.Step.Options,
 help_strings: HelpStrings,
+hlsl: ?*HlslStep,
 metallib: ?*MetallibStep,
 unicode_tables: UnicodeTables,
 framedata: GhosttyFrameData,
@@ -40,6 +42,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
 
         // Setup by retarget
         .options = undefined,
+        .hlsl = undefined,
         .metallib = undefined,
     };
     try result.initTarget(b, cfg.target);
@@ -87,6 +90,25 @@ fn initTarget(
         .name = "Ghostty",
         .target = target,
         .sources = &.{b.path("src/renderer/shaders/shaders.metal")},
+    });
+
+    // Update our HLSL shaders
+    self.hlsl = .create(b, .{
+        .target = target,
+        .shaders = &.{
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/cell.hlsl"),
+                .profile = "vs_5_0",
+                .entry_point = "VSMain",
+                .output_name = "cell_vs",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/cell.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "PSMain",
+                .output_name = "cell_ps",
+            },
+        },
     });
 
     // Change our config
@@ -446,6 +468,18 @@ pub fn add(
         step.root_module.addAnonymousImport("ghostty_metallib", .{
             .root_source_file = metallib.output,
         });
+    }
+
+    if (step.rootModuleTarget().os.tag == .windows) {
+        if (self.hlsl) |hlsl| {
+            step.step.dependOn(hlsl.step);
+            step.root_module.addAnonymousImport("ghostty_hlsl_cell_vs", .{
+                .root_source_file = hlsl.outputs.get("cell_vs").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_cell_ps", .{
+                .root_source_file = hlsl.outputs.get("cell_ps").?,
+            });
+        }
     }
 
     // Other dependencies, mostly pure Zig
