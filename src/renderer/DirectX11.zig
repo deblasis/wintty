@@ -170,25 +170,49 @@ pub fn presentLastTarget(self: *DirectX11) !void {
 }
 
 pub inline fn bufferOptions(self: DirectX11) bufferpkg.Options {
-    _ = self;
-    return .{};
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    return .{
+        .device = dev.device,
+        .context = dev.context,
+        .usage = .dynamic,
+        .bind_flags = d3d11.D3D11_BIND_VERTEX_BUFFER,
+    };
 }
 
+/// Instance buffers use the same options as vertex buffers -- both are
+/// bound to the IA stage as vertex data via IASetVertexBuffers.
 pub const instanceBufferOptions = bufferOptions;
-pub const uniformBufferOptions = bufferOptions;
 pub const fgBufferOptions = bufferOptions;
 pub const bgBufferOptions = bufferOptions;
 pub const imageBufferOptions = bufferOptions;
 pub const bgImageBufferOptions = bufferOptions;
 
+/// Uniform buffers are bound as constant buffers (HLSL cbuffer).
+/// DX11 requires constant buffer sizes to be a multiple of 16 bytes.
+pub inline fn uniformBufferOptions(self: DirectX11) bufferpkg.Options {
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    return .{
+        .device = dev.device,
+        .context = dev.context,
+        .usage = .dynamic,
+        .bind_flags = d3d11.D3D11_BIND_CONSTANT_BUFFER,
+    };
+}
+
 pub inline fn textureOptions(self: DirectX11) Texture.Options {
-    _ = self;
-    return .{};
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    return .{
+        .device = dev.device,
+        .context = dev.context,
+        .format = .B8G8R8A8_UNORM,
+    };
 }
 
 pub inline fn samplerOptions(self: DirectX11) Sampler.Options {
-    _ = self;
-    return .{};
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    return .{
+        .device = dev.device,
+    };
 }
 
 pub inline fn imageTextureOptions(
@@ -196,19 +220,44 @@ pub inline fn imageTextureOptions(
     format: ImageTextureFormat,
     srgb: bool,
 ) Texture.Options {
-    _ = self;
-    _ = format;
-    _ = srgb;
-    return .{};
+    _ = srgb; // DX11 sRGB handled via SRV format, not implemented yet
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    const dxgi_format: dxgi.DXGI_FORMAT = switch (format) {
+        .gray => .R8_UNORM,
+        .rgba => .R8G8B8A8_UNORM,
+        .bgra => .B8G8R8A8_UNORM,
+    };
+    return .{
+        .device = dev.device,
+        .context = dev.context,
+        .format = dxgi_format,
+    };
 }
 
 pub fn initAtlasTexture(
     self: *const DirectX11,
     atlas: *const font.Atlas,
 ) Texture.Error!Texture {
-    _ = self;
-    _ = atlas;
-    @panic("TODO: DX11 initAtlasTexture");
+    const dev = self.device orelse @panic("DX11 device not initialized");
+
+    // Map font atlas format to DXGI format.
+    // Metal uses r8unorm / bgra8unorm_srgb; we use the DX11 equivalents.
+    const dxgi_format: dxgi.DXGI_FORMAT = switch (atlas.format) {
+        .grayscale => .R8_UNORM,
+        .bgra => .B8G8R8A8_UNORM,
+        else => std.debug.panic("unsupported atlas format for DX11 texture: {}", .{atlas.format}),
+    };
+
+    return try Texture.init(
+        .{
+            .device = dev.device,
+            .context = dev.context,
+            .format = dxgi_format,
+        },
+        @intCast(atlas.size),
+        @intCast(atlas.size),
+        atlas.data,
+    );
 }
 
 test {
