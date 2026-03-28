@@ -5,6 +5,7 @@ const Sampler = @import("Sampler.zig");
 const Target = @import("Target.zig");
 const Texture = @import("Texture.zig");
 const bufferpkg = @import("buffer.zig");
+const RawBuffer = bufferpkg.RawBuffer;
 
 /// Options for beginning a render pass.
 pub const Options = struct {
@@ -22,8 +23,8 @@ pub const Options = struct {
 /// A single step in a render pass.
 pub const Step = struct {
     pipeline: Pipeline,
-    uniforms: ?bufferpkg.Buffer(u8) = null,
-    buffers: []const ?bufferpkg.Buffer(u8) = &.{},
+    uniforms: ?RawBuffer = null,
+    buffers: []const ?RawBuffer = &.{},
     textures: []const ?Texture = &.{},
     samplers: []const ?Sampler = &.{},
     draw: Draw,
