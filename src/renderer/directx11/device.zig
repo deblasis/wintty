@@ -8,12 +8,18 @@ const HRESULT = com.HRESULT;
 const GUID = com.GUID;
 const IUnknown = com.IUnknown;
 const IDXGISwapChain = dxgi.IDXGISwapChain;
+const HWND = dxgi.HWND;
+
+pub const Surface = union(enum) {
+    hwnd: HWND,
+    swap_chain_panel: *dxgi.ISwapChainPanelNative,
+};
 
 pub const Device = struct {
     device: *d3d11.ID3D11Device,
     context: *d3d11.ID3D11DeviceContext,
     swap_chain: *dxgi.IDXGISwapChain1,
-    panel_native: *dxgi.ISwapChainPanelNative,
+    panel_native: ?*dxgi.ISwapChainPanelNative,
     rtv: ?*d3d11.ID3D11RenderTargetView,
     width: u32,
     height: u32,
@@ -29,11 +35,8 @@ pub const Device = struct {
         RenderTargetViewFailed,
     };
 
-    pub fn init(panel_native_ptr: *anyopaque, width: u32, height: u32) InitError!Device {
-        log.info("init called: panel=0x{x}, size={}x{}", .{ @intFromPtr(panel_native_ptr), width, height });
-
-        // Cast the opaque pointer to ISwapChainPanelNative.
-        const panel_native: *dxgi.ISwapChainPanelNative = @ptrCast(@alignCast(panel_native_ptr));
+    pub fn init(surface: Surface, width: u32, height: u32) InitError!Device {
+        log.info("init called: size={}x{}", .{ width, height });
 
         // Create D3D11 device and immediate context.
         var device: ?*d3d11.ID3D11Device = null;
@@ -92,8 +95,13 @@ pub const Device = struct {
         const factory: *dxgi.IDXGIFactory2 = @ptrCast(@alignCast(factory_opt.?));
         defer _ = factory.Release();
 
-        // Create swap chain for composition.
-        const desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
+        // Create swap chain. Descriptor differs by surface type:
+        // - HWND: opaque window, DXGI_ALPHA_MODE_UNSPECIFIED
+        // - Composition: premultiplied alpha for XAML integration
+        var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
+        var panel_native: ?*dxgi.ISwapChainPanelNative = null;
+
+        var desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
             .Width = width,
             .Height = height,
             .Format = .B8G8R8A8_UNORM,
@@ -102,32 +110,51 @@ pub const Device = struct {
             .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
             .BufferCount = 2,
             .Scaling = .STRETCH,
-            .SwapEffect = .FLIP_SEQUENTIAL,
-            .AlphaMode = .PREMULTIPLIED,
+            .SwapEffect = .FLIP_DISCARD,
+            .AlphaMode = .UNSPECIFIED,
             .Flags = 0,
         };
 
-        var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
-        hr = factory.CreateSwapChainForComposition(
-            @ptrCast(dev),
-            &desc,
-            null,
-            &swap_chain,
-        );
+        switch (surface) {
+            .hwnd => |hwnd| {
+                hr = factory.CreateSwapChainForHwnd(
+                    @ptrCast(dev),
+                    hwnd,
+                    &desc,
+                    null,
+                    null,
+                    &swap_chain,
+                );
+            },
+            .swap_chain_panel => |panel| {
+                panel_native = panel;
+                desc.AlphaMode = .PREMULTIPLIED;
+                hr = factory.CreateSwapChainForComposition(
+                    @ptrCast(dev),
+                    &desc,
+                    null,
+                    &swap_chain,
+                );
+            },
+        }
         if (com.FAILED(hr) or swap_chain == null) {
-            log.err("CreateSwapChainForComposition failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+            log.err("swap chain creation failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
             return InitError.SwapChainCreationFailed;
         }
         const sc = swap_chain.?;
         errdefer _ = sc.Release();
 
-        // Attach the swap chain to the SwapChainPanel.
-        hr = panel_native.SetSwapChain(@ptrCast(sc));
-        if (com.FAILED(hr)) {
-            log.err("SetSwapChain failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
-            return InitError.SetSwapChainFailed;
+        // For composition surfaces, attach swap chain to the panel.
+        if (panel_native) |panel| {
+            hr = panel.SetSwapChain(@ptrCast(sc));
+            if (com.FAILED(hr)) {
+                log.err("SetSwapChain failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                return InitError.SetSwapChainFailed;
+            }
         }
-        errdefer _ = panel_native.SetSwapChain(null);
+        errdefer if (panel_native) |panel| {
+            _ = panel.SetSwapChain(null);
+        };
 
         // Get the back buffer and create a render target view.
         const rtv = createRenderTargetView(dev, sc) orelse {
@@ -155,8 +182,10 @@ pub const Device = struct {
             self.rtv = null;
         }
 
-        // Detach swap chain from the panel.
-        _ = self.panel_native.SetSwapChain(null);
+        // Detach swap chain from the panel (composition surfaces only).
+        if (self.panel_native) |panel| {
+            _ = panel.SetSwapChain(null);
+        }
 
         // Release in reverse creation order.
         _ = self.swap_chain.Release();
