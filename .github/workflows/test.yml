@@ -113,7 +113,6 @@ jobs:
       - test-lib-vt
       - test-lib-vt-pkgconfig
       - test-macos
-      - test-windows
       - pinact
       - prettier
       - swiftlint
@@ -1403,6 +1402,12 @@ jobs:
 
       - name: Test
         run: zig build -Dapp-runtime=none test
+
+      - name: Build ghostty.dll
+        run: zig build -Dapp-runtime=none -Demit-exe=false
+
+      - name: .NET interop tests
+        run: dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj
 
   test-i18n:
     strategy:
