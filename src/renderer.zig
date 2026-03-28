@@ -40,10 +40,7 @@ pub const Renderer = switch (build_config.renderer) {
     .metal => GenericRenderer(Metal),
     .opengl => GenericRenderer(OpenGL),
     .webgl => WebGL,
-    // DirectX11 does not implement GenericRenderer yet. Use OpenGL as a
-    // placeholder so shared code (Surface, message, etc.) compiles. The
-    // actual DX11 rendering is driven through DirectX11.Device directly.
-    .directx11 => GenericRenderer(OpenGL),
+    .directx11 => GenericRenderer(DirectX11),
 };
 
 /// The health status of a renderer. These must be shared across all
