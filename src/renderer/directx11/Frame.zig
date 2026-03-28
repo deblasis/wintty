@@ -1,5 +1,4 @@
 //! Frame context for DX11 draw commands.
-//! TODO: Implement with ID3D11DeviceContext deferred or immediate context.
 const DirectX11 = @import("../DirectX11.zig");
 const Renderer = @import("../generic.zig").Renderer(DirectX11);
 const Target = @import("Target.zig");
@@ -24,16 +23,29 @@ pub fn begin(
 }
 
 pub inline fn renderPass(
-    self: *const @This(),
+    self: *@This(),
     attachments: []const RenderPass.Options.Attachment,
 ) RenderPass {
-    _ = self;
-    _ = attachments;
-    @panic("TODO: DX11 Frame.renderPass");
+    // Clear the render target using the first attachment's clear color.
+    if (self.renderer.api.device) |*dev| {
+        for (attachments) |att| {
+            if (att.clear_color) |color| {
+                dev.clearRenderTarget(.{
+                    @floatCast(color[0]),
+                    @floatCast(color[1]),
+                    @floatCast(color[2]),
+                    @floatCast(color[3]),
+                });
+                break;
+            }
+        }
+    }
+    return .{};
 }
 
 pub fn complete(self: *@This(), sync: bool) void {
+    // DX11 immediate mode: commands already executed. Present happens in
+    // presentLastTarget(), called by GenericRenderer after frame completion.
     _ = self;
     _ = sync;
-    @panic("TODO: DX11 Frame.complete");
 }
