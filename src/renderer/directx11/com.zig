@@ -62,4 +62,5 @@ pub const Reserved = *const fn () callconv(.winapi) void;
 
 test {
     _ = @import("com_test.zig");
+    _ = @import("gpu_test.zig");
 }
