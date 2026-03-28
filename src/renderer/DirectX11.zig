@@ -9,6 +9,7 @@
 //! already in place from prior work in the directx11/ subdirectory.
 pub const DirectX11 = @This();
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -17,6 +18,8 @@ const font = @import("../font/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const Renderer = rendererpkg.GenericRenderer(DirectX11);
 const shadertoy = @import("shadertoy.zig");
+const apprt = @import("../apprt.zig");
+const log = std.log.scoped(.directx11);
 
 // --- GraphicsAPI contract: types ---
 
@@ -62,7 +65,8 @@ pub const dxgi = @import("directx11/dxgi.zig");
 
 // --- Sub-module re-exports: renderer components from 025 ---
 
-pub const Device = @import("directx11/device.zig").Device;
+const devicepkg = @import("directx11/device.zig");
+pub const Device = devicepkg.Device;
 pub const CellPipeline = @import("directx11/cell_pipeline.zig").Pipeline;
 pub const Constants = @import("directx11/cell_pipeline.zig").Constants;
 pub const CellGrid = @import("directx11/cell_grid.zig").CellGrid;
@@ -73,17 +77,45 @@ pub const CellInstance = @import("directx11/cell_grid.zig").CellInstance;
 /// Runtime blending mode, set by GenericRenderer when config changes.
 blending: configpkg.Config.AlphaBlending = .native,
 
+/// The DX11 device managing the swap chain and render target.
+device: ?Device = null,
+
 // --- GraphicsAPI contract: functions ---
 
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX11 {
     _ = alloc;
-    _ = opts;
-    @panic("TODO: DX11 init");
+
+    const device = device: {
+        if (comptime builtin.os.tag != .windows) {
+            break :device null;
+        } else {
+            switch (opts.rt_surface.platform) {
+                .windows => |w| {
+                    const surface: devicepkg.Surface = if (w.hwnd) |hwnd|
+                        .{ .hwnd = hwnd }
+                    else
+                        @panic("HWND surface requires a non-null hwnd");
+
+                    const size = opts.size.screen;
+                    break :device Device.init(surface, size.width, size.height) catch |err| {
+                        log.err("DX11 device init failed: {}", .{err});
+                        return error.DeviceInitFailed;
+                    };
+                },
+                else => @panic("unsupported platform for DX11"),
+            }
+        }
+    };
+
+    return .{
+        .device = device,
+    };
 }
 
 pub fn deinit(self: *DirectX11) void {
-    _ = self;
-    @panic("TODO: DX11 deinit");
+    if (self.device) |*dev| {
+        dev.deinit();
+    }
 }
 
 pub fn drawFrameStart(self: *DirectX11) void {
@@ -108,15 +140,15 @@ pub fn initShaders(
 }
 
 pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
-    _ = self;
-    @panic("TODO: DX11 surfaceSize");
+    if (self.device) |dev| {
+        return .{ .width = dev.width, .height = dev.height };
+    }
+    return .{ .width = 0, .height = 0 };
 }
 
 pub fn initTarget(self: *const DirectX11, width: usize, height: usize) !Target {
     _ = self;
-    _ = width;
-    _ = height;
-    @panic("TODO: DX11 initTarget");
+    return .{ .width = width, .height = height };
 }
 
 pub inline fn beginFrame(
@@ -129,8 +161,12 @@ pub inline fn beginFrame(
 }
 
 pub fn presentLastTarget(self: *DirectX11) !void {
-    _ = self;
-    @panic("TODO: DX11 presentLastTarget");
+    if (self.device) |*dev| {
+        dev.present() catch |err| {
+            log.err("present failed: {}", .{err});
+            return error.PresentFailed;
+        };
+    }
 }
 
 pub inline fn bufferOptions(self: DirectX11) bufferpkg.Options {
