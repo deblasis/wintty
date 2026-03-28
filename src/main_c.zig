@@ -206,6 +206,7 @@ pub const DllMain = if (builtin.os.tag == .windows) struct {
     }
 }.handler else void;
 
+
 test "ghostty_string_s empty string" {
     const testing = std.testing;
     const empty_string = String.empty;

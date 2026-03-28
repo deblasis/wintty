@@ -10,16 +10,11 @@ verify the MSVC C runtime is properly initialized.
 
 ### Build
 
-First build ghostty.dll, then compile the test:
-
 ```
-zig build -Dapp-runtime=none -Demit-exe=false
 zig cc test_dll_init.c -o test_dll_init.exe -target native-native-msvc
 ```
 
 ### Run
-
-From this directory:
 
 ```
 copy ..\..\zig-out\lib\ghostty-internal.dll . && test_dll_init.exe
@@ -29,8 +24,5 @@ Expected output (after the CRT fix):
 
 ```
 ghostty_info: <version string>
+ghostty_init: 0
 ```
-
-The ghostty_info call verifies the DLL loads and the CRT is initialized.
-Before the fix, loading the DLL would crash with "access violation writing
-0x0000000000000024".
