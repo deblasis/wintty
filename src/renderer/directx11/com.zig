@@ -26,7 +26,7 @@ pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 pub const E_FAIL: HRESULT = @bitCast(@as(u32, 0x80004005));
 pub const DXGI_ERROR_DEVICE_REMOVED: HRESULT = @bitCast(@as(u32, 0x887A0005));
 
-/// IUnknown — base COM interface that all COM objects implement.
+/// IUnknown - base COM interface that all COM objects implement.
 pub const IUnknown = extern struct {
     vtable: *const VTable,
 
