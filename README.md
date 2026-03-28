@@ -73,9 +73,11 @@
 > **DX11 renderer infrastructure** (in fork)
 >
 > - [x] COM interface definitions (d3d11, dxgi) with vtable bindings
-> - [x] DX11 device lifecycle, swap chain for XAML composition
+> - [x] DX11 device lifecycle with dual surface support (HWND for standalone/embedding, SwapChainPanel for WinUI host)
 > - [x] Instanced cell grid renderer with pre-compiled HLSL shaders
+> - [x] HLSL build step (HlslStep.zig) mirroring Metal's MetallibStep
 > - [x] Backend enum with `directx11` variant
+> - [x] GraphicsAPI contract stubs for GenericRenderer
 >
 > **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
 >
@@ -89,10 +91,23 @@
 > - [x] `--version` flag working from command line
 > - [x] Interop test suite (7 tests against the real DLL)
 >
+> ### Architecture: Dual Surface Support
+>
+> The DX11 renderer is dual-channel at the library level so that libghostty
+> consumers can pick whichever surface model fits their host:
+> - **HWND** -- `CreateSwapChainForHwnd`, for standalone windows, test harnesses, and third-party embedders
+> - **SwapChainPanel** (composition) -- `CreateSwapChainForComposition`, for WinUI 3 / XAML hosts
+>
+> We are iterating on SwapChainPanel with the information we have today but
+> the choice is not set in stone -- the dual-channel design means we can
+> change our mind later without breaking embedders.
+>
+> The device picks the path based on what the caller provides. No compile-time flags.
+>
 > ### What is next
 >
-> - [ ] Implement GenericRenderer GraphicsAPI contract for DX11
-> - [ ] Windows platform enum and C# scaffold integration
+> - [x] DX11 clear-to-color: wire GenericRenderer contract, first pixels on screen
+> - [ ] Cell rendering: instance buffer, texture atlas, text on screen
 > - [ ] DirectWrite font backend
 > - [ ] ConPTY shell spawning
 > - [ ] Keyboard, mouse, clipboard
