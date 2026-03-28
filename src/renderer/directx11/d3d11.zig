@@ -118,6 +118,84 @@ pub const D3D11_MAPPED_SUBRESOURCE = extern struct {
     DepthPitch: u32,
 };
 
+pub const D3D11_TEXTURE2D_DESC = extern struct {
+    Width: u32,
+    Height: u32,
+    MipLevels: u32,
+    ArraySize: u32,
+    Format: DXGI_FORMAT,
+    SampleDesc: dxgi.DXGI_SAMPLE_DESC,
+    Usage: D3D11_USAGE,
+    BindFlags: D3D11_BIND_FLAG,
+    CPUAccessFlags: D3D11_CPU_ACCESS_FLAG,
+    MiscFlags: u32,
+};
+
+pub const D3D11_SRV_DIMENSION = enum(u32) {
+    UNKNOWN = 0,
+    BUFFER = 1,
+    TEXTURE1D = 2,
+    TEXTURE1DARRAY = 3,
+    TEXTURE2D = 4,
+    TEXTURE2DARRAY = 5,
+    TEXTURE2DMS = 6,
+    TEXTURE2DMSARRAY = 7,
+    TEXTURE3D = 8,
+    TEXTURECUBE = 9,
+    TEXTURECUBEARRAY = 10,
+    BUFFEREX = 11,
+};
+
+/// Describes a shader resource view. We only support the Texture2D dimension.
+/// The full C type has a union of all SRV dimensions at offset 8 -- we model
+/// only Texture2D because that's all the font atlas needs. If other SRV types
+/// are needed later, this struct would need the full union.
+pub const D3D11_SHADER_RESOURCE_VIEW_DESC = extern struct {
+    Format: DXGI_FORMAT,
+    ViewDimension: D3D11_SRV_DIMENSION,
+    // Texture2D union member: { MostDetailedMip: u32, MipLevels: u32 }
+    // followed by padding to fill the 16-byte union.
+    MostDetailedMip: u32,
+    MipLevels: u32,
+    _pad: [2]u32 = .{ 0, 0 },
+};
+
+pub const D3D11_FILTER = enum(u32) {
+    MIN_MAG_MIP_POINT = 0,
+    MIN_MAG_MIP_LINEAR = 0x15,
+    _,
+};
+
+pub const D3D11_TEXTURE_ADDRESS_MODE = enum(u32) {
+    WRAP = 1,
+    MIRROR = 2,
+    CLAMP = 3,
+    BORDER = 4,
+    MIRROR_ONCE = 5,
+};
+
+pub const D3D11_SAMPLER_DESC = extern struct {
+    Filter: D3D11_FILTER,
+    AddressU: D3D11_TEXTURE_ADDRESS_MODE,
+    AddressV: D3D11_TEXTURE_ADDRESS_MODE,
+    AddressW: D3D11_TEXTURE_ADDRESS_MODE,
+    MipLODBias: f32,
+    MaxAnisotropy: u32,
+    ComparisonFunc: u32, // D3D11_COMPARISON_FUNC, not enumerated here
+    BorderColor: [4]f32,
+    MinLOD: f32,
+    MaxLOD: f32,
+};
+
+pub const D3D11_BOX = extern struct {
+    left: u32,
+    top: u32,
+    front: u32,
+    right: u32,
+    bottom: u32,
+    back: u32,
+};
+
 // ID3D11DeviceChild
 pub const ID3D11DeviceChild = extern struct {
     vtable: *const VTable,
@@ -427,10 +505,21 @@ pub const ID3D11Device = extern struct {
         ) callconv(.winapi) HRESULT,
         // slots 4-6
         CreateTexture1D: Reserved,
-        CreateTexture2D: Reserved,
+        // slot 5: CreateTexture2D
+        CreateTexture2D: *const fn (
+            *ID3D11Device,
+            *const D3D11_TEXTURE2D_DESC,
+            ?*const D3D11_SUBRESOURCE_DATA,
+            *?*ID3D11Texture2D,
+        ) callconv(.winapi) HRESULT,
         CreateTexture3D: Reserved,
-        // slot 7
-        CreateShaderResourceView: Reserved,
+        // slot 7: CreateShaderResourceView
+        CreateShaderResourceView: *const fn (
+            *ID3D11Device,
+            *ID3D11Resource,
+            ?*const D3D11_SHADER_RESOURCE_VIEW_DESC,
+            *?*ID3D11ShaderResourceView,
+        ) callconv(.winapi) HRESULT,
         // slot 8
         CreateUnorderedAccessView: Reserved,
         // slot 9: CreateRenderTargetView
@@ -481,8 +570,12 @@ pub const ID3D11Device = extern struct {
         CreateBlendState: Reserved,
         CreateDepthStencilState: Reserved,
         CreateRasterizerState: Reserved,
-        // slot 23
-        CreateSamplerState: Reserved,
+        // slot 23: CreateSamplerState
+        CreateSamplerState: *const fn (
+            *ID3D11Device,
+            *const D3D11_SAMPLER_DESC,
+            *?*ID3D11SamplerState,
+        ) callconv(.winapi) HRESULT,
         // slots 24-26
         CreateQuery: Reserved,
         CreatePredicate: Reserved,
@@ -561,6 +654,32 @@ pub const ID3D11Device = extern struct {
         pixel_shader: *?*ID3D11PixelShader,
     ) HRESULT {
         return self.vtable.CreatePixelShader(self, shader_bytecode, bytecode_length, class_linkage, pixel_shader);
+    }
+
+    pub inline fn CreateTexture2D(
+        self: *ID3D11Device,
+        desc: *const D3D11_TEXTURE2D_DESC,
+        initial_data: ?*const D3D11_SUBRESOURCE_DATA,
+        texture: *?*ID3D11Texture2D,
+    ) HRESULT {
+        return self.vtable.CreateTexture2D(self, desc, initial_data, texture);
+    }
+
+    pub inline fn CreateShaderResourceView(
+        self: *ID3D11Device,
+        resource: *ID3D11Resource,
+        desc: ?*const D3D11_SHADER_RESOURCE_VIEW_DESC,
+        srv: *?*ID3D11ShaderResourceView,
+    ) HRESULT {
+        return self.vtable.CreateShaderResourceView(self, resource, desc, srv);
+    }
+
+    pub inline fn CreateSamplerState(
+        self: *ID3D11Device,
+        desc: *const D3D11_SAMPLER_DESC,
+        sampler: *?*ID3D11SamplerState,
+    ) HRESULT {
+        return self.vtable.CreateSamplerState(self, desc, sampler);
     }
 
     pub inline fn QueryInterface(self: *ID3D11Device, riid: *const GUID, ppvObject: *?*anyopaque) HRESULT {
@@ -796,7 +915,15 @@ pub const ID3D11DeviceContext = extern struct {
         // slot 47: CopyResource
         _reserved47: Reserved,
         // slot 48: UpdateSubresource
-        _reserved48: Reserved,
+        UpdateSubresource: *const fn (
+            *ID3D11DeviceContext,
+            *ID3D11Resource,       // pDstResource
+            u32,                   // DstSubresource
+            ?*const D3D11_BOX,     // pDstBox (null = entire resource)
+            *const anyopaque,      // pSrcData
+            u32,                   // SrcRowPitch
+            u32,                   // SrcDepthPitch
+        ) callconv(.winapi) void,
         // slot 49: CopyStructureCount
         _reserved49: Reserved,
         // slot 50: ClearRenderTargetView
@@ -1012,6 +1139,18 @@ pub const ID3D11DeviceContext = extern struct {
 
     pub inline fn ClearRenderTargetView(self: *ID3D11DeviceContext, rtv: *ID3D11RenderTargetView, color: *const [4]f32) void {
         self.vtable.ClearRenderTargetView(self, rtv, color);
+    }
+
+    pub inline fn UpdateSubresource(
+        self: *ID3D11DeviceContext,
+        resource: *ID3D11Resource,
+        subresource: u32,
+        dst_box: ?*const D3D11_BOX,
+        src_data: *const anyopaque,
+        src_row_pitch: u32,
+        src_depth_pitch: u32,
+    ) void {
+        self.vtable.UpdateSubresource(self, resource, subresource, dst_box, src_data, src_row_pitch, src_depth_pitch);
     }
 
     pub inline fn Release(self: *ID3D11DeviceContext) u32 {
