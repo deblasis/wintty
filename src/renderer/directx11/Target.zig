@@ -13,6 +13,7 @@ width: usize = 0,
 height: usize = 0,
 
 pub fn deinit(self: *@This()) void {
-    _ = self;
-    @panic("TODO: DX11 Target.deinit");
+    // Backbuffer is owned by the swap chain, nothing to release here.
+    self.width = 0;
+    self.height = 0;
 }
