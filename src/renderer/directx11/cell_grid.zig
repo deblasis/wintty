@@ -12,7 +12,7 @@ const d3d11 = @import("d3d11.zig");
 
 const HRESULT = com.HRESULT;
 
-/// Per-cell instance data — must match the HLSL CellInstance and input layout.
+/// Per-cell instance data - must match the HLSL CellInstance and input layout.
 pub const CellInstance = extern struct {
     bg_color: [4]f32,
     fg_color: [4]f32,
