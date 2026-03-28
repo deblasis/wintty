@@ -21,6 +21,99 @@
   </p>
 </p>
 
+> [!IMPORTANT]
+> ## Ghostty for Windows (Soft Fork)
+>
+> <p align="center">🍬🍴</p>
+>
+> This is a soft fork focused on bringing Ghostty to Windows.
+> The `windows` branch is the default and contains all Windows-specific work
+> rebased on top of upstream `main`, which is synced daily.
+>
+> **Status:** Foundation done, working on renderer and app shell
+>
+> The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
+> as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
+> The C# layer handles windowing, input, and platform integration via P/Invoke.
+>
+> ### Building
+>
+> Prerequisites: [Zig](https://ziglang.org/) (version in `build.zig.zon`), [Just](https://github.com/casey/just)
+>
+> ```bash
+> just              # Run tests + build DLL
+> just test         # Run all Zig tests
+> just test-lib-vt  # Fast: test libghostty-vt only
+> just build-dll    # Build libghostty.dll
+> just sync         # Rebase on latest upstream
+> ```
+>
+> See [docs/windows/tooling.md](docs/windows/tooling.md) for why Just and how CI (I should call it DisContinous Integration) works.
+>
+> ### Branching Model
+>
+> - `main` - mirror of upstream `ghostty-org/ghostty`, synced daily, if it's a good day
+> - `windows` (default) - all Windows work rebased on upstream
+> - Feature branches - branch off `windows`, PR back into `windows`
+>
+> ### What is done
+>
+> **Build infrastructure** (17 PRs merged upstream)
+>
+> - [x] `zig build test` passing on Windows (2604 tests, 53 skipped)
+> - [x] All shared dependencies building (FreeType, HarfBuzz, zlib, oniguruma, glslang, etc.)
+> - [x] `zig build test-lib-vt` passing on all platforms
+> - [x] Windows CI running without `continue-on-error`
+> - [x] Backslash path handling in config parsing
+> - [x] CRLF line ending fix for comptime parsing + `.gitattributes` normalization
+> - [x] `ghostty.dll` building on Windows (CRT init fix for MSVC DLL mode)
+> - [x] DLL init regression test and build instructions
+> - [x] Full Windows CI test suite
+>
+> **DX11 renderer infrastructure** (in fork)
+>
+> - [x] COM interface definitions (d3d11, dxgi) with vtable bindings
+> - [x] DX11 device lifecycle, swap chain for XAML composition
+> - [x] Instanced cell grid renderer with pre-compiled HLSL shaders
+> - [x] Backend enum with `directx11` variant
+>
+> **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
+>
+> - [x] DX11 swap chain created from Zig, bound to WinUI 3 SwapChainPanel
+> - [x] Instanced cell grid rendering, bitmap font, animated demo scenes, resize, DPI
+>
+> **App scaffold** (in fork)
+>
+> - [x] C# WinUI 3 project scaffold (`windows/Ghostty/`)
+> - [x] P/Invoke bindings for libghostty C API
+> - [x] `--version` flag working from command line
+> - [x] Interop test suite (7 tests against the real DLL)
+>
+> ### What is next
+>
+> - [ ] Implement GenericRenderer GraphicsAPI contract for DX11
+> - [ ] Windows platform enum and C# scaffold integration
+> - [ ] DirectWrite font backend
+> - [ ] ConPTY shell spawning
+> - [ ] Keyboard, mouse, clipboard
+> - [ ] Per-monitor DPI, dark/light mode theming
+>
+> **Feature parity** (later)
+>
+> - [ ] Multi-window, tabs, splits
+> - [ ] Native settings UI, desktop notifications
+> - [ ] Quick terminal, command palette, global keybinds
+> - [ ] Installer packages (MSI, MSIX, winget), auto-update
+>
+> ### History
+>
+> This fork started as an upstream contribution effort. 17 PRs were merged
+> into ghostty-org/ghostty covering build fixes, CI, and DLL infrastructure.
+> The project continues as a soft fork - upstream doesn't have capacity to
+> maintain Windows-specific changes right now, so here we are.
+> GitHub Actions are disabled for this fork because we are poor and just.
+> I mean, we use `just` for insanity checks.
+
 ## About
 
 Ghostty is a terminal emulator that differentiates itself by being
