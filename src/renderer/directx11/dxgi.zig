@@ -1,3 +1,4 @@
+const std = @import("std");
 const com = @import("com.zig");
 const GUID = com.GUID;
 const HRESULT = com.HRESULT;
@@ -36,6 +37,9 @@ pub const DXGI_ALPHA_MODE = enum(u32) {
 
 pub const DXGI_USAGE = u32;
 pub const DXGI_USAGE_RENDER_TARGET_OUTPUT: DXGI_USAGE = 0x00000020;
+
+/// Win32 HWND is a pointer-sized handle, same underlying type as HANDLE.
+pub const HWND = std.os.windows.HANDLE;
 
 // --- Structs ---
 
@@ -430,7 +434,15 @@ pub const IDXGIFactory2 = extern struct {
         IsCurrent: Reserved,
         // IDXGIFactory2 (slots 14-24)
         IsWindowedStereoEnabled: Reserved,
-        CreateSwapChainForHwnd: Reserved,
+        CreateSwapChainForHwnd: *const fn (
+            self: *IDXGIFactory2,
+            pDevice: *IUnknown,
+            hWnd: HWND,
+            pDesc: *const DXGI_SWAP_CHAIN_DESC1,
+            pFullscreenDesc: ?*const anyopaque,
+            pRestrictToOutput: ?*anyopaque,
+            ppSwapChain: *?*IDXGISwapChain1,
+        ) callconv(.winapi) HRESULT,
         CreateSwapChainForCoreWindow: Reserved,
         GetSharedResourceAdapterLuid: Reserved,
         RegisterStereoStatusWindow: Reserved,
@@ -456,6 +468,18 @@ pub const IDXGIFactory2 = extern struct {
         swap_chain: *?*IDXGISwapChain1,
     ) HRESULT {
         return self.vtable.CreateSwapChainForComposition(self, device, desc, restrict_to_output, swap_chain);
+    }
+
+    pub inline fn CreateSwapChainForHwnd(
+        self: *IDXGIFactory2,
+        device: *IUnknown,
+        hwnd: HWND,
+        desc: *const DXGI_SWAP_CHAIN_DESC1,
+        fullscreen_desc: ?*const anyopaque,
+        restrict_to_output: ?*anyopaque,
+        swap_chain: *?*IDXGISwapChain1,
+    ) HRESULT {
+        return self.vtable.CreateSwapChainForHwnd(self, device, hwnd, desc, fullscreen_desc, restrict_to_output, swap_chain);
     }
 
     pub inline fn Release(self: *IDXGIFactory2) u32 {
