@@ -60,7 +60,7 @@ test "D3D11_MAPPED_SUBRESOURCE size" {
     try std.testing.expectEqual(@sizeOf(d3d11.D3D11_MAPPED_SUBRESOURCE), expected);
 }
 
-// Verify vtable pointer layout — COM objects are a single pointer to a vtable.
+// Verify vtable pointer layout - COM objects are a single pointer to a vtable.
 
 test "IDXGIDevice is a single vtable pointer" {
     try std.testing.expectEqual(@sizeOf(dxgi.IDXGIDevice), @sizeOf(*anyopaque));
