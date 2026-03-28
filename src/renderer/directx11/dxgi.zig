@@ -69,9 +69,7 @@ pub const DXGI_MATRIX_3X2_F = extern struct {
 
 const Reserved = com.Reserved;
 
-// =============================================================================
-// IDXGIObject — 7 methods total (3 IUnknown + 4 own)
-// =============================================================================
+// IDXGIObject
 pub const IDXGIObject = extern struct {
     vtable: *const VTable,
 
@@ -88,9 +86,7 @@ pub const IDXGIObject = extern struct {
     };
 };
 
-// =============================================================================
-// IDXGIDeviceSubObject — 8 methods total (7 IDXGIObject + 1 own)
-// =============================================================================
+// IDXGIDeviceSubObject
 pub const IDXGIDeviceSubObject = extern struct {
     vtable: *const VTable,
 
@@ -109,10 +105,8 @@ pub const IDXGIDeviceSubObject = extern struct {
     };
 };
 
-// =============================================================================
-// IDXGISwapChain — 18 methods total (8 IDXGIDeviceSubObject + 10 own)
+// IDXGISwapChain
 // Slots we call: Present (8), GetBuffer (9)
-// =============================================================================
 pub const IDXGISwapChain = extern struct {
     vtable: *const VTable,
 
@@ -154,9 +148,7 @@ pub const IDXGISwapChain = extern struct {
     }
 };
 
-// =============================================================================
-// IDXGISwapChain1 — 29 methods total (18 IDXGISwapChain + 11 own)
-// =============================================================================
+// IDXGISwapChain1
 pub const IDXGISwapChain1 = extern struct {
     vtable: *const VTable,
 
@@ -214,10 +206,8 @@ pub const IDXGISwapChain1 = extern struct {
     }
 };
 
-// =============================================================================
-// IDXGISwapChain2 — 36 methods total (29 IDXGISwapChain1 + 7 own)
+// IDXGISwapChain2
 // Slot we call: SetMatrixTransform (34)
-// =============================================================================
 pub const IDXGISwapChain2 = extern struct {
     vtable: *const VTable,
 
@@ -290,10 +280,8 @@ pub const IDXGISwapChain2 = extern struct {
     }
 };
 
-// =============================================================================
-// IDXGIDevice — 11 methods total (7 IDXGIObject + 4 own)
+// IDXGIDevice
 // Slot we call: GetAdapter (slot 7)
-// =============================================================================
 pub const IDXGIDevice = extern struct {
     vtable: *const VTable,
 
@@ -330,10 +318,8 @@ pub const IDXGIDevice = extern struct {
     }
 };
 
-// =============================================================================
-// IDXGIAdapter — 10 methods total (7 IDXGIObject + 3 own)
+// IDXGIAdapter
 // Slot we call: GetParent (slot 6, inherited from IDXGIObject)
-// =============================================================================
 pub const IDXGIAdapter = extern struct {
     vtable: *const VTable,
 
@@ -362,9 +348,7 @@ pub const IDXGIAdapter = extern struct {
     }
 };
 
-// =============================================================================
-// IDXGIFactory — 12 methods total (7 IDXGIObject + 5 own)
-// =============================================================================
+// IDXGIFactory
 pub const IDXGIFactory = extern struct {
     vtable: *const VTable,
 
@@ -387,9 +371,7 @@ pub const IDXGIFactory = extern struct {
     };
 };
 
-// =============================================================================
-// IDXGIFactory1 — 14 methods total (12 IDXGIFactory + 2 own)
-// =============================================================================
+// IDXGIFactory1
 pub const IDXGIFactory1 = extern struct {
     vtable: *const VTable,
 
@@ -415,10 +397,8 @@ pub const IDXGIFactory1 = extern struct {
     };
 };
 
-// =============================================================================
-// IDXGIFactory2 — 25 methods total (14 IDXGIFactory1 + 11 own)
+// IDXGIFactory2
 // Slot we call: CreateSwapChainForComposition (slot 24)
-// =============================================================================
 pub const IDXGIFactory2 = extern struct {
     vtable: *const VTable,
 
@@ -483,10 +463,8 @@ pub const IDXGIFactory2 = extern struct {
     }
 };
 
-// =============================================================================
-// ISwapChainPanelNative — 4 methods total (3 IUnknown + 1 own)
+// ISwapChainPanelNative
 // Slot we call: SetSwapChain (slot 3)
-// =============================================================================
 pub const ISwapChainPanelNative = extern struct {
     vtable: *const VTable,
 
