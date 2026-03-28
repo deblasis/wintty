@@ -3,6 +3,10 @@ const std = @import("std");
 /// Options for initializing a buffer.
 pub const Options = struct {};
 
+/// Opaque stand-in for an ID3D11Buffer COM pointer.
+/// TODO: Replace with *d3d11.ID3D11Buffer when the full pipeline is implemented.
+pub const RawBuffer = struct {};
+
 /// DX11 GPU data buffer for a set of equal-typed elements.
 /// TODO: Implement with ID3D11Buffer (DYNAMIC usage, Map/Unmap for CPU writes).
 pub fn Buffer(comptime T: type) type {
@@ -11,6 +15,11 @@ pub fn Buffer(comptime T: type) type {
 
         opts: Options,
         len: usize,
+
+        /// Type-erased handle for passing to RenderPass.Step. Mirrors the
+        /// .buffer field on Metal (objc.Object) and OpenGL (gl.Buffer) buffers
+        /// so GenericRenderer can pass uniform/vertex buffers without knowing T.
+        buffer: RawBuffer = .{},
 
         pub fn init(opts: Options, len: usize) !Self {
             _ = opts;
