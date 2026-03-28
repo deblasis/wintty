@@ -118,9 +118,7 @@ pub const D3D11_MAPPED_SUBRESOURCE = extern struct {
     DepthPitch: u32,
 };
 
-// =============================================================================
-// ID3D11DeviceChild — 7 methods total (3 IUnknown + 4 own)
-// =============================================================================
+// ID3D11DeviceChild
 pub const ID3D11DeviceChild = extern struct {
     vtable: *const VTable,
 
@@ -137,9 +135,7 @@ pub const ID3D11DeviceChild = extern struct {
     };
 };
 
-// =============================================================================
-// ID3D11Resource — 10 methods total (7 ID3D11DeviceChild + 3 own)
-// =============================================================================
+// ID3D11Resource
 pub const ID3D11Resource = extern struct {
     vtable: *const VTable,
 
@@ -160,9 +156,7 @@ pub const ID3D11Resource = extern struct {
     };
 };
 
-// =============================================================================
-// ID3D11View — 8 methods total (7 ID3D11DeviceChild + 1 own)
-// =============================================================================
+// ID3D11View
 pub const ID3D11View = extern struct {
     vtable: *const VTable,
 
@@ -181,10 +175,7 @@ pub const ID3D11View = extern struct {
     };
 };
 
-// =============================================================================
-// ID3D11RenderTargetView — 9 methods total (8 ID3D11View + 1 own)
-// Inherits: IUnknown(3) + ID3D11DeviceChild(4) + ID3D11View(1) + own(1)
-// =============================================================================
+// ID3D11RenderTargetView
 pub const ID3D11RenderTargetView = extern struct {
     vtable: *const VTable,
 
@@ -216,10 +207,7 @@ pub const ID3D11RenderTargetView = extern struct {
     }
 };
 
-// =============================================================================
-// ID3D11Texture2D — 11 methods total
-// Inherits: IUnknown(3) + ID3D11DeviceChild(4) + ID3D11Resource(3) + own(1)
-// =============================================================================
+// ID3D11Texture2D
 pub const ID3D11Texture2D = extern struct {
     vtable: *const VTable,
 
@@ -253,10 +241,7 @@ pub const ID3D11Texture2D = extern struct {
     }
 };
 
-// =============================================================================
-// ID3D11Buffer — 11 methods total
-// Inherits: IUnknown(3) + ID3D11DeviceChild(4) + ID3D11Resource(3) + own(1)
-// =============================================================================
+// ID3D11Buffer
 pub const ID3D11Buffer = extern struct {
     vtable: *const VTable,
 
@@ -283,10 +268,7 @@ pub const ID3D11Buffer = extern struct {
     }
 };
 
-// =============================================================================
-// Simple ID3D11DeviceChild derivatives — 7 methods each (no own methods)
 // ID3D11VertexShader, ID3D11PixelShader, ID3D11InputLayout, ID3D11SamplerState
-// =============================================================================
 pub const ID3D11VertexShader = extern struct {
     vtable: *const VTable,
 
@@ -383,8 +365,7 @@ pub const ID3D11ShaderResourceView = extern struct {
     }
 };
 
-// =============================================================================
-// ID3D11Device — 43 methods total (3 IUnknown + 40 own)
+// ID3D11Device
 // Vtable order from d3d11.h:
 //   0: QueryInterface
 //   1: AddRef
@@ -429,7 +410,6 @@ pub const ID3D11ShaderResourceView = extern struct {
 //  40: GetImmediateContext
 //  41: SetExceptionMode
 //  42: GetExceptionMode
-// =============================================================================
 pub const ID3D11Device = extern struct {
     vtable: *const VTable,
 
@@ -592,13 +572,11 @@ pub const ID3D11Device = extern struct {
     }
 };
 
-/// Opaque type — we never call methods on this, only pass null.
+/// Opaque type - we never call methods on this, only pass null.
 pub const ID3D11ClassLinkage = opaque {};
 
-// =============================================================================
-// ID3D11DeviceContext — 115 methods total
-// Inherits: IUnknown(3) + ID3D11DeviceChild(4) = 7 inherited, 108 own
-// Vtable order from d3d11.h (verified against d3d11_c.h):
+// ID3D11DeviceContext
+// Vtable order from d3d11.h:
 //   0: QueryInterface          56: GetResourceMinLOD
 //   1: AddRef                  57: ResolveSubresource
 //   2: Release                 58: ExecuteCommandList
@@ -658,7 +636,6 @@ pub const ID3D11ClassLinkage = opaque {};
 //                             112: GetType
 //                             113: GetContextFlags
 //                             114: FinishCommandList
-// =============================================================================
 pub const ID3D11DeviceContext = extern struct {
     vtable: *const VTable,
 
@@ -1042,12 +1019,10 @@ pub const ID3D11DeviceContext = extern struct {
     }
 };
 
-/// Opaque type — we never call methods on class instances directly.
+/// Opaque type - we never call methods on class instances directly.
 pub const ID3D11ClassInstance = opaque {};
 
-// =============================================================================
-// D3D11CreateDevice — imported from d3d11.dll
-// =============================================================================
+// D3D11CreateDevice - imported from d3d11.dll
 pub const D3D11CreateDevice = @extern(*const fn (
     pAdapter: ?*anyopaque, // IDXGIAdapter
     DriverType: D3D_DRIVER_TYPE,
