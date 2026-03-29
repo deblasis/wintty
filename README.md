@@ -38,6 +38,12 @@
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
 >
+> **MVWT** Minimum Viewable Windows Terminal
+> `[█████████░░░░░░░░░░░] 45%`
+>
+> **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
+> `[░░░░░░░░░░░░░░░░░░░░]  0%`
+>
 > The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
 > as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
 > The C# layer handles windowing, input, and platform integration via P/Invoke.
