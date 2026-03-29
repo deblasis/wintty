@@ -136,7 +136,7 @@ pub fn initShaders(
     _ = self;
     _ = alloc;
     _ = custom_shaders;
-    @panic("TODO: DX11 initShaders");
+    return shaders.Shaders.init();
 }
 
 pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
