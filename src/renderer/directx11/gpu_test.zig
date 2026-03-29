@@ -11,6 +11,8 @@ const com = @import("com.zig");
 const buffer_mod = @import("buffer.zig");
 const Texture = @import("Texture.zig");
 const Sampler = @import("Sampler.zig");
+const Pipeline = @import("Pipeline.zig");
+const RenderPass = @import("RenderPass.zig");
 
 const Buffer = buffer_mod.Buffer;
 
@@ -251,4 +253,47 @@ test "Sampler: create and deinit" {
         .device = dev.device,
     });
     defer sampler.deinit();
+}
+
+test "Pipeline: default init and deinit" {
+    var pipeline = Pipeline{};
+    pipeline.deinit();
+}
+
+test "Pipeline: deinit on empty pipeline is safe to call" {
+    var pipeline = Pipeline{};
+    pipeline.deinit();
+}
+
+test "RenderPass: begin and complete with no device" {
+    var pass = RenderPass.begin(null, null, .{ .attachments = &.{} });
+    pass.complete();
+}
+
+test "RenderPass: step with empty pipeline is no-op" {
+    const dev = createTestDevice() orelse return;
+    defer _ = dev.device.Release();
+    defer _ = dev.context.Release();
+
+    var pass = RenderPass.begin(dev.context, dev.device, .{ .attachments = &.{} });
+    defer pass.complete();
+
+    pass.step(.{
+        .pipeline = .{},
+        .draw = .{ .type = .triangle, .vertex_count = 3 },
+    });
+}
+
+test "RenderPass: step with zero instance count is no-op" {
+    const dev = createTestDevice() orelse return;
+    defer _ = dev.device.Release();
+    defer _ = dev.context.Release();
+
+    var pass = RenderPass.begin(dev.context, dev.device, .{ .attachments = &.{} });
+    defer pass.complete();
+
+    pass.step(.{
+        .pipeline = .{},
+        .draw = .{ .type = .triangle_strip, .vertex_count = 4, .instance_count = 0 },
+    });
 }

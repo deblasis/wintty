@@ -66,6 +66,37 @@ pub const D3D_PRIMITIVE_TOPOLOGY = enum(u32) {
     _,
 };
 
+// D3D11 blend enum values start at 1, not 0.
+pub const D3D11_BLEND = enum(u32) {
+    ZERO = 1,
+    ONE = 2,
+    SRC_COLOR = 3,
+    INV_SRC_COLOR = 4,
+    SRC_ALPHA = 5,
+    INV_SRC_ALPHA = 6,
+    DEST_ALPHA = 7,
+    INV_DEST_ALPHA = 8,
+    DEST_COLOR = 9,
+    INV_DEST_COLOR = 10,
+    SRC_ALPHA_SAT = 11,
+    BLEND_FACTOR = 14,
+    INV_BLEND_FACTOR = 15,
+    SRC1_COLOR = 16,
+    INV_SRC1_COLOR = 17,
+    SRC1_ALPHA = 18,
+    INV_SRC1_ALPHA = 19,
+    _,
+};
+
+pub const D3D11_BLEND_OP = enum(u32) {
+    ADD = 1,
+    SUBTRACT = 2,
+    REV_SUBTRACT = 3,
+    MIN = 4,
+    MAX = 5,
+    _,
+};
+
 pub const D3D11_CREATE_DEVICE_FLAG = u32;
 pub const D3D11_CREATE_DEVICE_SINGLETHREADED: D3D11_CREATE_DEVICE_FLAG = 0x1;
 pub const D3D11_CREATE_DEVICE_DEBUG: D3D11_CREATE_DEVICE_FLAG = 0x2;
@@ -174,6 +205,17 @@ pub const D3D11_TEXTURE_ADDRESS_MODE = enum(u32) {
     MIRROR_ONCE = 5,
 };
 
+pub const D3D11_COMPARISON_FUNC = enum(u32) {
+    NEVER = 1,
+    LESS = 2,
+    EQUAL = 3,
+    LESS_EQUAL = 4,
+    GREATER = 5,
+    NOT_EQUAL = 6,
+    GREATER_EQUAL = 7,
+    ALWAYS = 8,
+};
+
 pub const D3D11_SAMPLER_DESC = extern struct {
     Filter: D3D11_FILTER,
     AddressU: D3D11_TEXTURE_ADDRESS_MODE,
@@ -181,10 +223,27 @@ pub const D3D11_SAMPLER_DESC = extern struct {
     AddressW: D3D11_TEXTURE_ADDRESS_MODE,
     MipLODBias: f32,
     MaxAnisotropy: u32,
-    ComparisonFunc: u32, // D3D11_COMPARISON_FUNC, not enumerated here
+    ComparisonFunc: D3D11_COMPARISON_FUNC,
     BorderColor: [4]f32,
     MinLOD: f32,
     MaxLOD: f32,
+};
+
+pub const D3D11_RENDER_TARGET_BLEND_DESC = extern struct {
+    BlendEnable: u32 = 0,
+    SrcBlend: D3D11_BLEND = .ONE,
+    DestBlend: D3D11_BLEND = .ZERO,
+    BlendOp: D3D11_BLEND_OP = .ADD,
+    SrcBlendAlpha: D3D11_BLEND = .ONE,
+    DestBlendAlpha: D3D11_BLEND = .ZERO,
+    BlendOpAlpha: D3D11_BLEND_OP = .ADD,
+    RenderTargetWriteMask: u8 = 0x0F,
+};
+
+pub const D3D11_BLEND_DESC = extern struct {
+    AlphaToCoverageEnable: u32 = 0,
+    IndependentBlendEnable: u32 = 0,
+    RenderTarget: [8]D3D11_RENDER_TARGET_BLEND_DESC = [_]D3D11_RENDER_TARGET_BLEND_DESC{.{}} ** 8,
 };
 
 pub const D3D11_BOX = extern struct {
@@ -443,6 +502,28 @@ pub const ID3D11ShaderResourceView = extern struct {
     }
 };
 
+pub const ID3D11BlendState = extern struct {
+    vtable: *const VTable,
+
+    const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: Reserved,
+        AddRef: Reserved,
+        Release: *const fn (*ID3D11BlendState) callconv(.winapi) u32,
+        // ID3D11DeviceChild (slots 3-6)
+        GetDevice: Reserved,
+        GetPrivateData: Reserved,
+        SetPrivateData: Reserved,
+        SetPrivateDataInterface: Reserved,
+        // ID3D11BlendState (slot 7)
+        GetDesc: Reserved,
+    };
+
+    pub inline fn Release(self: *ID3D11BlendState) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
 // ID3D11Device
 // Vtable order from d3d11.h:
 //   0: QueryInterface
@@ -566,8 +647,12 @@ pub const ID3D11Device = extern struct {
         CreateComputeShader: Reserved,
         // slot 19
         CreateClassLinkage: Reserved,
-        // slots 20-22
-        CreateBlendState: Reserved,
+        // slot 20: CreateBlendState
+        CreateBlendState: *const fn (
+            *ID3D11Device,
+            *const D3D11_BLEND_DESC,
+            *?*ID3D11BlendState,
+        ) callconv(.winapi) HRESULT,
         CreateDepthStencilState: Reserved,
         CreateRasterizerState: Reserved,
         // slot 23: CreateSamplerState
@@ -672,6 +757,10 @@ pub const ID3D11Device = extern struct {
         srv: *?*ID3D11ShaderResourceView,
     ) HRESULT {
         return self.vtable.CreateShaderResourceView(self, resource, desc, srv);
+    }
+
+    pub inline fn CreateBlendState(self: *ID3D11Device, desc: *const D3D11_BLEND_DESC, state: *?*ID3D11BlendState) HRESULT {
+        return self.vtable.CreateBlendState(self, desc, state);
     }
 
     pub inline fn CreateSamplerState(
@@ -806,7 +895,11 @@ pub const ID3D11DeviceContext = extern struct {
         // slot 12: DrawIndexed
         DrawIndexed: Reserved,
         // slot 13: Draw
-        Draw: Reserved,
+        Draw: *const fn (
+            *ID3D11DeviceContext,
+            VertexCount: u32,
+            StartVertexLocation: u32,
+        ) callconv(.winapi) void,
         // slot 14: Map
         Map: *const fn (
             *ID3D11DeviceContext,
@@ -823,7 +916,12 @@ pub const ID3D11DeviceContext = extern struct {
             u32, // Subresource
         ) callconv(.winapi) void,
         // slot 16: PSSetConstantBuffers
-        _reserved16: Reserved,
+        PSSetConstantBuffers: *const fn (
+            *ID3D11DeviceContext,
+            StartSlot: u32,
+            NumBuffers: u32,
+            ppConstantBuffers: [*]const ?*ID3D11Buffer,
+        ) callconv(.winapi) void,
         // slot 17: IASetInputLayout
         IASetInputLayout: *const fn (
             *ID3D11DeviceContext,
@@ -860,7 +958,12 @@ pub const ID3D11DeviceContext = extern struct {
             D3D_PRIMITIVE_TOPOLOGY,
         ) callconv(.winapi) void,
         // slot 25: VSSetShaderResources
-        _reserved25: Reserved,
+        VSSetShaderResources: *const fn (
+            *ID3D11DeviceContext,
+            StartSlot: u32,
+            NumViews: u32,
+            ppShaderResourceViews: [*]const ?*ID3D11ShaderResourceView,
+        ) callconv(.winapi) void,
         // slot 26: VSSetSamplers
         _reserved26: Reserved,
         // slot 27: Begin
@@ -885,7 +988,12 @@ pub const ID3D11DeviceContext = extern struct {
         // slot 34: OMSetRenderTargetsAndUnorderedAccessViews
         _reserved34: Reserved,
         // slot 35: OMSetBlendState
-        _reserved35: Reserved,
+        OMSetBlendState: *const fn (
+            *ID3D11DeviceContext,
+            ?*ID3D11BlendState,
+            ?*const [4]f32,
+            u32,
+        ) callconv(.winapi) void,
         // slot 36: OMSetDepthStencilState
         _reserved36: Reserved,
         // slot 37: SOSetTargets
@@ -1062,6 +1170,10 @@ pub const ID3D11DeviceContext = extern struct {
         _reserved114: Reserved,
     };
 
+    pub inline fn Draw(self: *ID3D11DeviceContext, vertex_count: u32, start_vertex: u32) void {
+        self.vtable.Draw(self, vertex_count, start_vertex);
+    }
+
     pub inline fn VSSetConstantBuffers(self: *ID3D11DeviceContext, start_slot: u32, buffers: []const ?*ID3D11Buffer) void {
         self.vtable.VSSetConstantBuffers(self, start_slot, @intCast(buffers.len), buffers.ptr);
     }
@@ -1093,6 +1205,10 @@ pub const ID3D11DeviceContext = extern struct {
         return self.vtable.Map(self, resource, subresource, map_type, map_flags, mapped);
     }
 
+    pub inline fn PSSetConstantBuffers(self: *ID3D11DeviceContext, start_slot: u32, buffers: []const ?*ID3D11Buffer) void {
+        self.vtable.PSSetConstantBuffers(self, start_slot, @intCast(buffers.len), buffers.ptr);
+    }
+
     pub inline fn Unmap(self: *ID3D11DeviceContext, resource: *ID3D11Resource, subresource: u32) void {
         self.vtable.Unmap(self, resource, subresource);
     }
@@ -1115,6 +1231,10 @@ pub const ID3D11DeviceContext = extern struct {
         self.vtable.IASetPrimitiveTopology(self, topology);
     }
 
+    pub inline fn VSSetShaderResources(self: *ID3D11DeviceContext, start_slot: u32, views: []const ?*ID3D11ShaderResourceView) void {
+        self.vtable.VSSetShaderResources(self, start_slot, @intCast(views.len), views.ptr);
+    }
+
     pub inline fn DrawInstanced(
         self: *ID3D11DeviceContext,
         vertex_count: u32,
@@ -1123,6 +1243,10 @@ pub const ID3D11DeviceContext = extern struct {
         start_instance: u32,
     ) void {
         self.vtable.DrawInstanced(self, vertex_count, instance_count, start_vertex, start_instance);
+    }
+
+    pub inline fn OMSetBlendState(self: *ID3D11DeviceContext, state: ?*ID3D11BlendState, blend_factor: ?*const [4]f32, sample_mask: u32) void {
+        self.vtable.OMSetBlendState(self, state, blend_factor, sample_mask);
     }
 
     pub inline fn OMSetRenderTargets(
