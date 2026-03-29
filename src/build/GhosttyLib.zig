@@ -10,8 +10,10 @@ const LipoStep = @import("LipoStep.zig");
 /// The step that generates the file.
 step: *std.Build.Step,
 
-/// The final static library file
+/// The final library file (DLL or static .lib/.a).
 output: std.Build.LazyPath,
+/// The import library for DLL builds on Windows (.lib), null otherwise.
+implib: ?std.Build.LazyPath = null,
 dsym: ?std.Build.LazyPath,
 pkg_config: ?std.Build.LazyPath,
 pkg_config_static: ?std.Build.LazyPath,
@@ -160,6 +162,10 @@ pub fn initShared(
     return .{
         .step = &lib.step,
         .output = lib.getEmittedBin(),
+        .implib = if (deps.config.target.result.os.tag == .windows)
+            lib.getEmittedImplib()
+        else
+            null,
         .dsym = dsymutil,
         .pkg_config = pcs.shared,
         .pkg_config_static = pcs.static,
