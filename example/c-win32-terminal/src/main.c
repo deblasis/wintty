@@ -2,11 +2,11 @@
 //
 // Minimal Win32 host for libghostty. Creates an HWND and passes it to
 // ghostty which creates a surface with DX11 rendering and ConPTY.
-// This is the skeleton -- no input forwarding yet, so the terminal
-// won't accept keyboard or mouse input.
+// Forwards keyboard, mouse, resize, focus, and DPI events to ghostty.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <windowsx.h>
 #include <ghostty.h>
 #include <stdio.h>
 
@@ -15,6 +15,7 @@
 static HWND g_hwnd = NULL;
 static ghostty_app_t g_app = NULL;
 static ghostty_surface_t g_surface = NULL;
+static WCHAR g_high_surrogate = 0;
 
 // --- Forward declarations ---
 
@@ -64,6 +65,30 @@ static void close_surface_cb(void* userdata, bool process_alive) {
     if (g_hwnd) PostMessage(g_hwnd, WM_CLOSE, 0, 0);
 }
 
+// --- Input helpers ---
+
+// Extract the Win32 scancode from WM_KEYDOWN/WM_KEYUP lParam.
+// Bits 16-23 are the scancode. Bit 24 is the extended key flag.
+// Extended keys (arrows, numpad, etc.) need the 0xE000 prefix.
+static uint32_t scancode_from_lparam(LPARAM lp) {
+    uint32_t sc = (lp >> 16) & 0xFF;
+    if (lp & (1 << 24)) sc |= 0xE000;  // extended key
+    return sc;
+}
+
+// Map Win32 modifier state to ghostty mods.
+static ghostty_input_mods_e current_mods(void) {
+    ghostty_input_mods_e mods = GHOSTTY_MODS_NONE;
+    if (GetKeyState(VK_SHIFT) & 0x8000) mods |= GHOSTTY_MODS_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods |= GHOSTTY_MODS_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000) mods |= GHOSTTY_MODS_ALT;
+    if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000)
+        mods |= GHOSTTY_MODS_SUPER;
+    if (GetKeyState(VK_CAPITAL) & 0x0001) mods |= GHOSTTY_MODS_CAPS;
+    if (GetKeyState(VK_NUMLOCK) & 0x0001) mods |= GHOSTTY_MODS_NUM;
+    return mods;
+}
+
 // --- Window procedure ---
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -71,6 +96,137 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GHOSTTY_WAKEUP:
         if (g_app) ghostty_app_tick(g_app);
         return 0;
+
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        if (!g_surface) break;
+        ghostty_input_key_s key = {
+            .action = (lp & (1 << 30)) ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS,
+            .mods = current_mods(),
+            .consumed_mods = GHOSTTY_MODS_NONE,
+            .keycode = scancode_from_lparam(lp),
+            .text = NULL,
+            .composing = false,
+            .unshifted_codepoint = 0,
+        };
+        ghostty_surface_key(g_surface, key);
+        return 0;
+    }
+
+    case WM_KEYUP:
+    case WM_SYSKEYUP: {
+        if (!g_surface) break;
+        ghostty_input_key_s key = {
+            .action = GHOSTTY_ACTION_RELEASE,
+            .mods = current_mods(),
+            .consumed_mods = GHOSTTY_MODS_NONE,
+            .keycode = scancode_from_lparam(lp),
+            .text = NULL,
+            .composing = false,
+            .unshifted_codepoint = 0,
+        };
+        ghostty_surface_key(g_surface, key);
+        return 0;
+    }
+
+    case WM_CHAR: {
+        if (!g_surface) break;
+        // wp is a UTF-16 code unit. Characters outside the BMP arrive as
+        // two WM_CHAR messages (high surrogate then low surrogate).
+        WCHAR wc = (WCHAR)wp;
+        wchar_t wc_buf[3] = {0};
+        int count;
+
+        if (IS_HIGH_SURROGATE(wc)) {
+            g_high_surrogate = wc;
+            return 0;
+        }
+        if (IS_LOW_SURROGATE(wc)) {
+            if (g_high_surrogate) {
+                wc_buf[0] = g_high_surrogate;
+                wc_buf[1] = wc;
+                g_high_surrogate = 0;
+                count = 2;
+            } else {
+                return 0;  // orphaned low surrogate
+            }
+        } else {
+            g_high_surrogate = 0;
+            wc_buf[0] = wc;
+            count = 1;
+        }
+
+        char utf8[8] = {0};
+        int len = WideCharToMultiByte(CP_UTF8, 0, wc_buf, count, utf8, sizeof(utf8) - 1, NULL, NULL);
+        if (len > 0) {
+            utf8[len] = '\0';
+            ghostty_surface_text(g_surface, utf8, (uintptr_t)len);
+        }
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+        if (g_surface) {
+            // GET_X/Y_LPARAM handles sign correctly during mouse capture
+            double x = (double)GET_X_LPARAM(lp);
+            double y = (double)GET_Y_LPARAM(lp);
+            ghostty_surface_mouse_pos(g_surface, x, y, current_mods());
+        }
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        if (g_surface) {
+            SetCapture(g_hwnd);
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, current_mods());
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (g_surface) {
+            ReleaseCapture();
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, current_mods());
+        }
+        return 0;
+
+    case WM_RBUTTONDOWN:
+        if (g_surface)
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_RIGHT, current_mods());
+        return 0;
+
+    case WM_RBUTTONUP:
+        if (g_surface)
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_RIGHT, current_mods());
+        return 0;
+
+    case WM_MBUTTONDOWN:
+        if (g_surface)
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_MIDDLE, current_mods());
+        return 0;
+
+    case WM_MBUTTONUP:
+        if (g_surface)
+            ghostty_surface_mouse_button(g_surface,
+                GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_MIDDLE, current_mods());
+        return 0;
+
+    case WM_MOUSEWHEEL: {
+        if (!g_surface) break;
+        double delta = (double)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+        ghostty_surface_mouse_scroll(g_surface, 0, delta, 0);
+        return 0;
+    }
+
+    case WM_MOUSEHWHEEL: {
+        if (!g_surface) break;
+        double delta = (double)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+        ghostty_surface_mouse_scroll(g_surface, delta, 0, 0);
+        return 0;
+    }
 
     case WM_SIZE:
         if (g_surface) {
@@ -86,13 +242,31 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_surface) ghostty_surface_set_focus(g_surface, false);
         return 0;
 
+    case WM_DPICHANGED: {
+        if (g_surface) {
+            UINT new_dpi = HIWORD(wp);
+            double new_scale = (double)new_dpi / 96.0;
+            ghostty_surface_set_content_scale(g_surface, new_scale, new_scale);
+        }
+        // Resize to the suggested rect
+        RECT* suggested = (RECT*)lp;
+        SetWindowPos(g_hwnd, NULL,
+            suggested->left, suggested->top,
+            suggested->right - suggested->left,
+            suggested->bottom - suggested->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
 
     default:
-        return DefWindowProc(hwnd, msg, wp, lp);
+        break;
     }
+
+    return DefWindowProc(hwnd, msg, wp, lp);
 }
 
 // --- Entry point ---
@@ -125,7 +299,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int show) {
 
     // 3. Initialize ghostty global state
     char* argv[] = { "ghostty-example" };
-    if (ghostty_init(1, argv) != GHOSTTY_SUCCESS) {
+    if (ghostty_init(1, argv) != 0) {
         fprintf(stderr, "ghostty_init failed\n");
         return 1;
     }
