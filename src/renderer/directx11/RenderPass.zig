@@ -128,16 +128,15 @@ pub fn step(self: *@This(), s: Step) void {
         .triangle_strip => .TRIANGLESTRIP,
     });
 
-    // Bind vertex buffers with stride from the pipeline's input layout.
-    // Why: Metal reserves slot 0 for vertex data and slot 1 for uniforms,
-    // starting additional buffers at slot 2. DX11 doesn't need that
-    // workaround -- uniforms go through constant buffers (a separate
-    // binding point), so vertex buffers bind at their natural index.
-    for (s.buffers, 0..) |buf_opt, i| {
-        if (buf_opt) |buf| {
+    // Bind buffers[0] as vertex buffer, buffers[1..] as SRVs.
+    // Mirrors OpenGL which binds buffers[0] as vertex data and
+    // buffers[1..] as storage buffers (SSBOs). In DX11, the SSBO
+    // equivalent is a StructuredBuffer bound via an SRV.
+    if (s.buffers.len > 0) {
+        if (s.buffers[0]) |buf| {
             ctx.IASetVertexBuffers(
-                @intCast(i),
-                &.{@as(?*d3d11.ID3D11Buffer, buf)},
+                0,
+                &.{@as(?*d3d11.ID3D11Buffer, buf.ptr)},
                 &.{s.pipeline.instance_stride},
                 &.{@as(u32, 0)},
             );
@@ -149,16 +148,33 @@ pub fn step(self: *@This(), s: Step) void {
     // buffers, so slot 0 here doesn't conflict with IASetVertexBuffers
     // slot 0 above. Metal uses buffer index 1 for uniforms instead.
     if (s.uniforms) |buf| {
-        ctx.VSSetConstantBuffers(0, &.{@as(?*d3d11.ID3D11Buffer, buf)});
-        ctx.PSSetConstantBuffers(0, &.{@as(?*d3d11.ID3D11Buffer, buf)});
+        ctx.VSSetConstantBuffers(0, &.{@as(?*d3d11.ID3D11Buffer, buf.ptr)});
+        ctx.PSSetConstantBuffers(0, &.{@as(?*d3d11.ID3D11Buffer, buf.ptr)});
     }
 
     // Bind textures as shader resource views for both VS and PS.
+    // Textures occupy t-register slots 0..N-1.
     for (s.textures, 0..) |tex_opt, i| {
         if (tex_opt) |tex| {
             const srv = @as(?*d3d11.ID3D11ShaderResourceView, tex.srv);
             ctx.VSSetShaderResources(@intCast(i), &.{srv});
             ctx.PSSetShaderResources(@intCast(i), &.{srv});
+        }
+    }
+
+    // Bind structured buffers (buffers[1..]) as SRVs, continuing
+    // after the texture slots. HLSL registers are:
+    //   bg_color/cell_bg: cell_bg_colors at t0 (no textures)
+    //   cell_text: atlases at t0,t1, cell_bg_colors at t2
+    if (s.buffers.len > 1) {
+        for (s.buffers[1..], 0..) |buf_opt, i| {
+            if (buf_opt) |buf| {
+                if (buf.srv) |srv| {
+                    const slot: u32 = @intCast(s.textures.len + i);
+                    ctx.VSSetShaderResources(slot, &.{@as(?*d3d11.ID3D11ShaderResourceView, srv)});
+                    ctx.PSSetShaderResources(slot, &.{@as(?*d3d11.ID3D11ShaderResourceView, srv)});
+                }
+            }
         }
     }
 
