@@ -48,6 +48,9 @@ pub const D3D11_CPU_ACCESS_FLAG = u32;
 pub const D3D11_CPU_ACCESS_WRITE: D3D11_CPU_ACCESS_FLAG = 0x10000;
 pub const D3D11_CPU_ACCESS_READ: D3D11_CPU_ACCESS_FLAG = 0x20000;
 
+pub const D3D11_RESOURCE_MISC_FLAG = u32;
+pub const D3D11_RESOURCE_MISC_BUFFER_STRUCTURED: D3D11_RESOURCE_MISC_FLAG = 0x40;
+
 pub const D3D11_MAP = enum(u32) {
     READ = 1,
     WRITE = 2,
@@ -177,15 +180,16 @@ pub const D3D11_SRV_DIMENSION = enum(u32) {
     BUFFEREX = 11,
 };
 
-/// Describes a shader resource view. We only support the Texture2D dimension.
-/// The full C type has a union of all SRV dimensions at offset 8 -- we model
-/// only Texture2D because that's all the font atlas needs. If other SRV types
-/// are needed later, this struct would need the full union.
+/// Describes a shader resource view.
+/// The union at offset 8 overlaps Texture2D { MostDetailedMip, MipLevels }
+/// with Buffer { FirstElement, NumElements }. Both are two u32s at the same
+/// offset, so we name the fields after the Texture2D variant and reuse them
+/// for buffer SRVs (FirstElement = MostDetailedMip, NumElements = MipLevels).
 pub const D3D11_SHADER_RESOURCE_VIEW_DESC = extern struct {
     Format: DXGI_FORMAT,
     ViewDimension: D3D11_SRV_DIMENSION,
-    // Texture2D union member: { MostDetailedMip: u32, MipLevels: u32 }
-    // followed by padding to fill the 16-byte union.
+    // Texture2D: { MostDetailedMip, MipLevels }
+    // Buffer:    { FirstElement, NumElements }
     MostDetailedMip: u32,
     MipLevels: u32,
     _pad: [2]u32 = .{ 0, 0 },

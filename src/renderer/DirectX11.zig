@@ -140,7 +140,13 @@ pub fn initShaders(
 
 pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
     if (self.device) |dev| {
-        return .{ .width = dev.width, .height = dev.height };
+        // Query the actual window size, not the swap chain buffer size.
+        // The swap chain buffer is only resized in beginFrame, so returning
+        // dev.width/height here would create a circular dependency: drawFrame
+        // compares surfaceSize() against self.size.screen to detect resize,
+        // but dev.width/height only change after the resize is detected.
+        const ws = dev.windowSize();
+        return .{ .width = ws.width, .height = ws.height };
     }
     return .{ .width = 0, .height = 0 };
 }
@@ -159,6 +165,23 @@ pub inline fn beginFrame(
     target: *Target,
 ) !Frame {
     _ = self;
+
+    // Resize the swap chain if the target dimensions don't match the
+    // back buffer. initTarget can't do this because it receives the
+    // API by value (const), but beginFrame has mutable access through
+    // the renderer. device is ?Device (inline), so we need &renderer.api.
+    if (renderer.api.device) |*dev| {
+        const w: u32 = @intCast(target.width);
+        const h: u32 = @intCast(target.height);
+        if (dev.width != w or dev.height != h) {
+            dev.resize(w, h) catch |err| {
+                log.err("swap chain resize failed: {}", .{err});
+                return error.PresentFailed;
+            };
+            target.rtv = dev.rtv;
+        }
+    }
+
     return try Frame.begin(.{}, renderer, target);
 }
 
@@ -185,9 +208,22 @@ pub inline fn bufferOptions(self: DirectX11) bufferpkg.Options {
 /// bound to the IA stage as vertex data via IASetVertexBuffers.
 pub const instanceBufferOptions = bufferOptions;
 pub const fgBufferOptions = bufferOptions;
-pub const bgBufferOptions = bufferOptions;
 pub const imageBufferOptions = bufferOptions;
 pub const bgImageBufferOptions = bufferOptions;
+
+/// Cell background buffer is bound as StructuredBuffer<uint> in HLSL,
+/// not as a vertex buffer. It needs SHADER_RESOURCE binding and a
+/// structure stride so the GPU can index into it by element.
+pub inline fn bgBufferOptions(self: DirectX11) bufferpkg.Options {
+    const dev = self.device orelse @panic("DX11 device not initialized");
+    return .{
+        .device = dev.device,
+        .context = dev.context,
+        .usage = .dynamic,
+        .bind_flags = d3d11.D3D11_BIND_SHADER_RESOURCE,
+        .structure_byte_stride = @sizeOf(u32),
+    };
+}
 
 /// Uniform buffers are bound as constant buffers (HLSL cbuffer).
 /// DX11 requires constant buffer sizes to be a multiple of 16 bytes.
