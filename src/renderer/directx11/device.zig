@@ -233,27 +233,6 @@ pub const Device = struct {
         }
     }
 
-    pub fn clearRenderTarget(self: *Device, color: [4]f32) void {
-        const rtv = self.rtv orelse return;
-
-        // Set viewport to full swap chain dimensions.
-        const viewport = d3d11.D3D11_VIEWPORT{
-            .TopLeftX = 0.0,
-            .TopLeftY = 0.0,
-            .Width = @floatFromInt(self.width),
-            .Height = @floatFromInt(self.height),
-            .MinDepth = 0.0,
-            .MaxDepth = 1.0,
-        };
-        self.context.RSSetViewports(&.{viewport});
-
-        // Bind the render target.
-        self.context.OMSetRenderTargets(&.{rtv}, null);
-
-        // Clear to the specified color.
-        self.context.ClearRenderTargetView(rtv, &color);
-    }
-
     /// Get the back buffer from the swap chain and create a render target view.
     fn createRenderTargetView(
         device: *d3d11.ID3D11Device,

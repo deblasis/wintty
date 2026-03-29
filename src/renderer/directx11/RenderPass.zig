@@ -59,12 +59,49 @@ pub fn begin(
     device: ?*d3d11.ID3D11Device,
     opts: Options,
 ) @This() {
-    // Clearing and render target binding is handled by Frame.renderPass()
-    // via device.clearRenderTarget(), which sets the viewport, binds the
-    // swap chain's RTV, and clears it. Per-attachment RTV creation from
-    // Texture/Target is a future task (Target doesn't hold an
-    // ID3D11Texture2D yet).
-    _ = opts;
+    const ctx = context orelse return .{ .context = null, .device = device };
+
+    // Bind the first attachment's render target and optionally clear it.
+    // GenericRenderer always passes exactly one attachment per render pass.
+    if (opts.attachments.len == 0) return .{ .context = context, .device = device };
+
+    const att = opts.attachments[0];
+    const target, const rtv = switch (att.target) {
+        .target => |t| .{ t, t.rtv orelse {
+            log.warn("render pass attachment has no RTV, skipping bind", .{});
+            return .{ .context = context, .device = device };
+        } },
+        // Texture-as-RTV not yet supported (needs CreateRenderTargetView
+        // from the texture's ID3D11Texture2D).
+        .texture => {
+            log.warn("texture attachments not yet supported in DX11 render pass", .{});
+            return .{ .context = context, .device = device };
+        },
+    };
+
+    // Set viewport to target dimensions.
+    const viewport = d3d11.D3D11_VIEWPORT{
+        .TopLeftX = 0.0,
+        .TopLeftY = 0.0,
+        .Width = @floatFromInt(target.width),
+        .Height = @floatFromInt(target.height),
+        .MinDepth = 0.0,
+        .MaxDepth = 1.0,
+    };
+    ctx.RSSetViewports(&.{viewport});
+
+    // Bind the render target.
+    ctx.OMSetRenderTargets(&.{rtv}, null);
+
+    // Clear if requested.
+    if (att.clear_color) |color| {
+        ctx.ClearRenderTargetView(rtv, &.{
+            @floatCast(color[0]),
+            @floatCast(color[1]),
+            @floatCast(color[2]),
+            @floatCast(color[3]),
+        });
+    }
 
     return .{ .context = context, .device = device };
 }

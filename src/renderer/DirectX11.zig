@@ -3,10 +3,9 @@
 //! This module provides the GraphicsAPI contract required by GenericRenderer,
 //! mirroring the structure of Metal.zig and OpenGL.zig.
 //!
-//! Current status: stub - all functions panic at runtime. The contract is
-//! satisfied at compile time so that GenericRenderer(DirectX11) compiles.
-//! Infrastructure (COM bindings, device lifecycle, cell grid pipeline) is
-//! already in place from prior work in the directx11/ subdirectory.
+//! Current status: device init, shader loading, and render loop wiring are
+//! functional. The bg_color pipeline renders the terminal background through
+//! the real Frame -> RenderPass -> step() path.
 pub const DirectX11 = @This();
 
 const builtin = @import("builtin");
@@ -147,8 +146,11 @@ pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
 }
 
 pub fn initTarget(self: *const DirectX11, width: usize, height: usize) !Target {
-    _ = self;
-    return .{ .width = width, .height = height };
+    return .{
+        .rtv = if (self.device) |dev| dev.rtv else null,
+        .width = width,
+        .height = height,
+    };
 }
 
 pub inline fn beginFrame(
