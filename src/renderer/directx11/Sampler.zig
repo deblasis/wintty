@@ -39,7 +39,7 @@ pub fn init(opts: Options) Error!Self {
         .AddressW = .CLAMP,
         .MipLODBias = 0.0,
         .MaxAnisotropy = 1,
-        .ComparisonFunc = 1, // D3D11_COMPARISON_NEVER (unused with non-comparison filters, but 0 is not a valid enum value)
+        .ComparisonFunc = .NEVER, // unused with non-comparison filters, but 0 is not a valid enum value
         .BorderColor = .{ 0.0, 0.0, 0.0, 0.0 },
         .MinLOD = 0.0,
         .MaxLOD = std.math.floatMax(f32),
