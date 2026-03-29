@@ -7,7 +7,14 @@ const log = std.log.scoped(.directx11);
 /// Type-erased buffer handle for passing to RenderPass.Step.
 /// Mirrors Metal's objc.Object and OpenGL's gl.Buffer -- lets
 /// GenericRenderer pass uniform/vertex buffers without knowing T.
-pub const RawBuffer = *d3d11.ID3D11Buffer;
+///
+/// Carries an optional SRV for buffers that are bound as
+/// StructuredBuffer in HLSL (e.g. cell_bg_colors at register(t0)).
+/// Vertex and constant buffers leave srv as null.
+pub const RawBuffer = struct {
+    ptr: *d3d11.ID3D11Buffer,
+    srv: ?*d3d11.ID3D11ShaderResourceView = null,
+};
 
 /// Options for initializing a buffer.
 pub const Options = struct {
@@ -15,6 +22,10 @@ pub const Options = struct {
     context: *d3d11.ID3D11DeviceContext,
     usage: Usage = .dynamic,
     bind_flags: d3d11.D3D11_BIND_FLAG = d3d11.D3D11_BIND_VERTEX_BUFFER,
+    /// Set to @sizeOf(T) for StructuredBuffer bindings.
+    /// When non-zero, the buffer is created with MISC_BUFFER_STRUCTURED
+    /// and an SRV is created for shader access.
+    structure_byte_stride: u32 = 0,
 };
 
 pub const Usage = enum {
@@ -46,16 +57,17 @@ pub fn Buffer(comptime T: type) type {
         /// The options this buffer was initialized with.
         opts: Options,
 
-        /// The underlying ID3D11Buffer COM object.
-        buffer: *d3d11.ID3D11Buffer,
+        /// The underlying ID3D11Buffer and optional SRV for structured buffers.
+        buffer: RawBuffer,
 
         /// The allocated capacity in number of T elements (not bytes).
         len: usize,
 
         pub fn init(opts: Options, len: usize) !Self {
             const byte_size = validateAndComputeSize(opts, len);
-            const buffer = try createBuffer(opts, byte_size, null);
-            return .{ .opts = opts, .buffer = buffer, .len = len };
+            const buf = try createBuffer(opts, byte_size, null);
+            const srv = try createSRV(opts, buf, len);
+            return .{ .opts = opts, .buffer = .{ .ptr = buf, .srv = srv }, .len = len };
         }
 
         /// Init the buffer filled with the given data.
@@ -66,12 +78,14 @@ pub fn Buffer(comptime T: type) type {
                 .SysMemPitch = 0,
                 .SysMemSlicePitch = 0,
             };
-            const buffer = try createBuffer(opts, byte_size, &initial_data);
-            return .{ .opts = opts, .buffer = buffer, .len = data.len };
+            const buf = try createBuffer(opts, byte_size, &initial_data);
+            const srv = try createSRV(opts, buf, data.len);
+            return .{ .opts = opts, .buffer = .{ .ptr = buf, .srv = srv }, .len = data.len };
         }
 
         pub fn deinit(self: *const Self) void {
-            _ = self.buffer.Release();
+            if (self.buffer.srv) |srv| _ = srv.Release();
+            _ = self.buffer.ptr.Release();
         }
 
         /// Sync new contents to the buffer, replacing everything.
@@ -91,11 +105,14 @@ pub fn Buffer(comptime T: type) type {
             // WRITE_DISCARD rotates which allocation you write to, but
             // it can't grow the allocation -- that requires a new buffer.
             if (req_bytes > self.len * @sizeOf(T)) {
-                _ = self.buffer.Release();
+                if (self.buffer.srv) |srv| _ = srv.Release();
+                _ = self.buffer.ptr.Release();
                 // Allocate 2x what we need to amortize future growth.
                 const new_len = data.len * 2;
                 const new_byte_size = validateAndComputeSize(self.opts, new_len);
-                self.buffer = try createBuffer(self.opts, new_byte_size, null);
+                const buf = try createBuffer(self.opts, new_byte_size, null);
+                const srv = try createSRV(self.opts, buf, new_len);
+                self.buffer = .{ .ptr = buf, .srv = srv };
                 self.len = new_len;
             }
 
@@ -103,7 +120,7 @@ pub fn Buffer(comptime T: type) type {
             // fresh allocation -- no need to worry about what the GPU is reading.
             var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
             const hr = self.opts.context.Map(
-                @ptrCast(self.buffer),
+                @ptrCast(self.buffer.ptr),
                 0,
                 .WRITE_DISCARD,
                 0,
@@ -116,13 +133,13 @@ pub fn Buffer(comptime T: type) type {
 
             const dst: [*]u8 = @ptrCast(mapped.pData orelse {
                 log.warn("Buffer.sync: Map returned null pData", .{});
-                self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+                self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
                 return error.DirectXFailed;
             });
             const src: [*]const u8 = @ptrCast(data.ptr);
             @memcpy(dst[0..req_bytes], src[0..req_bytes]);
 
-            self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+            self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
         }
 
         /// Like sync but takes data from an array of ArrayLists.
@@ -139,16 +156,19 @@ pub fn Buffer(comptime T: type) type {
             const req_bytes = total_len * @sizeOf(T);
 
             if (req_bytes > self.len * @sizeOf(T)) {
-                _ = self.buffer.Release();
+                if (self.buffer.srv) |srv| _ = srv.Release();
+                _ = self.buffer.ptr.Release();
                 const new_len = total_len * 2;
                 const new_byte_size = validateAndComputeSize(self.opts, new_len);
-                self.buffer = try createBuffer(self.opts, new_byte_size, null);
+                const buf = try createBuffer(self.opts, new_byte_size, null);
+                const new_srv = try createSRV(self.opts, buf, new_len);
+                self.buffer = .{ .ptr = buf, .srv = new_srv };
                 self.len = new_len;
             }
 
             var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
             const hr = self.opts.context.Map(
-                @ptrCast(self.buffer),
+                @ptrCast(self.buffer.ptr),
                 0,
                 .WRITE_DISCARD,
                 0,
@@ -161,7 +181,7 @@ pub fn Buffer(comptime T: type) type {
 
             const dst: [*]u8 = @ptrCast(mapped.pData orelse {
                 log.warn("Buffer.syncFromArrayLists: Map returned null pData", .{});
-                self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+                self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
                 return error.DirectXFailed;
             });
 
@@ -173,7 +193,7 @@ pub fn Buffer(comptime T: type) type {
                 offset += chunk_bytes;
             }
 
-            self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+            self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
 
             return total_len;
         }
@@ -187,7 +207,7 @@ pub fn Buffer(comptime T: type) type {
 
             var mapped: d3d11.D3D11_MAPPED_SUBRESOURCE = undefined;
             const hr = self.opts.context.Map(
-                @ptrCast(self.buffer),
+                @ptrCast(self.buffer.ptr),
                 0,
                 .WRITE_DISCARD,
                 0,
@@ -200,14 +220,14 @@ pub fn Buffer(comptime T: type) type {
 
             const ptr: [*]T = @ptrCast(@alignCast(mapped.pData orelse {
                 log.warn("Buffer.map: Map returned null pData", .{});
-                self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+                self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
                 return error.DirectXFailed;
             }));
             return ptr[0..len];
         }
 
         pub fn unmap(self: *Self) void {
-            self.opts.context.Unmap(@ptrCast(self.buffer), 0);
+            self.opts.context.Unmap(@ptrCast(self.buffer.ptr), 0);
         }
 
         /// Resize the buffer, discarding old contents.
@@ -215,9 +235,12 @@ pub fn Buffer(comptime T: type) type {
         /// Used when the terminal grid size changes and we need
         /// a buffer of a completely different capacity.
         pub fn resize(self: *Self, new_len: usize) !void {
-            _ = self.buffer.Release();
+            if (self.buffer.srv) |srv| _ = srv.Release();
+            _ = self.buffer.ptr.Release();
             const byte_size = validateAndComputeSize(self.opts, new_len);
-            self.buffer = try createBuffer(self.opts, byte_size, null);
+            const buf = try createBuffer(self.opts, byte_size, null);
+            const srv = try createSRV(self.opts, buf, new_len);
+            self.buffer = .{ .ptr = buf, .srv = srv };
             self.len = new_len;
         }
 
@@ -244,13 +267,14 @@ pub fn Buffer(comptime T: type) type {
             byte_size: u32,
             initial_data: ?*const d3d11.D3D11_SUBRESOURCE_DATA,
         ) !*d3d11.ID3D11Buffer {
+            const is_structured = opts.structure_byte_stride > 0;
             const desc = d3d11.D3D11_BUFFER_DESC{
                 .ByteWidth = byte_size,
                 .Usage = .DYNAMIC,
                 .BindFlags = opts.bind_flags,
                 .CPUAccessFlags = d3d11.D3D11_CPU_ACCESS_WRITE,
-                .MiscFlags = 0,
-                .StructureByteStride = 0,
+                .MiscFlags = if (is_structured) d3d11.D3D11_RESOURCE_MISC_BUFFER_STRUCTURED else 0,
+                .StructureByteStride = opts.structure_byte_stride,
             };
             var buffer: ?*d3d11.ID3D11Buffer = null;
             const hr = opts.device.CreateBuffer(&desc, initial_data, &buffer);
@@ -259,6 +283,36 @@ pub fn Buffer(comptime T: type) type {
                 return error.DirectXFailed;
             }
             return buffer orelse error.DirectXFailed;
+        }
+
+        /// Create an SRV for structured buffers so the shader can read
+        /// them as StructuredBuffer<T>. Returns null for non-structured
+        /// buffers (vertex, constant).
+        fn createSRV(
+            opts: Options,
+            buf: *d3d11.ID3D11Buffer,
+            num_elements: usize,
+        ) !?*d3d11.ID3D11ShaderResourceView {
+            if (opts.structure_byte_stride == 0) return null;
+
+            const desc = d3d11.D3D11_SHADER_RESOURCE_VIEW_DESC{
+                .Format = .UNKNOWN,
+                .ViewDimension = .BUFFER,
+                // Buffer union: FirstElement = MostDetailedMip, NumElements = MipLevels
+                .MostDetailedMip = 0,
+                .MipLevels = @intCast(num_elements),
+            };
+            var srv: ?*d3d11.ID3D11ShaderResourceView = null;
+            const hr = opts.device.CreateShaderResourceView(
+                @ptrCast(buf),
+                &desc,
+                &srv,
+            );
+            if (com.FAILED(hr)) {
+                log.err("CreateShaderResourceView for structured buffer failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                return error.DirectXFailed;
+            }
+            return srv orelse error.DirectXFailed;
         }
     };
 }
