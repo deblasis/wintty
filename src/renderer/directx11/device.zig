@@ -15,12 +15,24 @@ pub const Surface = union(enum) {
     swap_chain_panel: *dxgi.ISwapChainPanelNative,
 };
 
+pub const RECT = extern struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) i32;
+
 pub const Device = struct {
     device: *d3d11.ID3D11Device,
     context: *d3d11.ID3D11DeviceContext,
     swap_chain: *dxgi.IDXGISwapChain1,
     panel_native: ?*dxgi.ISwapChainPanelNative,
     rtv: ?*d3d11.ID3D11RenderTargetView,
+    /// The HWND for querying the actual window size.
+    /// Null for composition (SwapChainPanel) surfaces.
+    hwnd: ?HWND,
     width: u32,
     height: u32,
 
@@ -170,6 +182,10 @@ pub const Device = struct {
             .swap_chain = sc,
             .panel_native = panel_native,
             .rtv = rtv,
+            .hwnd = switch (surface) {
+                .hwnd => |h| h,
+                .swap_chain_panel => null,
+            },
             .width = width,
             .height = height,
         };
@@ -191,6 +207,21 @@ pub const Device = struct {
         _ = self.swap_chain.Release();
         _ = self.context.Release();
         _ = self.device.Release();
+    }
+
+    /// Return the actual window client area size.
+    /// Falls back to the swap chain buffer dimensions when there's
+    /// no HWND (composition surfaces).
+    pub fn windowSize(self: *const Device) struct { width: u32, height: u32 } {
+        if (self.hwnd) |hwnd| {
+            var rc: RECT = undefined;
+            if (GetClientRect(hwnd, &rc) != 0) {
+                const w: u32 = @intCast(rc.right - rc.left);
+                const h: u32 = @intCast(rc.bottom - rc.top);
+                if (w > 0 and h > 0) return .{ .width = w, .height = h };
+            }
+        }
+        return .{ .width = self.width, .height = self.height };
     }
 
     pub const ResizeError = error{
