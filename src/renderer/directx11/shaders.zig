@@ -13,7 +13,6 @@ const math = @import("../../math.zig");
 const Pipeline = @import("Pipeline.zig");
 
 /// Shader management for DX11.
-/// TODO: Implement HLSL shader compilation and caching.
 pub const Shaders = struct {
     pipelines: Pipelines = .{},
     post_pipelines: []const Pipeline = &.{},
@@ -27,10 +26,27 @@ pub const Shaders = struct {
         bg_image: Pipeline = .{},
     };
 
+    /// Return default-initialized pipelines (all shader pointers null).
+    /// RenderPass.step() skips pipelines with no shaders loaded.
+    pub fn init() Shaders {
+        return .{};
+    }
+
     pub fn deinit(self: *Shaders, alloc: std.mem.Allocator) void {
-        _ = self;
-        _ = alloc;
-        @panic("TODO: DX11 Shaders.deinit");
+        for (self.post_pipelines) |p| {
+            p.deinit();
+        }
+        if (self.post_pipelines.len > 0) {
+            alloc.free(self.post_pipelines);
+        }
+        self.post_pipelines = &.{};
+
+        self.pipelines.bg_color.deinit();
+        self.pipelines.cell_bg.deinit();
+        self.pipelines.cell_text.deinit();
+        self.pipelines.image.deinit();
+        self.pipelines.bg_image.deinit();
+        self.pipelines = .{};
     }
 };
 
