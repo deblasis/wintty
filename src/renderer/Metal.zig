@@ -99,7 +99,10 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
             .view = switch (opts.rt_surface.platform) {
                 .macos => |v| v.nsview,
                 .ios => |v| v.uiview,
-                .windows => @compileError("unsupported platform for metal"),
+                // Platform is a runtime tagged union so all arms are analyzed.
+                // @compileError would fire during analysis even though this
+                // path is never reached. unreachable is correct here.
+                .windows => unreachable,
             },
         },
 
