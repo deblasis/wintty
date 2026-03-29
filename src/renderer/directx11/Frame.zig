@@ -26,20 +26,6 @@ pub inline fn renderPass(
     self: *@This(),
     attachments: []const RenderPass.Options.Attachment,
 ) RenderPass {
-    // Clear the render target using the first attachment's clear color.
-    if (self.renderer.api.device) |*dev| {
-        for (attachments) |att| {
-            if (att.clear_color) |color| {
-                dev.clearRenderTarget(.{
-                    @floatCast(color[0]),
-                    @floatCast(color[1]),
-                    @floatCast(color[2]),
-                    @floatCast(color[3]),
-                });
-                break;
-            }
-        }
-    }
     if (self.renderer.api.device) |*dev| {
         return RenderPass.begin(dev.context, dev.device, .{ .attachments = attachments });
     } else {
