@@ -274,6 +274,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int show) {
     (void)hPrev; (void)cmdLine;
 
+    // Attach to parent console or allocate one so we can see stderr/stdout.
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) AllocConsole();
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+
     // 1. Register window class
     WNDCLASSEX wc = {
         .cbSize = sizeof(wc),

@@ -30,10 +30,10 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** Foundation done, working on renderer and app shell
+> **Status:** Foundation done, C Win32 example wiring app + renderer + input
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████░░░░░░░░░░░] 45%`
+> `[█████████░░░░░░░░░░░] 48%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
