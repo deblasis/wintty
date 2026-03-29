@@ -26,10 +26,6 @@ pub const Usage = enum {
     // a consumer (e.g. static vertex data for screen quads).
 };
 
-/// Opaque stand-in for an ID3D11Buffer COM pointer.
-/// TODO: Replace with *d3d11.ID3D11Buffer when the full pipeline is implemented.
-pub const RawBuffer = struct {};
-
 /// DX11 GPU data buffer for a set of equal-typed elements.
 ///
 /// Wraps an ID3D11Buffer with DYNAMIC usage and CPU_ACCESS_WRITE.
@@ -55,11 +51,6 @@ pub fn Buffer(comptime T: type) type {
 
         /// The allocated capacity in number of T elements (not bytes).
         len: usize,
-
-        /// Type-erased handle for passing to RenderPass.Step. Mirrors the
-        /// .buffer field on Metal (objc.Object) and OpenGL (gl.Buffer) buffers
-        /// so GenericRenderer can pass uniform/vertex buffers without knowing T.
-        buffer: RawBuffer = .{},
 
         pub fn init(opts: Options, len: usize) !Self {
             const byte_size = validateAndComputeSize(opts, len);
