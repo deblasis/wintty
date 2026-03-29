@@ -9,8 +9,177 @@
 //! data structs to catch layout drift across backends.
 const std = @import("std");
 const math = @import("../../math.zig");
+const builtin = @import("builtin");
+const com = @import("com.zig");
+const d3d11 = @import("d3d11.zig");
+const dxgi = @import("dxgi.zig");
 
 const Pipeline = @import("Pipeline.zig");
+
+/// Embedded shader bytecode -- compiled at build time by HlslStep.zig.
+/// On non-Windows these are empty slices so the module still compiles.
+const shader_bytecode = if (builtin.os.tag == .windows) struct {
+    const bg_color_vs = @embedFile("ghostty_hlsl_bg_color_vs");
+    const bg_color_ps = @embedFile("ghostty_hlsl_bg_color_ps");
+    const cell_bg_ps = @embedFile("ghostty_hlsl_cell_bg_ps");
+    const cell_text_vs = @embedFile("ghostty_hlsl_cell_text_vs");
+    const cell_text_ps = @embedFile("ghostty_hlsl_cell_text_ps");
+    const image_vs = @embedFile("ghostty_hlsl_image_vs");
+    const image_ps = @embedFile("ghostty_hlsl_image_ps");
+    const bg_image_vs = @embedFile("ghostty_hlsl_bg_image_vs");
+    const bg_image_ps = @embedFile("ghostty_hlsl_bg_image_ps");
+} else struct {
+    const bg_color_vs: []const u8 = &.{};
+    const bg_color_ps: []const u8 = &.{};
+    const cell_bg_ps: []const u8 = &.{};
+    const cell_text_vs: []const u8 = &.{};
+    const cell_text_ps: []const u8 = &.{};
+    const image_vs: []const u8 = &.{};
+    const image_ps: []const u8 = &.{};
+    const bg_image_vs: []const u8 = &.{};
+    const bg_image_ps: []const u8 = &.{};
+};
+
+// --- Input element descriptions for instanced pipelines ---
+const PER_INSTANCE = d3d11.D3D11_INPUT_CLASSIFICATION.PER_INSTANCE_DATA;
+
+/// Input layout for CellText instances.
+const cell_text_input_elements = [_]d3d11.D3D11_INPUT_ELEMENT_DESC{
+    .{ // glyph_pos: [2]u32
+        .SemanticName = "GLYPH_POS",
+        .SemanticIndex = 0,
+        .Format = .R32G32_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 0,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // glyph_size: [2]u32
+        .SemanticName = "GLYPH_SIZE",
+        .SemanticIndex = 0,
+        .Format = .R32G32_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 8,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // bearings: [2]i16
+        .SemanticName = "BEARINGS",
+        .SemanticIndex = 0,
+        .Format = .R16G16_SINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 16,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // grid_pos: [2]u16
+        .SemanticName = "GRID_POS",
+        .SemanticIndex = 0,
+        .Format = .R16G16_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 20,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // color: [4]u8
+        .SemanticName = "COLOR",
+        .SemanticIndex = 0,
+        .Format = .R8G8B8A8_UNORM,
+        .InputSlot = 0,
+        .AlignedByteOffset = 24,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // atlas: Atlas (u8)
+        .SemanticName = "ATLAS",
+        .SemanticIndex = 0,
+        .Format = .R8_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 28,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // bools: packed struct(u8)
+        .SemanticName = "BOOLS",
+        .SemanticIndex = 0,
+        .Format = .R8_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 29,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+};
+
+/// Input layout for Image instances.
+const image_input_elements = [_]d3d11.D3D11_INPUT_ELEMENT_DESC{
+    .{ // grid_pos: [2]f32
+        .SemanticName = "GRID_POS",
+        .SemanticIndex = 0,
+        .Format = .R32G32_FLOAT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 0,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // cell_offset: [2]f32
+        .SemanticName = "CELL_OFFSET",
+        .SemanticIndex = 0,
+        .Format = .R32G32_FLOAT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 8,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // source_rect: [4]f32
+        .SemanticName = "SOURCE_RECT",
+        .SemanticIndex = 0,
+        .Format = .R32G32B32A32_FLOAT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 16,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // dest_size: [2]f32
+        .SemanticName = "DEST_SIZE",
+        .SemanticIndex = 0,
+        .Format = .R32G32_FLOAT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 32,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+};
+
+/// Input layout for BgImage instances.
+const bg_image_input_elements = [_]d3d11.D3D11_INPUT_ELEMENT_DESC{
+    .{ // opacity: f32
+        .SemanticName = "OPACITY",
+        .SemanticIndex = 0,
+        .Format = .R32_FLOAT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 0,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+    .{ // info: packed struct(u8)
+        .SemanticName = "INFO",
+        .SemanticIndex = 0,
+        .Format = .R8_UINT,
+        .InputSlot = 0,
+        .AlignedByteOffset = 4,
+        .InputSlotClass = PER_INSTANCE,
+        .InstanceDataStepRate = 1,
+    },
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CellText) == 32);
+    std.debug.assert(@offsetOf(CellText, "bools") == 29);
+    std.debug.assert(@sizeOf(Image) == 40);
+    std.debug.assert(@offsetOf(Image, "dest_size") == 32);
+    std.debug.assert(@sizeOf(BgImage) == 8);
+    std.debug.assert(@offsetOf(BgImage, "info") == 4);
+}
 
 /// Shader management for DX11.
 pub const Shaders = struct {
@@ -26,10 +195,48 @@ pub const Shaders = struct {
         bg_image: Pipeline = .{},
     };
 
-    /// Return default-initialized pipelines (all shader pointers null).
-    /// RenderPass.step() skips pipelines with no shaders loaded.
-    pub fn init() Shaders {
-        return .{};
+    pub const InitError = Pipeline.InitError;
+
+    /// Initialize all 5 pipelines from embedded shader bytecode.
+    /// On non-Windows, returns default-initialized (empty) pipelines.
+    pub fn init(device: ?*d3d11.ID3D11Device) InitError!Shaders {
+        const dev = device orelse return .{};
+
+        return .{
+            .pipelines = .{
+                .bg_color = try Pipeline.init(.{
+                    .device = dev,
+                    .vs_bytecode = shader_bytecode.bg_color_vs,
+                    .ps_bytecode = shader_bytecode.bg_color_ps,
+                }),
+                .cell_bg = try Pipeline.init(.{
+                    .device = dev,
+                    .vs_bytecode = shader_bytecode.bg_color_vs, // shared VS
+                    .ps_bytecode = shader_bytecode.cell_bg_ps,
+                }),
+                .cell_text = try Pipeline.init(.{
+                    .device = dev,
+                    .vs_bytecode = shader_bytecode.cell_text_vs,
+                    .ps_bytecode = shader_bytecode.cell_text_ps,
+                    .input_elements = &cell_text_input_elements,
+                    .instance_stride = @sizeOf(CellText),
+                }),
+                .image = try Pipeline.init(.{
+                    .device = dev,
+                    .vs_bytecode = shader_bytecode.image_vs,
+                    .ps_bytecode = shader_bytecode.image_ps,
+                    .input_elements = &image_input_elements,
+                    .instance_stride = @sizeOf(Image),
+                }),
+                .bg_image = try Pipeline.init(.{
+                    .device = dev,
+                    .vs_bytecode = shader_bytecode.bg_image_vs,
+                    .ps_bytecode = shader_bytecode.bg_image_ps,
+                    .input_elements = &bg_image_input_elements,
+                    .instance_stride = @sizeOf(BgImage),
+                }),
+            },
+        };
     }
 
     pub fn deinit(self: *Shaders, alloc: std.mem.Allocator) void {
@@ -56,6 +263,8 @@ pub const Uniforms = extern struct {
     screen_size: [2]f32 align(8),
     cell_size: [2]f32 align(8),
     grid_size: [2]u16 align(4),
+    /// The padding around the terminal grid in pixels. In order:
+    /// top, right, bottom, left.
     grid_padding: [4]f32 align(16),
     padding_extend: PaddingExtend align(1),
     min_contrast: f32 align(4),
