@@ -10,7 +10,7 @@ const LipoStep = @import("LipoStep.zig");
 /// The step that generates the file.
 step: *std.Build.Step,
 
-/// The final library file
+/// The final library file (DLL or static .lib/.a).
 output: std.Build.LazyPath,
 /// The import library for DLL builds on Windows (.lib), null otherwise.
 implib: ?std.Build.LazyPath = null,
