@@ -108,6 +108,60 @@ fn initTarget(
                 .entry_point = "PSMain",
                 .output_name = "cell_ps",
             },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "vs_5_0",
+                .entry_point = "BgColorVS",
+                .output_name = "bg_color_vs",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "BgColorPS",
+                .output_name = "bg_color_ps",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "CellBgPS",
+                .output_name = "cell_bg_ps",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "vs_5_0",
+                .entry_point = "CellTextVS",
+                .output_name = "cell_text_vs",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "CellTextPS",
+                .output_name = "cell_text_ps",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "vs_5_0",
+                .entry_point = "ImageVS",
+                .output_name = "image_vs",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "ImagePS",
+                .output_name = "image_ps",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "vs_5_0",
+                .entry_point = "BgImageVS",
+                .output_name = "bg_image_vs",
+            },
+            .{
+                .source = b.path("src/renderer/shaders/hlsl/shaders.hlsl"),
+                .profile = "ps_5_0",
+                .entry_point = "BgImagePS",
+                .output_name = "bg_image_ps",
+            },
         },
     });
 
@@ -478,6 +532,33 @@ pub fn add(
             });
             step.root_module.addAnonymousImport("ghostty_hlsl_cell_ps", .{
                 .root_source_file = hlsl.outputs.get("cell_ps").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_bg_color_vs", .{
+                .root_source_file = hlsl.outputs.get("bg_color_vs").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_bg_color_ps", .{
+                .root_source_file = hlsl.outputs.get("bg_color_ps").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_cell_bg_ps", .{
+                .root_source_file = hlsl.outputs.get("cell_bg_ps").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_cell_text_vs", .{
+                .root_source_file = hlsl.outputs.get("cell_text_vs").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_cell_text_ps", .{
+                .root_source_file = hlsl.outputs.get("cell_text_ps").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_image_vs", .{
+                .root_source_file = hlsl.outputs.get("image_vs").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_image_ps", .{
+                .root_source_file = hlsl.outputs.get("image_ps").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_bg_image_vs", .{
+                .root_source_file = hlsl.outputs.get("bg_image_vs").?,
+            });
+            step.root_module.addAnonymousImport("ghostty_hlsl_bg_image_ps", .{
+                .root_source_file = hlsl.outputs.get("bg_image_ps").?,
             });
         }
     }

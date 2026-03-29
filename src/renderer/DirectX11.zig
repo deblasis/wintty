@@ -133,10 +133,10 @@ pub fn initShaders(
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
-    _ = self;
     _ = alloc;
     _ = custom_shaders;
-    return shaders.Shaders.init();
+    const d3d_device = if (self.device) |dev| dev.device else null;
+    return shaders.Shaders.init(d3d_device);
 }
 
 pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
