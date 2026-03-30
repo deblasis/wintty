@@ -61,7 +61,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_OUT_OF_SPACE if the buffer
  *         is too small
  */
-GHOSTTY_API GhosttyResult ghostty_focus_encode(
+GHOSTTY_EXPORT GhosttyResult ghostty_focus_encode(
     GhosttyFocusEvent event,
     char* buf,
     size_t buf_len,
