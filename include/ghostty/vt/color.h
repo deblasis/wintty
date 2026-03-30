@@ -85,7 +85,7 @@ typedef uint8_t GhosttyColorPaletteIndex;
  *
  * @ingroup sgr
  */
-GHOSTTY_API void ghostty_color_rgb_get(GhosttyColorRgb color,
+GHOSTTY_EXPORT void ghostty_color_rgb_get(GhosttyColorRgb color,
                            uint8_t* r,
                            uint8_t* g,
                            uint8_t* b);

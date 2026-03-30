@@ -182,7 +182,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_OUT_OF_SPACE if the buffer
  *         is too small
  */
-GHOSTTY_API GhosttyResult ghostty_mode_report_encode(
+GHOSTTY_EXPORT GhosttyResult ghostty_mode_report_encode(
     GhosttyMode mode,
     GhosttyModeReportState state,
     char* buf,

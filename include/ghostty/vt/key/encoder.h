@@ -129,7 +129,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  *
  * @ingroup key
  */
-GHOSTTY_API GhosttyResult ghostty_key_encoder_new(const GhosttyAllocator *allocator, GhosttyKeyEncoder *encoder);
+GHOSTTY_EXPORT GhosttyResult ghostty_key_encoder_new(const GhosttyAllocator *allocator, GhosttyKeyEncoder *encoder);
 
 /**
  * Free a key encoder instance.
@@ -141,7 +141,7 @@ GHOSTTY_API GhosttyResult ghostty_key_encoder_new(const GhosttyAllocator *alloca
  *
  * @ingroup key
  */
-GHOSTTY_API void ghostty_key_encoder_free(GhosttyKeyEncoder encoder);
+GHOSTTY_EXPORT void ghostty_key_encoder_free(GhosttyKeyEncoder encoder);
 
 /**
  * Set an option on the key encoder.
@@ -164,7 +164,7 @@ GHOSTTY_API void ghostty_key_encoder_free(GhosttyKeyEncoder encoder);
  *
  * @ingroup key
  */
-GHOSTTY_API void ghostty_key_encoder_setopt(GhosttyKeyEncoder encoder, GhosttyKeyEncoderOption option, const void *value);
+GHOSTTY_EXPORT void ghostty_key_encoder_setopt(GhosttyKeyEncoder encoder, GhosttyKeyEncoderOption option, const void *value);
 
 /**
  * Set encoder options from a terminal's current state.
@@ -183,7 +183,7 @@ GHOSTTY_API void ghostty_key_encoder_setopt(GhosttyKeyEncoder encoder, GhosttyKe
  *
  * @ingroup key
  */
-GHOSTTY_API void ghostty_key_encoder_setopt_from_terminal(GhosttyKeyEncoder encoder, GhosttyTerminal terminal);
+GHOSTTY_EXPORT void ghostty_key_encoder_setopt_from_terminal(GhosttyKeyEncoder encoder, GhosttyTerminal terminal);
 
 /**
  * Encode a key event into a terminal escape sequence.
@@ -250,6 +250,6 @@ GHOSTTY_API void ghostty_key_encoder_setopt_from_terminal(GhosttyKeyEncoder enco
  *
  * @ingroup key
  */
-GHOSTTY_API GhosttyResult ghostty_key_encoder_encode(GhosttyKeyEncoder encoder, GhosttyKeyEvent event, char *out_buf, size_t out_buf_size, size_t *out_len);
+GHOSTTY_EXPORT GhosttyResult ghostty_key_encoder_encode(GhosttyKeyEncoder encoder, GhosttyKeyEvent event, char *out_buf, size_t out_buf_size, size_t *out_len);
 
 #endif /* GHOSTTY_VT_KEY_ENCODER_H */

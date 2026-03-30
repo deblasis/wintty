@@ -131,7 +131,7 @@ typedef struct {
  *
  * @ingroup formatter
  */
-GHOSTTY_API GhosttyResult ghostty_formatter_terminal_new(
+GHOSTTY_EXPORT GhosttyResult ghostty_formatter_terminal_new(
     const GhosttyAllocator* allocator,
     GhosttyFormatter* formatter,
     GhosttyTerminal terminal,
@@ -158,7 +158,7 @@ GHOSTTY_API GhosttyResult ghostty_formatter_terminal_new(
  *
  * @ingroup formatter
  */
-GHOSTTY_API GhosttyResult ghostty_formatter_format_buf(GhosttyFormatter formatter,
+GHOSTTY_EXPORT GhosttyResult ghostty_formatter_format_buf(GhosttyFormatter formatter,
                                            uint8_t* buf,
                                            size_t buf_len,
                                            size_t* out_written);
@@ -181,7 +181,7 @@ GHOSTTY_API GhosttyResult ghostty_formatter_format_buf(GhosttyFormatter formatte
  *
  * @ingroup formatter
  */
-GHOSTTY_API GhosttyResult ghostty_formatter_format_alloc(GhosttyFormatter formatter,
+GHOSTTY_EXPORT GhosttyResult ghostty_formatter_format_alloc(GhosttyFormatter formatter,
                                              const GhosttyAllocator* allocator,
                                              uint8_t** out_ptr,
                                              size_t* out_len);
@@ -196,7 +196,7 @@ GHOSTTY_API GhosttyResult ghostty_formatter_format_alloc(GhosttyFormatter format
  *
  * @ingroup formatter
  */
-GHOSTTY_API void ghostty_formatter_free(GhosttyFormatter formatter);
+GHOSTTY_EXPORT void ghostty_formatter_free(GhosttyFormatter formatter);
 
 /** @} */
 
