@@ -55,7 +55,7 @@ extern "C" {
  * @param len The length of the data in bytes
  * @return true if the data is safe to paste, false otherwise
  */
-GHOSTTY_API bool ghostty_paste_is_safe(const char* data, size_t len);
+GHOSTTY_EXPORT bool ghostty_paste_is_safe(const char* data, size_t len);
 
 /**
  * Encode paste data for writing to the terminal pty.
@@ -84,7 +84,7 @@ GHOSTTY_API bool ghostty_paste_is_safe(const char* data, size_t len);
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_OUT_OF_SPACE if the buffer
  *         is too small
  */
-GHOSTTY_API GhosttyResult ghostty_paste_encode(
+GHOSTTY_EXPORT GhosttyResult ghostty_paste_encode(
     char* data,
     size_t data_len,
     bool bracketed,
