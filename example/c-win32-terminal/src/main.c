@@ -26,6 +26,8 @@ static LRESULT CALLBACK wnd_proc(HWND, UINT, WPARAM, LPARAM);
 // We post a message to the main thread's message loop.
 
 #define WM_GHOSTTY_WAKEUP (WM_APP + 1)
+#define WM_GHOSTTY_RESIZE_TIMER 1
+#define RESIZE_TIMER_MS 8  // ~120 Hz for smooth resize
 
 static void wakeup_cb(void* userdata) {
     (void)userdata;
@@ -228,6 +230,24 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_ENTERSIZEMOVE:
+        // Windows enters a modal loop during resize/move. Normal messages
+        // don't flow, so we use a timer to keep the renderer ticking.
+        SetTimer(hwnd, WM_GHOSTTY_RESIZE_TIMER, RESIZE_TIMER_MS, NULL);
+        return 0;
+
+    case WM_EXITSIZEMOVE:
+        KillTimer(hwnd, WM_GHOSTTY_RESIZE_TIMER);
+        // One final tick to render at the settled size.
+        if (g_app) ghostty_app_tick(g_app);
+        return 0;
+
+    case WM_TIMER:
+        if (wp == WM_GHOSTTY_RESIZE_TIMER && g_app) {
+            ghostty_app_tick(g_app);
+        }
+        return 0;
+
     case WM_SIZE:
         if (g_surface) {
             ghostty_surface_set_size(g_surface, LOWORD(lp), HIWORD(lp));
@@ -259,6 +279,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_DESTROY:
+        KillTimer(hwnd, WM_GHOSTTY_RESIZE_TIMER);
         PostQuitMessage(0);
         return 0;
 
