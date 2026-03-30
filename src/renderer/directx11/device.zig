@@ -30,6 +30,7 @@ pub const Device = struct {
     swap_chain: *dxgi.IDXGISwapChain1,
     panel_native: ?*dxgi.ISwapChainPanelNative,
     rtv: ?*d3d11.ID3D11RenderTargetView,
+    blend_state: ?*d3d11.ID3D11BlendState,
     /// The HWND for querying the actual window size.
     /// Null for composition (SwapChainPanel) surfaces.
     hwnd: ?HWND,
@@ -45,6 +46,7 @@ pub const Device = struct {
         SetSwapChainFailed,
         BackBufferFailed,
         RenderTargetViewFailed,
+        BlendStateCreationFailed,
     };
 
     pub fn init(surface: Surface, width: u32, height: u32) InitError!Device {
@@ -173,6 +175,16 @@ pub const Device = struct {
             log.err("createRenderTargetView failed", .{});
             return InitError.RenderTargetViewFailed;
         };
+        errdefer _ = rtv.Release();
+
+        // Create a premultiplied-alpha blend state so that translucent
+        // pixels (e.g. padding cells output as float4(0,0,0,0) by the
+        // cell_bg shader) blend over the background instead of
+        // overwriting it with transparent black.
+        const blend_state = createBlendState(dev) orelse {
+            log.err("createBlendState failed", .{});
+            return InitError.BlendStateCreationFailed;
+        };
 
         log.info("device initialised: {}x{}", .{ width, height });
 
@@ -182,6 +194,7 @@ pub const Device = struct {
             .swap_chain = sc,
             .panel_native = panel_native,
             .rtv = rtv,
+            .blend_state = blend_state,
             .hwnd = switch (surface) {
                 .hwnd => |h| h,
                 .swap_chain_panel => null,
@@ -196,6 +209,12 @@ pub const Device = struct {
         if (self.rtv) |rtv| {
             _ = rtv.Release();
             self.rtv = null;
+        }
+
+        // Release blend state.
+        if (self.blend_state) |bs| {
+            _ = bs.Release();
+            self.blend_state = null;
         }
 
         // Detach swap chain from the panel (composition surfaces only).
@@ -262,6 +281,31 @@ pub const Device = struct {
             log.err("IDXGISwapChain1::Present failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
             return PresentError.PresentFailed;
         }
+    }
+
+    /// Create a premultiplied-alpha blend state.
+    /// SRC_BLEND=ONE, DEST_BLEND=INV_SRC_ALPHA implements standard
+    /// premultiplied alpha compositing: out = src + dst * (1 - src.a).
+    fn createBlendState(device: *d3d11.ID3D11Device) ?*d3d11.ID3D11BlendState {
+        var blend_desc = d3d11.D3D11_BLEND_DESC{};
+        blend_desc.RenderTarget[0] = .{
+            .BlendEnable = 1,
+            .SrcBlend = .ONE,
+            .DestBlend = .INV_SRC_ALPHA,
+            .BlendOp = .ADD,
+            .SrcBlendAlpha = .ONE,
+            .DestBlendAlpha = .INV_SRC_ALPHA,
+            .BlendOpAlpha = .ADD,
+            .RenderTargetWriteMask = 0x0F,
+        };
+
+        var state: ?*d3d11.ID3D11BlendState = null;
+        const hr = device.CreateBlendState(&blend_desc, &state);
+        if (com.FAILED(hr) or state == null) {
+            log.err("ID3D11Device::CreateBlendState failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+            return null;
+        }
+        return state.?;
     }
 
     /// Get the back buffer from the swap chain and create a render target view.
