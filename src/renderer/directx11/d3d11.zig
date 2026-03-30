@@ -520,11 +520,15 @@ pub const ID3D11BlendState = extern struct {
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         // ID3D11BlendState (slot 7)
-        GetDesc: Reserved,
+        GetDesc: *const fn (*ID3D11BlendState, *D3D11_BLEND_DESC) callconv(.winapi) void,
     };
 
     pub inline fn Release(self: *ID3D11BlendState) u32 {
         return self.vtable.Release(self);
+    }
+
+    pub inline fn GetDesc(self: *ID3D11BlendState, desc: *D3D11_BLEND_DESC) void {
+        self.vtable.GetDesc(self, desc);
     }
 };
 
