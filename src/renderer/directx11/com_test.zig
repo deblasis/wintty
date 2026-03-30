@@ -80,6 +80,17 @@ test "D3D11_BOX size" {
     try std.testing.expectEqual(@sizeOf(d3d11.D3D11_BOX), 24);
 }
 
+test "D3D11_BLEND_DESC size" {
+    // AlphaToCoverageEnable(4) + IndependentBlendEnable(4) + 8 * D3D11_RENDER_TARGET_BLEND_DESC(32) = 264 bytes.
+    try std.testing.expectEqual(@sizeOf(d3d11.D3D11_BLEND_DESC), 264);
+}
+
+test "D3D11_RENDER_TARGET_BLEND_DESC size" {
+    // BlendEnable(4) + SrcBlend(4) + DestBlend(4) + BlendOp(4) + SrcBlendAlpha(4)
+    // + DestBlendAlpha(4) + BlendOpAlpha(4) + RenderTargetWriteMask(1) + padding(3) = 32 bytes.
+    try std.testing.expectEqual(@sizeOf(d3d11.D3D11_RENDER_TARGET_BLEND_DESC), 32);
+}
+
 // Verify vtable pointer layout - COM objects are a single pointer to a vtable.
 
 test "IDXGIDevice is a single vtable pointer" {

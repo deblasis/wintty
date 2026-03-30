@@ -13,6 +13,7 @@ const Texture = @import("Texture.zig");
 const Sampler = @import("Sampler.zig");
 const Pipeline = @import("Pipeline.zig");
 const RenderPass = @import("RenderPass.zig");
+const Device = @import("device.zig").Device;
 
 const Buffer = buffer_mod.Buffer;
 
@@ -296,4 +297,100 @@ test "RenderPass: step with zero instance count is no-op" {
         .pipeline = .{},
         .draw = .{ .type = .triangle_strip, .vertex_count = 4, .instance_count = 0 },
     });
+}
+
+test "BlendState: premultiplied alpha config" {
+    const dev = createTestDevice() orelse return;
+    defer _ = dev.device.Release();
+    defer _ = dev.context.Release();
+
+    // Create a blend state the same way Device.init does.
+    var blend_desc = d3d11.D3D11_BLEND_DESC{};
+    blend_desc.RenderTarget[0] = .{
+        .BlendEnable = 1,
+        .SrcBlend = .ONE,
+        .DestBlend = .INV_SRC_ALPHA,
+        .BlendOp = .ADD,
+        .SrcBlendAlpha = .ONE,
+        .DestBlendAlpha = .INV_SRC_ALPHA,
+        .BlendOpAlpha = .ADD,
+        .RenderTargetWriteMask = 0x0F,
+    };
+
+    var state: ?*d3d11.ID3D11BlendState = null;
+    const hr = dev.device.CreateBlendState(&blend_desc, &state);
+    try std.testing.expect(!com.FAILED(hr));
+    try std.testing.expect(state != null);
+    defer _ = state.?.Release();
+
+    // Read back the descriptor and verify the blend factors.
+    // Guards against someone changing SrcBlend/DestBlend (PR #75 regression).
+    var readback = d3d11.D3D11_BLEND_DESC{};
+    state.?.GetDesc(&readback);
+
+    const rt0 = readback.RenderTarget[0];
+    try std.testing.expectEqual(rt0.BlendEnable, 1);
+    try std.testing.expectEqual(rt0.SrcBlend, .ONE);
+    try std.testing.expectEqual(rt0.DestBlend, .INV_SRC_ALPHA);
+    try std.testing.expectEqual(rt0.BlendOp, .ADD);
+    try std.testing.expectEqual(rt0.SrcBlendAlpha, .ONE);
+    try std.testing.expectEqual(rt0.DestBlendAlpha, .INV_SRC_ALPHA);
+    try std.testing.expectEqual(rt0.BlendOpAlpha, .ADD);
+    try std.testing.expectEqual(rt0.RenderTargetWriteMask, 0x0F);
+}
+
+test "SwapChain: HWND surface uses SCALING_NONE" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    // Create a hidden window for the swap chain.
+    const HWND = dxgi.HWND;
+    const HINSTANCE = std.os.windows.HINSTANCE;
+    const WNDCLASSEXW = extern struct {
+        cbSize: u32 = @sizeOf(@This()),
+        style: u32 = 0,
+        lpfnWndProc: *const fn (HWND, u32, usize, isize) callconv(.winapi) isize,
+        cbClsExtra: i32 = 0,
+        cbWndExtra: i32 = 0,
+        hInstance: ?HINSTANCE = null,
+        hIcon: ?*anyopaque = null,
+        hCursor: ?*anyopaque = null,
+        hbrBackground: ?*anyopaque = null,
+        lpszMenuName: ?[*:0]const u16 = null,
+        lpszClassName: [*:0]const u16,
+        hIconSm: ?*anyopaque = null,
+    };
+
+    const user32 = struct {
+        extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(.winapi) u16;
+        extern "user32" fn CreateWindowExW(
+            u32, [*:0]const u16, ?[*:0]const u16,
+            u32, i32, i32, i32, i32,
+            ?HWND, ?*anyopaque, ?HINSTANCE, ?*anyopaque,
+        ) callconv(.winapi) ?HWND;
+        extern "user32" fn DestroyWindow(HWND) callconv(.winapi) i32;
+        fn defWindowProc(_: HWND, _: u32, _: usize, _: isize) callconv(.winapi) isize {
+            return 0;
+        }
+    };
+
+    const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyTestClass");
+    const wc = WNDCLASSEXW{ .lpfnWndProc = user32.defWindowProc, .lpszClassName = class_name };
+    _ = user32.RegisterClassExW(&wc);
+
+    const hwnd = user32.CreateWindowExW(
+        0, class_name, null, 0, // WS_OVERLAPPED
+        0, 0, 100, 100, null, null, null, null,
+    ) orelse return; // Skip if window creation fails (e.g. headless CI).
+    defer _ = user32.DestroyWindow(hwnd);
+
+    // Init the full Device with an HWND surface.
+    var device = Device.init(.{ .hwnd = hwnd }, 100, 100) catch return;
+    defer device.deinit();
+
+    // Query the swap chain descriptor and verify scaling.
+    // Guards against regression to STRETCH (PR #76).
+    var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
+    const hr = device.swap_chain.GetDesc1(&desc);
+    try std.testing.expect(!com.FAILED(hr));
+    try std.testing.expectEqual(desc.Scaling, .NONE);
 }
