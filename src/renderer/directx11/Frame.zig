@@ -31,9 +31,9 @@ pub inline fn renderPass(
     attachments: []const RenderPass.Options.Attachment,
 ) RenderPass {
     if (self.renderer.api.device) |*dev| {
-        return RenderPass.begin(dev.context, dev.device, .{ .attachments = attachments });
+        return RenderPass.begin(dev.context, dev.device, dev.blend_state, .{ .attachments = attachments });
     } else {
-        return RenderPass.begin(null, null, .{ .attachments = attachments });
+        return RenderPass.begin(null, null, null, .{ .attachments = attachments });
     }
 }
 

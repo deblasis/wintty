@@ -95,6 +95,9 @@ uint2 unpack_grid_size()
     return uint2(grid_size_packed & 0xFFFFu, (grid_size_packed >> 16u) & 0xFFFFu);
 }
 
+// TODO: re-enable padding_extend once DX11 blend state reliably composites
+// transparent pixels.  Until then, CellBgPS always clamps to the nearest
+// edge cell instead of returning transparent for non-extended padding.
 bool padding_extend_left()  { return (padding_extend_packed & EXTEND_LEFT)  != 0u; }
 bool padding_extend_right() { return (padding_extend_packed & EXTEND_RIGHT) != 0u; }
 bool padding_extend_up()    { return (padding_extend_packed & EXTEND_UP)    != 0u; }
@@ -212,34 +215,34 @@ float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
 
     uint2 gs = unpack_grid_size();
 
-    // Clamp or discard in X depending on padding_extend flags.
-    if (grid_pos.x < 0) {
-        if (padding_extend_left())
-            grid_pos.x = 0;
-        else
-            return float4(0.0, 0.0, 0.0, 0.0);
-    } else if (grid_pos.x >= (int)gs.x) {
-        if (padding_extend_right())
-            grid_pos.x = (int)gs.x - 1;
-        else
-            return float4(0.0, 0.0, 0.0, 0.0);
-    }
+    // Clamp out-of-bounds grid positions to the nearest edge cell.
+    //
+    // Metal and OpenGL return transparent here (unless padding_extend is
+    // set) and rely on alpha blending to let the bg_color pass show
+    // through.  On DX11 the blend state does not reliably composite
+    // transparent pixels, so we always clamp to the edge cell.  This
+    // also avoids a visible color mismatch when the terminal sets per-
+    // cell backgrounds (e.g. cmd.exe) that differ from bg_color.
+    if (grid_pos.x < 0)
+        grid_pos.x = 0;
+    else if (grid_pos.x >= (int)gs.x)
+        grid_pos.x = (int)gs.x - 1;
 
-    // Clamp or discard in Y.
-    if (grid_pos.y < 0) {
-        if (padding_extend_up())
-            grid_pos.y = 0;
-        else
-            return float4(0.0, 0.0, 0.0, 0.0);
-    } else if (grid_pos.y >= (int)gs.y) {
-        if (padding_extend_down())
-            grid_pos.y = (int)gs.y - 1;
-        else
-            return float4(0.0, 0.0, 0.0, 0.0);
-    }
+    if (grid_pos.y < 0)
+        grid_pos.y = 0;
+    else if (grid_pos.y >= (int)gs.y)
+        grid_pos.y = (int)gs.y - 1;
 
     uint idx = (uint)grid_pos.y * gs.x + (uint)grid_pos.x;
-    return load_color(cell_bg_colors[idx]);
+    float4 bg = load_color(cell_bg_colors[idx]);
+
+    // Composite over the global background so the result is fully opaque.
+    // On Metal/OpenGL this compositing happens via hardware blending, but
+    // DX11's blend state is unreliable for this.  Doing it in the shader
+    // produces the same result: out = cell_bg + bg_color * (1 - cell_bg.a).
+    float4 global_bg = load_color(bg_color_packed);
+    bg = float4(bg.rgb + global_bg.rgb * (1.0 - bg.a), 1.0);
+    return bg;
 }
 
 // ===========================================================================
