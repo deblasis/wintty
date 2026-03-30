@@ -266,7 +266,7 @@ test "Pipeline: deinit on empty pipeline is safe to call" {
 }
 
 test "RenderPass: begin and complete with no device" {
-    var pass = RenderPass.begin(null, null, .{ .attachments = &.{} });
+    var pass = RenderPass.begin(null, null, null, .{ .attachments = &.{} });
     pass.complete();
 }
 
@@ -275,7 +275,7 @@ test "RenderPass: step with empty pipeline is no-op" {
     defer _ = dev.device.Release();
     defer _ = dev.context.Release();
 
-    var pass = RenderPass.begin(dev.context, dev.device, .{ .attachments = &.{} });
+    var pass = RenderPass.begin(dev.context, dev.device, null, .{ .attachments = &.{} });
     defer pass.complete();
 
     pass.step(.{
@@ -289,7 +289,7 @@ test "RenderPass: step with zero instance count is no-op" {
     defer _ = dev.device.Release();
     defer _ = dev.context.Release();
 
-    var pass = RenderPass.begin(dev.context, dev.device, .{ .attachments = &.{} });
+    var pass = RenderPass.begin(dev.context, dev.device, null, .{ .attachments = &.{} });
     defer pass.complete();
 
     pass.step(.{
