@@ -121,7 +121,7 @@ typedef struct {
  *
  * @ingroup grid_ref
  */
-GHOSTTY_API GhosttyResult ghostty_grid_ref_cell(const GhosttyGridRef *ref,
+GHOSTTY_EXPORT GhosttyResult ghostty_grid_ref_cell(const GhosttyGridRef *ref,
                                     GhosttyCell *out_cell);
 
 /**
@@ -134,7 +134,7 @@ GHOSTTY_API GhosttyResult ghostty_grid_ref_cell(const GhosttyGridRef *ref,
  *
  * @ingroup grid_ref
  */
-GHOSTTY_API GhosttyResult ghostty_grid_ref_row(const GhosttyGridRef *ref,
+GHOSTTY_EXPORT GhosttyResult ghostty_grid_ref_row(const GhosttyGridRef *ref,
                                    GhosttyRow *out_row);
 
 /**
@@ -159,7 +159,7 @@ GHOSTTY_API GhosttyResult ghostty_grid_ref_row(const GhosttyGridRef *ref,
  *
  * @ingroup grid_ref
  */
-GHOSTTY_API GhosttyResult ghostty_grid_ref_graphemes(const GhosttyGridRef *ref,
+GHOSTTY_EXPORT GhosttyResult ghostty_grid_ref_graphemes(const GhosttyGridRef *ref,
                                          uint32_t *buf,
                                          size_t buf_len,
                                          size_t *out_len);
@@ -200,7 +200,7 @@ GHOSTTY_API GhosttyResult ghostty_grid_ref_hyperlink_uri(
  *
  * @ingroup grid_ref
  */
-GHOSTTY_API GhosttyResult ghostty_grid_ref_style(const GhosttyGridRef *ref,
+GHOSTTY_EXPORT GhosttyResult ghostty_grid_ref_style(const GhosttyGridRef *ref,
                                      GhosttyStyle *out_style);
 
 /** @} */
