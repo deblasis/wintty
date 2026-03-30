@@ -126,6 +126,13 @@
 > - [ ] Quick terminal, command palette, global keybinds
 > - [ ] Installer packages (MSI, MSIX, winget), auto-update
 >
+> ### .NET Examples
+>
+> .NET-specific examples live in [deblasis/libghostty-dotnet](https://github.com/deblasis/libghostty-dotnet),
+> separate from the `example/` directory in this repo which is for C and Zig.
+> These examples help surface friction points, bugs, and integration gaps
+> from the perspective of a .NET consumer of libghostty.
+>
 > ### History
 >
 > This fork started as an upstream contribution effort. 17 PRs were merged
