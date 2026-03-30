@@ -187,7 +187,7 @@ pub const IDXGISwapChain1 = extern struct {
         GetFrameStatistics: Reserved,
         GetLastPresentCount: Reserved,
         // IDXGISwapChain1 (slots 18-28)
-        GetDesc1: Reserved,
+        GetDesc1: *const fn (*IDXGISwapChain1, *DXGI_SWAP_CHAIN_DESC1) callconv(.winapi) HRESULT,
         GetFullscreenDesc: Reserved,
         GetHwnd: Reserved,
         GetCoreWindow: Reserved,
@@ -206,6 +206,10 @@ pub const IDXGISwapChain1 = extern struct {
 
     pub inline fn GetBuffer(self: *IDXGISwapChain1, buffer: u32, riid: *const GUID, surface: *?*anyopaque) HRESULT {
         return self.vtable.GetBuffer(self, buffer, riid, surface);
+    }
+
+    pub inline fn GetDesc1(self: *IDXGISwapChain1, desc: *DXGI_SWAP_CHAIN_DESC1) HRESULT {
+        return self.vtable.GetDesc1(self, desc);
     }
 
     pub inline fn ResizeBuffers(self: *IDXGISwapChain1, buffer_count: u32, width: u32, height: u32, format: DXGI_FORMAT, flags: u32) HRESULT {
