@@ -54,28 +54,33 @@ context: ?*d3d11.ID3D11DeviceContext,
 /// The device for creating render target views from textures.
 device: ?*d3d11.ID3D11Device,
 
+/// Blend state for premultiplied-alpha compositing.
+blend_state: ?*d3d11.ID3D11BlendState,
+
 pub fn begin(
     context: ?*d3d11.ID3D11DeviceContext,
     device: ?*d3d11.ID3D11Device,
+    blend_state: ?*d3d11.ID3D11BlendState,
     opts: Options,
 ) @This() {
-    const ctx = context orelse return .{ .context = null, .device = device };
+    const self: @This() = .{ .context = context, .device = device, .blend_state = blend_state };
+    const ctx = context orelse return self;
 
     // Bind the first attachment's render target and optionally clear it.
     // GenericRenderer always passes exactly one attachment per render pass.
-    if (opts.attachments.len == 0) return .{ .context = context, .device = device };
+    if (opts.attachments.len == 0) return self;
 
     const att = opts.attachments[0];
     const target, const rtv = switch (att.target) {
         .target => |t| .{ t, t.rtv orelse {
             log.warn("render pass attachment has no RTV, skipping bind", .{});
-            return .{ .context = context, .device = device };
+            return self;
         } },
         // Texture-as-RTV not yet supported (needs CreateRenderTargetView
         // from the texture's ID3D11Texture2D).
         .texture => {
             log.warn("texture attachments not yet supported in DX11 render pass", .{});
-            return .{ .context = context, .device = device };
+            return self;
         },
     };
 
@@ -93,6 +98,12 @@ pub fn begin(
     // Bind the render target.
     ctx.OMSetRenderTargets(&.{rtv}, null);
 
+    // Bind blend state so translucent pixels composite correctly
+    // instead of overwriting the destination.
+    if (blend_state) |bs| {
+        ctx.OMSetBlendState(bs, null, 0xFFFFFFFF);
+    }
+
     // Clear if requested.
     if (att.clear_color) |color| {
         ctx.ClearRenderTargetView(rtv, &.{
@@ -103,7 +114,7 @@ pub fn begin(
         });
     }
 
-    return .{ .context = context, .device = device };
+    return self;
 }
 
 pub fn step(self: *@This(), s: Step) void {
