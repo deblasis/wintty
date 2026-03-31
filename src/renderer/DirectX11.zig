@@ -140,6 +140,15 @@ pub fn initShaders(
     return shaders.Shaders.init(d3d_device);
 }
 
+/// Notify the DX11 device of the desired surface dimensions.
+/// For composition surfaces (no HWND), windowSize() will return these
+/// values so the renderer's resize detection loop can pick them up.
+pub fn setTargetSize(self: *DirectX11, width: u32, height: u32) void {
+    if (self.device) |*dev| {
+        dev.setTargetSize(width, height);
+    }
+}
+
 pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
     if (self.device) |dev| {
         // Query the actual window size, not the swap chain buffer size.
