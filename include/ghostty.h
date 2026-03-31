@@ -457,6 +457,12 @@ typedef struct {
 typedef struct {
   void* hwnd;
   void* swap_chain_panel;
+  // OUT: receives the DXGI shared handle for the render texture.
+  // Open with OpenSharedResource on the device returned by
+  // ghostty_surface_get_d3d11_device to avoid cross-device sync issues.
+  void* shared_texture_out;
+  uint32_t texture_width;
+  uint32_t texture_height;
 } ghostty_platform_windows_s;
 
 typedef union {
@@ -1122,6 +1128,20 @@ GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, do
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
+// Returns the ID3D11Device* used by this surface's renderer. Shared texture
+// consumers should call OpenSharedResource on this device to avoid cross-device
+// synchronization issues. Returns NULL on non-DX11 builds.
+GHOSTTY_API void* ghostty_surface_get_d3d11_device(ghostty_surface_t);
+// Returns the ID3D11DeviceContext* ghostty uses for rendering. Consumers
+// need this for CopyResource from the shared texture. Enable multithread
+// protection when accessing from a non-render thread. Returns NULL on
+// non-DX11 builds.
+GHOSTTY_API void* ghostty_surface_get_d3d11_context(ghostty_surface_t);
+// Returns the ID3D11Texture2D* ghostty renders to in shared texture mode.
+// Same-process consumers can CopyResource from this directly. The texture
+// pointer changes on resize -- re-read after ghostty_surface_set_size.
+// Returns NULL if not in shared texture mode.
+GHOSTTY_API void* ghostty_surface_get_d3d11_texture(ghostty_surface_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
