@@ -50,6 +50,7 @@ pub const D3D11_CPU_ACCESS_READ: D3D11_CPU_ACCESS_FLAG = 0x20000;
 
 pub const D3D11_RESOURCE_MISC_FLAG = u32;
 pub const D3D11_RESOURCE_MISC_BUFFER_STRUCTURED: D3D11_RESOURCE_MISC_FLAG = 0x40;
+pub const D3D11_RESOURCE_MISC_SHARED: D3D11_RESOURCE_MISC_FLAG = 0x2;
 
 pub const D3D11_MAP = enum(u32) {
     READ = 1,
@@ -1169,7 +1170,7 @@ pub const ID3D11DeviceContext = extern struct {
         // slot 110: ClearState
         _reserved110: Reserved,
         // slot 111: Flush
-        _reserved111: Reserved,
+        Flush: *const fn (*ID3D11DeviceContext) callconv(.winapi) void,
         // slot 112: GetType
         _reserved112: Reserved,
         // slot 113: GetContextFlags
@@ -1287,6 +1288,10 @@ pub const ID3D11DeviceContext = extern struct {
 
     pub inline fn Release(self: *ID3D11DeviceContext) u32 {
         return self.vtable.Release(self);
+    }
+
+    pub inline fn Flush(self: *ID3D11DeviceContext) void {
+        self.vtable.Flush(self);
     }
 };
 
