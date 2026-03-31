@@ -877,6 +877,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Notify the graphics API of the desired surface dimensions.
+        /// Used by composition surfaces (no HWND) where the renderer
+        /// cannot query the window size directly.
+        pub fn setTargetSize(self: *Self, width: u32, height: u32) void {
+            if (@hasDecl(GraphicsAPI, "setTargetSize")) {
+                self.api.setTargetSize(width, height);
+            }
+        }
+
         /// Callback called by renderer.Thread when it begins.
         pub fn threadEnter(self: *const Self, surface: *apprt.Surface) !void {
             // If our API has to do things on thread enter, let it.

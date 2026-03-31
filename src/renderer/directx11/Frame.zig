@@ -31,6 +31,19 @@ pub inline fn renderPass(
     attachments: []const RenderPass.Options.Attachment,
 ) RenderPass {
     if (self.renderer.api.device) |*dev| {
+        // Composition surfaces use premultiplied alpha, so the clear
+        // color must be opaque to prevent the host background from
+        // showing through uncovered pixels. HWND surfaces use
+        // UNSPECIFIED alpha mode where alpha is ignored anyway.
+        if (dev.hwnd == null) {
+            var patched: [8]RenderPass.Options.Attachment = undefined;
+            const n = @min(attachments.len, patched.len);
+            for (attachments[0..n], patched[0..n]) |src, *dst| {
+                dst.* = src;
+                if (dst.clear_color) |*c| c[3] = 1.0;
+            }
+            return RenderPass.begin(dev.context, dev.device, dev.blend_state, .{ .attachments = patched[0..n] });
+        }
         return RenderPass.begin(dev.context, dev.device, dev.blend_state, .{ .attachments = attachments });
     } else {
         return RenderPass.begin(null, null, null, .{ .attachments = attachments });
