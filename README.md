@@ -79,7 +79,7 @@
 > **DX11 renderer infrastructure** (in fork)
 >
 > - [x] COM interface definitions (d3d11, dxgi) with vtable bindings
-> - [x] DX11 device lifecycle with dual surface support (HWND for standalone/embedding, SwapChainPanel for WinUI host)
+> - [x] DX11 device lifecycle with triple surface support (HWND, SwapChainPanel, shared DXGI texture)
 > - [x] Instanced cell grid renderer with pre-compiled HLSL shaders
 > - [x] HLSL build step (HlslStep.zig) mirroring Metal's MetallibStep
 > - [x] Backend enum with `directx11` variant
@@ -97,16 +97,13 @@
 > - [x] `--version` flag working from command line
 > - [x] Interop test suite (7 tests against the real DLL)
 >
-> ### Architecture: Dual Surface Support
+> ### Architecture: Surface Modes
 >
-> The DX11 renderer is dual-channel at the library level so that libghostty
-> consumers can pick whichever surface model fits their host:
+> The DX11 renderer supports three surface modes at the library level so that
+> libghostty consumers can pick whichever model fits their host:
 > - **HWND** -- `CreateSwapChainForHwnd`, for standalone windows, test harnesses, and third-party embedders
 > - **SwapChainPanel** (composition) -- `CreateSwapChainForComposition`, for WinUI 3 / XAML hosts
->
-> We are iterating on SwapChainPanel with the information we have today but
-> the choice is not set in stone -- the dual-channel design means we can
-> change our mind later without breaking embedders.
+> - **Shared texture** -- renders to a standalone `ID3D11Texture2D` with a DXGI shared handle, for game engines (Unity, Unreal, Godot), custom renderers, and offscreen scenarios
 >
 > The device picks the path based on what the caller provides. No compile-time flags.
 >

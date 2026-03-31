@@ -116,6 +116,46 @@ pub const IDXGIDeviceSubObject = extern struct {
     };
 };
 
+// IDXGIResource
+// Inherits IDXGIDeviceSubObject. Slot we call: GetSharedHandle (slot 8)
+pub const IDXGIResource = extern struct {
+    vtable: *const VTable,
+
+    pub const IID = GUID{
+        .data1 = 0x035f3ab4,
+        .data2 = 0x482e,
+        .data3 = 0x4e50,
+        .data4 = .{ 0xb4, 0x1f, 0x8a, 0x7f, 0x8b, 0xd8, 0x96, 0x0b },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDXGIResource, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDXGIResource) callconv(.winapi) u32,
+        Release: *const fn (*IDXGIResource) callconv(.winapi) u32,
+        // IDXGIObject (slots 3-6)
+        SetPrivateData: Reserved,
+        SetPrivateDataInterface: Reserved,
+        GetPrivateData: Reserved,
+        GetParent: Reserved,
+        // IDXGIDeviceSubObject (slot 7)
+        GetDevice: Reserved,
+        // IDXGIResource (slots 8-11)
+        GetSharedHandle: *const fn (*IDXGIResource, *?std.os.windows.HANDLE) callconv(.winapi) HRESULT,
+        GetUsage: Reserved,
+        SetEvictionPriority: Reserved,
+        GetEvictionPriority: Reserved,
+    };
+
+    pub inline fn GetSharedHandle(self: *IDXGIResource, handle: *?std.os.windows.HANDLE) HRESULT {
+        return self.vtable.GetSharedHandle(self, handle);
+    }
+
+    pub inline fn Release(self: *IDXGIResource) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
 // IDXGISwapChain
 // Slots we call: Present (8), GetBuffer (9)
 pub const IDXGISwapChain = extern struct {

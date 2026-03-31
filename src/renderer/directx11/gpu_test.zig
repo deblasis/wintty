@@ -339,6 +339,35 @@ test "BlendState: premultiplied alpha config" {
     try std.testing.expectEqual(rt0.RenderTargetWriteMask, 0x0F);
 }
 
+test "Device: shared texture mode skips swap chain" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const HANDLE = std.os.windows.HANDLE;
+    var shared_handle: ?HANDLE = null;
+
+    var device = Device.init(.{ .shared_texture = .{
+        .handle_out = &shared_handle,
+        .width = 640,
+        .height = 480,
+    } }, 640, 480) catch return; // Skip if no GPU.
+    defer device.deinit();
+
+    // Shared texture mode: no swap chain, no RTV on Device (Target owns those).
+    try std.testing.expect(device.swap_chain == null);
+    try std.testing.expect(device.rtv == null);
+    try std.testing.expectEqual(device.hwnd, null);
+    try std.testing.expectEqual(device.width, 640);
+    try std.testing.expectEqual(device.height, 480);
+
+    // present() should flush without error.
+    try device.present();
+
+    // resize() should update dimensions without touching a swap chain.
+    try device.resize(1280, 720);
+    try std.testing.expectEqual(device.width, 1280);
+    try std.testing.expectEqual(device.height, 720);
+}
+
 test "SwapChain: HWND surface uses SCALING_NONE" {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -390,7 +419,7 @@ test "SwapChain: HWND surface uses SCALING_NONE" {
     // Query the swap chain descriptor and verify scaling.
     // Guards against regression to STRETCH (PR #76).
     var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
-    const hr = device.swap_chain.GetDesc1(&desc);
+    const hr = device.swap_chain.?.GetDesc1(&desc);
     try std.testing.expect(!com.FAILED(hr));
     try std.testing.expectEqual(desc.Scaling, .NONE);
 }
