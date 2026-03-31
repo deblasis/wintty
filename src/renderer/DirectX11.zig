@@ -92,8 +92,10 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX11 {
                 .windows => |w| {
                     const surface: devicepkg.Surface = if (w.hwnd) |hwnd|
                         .{ .hwnd = hwnd }
+                    else if (w.swap_chain_panel) |panel|
+                        .{ .swap_chain_panel = @ptrCast(@alignCast(panel)) }
                     else
-                        @panic("HWND surface requires a non-null hwnd");
+                        @panic("Windows surface requires either hwnd or swap_chain_panel");
 
                     const size = opts.size.screen;
                     break :device Device.init(surface, size.width, size.height) catch |err| {
