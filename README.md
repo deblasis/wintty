@@ -30,10 +30,10 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** Foundation done, C Win32 example wiring app + renderer + input
+> **Status:** Terminal renders real text via DX11 + FreeType, ConPTY shell works, input handling in place
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████░░░░░░░░░░░] 48%`
+> `[█████████████░░░░░░░] 65%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
@@ -113,11 +113,13 @@
 > ### What is next
 >
 > - [x] DX11 clear-to-color: wire GenericRenderer contract, first pixels on screen
-> - [ ] Cell rendering: instance buffer, texture atlas, text on screen
-> - [ ] DirectWrite font backend
-> - [ ] ConPTY shell spawning
-> - [ ] Keyboard, mouse, clipboard
-> - [ ] Per-monitor DPI, dark/light mode theming
+> - [x] Cell rendering: full GenericRenderer path, all 5 HLSL pipelines, atlas textures, buffer sync
+> - [x] ConPTY shell spawning (via libghostty embedded apprt)
+> - [x] Keyboard and mouse input (scancodes, WM_CHAR with surrogate pairs, all mouse events)
+> - [x] Composition swap chain API for WinUI 3 embedders
+> - [ ] DirectWrite font backend (currently FreeType fallback, no font discovery)
+> - [ ] Clipboard (read/write stubs, not yet wired to Win32 clipboard API)
+> - [ ] Per-monitor DPI (handled but manifest not linked in example), dark/light mode theming
 >
 > **Feature parity** (later)
 >
