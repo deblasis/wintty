@@ -456,6 +456,7 @@ typedef struct {
 
 typedef struct {
   void* hwnd;
+  void* swap_chain_panel;
 } ghostty_platform_windows_s;
 
 typedef union {

@@ -362,6 +362,8 @@ pub const Platform = union(PlatformTag) {
     pub const Windows = if (builtin.target.os.tag == .windows) struct {
         /// The HWND to render into, or null for composition swap chain.
         hwnd: ?std.os.windows.HANDLE,
+        /// ISwapChainPanelNative pointer for composition swap chain, or null for HWND path.
+        swap_chain_panel: ?*anyopaque = null,
     } else void;
 
     // The C ABI compatible version of this union. The tag is expected
@@ -377,6 +379,7 @@ pub const Platform = union(PlatformTag) {
 
         windows: extern struct {
             hwnd: ?*anyopaque,
+            swap_chain_panel: ?*anyopaque,
         },
     };
 
@@ -400,6 +403,7 @@ pub const Platform = union(PlatformTag) {
 
             .windows => if (Windows != void) .{ .windows = .{
                 .hwnd = c_platform.windows.hwnd,
+                .swap_chain_panel = c_platform.windows.swap_chain_panel,
             } } else error.UnsupportedPlatform,
         };
     }
