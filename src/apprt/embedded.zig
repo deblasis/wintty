@@ -379,10 +379,16 @@ pub const Platform = union(PlatformTag) {
     } else void;
 
     pub const Windows = if (builtin.target.os.tag == .windows) struct {
-        /// The HWND to render into, or null for composition swap chain.
+        /// The HWND to render into, or null for composition/shared texture modes.
         hwnd: ?std.os.windows.HANDLE,
-        /// ISwapChainPanelNative pointer for composition swap chain, or null for HWND path.
+        /// ISwapChainPanelNative pointer for composition swap chain, or null.
         swap_chain_panel: ?*anyopaque = null,
+        /// OUT pointer for shared texture DXGI handle, or null.
+        shared_texture_out: ?*anyopaque = null,
+        /// Width of the shared texture in pixels. Required when shared_texture_out is set.
+        texture_width: u32 = 0,
+        /// Height of the shared texture in pixels. Required when shared_texture_out is set.
+        texture_height: u32 = 0,
     } else void;
 
     // The C ABI compatible version of this union. The tag is expected
@@ -399,6 +405,9 @@ pub const Platform = union(PlatformTag) {
         windows: extern struct {
             hwnd: ?*anyopaque,
             swap_chain_panel: ?*anyopaque,
+            shared_texture_out: ?*anyopaque,
+            texture_width: u32,
+            texture_height: u32,
         },
     };
 
@@ -423,6 +432,9 @@ pub const Platform = union(PlatformTag) {
             .windows => if (Windows != void) .{ .windows = .{
                 .hwnd = c_platform.windows.hwnd,
                 .swap_chain_panel = c_platform.windows.swap_chain_panel,
+                .shared_texture_out = c_platform.windows.shared_texture_out,
+                .texture_width = c_platform.windows.texture_width,
+                .texture_height = c_platform.windows.texture_height,
             } } else error.UnsupportedPlatform,
         };
     }
@@ -1720,6 +1732,37 @@ pub const CAPI = struct {
     /// call as soon as possible (NOW if possible).
     export fn ghostty_surface_draw(surface: *Surface) void {
         surface.draw();
+    }
+
+    /// Return the ID3D11Device pointer that ghostty uses for rendering.
+    /// Shared texture consumers should open the DXGI shared handle on
+    /// this same device to avoid cross-device synchronization issues.
+    /// Returns null on non-DX11 builds or if the device is not initialized.
+    export fn ghostty_surface_get_d3d11_device(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const dev = surface.core_surface.renderer.api.device orelse return null;
+        return @ptrCast(dev.device);
+    }
+
+    /// Return the ID3D11DeviceContext pointer that ghostty uses for
+    /// rendering. Consumers need this to call CopyResource from the
+    /// shared texture. Enable multithread protection on the context
+    /// when accessing from a non-render thread.
+    /// Returns null on non-DX11 builds or if the device is not initialized.
+    export fn ghostty_surface_get_d3d11_context(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const dev = surface.core_surface.renderer.api.device orelse return null;
+        return @ptrCast(dev.context);
+    }
+
+    /// Return the ID3D11Texture2D pointer that ghostty renders to in
+    /// shared texture mode. Same-process consumers can CopyResource
+    /// directly from this pointer using ghostty's device context.
+    /// Returns null on non-DX11 builds or if not in shared texture mode.
+    export fn ghostty_surface_get_d3d11_texture(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const st = surface.core_surface.renderer.api.shared_target orelse return null;
+        return @ptrCast(st.texture orelse return null);
     }
 
     /// Update the size of a surface. This will trigger resize notifications
