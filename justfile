@@ -23,6 +23,60 @@ test-cross:
     @echo "Use the cross-platform-test Claude Code skill for native multi-platform testing."
     @echo "It runs zig build test natively on Windows, Linux, and Mac via SSH."
 
+# Build and test all examples (mirrors CI: clean zig-out, build zig + cmake examples)
+test-examples: _test-examples-zig _test-examples-cmake
+    @echo "All examples done."
+
+# Zig examples (zig build in each example dir)
+_test-examples-zig:
+    #!/usr/bin/env bash
+    set -e
+    rm -rf zig-out .zig-cache
+    failed=""
+    for dir in example/*/; do
+        [ -f "$dir/build.zig.zon" ] || continue
+        name=$(basename "$dir")
+        echo "=== zig: $name ==="
+        (cd "$dir" && zig build 2>&1) || failed="$failed $name"
+    done
+    if [ -n "$failed" ]; then
+        echo "FAILED:$failed"
+        exit 1
+    fi
+
+# CMake examples (requires VS Dev Shell on Windows)
+_test-examples-cmake:
+    #!/usr/bin/env bash
+    set -e
+    failed=""
+    # Convert MSYS /c/... paths to C:\... for PowerShell/CMake
+    if [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || -n "$WINDIR" ]]; then
+        win_root=$(cygpath -w "$PWD")
+    fi
+    for dir in example/*/; do
+        [ -f "$dir/CMakeLists.txt" ] || continue
+        name=$(basename "$dir")
+        echo "=== cmake: $name ==="
+        rm -rf "$dir/build"
+        if [ -n "$win_root" ]; then
+            win_dir="$win_root\\$dir"
+            powershell.exe -NoProfile -Command "
+                Import-Module 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+                Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\18\Community' -DevCmdArguments '-arch=x64' -SkipAutomaticLocation
+                cd '$win_dir'
+                cmake -B build -DFETCHCONTENT_SOURCE_DIR_GHOSTTY='$win_root'
+                cmake --build build
+            " || failed="$failed $name"
+        else
+            repo_root="$PWD"
+            (cd "$dir" && cmake -B build -DFETCHCONTENT_SOURCE_DIR_GHOSTTY="$repo_root" && cmake --build build) || failed="$failed $name"
+        fi
+    done
+    if [ -n "$failed" ]; then
+        echo "FAILED:$failed"
+        exit 1
+    fi
+
 # === Building ===
 
 # Build libghostty DLL
