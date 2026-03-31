@@ -79,41 +79,70 @@ blending: configpkg.Config.AlphaBlending = .native,
 /// The DX11 device managing the swap chain and render target.
 device: ?Device = null,
 
+/// Target for shared texture mode. Owns the texture and RTV.
+/// Null for swap chain modes (Target borrows from Device).
+shared_target: ?Target = null,
+
 // --- GraphicsAPI contract: functions ---
 
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX11 {
     _ = alloc;
 
-    const device = device: {
-        if (comptime builtin.os.tag != .windows) {
-            break :device null;
-        } else {
-            switch (opts.rt_surface.platform) {
-                .windows => |w| {
-                    const surface: devicepkg.Surface = if (w.hwnd) |hwnd|
-                        .{ .hwnd = hwnd }
-                    else if (w.swap_chain_panel) |panel|
-                        .{ .swap_chain_panel = @ptrCast(@alignCast(panel)) }
-                    else
-                        @panic("Windows surface requires either hwnd or swap_chain_panel");
+    var result = DirectX11{};
 
-                    const size = opts.size.screen;
-                    break :device Device.init(surface, size.width, size.height) catch |err| {
-                        log.err("DX11 device init failed: {}", .{err});
-                        return error.DeviceInitFailed;
-                    };
-                },
-                else => @panic("unsupported platform for DX11"),
+    if (comptime builtin.os.tag != .windows) {
+        return result;
+    }
+
+    switch (opts.rt_surface.platform) {
+        .windows => |w| {
+            const surface: devicepkg.Surface = if (w.hwnd) |hwnd|
+                .{ .hwnd = hwnd }
+            else if (w.swap_chain_panel) |panel|
+                .{ .swap_chain_panel = @ptrCast(@alignCast(panel)) }
+            else if (w.shared_texture_out) |out_ptr|
+                .{ .shared_texture = .{
+                    .handle_out = @ptrCast(@alignCast(out_ptr)),
+                    .width = w.texture_width,
+                    .height = w.texture_height,
+                } }
+            else
+                @panic("Windows surface requires hwnd, swap_chain_panel, or shared_texture_out");
+
+            const size = opts.size.screen;
+            result.device = Device.init(surface, size.width, size.height) catch |err| {
+                log.err("DX11 device init failed: {}", .{err});
+                return error.DeviceInitFailed;
+            };
+
+            // For shared texture mode, create the Target now since it
+            // owns the texture and RTV (instead of borrowing from Device).
+            if (surface == .shared_texture) {
+                const cfg = surface.shared_texture;
+                result.shared_target = Target.initSharedTexture(
+                    result.device.?.device,
+                    cfg.width,
+                    cfg.height,
+                    cfg.handle_out,
+                ) catch |err| {
+                    log.err("shared texture init failed: {}", .{err});
+                    result.device.?.deinit();
+                    result.device = null;
+                    return error.DeviceInitFailed;
+                };
             }
-        }
-    };
+        },
+        else => @panic("unsupported platform for DX11"),
+    }
 
-    return .{
-        .device = device,
-    };
+    return result;
 }
 
 pub fn deinit(self: *DirectX11) void {
+    if (self.shared_target) |*t| {
+        t.deinit();
+        self.shared_target = null;
+    }
     if (self.device) |*dev| {
         dev.deinit();
     }
@@ -163,6 +192,16 @@ pub fn surfaceSize(self: *const DirectX11) !struct { width: u32, height: u32 } {
 }
 
 pub fn initTarget(self: *const DirectX11, width: usize, height: usize) !Target {
+    // Shared texture mode: return a borrowed view of the shared target.
+    // Only copy rtv and dimensions -- leave texture and handle_out null
+    // so releaseOwnedResources treats this as borrowed (no double-release).
+    if (self.shared_target) |st| {
+        return .{
+            .rtv = st.rtv,
+            .width = st.width,
+            .height = st.height,
+        };
+    }
     return .{
         .rtv = if (self.device) |dev| dev.rtv else null,
         .width = width,
@@ -185,11 +224,24 @@ pub inline fn beginFrame(
         const w: u32 = @intCast(target.width);
         const h: u32 = @intCast(target.height);
         if (dev.width != w or dev.height != h) {
-            dev.resize(w, h) catch |err| {
-                log.err("swap chain resize failed: {}", .{err});
-                return error.PresentFailed;
-            };
-            target.rtv = dev.rtv;
+            if (renderer.api.shared_target) |*st| {
+                // Shared texture mode: Target owns the texture, resize it.
+                st.resizeSharedTexture(dev.device, w, h) catch |err| {
+                    log.err("shared texture resize failed: {}", .{err});
+                    return error.PresentFailed;
+                };
+                // Update the borrowed view's rtv (texture stays null -- borrowed).
+                target.rtv = st.rtv;
+                dev.width = w;
+                dev.height = h;
+            } else {
+                // Swap chain mode: Device owns the back buffer, resize it.
+                dev.resize(w, h) catch |err| {
+                    log.err("swap chain resize failed: {}", .{err});
+                    return error.PresentFailed;
+                };
+                target.rtv = dev.rtv;
+            }
         }
     }
 
