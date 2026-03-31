@@ -1726,6 +1726,10 @@ pub const CAPI = struct {
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
         surface.updateSize(w, h);
+        // For composition surfaces (no HWND), the renderer cannot query
+        // the window size via GetClientRect. Forward the desired dimensions
+        // so the resize detection loop in drawFrame picks up the change.
+        surface.core_surface.renderer.setTargetSize(w, h);
     }
 
     /// Return the size information a surface has.
