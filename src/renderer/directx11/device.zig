@@ -36,6 +36,11 @@ pub const Device = struct {
     hwnd: ?HWND,
     width: u32,
     height: u32,
+    /// Desired size set by the embedder (via ghostty_surface_set_size).
+    /// Used by windowSize() for composition surfaces where there is no
+    /// HWND to query. Zero means "use current buffer size".
+    target_width: u32 = 0,
+    target_height: u32 = 0,
 
     pub const InitError = error{
         DeviceCreationFailed,
@@ -49,7 +54,11 @@ pub const Device = struct {
         BlendStateCreationFailed,
     };
 
-    pub fn init(surface: Surface, width: u32, height: u32) InitError!Device {
+    pub fn init(surface: Surface, w_in: u32, h_in: u32) InitError!Device {
+        // Clamp to at least 1x1 -- CreateSwapChainForComposition with 0x0
+        // produces a degenerate swap chain that ResizeBuffers cannot recover.
+        const width = @max(w_in, 1);
+        const height = @max(h_in, 1);
         log.info("init called: size={}x{}", .{ width, height });
 
         // Create D3D11 device and immediate context.
@@ -231,9 +240,10 @@ pub const Device = struct {
         _ = self.device.Release();
     }
 
-    /// Return the actual window client area size.
-    /// Falls back to the swap chain buffer dimensions when there's
-    /// no HWND (composition surfaces).
+    /// Return the desired surface size.
+    /// HWND path: queries GetClientRect for the actual window size.
+    /// Composition path: returns the target size set by the embedder
+    /// via setTargetSize, falling back to the current buffer size.
     pub fn windowSize(self: *const Device) struct { width: u32, height: u32 } {
         if (self.hwnd) |hwnd| {
             var rc: RECT = undefined;
@@ -243,7 +253,20 @@ pub const Device = struct {
                 if (w > 0 and h > 0) return .{ .width = w, .height = h };
             }
         }
+        // Composition: use embedder-supplied target size if available.
+        if (self.target_width > 0 and self.target_height > 0) {
+            return .{ .width = self.target_width, .height = self.target_height };
+        }
         return .{ .width = self.width, .height = self.height };
+    }
+
+    /// Set the desired surface size for composition surfaces.
+    /// Called when the embedder reports a size change (ghostty_surface_set_size).
+    /// The actual swap chain resize happens in beginFrame when the renderer
+    /// detects the mismatch between windowSize() and the buffer dimensions.
+    pub fn setTargetSize(self: *Device, width: u32, height: u32) void {
+        self.target_width = width;
+        self.target_height = height;
     }
 
     pub const ResizeError = error{
