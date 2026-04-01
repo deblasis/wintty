@@ -3,6 +3,7 @@ const log = std.log.scoped(.directx11);
 const com = @import("com.zig");
 const dxgi = @import("dxgi.zig");
 const d3d11 = @import("d3d11.zig");
+const dcomp = @import("dcomp.zig");
 
 const HRESULT = com.HRESULT;
 const GUID = com.GUID;
@@ -41,6 +42,12 @@ pub const Device = struct {
     /// The HWND for querying the actual window size.
     /// Null for composition (SwapChainPanel) or shared texture surfaces.
     hwnd: ?HWND,
+    /// DirectComposition objects for HWND surfaces. The dcomp visual tree
+    /// attaches the swap chain to the window via DWM composition, enabling
+    /// per-pixel transparency and independent flip when opaque.
+    dcomp_device: ?*dcomp.IDCompositionDevice = null,
+    dcomp_target: ?*dcomp.IDCompositionTarget = null,
+    dcomp_visual: ?*dcomp.IDCompositionVisual = null,
     width: u32,
     height: u32,
     /// Desired size set by the embedder (via ghostty_surface_set_size).
@@ -56,6 +63,7 @@ pub const Device = struct {
         GetFactoryFailed,
         SwapChainCreationFailed,
         SetSwapChainFailed,
+        DCompCreationFailed,
         BackBufferFailed,
         RenderTargetViewFailed,
         BlendStateCreationFailed,
@@ -100,6 +108,9 @@ pub const Device = struct {
         var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
         var panel_native: ?*dxgi.ISwapChainPanelNative = null;
         var rtv: ?*d3d11.ID3D11RenderTargetView = null;
+        var dcomp_dev: ?*dcomp.IDCompositionDevice = null;
+        var dcomp_target_local: ?*dcomp.IDCompositionTarget = null;
+        var dcomp_visual_local: ?*dcomp.IDCompositionVisual = null;
         if (surface != .shared_texture) {
             // QueryInterface device -> IDXGIDevice
             var dxgi_device_opt: ?*anyopaque = null;
@@ -130,11 +141,45 @@ pub const Device = struct {
             const factory: *dxgi.IDXGIFactory2 = @ptrCast(@alignCast(factory_opt.?));
             defer _ = factory.Release();
 
-            // Create swap chain. Descriptor differs by surface type:
-            // - HWND: opaque window, DXGI_ALPHA_MODE_UNSPECIFIED
-            // - Composition: premultiplied alpha for XAML integration
+            // Create swap chain. Both HWND and XAML paths use
+            // CreateSwapChainForComposition with premultiplied alpha.
+            // HWND attaches via DirectComposition, XAML via ISwapChainPanelNative.
             switch (surface) {
                 .hwnd => |hwnd| {
+                    // Create DirectComposition device, target, and visual.
+                    // The dcomp visual tree gives us DWM composition: per-pixel
+                    // transparency when needed, independent flip when opaque.
+                    var dcomp_device_opt: ?*anyopaque = null;
+                    hr = dcomp.DCompositionCreateDevice(
+                        @ptrCast(dxgi_device),
+                        &dcomp.IDCompositionDevice.IID,
+                        &dcomp_device_opt,
+                    );
+                    if (com.FAILED(hr) or dcomp_device_opt == null) {
+                        log.err("DCompositionCreateDevice failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                        return InitError.DCompCreationFailed;
+                    }
+                    dcomp_dev = @ptrCast(@alignCast(dcomp_device_opt.?));
+
+                    var dcomp_tgt: ?*dcomp.IDCompositionTarget = null;
+                    hr = dcomp_dev.?.CreateTargetForHwnd(hwnd, 0, &dcomp_tgt);
+                    if (com.FAILED(hr) or dcomp_tgt == null) {
+                        log.err("CreateTargetForHwnd failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                        return InitError.DCompCreationFailed;
+                    }
+                    dcomp_target_local = dcomp_tgt;
+
+                    var dcomp_vis: ?*dcomp.IDCompositionVisual = null;
+                    hr = dcomp_dev.?.CreateVisual(&dcomp_vis);
+                    if (com.FAILED(hr) or dcomp_vis == null) {
+                        log.err("CreateVisual failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                        return InitError.DCompCreationFailed;
+                    }
+                    dcomp_visual_local = dcomp_vis;
+
+                    // Composition swap chain with premultiplied alpha.
+                    // DWM picks independent flip when fully opaque, composed flip
+                    // when transparency is present.
                     var desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
                         .Width = width,
                         .Height = height,
@@ -143,16 +188,14 @@ pub const Device = struct {
                         .SampleDesc = .{ .Count = 1, .Quality = 0 },
                         .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
                         .BufferCount = 2,
-                        .Scaling = .NONE,
+                        .Scaling = .STRETCH,
                         .SwapEffect = .FLIP_DISCARD,
-                        .AlphaMode = .UNSPECIFIED,
+                        .AlphaMode = .PREMULTIPLIED,
                         .Flags = 0,
                     };
-                    hr = factory.CreateSwapChainForHwnd(
+                    hr = factory.CreateSwapChainForComposition(
                         @ptrCast(dev),
-                        hwnd,
                         &desc,
-                        null,
                         null,
                         &swap_chain,
                     );
@@ -169,8 +212,6 @@ pub const Device = struct {
                         .BufferCount = 2,
                         .Scaling = .STRETCH,
                         .SwapEffect = .FLIP_DISCARD,
-                        // Composition surfaces need premultiplied alpha for XAML
-                        // integration; HWND surfaces use UNSPECIFIED.
                         .AlphaMode = .PREMULTIPLIED,
                         .Flags = 0,
                     };
@@ -198,6 +239,29 @@ pub const Device = struct {
                 }
             }
 
+            // For HWND surfaces, attach swap chain to the DirectComposition
+            // visual tree and commit to make it visible.
+            if (dcomp_visual_local) |visual| {
+                hr = visual.SetContent(@ptrCast(swap_chain.?));
+                if (com.FAILED(hr)) {
+                    log.err("IDCompositionVisual::SetContent failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                    _ = swap_chain.?.Release();
+                    return InitError.DCompCreationFailed;
+                }
+                hr = dcomp_target_local.?.SetRoot(visual);
+                if (com.FAILED(hr)) {
+                    log.err("IDCompositionTarget::SetRoot failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                    _ = swap_chain.?.Release();
+                    return InitError.DCompCreationFailed;
+                }
+                hr = dcomp_dev.?.Commit();
+                if (com.FAILED(hr)) {
+                    log.err("IDCompositionDevice::Commit failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
+                    _ = swap_chain.?.Release();
+                    return InitError.DCompCreationFailed;
+                }
+            }
+
             // Get the back buffer and create a render target view.
             rtv = createRenderTargetView(dev, swap_chain.?) orelse {
                 log.err("createRenderTargetView failed", .{});
@@ -210,6 +274,9 @@ pub const Device = struct {
         errdefer if (sc) |s| { _ = s.Release(); };
         errdefer if (panel_native) |panel| { _ = panel.SetSwapChain(null); };
         errdefer if (rtv) |r| { _ = r.Release(); };
+        errdefer if (dcomp_visual_local) |v| { _ = v.Release(); };
+        errdefer if (dcomp_target_local) |t| { _ = t.Release(); };
+        errdefer if (dcomp_dev) |d| { _ = d.Release(); };
 
         // Create a premultiplied-alpha blend state so that translucent
         // pixels (e.g. padding cells output as float4(0,0,0,0) by the
@@ -233,6 +300,9 @@ pub const Device = struct {
                 .hwnd => |h| h,
                 .swap_chain_panel, .shared_texture => null,
             },
+            .dcomp_device = dcomp_dev,
+            .dcomp_target = dcomp_target_local,
+            .dcomp_visual = dcomp_visual_local,
             .width = width,
             .height = height,
         };
@@ -249,6 +319,20 @@ pub const Device = struct {
         if (self.blend_state) |bs| {
             _ = bs.Release();
             self.blend_state = null;
+        }
+
+        // Release DirectComposition objects in reverse creation order.
+        if (self.dcomp_visual) |visual| {
+            _ = visual.Release();
+            self.dcomp_visual = null;
+        }
+        if (self.dcomp_target) |target| {
+            _ = target.Release();
+            self.dcomp_target = null;
+        }
+        if (self.dcomp_device) |dcomp_dev| {
+            _ = dcomp_dev.Release();
+            self.dcomp_device = null;
         }
 
         // Detach swap chain from the panel (composition surfaces only).
@@ -342,6 +426,10 @@ pub const Device = struct {
         if (com.FAILED(hr)) {
             log.err("IDXGISwapChain1::Present failed: hr=0x{x}", .{@as(u32, @bitCast(hr))});
             return PresentError.PresentFailed;
+        }
+        // Flush the DirectComposition tree so DWM sees the new frame.
+        if (self.dcomp_device) |dcomp_dev| {
+            _ = dcomp_dev.Commit();
         }
     }
 
