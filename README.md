@@ -30,10 +30,10 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** Terminal renders real text via DX11 + FreeType, ConPTY shell works, input handling in place
+> **Status:** DX11 renderer complete (3 surface modes + DirectComposition), cell rendering pipeline wired end-to-end, 6 .NET examples
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████████░░░░░░░] 65%`
+> `[█████████████░░░░░░░] 68%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
