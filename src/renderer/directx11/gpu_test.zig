@@ -14,6 +14,8 @@ const Sampler = @import("Sampler.zig");
 const Pipeline = @import("Pipeline.zig");
 const RenderPass = @import("RenderPass.zig");
 const Device = @import("device.zig").Device;
+const dcomp = @import("dcomp.zig");
+const Surface = @import("device.zig").Surface;
 
 const Buffer = buffer_mod.Buffer;
 
@@ -368,7 +370,7 @@ test "Device: shared texture mode skips swap chain" {
     try std.testing.expectEqual(device.height, 720);
 }
 
-test "SwapChain: HWND surface uses SCALING_NONE" {
+test "SwapChain: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
     if (comptime builtin.os.tag != .windows) return;
 
     // Create a hidden window for the swap chain.
@@ -402,24 +404,49 @@ test "SwapChain: HWND surface uses SCALING_NONE" {
         }
     };
 
-    const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyTestClass");
+    const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyDCompTestClass");
     const wc = WNDCLASSEXW{ .lpfnWndProc = user32.defWindowProc, .lpszClassName = class_name };
     _ = user32.RegisterClassExW(&wc);
 
     const hwnd = user32.CreateWindowExW(
-        0, class_name, null, 0, // WS_OVERLAPPED
+        0, class_name, null, 0,
         0, 0, 100, 100, null, null, null, null,
-    ) orelse return; // Skip if window creation fails (e.g. headless CI).
+    ) orelse return;
     defer _ = user32.DestroyWindow(hwnd);
 
-    // Init the full Device with an HWND surface.
     var device = Device.init(.{ .hwnd = hwnd }, 100, 100) catch return;
     defer device.deinit();
 
-    // Query the swap chain descriptor and verify scaling.
-    // Guards against regression to STRETCH (PR #76).
+    // HWND path now uses DirectComposition: dcomp objects must be non-null.
+    try std.testing.expect(device.dcomp_device != null);
+    try std.testing.expect(device.dcomp_target != null);
+    try std.testing.expect(device.dcomp_visual != null);
+
+    // Swap chain uses composition path: STRETCH scaling, premultiplied alpha.
     var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
     const hr = device.swap_chain.?.GetDesc1(&desc);
     try std.testing.expect(!com.FAILED(hr));
-    try std.testing.expectEqual(desc.Scaling, .NONE);
+    try std.testing.expectEqual(desc.Scaling, .STRETCH);
+    try std.testing.expectEqual(desc.AlphaMode, .PREMULTIPLIED);
+
+    // Present should succeed (includes dcomp Commit).
+    try device.present();
+}
+
+test "Device: shared texture mode has no dcomp objects" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const HANDLE = std.os.windows.HANDLE;
+    var shared_handle: ?HANDLE = null;
+
+    var device = Device.init(.{ .shared_texture = .{
+        .handle_out = &shared_handle,
+        .width = 640,
+        .height = 480,
+    } }, 640, 480) catch return;
+    defer device.deinit();
+
+    try std.testing.expectEqual(device.dcomp_device, null);
+    try std.testing.expectEqual(device.dcomp_target, null);
+    try std.testing.expectEqual(device.dcomp_visual, null);
 }
