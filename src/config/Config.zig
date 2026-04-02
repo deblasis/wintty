@@ -512,8 +512,9 @@ language: ?[:0]const u8 = null,
 /// to turn all flags on or off.
 ///
 /// This configuration only applies to Ghostty builds that use FreeType.
-/// This is usually the case only for Linux builds. macOS uses CoreText
-/// and does not have an equivalent configuration.
+/// This is usually the case for Linux builds and Windows builds using
+/// the `directwrite_freetype` backend. macOS uses CoreText and does not
+/// have an equivalent configuration.
 ///
 /// Available flags:
 ///
