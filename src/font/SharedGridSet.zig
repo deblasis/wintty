@@ -353,9 +353,31 @@ fn collection(
         }
     }
 
-    // Emoji fallback. We don't include this on Mac since Mac is expected
-    // to always have the Apple Emoji available on the system.
-    if (comptime !builtin.target.os.tag.isDarwin() or Discover == void) {
+    // On Windows, always search for and add the Segoe UI Emoji font
+    // as our preferred emoji font for fallback. We do this in case
+    // people add other emoji fonts to their system, we always want to
+    // prefer the official one. Users can override this by explicitly
+    // specifying a font-family for emoji.
+    if (comptime builtin.target.os.tag == .windows and Discover != void) windows_emoji: {
+        const disco = try self.discover() orelse break :windows_emoji;
+        var disco_it = try disco.discover(self.alloc, .{
+            .family = "Segoe UI Emoji",
+        });
+        defer disco_it.deinit();
+        if (try disco_it.next()) |face| {
+            _ = try c.addDeferred(self.alloc, face, .{
+                .style = .regular,
+                .fallback = true,
+                // No size adjustment for emojis.
+                .size_adjustment = .none,
+            });
+        }
+    }
+
+    // Embedded emoji fallback for platforms without a system emoji font.
+    // macOS and Windows use their native emoji fonts (added above) when
+    // discovery is available.
+    if (comptime !(builtin.target.os.tag.isDarwin() or builtin.target.os.tag == .windows) or Discover == void) {
         _ = try c.add(
             self.alloc,
             try .init(
