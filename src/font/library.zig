@@ -12,6 +12,7 @@ pub const Library = switch (options.backend) {
     .freetype,
     .freetype_windows,
     .fontconfig_freetype,
+    .directwrite_freetype,
     .coretext_freetype,
     => FreetypeLibrary,
 

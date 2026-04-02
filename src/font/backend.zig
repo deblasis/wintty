@@ -28,6 +28,10 @@ pub const Backend = enum {
     /// CoreText for font discovery and rendering, no shaping.
     coretext_noshape,
 
+    /// DirectWrite for font discovery, FreeType for rendering,
+    /// and HarfBuzz for shaping (Windows).
+    directwrite_freetype,
+
     /// Use the browser font system and the Canvas API (wasm). This limits
     /// the available fonts to browser fonts (anything Canvas natively
     /// supports).
@@ -47,11 +51,11 @@ pub const Backend = enum {
         }
 
         if (target.os.tag == .windows) {
-            // Avoid fontconfig on Windows because its libxml2 dependency
-            // may not unpack due to symlinks. Use the FreeType-based
-            // Windows font-directory scanner for discovery. A future
-            // DirectWrite backend can replace this if needed.
-            return .freetype_windows;
+            // wintty fork default: prefer DirectWrite for OS-authoritative
+            // font enumeration, locale-aware fallback (CJK / emoji), and
+            // weight/italic scoring. Upstream's freetype_windows directory
+            // scanner remains available as a build option.
+            return .directwrite_freetype;
         }
 
         // macOS also supports "coretext_freetype" but there is no scenario
@@ -68,6 +72,7 @@ pub const Backend = enum {
             .freetype,
             .freetype_windows,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             => true,
 
@@ -90,6 +95,7 @@ pub const Backend = enum {
             .freetype,
             .freetype_windows,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .web_canvas,
             => false,
         };
@@ -101,6 +107,7 @@ pub const Backend = enum {
 
             .freetype,
             .freetype_windows,
+            .directwrite_freetype,
             .coretext,
             .coretext_freetype,
             .coretext_harfbuzz,
@@ -115,11 +122,27 @@ pub const Backend = enum {
             .freetype,
             .freetype_windows,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             .coretext_harfbuzz,
             => true,
 
             .coretext,
+            .coretext_noshape,
+            .web_canvas,
+            => false,
+        };
+    }
+
+    pub fn hasDirectwrite(self: Backend) bool {
+        return switch (self) {
+            .directwrite_freetype => true,
+            .freetype,
+            .freetype_windows,
+            .fontconfig_freetype,
+            .coretext,
+            .coretext_freetype,
+            .coretext_harfbuzz,
             .coretext_noshape,
             .web_canvas,
             => false,

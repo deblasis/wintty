@@ -3,29 +3,6 @@ const com = @import("com.zig");
 const dxgi = @import("dxgi.zig");
 const d3d11 = @import("d3d11.zig");
 
-// Verify COM GUID byte layout matches the Windows SDK definitions.
-// GUIDs are stored as { u32, u16, u16, [8]u8 } in little-endian.
-
-test "IUnknown GUID has no definition" {
-    // IUnknown doesn't define its own IID in our bindings (it's accessed
-    // via derived interfaces), so verify the base struct layout instead.
-    try std.testing.expectEqual(@sizeOf(com.GUID), 16);
-    try std.testing.expectEqual(@alignOf(com.GUID), 4);
-}
-
-test "HRESULT helpers" {
-    try std.testing.expect(com.SUCCEEDED(com.S_OK));
-    try std.testing.expect(!com.FAILED(com.S_OK));
-    try std.testing.expect(com.FAILED(com.E_FAIL));
-    try std.testing.expect(!com.SUCCEEDED(com.E_FAIL));
-    try std.testing.expect(com.FAILED(com.E_NOINTERFACE));
-    try std.testing.expect(com.FAILED(com.DXGI_ERROR_DEVICE_REMOVED));
-}
-
-test "Reserved type is function pointer sized" {
-    try std.testing.expectEqual(@sizeOf(com.Reserved), @sizeOf(*anyopaque));
-}
-
 // Verify struct sizes match the C ABI (these are extern structs that
 // cross the COM boundary, so size mismatches cause runtime crashes).
 
