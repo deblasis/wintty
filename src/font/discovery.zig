@@ -528,6 +528,11 @@ pub const DirectWrite = struct {
         return @ptrCast(buf[0..len :0].ptr);
     }
 
+    // Variation axes are not used for scoring because DirectWrite's
+    // GetWeight/GetStyle already return instance-level values. Variations
+    // are passed through to DeferredFace and applied when the font is
+    // loaded via FreeType (see DeferredFace.loadDirectWrite).
+
     pub const DiscoverIterator = struct {
         fonts: []*dwrite.IDWriteFont,
         alloc: Allocator,
@@ -1731,4 +1736,31 @@ test "directwrite fallback" {
         defer f_mut.deinit();
         try testing.expect(f_mut.hasCodepoint(0x1F600, null));
     }
+}
+
+test "directwrite variations" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const variations = [_]Variation{
+        .{ .id = Variation.Id.init("wght"), .value = 300 },
+    };
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+    var it = try dw.discover(alloc, .{
+        .family = "Cascadia Code",
+        .variations = &variations,
+        .size = 12,
+    });
+    defer it.deinit();
+
+    // Variations are carried through to DeferredFace for application
+    // at load time (via FreeType's setVarDesignCoordinates).
+    var face = (try it.next()) orelse return;
+    defer face.deinit();
+    try testing.expectEqual(1, face.dw.?.variations.len);
+    try testing.expectEqual(Variation.Id.init("wght"), face.dw.?.variations[0].id);
 }
