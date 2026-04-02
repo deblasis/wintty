@@ -5,6 +5,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const fontconfig = @import("fontconfig");
 const macos = @import("macos");
 const opentype = @import("opentype.zig");
+const dwrite = @import("directwrite.zig");
 const options = @import("main.zig").options;
 const Collection = @import("main.zig").Collection;
 const DeferredFace = @import("main.zig").DeferredFace;
@@ -19,6 +20,7 @@ const log = std.log.scoped(.discovery);
 pub const Discover = switch (options.backend) {
     .freetype => void, // no discovery
     .freetype_windows => Windows,
+    .directwrite_freetype => DirectWrite,
     .fontconfig_freetype => Fontconfig,
     .web_canvas => void, // no discovery
     .coretext,
@@ -242,6 +244,314 @@ pub const Descriptor = struct {
 
         return try macos.text.FontDescriptor.createWithAttributes(@ptrCast(attrs));
     }
+};
+
+pub const DirectWrite = struct {
+    factory: *dwrite.IDWriteFactory3,
+    collection: *dwrite.IDWriteFontCollection,
+    fallback: *dwrite.IDWriteFontFallback,
+    number_sub: *dwrite.IDWriteNumberSubstitution,
+
+    pub fn init() DirectWrite {
+        const createFactory = dwrite.loadDWriteCreateFactory() catch
+            @panic("DirectWrite: failed to load DWriteCreateFactory");
+
+        var factory_raw: ?*anyopaque = null;
+        var hr = createFactory(.SHARED, &dwrite.IDWriteFactory3.IID, &factory_raw);
+        if (dwrite.FAILED(hr)) @panic("DirectWrite: failed to create factory");
+        const factory: *dwrite.IDWriteFactory3 = @ptrCast(@alignCast(factory_raw.?));
+
+        var collection: ?*dwrite.IDWriteFontCollection = null;
+        hr = factory.GetSystemFontCollection(&collection, 0);
+        if (dwrite.FAILED(hr)) @panic("DirectWrite: failed to get system font collection");
+
+        var fallback: ?*dwrite.IDWriteFontFallback = null;
+        hr = factory.GetSystemFontFallback(&fallback);
+        if (dwrite.FAILED(hr)) @panic("DirectWrite: failed to get system font fallback");
+
+        // We don't need number substitution for font discovery, but
+        // IDWriteTextAnalysisSource requires one for MapCharacters.
+        const DWRITE_NUMBER_SUBSTITUTION_METHOD_NONE: u32 = 2;
+        var number_sub: ?*dwrite.IDWriteNumberSubstitution = null;
+        hr = factory.CreateNumberSubstitution(DWRITE_NUMBER_SUBSTITUTION_METHOD_NONE, null, 0, &number_sub);
+        if (dwrite.FAILED(hr)) @panic("DirectWrite: failed to create number substitution");
+
+        return .{
+            .factory = factory,
+            .collection = collection.?,
+            .fallback = fallback.?,
+            .number_sub = number_sub.?,
+        };
+    }
+
+    pub fn deinit(self: *DirectWrite) void {
+        _ = self.number_sub.Release();
+        _ = self.fallback.Release();
+        _ = self.collection.Release();
+        _ = self.factory.Release();
+    }
+
+    pub fn discover(self: *const DirectWrite, alloc: Allocator, desc: Descriptor) !DiscoverIterator {
+        const family = desc.family orelse return DiscoverIterator.empty(alloc, desc.variations);
+
+        // Convert family name to UTF-16 (ASCII fast path for font names)
+        var wfamily_buf: [128]u16 = undefined;
+        const wfamily = utf8ToUtf16Le(&wfamily_buf, family) orelse
+            return DiscoverIterator.empty(alloc, desc.variations);
+
+        var family_index: u32 = 0;
+        var exists: i32 = 0;
+        var hr = self.collection.FindFamilyName(wfamily, &family_index, &exists);
+        if (dwrite.FAILED(hr) or exists == 0)
+            return DiscoverIterator.empty(alloc, desc.variations);
+
+        var dw_family: ?*dwrite.IDWriteFontFamily = null;
+        hr = self.collection.GetFontFamily(family_index, &dw_family);
+        if (dwrite.FAILED(hr)) return error.DirectWriteError;
+        defer _ = dw_family.?.Release();
+
+        const font_count = dw_family.?.GetFontCount();
+        var fonts = try alloc.alloc(ScoredFont, font_count);
+        var valid_count: usize = 0;
+
+        for (0..font_count) |i| {
+            var dw_font: ?*dwrite.IDWriteFont = null;
+            hr = dw_family.?.GetFont(@intCast(i), &dw_font);
+            if (dwrite.FAILED(hr)) continue;
+
+            if (dw_font.?.GetSimulations() != .NONE) {
+                _ = dw_font.?.Release();
+                continue;
+            }
+
+            fonts[valid_count] = .{ .font = dw_font.?, .score = scoreFont(&desc, dw_font.?) };
+            valid_count += 1;
+        }
+
+        const scored = fonts[0..valid_count];
+        std.mem.sortUnstable(ScoredFont, scored, {}, struct {
+            fn lessThan(_: void, a: ScoredFont, b: ScoredFont) bool {
+                return a.score.int() > b.score.int();
+            }
+        }.lessThan);
+
+        var result = try alloc.alloc(*dwrite.IDWriteFont, valid_count);
+        for (scored, 0..) |sf, j| result[j] = sf.font;
+        alloc.free(fonts);
+
+        return DiscoverIterator{
+            .fonts = result,
+            .alloc = alloc,
+            .variations = desc.variations,
+            .i = 0,
+        };
+    }
+
+    pub fn discoverFallback(
+        self: *const DirectWrite,
+        alloc: Allocator,
+        collection: *Collection,
+        desc: Descriptor,
+    ) !DiscoverIterator {
+        _ = collection;
+        if (desc.codepoint == 0) return try self.discover(alloc, desc);
+
+        var utf16_buf: [2]u16 = undefined;
+        const utf16_len: u32 = if (desc.codepoint > 0xFFFF) blk: {
+            const cp = desc.codepoint - 0x10000;
+            utf16_buf[0] = @intCast(0xD800 + (cp >> 10));
+            utf16_buf[1] = @intCast(0xDC00 + (cp & 0x3FF));
+            break :blk 2;
+        } else blk: {
+            utf16_buf[0] = @intCast(desc.codepoint);
+            break :blk 1;
+        };
+
+        var source = TextAnalysisSource{
+            .vtable = &TextAnalysisSource.static_vtable,
+            .text = &utf16_buf,
+            .text_len = utf16_len,
+            .number_sub = self.number_sub,
+        };
+
+        var mapped_length: u32 = 0;
+        var mapped_font: ?*dwrite.IDWriteFont = null;
+        var scale: f32 = 0;
+
+        const base_weight: dwrite.DWRITE_FONT_WEIGHT = if (desc.bold) .BOLD else .NORMAL;
+        const base_style: dwrite.DWRITE_FONT_STYLE = if (desc.italic) .ITALIC else .NORMAL;
+
+        const fb_hr = self.fallback.MapCharacters(
+            @ptrCast(&source),
+            0,
+            utf16_len,
+            self.collection,
+            null,
+            base_weight,
+            base_style,
+            .NORMAL,
+            &mapped_length,
+            &mapped_font,
+            &scale,
+        );
+
+        if (dwrite.SUCCEEDED(fb_hr)) {
+            if (mapped_font) |font| {
+                var result = try alloc.alloc(*dwrite.IDWriteFont, 1);
+                result[0] = font;
+                return DiscoverIterator{
+                    .fonts = result,
+                    .alloc = alloc,
+                    .variations = desc.variations,
+                    .i = 0,
+                };
+            }
+        }
+
+        return try self.discover(alloc, desc);
+    }
+
+    // Scoring
+
+    const Score = packed struct {
+        const Backing = @typeInfo(@This()).@"struct".backing_integer.?;
+        glyph_count: u16 = 0,
+        bold: bool = false,
+        italic: bool = false,
+        normal_stretch: bool = false,
+        codepoint: bool = false,
+
+        pub fn int(self: Score) Backing {
+            return @bitCast(self);
+        }
+    };
+
+    const ScoredFont = struct {
+        font: *dwrite.IDWriteFont,
+        score: Score,
+    };
+
+    fn scoreFont(desc: *const Descriptor, font: *dwrite.IDWriteFont) Score {
+        var score: Score = .{};
+
+        const weight = font.GetWeight();
+        const style = font.GetStyle();
+        const stretch = font.GetStretch();
+
+        const is_bold = @intFromEnum(weight) >= @intFromEnum(dwrite.DWRITE_FONT_WEIGHT.SEMI_BOLD);
+        score.bold = desc.bold == is_bold;
+
+        const is_italic = (style == .ITALIC or style == .OBLIQUE);
+        score.italic = desc.italic == is_italic;
+
+        score.normal_stretch = (stretch == .NORMAL);
+
+        if (desc.codepoint > 0) {
+            var cp_exists: i32 = 0;
+            const cp_hr = font.HasCharacter(desc.codepoint, &cp_exists);
+            if (dwrite.SUCCEEDED(cp_hr) and cp_exists != 0) score.codepoint = true;
+        }
+
+        return score;
+    }
+
+    // TextAnalysisSource -- minimal implementation for IDWriteFontFallback::MapCharacters
+
+    const TextAnalysisSource = extern struct {
+        vtable: *const dwrite.IDWriteTextAnalysisSource.VTable,
+        text: *const [2]u16,
+        text_len: u32,
+        number_sub: *dwrite.IDWriteNumberSubstitution,
+
+        const static_vtable = dwrite.IDWriteTextAnalysisSource.VTable{
+            .QueryInterface = @ptrCast(&queryInterface),
+            .AddRef = @ptrCast(&addRef),
+            .Release = @ptrCast(&release),
+            .GetTextAtPosition = @ptrCast(&getTextAtPosition),
+            .GetTextBeforePosition = @ptrCast(&getTextBeforePosition),
+            .GetParagraphReadingDirection = @ptrCast(&getParagraphReadingDirection),
+            .GetLocaleName = @ptrCast(&getLocaleName),
+            .GetNumberSubstitution = @ptrCast(&getNumberSubstitution),
+        };
+
+        fn queryInterface(_: *TextAnalysisSource, _: *const dwrite.GUID, _: *?*anyopaque) callconv(.winapi) dwrite.HRESULT {
+            return dwrite.E_NOINTERFACE;
+        }
+        fn addRef(_: *TextAnalysisSource) callconv(.winapi) u32 { return 1; }
+        fn release(_: *TextAnalysisSource) callconv(.winapi) u32 { return 1; }
+
+        fn getTextAtPosition(self: *TextAnalysisSource, pos: u32, text_out: *?[*]const u16, len_out: *u32) callconv(.winapi) dwrite.HRESULT {
+            if (pos >= self.text_len) {
+                text_out.* = null;
+                len_out.* = 0;
+            } else {
+                text_out.* = @as([*]const u16, self.text) + pos;
+                len_out.* = self.text_len - pos;
+            }
+            return dwrite.S_OK;
+        }
+
+        fn getTextBeforePosition(self: *TextAnalysisSource, pos: u32, text_out: *?[*]const u16, len_out: *u32) callconv(.winapi) dwrite.HRESULT {
+            if (pos == 0 or pos > self.text_len) {
+                text_out.* = null;
+                len_out.* = 0;
+            } else {
+                text_out.* = @as([*]const u16, self.text);
+                len_out.* = pos;
+            }
+            return dwrite.S_OK;
+        }
+
+        fn getParagraphReadingDirection(_: *TextAnalysisSource) callconv(.winapi) dwrite.DWRITE_READING_DIRECTION {
+            return .LEFT_TO_RIGHT;
+        }
+
+        fn getLocaleName(_: *TextAnalysisSource, _: u32, text_len: *u32, locale: *?[*:0]const u16) callconv(.winapi) dwrite.HRESULT {
+            const empty: [*:0]const u16 = &[_:0]u16{};
+            locale.* = empty;
+            text_len.* = 0;
+            return dwrite.S_OK;
+        }
+
+        fn getNumberSubstitution(self: *TextAnalysisSource, _: u32, text_len: *u32, sub: *?*dwrite.IDWriteNumberSubstitution) callconv(.winapi) dwrite.HRESULT {
+            sub.* = self.number_sub;
+            text_len.* = self.text_len;
+            return dwrite.S_OK;
+        }
+    };
+
+    // UTF-8 to null-terminated UTF-16LE for DirectWrite APIs.
+
+    fn utf8ToUtf16Le(buf: []u16, utf8: []const u8) ?[*:0]const u16 {
+        const len = std.unicode.utf8ToUtf16Le(buf[0 .. buf.len - 1], utf8) catch return null;
+        buf[len] = 0;
+        return @ptrCast(buf[0..len :0].ptr);
+    }
+
+    pub const DiscoverIterator = struct {
+        fonts: []*dwrite.IDWriteFont,
+        alloc: Allocator,
+        variations: []const Variation,
+        i: usize,
+
+        pub fn empty(alloc: Allocator, variations: []const Variation) DiscoverIterator {
+            return .{ .fonts = &.{}, .alloc = alloc, .variations = variations, .i = 0 };
+        }
+
+        pub fn deinit(self: *DiscoverIterator) void {
+            for (self.fonts) |font| _ = font.Release();
+            if (self.fonts.len > 0) self.alloc.free(self.fonts);
+            self.* = undefined;
+        }
+
+        pub fn next(self: *DiscoverIterator) !?DeferredFace {
+            if (self.i >= self.fonts.len) return null;
+            const font = self.fonts[self.i];
+            _ = font.AddRef();
+            defer self.i += 1;
+            return DeferredFace{ .dw = .{ .font = font, .variations = self.variations } };
+        }
+    };
 };
 
 pub const Fontconfig = struct {
@@ -1346,4 +1656,79 @@ test "windows" {
     var face = (try it.next()) orelse return error.TestFontNotFound;
     defer face.deinit();
     try testing.expect(face.hasCodepoint('A', null));
+}
+
+test "directwrite" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+    var it = try dw.discover(alloc, .{ .family = "Consolas", .size = 12 });
+    defer it.deinit();
+    var count: usize = 0;
+    while (try it.next()) |_| {
+        count += 1;
+    }
+    try testing.expect(count > 0);
+}
+
+test "directwrite codepoint" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+    var it = try dw.discover(alloc, .{ .family = "Consolas", .codepoint = 'A', .size = 12 });
+    defer it.deinit();
+
+    var face = (try it.next()).?;
+    defer face.deinit();
+    try testing.expect(face.hasCodepoint('A', null));
+    try testing.expect(face.hasCodepoint('B', null));
+}
+
+test "directwrite bold" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+    var it = try dw.discover(alloc, .{ .family = "Consolas", .bold = true, .size = 12 });
+    defer it.deinit();
+
+    var face = (try it.next()).?;
+    defer face.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const name = try face.name(&buf);
+    try testing.expect(name.len > 0);
+}
+
+test "directwrite fallback" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+
+    // U+1F600 = grinning face emoji -- should find a fallback font
+    var dummy_collection: Collection = undefined;
+    var it = try dw.discoverFallback(alloc, &dummy_collection, .{ .codepoint = 0x1F600, .size = 12 });
+    defer it.deinit();
+
+    // It's OK if no emoji font is found on headless CI
+    if (try it.next()) |f| {
+        var f_mut = f;
+        defer f_mut.deinit();
+        try testing.expect(f_mut.hasCodepoint(0x1F600, null));
+    }
 }
