@@ -25,6 +25,7 @@ pub const SharedGridSet = @import("SharedGridSet.zig");
 pub const sprite = @import("sprite.zig");
 pub const Sprite = sprite.Sprite;
 pub const SpriteFace = sprite.Face;
+pub const directwrite = if (options.backend.hasDirectwrite()) @import("directwrite.zig") else struct {};
 pub const Descriptor = discovery.Descriptor;
 pub const Discover = discovery.Discover;
 pub const Library = library.Library;
