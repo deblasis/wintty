@@ -1034,7 +1034,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_new(const GhosttyAllocator* allocator,
+GHOSTTY_API GhosttyResult ghostty_terminal_new(const GhosttyAllocator* allocator,
                                    GhosttyTerminal* terminal,
                                    GhosttyTerminalOptions options);
 
@@ -1048,7 +1048,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_terminal_new(const GhosttyAllocator* alloca
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT void ghostty_terminal_free(GhosttyTerminal terminal);
+GHOSTTY_API void ghostty_terminal_free(GhosttyTerminal terminal);
 
 /**
  * Perform a full reset of the terminal (RIS).
@@ -1061,7 +1061,7 @@ GHOSTTY_EXPORT void ghostty_terminal_free(GhosttyTerminal terminal);
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT void ghostty_terminal_reset(GhosttyTerminal terminal);
+GHOSTTY_API void ghostty_terminal_reset(GhosttyTerminal terminal);
 
 /**
  * Resize the terminal to the given dimensions.
@@ -1084,7 +1084,7 @@ GHOSTTY_EXPORT void ghostty_terminal_reset(GhosttyTerminal terminal);
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_resize(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_resize(GhosttyTerminal terminal,
                                       uint16_t cols,
                                       uint16_t rows,
                                       uint32_t cell_width_px,
@@ -1110,7 +1110,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_terminal_resize(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_set(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_set(GhosttyTerminal terminal,
                                    GhosttyTerminalOption option,
                                    const void* value);
 
@@ -1135,7 +1135,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_terminal_set(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT void ghostty_terminal_vt_write(GhosttyTerminal terminal,
+GHOSTTY_API void ghostty_terminal_vt_write(GhosttyTerminal terminal,
                                 const uint8_t* data,
                                 size_t len);
 
@@ -1155,7 +1155,7 @@ GHOSTTY_EXPORT void ghostty_terminal_vt_write(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT void ghostty_terminal_scroll_viewport(GhosttyTerminal terminal,
+GHOSTTY_API void ghostty_terminal_scroll_viewport(GhosttyTerminal terminal,
                                        GhosttyTerminalScrollViewport behavior);
 
 /**
@@ -1172,7 +1172,7 @@ GHOSTTY_EXPORT void ghostty_terminal_scroll_viewport(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_mode_get(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_mode_get(GhosttyTerminal terminal,
                                         GhosttyMode mode,
                                         bool* out_value);
 
@@ -1189,7 +1189,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_terminal_mode_get(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_mode_set(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_mode_set(GhosttyTerminal terminal,
                                          GhosttyMode mode,
                                          bool value);
 
@@ -1209,7 +1209,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_terminal_mode_set(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_get(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_get(GhosttyTerminal terminal,
                                     GhosttyTerminalData data,
                                     void *out);
 
@@ -1272,7 +1272,7 @@ GHOSTTY_API GhosttyResult ghostty_terminal_get_multi(GhosttyTerminal terminal,
  *
  * @ingroup terminal
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal,
+GHOSTTY_API GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal,
                                         GhosttyPoint point,
                                         GhosttyGridRef *out_ref);
 

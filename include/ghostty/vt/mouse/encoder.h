@@ -134,7 +134,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_mouse_encoder_new(const GhosttyAllocator *allocator,
+GHOSTTY_API GhosttyResult ghostty_mouse_encoder_new(const GhosttyAllocator *allocator,
                                         GhosttyMouseEncoder *encoder);
 
 /**
@@ -144,7 +144,7 @@ GHOSTTY_EXPORT GhosttyResult ghostty_mouse_encoder_new(const GhosttyAllocator *a
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT void ghostty_mouse_encoder_free(GhosttyMouseEncoder encoder);
+GHOSTTY_API void ghostty_mouse_encoder_free(GhosttyMouseEncoder encoder);
 
 /**
  * Set an option on the mouse encoder.
@@ -157,7 +157,7 @@ GHOSTTY_EXPORT void ghostty_mouse_encoder_free(GhosttyMouseEncoder encoder);
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT void ghostty_mouse_encoder_setopt(GhosttyMouseEncoder encoder,
+GHOSTTY_API void ghostty_mouse_encoder_setopt(GhosttyMouseEncoder encoder,
                                   GhosttyMouseEncoderOption option,
                                   const void *value);
 
@@ -172,7 +172,7 @@ GHOSTTY_EXPORT void ghostty_mouse_encoder_setopt(GhosttyMouseEncoder encoder,
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT void ghostty_mouse_encoder_setopt_from_terminal(GhosttyMouseEncoder encoder,
+GHOSTTY_API void ghostty_mouse_encoder_setopt_from_terminal(GhosttyMouseEncoder encoder,
                                                 GhosttyTerminal terminal);
 
 /**
@@ -184,7 +184,7 @@ GHOSTTY_EXPORT void ghostty_mouse_encoder_setopt_from_terminal(GhosttyMouseEncod
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT void ghostty_mouse_encoder_reset(GhosttyMouseEncoder encoder);
+GHOSTTY_API void ghostty_mouse_encoder_reset(GhosttyMouseEncoder encoder);
 
 /**
  * Encode a mouse event into a terminal escape sequence.
@@ -205,7 +205,7 @@ GHOSTTY_EXPORT void ghostty_mouse_encoder_reset(GhosttyMouseEncoder encoder);
  *
  * @ingroup mouse
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_mouse_encoder_encode(GhosttyMouseEncoder encoder,
+GHOSTTY_API GhosttyResult ghostty_mouse_encoder_encode(GhosttyMouseEncoder encoder,
                                            GhosttyMouseEvent event,
                                            char *out_buf,
                                            size_t out_buf_size,

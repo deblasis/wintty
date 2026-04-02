@@ -85,7 +85,7 @@ typedef struct {
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_OUT_OF_SPACE if the buffer
  *         is too small
  */
-GHOSTTY_EXPORT GhosttyResult ghostty_size_report_encode(
+GHOSTTY_API GhosttyResult ghostty_size_report_encode(
     GhosttySizeReportStyle style,
     GhosttySizeReportSize size,
     char* buf,
