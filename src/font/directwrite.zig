@@ -824,9 +824,6 @@ pub fn loadDWriteCreateFactory() !DWriteCreateFactoryFn {
 
 /// Read the string at index 0 from an IDWriteLocalizedStrings into a
 /// UTF-8 slice backed by the provided buffer.
-///
-/// Covers all BMP characters, which includes every practical font name.
-/// Surrogate pairs (non-BMP) are replaced with U+FFFD.
 pub fn getLocalizedString(
     strings: *IDWriteLocalizedStrings,
     buf: []u8,
@@ -843,37 +840,10 @@ pub fn getLocalizedString(
     const hr2 = strings.GetString(0, &wide_buf, wide_len + 1);
     if (FAILED(hr2)) return error.GetStringFailed;
 
-    // Convert UTF-16LE to UTF-8 manually, handling BMP characters.
-    var out_pos: usize = 0;
-    var i: usize = 0;
-    while (i < wide_len) : (i += 1) {
-        const wc = wide_buf[i];
-        const codepoint: u21 = if (wc >= 0xD800 and wc <= 0xDFFF)
-            // Surrogate -- replace with U+FFFD (we only handle BMP).
-            0xFFFD
-        else
-            wc;
+    const out_len = std.unicode.utf16LeToUtf8(buf, wide_buf[0..wide_len]) catch
+        return error.BufferTooSmall;
 
-        // Encode codepoint as UTF-8.
-        if (codepoint < 0x80) {
-            if (out_pos >= buf.len) return error.BufferTooSmall;
-            buf[out_pos] = @intCast(codepoint);
-            out_pos += 1;
-        } else if (codepoint < 0x800) {
-            if (out_pos + 1 >= buf.len) return error.BufferTooSmall;
-            buf[out_pos] = @intCast(0xC0 | (codepoint >> 6));
-            buf[out_pos + 1] = @intCast(0x80 | (codepoint & 0x3F));
-            out_pos += 2;
-        } else {
-            if (out_pos + 2 >= buf.len) return error.BufferTooSmall;
-            buf[out_pos] = @intCast(0xE0 | (codepoint >> 12));
-            buf[out_pos + 1] = @intCast(0x80 | ((codepoint >> 6) & 0x3F));
-            buf[out_pos + 2] = @intCast(0x80 | (codepoint & 0x3F));
-            out_pos += 3;
-        }
-    }
-
-    return buf[0..out_pos];
+    return buf[0..out_len];
 }
 
 // --- Tests ---
