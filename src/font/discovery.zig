@@ -294,7 +294,7 @@ pub const DirectWrite = struct {
     pub fn discover(self: *const DirectWrite, alloc: Allocator, desc: Descriptor) !DiscoverIterator {
         const family = desc.family orelse return DiscoverIterator.empty(alloc, desc.variations);
 
-        // Convert family name to UTF-16 (ASCII fast path for font names)
+        // Convert family name to UTF-16 for DirectWrite APIs
         var wfamily_buf: [128]u16 = undefined;
         const wfamily = utf8ToUtf16Le(&wfamily_buf, family) orelse
             return DiscoverIterator.empty(alloc, desc.variations);
@@ -1725,7 +1725,9 @@ test "directwrite fallback" {
     var dw = DirectWrite.init();
     defer dw.deinit();
 
-    // U+1F600 = grinning face emoji -- should find a fallback font
+    // U+1F600 = grinning face emoji -- should find a fallback font.
+    // DirectWrite.discoverFallback ignores the collection parameter
+    // (uses its own system collection), so undefined is safe here.
     var dummy_collection: Collection = undefined;
     var it = try dw.discoverFallback(alloc, &dummy_collection, .{ .codepoint = 0x1F600, .size = 12 });
     defer it.deinit();
