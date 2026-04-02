@@ -104,7 +104,7 @@ fn createSharedTextureResources(
         .Format = .B8G8R8A8_UNORM,
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .Usage = .DEFAULT,
-        .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET,
+        .BindFlags = d3d11.D3D11_BIND_RENDER_TARGET | d3d11.D3D11_BIND_SHADER_RESOURCE,
         .CPUAccessFlags = 0,
         .MiscFlags = d3d11.D3D11_RESOURCE_MISC_SHARED,
     };
