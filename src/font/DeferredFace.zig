@@ -10,6 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fontconfig = @import("fontconfig");
 const macos = @import("macos");
+const dwrite = @import("directwrite.zig");
 const font = @import("main.zig");
 const options = @import("main.zig").options;
 const Library = @import("main.zig").Library;
@@ -33,6 +34,10 @@ win: if (options.backend == .freetype_windows) ?Windows else void =
 /// Canvas
 wc: if (options.backend == .web_canvas) ?WebCanvas else void =
     if (options.backend == .web_canvas) null else {},
+
+/// DirectWrite
+dw: if (options.backend == .directwrite_freetype) ?DirectWrite else void =
+    if (options.backend == .directwrite_freetype) null else {},
 
 /// Fontconfig specific data. This is only present if building with fontconfig.
 pub const Fontconfig = struct {
@@ -124,11 +129,22 @@ pub const WebCanvas = struct {
     }
 };
 
+pub const DirectWrite = struct {
+    font: *dwrite.IDWriteFont,
+    variations: []const font.face.Variation,
+
+    pub fn deinit(self: *DirectWrite) void {
+        _ = self.font.Release();
+        self.* = undefined;
+    }
+};
+
 pub fn deinit(self: *DeferredFace) void {
     switch (options.backend) {
         .fontconfig_freetype => if (self.fc) |*fc| fc.deinit(),
         .freetype => {},
         .freetype_windows => if (self.win) |*w| w.deinit(),
+        .directwrite_freetype => if (self.dw) |*dw_| dw_.deinit(),
         .web_canvas => if (self.wc) |*wc| wc.deinit(),
         .coretext,
         .coretext_freetype,
@@ -145,6 +161,19 @@ pub fn familyName(self: DeferredFace, buf: []u8) ![]const u8 {
         .freetype => {},
 
         .freetype_windows => if (self.win) |w| return try w.peek.name(buf),
+
+        .directwrite_freetype => if (self.dw) |dw_| {
+            var names: ?*dwrite.IDWriteLocalizedStrings = null;
+            var str_exists: i32 = 0;
+            const hr = dw_.font.GetInformationalStrings(.WIN32_FAMILY_NAMES, &names, &str_exists);
+            if (dwrite.SUCCEEDED(hr) and str_exists != 0) {
+                if (names) |n| {
+                    defer _ = n.Release();
+                    return dwrite.getLocalizedString(n, buf);
+                }
+            }
+            return "";
+        },
 
         .fontconfig_freetype => if (self.fc) |fc|
             return (try fc.pattern.get(.family, 0)).string,
@@ -175,6 +204,29 @@ pub fn name(self: DeferredFace, buf: []u8) ![]const u8 {
         .freetype => {},
 
         .freetype_windows => if (self.win) |w| return try w.peek.name(buf),
+
+        .directwrite_freetype => if (self.dw) |dw_| {
+            // Try full name first
+            var names: ?*dwrite.IDWriteLocalizedStrings = null;
+            var str_exists: i32 = 0;
+            var hr = dw_.font.GetInformationalStrings(.FULL_NAME, &names, &str_exists);
+            if (dwrite.SUCCEEDED(hr) and str_exists != 0) {
+                if (names) |n| {
+                    defer _ = n.Release();
+                    return dwrite.getLocalizedString(n, buf);
+                }
+            }
+            // Fall back to face names
+            var face_names: ?*dwrite.IDWriteLocalizedStrings = null;
+            hr = dw_.font.GetFaceNames(&face_names);
+            if (dwrite.SUCCEEDED(hr)) {
+                if (face_names) |n| {
+                    defer _ = n.Release();
+                    return dwrite.getLocalizedString(n, buf);
+                }
+            }
+            return "";
+        },
 
         .fontconfig_freetype => if (self.fc) |fc|
             return (try fc.pattern.get(.fullname, 0)).string,
@@ -210,6 +262,7 @@ pub fn load(
     return switch (options.backend) {
         .fontconfig_freetype => try self.loadFontconfig(lib, opts),
         .freetype_windows => try self.loadWindows(lib, opts),
+        .directwrite_freetype => try self.loadDirectWrite(lib, opts),
         .coretext, .coretext_harfbuzz, .coretext_noshape => try self.loadCoreText(lib, opts),
         .coretext_freetype => try self.loadCoreTextFreetype(lib, opts),
         .web_canvas => try self.loadWebCanvas(opts),
@@ -315,6 +368,69 @@ fn loadWebCanvas(
     return try .initNamed(wc.alloc, wc.font_str, opts, wc.presentation);
 }
 
+fn loadDirectWrite(self: *DeferredFace, lib: Library, opts: font.face.Options) !Face {
+    const dw_ = self.dw.?;
+
+    var dw_face: ?*dwrite.IDWriteFontFace = null;
+    var hr = dw_.font.CreateFontFace(&dw_face);
+    if (dwrite.FAILED(hr)) return error.DirectWriteError;
+    defer _ = dw_face.?.Release();
+
+    // Get file count
+    var num_files: u32 = 0;
+    hr = dw_face.?.GetFiles(&num_files, null);
+    if (dwrite.FAILED(hr) or num_files == 0) return error.FontHasNoFile;
+
+    // Get first font file
+    var font_file: ?*dwrite.IDWriteFontFile = null;
+    var one: u32 = 1;
+    hr = dw_face.?.GetFiles(&one, @ptrCast(&font_file));
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+    defer _ = font_file.?.Release();
+
+    // Get reference key
+    var key: ?*const anyopaque = null;
+    var key_size: u32 = 0;
+    hr = font_file.?.GetReferenceKey(&key, &key_size);
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+
+    // Get loader and QI to local loader
+    var loader: ?*dwrite.IDWriteFontFileLoader = null;
+    hr = font_file.?.GetLoader(&loader);
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+    defer _ = loader.?.Release();
+
+    var local_loader_raw: ?*anyopaque = null;
+    hr = loader.?.QueryInterface(&dwrite.IDWriteLocalFontFileLoader.IID, &local_loader_raw);
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+    const local_loader: *dwrite.IDWriteLocalFontFileLoader = @ptrCast(@alignCast(local_loader_raw.?));
+    defer _ = local_loader.Release();
+
+    // Get file path length then path
+    var path_len: u32 = 0;
+    hr = local_loader.GetFilePathLengthFromKey(key.?, key_size, &path_len);
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+
+    var wpath_buf: [512]u16 = undefined;
+    if (path_len + 1 > wpath_buf.len) return error.FontPathCantDecode;
+    hr = local_loader.GetFilePathFromKey(key.?, key_size, &wpath_buf, path_len + 1);
+    if (dwrite.FAILED(hr)) return error.FontHasNoFile;
+
+    // Convert UTF-16 path to null-terminated UTF-8 for FreeType
+    var path_buf: [1024]u8 = undefined;
+    const utf8_len = std.unicode.utf16LeToUtf8(path_buf[0 .. path_buf.len - 1], wpath_buf[0..path_len]) catch
+        return error.FontPathCantDecode;
+    path_buf[utf8_len] = 0;
+    const path: [:0]const u8 = path_buf[0..utf8_len :0];
+
+    const face_index: i32 = @intCast(dw_face.?.GetIndex());
+
+    var face = try Face.initFile(lib, path, face_index, opts);
+    errdefer face.deinit();
+    try face.setVariations(dw_.variations, opts);
+    return face;
+}
+
 /// Returns true if this face can satisfy the given codepoint and
 /// presentation. If presentation is null, then it just checks if the
 /// codepoint is present at all.
@@ -386,6 +502,19 @@ pub fn hasCodepoint(self: DeferredFace, cp: u32, p: ?Presentation) bool {
 
         // Canvas always has the codepoint because we have no way of
         // really checking and we let the browser handle it.
+        .directwrite_freetype => {
+            if (self.dw) |dw_| {
+                if (p) |desired_p| {
+                    const is_color = dw_.font.IsColorFont() != 0;
+                    const actual_p: Presentation = if (is_color) .emoji else .text;
+                    if (actual_p != desired_p) return false;
+                }
+                var cp_exists: i32 = 0;
+                const hr = dw_.font.HasCharacter(cp, &cp_exists);
+                return dwrite.SUCCEEDED(hr) and cp_exists != 0;
+            }
+        },
+
         .web_canvas => if (self.wc) |wc| {
             // Fast-path if we have a specific presentation and we
             // don't match, then it is definitely not this face.
@@ -527,4 +656,32 @@ test "coretext" {
     var face = try def.load(lib, .{ .size = .{ .points = 12 } });
     defer face.deinit();
     try testing.expect(face.glyphIndex(' ') != null);
+}
+
+test "directwrite" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const discovery_mod = @import("main.zig").discovery;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var def = def: {
+        var dw = discovery_mod.DirectWrite.init();
+        defer dw.deinit();
+        var it = try dw.discover(alloc, .{ .family = "Consolas", .size = 12 });
+        defer it.deinit();
+        break :def (try it.next()).?;
+    };
+    defer def.deinit();
+
+    var buf_dw: [1024]u8 = undefined;
+    const n_dw = try def.name(&buf_dw);
+    try testing.expect(n_dw.len > 0);
+
+    var face_dw = try def.load(lib, .{ .size = .{ .points = 12 } });
+    defer face_dw.deinit();
+    try testing.expect(face_dw.glyphIndex(' ') != null);
 }

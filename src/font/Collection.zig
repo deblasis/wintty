@@ -1438,6 +1438,7 @@ test "face metrics" {
         .cell_width = switch (options.backend) {
             .freetype,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             => 8.0,
             .coretext,
@@ -1458,6 +1459,7 @@ test "face metrics" {
         .ascii_height = switch (options.backend) {
             .freetype,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             => 18.0625,
             .coretext,
@@ -1472,6 +1474,7 @@ test "face metrics" {
         .cell_width = switch (options.backend) {
             .freetype,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             => 10.0,
             .coretext,
@@ -1492,6 +1495,7 @@ test "face metrics" {
         .ascii_height = switch (options.backend) {
             .freetype,
             .fontconfig_freetype,
+            .directwrite_freetype,
             .coretext_freetype,
             => 16.0,
             .coretext,
