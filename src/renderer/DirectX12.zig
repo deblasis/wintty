@@ -57,6 +57,7 @@ pub const ImageTextureFormat = enum {
 pub const com = @import("directx12/com.zig");
 pub const d3d12 = @import("directx12/d3d12.zig");
 pub const dcomp = @import("directx12/dcomp.zig");
+pub const descriptor_heap = @import("directx12/descriptor_heap.zig");
 pub const device = @import("directx12/device.zig");
 pub const dxgi = @import("directx12/dxgi.zig");
 
@@ -182,6 +183,7 @@ test {
     _ = com;
     _ = d3d12;
     _ = dcomp;
+    _ = descriptor_heap;
     _ = device;
     _ = dxgi;
 }
