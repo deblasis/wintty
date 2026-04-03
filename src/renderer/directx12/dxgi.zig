@@ -335,6 +335,82 @@ pub const IDXGISwapChain2 = extern struct {
     }
 };
 
+// IDXGISwapChain3
+// Slot we call: GetCurrentBackBufferIndex (36)
+pub const IDXGISwapChain3 = extern struct {
+    vtable: *const VTable,
+
+    pub const IID = GUID{
+        .data1 = 0x94d99bdb,
+        .data2 = 0xf1f8,
+        .data3 = 0x4ab0,
+        .data4 = .{ 0xb2, 0x36, 0x7d, 0xa0, 0x17, 0x0e, 0xda, 0xb1 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDXGISwapChain3, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
+        Release: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
+        // IDXGIObject (slots 3-6)
+        SetPrivateData: Reserved,
+        SetPrivateDataInterface: Reserved,
+        GetPrivateData: Reserved,
+        GetParent: Reserved,
+        // IDXGIDeviceSubObject (slot 7)
+        GetDevice: Reserved,
+        // IDXGISwapChain (slots 8-17)
+        Present: *const fn (*IDXGISwapChain3, u32, u32) callconv(.winapi) HRESULT,
+        GetBuffer: *const fn (*IDXGISwapChain3, u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        SetFullscreenState: Reserved,
+        GetFullscreenState: Reserved,
+        GetDesc: Reserved,
+        ResizeBuffers: Reserved,
+        ResizeTarget: Reserved,
+        GetContainingOutput: Reserved,
+        GetFrameStatistics: Reserved,
+        GetLastPresentCount: Reserved,
+        // IDXGISwapChain1 (slots 18-28)
+        GetDesc1: Reserved,
+        GetFullscreenDesc: Reserved,
+        GetHwnd: Reserved,
+        GetCoreWindow: Reserved,
+        Present1: Reserved,
+        IsTemporaryMonoSupported: Reserved,
+        GetRestrictToOutput: Reserved,
+        SetBackgroundColor: Reserved,
+        GetBackgroundColor: Reserved,
+        SetRotation: Reserved,
+        GetRotation: Reserved,
+        // IDXGISwapChain2 (slots 29-35)
+        SetSourceSize: Reserved,
+        GetSourceSize: Reserved,
+        SetMaximumFrameLatency: Reserved,
+        GetMaximumFrameLatency: Reserved,
+        GetFrameLatencyWaitableObject: Reserved,
+        SetMatrixTransform: Reserved,
+        GetMatrixTransform: Reserved,
+        // IDXGISwapChain3 (slot 36)
+        GetCurrentBackBufferIndex: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
+    };
+
+    pub inline fn Present(self: *IDXGISwapChain3, sync_interval: u32, flags: u32) HRESULT {
+        return self.vtable.Present(self, sync_interval, flags);
+    }
+
+    pub inline fn GetBuffer(self: *IDXGISwapChain3, buffer: u32, riid: *const GUID, surface: *?*anyopaque) HRESULT {
+        return self.vtable.GetBuffer(self, buffer, riid, surface);
+    }
+
+    pub inline fn GetCurrentBackBufferIndex(self: *IDXGISwapChain3) u32 {
+        return self.vtable.GetCurrentBackBufferIndex(self);
+    }
+
+    pub inline fn Release(self: *IDXGISwapChain3) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
 // IDXGIDevice
 // Slot we call: GetAdapter (slot 7)
 pub const IDXGIDevice = extern struct {
