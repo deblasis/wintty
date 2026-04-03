@@ -403,8 +403,9 @@ pub fn presentLastTarget(self: *DirectX12) !void {
 }
 
 pub inline fn bufferOptions(self: DirectX12) bufferpkg.Options {
-    _ = self;
-    return .{};
+    return .{
+        .device = if (self.dev) |*d| d.device else null,
+    };
 }
 
 pub const instanceBufferOptions = bufferOptions;
@@ -413,13 +414,11 @@ pub const imageBufferOptions = bufferOptions;
 pub const bgImageBufferOptions = bufferOptions;
 
 pub inline fn bgBufferOptions(self: DirectX12) bufferpkg.Options {
-    _ = self;
-    return .{};
+    return self.bufferOptions();
 }
 
 pub inline fn uniformBufferOptions(self: DirectX12) bufferpkg.Options {
-    _ = self;
-    return .{};
+    return self.bufferOptions();
 }
 
 pub inline fn textureOptions(self: DirectX12) Texture.Options {
