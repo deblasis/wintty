@@ -13,7 +13,3 @@ pub const Reserved = windows_com.Reserved;
 
 // DXGI error code used for device-lost / TDR recovery.
 pub const DXGI_ERROR_DEVICE_REMOVED: HRESULT = @bitCast(@as(u32, 0x887A0005));
-
-test {
-    _ = @import("com_test.zig");
-}
