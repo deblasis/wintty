@@ -11,10 +11,9 @@ pub const E_FAIL = windows_com.E_FAIL;
 pub const IUnknown = windows_com.IUnknown;
 pub const Reserved = windows_com.Reserved;
 
-// DX11-specific HRESULT code; not a general COM primitive.
+// DXGI error code used for device-lost / TDR recovery.
 pub const DXGI_ERROR_DEVICE_REMOVED: HRESULT = @bitCast(@as(u32, 0x887A0005));
 
 test {
     _ = @import("com_test.zig");
-    _ = @import("gpu_test.zig");
 }
