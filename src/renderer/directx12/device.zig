@@ -8,7 +8,7 @@
 //! - HWND: standalone windows, uses DirectComposition
 //! - SwapChainPanel: WinUI 3 / XAML hosts
 //! - SharedTexture: offscreen / game engine embedding (no swap chain)
-const Device = @This();
+pub const Device = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");

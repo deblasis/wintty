@@ -9,7 +9,7 @@
 //! - CBV/SRV/UAV (shader-visible): constant buffers, textures
 //! - Sampler (shader-visible): texture samplers
 //! - RTV (non-shader-visible): render target views
-const DescriptorHeap = @This();
+pub const DescriptorHeap = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
