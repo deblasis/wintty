@@ -567,3 +567,15 @@ pub const ISwapChainPanelNative = extern struct {
         return self.vtable.Release(self);
     }
 };
+
+// --- DXGI factory creation flags ---
+
+pub const DXGI_CREATE_FACTORY_DEBUG: u32 = 0x01;
+
+// --- Extern functions ---
+
+pub extern "dxgi" fn CreateDXGIFactory2(
+    Flags: u32,
+    riid: *const GUID,
+    ppFactory: *?*anyopaque,
+) callconv(.winapi) HRESULT;
