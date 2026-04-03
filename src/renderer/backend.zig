@@ -6,7 +6,7 @@ pub const Backend = enum {
     opengl,
     metal,
     webgl,
-    directx11,
+    directx12,
 
     pub fn default(
         target: std.Target,
@@ -19,7 +19,7 @@ pub const Backend = enum {
         }
 
         if (target.os.tag.isDarwin()) return .metal;
-        if (target.os.tag == .windows) return .directx11;
+        if (target.os.tag == .windows) return .directx12;
         return .opengl;
     }
 };
