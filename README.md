@@ -30,10 +30,10 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** DX11 renderer complete (3 surface modes + DirectComposition), cell rendering pipeline wired end-to-end, 6 .NET examples
+> **Status:** DX12 renderer in progress (3 surface modes + DirectComposition), shared infrastructure from DX11 carried forward
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████████░░░░░░░] 68%`
+> `[██████████░░░░░░░░░░] 54%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
@@ -41,6 +41,7 @@
 > The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
 > as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
 > The C# layer handles windowing, input, and platform integration via P/Invoke.
+> The renderer uses DirectX 12 with DXGI swap chains and DirectComposition.
 >
 > ### Building
 >
@@ -76,14 +77,17 @@
 > - [x] DLL init regression test and build instructions
 > - [x] Full Windows CI test suite
 >
-> **DX11 renderer infrastructure** (in fork)
+> **DX12 renderer infrastructure** (in fork, in progress)
 >
-> - [x] COM interface definitions (d3d11, dxgi) with vtable bindings
-> - [x] DX11 device lifecycle with triple surface support (HWND, SwapChainPanel, shared DXGI texture)
-> - [x] Instanced cell grid renderer with pre-compiled HLSL shaders
-> - [x] HLSL build step (HlslStep.zig) mirroring Metal's MetallibStep
-> - [x] Backend enum with `directx11` variant
-> - [x] GraphicsAPI contract stubs for GenericRenderer
+> - [x] DXGI bindings (adapters, factories, swap chains -- carried from DX11)
+> - [x] DirectComposition bindings (DWM composition -- carried from DX11)
+> - [x] COM helpers and test infrastructure (carried from DX11)
+> - [x] HLSL shaders (5 pipelines, SM 6.0 via dxc.exe)
+> - [ ] D3D12 COM interface bindings
+> - [ ] DX12 device lifecycle (command queue, fence, descriptor heaps)
+> - [ ] DX12 render pipeline (PSOs, root signatures, command lists)
+> - [ ] DX12 GPU primitives (upload heap buffers, textures, samplers)
+> - [ ] Backend enum with `directx12` variant
 >
 > **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
 >
@@ -99,21 +103,21 @@
 >
 > ### Architecture: Surface Modes
 >
-> The DX11 renderer supports three surface modes at the library level so that
+> The DX12 renderer supports three surface modes at the library level so that
 > libghostty consumers can pick whichever model fits their host:
-> - **HWND** -- `CreateSwapChainForHwnd`, for standalone windows, test harnesses, and third-party embedders
-> - **SwapChainPanel** (composition) -- `CreateSwapChainForComposition`, for WinUI 3 / XAML hosts
-> - **Shared texture** -- renders to a standalone `ID3D11Texture2D` with a DXGI shared handle, for game engines (Unity, Unreal, Godot), custom renderers, and offscreen scenarios
+> - **HWND** -- `CreateSwapChainForHwnd` via DXGI, for standalone windows, test harnesses, and third-party embedders
+> - **SwapChainPanel** (composition) -- `CreateSwapChainForComposition` via DXGI, for WinUI 3 / XAML hosts
+> - **Shared texture** -- renders to a standalone `ID3D12Resource` (texture) with a DXGI shared handle, for game engines, custom renderers, and offscreen scenarios
 >
 > The device picks the path based on what the caller provides. No compile-time flags.
 >
 > ### What is next
 >
-> - [x] DX11 clear-to-color: wire GenericRenderer contract, first pixels on screen
-> - [x] Cell rendering: full GenericRenderer path, all 5 HLSL pipelines, atlas textures, buffer sync
-> - [x] ConPTY shell spawning (via libghostty embedded apprt)
-> - [x] Keyboard and mouse input (scancodes, WM_CHAR with surrogate pairs, all mouse events)
-> - [x] Composition swap chain API for WinUI 3 embedders
+> - [ ] DX12 renderer: device, command queue, fence, descriptor heaps
+> - [ ] DX12 render pipelines: PSOs, root signatures, command list recording
+> - [ ] DX12 GPU primitives: upload heap buffers, textures, samplers
+> - [ ] DX12 clear-to-color: first pixels via DX12
+> - [ ] DX12 cell rendering: wire all 5 HLSL pipelines through DX12
 > - [ ] DirectWrite font backend (currently FreeType fallback, no font discovery)
 > - [ ] Clipboard (read/write stubs, not yet wired to Win32 clipboard API)
 > - [ ] Per-monitor DPI (handled but manifest not linked in example), dark/light mode theming
