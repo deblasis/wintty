@@ -120,7 +120,12 @@ pub inline fn beginFrame(
     target: *Target,
 ) !Frame {
     _ = self;
+    // Stub frame: D3D objects are null so complete()/reset() guard against
+    // them safely. Real init happens once device wiring lands (PR 13).
     return .{
+        .command_allocator = null,
+        .command_list = null,
+        .fence_value = 0,
         .renderer = renderer,
         .target = target,
     };
