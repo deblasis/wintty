@@ -55,6 +55,9 @@ pub const ImageTextureFormat = enum {
 // --- Sub-module re-exports: low-level D3D12/DXGI/COM bindings ---
 
 pub const com = @import("directx12/com.zig");
+pub const d3d12 = @import("directx12/d3d12.zig");
+pub const dcomp = @import("directx12/dcomp.zig");
+pub const device = @import("directx12/device.zig");
 pub const dxgi = @import("directx12/dxgi.zig");
 
 // --- GraphicsAPI contract: mutable state ---
@@ -177,6 +180,8 @@ pub fn initAtlasTexture(
 
 test {
     _ = com;
-    _ = @import("directx12/dcomp.zig");
+    _ = d3d12;
+    _ = dcomp;
+    _ = device;
     _ = dxgi;
 }
