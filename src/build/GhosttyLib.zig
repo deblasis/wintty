@@ -149,11 +149,11 @@ pub fn initShared(
         lib.root_module.linkSystemLibrary("libucrt", dynamic_link_opts);
     }
 
-    // Link DirectX 11 libraries on Windows when using the directx11 renderer.
+    // Link DirectX 12 libraries on Windows when using the directx12 renderer.
     if (deps.config.target.result.os.tag == .windows and
-        deps.config.renderer == .directx11)
+        deps.config.renderer == .directx12)
     {
-        lib.linkSystemLibrary("d3d11");
+        lib.linkSystemLibrary("d3d12");
         lib.linkSystemLibrary("dxgi");
     }
 

@@ -18,7 +18,7 @@ pub const GenericRenderer = @import("renderer/generic.zig").Renderer;
 pub const Metal = @import("renderer/Metal.zig");
 pub const OpenGL = @import("renderer/OpenGL.zig");
 pub const WebGL = @import("renderer/WebGL.zig");
-pub const DirectX11 = if (build_config.renderer == .directx11) @import("renderer/DirectX11.zig") else struct {};
+pub const DirectX12 = if (build_config.renderer == .directx12) @import("renderer/DirectX12.zig") else struct {};
 pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
 pub const Thread = @import("renderer/Thread.zig");
@@ -40,7 +40,7 @@ pub const Renderer = switch (build_config.renderer) {
     .metal => GenericRenderer(Metal),
     .opengl => GenericRenderer(OpenGL),
     .webgl => WebGL,
-    .directx11 => GenericRenderer(DirectX11),
+    .directx12 => GenericRenderer(DirectX12),
 };
 
 /// The health status of a renderer. These must be shared across all
