@@ -1,10 +1,10 @@
-// HLSL shaders for the Ghostty DX11 renderer.
+// HLSL shaders for the Ghostty DirectX renderer.
 //
 // Implements all 5 pipelines: bg_color, cell_bg, cell_text, image, bg_image.
 //
 // Each pipeline is compiled separately (one VS + one PS per pipeline). All
 // entry points live in this single file so the cbuffer declaration and
-// helpers are shared. The build system invokes fxc/dxc once per entry point.
+// helpers are shared. The build system invokes dxc once per entry point.
 //
 // Texture and structured-buffer declarations appear once per logical binding
 // slot. Because pipelines are compiled separately the compiler only sees the
@@ -13,7 +13,7 @@
 // ---- cbuffer layout -------------------------------------------------------
 //
 // The cbuffer must match the byte layout of the Zig Uniforms extern struct in
-// src/renderer/directx11/shaders.zig. GenericRenderer writes the struct
+// src/renderer/directx12/gpu_data.zig. GenericRenderer writes the struct
 // directly to the GPU buffer, byte-for-byte.
 //
 // HLSL's default cbuffer packing rules do NOT match C struct layout: HLSL
@@ -95,7 +95,7 @@ uint2 unpack_grid_size()
     return uint2(grid_size_packed & 0xFFFFu, (grid_size_packed >> 16u) & 0xFFFFu);
 }
 
-// TODO: re-enable padding_extend once DX11 blend state reliably composites
+// TODO: re-enable padding_extend once blend state reliably composites
 // transparent pixels.  Until then, CellBgPS always clamps to the nearest
 // edge cell instead of returning transparent for non-extended padding.
 bool padding_extend_left()  { return (padding_extend_packed & EXTEND_LEFT)  != 0u; }
@@ -199,7 +199,7 @@ float4 BgColorPS(FullScreenVSOut input) : SV_TARGET
 //
 // The CPU side binds an array of packed RGBA u32 values indexed by grid
 // position (row-major: index = y * grid_width + x).
-// In DX11 this is a StructuredBuffer<uint> at t0.
+// This is a StructuredBuffer<uint> at t0.
 // ===========================================================================
 
 StructuredBuffer<uint> cell_bg_colors : register(t0);
@@ -219,7 +219,7 @@ float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
     //
     // Metal and OpenGL return transparent here (unless padding_extend is
     // set) and rely on alpha blending to let the bg_color pass show
-    // through.  On DX11 the blend state does not reliably composite
+    // through.  The blend state does not reliably composite
     // transparent pixels, so we always clamp to the edge cell.  This
     // also avoids a visible color mismatch when the terminal sets per-
     // cell backgrounds (e.g. cmd.exe) that differ from bg_color.
@@ -238,7 +238,7 @@ float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
 
     // Composite over the global background so the result is fully opaque.
     // On Metal/OpenGL this compositing happens via hardware blending, but
-    // DX11's blend state is unreliable for this.  Doing it in the shader
+    // The blend state is unreliable for this.  Doing it in the shader
     // produces the same result: out = cell_bg + bg_color * (1 - cell_bg.a).
     float4 global_bg = load_color(bg_color_packed);
     bg = float4(bg.rgb + global_bg.rgb * (1.0 - bg.a), 1.0);
