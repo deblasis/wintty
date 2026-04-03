@@ -274,6 +274,53 @@ pub const D3D12_STATIC_BORDER_COLOR = enum(u32) {
     OPAQUE_WHITE = 2,
 };
 
+pub const D3D12_SRV_DIMENSION = enum(u32) {
+    UNKNOWN = 0,
+    BUFFER = 1,
+    TEXTURE1D = 2,
+    TEXTURE1DARRAY = 3,
+    TEXTURE2D = 4,
+    TEXTURE2DARRAY = 5,
+    TEXTURE2DMS = 6,
+    TEXTURE2DMSARRAY = 7,
+    TEXTURE3D = 8,
+    TEXTURECUBE = 9,
+    TEXTURECUBEARRAY = 10,
+    RAYTRACING_ACCELERATION_STRUCTURE = 11,
+};
+
+pub const D3D12_TEX2D_SRV = extern struct {
+    MostDetailedMip: u32,
+    MipLevels: u32,
+    PlaneSlice: u32,
+    ResourceMinLODClamp: f32,
+};
+
+pub const D3D12_SHADER_RESOURCE_VIEW_DESC = extern struct {
+    Format: DXGI_FORMAT,
+    ViewDimension: D3D12_SRV_DIMENSION,
+    Shader4ComponentMapping: u32,
+    u: extern union {
+        Texture2D: D3D12_TEX2D_SRV,
+    },
+};
+
+/// Default component mapping: identity (RGBA -> RGBA).
+pub const D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING: u32 = 0x00001688;
+
+pub const D3D12_SAMPLER_DESC = extern struct {
+    Filter: D3D12_FILTER,
+    AddressU: D3D12_TEXTURE_ADDRESS_MODE,
+    AddressV: D3D12_TEXTURE_ADDRESS_MODE,
+    AddressW: D3D12_TEXTURE_ADDRESS_MODE,
+    MipLODBias: f32,
+    MaxAnisotropy: u32,
+    ComparisonFunc: D3D12_COMPARISON_FUNC,
+    BorderColor: [4]f32,
+    MinLOD: f32,
+    MaxLOD: f32,
+};
+
 pub const D3D12_COLOR_WRITE_ENABLE = enum(u32) {
     RED = 1,
     GREEN = 2,
@@ -571,9 +618,14 @@ pub const D3D12_PLACED_SUBRESOURCE_FOOTPRINT = extern struct {
     Footprint: D3D12_SUBRESOURCE_FOOTPRINT,
 };
 
+pub const D3D12_TEXTURE_COPY_TYPE = enum(u32) {
+    SUBRESOURCE_INDEX = 0,
+    PLACED_FOOTPRINT = 1,
+};
+
 pub const D3D12_TEXTURE_COPY_LOCATION = extern struct {
     pResource: *ID3D12Resource,
-    Type: u32, // D3D12_TEXTURE_COPY_TYPE
+    Type: D3D12_TEXTURE_COPY_TYPE,
     u: extern union {
         PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
         SubresourceIndex: u32,
@@ -1228,7 +1280,7 @@ pub const ID3D12Device = extern struct {
         // slot 17
         CreateConstantBufferView: Reserved,
         // slot 18
-        CreateShaderResourceView: Reserved,
+        CreateShaderResourceView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, DestDescriptor: D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
         // slot 19
         CreateUnorderedAccessView: Reserved,
         // slot 20
@@ -1236,7 +1288,7 @@ pub const ID3D12Device = extern struct {
         // slot 21
         CreateDepthStencilView: Reserved,
         // slot 22
-        CreateSampler: Reserved,
+        CreateSampler: *const fn (*ID3D12Device, pDesc: *const D3D12_SAMPLER_DESC, DestDescriptor: D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
         // slot 23
         CopyDescriptors: Reserved,
         // slot 24
@@ -1307,6 +1359,14 @@ pub const ID3D12Device = extern struct {
 
     pub inline fn CreateRootSignature(self: *ID3D12Device, node_mask: u32, blob: *const anyopaque, blob_len: usize, riid: *const GUID, pp: *?*anyopaque) HRESULT {
         return self.vtable.CreateRootSignature(self, node_mask, blob, blob_len, riid, pp);
+    }
+
+    pub inline fn CreateShaderResourceView(self: *ID3D12Device, resource: ?*ID3D12Resource, desc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
+        self.vtable.CreateShaderResourceView(self, resource, desc, dest);
+    }
+
+    pub inline fn CreateSampler(self: *ID3D12Device, desc: *const D3D12_SAMPLER_DESC, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
+        self.vtable.CreateSampler(self, desc, dest);
     }
 
     pub inline fn CreateRenderTargetView(self: *ID3D12Device, resource: ?*ID3D12Resource, desc: ?*const anyopaque, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
