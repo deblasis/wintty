@@ -4,6 +4,7 @@
 //! a stub Shaders type that satisfies the GenericRenderer contract.
 const std = @import("std");
 
+const d3d12 = @import("d3d12.zig");
 const gpu_data = @import("gpu_data.zig");
 const Pipeline = @import("Pipeline.zig");
 
@@ -15,6 +16,9 @@ pub const BgImage = gpu_data.BgImage;
 
 /// Shader management for DX12.
 pub const Shaders = struct {
+    /// Shared root signature owned by this Shaders instance.
+    /// All pipelines reference it but only Shaders releases it.
+    root_signature: ?*d3d12.ID3D12RootSignature = null,
     pipelines: Pipelines = .{},
     post_pipelines: []const Pipeline = &.{},
     defunct: bool = false,
@@ -42,5 +46,8 @@ pub const Shaders = struct {
         self.pipelines.image.deinit();
         self.pipelines.bg_image.deinit();
         self.pipelines = .{};
+
+        if (self.root_signature) |rs| _ = rs.Release();
+        self.root_signature = null;
     }
 };
