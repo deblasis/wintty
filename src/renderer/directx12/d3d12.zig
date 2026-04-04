@@ -605,6 +605,79 @@ pub const D3D12_ROOT_SIGNATURE_DESC = extern struct {
     Flags: D3D12_ROOT_SIGNATURE_FLAGS,
 };
 
+// --- Root Signature versioning ---
+
+pub const D3D_ROOT_SIGNATURE_VERSION = enum(u32) {
+    VERSION_1_0 = 1,
+    VERSION_1_1 = 2,
+};
+
+// --- Root Signature v1.1 types ---
+
+pub const D3D12_DESCRIPTOR_RANGE_FLAGS = enum(u32) {
+    NONE = 0,
+    DESCRIPTORS_VOLATILE = 0x1,
+    DATA_VOLATILE = 0x2,
+    DATA_STATIC_WHILE_SET_AT_EXECUTE = 0x4,
+    DATA_STATIC = 0x8,
+    DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS = 0x10000,
+    _,
+};
+
+pub const D3D12_DESCRIPTOR_RANGE1 = extern struct {
+    RangeType: D3D12_DESCRIPTOR_RANGE_TYPE,
+    NumDescriptors: u32,
+    BaseShaderRegister: u32,
+    RegisterSpace: u32,
+    Flags: D3D12_DESCRIPTOR_RANGE_FLAGS,
+    OffsetInDescriptorsFromTableStart: u32,
+};
+
+pub const D3D12_ROOT_DESCRIPTOR_TABLE1 = extern struct {
+    NumDescriptorRanges: u32,
+    pDescriptorRanges: ?[*]const D3D12_DESCRIPTOR_RANGE1,
+};
+
+pub const D3D12_ROOT_DESCRIPTOR_FLAGS = enum(u32) {
+    NONE = 0,
+    DATA_VOLATILE = 0x2,
+    DATA_STATIC_WHILE_SET_AT_EXECUTE = 0x4,
+    DATA_STATIC = 0x8,
+    _,
+};
+
+pub const D3D12_ROOT_DESCRIPTOR1 = extern struct {
+    ShaderRegister: u32,
+    RegisterSpace: u32,
+    Flags: D3D12_ROOT_DESCRIPTOR_FLAGS,
+};
+
+pub const D3D12_ROOT_PARAMETER1 = extern struct {
+    ParameterType: D3D12_ROOT_PARAMETER_TYPE,
+    u: extern union {
+        DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE1,
+        Constants: D3D12_ROOT_CONSTANTS,
+        Descriptor: D3D12_ROOT_DESCRIPTOR1,
+    },
+    ShaderVisibility: D3D12_SHADER_VISIBILITY,
+};
+
+pub const D3D12_ROOT_SIGNATURE_DESC1 = extern struct {
+    NumParameters: u32,
+    pParameters: ?[*]const D3D12_ROOT_PARAMETER1,
+    NumStaticSamplers: u32,
+    pStaticSamplers: ?[*]const D3D12_STATIC_SAMPLER_DESC,
+    Flags: D3D12_ROOT_SIGNATURE_FLAGS,
+};
+
+pub const D3D12_VERSIONED_ROOT_SIGNATURE_DESC = extern struct {
+    Version: D3D_ROOT_SIGNATURE_VERSION,
+    u: extern union {
+        Desc_1_0: D3D12_ROOT_SIGNATURE_DESC,
+        Desc_1_1: D3D12_ROOT_SIGNATURE_DESC1,
+    },
+};
+
 pub const D3D12_SUBRESOURCE_FOOTPRINT = extern struct {
     Format: DXGI_FORMAT,
     Width: u32,
@@ -1400,9 +1473,8 @@ pub extern "d3d12" fn D3D12GetDebugInterface(
     ppvDebug: *?*anyopaque,
 ) callconv(.winapi) HRESULT;
 
-pub extern "d3d12" fn D3D12SerializeRootSignature(
-    pRootSignature: *const D3D12_ROOT_SIGNATURE_DESC,
-    Version: u32,
+pub extern "d3d12" fn D3D12SerializeVersionedRootSignature(
+    pRootSignature: *const D3D12_VERSIONED_ROOT_SIGNATURE_DESC,
     ppBlob: *?*ID3DBlob,
     ppErrorBlob: *?*ID3DBlob,
 ) callconv(.winapi) HRESULT;
@@ -1445,6 +1517,13 @@ test "D3D12 struct sizes" {
     try std.testing.expectEqual(32, @sizeOf(D3D12_RESOURCE_BARRIER));
     try std.testing.expectEqual(32, @sizeOf(D3D12_ROOT_PARAMETER));
     try std.testing.expectEqual(656, @sizeOf(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+
+    // v1.1 root signature types
+    try std.testing.expectEqual(24, @sizeOf(D3D12_DESCRIPTOR_RANGE1));
+    try std.testing.expectEqual(12, @sizeOf(D3D12_ROOT_DESCRIPTOR1));
+    try std.testing.expectEqual(32, @sizeOf(D3D12_ROOT_PARAMETER1));
+    try std.testing.expectEqual(40, @sizeOf(D3D12_ROOT_SIGNATURE_DESC1));
+    try std.testing.expectEqual(48, @sizeOf(D3D12_VERSIONED_ROOT_SIGNATURE_DESC));
 }
 
 test "D3D12 GUID constants" {
