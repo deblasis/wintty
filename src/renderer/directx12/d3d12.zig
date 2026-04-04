@@ -946,16 +946,23 @@ pub const ID3D12DescriptorHeap = extern struct {
         // ID3D12Pageable adds nothing
         // ID3D12DescriptorHeap (slots 8-10)
         GetDesc: Reserved,
-        GetCPUDescriptorHandleForHeapStart: *const fn (*ID3D12DescriptorHeap) callconv(.winapi) D3D12_CPU_DESCRIPTOR_HANDLE,
-        GetGPUDescriptorHandleForHeapStart: *const fn (*ID3D12DescriptorHeap) callconv(.winapi) D3D12_GPU_DESCRIPTOR_HANDLE,
+        // These COM methods return structs via a hidden output pointer
+        // (the C ABI convention used in the actual vtable). The C++ wrapper
+        // hides this, but the binary vtable uses: void fn(This, *RetVal).
+        GetCPUDescriptorHandleForHeapStart: *const fn (*ID3D12DescriptorHeap, *D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
+        GetGPUDescriptorHandleForHeapStart: *const fn (*ID3D12DescriptorHeap, *D3D12_GPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
     };
 
     pub inline fn GetCPUDescriptorHandleForHeapStart(self: *ID3D12DescriptorHeap) D3D12_CPU_DESCRIPTOR_HANDLE {
-        return self.vtable.GetCPUDescriptorHandleForHeapStart(self);
+        var result: D3D12_CPU_DESCRIPTOR_HANDLE = undefined;
+        self.vtable.GetCPUDescriptorHandleForHeapStart(self, &result);
+        return result;
     }
 
     pub inline fn GetGPUDescriptorHandleForHeapStart(self: *ID3D12DescriptorHeap) D3D12_GPU_DESCRIPTOR_HANDLE {
-        return self.vtable.GetGPUDescriptorHandleForHeapStart(self);
+        var result: D3D12_GPU_DESCRIPTOR_HANDLE = undefined;
+        self.vtable.GetGPUDescriptorHandleForHeapStart(self, &result);
+        return result;
     }
 
     pub inline fn Release(self: *ID3D12DescriptorHeap) u32 {
@@ -1553,4 +1560,26 @@ test "D3D12 COM interfaces are single vtable pointers" {
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(ID3D12CommandQueue));
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(ID3D12GraphicsCommandList));
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(ID3D12Resource));
+}
+
+test "DescriptorHeap vtable uses output pointer for struct returns" {
+    // COM methods that return structs use a hidden output pointer in the
+    // binary vtable (the C ABI convention). Verify the vtable function
+    // signatures take an output pointer parameter instead of returning
+    // the struct directly.
+    const VTable = ID3D12DescriptorHeap.VTable;
+    const cpu_fn_info = @typeInfo(@TypeOf(@as(VTable, undefined).GetCPUDescriptorHandleForHeapStart));
+    const gpu_fn_info = @typeInfo(@TypeOf(@as(VTable, undefined).GetGPUDescriptorHandleForHeapStart));
+
+    // Both should be pointers to functions
+    const cpu_child = @typeInfo(cpu_fn_info.pointer.child);
+    const gpu_child = @typeInfo(gpu_fn_info.pointer.child);
+
+    // Should take 2 params (self + output pointer), not 1 (self only)
+    try std.testing.expectEqual(2, cpu_child.@"fn".params.len);
+    try std.testing.expectEqual(2, gpu_child.@"fn".params.len);
+
+    // Return type should be void, not a struct
+    try std.testing.expectEqual(void, cpu_child.@"fn".return_type.?);
+    try std.testing.expectEqual(void, gpu_child.@"fn".return_type.?);
 }
