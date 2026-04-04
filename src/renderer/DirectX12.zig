@@ -110,9 +110,6 @@ back_buffers: [device.Device.frame_count]?*d3d12.ID3D12Resource = .{ null, null,
 rtv_handles: [device.Device.frame_count]d3d12.D3D12_CPU_DESCRIPTOR_HANDLE =
     .{ .{ .ptr = 0 }, .{ .ptr = 0 }, .{ .ptr = 0 } },
 
-/// Fence values per frame for CPU/GPU sync.
-frame_fence_values: [device.Device.frame_count]u64 = .{ 0, 0, 0 },
-
 /// Command list from the current beginFrame, executed in drawFrameEnd.
 pending_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 
@@ -347,7 +344,9 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     // Safe without sync because rendering is single-threaded per surface.
     const frame_idx = self.pending_frame_index;
     dev_ptr.fence_value += 1;
-    self.frame_fence_values[frame_idx] = dev_ptr.fence_value;
+    if (self.gpu_frames[frame_idx]) |*f| {
+        f.fence_value = dev_ptr.fence_value;
+    }
     const hr = dev_ptr.command_queue.Signal(dev_ptr.fence, dev_ptr.fence_value);
     if (com.FAILED(hr)) {
         log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(hr))});
@@ -416,8 +415,9 @@ pub inline fn beginFrame(
     // Which back buffer does the swap chain want us to render to?
     const frame_idx = sc3.GetCurrentBackBufferIndex();
 
-    // Wait for this frame slot's previous GPU work to finish.
-    const wait_value = api.frame_fence_values[frame_idx];
+    // Extract the frame for this slot and wait for its previous GPU work.
+    var frame = api.gpu_frames[frame_idx] orelse return error.FrameNotReady;
+    const wait_value = frame.fence_value;
     if (dev_ptr.fence.GetCompletedValue() < wait_value) {
         const hr = dev_ptr.fence.SetEventOnCompletion(wait_value, dev_ptr.fence_event);
         if (com.FAILED(hr)) return error.FrameSyncFailed;
@@ -429,7 +429,6 @@ pub inline fn beginFrame(
     target.rtv_handle = api.rtv_handles[frame_idx];
 
     // Reset and open the command list for recording.
-    var frame = api.gpu_frames[frame_idx] orelse return error.FrameNotReady;
     try frame.reset();
     frame.renderer = renderer;
     frame.target = target;
@@ -541,4 +540,8 @@ test {
     _ = descriptor_heap;
     _ = device;
     _ = dxgi;
+}
+
+test "DirectX12 does not have frame_fence_values" {
+    try std.testing.expect(!@hasField(DirectX12, "frame_fence_values"));
 }
