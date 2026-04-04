@@ -199,10 +199,10 @@ float4 BgColorPS(FullScreenVSOut input) : SV_TARGET
 //
 // The CPU side binds an array of packed RGBA u32 values indexed by grid
 // position (row-major: index = y * grid_width + x).
-// This is a StructuredBuffer<uint> at t0.
+// This is a StructuredBuffer<uint> at t3 (root SRV, not in the descriptor table).
 // ===========================================================================
 
-StructuredBuffer<uint> cell_bg_colors : register(t0);
+StructuredBuffer<uint> cell_bg_colors : register(t3);
 
 float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
 {
@@ -263,12 +263,12 @@ float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
 // Texture bindings:
 //   t0 = grayscale atlas (Texture2D<float4>)
 //   t1 = color atlas     (Texture2D<float4>)
-//   t2 = cell bg colors  (StructuredBuffer<uint>)
+//   t3 = cell bg colors  (StructuredBuffer<uint>, root SRV)
 // ===========================================================================
 
 Texture2D<float4>  ct_atlas_grayscale   : register(t0);
 Texture2D<float4>  ct_atlas_color       : register(t1);
-StructuredBuffer<uint> ct_cell_bg_colors: register(t2);
+StructuredBuffer<uint> ct_cell_bg_colors: register(t3);
 
 struct CellTextVSIn
 {
