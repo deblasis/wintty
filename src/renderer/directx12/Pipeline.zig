@@ -5,8 +5,9 @@
 //! layout that all pipelines share:
 //!
 //!   Param 0: CBV at b0 (Uniforms constant buffer)
-//!   Param 1: Descriptor table for SRVs at t0..t2 (textures, structured buffers)
+//!   Param 1: Descriptor table for SRVs at t0..t2 (atlas textures)
 //!   Param 2: Descriptor table for samplers at s0
+//!   Param 3: Inline SRV at t3 (structured buffer, e.g. cells_bg)
 //!
 //! This matches the HLSL register layout in shaders.hlsl. All five
 //! pipelines (bg_color, cell_bg, cell_text, image, bg_image) share the
@@ -58,6 +59,7 @@ pub const srv_table_size: u32 = 3;
 pub const root_param_cbv: u32 = 0;
 pub const root_param_srv_table: u32 = 1;
 pub const root_param_sampler_table: u32 = 2;
+pub const root_param_buffer_srv: u32 = 3;
 
 /// Create the shared root signature used by all pipelines.
 ///
@@ -65,6 +67,7 @@ pub const root_param_sampler_table: u32 = 2;
 ///   [0] CBV at b0 (inline root CBV -- just a GPU virtual address)
 ///   [1] Descriptor table: 3 SRVs at t0, t1, t2
 ///   [2] Descriptor table: 1 sampler at s0
+///   [3] Inline SRV at t3 (structured buffer data, e.g. cells_bg)
 pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignature {
     // SRV range: t0..t2 (textures and structured buffers).
     // DATA_STATIC: atlas textures are uploaded once and don't change
@@ -116,6 +119,19 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
             .u = .{ .DescriptorTable = .{
                 .NumDescriptorRanges = 1,
                 .pDescriptorRanges = @ptrCast(&sampler_range),
+            } },
+            .ShaderVisibility = .ALL,
+        },
+        // [3] Inline SRV for structured buffer data (cells_bg).
+        // Binds with SetGraphicsRootShaderResourceView -- the GPU virtual
+        // address is passed directly, no descriptor heap slot needed.
+        // DATA_VOLATILE: the buffer binding changes per draw call.
+        .{
+            .ParameterType = .SRV,
+            .u = .{ .Descriptor = .{
+                .ShaderRegister = 3,
+                .RegisterSpace = 0,
+                .Flags = .DATA_VOLATILE,
             } },
             .ShaderVisibility = .ALL,
         },
@@ -308,6 +324,10 @@ test "root parameter indices" {
     try std.testing.expectEqual(@as(u32, 0), root_param_cbv);
     try std.testing.expectEqual(@as(u32, 1), root_param_srv_table);
     try std.testing.expectEqual(@as(u32, 2), root_param_sampler_table);
+}
+
+test "root_param_buffer_srv index" {
+    try std.testing.expectEqual(@as(u32, 3), root_param_buffer_srv);
 }
 
 test "srv_table_size covers t0..t2" {
