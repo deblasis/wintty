@@ -238,8 +238,6 @@ pub fn step(self: *RenderPass, s: Step) void {
 
     // Bind the first buffer as the instance vertex buffer.
     // Only the first non-null buffer with a stride is bound as a VB.
-    // Multi-buffer pipelines (e.g. cell_text) will need root descriptor
-    // table entries for storage buffers -- see #128.
     for (s.buffers) |b| {
         if (b) |buf| {
             if (buf.gpu_address != 0 and buf.size > 0 and buf.stride > 0) {
@@ -250,6 +248,20 @@ pub fn step(self: *RenderPass, s: Step) void {
                 };
                 cl.IASetVertexBuffers(0, 1, @ptrCast(&vbv));
                 break;
+            }
+        }
+    }
+
+    // Bind buffers[1] as a root SRV descriptor (e.g. cells_bg).
+    // buffers[0] is bound as a vertex buffer above. buffers[1] is
+    // structured buffer data accessed via SRV in the pixel/vertex shader.
+    if (s.buffers.len > 1) {
+        if (s.buffers[1]) |buf| {
+            if (buf.gpu_address != 0) {
+                cl.SetGraphicsRootShaderResourceView(
+                    Pipeline.root_param_buffer_srv,
+                    buf.gpu_address,
+                );
             }
         }
     }
@@ -300,6 +312,16 @@ test "RenderPass has required methods" {
     try std.testing.expect(@TypeOf(RenderPass.begin) != void);
     try std.testing.expect(@TypeOf(RenderPass.step) != void);
     try std.testing.expect(@TypeOf(RenderPass.complete) != void);
+}
+
+test "Step supports multiple buffers" {
+    const s = Step{
+        .buffers = &.{
+            RawBuffer{ .gpu_address = 0x1000, .size = 256, .stride = 32 },
+            RawBuffer{ .gpu_address = 0x2000, .size = 128, .stride = 4 },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 2), s.buffers.len);
 }
 
 test "Step DrawType values" {
