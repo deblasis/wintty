@@ -1391,7 +1391,7 @@ pub const ID3D12Device = extern struct {
         // slot 36
         CreateFence: *const fn (*ID3D12Device, InitialValue: u64, Flags: D3D12_FENCE_FLAGS, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         // slot 37
-        GetDeviceRemovedReason: Reserved,
+        GetDeviceRemovedReason: *const fn (*ID3D12Device) callconv(.winapi) HRESULT,
         // slot 38
         GetCopyableFootprints: Reserved,
         // slot 39
@@ -1452,6 +1452,10 @@ pub const ID3D12Device = extern struct {
 
     pub inline fn CreateFence(self: *ID3D12Device, initial_value: u64, flags: D3D12_FENCE_FLAGS, riid: *const GUID, pp: *?*anyopaque) HRESULT {
         return self.vtable.CreateFence(self, initial_value, flags, riid, pp);
+    }
+
+    pub inline fn GetDeviceRemovedReason(self: *ID3D12Device) HRESULT {
+        return self.vtable.GetDeviceRemovedReason(self);
     }
 
     pub inline fn Release(self: *ID3D12Device) u32 {
