@@ -1194,7 +1194,7 @@ pub const ID3D12GraphicsCommandList = extern struct {
         // slot 39
         SetComputeRootShaderResourceView: Reserved,
         // slot 40
-        SetGraphicsRootShaderResourceView: Reserved,
+        SetGraphicsRootShaderResourceView: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BufferLocation: u64) callconv(.winapi) void,
         // slot 41
         SetComputeRootUnorderedAccessView: Reserved,
         // slot 42
@@ -1293,6 +1293,10 @@ pub const ID3D12GraphicsCommandList = extern struct {
 
     pub inline fn SetGraphicsRootConstantBufferView(self: *ID3D12GraphicsCommandList, index: u32, buffer_location: u64) void {
         self.vtable.SetGraphicsRootConstantBufferView(self, index, buffer_location);
+    }
+
+    pub inline fn SetGraphicsRootShaderResourceView(self: *ID3D12GraphicsCommandList, index: u32, buffer_location: u64) void {
+        self.vtable.SetGraphicsRootShaderResourceView(self, index, buffer_location);
     }
 
     pub inline fn CopyBufferRegion(self: *ID3D12GraphicsCommandList, dst: *ID3D12Resource, dst_offset: u64, src: *ID3D12Resource, src_offset: u64, num_bytes: u64) void {
