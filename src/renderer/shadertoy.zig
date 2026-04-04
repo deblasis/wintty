@@ -40,7 +40,7 @@ pub const Uniforms = extern struct {
 };
 
 /// The target to load shaders for.
-pub const Target = enum { glsl, msl };
+pub const Target = enum { glsl, msl, hlsl };
 
 /// Load a set of shaders from files and convert them to the target
 /// format. The shader order is preserved.
@@ -135,6 +135,7 @@ pub fn loadFromFile(
         // is the final result that will be returned to the caller.
         .glsl => try glslFromSpv(alloc_gpa, spirv),
         .msl => try mslFromSpv(alloc_gpa, spirv),
+        .hlsl => try hlslFromSpv(alloc_gpa, spirv),
     };
 }
 
@@ -248,6 +249,23 @@ pub fn mslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
                 options,
                 c.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING,
                 c.SPVC_TRUE,
+            ) != c.SPVC_SUCCESS) {
+                return error.SpvcFailed;
+            }
+        }
+    }).setOptions);
+}
+
+/// Convert SPIR-V binary to HLSL.
+pub fn hlslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
+    const c = spvcross.c;
+    return try spvCross(alloc, c.SPVC_BACKEND_HLSL, spv, (struct {
+        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
+            // Target Shader Model 6.0 for broad DX12 hardware support.
+            if (c.spvc_compiler_options_set_uint(
+                options,
+                c.SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL,
+                60,
             ) != c.SPVC_SUCCESS) {
                 return error.SpvcFailed;
             }
@@ -420,6 +438,26 @@ test "shadertoy to glsl" {
     defer alloc.free(glsl);
 
     // log.warn("glsl={s}", .{glsl});
+}
+
+test "shadertoy to hlsl" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_crt);
+    defer alloc.free(src);
+
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    try spirvFromGlsl(&buf.writer, null, src);
+
+    // TODO: Replace this with an aligned version of Writer.Allocating
+    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
+    defer spvlist.deinit(alloc);
+    try spvlist.appendSlice(alloc, buf.written());
+
+    const hlsl = try hlslFromSpv(alloc, spvlist.items);
+    defer alloc.free(hlsl);
 }
 
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");
