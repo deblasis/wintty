@@ -296,11 +296,22 @@ pub const D3D12_TEX2D_SRV = extern struct {
     ResourceMinLODClamp: f32,
 };
 
+pub const D3D12_BUFFER_SRV = extern struct {
+    FirstElement: u64,
+    NumElements: u32,
+    StructureByteStride: u32,
+    Flags: u32,
+};
+
 pub const D3D12_SHADER_RESOURCE_VIEW_DESC = extern struct {
     Format: DXGI_FORMAT,
     ViewDimension: D3D12_SRV_DIMENSION,
     Shader4ComponentMapping: u32,
     u: extern union {
+        // The union must be the size of the largest member (D3D12_BUFFER_SRV
+        // at 24 bytes). Without all members, the union would be too small and
+        // the D3D12 runtime could read past the end of the struct.
+        Buffer: D3D12_BUFFER_SRV,
         Texture2D: D3D12_TEX2D_SRV,
     },
 };
@@ -1185,7 +1196,10 @@ pub const ID3D12GraphicsCommandList = extern struct {
         // slot 31
         SetComputeRootDescriptorTable: Reserved,
         // slot 32
-        SetGraphicsRootDescriptorTable: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BaseDescriptor: D3D12_GPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
+        // BaseDescriptor is D3D12_GPU_DESCRIPTOR_HANDLE (8-byte struct).
+        // Use u64 in the vtable for the same ABI reason as the device
+        // descriptor handle parameters above.
+        SetGraphicsRootDescriptorTable: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BaseDescriptor: u64) callconv(.winapi) void,
         // slot 33
         SetComputeRoot32BitConstant: Reserved,
         // slot 34
@@ -1217,7 +1231,9 @@ pub const ID3D12GraphicsCommandList = extern struct {
         // slot 47
         ClearDepthStencilView: Reserved,
         // slot 48
-        ClearRenderTargetView: *const fn (*ID3D12GraphicsCommandList, RenderTargetView: D3D12_CPU_DESCRIPTOR_HANDLE, ColorRGBA: *const [4]f32, NumRects: u32, pRects: ?[*]const D3D12_RECT) callconv(.winapi) void,
+        // RenderTargetView is D3D12_CPU_DESCRIPTOR_HANDLE (8-byte struct).
+        // Use usize in the vtable for the same ABI reason as above.
+        ClearRenderTargetView: *const fn (*ID3D12GraphicsCommandList, RenderTargetView: usize, ColorRGBA: *const [4]f32, NumRects: u32, pRects: ?[*]const D3D12_RECT) callconv(.winapi) void,
         // slot 49
         ClearUnorderedAccessViewUint: Reserved,
         // slot 50
@@ -1255,7 +1271,7 @@ pub const ID3D12GraphicsCommandList = extern struct {
     }
 
     pub inline fn ClearRenderTargetView(self: *ID3D12GraphicsCommandList, rtv: D3D12_CPU_DESCRIPTOR_HANDLE, color: *const [4]f32, num_rects: u32, rects: ?[*]const D3D12_RECT) void {
-        self.vtable.ClearRenderTargetView(self, rtv, color, num_rects, rects);
+        self.vtable.ClearRenderTargetView(self, rtv.ptr, color, num_rects, rects);
     }
 
     pub inline fn SetGraphicsRootSignature(self: *ID3D12GraphicsCommandList, root_sig: ?*ID3D12RootSignature) void {
@@ -1295,7 +1311,7 @@ pub const ID3D12GraphicsCommandList = extern struct {
     }
 
     pub inline fn SetGraphicsRootDescriptorTable(self: *ID3D12GraphicsCommandList, index: u32, base_descriptor: D3D12_GPU_DESCRIPTOR_HANDLE) void {
-        self.vtable.SetGraphicsRootDescriptorTable(self, index, base_descriptor);
+        self.vtable.SetGraphicsRootDescriptorTable(self, index, base_descriptor.ptr);
     }
 
     pub inline fn SetGraphicsRootConstantBufferView(self: *ID3D12GraphicsCommandList, index: u32, buffer_location: u64) void {
@@ -1364,15 +1380,19 @@ pub const ID3D12Device = extern struct {
         // slot 17
         CreateConstantBufferView: Reserved,
         // slot 18
-        CreateShaderResourceView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, DestDescriptor: D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
+        // DestDescriptor is D3D12_CPU_DESCRIPTOR_HANDLE (8-byte struct) passed
+        // by value. Use usize in the vtable to avoid Zig callconv(.winapi)
+        // struct-by-value ABI ambiguity -- same class of issue as the
+        // descriptor heap struct-return fix in PR # 142.
+        CreateShaderResourceView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, DestDescriptor: usize) callconv(.winapi) void,
         // slot 19
         CreateUnorderedAccessView: Reserved,
         // slot 20
-        CreateRenderTargetView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const anyopaque, DestDescriptor: D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
+        CreateRenderTargetView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const anyopaque, DestDescriptor: usize) callconv(.winapi) void,
         // slot 21
         CreateDepthStencilView: Reserved,
         // slot 22
-        CreateSampler: *const fn (*ID3D12Device, pDesc: *const D3D12_SAMPLER_DESC, DestDescriptor: D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
+        CreateSampler: *const fn (*ID3D12Device, pDesc: *const D3D12_SAMPLER_DESC, DestDescriptor: usize) callconv(.winapi) void,
         // slot 23
         CopyDescriptors: Reserved,
         // slot 24
@@ -1446,15 +1466,15 @@ pub const ID3D12Device = extern struct {
     }
 
     pub inline fn CreateShaderResourceView(self: *ID3D12Device, resource: ?*ID3D12Resource, desc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
-        self.vtable.CreateShaderResourceView(self, resource, desc, dest);
+        self.vtable.CreateShaderResourceView(self, resource, desc, dest.ptr);
     }
 
     pub inline fn CreateSampler(self: *ID3D12Device, desc: *const D3D12_SAMPLER_DESC, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
-        self.vtable.CreateSampler(self, desc, dest);
+        self.vtable.CreateSampler(self, desc, dest.ptr);
     }
 
     pub inline fn CreateRenderTargetView(self: *ID3D12Device, resource: ?*ID3D12Resource, desc: ?*const anyopaque, dest: D3D12_CPU_DESCRIPTOR_HANDLE) void {
-        self.vtable.CreateRenderTargetView(self, resource, desc, dest);
+        self.vtable.CreateRenderTargetView(self, resource, desc, dest.ptr);
     }
 
     pub inline fn CreateCommittedResource(self: *ID3D12Device, heap_props: *const D3D12_HEAP_PROPERTIES, heap_flags: u32, desc: *const D3D12_RESOURCE_DESC, initial_state: D3D12_RESOURCE_STATES, optimized_clear: ?*const anyopaque, riid: *const GUID, pp: *?*anyopaque) HRESULT {
@@ -1533,6 +1553,12 @@ test "D3D12 struct sizes" {
     try std.testing.expectEqual(32, @sizeOf(D3D12_ROOT_PARAMETER));
     try std.testing.expectEqual(656, @sizeOf(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
 
+    // SRV desc must match MSVC size (union sized to largest member: D3D12_BUFFER_SRV at 24 bytes).
+    // A too-small struct causes the D3D12 runtime to read past the end, triggering DEVICE_REMOVED.
+    try std.testing.expectEqual(36, @sizeOf(D3D12_SHADER_RESOURCE_VIEW_DESC));
+    try std.testing.expectEqual(24, @sizeOf(D3D12_BUFFER_SRV));
+    try std.testing.expectEqual(16, @sizeOf(D3D12_TEX2D_SRV));
+
     // v1.1 root signature types
     try std.testing.expectEqual(24, @sizeOf(D3D12_DESCRIPTOR_RANGE1));
     try std.testing.expectEqual(12, @sizeOf(D3D12_ROOT_DESCRIPTOR1));
@@ -1582,4 +1608,44 @@ test "DescriptorHeap vtable uses output pointer for struct returns" {
     // Return type should be void, not a struct
     try std.testing.expectEqual(void, cpu_child.@"fn".return_type.?);
     try std.testing.expectEqual(void, gpu_child.@"fn".return_type.?);
+}
+
+test "Device vtable passes descriptor handles as raw scalars" {
+    // COM methods that take D3D12_CPU_DESCRIPTOR_HANDLE by value must use
+    // usize in the vtable (not the extern struct) to avoid Zig callconv(.winapi)
+    // struct-by-value ABI ambiguity on x86_64-windows.
+    const VT = ID3D12Device.VTable;
+
+    // Helper: get the Nth parameter type from a vtable function pointer field.
+    const ParamType = struct {
+        fn get(comptime field: anytype, comptime n: usize) type {
+            const ptr_info = @typeInfo(@TypeOf(field));
+            const fn_info = @typeInfo(ptr_info.pointer.child);
+            return fn_info.@"fn".params[n].type.?;
+        }
+    };
+
+    // CreateShaderResourceView: last param (index 3) must be usize
+    try std.testing.expectEqual(usize, ParamType.get(@as(VT, undefined).CreateShaderResourceView, 3));
+    // CreateRenderTargetView: last param (index 3) must be usize
+    try std.testing.expectEqual(usize, ParamType.get(@as(VT, undefined).CreateRenderTargetView, 3));
+    // CreateSampler: last param (index 2) must be usize
+    try std.testing.expectEqual(usize, ParamType.get(@as(VT, undefined).CreateSampler, 2));
+}
+
+test "CommandList vtable passes descriptor handles as raw scalars" {
+    const VT = ID3D12GraphicsCommandList.VTable;
+
+    const ParamType = struct {
+        fn get(comptime field: anytype, comptime n: usize) type {
+            const ptr_info = @typeInfo(@TypeOf(field));
+            const fn_info = @typeInfo(ptr_info.pointer.child);
+            return fn_info.@"fn".params[n].type.?;
+        }
+    };
+
+    // ClearRenderTargetView: param 1 (after self) must be usize
+    try std.testing.expectEqual(usize, ParamType.get(@as(VT, undefined).ClearRenderTargetView, 1));
+    // SetGraphicsRootDescriptorTable: param 2 (after self + index) must be u64
+    try std.testing.expectEqual(u64, ParamType.get(@as(VT, undefined).SetGraphicsRootDescriptorTable, 2));
 }
