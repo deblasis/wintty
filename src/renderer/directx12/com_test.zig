@@ -51,6 +51,34 @@ test "ISwapChainPanelNative IID" {
     try std.testing.expectEqualSlices(u8, &iid.data4, &[_]u8{ 0xa2, 0x0c, 0xf6, 0xf1, 0xea, 0x90, 0x55, 0x4b });
 }
 
+// Verify DXGI error constants match the Windows SDK values.
+// These are HRESULT codes that cross the COM boundary, so wrong
+// values would silently miss device-loss events.
+
+test "DXGI_ERROR_DEVICE_REMOVED value" {
+    try std.testing.expectEqual(@as(u32, 0x887A0005), @as(u32, @bitCast(com.DXGI_ERROR_DEVICE_REMOVED)));
+}
+
+test "DXGI_ERROR_DEVICE_HUNG value" {
+    try std.testing.expectEqual(@as(u32, 0x887A0006), @as(u32, @bitCast(com.DXGI_ERROR_DEVICE_HUNG)));
+}
+
+test "DXGI_ERROR_DEVICE_RESET value" {
+    try std.testing.expectEqual(@as(u32, 0x887A0007), @as(u32, @bitCast(com.DXGI_ERROR_DEVICE_RESET)));
+}
+
+test "DXGI device-loss error codes are distinct" {
+    try std.testing.expect(com.DXGI_ERROR_DEVICE_REMOVED != com.DXGI_ERROR_DEVICE_HUNG);
+    try std.testing.expect(com.DXGI_ERROR_DEVICE_HUNG != com.DXGI_ERROR_DEVICE_RESET);
+    try std.testing.expect(com.DXGI_ERROR_DEVICE_REMOVED != com.DXGI_ERROR_DEVICE_RESET);
+}
+
+test "DXGI device-loss error codes are all failures" {
+    try std.testing.expect(com.FAILED(com.DXGI_ERROR_DEVICE_REMOVED));
+    try std.testing.expect(com.FAILED(com.DXGI_ERROR_DEVICE_HUNG));
+    try std.testing.expect(com.FAILED(com.DXGI_ERROR_DEVICE_RESET));
+}
+
 test "Buffer type instantiation compiles" {
     const buffer_mod = @import("buffer.zig");
     _ = buffer_mod.Buffer(f32);

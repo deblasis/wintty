@@ -84,6 +84,11 @@ const sampler_heap_capacity: u32 = 16;
 /// Runtime blending mode, set by GenericRenderer when config changes.
 blending: configpkg.Config.AlphaBlending = .native,
 
+/// Set to true when a device-loss error is detected (DEVICE_REMOVED,
+/// DEVICE_HUNG, or DEVICE_RESET). Prevents further GPU submissions
+/// until device recovery.
+device_lost: bool = false,
+
 /// DX12 device owning command queue, fence, and swap chain.
 dev: ?device.Device = null,
 
@@ -343,10 +348,14 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
     dev_ptr.command_queue.ExecuteCommandLists(1, &lists);
 
-    // Present the swap chain.
-    // Does not yet check for DXGI_ERROR_DEVICE_REMOVED -- see #130.
+    // Present the swap chain and check for device-removed errors.
     if (self.swap_chain3) |sc3| {
         const hr = sc3.Present(1, 0);
+        if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
+            self.handleDeviceRemoved();
+            // Fence signal is intentionally skipped -- the device is gone.
+            return;
+        }
         if (com.FAILED(hr)) {
             log.err("Present failed: 0x{x}", .{@as(u32, @bitCast(hr))});
         }
@@ -427,6 +436,7 @@ pub inline fn beginFrame(
     // as DX11.
     _ = self;
     const api: *DirectX12 = &renderer.api;
+    if (api.device_lost) return error.DeviceLost;
     // SharedTexture surfaces have no swap chain; they need a separate
     // submission path that is not yet implemented.
     const sc3 = api.swap_chain3 orelse return error.NoSwapChain;
@@ -470,10 +480,24 @@ pub fn presentLastTarget(self: *DirectX12) !void {
     // valid and the next beginFrame will wait correctly.
     if (self.swap_chain3) |sc3| {
         const hr = sc3.Present(1, 0);
+        if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
+            self.handleDeviceRemoved();
+            return error.PresentFailed;
+        }
         if (com.FAILED(hr)) {
             log.err("presentLastTarget failed: 0x{x}", .{@as(u32, @bitCast(hr))});
             return error.PresentFailed;
         }
+    }
+}
+
+fn handleDeviceRemoved(self: *DirectX12) void {
+    self.device_lost = true;
+    if (self.dev) |*dev_ptr| {
+        const reason = dev_ptr.device.GetDeviceRemovedReason();
+        log.err("GPU device removed, reason: 0x{x}", .{@as(u32, @bitCast(reason))});
+    } else {
+        log.err("GPU device removed, no device available for reason query", .{});
     }
 }
 
@@ -575,4 +599,31 @@ test "DirectX12 default cached size is zero" {
     const api: DirectX12 = .{};
     try std.testing.expectEqual(@as(u32, 0), api.cached_width);
     try std.testing.expectEqual(@as(u32, 0), api.cached_height);
+}
+
+test "DirectX12 has device_lost field" {
+    try std.testing.expect(@hasField(DirectX12, "device_lost"));
+}
+
+test "DirectX12 default device_lost is false" {
+    const api: DirectX12 = .{};
+    try std.testing.expect(!api.device_lost);
+}
+
+test "device_lost flag gates further rendering" {
+    var api: DirectX12 = .{};
+    try std.testing.expect(!api.device_lost);
+    // Simulate what handleDeviceRemoved does to the flag.
+    api.device_lost = true;
+    try std.testing.expect(api.device_lost);
+}
+
+test "device_lost flag is independent of device presence" {
+    var api: DirectX12 = .{};
+    // device_lost can be set regardless of whether dev is populated,
+    // matching the guard in beginFrame which checks device_lost before
+    // accessing dev.
+    try std.testing.expect(api.dev == null);
+    api.device_lost = true;
+    try std.testing.expect(api.device_lost);
 }

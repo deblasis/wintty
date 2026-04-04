@@ -767,3 +767,16 @@ test "Fence: execute empty command list and wait" {
     // Fence value should match what we signaled.
     try std.testing.expect(dev.fence.GetCompletedValue() >= dev.fence_value);
 }
+
+// ---- Device removed reason test ----
+
+test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
+    if (comptime builtin.os.tag != .windows) return;
+    var dev = createTestDevice() catch return;
+    defer dev.deinit();
+    _ = dev.command_list.Close();
+
+    // A healthy device should return S_OK (0) for GetDeviceRemovedReason.
+    const hr = dev.device.GetDeviceRemovedReason();
+    try std.testing.expectEqual(@as(com.HRESULT, 0), hr);
+}
