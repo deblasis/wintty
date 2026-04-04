@@ -22,10 +22,15 @@ pub const Options = struct {
 };
 
 /// Type-erased buffer handle for passing to RenderPass.Step.
-/// Holds the GPU virtual address and size needed for binding.
+/// Holds the GPU virtual address, total size, and per-element stride
+/// needed for vertex buffer view binding.
+/// Both size and stride are u32 to match D3D12_VERTEX_BUFFER_VIEW's
+/// SizeInBytes/StrideInBytes fields (UINT). Terminal buffers are well
+/// under the 4GB limit so @intCast from usize is always safe here.
 pub const RawBuffer = struct {
     gpu_address: u64 = 0,
-    size: u64 = 0,
+    size: u32 = 0,
+    stride: u32 = 0,
 };
 
 /// DX12 GPU data buffer for a set of equal-typed elements.
@@ -183,7 +188,8 @@ pub fn Buffer(comptime T: type) type {
             self.len = len;
             self.buffer = .{
                 .gpu_address = res.GetGPUVirtualAddress(),
-                .size = byte_size,
+                .size = @intCast(byte_size),
+                .stride = @sizeOf(T),
             };
         }
 

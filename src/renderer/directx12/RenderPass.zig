@@ -10,6 +10,7 @@ const RenderPass = @This();
 const d3d12 = @import("d3d12.zig");
 const ResourceStates = d3d12.D3D12_RESOURCE_STATES;
 
+const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
 const Pipeline = @import("Pipeline.zig");
 const Sampler = @import("Sampler.zig");
 const Target = @import("Target.zig");
@@ -21,6 +22,10 @@ const RawBuffer = bufferpkg.RawBuffer;
 pub const Options = struct {
     /// The command list to record into.
     command_list: *d3d12.ID3D12GraphicsCommandList,
+    /// Shader-visible CBV/SRV/UAV descriptor heap.
+    srv_heap: ?*DescriptorHeap = null,
+    /// Shader-visible sampler descriptor heap.
+    sampler_heap: ?*DescriptorHeap = null,
     /// Color attachments for this render pass.
     attachments: []const Attachment,
 
@@ -55,6 +60,8 @@ pub const Step = struct {
 };
 
 command_list: ?*d3d12.ID3D12GraphicsCommandList,
+srv_heap: ?*DescriptorHeap,
+sampler_heap: ?*DescriptorHeap,
 attachments: []const Options.Attachment,
 step_number: usize,
 
@@ -144,22 +151,116 @@ pub fn begin(opts: Options) RenderPass {
         cl.RSSetScissorRects(1, @ptrCast(&scissor));
     }
 
+    // Bind GPU-visible descriptor heaps for the duration of this pass.
+    // DX12 requires SetDescriptorHeaps before any SetGraphicsRootDescriptorTable.
+    var heap_count: u32 = 0;
+    var heaps: [2]*d3d12.ID3D12DescriptorHeap = undefined;
+    if (opts.srv_heap) |h| {
+        heaps[heap_count] = h.heap;
+        heap_count += 1;
+    }
+    if (opts.sampler_heap) |h| {
+        heaps[heap_count] = h.heap;
+        heap_count += 1;
+    }
+    if (heap_count > 0) {
+        cl.SetDescriptorHeaps(heap_count, &heaps);
+    }
+
     return .{
         .command_list = cl,
+        .srv_heap = opts.srv_heap,
+        .sampler_heap = opts.sampler_heap,
         .attachments = opts.attachments,
         .step_number = 0,
     };
 }
 
-/// Add a step to this render pass.
+/// Add a step to this render pass. Binds the pipeline, resources,
+/// and issues a DrawInstanced call.
 /// No-op if the render pass has no command list (stub path).
 pub fn step(self: *RenderPass, s: Step) void {
-    if (self.command_list == null) return;
+    const cl = self.command_list orelse return;
     if (s.draw.instance_count == 0) return;
+    const pso = s.pipeline.pso orelse return;
+    const root_sig = s.pipeline.root_signature orelse return;
 
-    // Pipeline, buffer bindings, texture/sampler bindings will be
-    // wired when Pipeline.zig, buffer.zig, Texture.zig, and
-    // Sampler.zig get their real implementations.
+    // Bind pipeline state and root signature.
+    cl.SetPipelineState(pso);
+    cl.SetGraphicsRootSignature(root_sig);
+
+    // Set primitive topology.
+    cl.IASetPrimitiveTopology(switch (s.draw.type) {
+        .triangle => .TRIANGLELIST,
+        .triangle_strip => .TRIANGLESTRIP,
+    });
+
+    // Bind uniforms as inline CBV at root parameter 0.
+    if (s.uniforms) |buf| {
+        if (buf.gpu_address != 0) {
+            cl.SetGraphicsRootConstantBufferView(
+                Pipeline.root_param_cbv,
+                buf.gpu_address,
+            );
+        }
+    }
+
+    // Bind the SRV descriptor table at root parameter 1.
+    // The root signature declares a contiguous range of srv_table_size (3)
+    // descriptors. Unlike Metal which binds textures individually at indices,
+    // DX12 binds the whole table from one base GPU handle. Textures must be
+    // allocated contiguously in the SRV heap so the range covers all slots.
+    for (s.textures) |t| {
+        if (t) |tex| {
+            if (tex.srv.gpu.ptr != 0) {
+                cl.SetGraphicsRootDescriptorTable(
+                    Pipeline.root_param_srv_table,
+                    tex.srv.gpu,
+                );
+                break;
+            }
+        }
+    }
+
+    // Bind the sampler descriptor table at root parameter 2.
+    // Same table-based binding as textures -- one call covers s0.
+    for (s.samplers) |samp| {
+        if (samp) |sampler| {
+            if (sampler.descriptor.gpu.ptr != 0) {
+                cl.SetGraphicsRootDescriptorTable(
+                    Pipeline.root_param_sampler_table,
+                    sampler.descriptor.gpu,
+                );
+                break;
+            }
+        }
+    }
+
+    // Bind the first buffer as the instance vertex buffer.
+    // Only the first non-null buffer with a stride is bound as a VB.
+    // Multi-buffer pipelines (e.g. cell_text) will need root descriptor
+    // table entries for storage buffers -- see #128.
+    for (s.buffers) |b| {
+        if (b) |buf| {
+            if (buf.gpu_address != 0 and buf.size > 0 and buf.stride > 0) {
+                const vbv = d3d12.D3D12_VERTEX_BUFFER_VIEW{
+                    .BufferLocation = buf.gpu_address,
+                    .SizeInBytes = buf.size,
+                    .StrideInBytes = buf.stride,
+                };
+                cl.IASetVertexBuffers(0, 1, @ptrCast(&vbv));
+                break;
+            }
+        }
+    }
+
+    // Issue the draw call.
+    cl.DrawInstanced(
+        @intCast(s.draw.vertex_count),
+        @intCast(s.draw.instance_count),
+        0,
+        0,
+    );
 
     self.step_number += 1;
 }
@@ -189,6 +290,8 @@ const std = @import("std");
 
 test "RenderPass struct fields" {
     try std.testing.expect(@hasField(RenderPass, "command_list"));
+    try std.testing.expect(@hasField(RenderPass, "srv_heap"));
+    try std.testing.expect(@hasField(RenderPass, "sampler_heap"));
     try std.testing.expect(@hasField(RenderPass, "attachments"));
     try std.testing.expect(@hasField(RenderPass, "step_number"));
 }
