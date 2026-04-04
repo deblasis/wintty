@@ -1,7 +1,7 @@
 # Example: Win32 Terminal (C)
 
 Minimal C program that embeds libghostty in a Win32 window.
-Uses the ghostty C API to create an app and surface with DX11
+Uses the ghostty C API to create an app and surface with DX12
 rendering. Creates the window, initializes ghostty, and forwards
 keyboard, mouse, resize, focus, and DPI events to the surface.
 
