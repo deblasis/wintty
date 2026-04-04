@@ -67,30 +67,37 @@ pub const root_param_sampler_table: u32 = 2;
 ///   [2] Descriptor table: 1 sampler at s0
 pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignature {
     // SRV range: t0..t2 (textures and structured buffers).
-    const srv_range = d3d12.D3D12_DESCRIPTOR_RANGE{
+    // DATA_STATIC: atlas textures are uploaded once and don't change
+    // within a command list execution.
+    const srv_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
         .RangeType = .SRV,
         .NumDescriptors = srv_table_size,
         .BaseShaderRegister = 0,
         .RegisterSpace = 0,
+        .Flags = .DATA_STATIC,
         .OffsetInDescriptorsFromTableStart = 0,
     };
 
     // Sampler range: s0.
-    const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE{
+    // NONE: default for v1.1 samplers is static descriptors.
+    const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
         .RangeType = .SAMPLER,
         .NumDescriptors = 1,
         .BaseShaderRegister = 0,
         .RegisterSpace = 0,
+        .Flags = .NONE,
         .OffsetInDescriptorsFromTableStart = 0,
     };
 
-    const root_params = [_]d3d12.D3D12_ROOT_PARAMETER{
+    const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
         // [0] Inline CBV at b0 -- binds with SetGraphicsRootConstantBufferView.
+        // DATA_VOLATILE: uniform buffer changes every frame.
         .{
             .ParameterType = .CBV,
             .u = .{ .Descriptor = .{
                 .ShaderRegister = 0,
                 .RegisterSpace = 0,
+                .Flags = .DATA_VOLATILE,
             } },
             .ShaderVisibility = .ALL,
         },
@@ -114,23 +121,22 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
         },
     };
 
-    const desc = d3d12.D3D12_ROOT_SIGNATURE_DESC{
-        .NumParameters = root_params.len,
-        .pParameters = &root_params,
-        .NumStaticSamplers = 0,
-        .pStaticSamplers = null,
-        .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+    const desc = d3d12.D3D12_VERSIONED_ROOT_SIGNATURE_DESC{
+        .Version = .VERSION_1_1,
+        .u = .{ .Desc_1_1 = .{
+            .NumParameters = root_params.len,
+            .pParameters = &root_params,
+            .NumStaticSamplers = 0,
+            .pStaticSamplers = null,
+            .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+        } },
     };
 
-    // Serialize the root signature to a blob.
+    // Serialize the versioned root signature to a blob.
     var blob: ?*d3d12.ID3DBlob = null;
     var error_blob: ?*d3d12.ID3DBlob = null;
-    // TODO(#127): upgrade to D3D_ROOT_SIGNATURE_VERSION_1_1 for DATA_STATIC /
-    // DESCRIPTORS_VOLATILE flags -- allows driver to optimize descriptor
-    // access for our workload (static atlas textures, per-frame uniforms).
-    var hr = d3d12.D3D12SerializeRootSignature(
+    var hr = d3d12.D3D12SerializeVersionedRootSignature(
         &desc,
-        1, // D3D_ROOT_SIGNATURE_VERSION_1
         &blob,
         &error_blob,
     );
