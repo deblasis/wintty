@@ -125,6 +125,9 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
     // Serialize the root signature to a blob.
     var blob: ?*d3d12.ID3DBlob = null;
     var error_blob: ?*d3d12.ID3DBlob = null;
+    // TODO(#127): upgrade to D3D_ROOT_SIGNATURE_VERSION_1_1 for DATA_STATIC /
+    // DESCRIPTORS_VOLATILE flags -- allows driver to optimize descriptor
+    // access for our workload (static atlas textures, per-frame uniforms).
     var hr = d3d12.D3D12SerializeRootSignature(
         &desc,
         1, // D3D_ROOT_SIGNATURE_VERSION_1
@@ -245,26 +248,7 @@ pub fn init(opts: Options) !Pipeline {
             .ForcedSampleCount = 0,
             .ConservativeRaster = 0,
         },
-        .DepthStencilState = .{
-            .DepthEnable = 0,
-            .DepthWriteMask = 0,
-            .DepthFunc = 0,
-            .StencilEnable = 0,
-            .StencilReadMask = 0,
-            .StencilWriteMask = 0,
-            .FrontFace = .{
-                .StencilFailOp = 0,
-                .StencilDepthFailOp = 0,
-                .StencilPassOp = 0,
-                .StencilFunc = 0,
-            },
-            .BackFace = .{
-                .StencilFailOp = 0,
-                .StencilDepthFailOp = 0,
-                .StencilPassOp = 0,
-                .StencilFunc = 0,
-            },
-        },
+        .DepthStencilState = std.mem.zeroes(d3d12.D3D12_DEPTH_STENCIL_DESC),
         .InputLayout = .{
             .pInputElementDescs = if (opts.input_layout) |il| il.ptr else null,
             .NumElements = if (opts.input_layout) |il| @intCast(il.len) else 0,
@@ -332,4 +316,14 @@ test "BlendMode values" {
 test "deinit on default pipeline is safe" {
     const p: Pipeline = .{};
     p.deinit();
+}
+
+test "deinit does not touch root_signature" {
+    // Shaders owns the shared root signature and releases it in
+    // Shaders.deinit. Pipeline.deinit must only release the PSO.
+    // If deinit tried to Release the root_signature this would crash
+    // on the bogus pointer, failing the test.
+    const sentinel: *d3d12.ID3D12RootSignature = @ptrFromInt(0xDEAD_BEF0);
+    const p: Pipeline = .{ .pso = null, .root_signature = sentinel };
+    p.deinit(); // must not dereference root_signature
 }
