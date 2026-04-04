@@ -39,8 +39,7 @@ fn hrFmt(hr: HRESULT) u32 {
 command_allocator: ?*d3d12.ID3D12CommandAllocator,
 command_list: ?*d3d12.ID3D12GraphicsCommandList,
 /// Fence value for GPU synchronization.
-/// TODO: fence wait is the caller's responsibility -- will be wired
-/// when the frame pool lands in a later PR.
+/// Caller must wait on this before reusing the frame -- see #132.
 fence_value: u64,
 
 renderer: *Renderer,
@@ -139,12 +138,20 @@ pub fn renderPass(
         // begin/step/complete will be no-ops without a command list.
         return .{
             .command_list = null,
+            .srv_heap = null,
+            .sampler_heap = null,
             .attachments = attachments,
             .step_number = 0,
         };
     };
+    // Pass GPU-visible descriptor heaps from the DirectX12 API so
+    // RenderPass.begin() can bind them via SetDescriptorHeaps before
+    // any root descriptor table calls.
+    const api = &self.renderer.api;
     return RenderPass.begin(.{
         .command_list = cl,
+        .srv_heap = if (api.srv_heap) |*h| @constCast(h) else null,
+        .sampler_heap = if (api.sampler_heap) |*h| @constCast(h) else null,
         .attachments = attachments,
     });
 }
