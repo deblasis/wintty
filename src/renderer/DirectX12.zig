@@ -1,8 +1,7 @@
 //! Graphics API wrapper for DirectX 12.
 //!
 //! This module provides the GraphicsAPI contract required by GenericRenderer,
-//! mirroring the structure of Metal.zig, OpenGL.zig, and the previous
-//! DirectX11.zig.
+//! mirroring the structure of Metal.zig and OpenGL.zig.
 //!
 //! Current status: all 5 render pipelines (bg_color, cell_bg, cell_text,
 //! image, bg_image) are wired end-to-end. Shader-visible descriptor heaps
