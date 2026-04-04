@@ -476,7 +476,7 @@ pub const Surface = struct {
         /// The platform that this surface is being initialized for and
         /// the associated platform-specific configuration.
         platform_tag: c_int = 0,
-        platform: Platform.C = undefined,
+        platform: Platform.C = std.mem.zeroes(Platform.C),
 
         /// Userdata passed to some of the callbacks.
         userdata: ?*anyopaque = null,
