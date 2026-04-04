@@ -118,6 +118,17 @@ pending_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Must be saved here because GetCurrentBackBufferIndex advances after Present.
 pending_frame_index: u32 = 0,
 
+/// Cached surface dimensions, updated by setTargetSize and seeded in init.
+///
+/// DX12 uses composition swap chains for all surface types (HWND via
+/// DirectComposition, SwapChainPanel via XAML). Unlike DX11's GetClientRect
+/// path, there is no way to query the actual window size from within the
+/// renderer -- the apprt must forward it via setTargetSize. The GetDesc1
+/// fallback returns buffer dimensions which lag behind until ResizeBuffers
+/// is called, so this cache is the primary source of truth.
+cached_width: u32 = 0,
+cached_height: u32 = 0,
+
 // --- GraphicsAPI contract: functions ---
 
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
@@ -267,6 +278,9 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         }
     }
 
+    result.cached_width = size.width;
+    result.cached_height = size.height;
+
     return result;
 }
 
@@ -364,20 +378,26 @@ pub fn initShaders(
     return shaders.Shaders.init(dev_device);
 }
 
+/// Called by the apprt (via generic.zig) when the surface is resized.
+/// This is the only resize signal DX12 gets -- composition swap chains
+/// have no equivalent of DX11's GetClientRect-based windowSize().
 pub fn setTargetSize(self: *DirectX12, width: u32, height: u32) void {
-    _ = self;
-    _ = width;
-    _ = height;
-    // Composition surfaces should store the target size -- see #131.
+    self.cached_width = width;
+    self.cached_height = height;
 }
 
 pub fn surfaceSize(self: *const DirectX12) !struct { width: u32, height: u32 } {
-    const dev_ptr = self.dev orelse return .{ .width = 0, .height = 0 };
+    if (self.cached_width != 0 and self.cached_height != 0) {
+        return .{ .width = self.cached_width, .height = self.cached_height };
+    }
 
+    // Fallback: query swap chain buffer dimensions via GetDesc1.
+    // init() seeds the cache, so this only fires on the very first frame
+    // if surfaceSize() is called before init() finishes. GetDesc1 returns
+    // the *buffer* size, which may lag behind the window until ResizeBuffers
+    // runs -- but it is the best we can do without the cache.
+    const dev_ptr = self.dev orelse return .{ .width = 0, .height = 0 };
     if (dev_ptr.swap_chain) |sc| {
-        // Query the swap chain's current buffer dimensions.
-        // GetDesc1 is called every frame -- should cache and re-query
-        // only on resize. See #131.
         var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
         const hr = sc.GetDesc1(&desc);
         if (com.SUCCEEDED(hr)) {
@@ -544,4 +564,15 @@ test {
 
 test "DirectX12 does not have frame_fence_values" {
     try std.testing.expect(!@hasField(DirectX12, "frame_fence_values"));
+}
+
+test "DirectX12 has cached size fields" {
+    try std.testing.expect(@hasField(DirectX12, "cached_width"));
+    try std.testing.expect(@hasField(DirectX12, "cached_height"));
+}
+
+test "DirectX12 default cached size is zero" {
+    const api: DirectX12 = .{};
+    try std.testing.expectEqual(@as(u32, 0), api.cached_width);
+    try std.testing.expectEqual(@as(u32, 0), api.cached_height);
 }
