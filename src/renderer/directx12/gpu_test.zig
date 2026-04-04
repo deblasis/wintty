@@ -806,6 +806,104 @@ test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {
     try std.testing.expectEqual(@as(u32, 1), desc.Height);
 }
 
+// ---- Device.init edge case tests ----
+
+test "Device: shared texture 0x0 dimensions does not crash" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const HANDLE = std.os.windows.HANDLE;
+    var shared_handle: ?HANDLE = null;
+
+    // SharedTexture mode has no swap chain, so 0x0 should not hit DXGI.
+    var device = Device.init(.{ .shared_texture = .{
+        .handle_out = &shared_handle,
+        .width = 0,
+        .height = 0,
+    } }, .{}) catch return;
+    defer device.deinit();
+
+    try std.testing.expect(device.swap_chain == null);
+    try std.testing.expect(device.fence_value == 0);
+}
+
+test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const HWND = dxgi.HWND;
+    const HINSTANCE = std.os.windows.HINSTANCE;
+    const WNDCLASSEXW = extern struct {
+        cbSize: u32 = @sizeOf(@This()),
+        style: u32 = 0,
+        lpfnWndProc: *const fn (HWND, u32, usize, isize) callconv(.winapi) isize,
+        cbClsExtra: i32 = 0,
+        cbWndExtra: i32 = 0,
+        hInstance: ?HINSTANCE = null,
+        hIcon: ?*anyopaque = null,
+        hCursor: ?*anyopaque = null,
+        hbrBackground: ?*anyopaque = null,
+        lpszMenuName: ?[*:0]const u16 = null,
+        lpszClassName: [*:0]const u16,
+        hIconSm: ?*anyopaque = null,
+    };
+
+    const user32 = struct {
+        extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(.winapi) u16;
+        extern "user32" fn CreateWindowExW(
+            u32,
+            [*:0]const u16,
+            ?[*:0]const u16,
+            u32,
+            i32,
+            i32,
+            i32,
+            i32,
+            ?HWND,
+            ?*anyopaque,
+            ?HINSTANCE,
+            ?*anyopaque,
+        ) callconv(.winapi) ?HWND;
+        extern "user32" fn DestroyWindow(HWND) callconv(.winapi) i32;
+        extern "user32" fn DefWindowProcW(HWND, u32, usize, isize) callconv(.winapi) isize;
+    };
+
+    const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyDX12ZeroDimTestClass");
+    const wc = WNDCLASSEXW{ .lpfnWndProc = user32.DefWindowProcW, .lpszClassName = class_name };
+    _ = user32.RegisterClassExW(&wc);
+
+    const hwnd = user32.CreateWindowExW(
+        0,
+        class_name,
+        null,
+        0,
+        0,
+        0,
+        1,
+        1,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return;
+    defer _ = user32.DestroyWindow(hwnd);
+
+    // 0x0 dimensions should be clamped to 1x1 inside createCompositionSwapChain.
+    var device = Device.init(.{ .hwnd = hwnd }, .{
+        .width = 0,
+        .height = 0,
+    }) catch return;
+    defer device.deinit();
+
+    // The swap chain must exist -- the clamp prevented DXGI from rejecting 0x0.
+    try std.testing.expect(device.swap_chain != null);
+
+    // Verify the swap chain dimensions were clamped to 1x1.
+    var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
+    const hr = device.swap_chain.?.GetDesc1(&desc);
+    try std.testing.expect(!com.FAILED(hr));
+    try std.testing.expectEqual(@as(u32, 1), desc.Width);
+    try std.testing.expectEqual(@as(u32, 1), desc.Height);
+}
+
 // ---- Execute and wait test (fence lifecycle) ----
 
 test "Fence: execute empty command list and wait" {
