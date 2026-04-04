@@ -48,9 +48,7 @@ pub const descriptor_heap = @import("directx12/descriptor_heap.zig");
 pub const device = @import("directx12/device.zig");
 pub const dxgi = @import("directx12/dxgi.zig");
 
-// Custom shaders not yet supported on DX12. Using .glsl as placeholder;
-// DX12 will need its own shadertoy.Target variant (.hlsl) -- see #129.
-pub const custom_shader_target: shadertoy.Target = .glsl;
+pub const custom_shader_target: shadertoy.Target = .hlsl;
 
 /// DX12 uses top-left origin, same as Metal and DX11.
 pub const custom_shader_y_is_down = true;
