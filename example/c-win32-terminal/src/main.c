@@ -1,7 +1,7 @@
 // example/c-win32-terminal/src/main.c
 //
 // Minimal Win32 host for libghostty. Creates an HWND and passes it to
-// ghostty which creates a surface with DX11 rendering and ConPTY.
+// ghostty which creates a surface with DX12 rendering and ConPTY.
 // Forwards keyboard, mouse, resize, focus, and DPI events to ghostty.
 
 #define WIN32_LEAN_AND_MEAN

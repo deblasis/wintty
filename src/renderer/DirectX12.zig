@@ -4,9 +4,11 @@
 //! mirroring the structure of Metal.zig, OpenGL.zig, and the previous
 //! DirectX11.zig.
 //!
-//! Current status: device init, swap chain, command queue, fence sync,
-//! clear render target, and present are functional. The window clears
-//! to the background color via the real DX12 pipeline.
+//! Current status: all 5 render pipelines (bg_color, cell_bg, cell_text,
+//! image, bg_image) are wired end-to-end. Shader-visible descriptor heaps
+//! for SRV and sampler binding are created at init. RenderPass.step()
+//! binds PSO, root signature, uniforms, textures, samplers, and instance
+//! buffers, then issues DrawInstanced calls.
 pub const DirectX12 = @This();
 
 const builtin = @import("builtin");
@@ -35,6 +37,8 @@ pub const Buffer = bufferpkg.Buffer;
 
 pub const shaders = @import("directx12/shaders.zig");
 
+const DescriptorHeap = @import("directx12/descriptor_heap.zig").DescriptorHeap;
+
 // --- Sub-module re-exports: low-level D3D12/DXGI/COM bindings ---
 
 pub const com = @import("directx12/com.zig");
@@ -44,9 +48,8 @@ pub const descriptor_heap = @import("directx12/descriptor_heap.zig");
 pub const device = @import("directx12/device.zig");
 pub const dxgi = @import("directx12/dxgi.zig");
 
-// TODO: custom shaders not yet supported on DX12. Using .glsl as placeholder;
-// DX12 will need its own shadertoy.Target variant (.hlsl) when custom shaders
-// are implemented. Can't add it without modifying upstream shadertoy.zig.
+// Custom shaders not yet supported on DX12. Using .glsl as placeholder;
+// DX12 will need its own shadertoy.Target variant (.hlsl) -- see #129.
 pub const custom_shader_target: shadertoy.Target = .glsl;
 
 /// DX12 uses top-left origin, same as Metal and DX11.
@@ -65,6 +68,17 @@ pub const ImageTextureFormat = enum {
     bgra,
 };
 
+
+/// Number of CBV/SRV/UAV descriptors in the shader-visible heap.
+/// Covers: font atlas (grayscale + color), grid texture, image textures,
+/// and up to ~50 custom shader textures. Will need tuning if custom
+/// shaders exceed this.
+const srv_heap_capacity: u32 = 64;
+
+/// Number of sampler descriptors in the shader-visible heap.
+/// Covers: default point/linear samplers + per-pipeline overrides.
+const sampler_heap_capacity: u32 = 16;
+
 // --- GraphicsAPI contract: mutable state ---
 
 /// Runtime blending mode, set by GenericRenderer when config changes.
@@ -78,7 +92,13 @@ dev: ?device.Device = null,
 swap_chain3: ?*dxgi.IDXGISwapChain3 = null,
 
 /// RTV descriptor heap for swap chain back buffers.
-rtv_heap: ?descriptor_heap.DescriptorHeap = null,
+rtv_heap: ?DescriptorHeap = null,
+
+/// Shader-visible CBV/SRV/UAV descriptor heap for textures and buffers.
+srv_heap: ?DescriptorHeap = null,
+
+/// Shader-visible sampler descriptor heap.
+sampler_heap: ?DescriptorHeap = null,
 
 /// Per-frame command recording contexts (triple buffered).
 gpu_frames: [device.Device.frame_count]?Frame = .{ null, null, null },
@@ -164,7 +184,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     };
 
     // Create RTV descriptor heap for back buffers.
-    result.rtv_heap = descriptor_heap.DescriptorHeap.init(
+    result.rtv_heap = DescriptorHeap.init(
         dev_ptr.device,
         .RTV,
         device.Device.frame_count,
@@ -176,6 +196,36 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     errdefer {
         result.rtv_heap.?.deinit();
         result.rtv_heap = null;
+    }
+
+    // Shader-visible CBV/SRV/UAV heap for texture SRVs.
+    result.srv_heap = DescriptorHeap.init(
+        dev_ptr.device,
+        .CBV_SRV_UAV,
+        srv_heap_capacity,
+        true,
+    ) catch |err| {
+        log.err("SRV descriptor heap creation failed: {}", .{err});
+        return error.DescriptorHeapCreationFailed;
+    };
+    errdefer {
+        result.srv_heap.?.deinit();
+        result.srv_heap = null;
+    }
+
+    // Shader-visible sampler heap for texture sampling.
+    result.sampler_heap = DescriptorHeap.init(
+        dev_ptr.device,
+        .SAMPLER,
+        sampler_heap_capacity,
+        true,
+    ) catch |err| {
+        log.err("Sampler descriptor heap creation failed: {}", .{err});
+        return error.DescriptorHeapCreationFailed;
+    };
+    errdefer {
+        result.sampler_heap.?.deinit();
+        result.sampler_heap = null;
     }
 
     // Get back buffer resources and create RTVs.
@@ -243,6 +293,16 @@ pub fn deinit(self: *DirectX12) void {
         }
     }
 
+    if (self.sampler_heap) |*h| {
+        h.deinit();
+        self.sampler_heap = null;
+    }
+
+    if (self.srv_heap) |*h| {
+        h.deinit();
+        self.srv_heap = null;
+    }
+
     if (self.rtv_heap) |*h| {
         h.deinit();
         self.rtv_heap = null;
@@ -273,8 +333,7 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     dev_ptr.command_queue.ExecuteCommandLists(1, &lists);
 
     // Present the swap chain.
-    // TODO: check for DXGI_ERROR_DEVICE_REMOVED and trigger TDR recovery
-    // once device-lost handling is implemented.
+    // Does not yet check for DXGI_ERROR_DEVICE_REMOVED -- see #130.
     if (self.swap_chain3) |sc3| {
         const hr = sc3.Present(1, 0);
         if (com.FAILED(hr)) {
@@ -300,18 +359,17 @@ pub fn initShaders(
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
-    _ = self;
     _ = alloc;
     _ = custom_shaders;
-    return .{};
+    const dev_device = if (self.dev) |*d| d.device else null;
+    return shaders.Shaders.init(dev_device);
 }
 
 pub fn setTargetSize(self: *DirectX12, width: u32, height: u32) void {
     _ = self;
     _ = width;
     _ = height;
-    // TODO: for composition surfaces, store the target size so
-    // surfaceSize() can return it (no HWND to query).
+    // Composition surfaces should store the target size -- see #131.
 }
 
 pub fn surfaceSize(self: *const DirectX12) !struct { width: u32, height: u32 } {
@@ -319,10 +377,8 @@ pub fn surfaceSize(self: *const DirectX12) !struct { width: u32, height: u32 } {
 
     if (dev_ptr.swap_chain) |sc| {
         // Query the swap chain's current buffer dimensions.
-        // TODO: GetDesc1 is called every frame -- cache the dimensions and
-        // only re-query on resize. For HWND surfaces, store the HWND on
-        // Device and query the client rect directly, so resize is detected
-        // before the swap chain is resized.
+        // GetDesc1 is called every frame -- should cache and re-query
+        // only on resize. See #131.
         var desc: dxgi.DXGI_SWAP_CHAIN_DESC1 = undefined;
         const hr = sc.GetDesc1(&desc);
         if (com.SUCCEEDED(hr)) {
@@ -422,13 +478,20 @@ pub inline fn uniformBufferOptions(self: DirectX12) bufferpkg.Options {
 }
 
 pub inline fn textureOptions(self: DirectX12) Texture.Options {
-    _ = self;
-    return .{};
+    return .{
+        .device = if (self.dev) |*d| d.device else null,
+        .command_list = self.pending_command_list,
+        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
+        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+    };
 }
 
 pub inline fn samplerOptions(self: DirectX12) Sampler.Options {
-    _ = self;
-    return .{};
+    return .{
+        .device = if (self.dev) |*d| d.device else null,
+        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
+        .sampler_heap = if (self.sampler_heap) |*h| @constCast(h) else null,
+    };
 }
 
 pub inline fn imageTextureOptions(
@@ -436,18 +499,39 @@ pub inline fn imageTextureOptions(
     format: ImageTextureFormat,
     srgb: bool,
 ) Texture.Options {
-    _ = self;
-    _ = format;
-    _ = srgb;
-    return .{};
+    _ = srgb; // DX12 sRGB handled by the render target format, not texture views.
+    return .{
+        .device = if (self.dev) |*d| d.device else null,
+        .command_list = self.pending_command_list,
+        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
+        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+        .pixel_format = switch (format) {
+            .gray => .R8_UNORM,
+            .rgba => .R8G8B8A8_UNORM,
+            .bgra => .B8G8R8A8_UNORM,
+        },
+    };
 }
 
 pub fn initAtlasTexture(
     self: *const DirectX12,
     atlas: *const font.Atlas,
 ) Texture.Error!Texture {
-    _ = self;
-    return .{ .width = @intCast(atlas.size) };
+    const size: usize = @intCast(atlas.size);
+    const pixel_format: dxgi.DXGI_FORMAT = switch (atlas.format) {
+        .grayscale => .R8_UNORM,
+        .bgra => .B8G8R8A8_UNORM,
+        // BGR has no direct DXGI format; use BGRA and let the atlas
+        // handle depth conversion when uploading.
+        .bgr => .B8G8R8A8_UNORM,
+    };
+    return Texture.init(.{
+        .device = if (self.dev) |*d| d.device else null,
+        .command_list = self.pending_command_list,
+        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
+        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+        .pixel_format = pixel_format,
+    }, size, size, null);
 }
 
 test {
