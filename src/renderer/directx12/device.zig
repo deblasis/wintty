@@ -229,6 +229,8 @@ pub fn deinit(self: *Device) void {
     if (self.swap_chain) |sc| _ = sc.Release();
 
     _ = self.device.Release();
+
+    self.* = undefined;
 }
 
 /// Signal the fence from the command queue and block until the GPU catches up.

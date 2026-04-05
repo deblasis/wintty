@@ -104,6 +104,8 @@ pub fn deinit(self: *Frame) void {
     if (self.command_allocator) |ca| {
         _ = ca.Release();
     }
+
+    self.* = undefined;
 }
 
 // --- Per-frame operations ---

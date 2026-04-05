@@ -330,6 +330,8 @@ pub fn deinit(self: *DirectX12) void {
         dev_ptr.deinit();
         self.dev = null;
     }
+
+    self.* = undefined;
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
