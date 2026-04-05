@@ -80,6 +80,8 @@ pub fn init(
 
 pub fn deinit(self: *DescriptorHeap) void {
     _ = self.heap.Release();
+
+    self.* = undefined;
 }
 
 /// Reset the allocator so all slots can be reused. Does not invalidate
