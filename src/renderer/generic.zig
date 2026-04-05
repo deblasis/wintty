@@ -671,6 +671,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             );
             errdefer swap_chain.deinit();
 
+            // Flush any init-time GPU commands (e.g., DX12 texture barriers).
+            // SwapChain.init creates placeholder atlas textures that may need
+            // resource state transitions submitted to the GPU before rendering.
+            if (@hasDecl(GraphicsAPI, "flushInitCommands")) {
+                api.flushInitCommands();
+            }
+
             // Create the font shaper.
             var font_shaper = try font.Shaper.init(alloc, .{
                 .features = options.config.font_features.items,
@@ -1576,7 +1583,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 frame.bg_image_buffer_modified = self.bg_image_buffer_modified;
             }
 
-            // If our font atlas changed, sync the texture data
+            // Get a frame context from the graphics API.
+            // This must happen before atlas sync because DX12 texture uploads
+            // (CopyTextureRegion) require the frame's command list, which is
+            // only available after beginFrame. Metal and OpenGL use immediate
+            // CPU-to-GPU copies so this ordering is transparent to them.
+            var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            defer frame_ctx.complete(sync);
+
+            // If our font atlas changed, sync the texture data.
+            // Placed after beginFrame so the DX12 command list is available.
             texture: {
                 const modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
                 if (modified <= frame.grayscale_modified) break :texture;
@@ -1593,10 +1609,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 frame.color_modified = self.font_grid.atlas_color.modified.load(.monotonic);
                 try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
             }
-
-            // Get a frame context from the graphics API.
-            var frame_ctx = try self.api.beginFrame(self, &frame.target);
-            defer frame_ctx.complete(sync);
 
             {
                 var pass = frame_ctx.renderPass(&.{.{
@@ -3369,6 +3381,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             atlas: *const font.Atlas,
             texture: *Texture,
         ) !void {
+            // DX12 rotates command lists across triple-buffered frames.
+            // Update the texture to use the current frame's command list
+            // before any upload or resize operation. Metal and OpenGL use
+            // immediate uploads so they don't need this.
+            if (@hasDecl(GraphicsAPI, "updateTextureCommandList")) {
+                self.api.updateTextureCommandList(texture);
+            }
+
             if (atlas.size > texture.width) {
                 // Free our old texture
                 texture.*.deinit();
