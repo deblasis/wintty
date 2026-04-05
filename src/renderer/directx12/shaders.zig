@@ -296,6 +296,8 @@ pub const Shaders = struct {
 
         if (self.root_signature) |rs| _ = rs.Release();
         self.root_signature = null;
+
+        self.* = undefined;
     }
 };
 
