@@ -1553,9 +1553,10 @@ test "D3D12 struct sizes" {
     try std.testing.expectEqual(32, @sizeOf(D3D12_ROOT_PARAMETER));
     try std.testing.expectEqual(656, @sizeOf(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
 
-    // SRV desc must match MSVC size (union sized to largest member: D3D12_BUFFER_SRV at 24 bytes).
-    // A too-small struct causes the D3D12 runtime to read past the end, triggering DEVICE_REMOVED.
-    try std.testing.expectEqual(36, @sizeOf(D3D12_SHADER_RESOURCE_VIEW_DESC));
+    // SRV desc must match MSVC ABI size. The union contains D3D12_BUFFER_SRV which starts
+    // with a u64, giving the union 8-byte alignment. After three u32 fields (12 bytes),
+    // 4 bytes of padding are inserted before the union: 12 + 4(pad) + 24(union) = 40.
+    try std.testing.expectEqual(40, @sizeOf(D3D12_SHADER_RESOURCE_VIEW_DESC));
     try std.testing.expectEqual(24, @sizeOf(D3D12_BUFFER_SRV));
     try std.testing.expectEqual(16, @sizeOf(D3D12_TEX2D_SRV));
 
