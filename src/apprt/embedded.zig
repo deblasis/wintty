@@ -453,6 +453,30 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
+    /// Windows key event buffering. WM_KEYDOWN and WM_CHAR arrive as
+    /// separate messages on Windows. We buffer the keydown here and
+    /// attach text from the following ghostty_surface_text call before
+    /// dispatching through key encoding. On non-Windows this is void
+    /// and eliminated by comptime.
+    pending_key: if (builtin.os.tag == .windows)
+        ?PendingKey
+    else
+        void = if (builtin.os.tag == .windows) null else {},
+
+    /// Text buffer for Windows key event combining. Lives outside the
+    /// pending_key optional so it doesn't get poisoned when the optional
+    /// is set to null in debug builds. The event.text pointer references
+    /// this buffer during dispatch. Sized to match GTK's im_buf (128)
+    /// so IME compositions aren't silently truncated.
+    pending_key_text: if (builtin.os.tag == .windows)
+        [128]u8
+    else
+        void = if (builtin.os.tag == .windows) .{0} ** 128 else {},
+
+    const PendingKey = struct {
+        event: App.KeyEvent,
+    };
+
     /// Surface initialization options.
     pub const Options = extern struct {
         /// The platform that this surface is being initialized for and
@@ -937,7 +961,37 @@ pub const Surface = struct {
         };
     }
 
+    /// Dispatch a key event through the core key handling path.
+    /// Extracted from ghostty_surface_key to share between the
+    /// immediate dispatch and pending key flush paths.
+    fn dispatchKey(self: *Surface, event: App.KeyEvent) bool {
+        return self.app.keyEvent(
+            .{ .surface = self },
+            event,
+        ) catch |err| {
+            log.warn("error processing key event err={}", .{err});
+            return false;
+        };
+    }
+
+    /// Flush any pending key event that was buffered by
+    /// ghostty_surface_key on Windows. Called before buffering a
+    /// new key or when a key release arrives. On non-Windows this
+    /// is a no-op eliminated by comptime.
+    fn flushPendingKey(self: *Surface) void {
+        if (comptime builtin.os.tag != .windows) return;
+        if (self.pending_key) |pending| {
+            self.pending_key = null;
+            _ = self.dispatchKey(pending.event);
+        }
+    }
+
     pub fn focusCallback(self: *Surface, focused: bool) void {
+        // Flush any buffered key event on focus loss so it isn't
+        // silently dropped (e.g. user presses a key then Alt-Tabs
+        // before WM_CHAR arrives).
+        if (!focused) self.flushPendingKey();
+
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("error in focus callback err={}", .{err});
             return;
@@ -1298,9 +1352,41 @@ pub const CAPI = struct {
                 )),
                 .keycode = self.keycode,
                 .text = if (self.text) |ptr| std.mem.sliceTo(ptr, 0) else null,
-                .unshifted_codepoint = self.unshifted_codepoint,
+                .unshifted_codepoint = if (self.unshifted_codepoint != 0)
+                    self.unshifted_codepoint
+                else
+                    unshiftedCodepointFromKeycode(self.keycode),
                 .composing = self.composing,
             };
+        }
+
+        /// Derive the unshifted codepoint from a Win32 scancode so
+        /// embedders don't need to provide it themselves. Uses
+        /// MapVirtualKeyW to go scancode -> VK -> base character,
+        /// matching what the C example does with MAPVK_VK_TO_CHAR.
+        /// On non-Windows this returns 0 (no-op).
+        fn unshiftedCodepointFromKeycode(keycode: u32) u32 {
+            if (comptime builtin.os.tag != .windows) return 0;
+
+            const win32 = struct {
+                const MAPVK_VSC_TO_VK_EX = 3;
+                const MAPVK_VK_TO_CHAR = 2;
+                extern "user32" fn MapVirtualKeyW(uCode: u32, uMapType: u32) callconv(.winapi) u32;
+            };
+
+            // Extended keys have 0xE000 prefix in our scancode
+            // encoding. MapVirtualKeyW expects the raw scancode
+            // with the extended bit in the high byte (0xE0xx).
+            const vk = win32.MapVirtualKeyW(keycode, win32.MAPVK_VSC_TO_VK_EX);
+            if (vk == 0) return 0;
+
+            // Bit 31 set means dead key -- mask it off.
+            var ch = win32.MapVirtualKeyW(vk, win32.MAPVK_VK_TO_CHAR) & 0x7FFFFFFF;
+
+            // Lowercase A-Z to match the unshifted physical key.
+            if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 'a';
+
+            return ch;
         }
     };
 
@@ -1836,17 +1922,37 @@ pub const CAPI = struct {
     /// Send this for raw keypresses (i.e. the keyDown event on macOS).
     /// This will handle the keymap translation and send the appropriate
     /// key and char events.
+    ///
+    /// On Windows, if this is a press/repeat with no text, the event
+    /// is buffered. A following ghostty_surface_text call will attach
+    /// text and dispatch through key encoding. This handles the split
+    /// WM_KEYDOWN / WM_CHAR message pattern so embedders don't need
+    /// to combine them manually.
     export fn ghostty_surface_key(
         surface: *Surface,
         event: KeyEvent,
     ) bool {
-        return surface.app.keyEvent(
-            .{ .surface = surface },
-            event.keyEvent(),
-        ) catch |err| {
-            log.warn("error processing key event err={}", .{err});
-            return false;
-        };
+        const key_event = event.keyEvent();
+
+        if (comptime builtin.os.tag == .windows) {
+            // Flush any previous pending key that never got text
+            // (e.g. arrow keys, function keys, backspace).
+            surface.flushPendingKey();
+
+            // If this is a press/repeat with no text, buffer it --
+            // a ghostty_surface_text call may follow with the character.
+            if (key_event.text == null and key_event.action != .release) {
+                surface.pending_key = .{ .event = key_event };
+                return false;
+            }
+
+            // Has text already (caller did combining) or is a release --
+            // dispatch immediately.
+            return surface.dispatchKey(key_event);
+        }
+
+        // Non-Windows: straight passthrough, unchanged.
+        return surface.dispatchKey(key_event);
     }
 
     /// Returns true if the given key event would trigger a binding
@@ -1870,14 +1976,39 @@ pub const CAPI = struct {
         return true;
     }
 
-    /// Send raw text to the terminal. This is treated like a paste
-    /// so this isn't useful for sending escape sequences. For that,
-    /// individual key input should be used.
+    /// Send raw text to the terminal. On non-Windows (or when there is
+    /// no pending key event), this is treated like a paste. On Windows,
+    /// if there is a pending key event from ghostty_surface_key, the
+    /// text is attached to that key and dispatched through key encoding
+    /// instead -- this handles the WM_CHAR message that follows WM_KEYDOWN.
     export fn ghostty_surface_text(
         surface: *Surface,
         ptr: [*]const u8,
         len: usize,
     ) void {
+        if (comptime builtin.os.tag == .windows) {
+            if (surface.pending_key) |*pending| {
+                const text = ptr[0..len];
+                const copy_len: usize = @min(text.len, surface.pending_key_text.len - 1);
+
+                // Copy text into the Surface-level buffer (not
+                // inside the optional) so it survives clearing
+                // pending_key. Zig poisons optional payloads in
+                // debug mode when set to null.
+                @memcpy(surface.pending_key_text[0..copy_len], text[0..copy_len]);
+                surface.pending_key_text[copy_len] = 0; // null-terminate
+
+                // Rebuild the event with text attached and dispatch
+                // through key encoding, not the paste path.
+                var event = pending.event;
+                event.text = surface.pending_key_text[0..copy_len :0];
+                surface.pending_key = null;
+                _ = surface.dispatchKey(event);
+                return;
+            }
+        }
+
+        // No pending key (or non-Windows): paste path, unchanged.
         surface.textCallback(ptr[0..len]);
     }
 
