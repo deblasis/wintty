@@ -23,7 +23,8 @@ height: usize = 0,
 
 pub fn deinit(self: *Target) void {
     if (self.resource) |r| _ = r.Release();
-    self.resource = null;
+
+    self.* = undefined;
 }
 
 /// Record a transition barrier on the given command list.
