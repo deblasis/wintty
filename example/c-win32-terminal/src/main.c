@@ -108,8 +108,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             .consumed_mods = GHOSTTY_MODS_NONE,
             .keycode = scancode_from_lparam(lp),
             .text = NULL,
-            .composing = false,
             .unshifted_codepoint = 0,
+            .composing = false,
         };
         ghostty_surface_key(g_surface, key);
         return 0;
@@ -124,25 +124,62 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             .consumed_mods = GHOSTTY_MODS_NONE,
             .keycode = scancode_from_lparam(lp),
             .text = NULL,
-            .composing = false,
             .unshifted_codepoint = 0,
+            .composing = false,
         };
         ghostty_surface_key(g_surface, key);
         return 0;
     }
 
-    case WM_CHAR: {
+    // WM_UNICHAR is sent by some IME frameworks (e.g. IBUS on Wine) and
+    // accessibility tools that bypass TranslateMessage. Unlike WM_CHAR
+    // which delivers UTF-16, WM_UNICHAR carries a full UTF-32 codepoint.
+    case WM_UNICHAR: {
+        if (wp == UNICODE_NOCHAR) return TRUE;
         if (!g_surface) break;
-        // wp is a UTF-16 code unit. Characters outside the BMP arrive as
-        // two WM_CHAR messages (high surrogate then low surrogate).
-        WCHAR wc = (WCHAR)wp;
+
+        // Convert the UTF-32 codepoint to a surrogate pair (or single
+        // wchar_t) so we can use WideCharToMultiByte like WM_CHAR.
+        uint32_t cp = (uint32_t)wp;
         wchar_t wc_buf[3] = {0};
         int count;
+        if (cp >= 0x10000 && cp < 0x110000) {
+            cp -= 0x10000;
+            wc_buf[0] = (wchar_t)(0xD800 | (cp >> 10));
+            wc_buf[1] = (wchar_t)(0xDC00 | (cp & 0x3FF));
+            count = 2;
+        } else {
+            wc_buf[0] = (wchar_t)cp;
+            count = 1;
+        }
+
+        char utf8[8] = {0};
+        int len = WideCharToMultiByte(CP_UTF8, 0, wc_buf, count,
+                                       utf8, sizeof(utf8) - 1, NULL, NULL);
+        if (len <= 0) return 0;
+        utf8[len] = '\0';
+
+        ghostty_surface_text(g_surface, utf8, (uintptr_t)len);
+        return 0;
+    }
+
+    case WM_DEADCHAR:
+    case WM_SYSDEADCHAR:
+        return 0;
+
+    case WM_CHAR:
+    case WM_SYSCHAR: {
+        if (!g_surface) break;
+
+        WCHAR wc = (WCHAR)wp;
 
         if (IS_HIGH_SURROGATE(wc)) {
             g_high_surrogate = wc;
             return 0;
         }
+
+        wchar_t wc_buf[3] = {0};
+        int count;
         if (IS_LOW_SURROGATE(wc)) {
             if (g_high_surrogate) {
                 wc_buf[0] = g_high_surrogate;
@@ -150,7 +187,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_high_surrogate = 0;
                 count = 2;
             } else {
-                return 0;  // orphaned low surrogate
+                return 0;
             }
         } else {
             g_high_surrogate = 0;
@@ -159,11 +196,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         char utf8[8] = {0};
-        int len = WideCharToMultiByte(CP_UTF8, 0, wc_buf, count, utf8, sizeof(utf8) - 1, NULL, NULL);
-        if (len > 0) {
-            utf8[len] = '\0';
-            ghostty_surface_text(g_surface, utf8, (uintptr_t)len);
-        }
+        int len = WideCharToMultiByte(CP_UTF8, 0, wc_buf, count,
+                                       utf8, sizeof(utf8) - 1, NULL, NULL);
+        if (len <= 0) return 0;
+        utf8[len] = '\0';
+
+        ghostty_surface_text(g_surface, utf8, (uintptr_t)len);
         return 0;
     }
 
