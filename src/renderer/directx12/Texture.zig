@@ -52,6 +52,12 @@ device: ?*d3d12.ID3D12Device = null,
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Current resource state for barrier tracking.
 state: d3d12.D3D12_RESOURCE_STATES = d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
+/// Staging buffer from the most recent upload, kept alive until the GPU
+/// finishes executing the CopyTextureRegion that reads from it.
+/// D3D12 does NOT extend resource lifetimes for recorded commands, so
+/// the staging buffer must outlive the command list execution.
+/// Released at the start of the next replaceRegion or in deinit.
+pending_staging: ?*d3d12.ID3D12Resource = null,
 
 const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
 
@@ -114,6 +120,9 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
 }
 
 pub fn deinit(self: Texture) void {
+    if (self.pending_staging) |staging| {
+        _ = staging.Release();
+    }
     if (self.resource) |res| {
         _ = res.Release();
     }
@@ -121,16 +130,33 @@ pub fn deinit(self: Texture) void {
     // it gets freed when the heap itself is destroyed.
 }
 
+/// Update the cached command list to the current frame's.
+/// DX12 uses triple-buffered command lists that rotate each frame;
+/// the texture must use the current frame's list, not a stale one
+/// from init or a different frame slot.
+pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) void {
+    self.command_list = cl;
+}
+
 /// Upload pixel data to a sub-region of this texture.
 ///
-/// Precondition: the command list must be executed and the GPU must
-/// finish before this texture is used for rendering. In practice,
-/// GenericRenderer calls waitForGpu() after each frame which satisfies
-/// this requirement.
+/// The staging buffer is kept alive until the next replaceRegion call or
+/// deinit, because D3D12 does not extend resource lifetimes for recorded
+/// commands. The previous staging buffer is safe to release here because
+/// the frame's fence wait in beginFrame guarantees the GPU finished
+/// executing the prior CopyTextureRegion.
 ///
 /// Returns error{}!void for API compatibility with Metal's replaceRegion
 /// which cannot fail. DX12 upload failures are logged but not propagated.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
+    // Release the staging buffer from the previous upload. Safe because
+    // beginFrame waited on the fence for this frame slot, so the GPU
+    // has finished reading from it.
+    if (self.pending_staging) |prev| {
+        _ = prev.Release();
+        self.pending_staging = null;
+    }
+
     // Transition to COPY_DEST if needed.
     if (self.state != d3d12.D3D12_RESOURCE_STATES.COPY_DEST) {
         self.transition(d3d12.D3D12_RESOURCE_STATES.COPY_DEST);
@@ -166,9 +192,9 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
         log.err("failed to create staging buffer for texture upload (size={d})", .{staging_size});
         return;
     };
-    // The staging buffer will be released after the command list executes.
-    // For now we rely on the caller to manage staging lifetime via GPU sync.
-    // In practice, GenericRenderer calls waitForGpu() after each frame.
+    // Staging buffer is saved to self.pending_staging after the copy is
+    // recorded, and released at the start of the next replaceRegion or
+    // in deinit (after the GPU has finished reading from it).
 
     // Map and copy row-by-row with pitch alignment.
     var mapped: ?*anyopaque = null;
@@ -225,11 +251,9 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
 
     cmd_list.CopyTextureRegion(&dst_loc, x, y, 0, &src_loc, &src_box);
 
-    // Release staging buffer. DX12 does NOT extend resource lifetimes for
-    // recorded commands (unlike D3D11). This Release is only safe because
-    // the caller ensures the command list is executed and the GPU finishes
-    // before the texture is used again (GenericRenderer.waitForGpu).
-    _ = staging.Release();
+    // Keep the staging buffer alive until the GPU finishes the copy.
+    // Released at the start of the next replaceRegion or in deinit.
+    self.pending_staging = staging;
 }
 
 fn transition(self: *Texture, new_state: d3d12.D3D12_RESOURCE_STATES) void {
@@ -370,6 +394,12 @@ test "Texture struct fields" {
     try std.testing.expect(@hasField(Texture, "srv"));
     try std.testing.expect(@hasField(Texture, "aligned_row_pitch"));
     try std.testing.expect(@hasField(Texture, "state"));
+    try std.testing.expect(@hasField(Texture, "pending_staging"));
+}
+
+test "Texture pending_staging defaults to null" {
+    const tex = Texture{};
+    try std.testing.expect(tex.pending_staging == null);
 }
 
 test "Texture.Options defaults" {
@@ -378,4 +408,15 @@ test "Texture.Options defaults" {
     try std.testing.expect(opts.command_list == null);
     try std.testing.expect(opts.srv_heap == null);
     try std.testing.expectEqual(dxgi.DXGI_FORMAT.R8_UNORM, opts.pixel_format);
+}
+
+test "setCommandList updates cached command list" {
+    var tex = Texture{};
+    try std.testing.expect(tex.command_list == null);
+    // Use a sentinel to verify the field is written without a real device.
+    const sentinel: *d3d12.ID3D12GraphicsCommandList = @ptrFromInt(0xDEAD0);
+    tex.setCommandList(sentinel);
+    try std.testing.expect(tex.command_list == sentinel);
+    tex.setCommandList(null);
+    try std.testing.expect(tex.command_list == null);
 }

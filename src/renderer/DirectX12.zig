@@ -113,7 +113,18 @@ rtv_handles: [device.Device.frame_count]d3d12.D3D12_CPU_DESCRIPTOR_HANDLE =
     .{ .{ .ptr = 0 }, .{ .ptr = 0 }, .{ .ptr = 0 } },
 
 /// Command list from the current beginFrame, executed in drawFrameEnd.
+/// Also temporarily set to the init command list during init() so that
+/// initAtlasTexture can record resource barriers for placeholder textures.
 pending_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
+
+/// Temporary command allocator for init-time GPU work (texture barriers).
+/// Created in init(), released by flushInitCommands().
+init_command_allocator: ?*d3d12.ID3D12CommandAllocator = null,
+
+/// Temporary command list for init-time GPU work.
+/// Set as pending_command_list during init so initAtlasTexture picks it
+/// up through the existing textureOptions path without signature changes.
+init_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 
 /// Back buffer index from the current beginFrame, used in drawFrameEnd
 /// to record the fence value against the correct frame slot.
@@ -280,6 +291,44 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         }
     }
 
+    // Create a one-shot command list for init-time texture work.
+    // initAtlasTexture (called from SwapChain.init) needs a command list
+    // to record COPY_DEST -> PIXEL_SHADER_RESOURCE barriers on placeholder
+    // textures. Per-frame command lists aren't available until beginFrame,
+    // so we create a dedicated one here and flush it after SwapChain.init.
+    {
+        var init_alloc: ?*d3d12.ID3D12CommandAllocator = null;
+        const alloc_hr = dev_ptr.device.CreateCommandAllocator(
+            .DIRECT,
+            &d3d12.ID3D12CommandAllocator.IID,
+            @ptrCast(&init_alloc),
+        );
+        if (com.FAILED(alloc_hr)) {
+            log.err("CreateCommandAllocator for init failed: 0x{x}", .{@as(u32, @bitCast(alloc_hr))});
+            return error.CommandAllocatorCreationFailed;
+        }
+        errdefer _ = init_alloc.?.Release();
+
+        var init_cl: ?*d3d12.ID3D12GraphicsCommandList = null;
+        const cl_hr = dev_ptr.device.CreateCommandList(
+            0,
+            .DIRECT,
+            init_alloc.?,
+            null,
+            &d3d12.ID3D12GraphicsCommandList.IID,
+            @ptrCast(&init_cl),
+        );
+        if (com.FAILED(cl_hr)) {
+            log.err("CreateCommandList for init failed: 0x{x}", .{@as(u32, @bitCast(cl_hr))});
+            return error.CommandListCreationFailed;
+        }
+        errdefer _ = init_cl.?.Release();
+
+        result.init_command_allocator = init_alloc;
+        result.init_command_list = init_cl;
+        result.pending_command_list = init_cl;
+    }
+
     result.cached_width = size.width;
     result.cached_height = size.height;
 
@@ -290,6 +339,16 @@ pub fn deinit(self: *DirectX12) void {
     // Wait for GPU to finish before releasing anything.
     if (self.dev) |*dev_ptr| {
         dev_ptr.waitForGpu() catch {};
+    }
+
+    // Release init command list if never flushed (error during init).
+    if (self.init_command_list) |cl| {
+        _ = cl.Release();
+        self.init_command_list = null;
+    }
+    if (self.init_command_allocator) |alloc| {
+        _ = alloc.Release();
+        self.init_command_allocator = null;
     }
 
     for (&self.gpu_frames) |*gf| {
@@ -332,6 +391,46 @@ pub fn deinit(self: *DirectX12) void {
     }
 
     self.* = undefined;
+}
+
+/// Execute and release the one-shot init command list.
+/// Called from GenericRenderer.init after SwapChain.init creates the
+/// initial atlas textures. Submits the recorded resource barriers
+/// (COPY_DEST -> PIXEL_SHADER_RESOURCE) and waits for the GPU to
+/// finish before the first render frame.
+pub fn flushInitCommands(self: *DirectX12) void {
+    const dev_ptr = &(self.dev orelse return);
+
+    if (self.init_command_list) |cl| {
+        const close_hr = cl.Close();
+        if (!com.FAILED(close_hr)) {
+            const lists = [_]*d3d12.ID3D12GraphicsCommandList{cl};
+            dev_ptr.command_queue.ExecuteCommandLists(1, &lists);
+
+            dev_ptr.waitForGpu() catch |err| {
+                log.err("waitForGpu after init commands failed: {}", .{err});
+            };
+        } else {
+            // Close failed -- the recorded barriers won't reach the GPU.
+            // Texture.state already reads PIXEL_SHADER_RESOURCE but the
+            // GPU-side state is still COPY_DEST, so the first render frame
+            // will likely hit a resource state mismatch. This typically
+            // means the device is already in a bad state.
+            log.err("init command list Close failed: 0x{x}", .{@as(u32, @bitCast(close_hr))});
+        }
+
+        _ = cl.Release();
+        self.init_command_list = null;
+    }
+
+    if (self.init_command_allocator) |alloc| {
+        _ = alloc.Release();
+        self.init_command_allocator = null;
+    }
+
+    // Clear so it doesn't point to the now-released init command list.
+    // beginFrame will set it to the per-frame command list.
+    self.pending_command_list = null;
 }
 
 pub fn drawFrameStart(self: *DirectX12) void {
@@ -576,6 +675,13 @@ pub fn initAtlasTexture(
     }, size, size, null);
 }
 
+/// Update an atlas texture's command list to the current frame's.
+/// DX12 rotates command lists across triple-buffered frames, so textures
+/// must not use a stale command list from a different frame slot.
+pub fn updateTextureCommandList(self: DirectX12, texture: *Texture) void {
+    texture.setCommandList(self.pending_command_list);
+}
+
 test {
     _ = com;
     _ = d3d12;
@@ -602,6 +708,17 @@ test "DirectX12 default cached size is zero" {
 
 test "DirectX12 has device_lost field" {
     try std.testing.expect(@hasField(DirectX12, "device_lost"));
+}
+
+test "DirectX12 has init command list fields" {
+    try std.testing.expect(@hasField(DirectX12, "init_command_allocator"));
+    try std.testing.expect(@hasField(DirectX12, "init_command_list"));
+}
+
+test "DirectX12 init command list defaults to null" {
+    const api: DirectX12 = .{};
+    try std.testing.expect(api.init_command_allocator == null);
+    try std.testing.expect(api.init_command_list == null);
 }
 
 test "DirectX12 default device_lost is false" {
