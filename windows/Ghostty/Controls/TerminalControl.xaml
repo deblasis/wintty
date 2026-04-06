@@ -1,19 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Focus, keyboard, and IME handlers live on the UserControl, not on
+    the inner SwapChainPanel. SwapChainPanel inherits from Grid (not
+    Control) and is not designed to be a focusable input sink: when it
+    is made tab-stop and has CharacterReceived/KeyDown handlers,
+    transient focus grabs from the TSF/IME input scope (or from the
+    composition visual tree itself) cause a continuous GotFocus/
+    LostFocus ping-pong. Keep all input on the root UserControl and
+    leave only SizeChanged + CompositionScaleChanged on the
+    SwapChainPanel.
+-->
 <UserControl
     x:Class="Ghostty.Controls.TerminalControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    IsTabStop="False"
+    IsTabStop="True"
+    TabNavigation="Cycle"
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch"
     HorizontalContentAlignment="Stretch"
     VerticalContentAlignment="Stretch"
     Loaded="OnLoaded"
-    Unloaded="OnUnloaded">
+    Unloaded="OnUnloaded"
+    GotFocus="OnGotFocus"
+    LostFocus="OnLostFocus"
+    KeyDown="OnKeyDown"
+    KeyUp="OnKeyUp"
+    CharacterReceived="OnCharacterReceived">
 
     <SwapChainPanel
         x:Name="Panel"
-        IsTabStop="True"
+        IsTabStop="False"
         HorizontalAlignment="Stretch"
         VerticalAlignment="Stretch"
         SizeChanged="OnSizeChanged"
@@ -21,10 +38,5 @@
         PointerPressed="OnPointerPressed"
         PointerMoved="OnPointerMoved"
         PointerReleased="OnPointerReleased"
-        PointerWheelChanged="OnPointerWheelChanged"
-        KeyDown="OnKeyDown"
-        KeyUp="OnKeyUp"
-        CharacterReceived="OnCharacterReceived"
-        GotFocus="OnGotFocus"
-        LostFocus="OnLostFocus" />
+        PointerWheelChanged="OnPointerWheelChanged" />
 </UserControl>
