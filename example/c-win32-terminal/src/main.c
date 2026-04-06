@@ -21,6 +21,12 @@ static WCHAR g_high_surrogate = 0;
 
 static LRESULT CALLBACK wnd_proc(HWND, UINT, WPARAM, LPARAM);
 
+// Prevent default Ctrl+C handler from killing us. Custom handlers
+// (unlike NULL) are not inherited by child processes.
+static BOOL WINAPI ctrl_handler(DWORD type) {
+    return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
+}
+
 // --- Runtime callbacks ---
 // ghostty calls wakeup from background threads when the app needs to tick.
 // We post a message to the main thread's message loop.
@@ -334,9 +340,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int show) {
     (void)hPrev; (void)cmdLine;
 
     // Attach to parent console or allocate one so we can see stderr/stdout.
+    // A console is required for Ctrl+C keystrokes to reach the GUI window.
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) AllocConsole();
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
+
+    // Prevent Ctrl+C from killing this process. A custom handler
+    // (unlike NULL) is not inherited by child processes.
+    SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
     // 1. Register window class
     WNDCLASSEX wc = {
