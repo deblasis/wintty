@@ -1,14 +1,38 @@
+using System;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
+using WinRT.Interop;
 
 namespace Ghostty;
 
 public sealed partial class MainWindow : Window
 {
+    // Win32 interop for the window class background brush. WinUI 3 hosts
+    // the XAML island inside a Win32 HWND whose WNDCLASS hbrBackground
+    // defaults to white. During an interactive drag-resize, DWM paints
+    // any uncovered window pixels with that brush BEFORE WinUI 3 gets a
+    // chance to extend its XAML content into the new area, producing a
+    // visible white flash at the leading edge of the drag. Replacing the
+    // class brush with a dark solid brush makes the flash invisible
+    // against any dark color scheme.
+    private const int GCLP_HBRBACKGROUND = -10;
+
+    [DllImport("user32.dll", EntryPoint = "SetClassLongPtrW", SetLastError = true)]
+    private static extern IntPtr SetClassLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateSolidBrush(uint crColor);
+
     public MainWindow()
     {
         InitializeComponent();
+
+        // Match the RootGrid background (#0C0C0C). Win32 COLORREF is 0x00BBGGRR.
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var brush = CreateSolidBrush(0x000C0C0Cu);
+        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
 
         // Mica is only available on Windows 11 22H1+ with a supported GPU.
         // Our TargetPlatformMinVersion is still 19041 (Windows 10), so a
