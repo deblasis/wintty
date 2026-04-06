@@ -2079,6 +2079,18 @@ test "legacy: ctrl+c" {
     try testing.expectEqualStrings("\x03", writer.buffered());
 }
 
+test "legacy: ctrl+c no text" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true },
+        .utf8 = "",
+        .unshifted_codepoint = 'c',
+    }, .{});
+    try testing.expectEqualStrings("\x03", writer.buffered());
+}
+
 test "legacy: ctrl+space" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2538,3 +2550,9 @@ test "ctrlseq: right ctrl c" {
     });
     try testing.expectEqual(@as(u8, 0x03), seq.?);
 }
+
+test "ctrlseq: ctrl c with no text uses logical key" {
+    const seq = ctrlSeq(.key_c, "", 'c', .{ .ctrl = true });
+    try testing.expectEqual(@as(u8, 0x03), seq.?);
+}
+
