@@ -1,0 +1,19 @@
+<Project>
+  <!--
+    'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which
+    lacks the PRI/Appx task DLLs. These ship with Visual Studio Build Tools.
+    Redirect when missing. See WindowsAppSDK#3997.
+  -->
+  <PropertyGroup Condition="!Exists('$(AppxMSBuildToolsPath)Microsoft.Build.Packaging.Pri.Tasks.dll')">
+    <AppxMSBuildToolsPath>$(MSBuildProgramFiles32)\Microsoft Visual Studio\18\BuildTools\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="!Exists('$(AppxMSBuildToolsPath)Microsoft.Build.Packaging.Pri.Tasks.dll')">
+    <AppxMSBuildToolsPath>$(ProgramW6432)\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="!Exists('$(AppxMSBuildToolsPath)Microsoft.Build.Packaging.Pri.Tasks.dll')">
+    <AppxMSBuildToolsPath>$(MSBuildProgramFiles32)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="!Exists('$(AppxMSBuildToolsPath)Microsoft.Build.Packaging.Pri.Tasks.dll')">
+    <AppxMSBuildToolsPath>$(ProgramW6432)\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+</Project>

@@ -83,6 +83,17 @@ _test-examples-cmake:
 build-dll:
     zig build -Dapp-runtime=none
 
+# === WinUI 3 app shell ===
+
+# Build the WinUI 3 app shell (expects ghostty.dll at zig-out/bin/).
+build-win:
+    dotnet build windows/Ghostty/Ghostty.sln
+
+# Build the DLL and the shell, then launch it.
+run-win: build-dll build-win
+    #!/usr/bin/env bash
+    exec ./windows/Ghostty/bin/x64/Debug/net9.0-windows10.0.19041.0/Ghostty.exe
+
 # === Upstream Sync ===
 
 # Fetch upstream and rebase windows branch
