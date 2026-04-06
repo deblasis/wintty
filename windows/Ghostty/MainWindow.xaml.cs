@@ -21,5 +21,11 @@ public sealed partial class MainWindow : Window
         // follow-up PR so we can focus on the terminal plumbing here.
         if (MicaController.IsSupported())
             SystemBackdrop = new MicaBackdrop();
+
+        // Route title updates and close requests from the terminal's
+        // runtime action callback to the window chrome. Both events
+        // are raised on the UI thread by TerminalControl.
+        Terminal.TitleChanged += (_, title) => Title = title;
+        Terminal.CloseRequested += (_, _) => Close();
     }
 }
