@@ -7,8 +7,14 @@ const Target = @This();
 
 const d3d12 = @import("d3d12.zig");
 
-/// The underlying GPU resource (swap chain back buffer or offscreen texture).
-/// Null until device wiring is done.
+/// The underlying GPU resource. This is a BORROWED reference -- it points
+/// at one of the API's `back_buffers[*]` slots and is rebound by every
+/// `beginFrame`. Target does NOT AddRef on assign and MUST NOT Release on
+/// deinit, otherwise after a swap chain ResizeBuffers (which releases the
+/// back buffers and re-acquires them) the old pointer here is dangling and
+/// Release on it is a use-after-free.
+///
+/// Null until `beginFrame` wires it up.
 resource: ?*d3d12.ID3D12Resource = null,
 
 /// CPU descriptor handle for the render target view.
@@ -22,8 +28,7 @@ width: usize = 0,
 height: usize = 0,
 
 pub fn deinit(self: *Target) void {
-    if (self.resource) |r| _ = r.Release();
-
+    // resource is a borrowed reference (see field doc) -- do NOT Release.
     self.* = undefined;
 }
 

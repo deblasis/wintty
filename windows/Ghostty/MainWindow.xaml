@@ -6,7 +6,16 @@
     xmlns:controls="using:Ghostty.Controls"
     Title="Ghostty">
 
-    <Grid x:Name="RootGrid">
+    <!--
+        RootGrid background matches a typical terminal background (Windows
+        Terminal's default #0C0C0C). Without this, the Window's default
+        white content background bleeds through during a resize: WinUI 3
+        grows the SwapChainPanel before DX12 finishes ResizeBuffers and
+        re-renders, leaving a visible white frame around the still-old
+        swap chain contents. A dark fill makes that gap effectively
+        invisible against any dark color scheme.
+    -->
+    <Grid x:Name="RootGrid" Background="#0C0C0C">
         <controls:TerminalControl
             x:Name="Terminal"
             HorizontalAlignment="Stretch"
