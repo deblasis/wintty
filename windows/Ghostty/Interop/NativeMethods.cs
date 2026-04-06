@@ -170,9 +170,14 @@ internal struct GhosttySurfaceSize
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void GhosttyWakeupCb(IntPtr userdata);
 
+// C signature: bool (*)(ghostty_app_t, ghostty_target_s, ghostty_action_s)
+// Both ghostty_target_s (16 bytes) and ghostty_action_s (hundreds of bytes)
+// are larger than 8 bytes, so on the Windows x64 ABI they are passed by
+// hidden pointer. We take both as IntPtr and decode the fields we need
+// with Marshal.PtrToStructure / Marshal.ReadIntPtr.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 [return: MarshalAs(UnmanagedType.I1)]
-internal delegate bool GhosttyActionCb(GhosttyApp app, GhosttyTarget target, IntPtr actionPtr);
+internal delegate bool GhosttyActionCb(GhosttyApp app, IntPtr targetPtr, IntPtr actionPtr);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 [return: MarshalAs(UnmanagedType.I1)]
@@ -211,6 +216,30 @@ internal struct GhosttyTarget
     [FieldOffset(0)] public int Tag;
     // union: only the surface variant is populated today
     [FieldOffset(8)] public IntPtr Surface;
+}
+
+// Subset of ghostty_action_tag_e from include/ghostty.h that we actually
+// dispatch on. Indices are pinned explicitly to the upstream values so a
+// reorder upstream cannot silently misroute one tag to another handler -
+// any tag we don't list falls through to "return false" in the action
+// callback and the core uses its default behavior.
+//
+// Synced against include/ghostty.h @ 2598bef60. To verify after a rebase:
+//   grep -n GHOSTTY_ACTION_ include/ghostty.h | grep -nE 'SET_TITLE|CLOSE_WINDOW|RING_BELL'
+// and confirm the ordinal positions still match the values below.
+internal enum GhosttyActionTag
+{
+    SetTitle = 32,
+    CloseWindow = 49,
+    RingBell = 50,
+}
+
+// ghostty_action_set_title_s { const char* title; }
+// We only read .title; the struct is declared so the offset is explicit.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionSetTitle
+{
+    public IntPtr Title;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -340,4 +369,15 @@ internal static class NativeMethods
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_process_exited")]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool SurfaceProcessExited(GhosttySurface surface);
+
+    // ---- user32 --------------------------------------------------------
+
+    // MessageBeep is thread-safe and minimal-dependency. Used by the
+    // action callback for RING_BELL without any dispatcher hop.
+    // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-messagebeep
+    internal const uint MB_OK = 0x00000000;
+
+    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool MessageBeep(uint uType);
 }
