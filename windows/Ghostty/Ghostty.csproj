@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Ghostty</RootNamespace>
+    <AssemblyName>Ghostty</AssemblyName>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250602001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+
+  <!--
+    Copy libghostty.dll from the zig-out install dir produced by
+    `zig build -Dapp-runtime=none`. This mirrors how macos/Ghostty.xcodeproj
+    consumes the xcframework from zig-out. Zig installs shared libs to
+    zig-out/lib on Windows (not zig-out/bin). The path is relative to this csproj.
+  -->
+  <ItemGroup>
+    <None Include="..\..\zig-out\lib\ghostty.dll" Condition="Exists('..\..\zig-out\lib\ghostty.dll')">
+      <Link>native\ghostty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="WarnIfNoLibghostty" BeforeTargets="Build"
+          Condition="!Exists('..\..\zig-out\lib\ghostty.dll')">
+    <Warning Text="ghostty.dll not found at ..\..\zig-out\lib\. Run 'zig build -Dapp-runtime=none' from the repo root first, or the app will fail to start." />
+  </Target>
+</Project>
