@@ -172,17 +172,6 @@ public sealed partial class TerminalControl : UserControl
         // firing after teardown and pin the control via the closure.
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
 
-        // Stop and detach the resize timer first so a pending tick cannot
-        // observe a half-freed surface. The timer holds a strong reference
-        // to this control via OnResizeTick, so leaving it pending across
-        // an Unloaded would also leak.
-        if (_resizeTimer is not null)
-        {
-            _resizeTimer.Stop();
-            _resizeTimer.Tick -= OnResizeTick;
-            _resizeTimer = null;
-        }
-
         // Tear down in reverse order. Each free is a no-op on a zero handle.
         if (_surface.Handle != IntPtr.Zero) NativeMethods.SurfaceFree(_surface);
         if (_app.Handle != IntPtr.Zero) NativeMethods.AppFree(_app);
@@ -292,43 +281,25 @@ public sealed partial class TerminalControl : UserControl
 
     // Size / scale -------------------------------------------------------
 
-    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resizeTimer;
-
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero) return;
-        KickResizeDebounce();
+        PushSurfaceSize();
     }
 
-    private void KickResizeDebounce()
+    private void PushSurfaceSize()
     {
-        // FIXME: the DX12 renderer recreates the swap chain on every
-        // set_size, which tears down GPU resources faster than the
-        // compositor can follow when WinUI 3 fires SizeChanged per pixel
-        // during a drag. The fix is in the renderer: ResizeBuffers instead
-        // of full recreate. Until that lands, debounce here. Drop this
-        // entire timer once the renderer is idempotent.
-        if (_resizeTimer is null)
-        {
-            _resizeTimer = DispatcherQueue.CreateTimer();
-            _resizeTimer.Interval = TimeSpan.FromMilliseconds(30);
-            _resizeTimer.IsRepeating = false;
-            _resizeTimer.Tick += OnResizeTick;
-        }
-        _resizeTimer.Start();
-    }
-
-    private void OnResizeTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
-    {
-        sender.Stop();
-        if (_surface.Handle == IntPtr.Zero) return;
-
         // Read the panel's own layout bounds rather than the
         // SizeChangedEventArgs value. DPI rounding and any padding in
         // the visual tree can make the two differ by a pixel, which
         // manifests as letterboxing: the DX12 swap chain sizes off one
         // value while the compositor stretches the panel to its own
         // bounds, leaving a gap at the edges.
+        //
+        // No debounce: the renderer's setTargetSize records the desired
+        // dimensions atomically and the actual ResizeBuffers happens at
+        // the top of the next beginFrame, so per-pixel SizeChanged spam
+        // costs us only an atomic store each.
         var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1.0;
         var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1.0;
         var w = (uint)Math.Max(1, Panel.ActualWidth * sx);
@@ -339,12 +310,12 @@ public sealed partial class TerminalControl : UserControl
     private void OnCompositionScaleChanged(SwapChainPanel sender, object args)
     {
         if (_surface.Handle == IntPtr.Zero) return;
-        // Push the new scale to libghostty, then re-kick the debounced
-        // resize path so the pixel dimensions get recomputed with the
-        // new scale. DPI change (e.g. moving the window between monitors)
-        // changes the pixel size even though the DIP size is unchanged.
+        // Push the new scale to libghostty, then recompute pixel
+        // dimensions: a DPI change (e.g. moving the window between
+        // monitors) shifts the pixel size even though the DIP size is
+        // unchanged.
         NativeMethods.SurfaceSetContentScale(_surface, sender.CompositionScaleX, sender.CompositionScaleY);
-        KickResizeDebounce();
+        PushSurfaceSize();
     }
 
     // Focus --------------------------------------------------------------
