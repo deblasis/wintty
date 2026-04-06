@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Controls.TerminalControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsTabStop="False"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch"
+    HorizontalContentAlignment="Stretch"
+    VerticalContentAlignment="Stretch"
+    Loaded="OnLoaded"
+    Unloaded="OnUnloaded">
+
+    <SwapChainPanel
+        x:Name="Panel"
+        IsTabStop="True"
+        HorizontalAlignment="Stretch"
+        VerticalAlignment="Stretch"
+        SizeChanged="OnSizeChanged"
+        CompositionScaleChanged="OnCompositionScaleChanged"
+        PointerPressed="OnPointerPressed"
+        PointerMoved="OnPointerMoved"
+        PointerReleased="OnPointerReleased"
+        PointerWheelChanged="OnPointerWheelChanged"
+        KeyDown="OnKeyDown"
+        KeyUp="OnKeyUp"
+        CharacterReceived="OnCharacterReceived"
+        GotFocus="OnGotFocus"
+        LostFocus="OnLostFocus" />
+</UserControl>
