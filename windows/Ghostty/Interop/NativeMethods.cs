@@ -323,6 +323,12 @@ internal static class NativeMethods
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_size")]
     internal static extern void SurfaceSetSize(GhosttySurface surface, uint width, uint height);
 
+    // MapVirtualKeyW for the keycode ScanCode==0 fallback in TerminalControl.
+    // Win32 user32, not WinRT - bypasses any WinUI framework filtering.
+    internal const uint MAPVK_VK_TO_VSC = 0;
+    [DllImport("user32.dll", EntryPoint = "MapVirtualKeyW")]
+    internal static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
+
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_content_scale")]
     internal static extern void SurfaceSetContentScale(GhosttySurface surface, double x, double y);
 
