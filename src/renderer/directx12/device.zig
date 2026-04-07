@@ -285,6 +285,16 @@ fn createCompositionSwapChain(
         .SampleDesc = .{ .Count = 1, .Quality = 0 },
         .BufferUsage = dxgi.DXGI_USAGE_RENDER_TARGET_OUTPUT,
         .BufferCount = frame_count,
+        // STRETCH causes DirectComposition to interpolate stale content
+        // into the bigger area for one frame, which is preferable to
+        // the black bar NONE produces with the
+        // CreateSwapChainForComposition path. The bounded one-frame
+        // stretch artifact is acceptable: setTargetSize wakes the
+        // renderer thread immediately, and the 120 Hz draw timer is a
+        // backstop, so the renderer typically converges within one
+        // frame. If the renderer thread ever stalls (TDR recovery, slow
+        // GPU) the stretch becomes a visible smear -- accept that as a
+        // graceful degradation rather than a black bar.
         .Scaling = .STRETCH,
         .SwapEffect = .FLIP_DISCARD,
         .AlphaMode = .PREMULTIPLIED,
