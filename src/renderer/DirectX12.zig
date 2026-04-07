@@ -471,6 +471,13 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     dev_ptr.command_queue.ExecuteCommandLists(1, &lists);
 
     // Present the swap chain and check for device-removed errors.
+    // Sync interval 1 paces to vblank without tearing against the
+    // compositor. Interactive resize relies on setTargetSize waking the
+    // renderer thread (see embedded.zig) plus the existing 120 Hz draw
+    // timer as a backstop -- both routes hit beginFrame, which compares
+    // desired_size against applied_width/height and calls ResizeBuffers
+    // before any new GPU work. The renderer thread owns Present
+    // exclusively; the apprt UI thread does no GPU work during resize.
     if (self.swap_chain3) |sc3| {
         const hr = sc3.Present(1, 0);
         if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
@@ -719,6 +726,7 @@ pub fn presentLastTarget(self: *DirectX12) !void {
     // No new GPU work is submitted, so the existing fence values remain
     // valid and the next beginFrame will wait correctly.
     if (self.swap_chain3) |sc3| {
+        // Sync interval 1: see drawFrameEnd for the rationale.
         const hr = sc3.Present(1, 0);
         if (hr == com.DXGI_ERROR_DEVICE_REMOVED or hr == com.DXGI_ERROR_DEVICE_HUNG or hr == com.DXGI_ERROR_DEVICE_RESET) {
             self.handleDeviceRemoved();
