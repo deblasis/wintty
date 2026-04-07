@@ -2,13 +2,21 @@
 <!--
     Focus, keyboard, and IME handlers live on the UserControl, not on
     the inner SwapChainPanel. SwapChainPanel inherits from Grid (not
-    Control) and is not designed to be a focusable input sink: when it
-    is made tab-stop and has CharacterReceived/KeyDown handlers,
-    transient focus grabs from the TSF/IME input scope (or from the
-    composition visual tree itself) cause a continuous GotFocus/
-    LostFocus ping-pong. Keep all input on the root UserControl and
-    leave only SizeChanged + CompositionScaleChanged on the
-    SwapChainPanel.
+    Control) and is not designed to be a focusable input sink.
+
+    Even with the panel set IsTabStop="False", clicking the SwapChainPanel
+    triggered a continuous GotFocus / LostFocus ping-pong: WinUI 3
+    implicitly hosts a Microsoft.UI.Xaml.Controls.ScrollViewer somewhere
+    above our content (likely the framework's XAML host for the Window),
+    and on every pointer click the framework focused that ScrollViewer
+    first; OnPointerPressed then bounced focus back to this UserControl,
+    generating a focused=false / focused=true pair on every click.
+
+    The fix is in TerminalControl.xaml.cs DisableAncestorScrollViewerTabStop,
+    which walks the visual tree at Loaded time and sets IsTabStop=false on
+    any ancestor ScrollViewer. This removes the parasitic ScrollViewer from
+    the focus chain at the source: no per-event handler, no global
+    FocusManager subscription, no fragile type-check filter.
 -->
 <UserControl
     x:Class="Ghostty.Controls.TerminalControl"
