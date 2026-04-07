@@ -1852,8 +1852,14 @@ pub const CAPI = struct {
         surface.updateSize(w, h);
         // For composition surfaces (no HWND), the renderer cannot query
         // the window size via GetClientRect. Forward the desired dimensions
-        // so the resize detection loop in drawFrame picks up the change.
+        // so the resize detection loop in beginFrame picks up the change.
         surface.core_surface.renderer.setTargetSize(w, h);
+        // Wake the renderer thread so it picks up the new desired_size
+        // immediately rather than waiting for its next natural draw-timer
+        // tick (~8 ms). Cheap (single futex op) and safe to call from any
+        // thread. The 120 Hz draw timer is the backstop if the wakeup is
+        // ever coalesced; in either path beginFrame applies the size.
+        surface.core_surface.renderer_thread.wakeup.notify() catch {};
     }
 
     /// Return the size information a surface has.
