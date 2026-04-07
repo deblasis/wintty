@@ -146,6 +146,29 @@ public sealed partial class TerminalControl : UserControl
         // Request focus so keyboard input starts flowing immediately.
         // Focus lives on the UserControl now, not the panel.
         this.Focus(FocusState.Programmatic);
+
+        // Walk our visual ancestors and disable IsTabStop on any
+        // ScrollViewer we find. WinUI 3 implicitly inserts a
+        // Microsoft.UI.Xaml.Controls.ScrollViewer above our content
+        // (likely from the Window's XAML host); without this, every
+        // pointer click on the SwapChainPanel routes through the
+        // framework's hit-test focus path -> ScrollViewer, gets bounced
+        // back by OnPointerPressed -> UserControl, and surfaces to
+        // libghostty as a focused=false / focused=true pair on every
+        // click. Removing the ScrollViewer from the focus chain at
+        // load time prevents the storm at the source, with no per-event
+        // cost and no global FocusManager subscription.
+        DisableAncestorScrollViewerTabStop();
+    }
+
+    private void DisableAncestorScrollViewerTabStop()
+    {
+        DependencyObject? node = this;
+        while (node is not null)
+        {
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+            if (node is ScrollViewer sv) sv.IsTabStop = false;
+        }
     }
 
     private void OnFirstLayoutUpdated(object? sender, object e)
@@ -295,15 +318,18 @@ public sealed partial class TerminalControl : UserControl
         // manifests as letterboxing: the DX12 swap chain sizes off one
         // value while the compositor stretches the panel to its own
         // bounds, leaving a gap at the edges.
-        //
-        // No debounce: the renderer's setTargetSize records the desired
-        // dimensions atomically and the actual ResizeBuffers happens at
-        // the top of the next beginFrame, so per-pixel SizeChanged spam
-        // costs us only an atomic store each.
         var sx = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1.0;
         var sy = Panel.CompositionScaleY > 0 ? Panel.CompositionScaleY : 1.0;
         var w = (uint)Math.Max(1, Panel.ActualWidth * sx);
         var h = (uint)Math.Max(1, Panel.ActualHeight * sy);
+
+        // Fire-and-forget. ghostty_surface_set_size records the desired
+        // dimensions in an atomic and wakes the renderer thread; the
+        // next beginFrame on that thread (within one wakeup hop or, at
+        // worst, one ~8 ms draw-timer tick) compares desired_size to
+        // applied_width/height and calls ResizeBuffers before the next
+        // Present. We never block here, never touch draw_mutex, and
+        // never do GPU work on the UI thread.
         NativeMethods.SurfaceSetSize(_surface, w, h);
     }
 
@@ -428,12 +454,44 @@ public sealed partial class TerminalControl : UserControl
         // VirtualKey). embedded.zig matches it against keycodes.entries
         // where the native column is the Win32 scancode, and derives
         // unshifted_codepoint via MapVirtualKeyW when we pass 0.
+        //
+        // Two scancode adjustments are required to match what the C
+        // example/c-win32-terminal/src/main.c (the canonical Win32
+        // embedder) computes from raw lParam:
+        //
+        //  1. Extended keys (arrows, navigation cluster, numpad enter,
+        //     right-side modifiers) need the 0xE000 prefix or'd in.
+        //     PhysicalKeyStatus.ScanCode only returns the low byte;
+        //     IsExtendedKey tells us whether to set the prefix.
+        //     Without this, Up/Down/Left/Right/Home/End/PgUp/PgDn never
+        //     find a match in input.keycodes.entries (the table uses
+        //     0xE048 etc on the Windows column) and the dispatch returns
+        //     .ignored.
+        //
+        //  2. WinUI 3 strips ScanCode entirely for some keys that the
+        //     framework treats as "navigation" (most notably Tab),
+        //     reporting 0 even on the press path. Fall back to
+        //     MapVirtualKey(VK, MAPVK_VK_TO_VSC) using e.Key as the
+        //     virtual-key when ScanCode is 0, so the apprt sees the
+        //     real scancode.
+        uint scancode = e.KeyStatus.ScanCode;
+        if (scancode == 0)
+        {
+            // Recover the OEM scancode from the VirtualKey. This handles
+            // Tab and any other key WinUI 3 strips ScanCode for.
+            scancode = NativeMethods.MapVirtualKeyW((uint)e.Key, NativeMethods.MAPVK_VK_TO_VSC);
+        }
+        if (e.KeyStatus.IsExtendedKey)
+        {
+            scancode |= 0xE000;
+        }
+
         var key = new GhosttyInputKey
         {
             Action = action,
             Mods = CurrentMods(),
             ConsumedMods = GhosttyMods.None,
-            Keycode = e.KeyStatus.ScanCode,
+            Keycode = scancode,
             Text = IntPtr.Zero,
             UnshiftedCodepoint = 0,
             Composing = false,
