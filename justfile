@@ -1,6 +1,18 @@
 # Ghostty Windows Fork - Build Orchestration
 # Run `just` for the default (full test + build), or `just <recipe>` for individual steps.
 
+# Cross-platform shell selection.
+#
+# On unix the default `sh` is fine and most recipes are single program
+# invocations (zig build, dotnet build) that work in any POSIX shell.
+#
+# On Windows we pin pwsh.exe so users do not need git-bash on PATH for the
+# common build/run recipes. The few recipes that genuinely need bash (the
+# example test loops, the sync helper) carry an explicit `#!/usr/bin/env bash`
+# shebang, which bypasses this setting and runs under bash regardless. Those
+# recipes still need git-bash on Windows; the build/run path does not.
+set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
+
 # Default: run tests and build the DLL
 default: test build-dll
 
@@ -86,19 +98,34 @@ build-dll:
 # === WinUI 3 app shell ===
 
 # Build the WinUI 3 app shell (expects ghostty.dll at zig-out/bin/).
+[windows]
 build-win:
     dotnet build windows/Ghostty/Ghostty.sln
 
+# Recipe body has no shebang so it runs under the platform shell selected by
+# `set windows-shell` above (pwsh on Windows). The previous version used a
+# bash shebang to `exec` the .exe, which forced git-bash on Windows for no
+# reason - launching a Windows .exe works fine from pwsh.
+
 # Build the DLL and the shell, then launch it.
+[windows]
 run-win: build-dll build-win
-    #!/usr/bin/env bash
-    exec ./windows/Ghostty/bin/x64/Debug/net9.0-windows10.0.19041.0/Ghostty.exe
+    ./windows/Ghostty/bin/x64/Debug/net9.0-windows10.0.19041.0/Ghostty.exe
 
 # === Upstream Sync ===
 
-# Fetch upstream and rebase windows branch
+# Pinned to bash via shebang so the POSIX `[` branch test below works
+# regardless of the platform shell. On Windows this requires git-bash on
+# PATH; sync is a maintainer command and the maintainer has it.
+
+# Fetch upstream and rebase windows branch.
 sync force="":
-    @if [ "{{ force }}" != "--force" ] && [ "$(git branch --show-current)" != "windows" ]; then echo "WARNING: you are on '$(git branch --show-current)', not 'windows'. Switch to windows branch first. Use 'just sync --force' to override." && exit 1; fi
+    #!/usr/bin/env bash
+    set -e
+    if [ "{{ force }}" != "--force" ] && [ "$(git branch --show-current)" != "windows" ]; then
+        echo "WARNING: you are on '$(git branch --show-current)', not 'windows'. Switch to windows branch first. Use 'just sync --force' to override."
+        exit 1
+    fi
     git fetch upstream
     git rebase upstream/main
-    @echo "Rebase complete. Review any conflicts, then: git push --force-with-lease origin windows"
+    echo "Rebase complete. Review any conflicts, then: git push --force-with-lease origin windows"
