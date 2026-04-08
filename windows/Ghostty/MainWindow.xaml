@@ -3,7 +3,6 @@
     x:Class="Ghostty.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:controls="using:Ghostty.Controls"
     Title="Ghostty">
 
     <!--
@@ -15,10 +14,5 @@
         swap chain contents. A dark fill makes that gap effectively
         invisible against any dark color scheme.
     -->
-    <Grid x:Name="RootGrid" Background="#0C0C0C">
-        <controls:TerminalControl
-            x:Name="Terminal"
-            HorizontalAlignment="Stretch"
-            VerticalAlignment="Stretch" />
-    </Grid>
+    <Grid x:Name="RootGrid" Background="#0C0C0C" />
 </Window>
