@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using Ghostty.Hosting;
+using Ghostty.Input;
 using Ghostty.Interop;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -27,7 +28,33 @@ public sealed partial class TerminalControl : UserControl
     private IntPtr _workingDirectoryUtf8;
     private IntPtr _commandUtf8;
     private IntPtr _initialInputUtf8;
-    private bool _initialized;
+
+    // The libghostty surface lifecycle is decoupled from
+    // OnLoaded/OnUnloaded so that visual-tree reparenting (which fires
+    // Unloaded then Loaded asynchronously) does NOT tear down the
+    // running shell. The surface is created once at first Loaded and
+    // freed only when PaneHost calls DisposeSurface() on the leaf
+    // being closed (or when the last leaf in the window is removed).
+    //
+    // Without this decoupling, every pane split would Unloaded ->
+    // SurfaceFree -> Loaded -> SurfaceNew on every existing leaf,
+    // killing each running shell process and replacing it with a fresh
+    // one. Worse, async event ordering can deliver Unloaded AFTER the
+    // matching Loaded, leaving a leaf in a half-dead state with no
+    // surface and no path to recover.
+    private bool _surfaceCreated;
+    private bool _surfaceDisposed;
+
+    // Set in OnKeyDown when we short-circuit a bound chord; consumed
+    // (and cleared) by the matching OnCharacterReceived. WinUI 3 fires
+    // BOTH OnKeyDown (raw key) and OnCharacterReceived (WM_CHAR text)
+    // for the same physical keypress, and they take INDEPENDENT paths
+    // into libghostty (SurfaceKey vs SurfaceText). Filtering OnKeyDown
+    // alone leaves OnCharacterReceived to forward the C0 control char
+    // (e.g. Ctrl+E -> U+0005) which the shell happily interprets as
+    // a readline command. The flag bridges the two handlers without
+    // requiring CharacterReceived to re-derive the original VirtualKey.
+    private bool _suppressNextCharacter;
 
     // Pinned managed handle to `this`, passed to libghostty as the
     // per-surface userdata. Per-surface callbacks (close_surface_cb,
@@ -44,8 +71,20 @@ public sealed partial class TerminalControl : UserControl
     /// </summary>
     internal GhosttyHost? Host { get; set; }
 
+    /// <summary>
+    /// Last title pushed by libghostty for this surface, or null if no
+    /// title has been set yet. Used by MainWindow to update the window
+    /// chrome immediately on focus change without waiting for the next
+    /// TitleChanged.
+    /// </summary>
+    public string? CurrentTitle { get; private set; }
+
     // Raisers invoked by GhosttyHost after routing an action to this leaf.
-    internal void RaiseTitleChanged(string title) => TitleChanged?.Invoke(this, title);
+    internal void RaiseTitleChanged(string title)
+    {
+        CurrentTitle = title;
+        TitleChanged?.Invoke(this, title);
+    }
     internal void RaiseCloseRequested() => CloseRequested?.Invoke(this, EventArgs.Empty);
 
     // Events raised from the runtime action callback. They always fire
@@ -65,8 +104,19 @@ public sealed partial class TerminalControl : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (_initialized) return;
-        _initialized = true;
+        // Tree-dependent setup runs every Loaded (idempotent):
+        // request focus, walk ancestors for the ScrollViewer fix, and
+        // arm the one-shot LayoutUpdated handler so the surface size
+        // gets primed once layout settles in the new parent.
+        Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+        Panel.LayoutUpdated += OnFirstLayoutUpdated;
+        DisableAncestorScrollViewerTabStop();
+
+        // Surface creation runs exactly once per control instance,
+        // even across multiple reparents. Subsequent Loaded events
+        // skip this entire block.
+        if (_surfaceCreated) return;
+        _surfaceCreated = true;
 
         if (Host is null)
             throw new InvalidOperationException(
@@ -120,34 +170,9 @@ public sealed partial class TerminalControl : UserControl
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);
 
-        // Prime the initial size when layout is actually settled.
-        // SwapChainPanel.SizeChanged fires during the first layout pass,
-        // which happens BEFORE Loaded, so by the time the surface exists
-        // no further SizeChanged is queued until the user resizes the
-        // window. Reading Panel.ActualWidth/Height here directly is
-        // also unsafe: CompositionScaleX/Y is frequently reported as 1.0
-        // until a later CompositionScaleChanged fires. Wait for
-        // LayoutUpdated - the first one after the surface exists
-        // guarantees ActualWidth/Height and the composition scale are
-        // both valid - then revoke the handler.
-        Panel.LayoutUpdated += OnFirstLayoutUpdated;
-
         // Request focus so keyboard input starts flowing immediately.
         // Focus lives on the UserControl now, not the panel.
         this.Focus(FocusState.Programmatic);
-
-        // Walk our visual ancestors and disable IsTabStop on any
-        // ScrollViewer we find. WinUI 3 implicitly inserts a
-        // Microsoft.UI.Xaml.Controls.ScrollViewer above our content
-        // (likely from the Window's XAML host); without this, every
-        // pointer click on the SwapChainPanel routes through the
-        // framework's hit-test focus path -> ScrollViewer, gets bounced
-        // back by OnPointerPressed -> UserControl, and surfaces to
-        // libghostty as a focused=false / focused=true pair on every
-        // click. Removing the ScrollViewer from the focus chain at
-        // load time prevents the storm at the source, with no per-event
-        // cost and no global FocusManager subscription.
-        DisableAncestorScrollViewerTabStop();
     }
 
     private void DisableAncestorScrollViewerTabStop()
@@ -179,9 +204,32 @@ public sealed partial class TerminalControl : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        // Drop the one-shot LayoutUpdated handler in case the initial size
-        // never settled (zero ActualWidth/Height): otherwise it would keep
-        // firing after teardown and pin the control via the closure.
+        // Intentionally NO surface teardown here. WinUI 3 fires Unloaded
+        // when the visual tree shifts the control to a new parent
+        // (split / rebuild), and the matching Loaded fires asynchronously
+        // moments later. Tearing down the surface on every Unloaded would
+        // kill every existing pane's shell process on every split. The
+        // surface is freed only when DisposeSurface() is called by
+        // PaneHost when the leaf is actually being removed.
+        //
+        // We only unsubscribe the one-shot LayoutUpdated handler to make
+        // sure it does not fire spuriously after the panel detaches.
+        // OnLoaded re-subscribes when the control re-enters a tree.
+        Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+    }
+
+    /// <summary>
+    /// Tear down the libghostty surface and per-control native
+    /// resources. Called by <see cref="Panes.PaneHost"/> when the
+    /// leaf is being closed (via Ctrl+Shift+W or process exit), and
+    /// by <see cref="MainWindow"/> for any remaining leaves at window
+    /// close. Idempotent.
+    /// </summary>
+    internal void DisposeSurface()
+    {
+        if (_surfaceDisposed) return;
+        _surfaceDisposed = true;
+
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
 
         if (_surface.Handle != IntPtr.Zero)
@@ -201,7 +249,6 @@ public sealed partial class TerminalControl : UserControl
         _workingDirectoryUtf8 = IntPtr.Zero;
         _commandUtf8 = IntPtr.Zero;
         _initialInputUtf8 = IntPtr.Zero;
-        _initialized = false;
 
         // Drop subscribers so MainWindow is not rooted via these events
         // after the control tears down.
@@ -347,11 +394,60 @@ public sealed partial class TerminalControl : UserControl
 
     // Keyboard -----------------------------------------------------------
 
-    private void OnKeyDown(object sender, KeyRoutedEventArgs e) =>
+    private void OnKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        // Reserved-chord short-circuit: if this chord is bound to an
+        // application-level KeyboardAccelerator (registered by
+        // MainWindow from KeyBindings.Default), do NOT forward it to
+        // libghostty and do NOT mark the event handled. WinUI 3
+        // KeyboardAccelerators fire AFTER routed key events and only
+        // when the focused element has not marked the event handled,
+        // so the focused TerminalControl has to actively step out of
+        // the way for the chord to reach the accelerator.
+        //
+        // We also set _suppressNextCharacter so the matching
+        // OnCharacterReceived (which fires independently with the
+        // WM_CHAR text, e.g. U+0005 for Ctrl+E) does not forward the
+        // control char to libghostty as text. Without this, the shell
+        // sees the C0 control char even though we filtered the key
+        // event itself.
+        if (KeyBindings.Default.Match(CurrentChordModifiers(), e.Key) is not null)
+        {
+            _suppressNextCharacter = true;
+            return;
+        }
         SendKey(e, GhosttyInputAction.Press);
+    }
 
-    private void OnKeyUp(object sender, KeyRoutedEventArgs e) =>
+    private void OnKeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        // Same short-circuit so the matching key-up never reaches
+        // libghostty either. Without this, libghostty would see a
+        // stray release for a press it never saw. Assumes every bound
+        // chord has at least one modifier; a plain unmodified bound
+        // key would swallow its key-up silently here.
+        var mods = CurrentChordModifiers();
+        if (KeyBindings.Default.Match(mods, e.Key) is not null) return;
         SendKey(e, GhosttyInputAction.Release);
+    }
+
+    private static Windows.System.VirtualKeyModifiers CurrentChordModifiers()
+    {
+        var mods = Windows.System.VirtualKeyModifiers.None;
+        if ((Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+                & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0)
+            mods |= Windows.System.VirtualKeyModifiers.Control;
+        if ((Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
+                & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0)
+            mods |= Windows.System.VirtualKeyModifiers.Shift;
+        if ((Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Menu)
+                & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0)
+            mods |= Windows.System.VirtualKeyModifiers.Menu;
+        return mods;
+    }
 
     private void SendKey(KeyRoutedEventArgs e, GhosttyInputAction action)
     {
@@ -418,6 +514,17 @@ public sealed partial class TerminalControl : UserControl
     private void OnCharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+
+        // If the matching OnKeyDown short-circuited a bound chord, drop
+        // the WM_CHAR that follows. WinUI 3 raises CharacterReceived
+        // independently of KeyDown handling, so without this the C0
+        // control char (e.g. U+0005 for Ctrl+E) reaches libghostty as
+        // text and the shell interprets it as a readline command.
+        if (_suppressNextCharacter)
+        {
+            _suppressNextCharacter = false;
+            return;
+        }
 
         // Forward WM_CHAR unchanged. The embedded apprt's key+text combining
         // handles C0 control filtering on its side: the preceding key event
