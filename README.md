@@ -33,7 +33,7 @@
 > **Status:** DX12 renderer in progress (3 surface modes + DirectComposition), shared infrastructure from DX11 carried forward
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[██████████░░░░░░░░░░] 54%`
+> `[█████████████████░░░] 85%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
