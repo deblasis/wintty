@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Plain net9.0 - no WinUI 3, no WinAppSDK. This test project
+      intentionally does NOT reference Ghostty.csproj: doing so would
+      cascade the WinAppSDK MRT/PRI build targets, which are a large
+      amount of packaging machinery we do not need to exercise pure
+      pane-tree logic.
+
+      Instead we compile PaneTree.cs directly and provide local stubs
+      for the PaneNode/LeafPane/SplitPane types it operates on. The
+      stubs match the real types structurally (same namespace, same
+      member names) but omit the TerminalControl reference. This keeps
+      the test build cheap and runnable on any .NET SDK without
+      Windows App SDK targets loaded.
+    -->
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>Ghostty.Tests</RootNamespace>
+    <AssemblyName>Ghostty.Tests</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Compile the pure-logic source directly. PaneTree.cs has no
+         WinUI dependency of its own; the stubs in PaneStubs.cs satisfy
+         its references to PaneNode / LeafPane / SplitPane / PaneOrientation. -->
+    <Compile Include="..\Ghostty\Panes\PaneTree.cs" Link="PaneTree.cs" />
+  </ItemGroup>
+
+</Project>
