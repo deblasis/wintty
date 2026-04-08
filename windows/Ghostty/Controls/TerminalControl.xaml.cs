@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using Ghostty.Hosting;
 using Ghostty.Interop;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -15,32 +16,37 @@ namespace Ghostty.Controls;
 /// SwapChainPanel composition path (null HWND). Matches how macOS's
 /// Ghostty.Surface.swift owns one ghostty_surface_t per SwiftUI view.
 ///
-/// This first pass owns the whole ghostty_app_t lifetime too; when we add
-/// tabs/splits the app handle will move up to MainWindow and each control
-/// will only own its surface.
+/// Config and app handle ownership lives in <see cref="Ghostty.Hosting.GhosttyHost"/>,
+/// which is constructed by MainWindow and assigned via the Host property before load.
 /// </summary>
 public sealed partial class TerminalControl : UserControl
 {
     // Handles ------------------------------------------------------------
 
-    private GhosttyConfig _config;
-    private GhosttyApp _app;
     private GhosttySurface _surface;
     private IntPtr _workingDirectoryUtf8;
     private IntPtr _commandUtf8;
     private IntPtr _initialInputUtf8;
     private bool _initialized;
 
-    // Keep delegates alive for as long as the runtime config references
-    // them. P/Invoke marshals the managed delegate to a native function
-    // pointer that the GC has no way of tracking, so a dropped field here
-    // would crash the Zig side on the first wakeup.
-    private GhosttyWakeupCb? _wakeupCb;
-    private GhosttyActionCb? _actionCb;
-    private GhosttyReadClipboardCb? _readClipboardCb;
-    private GhosttyConfirmReadClipboardCb? _confirmReadClipboardCb;
-    private GhosttyWriteClipboardCb? _writeClipboardCb;
-    private GhosttyCloseSurfaceCb? _closeSurfaceCb;
+    // Pinned managed handle to `this`, passed to libghostty as the
+    // per-surface userdata. Per-surface callbacks (close_surface_cb,
+    // read/write clipboard) receive this pointer back so GhosttyHost can
+    // resolve a callback to the owning TerminalControl without scanning
+    // the surface map. Allocated immediately before SurfaceNew, freed in
+    // OnUnloaded after SurfaceFree so the GC cannot move or collect this
+    // control while libghostty still holds a reference.
+    private GCHandle _selfHandle;
+
+    /// <summary>
+    /// The per-window libghostty host that owns the config and app
+    /// handles. Must be assigned before the control loads.
+    /// </summary>
+    internal GhosttyHost? Host { get; set; }
+
+    // Raisers invoked by GhosttyHost after routing an action to this leaf.
+    internal void RaiseTitleChanged(string title) => TitleChanged?.Invoke(this, title);
+    internal void RaiseCloseRequested() => CloseRequested?.Invoke(this, EventArgs.Empty);
 
     // Events raised from the runtime action callback. They always fire
     // on the UI thread: the callback itself runs on libghostty's thread
@@ -62,38 +68,11 @@ public sealed partial class TerminalControl : UserControl
         if (_initialized) return;
         _initialized = true;
 
-        // ghostty_init is documented safe to call repeatedly.
-        NativeMethods.Init(UIntPtr.Zero, IntPtr.Zero);
+        if (Host is null)
+            throw new InvalidOperationException(
+                "TerminalControl.Host must be set before the control loads.");
 
-        // Skip CLI args: WinUI 3's entry point swallows them before we get
-        // here. Default config files are loaded from the standard locations.
-        _config = NativeMethods.ConfigNew();
-        NativeMethods.ConfigLoadDefaultFiles(_config);
-        NativeMethods.ConfigFinalize(_config);
-
-        // The Zig side requires non-null callbacks even if they are no-ops;
-        // storing each delegate in a field prevents GC from freeing it while
-        // libghostty still holds the pointer.
-        _wakeupCb = OnWakeup;
-        _actionCb = OnAction;
-        _readClipboardCb = OnReadClipboard;
-        _confirmReadClipboardCb = OnConfirmReadClipboard;
-        _writeClipboardCb = OnWriteClipboard;
-        _closeSurfaceCb = OnCloseSurface;
-
-        var runtime = new GhosttyRuntimeConfig
-        {
-            Userdata = IntPtr.Zero,
-            SupportsSelectionClipboard = false,
-            WakeupCb = Marshal.GetFunctionPointerForDelegate(_wakeupCb),
-            ActionCb = Marshal.GetFunctionPointerForDelegate(_actionCb),
-            ReadClipboardCb = Marshal.GetFunctionPointerForDelegate(_readClipboardCb),
-            ConfirmReadClipboardCb = Marshal.GetFunctionPointerForDelegate(_confirmReadClipboardCb),
-            WriteClipboardCb = Marshal.GetFunctionPointerForDelegate(_writeClipboardCb),
-            CloseSurfaceCb = Marshal.GetFunctionPointerForDelegate(_closeSurfaceCb),
-        };
-
-        _app = NativeMethods.AppNew(runtime, _config);
+        var app = Host.App;
 
         // Surface config. swap_chain_panel takes an ISwapChainPanelNative*
         //    which libghostty's DX12 device init uses synchronously (it calls
@@ -127,9 +106,19 @@ public sealed partial class TerminalControl : UserControl
         surfaceConfig.Command = _commandUtf8;
         surfaceConfig.InitialInput = _initialInputUtf8;
 
-        _surface = NativeMethods.SurfaceNew(_app, surfaceConfig);
+        // Pin a managed handle to `this` and pass it as per-surface userdata.
+        // libghostty echoes this pointer back through close_surface_cb and the
+        // clipboard callbacks; GhosttyHost decodes it via GCHandle.FromIntPtr
+        // to dispatch the callback to the right control. Use Normal (not
+        // Pinned) - we are not pinning bytes, only preventing GC collection
+        // of the managed object behind the IntPtr.
+        _selfHandle = GCHandle.Alloc(this, GCHandleType.Normal);
+        surfaceConfig.Userdata = GCHandle.ToIntPtr(_selfHandle);
+
+        _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
         // Drop our ref to the panel: libghostty did not retain it.
         SwapChainPanelInterop.Release(panelPtr);
+        Host.Register(_surface, this);
 
         // Prime the initial size when layout is actually settled.
         // SwapChainPanel.SizeChanged fires during the first layout pass,
@@ -195,17 +184,20 @@ public sealed partial class TerminalControl : UserControl
         // firing after teardown and pin the control via the closure.
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
 
-        // Tear down in reverse order. Each free is a no-op on a zero handle.
-        if (_surface.Handle != IntPtr.Zero) NativeMethods.SurfaceFree(_surface);
-        if (_app.Handle != IntPtr.Zero) NativeMethods.AppFree(_app);
-        if (_config.Handle != IntPtr.Zero) NativeMethods.ConfigFree(_config);
+        if (_surface.Handle != IntPtr.Zero)
+        {
+            Host?.Unregister(_surface);
+            NativeMethods.SurfaceFree(_surface);
+        }
+        // Free the GCHandle AFTER SurfaceFree: libghostty may still touch
+        // userdata during teardown (e.g. emitting a final event). Once
+        // SurfaceFree returns, no callback can fire on this surface.
+        if (_selfHandle.IsAllocated) _selfHandle.Free();
         if (_workingDirectoryUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_workingDirectoryUtf8);
         if (_commandUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_commandUtf8);
         if (_initialInputUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_initialInputUtf8);
 
         _surface = default;
-        _app = default;
-        _config = default;
         _workingDirectoryUtf8 = IntPtr.Zero;
         _commandUtf8 = IntPtr.Zero;
         _initialInputUtf8 = IntPtr.Zero;
@@ -223,84 +215,6 @@ public sealed partial class TerminalControl : UserControl
         Marshal.WriteByte(p, 0);
         return p;
     }
-
-    // Runtime callbacks --------------------------------------------------
-    //
-    // These fire on libghostty's thread. For this first pass we implement
-    // the minimum required to avoid null-deref on the Zig side. Marshaling
-    // back to the UI thread for things like clipboard and actions will be
-    // added when those features are wired.
-
-    private void OnWakeup(IntPtr userdata)
-    {
-        // Fires on libghostty's thread. Hop to the UI dispatcher so the
-        // tick (and any resulting draws) lands on the right queue.
-        //
-        // OnUnloaded also runs on the UI thread, so the dispatched lambda
-        // and the teardown are serialized: either Unloaded ran first and
-        // the lambda sees a zero handle, or the lambda ran first and
-        // Unloaded waits its turn. No lock needed.
-        var dq = DispatcherQueue;
-        if (dq is null) return;
-        dq.TryEnqueue(() =>
-        {
-            if (_app.Handle != IntPtr.Zero) NativeMethods.AppTick(_app);
-        });
-    }
-
-    private bool OnAction(GhosttyApp _, IntPtr targetPtr, IntPtr actionPtr)
-    {
-        // ghostty_action_s layout:
-        //   { int32 tag; <union> action; }
-        // The union is 8-byte aligned on x64 so it starts at offset 8.
-        // We read the tag first and only touch the union for variants we
-        // actually handle. Returning false for an unhandled tag lets the
-        // core fall back to its default behavior. We also return false on
-        // any path that fails to actually invoke the handler (null pointer,
-        // null dispatcher) so the core never thinks we handled an action
-        // we silently dropped.
-        if (actionPtr == IntPtr.Zero) return false;
-        var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
-
-        switch (tag)
-        {
-            case GhosttyActionTag.SetTitle:
-            {
-                // set_title_s is { const char* title }, so the first
-                // pointer-sized word of the union is the UTF-8 title.
-                var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
-                var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
-                var dq = DispatcherQueue;
-                if (dq is null) return false;
-                dq.TryEnqueue(() => TitleChanged?.Invoke(this, title));
-                return true;
-            }
-
-            case GhosttyActionTag.RingBell:
-            {
-                // MessageBeep is thread-safe; no dispatcher hop needed.
-                NativeMethods.MessageBeep(NativeMethods.MB_OK);
-                return true;
-            }
-
-            case GhosttyActionTag.CloseWindow:
-            {
-                var dq = DispatcherQueue;
-                if (dq is null) return false;
-                dq.TryEnqueue(() => CloseRequested?.Invoke(this, EventArgs.Empty));
-                return true;
-            }
-
-            default:
-                // Everything else falls back to libghostty defaults.
-                return false;
-        }
-    }
-
-    private bool OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state) => false;
-    private void OnConfirmReadClipboard(IntPtr userdata, IntPtr str, IntPtr state, GhosttyClipboardRequest req) { }
-    private void OnWriteClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr content, UIntPtr count, bool confirm) { }
-    private void OnCloseSurface(IntPtr userdata, bool processAlive) { }
 
     // Size / scale -------------------------------------------------------
 
@@ -367,7 +281,8 @@ public sealed partial class TerminalControl : UserControl
         if (_surface.Handle == IntPtr.Zero) return;
         _focused = focused;
         NativeMethods.SurfaceSetFocus(_surface, focused);
-        if (_app.Handle != IntPtr.Zero) NativeMethods.AppSetFocus(_app, focused);
+        var app = Host?.App ?? default;
+        if (app.Handle != IntPtr.Zero) NativeMethods.AppSetFocus(app, focused);
     }
 
     // Mouse --------------------------------------------------------------
