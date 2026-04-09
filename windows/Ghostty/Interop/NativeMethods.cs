@@ -225,14 +225,29 @@ internal struct GhosttyTarget
 // callback and the core uses its default behavior.
 //
 // Synced against include/ghostty.h @ 2598bef60. To verify after a rebase:
-//   grep -n GHOSTTY_ACTION_ include/ghostty.h | grep -nE 'SET_TITLE|CLOSE_WINDOW|RING_BELL'
+//   grep -n GHOSTTY_ACTION_ include/ghostty.h | grep -nE 'SCROLLBAR|SET_TITLE|CLOSE_WINDOW|RING_BELL|PROGRESS_REPORT'
 // and confirm the ordinal positions still match the values below.
 internal enum GhosttyActionTag
 {
+    Scrollbar = 26,
     SetTitle = 32,
     CloseWindow = 49,
     RingBell = 50,
     ProgressReport = 56,
+}
+
+// ghostty_action_scrollbar_s:
+//   { uint64 total; uint64 offset; uint64 len; }
+// All values are row counts. `total` is the number of rows in the
+// scrollback+viewport, `offset` is the top row currently visible, and
+// `len` is the number of visible rows. The scrollbar is "at rest" /
+// unnecessary when `total <= len`.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionScrollbar
+{
+    public ulong Total;
+    public ulong Offset;
+    public ulong Len;
 }
 
 // ghostty_action_progress_report_state_e ordinal values, matching
@@ -390,6 +405,23 @@ internal static partial class NativeMethods
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_mouse_scroll")]
     internal static extern void SurfaceMouseScroll(GhosttySurface surface, double x, double y, int scrollMods);
+
+    // ghostty_surface_binding_action takes a non-NUL-terminated UTF-8
+    // string plus length and runs it through input.Binding.Action.parse.
+    // Used to forward ScrollBar drag events back into libghostty as a
+    // "scroll_to_row:N" binding action — the same path GTK uses from
+    // its vadjustment value-changed signal (see src/apprt/gtk/class/
+    // surface.zig::vadjValueChanged).
+    // Raw-pointer overload for zero-alloc hot paths (scrollbar drag):
+    // caller owns the UTF-8 buffer (typically stackalloc'd) and passes
+    // its length in bytes. No NUL terminator required on the native
+    // side — libghostty takes (ptr, len).
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_binding_action")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern unsafe bool SurfaceBindingAction(
+        GhosttySurface surface,
+        byte* action,
+        UIntPtr actionLen);
 
     // ---- surface misc --------------------------------------------------
 
