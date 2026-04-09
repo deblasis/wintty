@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Ghostty.Controls;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
+using Ghostty.Core.Taskbar;
+using Ghostty.Taskbar;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Panes;
@@ -23,6 +25,9 @@ public sealed partial class MainWindow : Window
     private readonly GhosttyHost _host;
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
+    private TaskbarList3Facade? _taskbarFacade;
+    private TaskbarProgressCoordinator? _taskbarCoordinator;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _taskbarTickTimer;
     private readonly ITabHost _tabHost;
     private LeafPane? _activeLeaf;
 
@@ -106,8 +111,77 @@ public sealed partial class MainWindow : Window
 
         _tabManager.LastTabClosed += (_, _) => Close();
 
+        // Taskbar progress: wire a TaskbarProgressCoordinator through
+        // a real ITaskbarList3 facade, driven by a 2s DispatcherQueueTimer.
+        //
+        // Narrow try/catch on COMException only: if CoCreateInstance /
+        // HrInit genuinely fails (explorer down, session 0, etc.) the
+        // indicator is a nice-to-have and we keep the window alive.
+        // Any other exception (NRE, OOM, arg errors) is a real bug and
+        // we let it propagate so it is visible in debug and telemetry.
+        try
+        {
+            // Reuse the HWND resolved for the class-brush fix above.
+            var facade = new TaskbarList3Facade(hwnd);
+            var coord = new TaskbarProgressCoordinator(
+                _tabManager,
+                facade,
+                () => DateTime.UtcNow);
+            var timer = DispatcherQueue.CreateTimer();
+            timer.Interval = TimeSpan.FromSeconds(2);
+            timer.IsRepeating = true;
+            // Capture the coordinator locally rather than dereferencing
+            // the field via `!`, so a partially-torn-down state cannot
+            // NRE here.
+            timer.Tick += (_, _) => coord.Tick();
+            timer.Start();
+
+            _taskbarFacade = facade;
+            _taskbarCoordinator = coord;
+            _taskbarTickTimer = timer;
+
+            // Pause cycling when minimized so the taskbar does not
+            // churn while the window is hidden. AppWindow.Changed
+            // fires on presenter state transitions. Store the handler
+            // so Closed can detach it.
+            _appWindowChanged = (_, _) =>
+            {
+                if (this.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter op)
+                {
+                    if (op.State == Microsoft.UI.Windowing.OverlappedPresenterState.Minimized)
+                        coord.Pause();
+                    else
+                        coord.Resume();
+                }
+            };
+            this.AppWindow.Changed += _appWindowChanged;
+        }
+        catch (COMException ex)
+        {
+            // Log loudly in debug; in release the taskbar indicator is
+            // simply absent for this window's lifetime.
+            System.Diagnostics.Debug.WriteLine(
+                $"Taskbar progress wiring failed: 0x{ex.HResult:X8} {ex.Message}");
+            System.Diagnostics.Debug.Fail("Taskbar progress wiring failed", ex.ToString());
+        }
+
         Closed += (_, _) =>
         {
+            // Tear down the taskbar chain before disposing the host.
+            // Order: stop timer, detach window state handler, dispose
+            // coordinator (unhooks TabManager), dispose facade (releases
+            // the ITaskbarList3 RCW).
+            _taskbarTickTimer?.Stop();
+            if (_appWindowChanged is not null)
+            {
+                this.AppWindow.Changed -= _appWindowChanged;
+                _appWindowChanged = null;
+            }
+            _taskbarCoordinator?.Dispose();
+            _taskbarCoordinator = null;
+            _taskbarFacade?.Dispose();
+            _taskbarFacade = null;
+
             // Surface lifetime is decoupled from Loaded/Unloaded
             // (see TerminalControl.DisposeSurface), so we have to
             // free every leaf in every tab explicitly before tearing
