@@ -2,5 +2,22 @@
 <Application
     x:Class="Ghostty.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:tabs="using:Ghostty.Tabs">
+    <!--
+      Application.Resources here SHADOWS the framework's automatic
+      load of the WinUI 3 controls theme resources unless we
+      explicitly merge XamlControlsResources back in. Without the
+      merged dictionary, controls like TabView fail at construction
+      with "Cannot find a Resource with the Name/Key TabViewButtonBackground".
+    -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <controls:XamlControlsResources/>
+            </ResourceDictionary.MergedDictionaries>
+            <tabs:ProgressVisibilityConverter x:Key="ProgressVisibilityConverter"/>
+        </ResourceDictionary>
+    </Application.Resources>
 </Application>

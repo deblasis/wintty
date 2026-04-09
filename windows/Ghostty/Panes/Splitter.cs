@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Panes;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
