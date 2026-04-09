@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.VerticalTabStrip"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="Transparent">
+
+    <UserControl.Resources>
+
+        <!--
+            Collapsed row: 40x40 centered glyph, nothing else. The "T"
+            placeholder stays until plan 3 wires real per-profile icons.
+            TODO(plan3): replace the "T" with ProfileEntry icon glyph.
+        -->
+        <DataTemplate x:Key="CollapsedRowTemplate">
+            <!-- Width pinned to the collapsed strip width (40px) with
+                 HorizontalAlignment=Left so the row content sits in
+                 the same place whether the ListView is 40 or 220 wide.
+                 Without this, the row's content area grows with the
+                 ListView and TextBlock HorizontalAlignment=Center ends
+                 up at x≈110 once the strip is ever expanded. -->
+            <Grid Width="40" Height="40"
+                  HorizontalAlignment="Left"
+                  Background="Transparent"
+                  ToolTipService.ToolTip="{Binding EffectiveTitle}">
+                <TextBlock Text="T"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Foreground="White"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Grid>
+        </DataTemplate>
+
+        <!--
+            Expanded row: icon + title + close button. Close button
+            is shown whenever expanded (no hover reveal) because the
+            VSM targeting required to fade it lives in the container
+            template, not the item template, and the simpler visible-
+            always behavior matches Windows Terminal's vertical strip.
+        -->
+        <DataTemplate x:Key="ExpandedRowTemplate">
+            <Grid Height="32" Background="Transparent">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="28"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="28"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0"
+                           Text="T"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="White"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Column="1"
+                           Text="{Binding EffectiveTitle}"
+                           Foreground="White"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           Margin="6,0,4,0"/>
+
+                <Button Grid.Column="2"
+                        Width="22" Height="22"
+                        Padding="0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Right"
+                        Tag="{Binding}"
+                        Click="OnRowCloseClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE894;"
+                              FontSize="10"/>
+                </Button>
+            </Grid>
+        </DataTemplate>
+
+        <!--
+            Container style: overrides the default ListViewItem
+            template so we can (a) get hover/selected backgrounds
+            without relying on the stock accent fill and (b) paint
+            a 3px accent bar on the left edge when selected.
+        -->
+        <Style x:Key="VerticalRowContainerStyle" TargetType="ListViewItem">
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0,1,0,1"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="UseSystemFocusVisuals" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListViewItem">
+                        <Grid x:Name="RowRoot" Background="Transparent">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal"/>
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="RowBg.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="RowBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Selected">
+                                        <VisualState.Setters>
+                                            <Setter Target="RowBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                            <Setter Target="AccentBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PointerOverSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="RowBg.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                            <Setter Target="AccentBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PressedSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="RowBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                            <Setter Target="AccentBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+
+                            <!-- Border (not Rectangle) so VSM setters can
+                                 drive Background — Rectangle only has
+                                 Fill and the setter silently no-ops. -->
+                            <Border x:Name="RowBg" Background="Transparent"/>
+
+                            <!--
+                                Accent bar: painted inside the row itself,
+                                so its position follows the row's own
+                                layout. No LayoutUpdated polling needed.
+                            -->
+                            <Rectangle x:Name="AccentBar"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                       Visibility="Collapsed"/>
+
+                            <!-- TemplateBindings are required on the
+                                 ContentPresenter; without them the
+                                 container has no Content wired up and
+                                 every row renders empty. -->
+                            <!-- No inset margin: the row template
+                                 owns the full 40px column width so
+                                 the collapsed glyph actually centers
+                                 inside the column. A 6px ContentPresenter
+                                 margin on a 40px column leaves only
+                                 28px for content and the glyph ends
+                                 up outside the clip rectangle. -->
+                            <ContentPresenter
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                ContentTransitions="{TemplateBinding ContentTransitions}"
+                                HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Stretch"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+    </UserControl.Resources>
+
+    <Grid x:Name="StripRoot">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Button x:Name="ChevronButton"
+                Grid.Row="0"
+                Width="32" Height="32"
+                Margin="4"
+                Padding="0"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="OnChevronClick">
+            <FontIcon x:Name="ChevronIcon"
+                      FontFamily="{StaticResource SymbolThemeFontFamily}"
+                      Glyph="&#xE76C;"/>
+        </Button>
+
+        <ListView x:Name="TabList"
+                  Grid.Row="1"
+                  SelectionMode="Single"
+                  IsItemClickEnabled="False"
+                  Padding="0"
+                  ItemContainerStyle="{StaticResource VerticalRowContainerStyle}"
+                  ItemTemplate="{StaticResource CollapsedRowTemplate}"
+                  SelectionChanged="OnSelectionChanged"
+                  ScrollViewer.HorizontalScrollMode="Disabled"
+                  ScrollViewer.HorizontalScrollBarVisibility="Hidden"/>
+
+        <Button x:Name="NewTabButton"
+                Grid.Row="2"
+                Width="32" Height="32"
+                Margin="4"
+                Padding="0"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="OnNewTabClick">
+            <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE710;"/>
+        </Button>
+    </Grid>
+</UserControl>
