@@ -3,6 +3,17 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <!--
+      WinUI 3 + Windows App SDK does not support AnyCPU because the
+      shell loads native components (libghostty.dll, WinAppSDK
+      runtime). Declare the supported platforms explicitly and force
+      x64 as the default when MSBuild is invoked without an explicit
+      /p:Platform argument. This makes `dotnet build Ghostty.sln`
+      land output at bin/x64/Debug/... predictably and lets the
+      run-win recipe point at a stable path.
+    -->
+    <Platforms>x86;x64;ARM64</Platforms>
+    <Platform Condition="'$(Platform)' == 'AnyCPU' or '$(Platform)' == ''">x64</Platform>
     <RootNamespace>Ghostty</RootNamespace>
     <AssemblyName>Ghostty</AssemblyName>
     <UseWinUI>true</UseWinUI>
@@ -18,6 +29,10 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250602001" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
   </ItemGroup>
 
   <!--
