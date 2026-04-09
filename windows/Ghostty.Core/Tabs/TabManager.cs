@@ -30,15 +30,13 @@ internal sealed class TabManager
 {
     private readonly Func<IPaneHost> _paneHostFactory;
     private readonly ObservableCollection<TabModel> _tabs = new();
-    private readonly ReadOnlyObservableCollection<TabModel> _tabsView;
     private TabModel _activeTab = null!;
 
-    // Exposed as a ReadOnlyObservableCollection so WinUI can still bind
-    // ItemsSource directly (INotifyCollectionChanged is forwarded) but
-    // view code cannot mutate the collection out of band and bypass
-    // TabManager bookkeeping. Tests only use Count / indexer, which
-    // the read-only view exposes.
-    public ReadOnlyObservableCollection<TabModel> Tabs => _tabsView;
+    // Exposed as the concrete ObservableCollection so WinUI can bind
+    // ItemsSource directly and pick up INotifyCollectionChanged for
+    // free. Tests only depend on IReadOnlyList surface (Count, indexer),
+    // which ObservableCollection satisfies.
+    public ObservableCollection<TabModel> Tabs => _tabs;
     public TabModel ActiveTab => _activeTab;
 
     /// <summary>
@@ -59,7 +57,6 @@ internal sealed class TabManager
     public TabManager(Func<IPaneHost> paneHostFactory)
     {
         _paneHostFactory = paneHostFactory;
-        _tabsView = new ReadOnlyObservableCollection<TabModel>(_tabs);
         var first = CreateTab();
         _tabs.Add(first);
         _activeTab = first;
