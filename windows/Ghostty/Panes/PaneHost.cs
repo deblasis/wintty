@@ -87,6 +87,35 @@ internal sealed class PaneHost : UserControl, IPaneHost
     public event EventHandler<LeafPane>? LeafFocused;
 
     /// <summary>
+    /// Raised when the active leaf's <c>TerminalControl</c> reports a
+    /// new OSC 9;4 state. Rewires across leaf-focus changes so only
+    /// the currently active leaf drives the tab-level indicator.
+    /// </summary>
+    public event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
+
+    // The leaf whose terminal we are currently subscribed to for
+    // progress updates. Swapped in BindActiveLeafProgress whenever
+    // the active leaf changes.
+    private TerminalControl? _progressBoundTerminal;
+
+    private void BindActiveLeafProgress()
+    {
+        var next = _activeLeaf.Terminal();
+        if (ReferenceEquals(next, _progressBoundTerminal)) return;
+        if (_progressBoundTerminal is not null)
+            _progressBoundTerminal.ProgressChanged -= OnActiveLeafProgressChanged;
+        _progressBoundTerminal = next;
+        next.ProgressChanged += OnActiveLeafProgressChanged;
+        // Re-emit the new leaf's last known state so subscribers see
+        // a correct value immediately after a focus change — without
+        // this the tab would stay stuck on the previous leaf's progress.
+        ProgressChanged?.Invoke(this, next.CurrentProgress);
+    }
+
+    private void OnActiveLeafProgressChanged(object? sender, Ghostty.Core.Tabs.TabProgressState state)
+        => ProgressChanged?.Invoke(this, state);
+
+    /// <summary>
     /// Raised when the last leaf in the tree closes. Subscribers should
     /// close the window.
     /// </summary>
@@ -174,7 +203,13 @@ internal sealed class PaneHost : UserControl, IPaneHost
 
         // Defer the first LeafFocused so subscribers (MainWindow) can
         // wire up before the event fires.
-        Loaded += (_, _) => LeafFocused?.Invoke(this, _activeLeaf);
+        Loaded += (_, _) =>
+        {
+            BindActiveLeafProgress();
+            LeafFocused?.Invoke(this, _activeLeaf);
+        };
+        // Rebind progress whenever the active leaf changes later.
+        LeafFocused += (_, _) => BindActiveLeafProgress();
     }
 
     // Public operations -------------------------------------------------
