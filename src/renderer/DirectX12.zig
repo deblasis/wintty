@@ -49,7 +49,7 @@ pub const dxgi = @import("directx12/dxgi.zig");
 
 pub const custom_shader_target: shadertoy.Target = .hlsl;
 
-/// DX12 uses top-left origin, same as Metal and DX11.
+/// DX12 uses top-left origin, same as Metal.
 pub const custom_shader_y_is_down = true;
 
 /// Triple buffering for DX12, matching Metal's swap chain depth.
@@ -134,9 +134,9 @@ pending_frame_index: u32 = 0,
 /// Desired surface dimensions, updated by setTargetSize.
 ///
 /// DX12 uses composition swap chains for all surface types (HWND via
-/// DirectComposition, SwapChainPanel via XAML). Unlike DX11's GetClientRect
-/// path, there is no way to query the actual window size from within the
-/// renderer -- the apprt must forward it via setTargetSize.
+/// DirectComposition, SwapChainPanel via XAML). Composition swap chains
+/// have no HWND to query for size, so the apprt must forward the window
+/// dimensions via setTargetSize.
 ///
 /// Width and height are packed into a single u64 (high 32 = width, low 32
 /// = height) so we can store/load both atomically. setTargetSize is invoked
@@ -518,7 +518,7 @@ pub fn initShaders(
 
 /// Called by the apprt (via generic.zig) when the surface is resized.
 /// This is the only resize signal DX12 gets -- composition swap chains
-/// have no equivalent of DX11's GetClientRect-based windowSize().
+/// have no HWND to query, so the apprt must forward the size.
 ///
 /// IMPORTANT: this is invoked synchronously from `ghostty_surface_set_size`,
 /// which the WinUI 3 shell calls on the C# UI thread for every SizeChanged
@@ -662,9 +662,8 @@ pub inline fn beginFrame(
     renderer: *Renderer,
     target: *Target,
 ) !Frame {
-    // self is *const to match the GraphicsAPI contract (Metal, OpenGL, DX11
-    // all use *const). Mutable access goes through renderer.api, same pattern
-    // as DX11.
+    // self is *const to match the GraphicsAPI contract (Metal and OpenGL
+    // both use *const). Mutable access goes through renderer.api.
     _ = self;
     const api: *DirectX12 = &renderer.api;
     if (api.device_lost) return error.DeviceLost;
