@@ -1,4 +1,4 @@
-// Cell grid shader for the DX11 SwapChainPanel spike.
+// Cell grid shader for the DX12 renderer.
 //
 // Renders a terminal-like grid of cells using instanced drawing.
 // Each cell instance provides bg/fg colors and a glyph index.
