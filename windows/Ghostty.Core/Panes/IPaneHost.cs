@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Tabs;
 
 namespace Ghostty.Core.Panes;
 
@@ -25,6 +26,13 @@ internal interface IPaneHost
 
     /// <summary>Raised when the last leaf in the tree closes.</summary>
     event EventHandler? LastLeafClosed;
+
+    /// <summary>Raised when the active leaf reports a progress state
+    /// change via OSC 9;4. Only the active leaf's progress is
+    /// forwarded — background panes update their own
+    /// <c>TerminalControl.CurrentProgress</c> but do not drive the
+    /// tab-level indicator.</summary>
+    event EventHandler<TabProgressState>? ProgressChanged;
 
     /// <summary>Close the currently active pane.</summary>
     void CloseActive();

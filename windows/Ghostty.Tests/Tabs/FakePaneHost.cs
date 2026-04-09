@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Tabs;
 
 namespace Ghostty.Tests.Tabs;
 
@@ -22,6 +23,10 @@ internal sealed class FakePaneHost : IPaneHost
 
     public event EventHandler<LeafPane>? LeafFocused;
     public event EventHandler? LastLeafClosed;
+    public event EventHandler<TabProgressState>? ProgressChanged;
+
+    public void RaiseProgressChanged(TabProgressState state)
+        => ProgressChanged?.Invoke(this, state);
 
     public void CloseActive()
     {
