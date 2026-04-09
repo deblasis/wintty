@@ -376,17 +376,45 @@ public sealed partial class TerminalControl : UserControl
         NativeMethods.SurfaceMousePos(_surface, pt.X, pt.Y, CurrentMods());
     }
 
+    // libghostty's ScrollMods is a u8 packed struct (src/input/mouse.zig):
+    //   bit 0       : precision (bool) — high-precision/pixel scroll
+    //   bits 1..3   : momentum (u3 enum) — inertial phase (macOS-only today)
+    //   bits 4..7   : padding
+    // WinUI 3 does not surface AppKit-style momentum phases, so we only
+    // set the precision bit. Momentum stays .none (0).
+    private const int ScrollModsPrecision = 0b0000_0001;
+
     private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero) return;
         var pt = e.GetCurrentPoint(Panel);
-        var delta = pt.Properties.MouseWheelDelta / 120.0;  // 120 = one notch
+        var rawDelta = pt.Properties.MouseWheelDelta;
         var isHorizontal = pt.Properties.IsHorizontalMouseWheel;
+
+        // Detect precision input (touchpad) vs discrete mouse wheel.
+        // PointerDeviceType.Touchpad is only reported when the user has a
+        // precision-touchpad driver; legacy touchpads masquerade as Mouse
+        // and correctly fall through to the discrete branch below.
+        //
+        // Precision path: Surface.zig treats the offset as pixels and
+        // applies mouse_scroll_multiplier.precision. Windows touchpads
+        // report small sub-WHEEL_DELTA values (~8..40 per frame) which
+        // map reasonably to pixel counts, so we pass the raw delta
+        // through without the /120 normalization used for wheels.
+        //
+        // Discrete wheel path: 120 units = one notch (WHEEL_DELTA).
+        // Surface.zig multiplies this by cell_size * discrete multiplier.
+        var (delta, scrollMods) = pt.PointerDeviceType switch
+        {
+            PointerDeviceType.Touchpad => ((double)rawDelta, ScrollModsPrecision),
+            _ => (rawDelta / 120.0, 0),
+        };
+
         NativeMethods.SurfaceMouseScroll(
             _surface,
             isHorizontal ? delta : 0.0,
             isHorizontal ? 0.0 : delta,
-            0);  // scroll mods packed bitfield - wire when we need them
+            scrollMods);
     }
 
     private void SendMouseButton(PointerRoutedEventArgs e, GhosttyMouseState state)
