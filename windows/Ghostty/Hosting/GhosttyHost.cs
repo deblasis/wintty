@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Ghostty.Clipboard;
 using Ghostty.Controls;
 using Ghostty.Core.Clipboard;
+using Ghostty.Core.Interop;
 using Ghostty.Interop;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;

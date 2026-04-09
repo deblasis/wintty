@@ -8,6 +8,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using Ghostty.Core.Interop;
 
 namespace Ghostty.Interop;
 
@@ -218,60 +219,15 @@ internal struct GhosttyTarget
     [FieldOffset(8)] public IntPtr Surface;
 }
 
-// Subset of ghostty_action_tag_e from include/ghostty.h that we actually
-// dispatch on. Indices are pinned explicitly to the upstream values so a
-// reorder upstream cannot silently misroute one tag to another handler -
-// any tag we don't list falls through to "return false" in the action
-// callback and the core uses its default behavior.
+// GhosttyActionTag, GhosttyActionScrollbar, GhosttyProgressState, and
+// GhosttyActionProgressReport now live in Ghostty.Core.Interop so
+// Ghostty.Tests (pure net9.0, no WinAppSDK) can pin their ordinals and
+// struct sizes. Call sites in GhosttyHost see them unchanged via the
+// `using Ghostty.Core.Interop;` at the top of this file.
 //
-// Synced against include/ghostty.h @ 2598bef60. To verify after a rebase:
-//   grep -n GHOSTTY_ACTION_ include/ghostty.h | grep -nE 'SCROLLBAR|SET_TITLE|CLOSE_WINDOW|RING_BELL|PROGRESS_REPORT'
-// and confirm the ordinal positions still match the values below.
-internal enum GhosttyActionTag
-{
-    Scrollbar = 26,
-    SetTitle = 32,
-    CloseWindow = 49,
-    RingBell = 50,
-    ProgressReport = 56,
-}
-
-// ghostty_action_scrollbar_s:
-//   { uint64 total; uint64 offset; uint64 len; }
-// All values are row counts. `total` is the number of rows in the
-// scrollback+viewport, `offset` is the top row currently visible, and
-// `len` is the number of visible rows. The scrollbar is "at rest" /
-// unnecessary when `total <= len`.
-[StructLayout(LayoutKind.Sequential)]
-internal struct GhosttyActionScrollbar
-{
-    public ulong Total;
-    public ulong Offset;
-    public ulong Len;
-}
-
-// ghostty_action_progress_report_state_e ordinal values, matching
-// the enum in include/ghostty.h around line 850. Do not reorder —
-// these are read by value out of the action payload.
-internal enum GhosttyProgressState
-{
-    Remove = 0,
-    Set = 1,
-    Error = 2,
-    Indeterminate = 3,
-    Pause = 4,
-}
-
-// ghostty_action_progress_report_s:
-//   { int32 state; int8 progress; /* -1 if none, else 0..100 */ }
-// Marshalled manually in GhosttyHost since the action union layout
-// places this at a known offset inside the larger action struct.
-[StructLayout(LayoutKind.Sequential)]
-internal struct GhosttyActionProgressReport
-{
-    public int State;
-    public sbyte Progress;
-}
+// See GhosttyActionsLayoutTests in Ghostty.Tests for the build-time
+// assertions and the grep command for re-verifying against
+// include/ghostty.h after a libghostty rebase.
 
 // ghostty_action_set_title_s { const char* title; }
 // We only read .title; the struct is declared so the offset is explicit.
