@@ -2542,9 +2542,12 @@ keybind: Keybinds = .{},
 /// `primary` on Linux and `clipboard` on macOS, and `false` is an alias for
 /// `none`.
 ///
-/// The default value is `primary` on Linux and `none` otherwise.
+/// The default value is `primary` on Linux, and `clipboard` on macOS and
+/// Windows, which have no selection clipboard to copy to.
 @"copy-on-select": CopyOnSelect = switch (builtin.os.tag) {
     .linux => .primary,
+    .macos => .clipboard,
+    .windows => .clipboard,
     else => .none,
 },
 
