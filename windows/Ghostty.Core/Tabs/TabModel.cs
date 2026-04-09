@@ -70,6 +70,14 @@ internal sealed class TabModel : INotifyPropertyChanged
         PaneHost = paneHost;
     }
 
+    /// <summary>
+    /// Disposer assigned by <see cref="TabManager.CreateTab"/> so
+    /// <see cref="TabManager.CloseTab"/> can unwire the per-tab
+    /// <c>IPaneHost.ProgressChanged</c> handler captured as a local
+    /// closure, without maintaining a side dictionary.
+    /// </summary>
+    internal Action? OnClose { get; set; }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Raise([CallerMemberName] string? name = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
