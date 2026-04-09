@@ -23,6 +23,14 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!--
+      Allow [GeneratedComInterface] types to interop with the few
+      remaining [ComImport] surfaces (e.g. WinRT projections, the
+      ISwapChainPanelNative shim) during the transition to fully
+      AOT-safe COM. The interop shim is on by default in .NET 9 but
+      we set it explicitly so the contract is documented in the csproj.
+    -->
+    <EnableGeneratedComInterfaceComImportInterop>true</EnableGeneratedComInterfaceComImportInterop>
   </PropertyGroup>
 
   <ItemGroup>
