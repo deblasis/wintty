@@ -251,13 +251,11 @@ internal enum GhosttyProgressState
 //   { int32 state; int8 progress; /* -1 if none, else 0..100 */ }
 // Marshalled manually in GhosttyHost since the action union layout
 // places this at a known offset inside the larger action struct.
-// Pinned offsets rather than LayoutKind.Sequential so any future
-// upstream reorder fails at build time rather than silently misreading.
-[StructLayout(LayoutKind.Explicit, Size = 8)]
+[StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyActionProgressReport
 {
-    [FieldOffset(0)] public int State;
-    [FieldOffset(4)] public sbyte Progress;
+    public int State;
+    public sbyte Progress;
 }
 
 // ghostty_action_set_title_s { const char* title; }
