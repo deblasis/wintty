@@ -6,55 +6,19 @@
     RequestedTheme="Dark"
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch">
+    <!-- Sidebar-only after #171. The title bar (with the active-tab
+         title text and the switch-layout button) moved up to
+         MainWindow so it can span the full window width even when
+         this UserControl is constrained to the strip column. -->
     <Grid Background="Transparent">
-        <Grid.RowDefinitions>
-            <!-- 40px title-bar grab row for window drag + caption buttons inset -->
-            <RowDefinition Height="Auto"/>
-            <!-- strip + content -->
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="StripColumn" Width="40"/>
+        </Grid.ColumnDefinitions>
 
-        <!-- Drag region for SetTitleBar: a 32px strip at the top of
-             the window, left-aligned, with a right-side spacer for
-             the caption buttons. -->
-        <Grid x:Name="TitleBarRow" Grid.Row="0" Height="32">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="146"/>
-            </Grid.ColumnDefinitions>
-            <Grid x:Name="CustomDragRegion" Grid.Column="0" Background="Transparent">
-                <TextBlock x:Name="TitleText"
-                           VerticalAlignment="Center"
-                           HorizontalAlignment="Center"
-                           FontSize="12"
-                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                           TextTrimming="CharacterEllipsis"
-                           IsHitTestVisible="False"/>
-            </Grid>
-        </Grid>
+        <ContentPresenter x:Name="StripHost" Grid.Column="0"/>
 
-        <!-- Row 1: strip in column 0, active PaneHost container in column 1. -->
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="StripColumn" Width="40"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <ContentPresenter x:Name="StripHost" Grid.Column="0"/>
-
-            <!-- Grid host for the drag handle, right-aligned inside
-                 the strip column. Was originally a Canvas — Canvas
-                 ignores HorizontalAlignment on children, so the
-                 handle rendered at (0,0) with zero position and was
-                 invisible in practice. -->
-            <Grid x:Name="HandleHost"
-                  Grid.Column="0"
-                  HorizontalAlignment="Right"/>
-
-            <Grid x:Name="PaneHostContainer"
-                  Grid.Column="1"
-                  HorizontalAlignment="Stretch"
-                  VerticalAlignment="Stretch"/>
-        </Grid>
+        <Grid x:Name="HandleHost"
+              Grid.Column="0"
+              HorizontalAlignment="Right"/>
     </Grid>
 </UserControl>

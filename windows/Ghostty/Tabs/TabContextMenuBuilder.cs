@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
+using Ghostty.Dialogs;
+using Ghostty.Input;
+using Ghostty.Settings;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Ghostty.Tabs;
@@ -18,7 +21,12 @@ namespace Ghostty.Tabs;
 /// </summary>
 internal static class TabContextMenuBuilder
 {
-    public static MenuFlyout Build(TabManager manager, TabModel tab, Func<TabModel, Task> requestClose)
+    public static MenuFlyout Build(
+        TabManager manager,
+        TabModel tab,
+        Func<TabModel, Task> requestClose,
+        PaneActionRouter router,
+        DialogTracker dialogs)
     {
         var flyout = new MenuFlyout();
 
@@ -41,15 +49,33 @@ internal static class TabContextMenuBuilder
 
         flyout.Items.Add(new MenuFlyoutSeparator());
 
+        // Runtime tab layout switch. The label flips based on the
+        // currently persisted setting so users see where they will
+        // end up. Dispatches via PaneActionRouter so MainWindow's
+        // single ToggleTabLayout entry point is the only place that
+        // actually flips state.
+        var settings = UiSettings.Load();
+        var switchLayout = new MenuFlyoutItem
+        {
+            Text = settings.VerticalTabs ? "Switch to horizontal tabs" : "Switch to vertical tabs",
+        };
+        switchLayout.Click += (_, _) => router.RequestToggleTabLayout();
+        flyout.Items.Add(switchLayout);
+
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
         var rename = new MenuFlyoutItem { Text = "Rename Tab" };
         rename.Click += async (_, _) =>
         {
             var target = flyout.Target;
             if (target?.XamlRoot is null) return;
             var dlg = new RenameTabDialog(tab.UserOverrideTitle) { XamlRoot = target.XamlRoot };
-            var res = await dlg.ShowAsync();
-            if (res == ContentDialogResult.Primary)
-                tab.UserOverrideTitle = string.IsNullOrWhiteSpace(dlg.Result) ? null : dlg.Result;
+            using (dialogs.Track(dlg))
+            {
+                var res = await dlg.ShowAsync();
+                if (res == ContentDialogResult.Primary)
+                    tab.UserOverrideTitle = string.IsNullOrWhiteSpace(dlg.Result) ? null : dlg.Result;
+            }
         };
         flyout.Items.Add(rename);
 

@@ -35,15 +35,14 @@
         the swap chain attachment survives indefinitely. This matches
         the pattern VerticalTabStrip will use in plan 2.
     -->
-    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
-
+    <!-- PaneHostContainer used to live here as Row 1 but the runtime
+         layout switch (#171) moved it up to MainWindow.RootGrid so
+         both tab hosts can share a single container without ever
+         reparenting the SwapChainPanels. This UserControl now renders
+         only the tab strip chrome. -->
+    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Top">
         <controls:TabView
             x:Name="TabViewControl"
-            Grid.Row="0"
             HorizontalAlignment="Stretch"
             CanReorderTabs="True"
             CanDragTabs="True"
@@ -53,6 +52,24 @@
             TabCloseRequested="OnTabCloseRequested"
             SelectionChanged="OnSelectionChanged"
             TabDragCompleted="OnTabDragCompleted">
+            <!-- Small button on the left side of the strip that
+                 switches to the vertical layout. Lives in the
+                 TabStripHeader slot (before the tabs) so it does not
+                 compete with the system caption buttons in the
+                 footer. -->
+            <controls:TabView.TabStripHeader>
+                <Button x:Name="SwitchToVerticalButton"
+                        Width="32" Height="32"
+                        Padding="0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Switch to vertical tabs (Ctrl+Shift+Alt+V)"
+                        Click="OnSwitchLayoutClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE89F;"
+                              FontSize="14"/>
+                </Button>
+            </controls:TabView.TabStripHeader>
             <!--
                 TabStripFooter is a right-side spacer that reserves
                 room for the OS caption buttons (min / max / close)
@@ -73,10 +90,5 @@
                       Background="Transparent"/>
             </controls:TabView.TabStripFooter>
         </controls:TabView>
-
-        <Grid x:Name="PaneHostContainer"
-              Grid.Row="1"
-              HorizontalAlignment="Stretch"
-              VerticalAlignment="Stretch"/>
     </Grid>
 </UserControl>
