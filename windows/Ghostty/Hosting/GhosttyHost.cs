@@ -219,6 +219,30 @@ internal sealed class GhosttyHost : IDisposable
                 return true;
             }
 
+            case GhosttyActionTag.Scrollbar:
+            {
+                // ghostty_action_scrollbar_s sits at union offset 8.
+                // Layout is authoritative in GhosttyActionScrollbar;
+                // read it as a single blit instead of three offset
+                // reads so the struct declaration is the single source
+                // of truth.
+                GhosttyActionScrollbar s;
+                unsafe
+                {
+                    s = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionScrollbar>(
+                        (void*)(actionPtr + 8));
+                }
+
+                // TerminalControl coalesces updates on its own side
+                // and hops to the UI thread with a cached delegate,
+                // so we don't need the dispatcher here — just resolve
+                // the surface and hand off. If the surface has already
+                // been disposed we silently drop the update.
+                if (_surfaces.TryGetValue(surfaceHandle, out var c))
+                    c.QueueScrollbarChanged(s.Total, s.Offset, s.Len);
+                return true;
+            }
+
             case GhosttyActionTag.ProgressReport:
             {
                 // ghostty_action_progress_report_s sits at union offset 8
