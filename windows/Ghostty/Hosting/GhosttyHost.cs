@@ -25,6 +25,23 @@ internal sealed class GhosttyHost : IDisposable
     private GhosttyConfig _config;
     private GhosttyApp _app;
 
+    /// <summary>
+    /// Monotonic millisecond tick of the most recent key event seen by
+    /// any <see cref="Ghostty.Controls.TerminalControl"/> bound to this
+    /// host. Read by <see cref="Tabs.VerticalTabHost"/>'s hover-expand
+    /// suppression to decide whether the user is mid-typing (popping
+    /// the sidebar in that case would feel jarring and could interfere
+    /// with an IME composition).
+    ///
+    /// <see cref="Environment.TickCount64"/> rather than
+    /// <see cref="DateTime.UtcNow"/>: monotonic, immune to NTP / DST
+    /// jumps, and a single read instead of a DateTime allocation on
+    /// every keystroke.
+    /// </summary>
+    public long LastKeystrokeTick { get; private set; } = long.MinValue / 2;
+
+    internal void NoteKeystroke() => LastKeystrokeTick = Environment.TickCount64;
+
     // Delegates must be retained as fields; P/Invoke hands out native
     // function pointers the GC cannot track.
     private GhosttyWakeupCb? _wakeupCb;

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Ghostty.Panes;
+namespace Ghostty.Core.Panes;
 
 /// <summary>
 /// Pure tree operations on <see cref="PaneNode"/>. Visitor helpers and

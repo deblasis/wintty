@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!--
+      Plain net9.0. No Windows App SDK targets, no PRI/MRT, no WinUI.
+      This assembly holds pure-logic types that both the WinUI shell
+      (Ghostty.csproj) and the test project (Ghostty.Tests.csproj)
+      reference normally via ProjectReference.
+
+      Goal: tests run against the real production types, not against
+      hand-written stubs that drift. The previous PaneStubs.cs +
+      Compile Include trick is replaced by this assembly.
+    -->
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>Ghostty.Core</RootNamespace>
+    <AssemblyName>Ghostty.Core</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- InternalsVisibleTo as MSBuild items rather than [assembly: ...]
+       attributes in a source file: the attribute form relies on a
+       specific file staying in the project and on usings preceding
+       namespaces, both of which rot silently. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ghostty" />
+    <InternalsVisibleTo Include="Ghostty.Tests" />
+  </ItemGroup>
+</Project>

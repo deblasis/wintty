@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.TabHost"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    RequestedTheme="Dark"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch"
+    HorizontalContentAlignment="Stretch"
+    VerticalContentAlignment="Stretch">
+    <!--
+        Two-row layout:
+        - Row 0: TabView used ONLY as a tab strip (TabViewItem.Content
+          is null on every item). The strip handles drag-reorder, the
+          add/close X buttons, and the visual tab UI.
+        - Row 1: PaneHostContainer is a Grid that owns the active tab's
+          PaneHost AS A SIBLING of every other tab's PaneHost. All
+          PaneHosts live here from creation to close; only Visibility
+          toggles when the active tab changes. They are NEVER reparented.
+
+        Why: TerminalControl's SwapChainPanel binds the libghostty
+        surface to a DXGI swap chain via SetSwapChain ONCE at SurfaceNew
+        time and never re-binds. If WinUI 3 unloads the SwapChainPanel
+        (which happens whenever its parent's content presenter swaps,
+        including during TabView's initial layout), the underlying
+        DirectComposition visual is torn down and recreated with no
+        swap chain attached. Frames continue rendering into the
+        original DXGI swap chain — completely invisible because the new
+        DCOMP visual has nothing to compose. The renderer log looks
+        healthy ("screen size = 800x600"), the build is clean, but the
+        screen is black.
+
+        Toggling Visibility on a sibling does NOT fire Unloaded, so
+        the swap chain attachment survives indefinitely. This matches
+        the pattern VerticalTabStrip will use in plan 2.
+    -->
+    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <controls:TabView
+            x:Name="TabViewControl"
+            Grid.Row="0"
+            HorizontalAlignment="Stretch"
+            CanReorderTabs="True"
+            CanDragTabs="True"
+            TabWidthMode="Equal"
+            IsAddTabButtonVisible="True"
+            AddTabButtonClick="OnAddTabButtonClick"
+            TabCloseRequested="OnTabCloseRequested"
+            SelectionChanged="OnSelectionChanged"
+            TabDragCompleted="OnTabDragCompleted">
+            <!--
+                TabStripFooter is a right-side spacer that reserves
+                room for the OS caption buttons (min / max / close)
+                when the window extends content into the title bar.
+                MainWindow calls SetTitleBar(CustomDragRegion) so
+                clicks on the empty strip area drag the window.
+
+                Width is hardcoded to 146 DIPs here which matches the
+                standard Windows 11 caption button width at 100%
+                scale. TODO(titlebar): bind to
+                AppWindow.TitleBar.RightInset / RasterizationScale at
+                runtime so the footer tracks DPI and high-contrast
+                variants that resize the caption buttons.
+            -->
+            <controls:TabView.TabStripFooter>
+                <Grid x:Name="CustomDragRegion"
+                      MinWidth="146"
+                      Background="Transparent"/>
+            </controls:TabView.TabStripFooter>
+        </controls:TabView>
+
+        <Grid x:Name="PaneHostContainer"
+              Grid.Row="1"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Stretch"/>
+    </Grid>
+</UserControl>

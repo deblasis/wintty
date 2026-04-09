@@ -1,4 +1,4 @@
-using Ghostty.Panes;
+using Ghostty.Core.Panes;
 using Xunit;
 
 namespace Ghostty.Tests;
