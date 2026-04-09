@@ -1,35 +1,59 @@
 using System;
 using System.Runtime.InteropServices;
-using Ghostty.Controls;
-using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
-using Ghostty.Core.Taskbar;
-using Ghostty.Taskbar;
+using Ghostty.Dialogs;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Panes;
+using Ghostty.Settings;
+using Ghostty.Shell;
 using Ghostty.Tabs;
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Composition.SystemBackdrops;
-using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Windows.System;
 using WinRT.Interop;
 
 namespace Ghostty;
 
+/// <summary>
+/// Composition root for the WinUI 3 shell. MainWindow holds the
+/// XAML structural elements (declared in MainWindow.xaml), wires
+/// the libghostty host, the tab manager, the two tab hosts, the
+/// pane action router, and three coordinators that own the rest
+/// of the cross-cutting plumbing:
+///
+///   - <see cref="LayoutCoordinator"/> handles the runtime switch
+///     between horizontal and vertical layouts (cross-fade
+///     Storyboard + strip-column tween + concurrent-tween guard).
+///   - <see cref="TitleBarCoordinator"/> owns the title bar
+///     drag-region selection, the caption-inset DPI sync, the
+///     active-leaf TitleChanged hook, and the vertical-mode title
+///     TextBlock binding.
+///   - <see cref="TaskbarHost"/> wires the Ghostty.Core taskbar
+///     progress coordinator into ITaskbarList3.
+///
+/// MainWindow itself only owns construction order, the dialog
+/// tracker, the keyboard accelerator install, and the Win32 class
+/// brush hack for resize flicker.
+/// </summary>
 public sealed partial class MainWindow : Window
 {
     private readonly GhosttyHost _host;
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
-    private TaskbarList3Facade? _taskbarFacade;
-    private TaskbarProgressCoordinator? _taskbarCoordinator;
-    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _taskbarTickTimer;
-    private readonly ITabHost _tabHost;
-    private LeafPane? _activeLeaf;
+    private readonly PaneActionRouter _router;
+    private readonly DialogTracker _dialogs = new();
+    private readonly UiSettings _uiSettings;
+
+    private readonly TabHost _horizontalTabHost;
+    private readonly VerticalTabHost _verticalTabHost;
+    private ITabHost _tabHost;
+
+    private readonly LayoutCoordinator _layout;
+    private readonly TitleBarCoordinator _titleBar;
+    private readonly TaskbarHost _taskbar;
 
     // Dedup guard for KeyboardAccelerator double-dispatch. WinUI 3
     // fires accelerator Invoked twice for a single key event when the
@@ -85,165 +109,157 @@ public sealed partial class MainWindow : Window
 
         // Extend content into the title bar: remove the system-drawn
         // title bar chrome and let TabHost's TabView strip render
-        // where the title bar used to be. The caption buttons
-        // (min / max / close) are still drawn by the system on the
-        // right; TabView's TabStripFooter reserves room for them.
-        // Must be set before the TabHost is parented so the content
-        // area is sized without the default title bar row.
+        // where the title bar used to be. Must be set before the
+        // TabHost is parented so the content area is sized without
+        // the default title bar row.
         ExtendsContentIntoTitleBar = true;
 
         _factory = new PaneHostFactory(_host);
         _tabManager = new TabManager(() => _factory.Create());
-        _tabHost = CreateTabHost(_tabManager);
-        RootGrid.Children.Add(_tabHost.HostElement);
+        _router = new PaneActionRouter(_tabManager);
+        _uiSettings = UiSettings.Load();
 
-        // Declare the drag region AFTER _tabHost is in the visual
-        // tree so DragRegion (the TabStripFooter Grid) is live.
-        // Clicking anywhere in that Grid drags the window; the tabs
-        // themselves are hit-test targets and remain interactive.
-        SetTitleBar(_tabHost.DragRegion as FrameworkElement);
+        _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
+        _verticalTabHost = new VerticalTabHost(_tabManager, _router, _dialogs, _host);
+
+        // Place both tab hosts in their RootGrid slots. The
+        // horizontal host spans both columns in row 0 so its TabView
+        // strip can grow under the title bar area; the vertical host
+        // anchors at col 0 and spans both rows.
+        Grid.SetRow((FrameworkElement)_horizontalTabHost.HostElement, 0);
+        Grid.SetColumn((FrameworkElement)_horizontalTabHost.HostElement, 0);
+        Grid.SetColumnSpan((FrameworkElement)_horizontalTabHost.HostElement, 2);
+        RootGrid.Children.Add(_horizontalTabHost.HostElement);
+
+        Grid.SetRow(_verticalTabHost, 0);
+        Grid.SetColumn(_verticalTabHost, 0);
+        Grid.SetRowSpan(_verticalTabHost, 2);
+        RootGrid.Children.Add(_verticalTabHost);
+
+        // Parent every existing and future PaneHost into the shared
+        // container declared in MainWindow.xaml. This is the single
+        // owner for PaneHost lifetime in the visual tree — both tab
+        // hosts read from it without ever reparenting.
+        foreach (var t in _tabManager.Tabs) AddPaneHost(t);
+        SwapActivePane();
+        _tabManager.TabAdded += (_, t) => { AddPaneHost(t); SwapActivePane(); };
+        _tabManager.TabRemoved += (_, t) => RemovePaneHost(t);
+        _tabManager.ActiveTabChanged += (_, _) => SwapActivePane();
+
+        // Tooltip chord label is sourced from KeyBindings.Default so
+        // the button description cannot drift from the accelerator.
+        var chord = KeyBindings.Default.Label(PaneAction.ToggleTabLayout);
+        ToolTipService.SetToolTip(
+            VerticalSwitchButton,
+            chord is null
+                ? "Switch to horizontal tabs"
+                : $"Switch to horizontal tabs ({chord})");
+
+        _tabHost = _uiSettings.VerticalTabs ? _verticalTabHost : _horizontalTabHost;
+
+        _layout = new LayoutCoordinator(
+            StripColumn,
+            (FrameworkElement)_horizontalTabHost.HostElement,
+            _verticalTabHost,
+            VerticalTitleBar);
+        _layout.Snap(_uiSettings.VerticalTabs);
+
+        _titleBar = new TitleBarCoordinator(
+            this,
+            _tabManager,
+            _horizontalTabHost,
+            _verticalTabHost,
+            VerticalTitleDragRegion,
+            VerticalTitleText,
+            VerticalCaptionInset,
+            isVerticalMode: () => _tabHost is VerticalTabHost);
+        _titleBar.ApplyForCurrentMode();
+        _titleBar.SyncCaptionInset();
+
+        _taskbar = new TaskbarHost(this, _tabManager);
+
+        AppWindow.Changed += (_, _) =>
+        {
+            _taskbar.OnAppWindowChanged(AppWindow);
+            _titleBar.SyncCaptionInset();
+        };
 
         InstallPaneAccelerators();
 
-        _tabManager.ActiveTabChanged += (_, _) => HookActiveTabTitle();
-        _tabManager.WindowTitleChanged += (_, _) => Title = _tabManager.ActiveTab.EffectiveTitle;
-        HookActiveTabTitle();
-
         _tabManager.LastTabClosed += (_, _) => Close();
 
-        // Taskbar progress: wire a TaskbarProgressCoordinator through
-        // a real ITaskbarList3 facade, driven by a 2s DispatcherQueueTimer.
-        //
-        // Narrow try/catch on COMException only: if CoCreateInstance /
-        // HrInit genuinely fails (explorer down, session 0, etc.) the
-        // indicator is a nice-to-have and we keep the window alive.
-        // Any other exception (NRE, OOM, arg errors) is a real bug and
-        // we let it propagate so it is visible in debug and telemetry.
+        Closed += OnClosedAsync;
+    }
+
+    private async void OnClosedAsync(object sender, WindowEventArgs args)
+    {
+        // Let any in-flight ContentDialog complete before tearing
+        // down the libghostty host. files-community/Files #17363
+        // documents the COMException that fires otherwise.
         try
         {
-            // Reuse the HWND resolved for the class-brush fix above.
-            var facade = new TaskbarList3Facade(hwnd);
-            var coord = new TaskbarProgressCoordinator(
-                _tabManager,
-                facade,
-                () => DateTime.UtcNow);
-            var timer = DispatcherQueue.CreateTimer();
-            timer.Interval = TimeSpan.FromSeconds(2);
-            timer.IsRepeating = true;
-            // Capture the coordinator locally rather than dereferencing
-            // the field via `!`, so a partially-torn-down state cannot
-            // NRE here.
-            timer.Tick += (_, _) => coord.Tick();
-            timer.Start();
-
-            _taskbarFacade = facade;
-            _taskbarCoordinator = coord;
-            _taskbarTickTimer = timer;
-
-            // Pause cycling when minimized so the taskbar does not
-            // churn while the window is hidden. AppWindow.Changed
-            // fires on presenter state transitions. Store the handler
-            // so Closed can detach it.
-            _appWindowChanged = (_, _) =>
-            {
-                if (this.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter op)
-                {
-                    if (op.State == Microsoft.UI.Windowing.OverlappedPresenterState.Minimized)
-                        coord.Pause();
-                    else
-                        coord.Resume();
-                }
-            };
-            this.AppWindow.Changed += _appWindowChanged;
+            if (_dialogs.PendingCount > 0)
+                await _dialogs.WhenAllClosedAsync();
         }
-        catch (COMException ex)
+        catch (Exception ex)
         {
-            // Log loudly in debug; in release the taskbar indicator is
-            // simply absent for this window's lifetime.
-            System.Diagnostics.Debug.WriteLine(
-                $"Taskbar progress wiring failed: 0x{ex.HResult:X8} {ex.Message}");
-            System.Diagnostics.Debug.Fail("Taskbar progress wiring failed", ex.ToString());
+            System.Diagnostics.Debug.WriteLine($"DialogTracker drain failed: {ex.Message}");
         }
 
-        Closed += (_, _) =>
-        {
-            // Tear down the taskbar chain before disposing the host.
-            // Order: stop timer, detach window state handler, dispose
-            // coordinator (unhooks TabManager), dispose facade (releases
-            // the ITaskbarList3 RCW).
-            _taskbarTickTimer?.Stop();
-            if (_appWindowChanged is not null)
-            {
-                this.AppWindow.Changed -= _appWindowChanged;
-                _appWindowChanged = null;
-            }
-            _taskbarCoordinator?.Dispose();
-            _taskbarCoordinator = null;
-            _taskbarFacade?.Dispose();
-            _taskbarFacade = null;
+        _taskbar.Dispose();
 
-            // Surface lifetime is decoupled from Loaded/Unloaded
-            // (see TerminalControl.DisposeSurface), so we have to
-            // free every leaf in every tab explicitly before tearing
-            // down the libghostty host.
-            foreach (var t in _tabManager.Tabs) t.PaneHost.DisposeAllLeaves();
-            _host.Dispose();
-        };
+        // Surface lifetime is decoupled from Loaded/Unloaded
+        // (see TerminalControl.DisposeSurface), so we have to
+        // free every leaf in every tab explicitly before tearing
+        // down the libghostty host.
+        foreach (var t in _tabManager.Tabs) t.PaneHost.DisposeAllLeaves();
+        _host.Dispose();
+    }
+
+    private void OnVerticalSwitchButtonClick(object sender, RoutedEventArgs e)
+        => _router.RequestToggleTabLayout();
+
+    private void AddPaneHost(TabModel tab)
+    {
+        var paneHost = (PaneHost)tab.PaneHost;
+        paneHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        paneHost.VerticalAlignment = VerticalAlignment.Stretch;
+        paneHost.Visibility = Visibility.Collapsed;
+        PaneHostContainer.Children.Add(paneHost);
+    }
+
+    private void RemovePaneHost(TabModel tab)
+    {
+        var paneHost = (PaneHost)tab.PaneHost;
+        PaneHostContainer.Children.Remove(paneHost);
+    }
+
+    private void SwapActivePane()
+    {
+        var active = (PaneHost)_tabManager.ActiveTab.PaneHost;
+        foreach (UIElement child in PaneHostContainer.Children)
+        {
+            child.Visibility = ReferenceEquals(child, active)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
     }
 
     /// <summary>
-    /// Pick which <see cref="ITabHost"/> implementation to use based
-    /// on the stubbed <c>vertical-tabs</c> config flag. Horizontal
-    /// (<see cref="TabHost"/>) is the default; vertical
-    /// (<see cref="VerticalTabHost"/>) opts in.
+    /// Toggle between horizontal and vertical tab layouts at runtime.
+    /// Triggered by Ctrl+Shift+Alt+V, the title-bar icon button, and
+    /// the strip context menu. Persists the choice via
+    /// <see cref="UiSettings"/> so it survives the next launch.
     /// </summary>
-    private ITabHost CreateTabHost(TabManager manager)
+    internal void ToggleTabLayout()
     {
-        // TODO(config): vertical-tabs (bool, default false)
-        const bool verticalTabs = false;
-        return verticalTabs
-            ? (ITabHost)new VerticalTabHost(manager, _host)
-            : new TabHost(manager);
-    }
-
-    /// <summary>
-    /// Subscribe the active tab's active leaf to live title-change
-    /// updates and write the title into <see cref="TabModel.ShellReportedTitle"/>.
-    /// Re-runs every time the active tab changes or the active leaf
-    /// within the active tab changes. The leaf-title hook lives here
-    /// (not in <see cref="TabManager"/>) because it touches WinUI
-    /// types that Ghostty.Core cannot reach.
-    /// </summary>
-    private void HookActiveTabTitle()
-    {
-        if (_activeLeaf is { } previous)
-            previous.Terminal().TitleChanged -= OnLiveTitleChanged;
-
-        var tab = _tabManager.ActiveTab;
-        var leaf = tab.PaneHost.ActiveLeaf;
-        _activeLeaf = leaf;
-        leaf.Terminal().TitleChanged += OnLiveTitleChanged;
-        tab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
-        Title = tab.EffectiveTitle;
-
-        tab.PaneHost.LeafFocused -= OnActiveTabLeafFocused;
-        tab.PaneHost.LeafFocused += OnActiveTabLeafFocused;
-    }
-
-    private void OnActiveTabLeafFocused(object? sender, LeafPane leaf)
-    {
-        if (_activeLeaf is { } previous)
-            previous.Terminal().TitleChanged -= OnLiveTitleChanged;
-        _activeLeaf = leaf;
-        leaf.Terminal().TitleChanged += OnLiveTitleChanged;
-        _tabManager.ActiveTab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
-    }
-
-    private void OnLiveTitleChanged(object? sender, string title)
-    {
-        // TabManager raises WindowTitleChanged in response, which
-        // sets Title via the constructor's subscription.
-        _tabManager.ActiveTab.ShellReportedTitle = title;
+        if (_layout.IsSwitching) return;
+        var toVertical = !_uiSettings.VerticalTabs;
+        _uiSettings.VerticalTabs = toVertical;
+        _uiSettings.Save();
+        _tabHost = toVertical ? _verticalTabHost : _horizontalTabHost;
+        _layout.Animate(toVertical);
+        _titleBar.ApplyForCurrentMode();
     }
 
     /// <summary>
@@ -264,9 +280,9 @@ public sealed partial class MainWindow : Window
     /// chords (it asks the same KeyBindings registry) to let the
     /// accelerator fire.
     ///
-    /// Bindings live in <see cref="KeyBindings.Default"/>; a future PR
-    /// will replace that with a config-driven loader and nothing here
-    /// has to change.
+    /// Router events are instance-scoped (no static subscriptions),
+    /// so MainWindow can be closed and garbage-collected cleanly once
+    /// the last tab closes.
     /// </summary>
     private void InstallPaneAccelerators()
     {
@@ -297,52 +313,35 @@ public sealed partial class MainWindow : Window
                 // See https://github.com/deblasis/ghostty/issues/165.
                 if (_acceleratorFiredThisKeyDown == captured.Action) return;
                 _acceleratorFiredThisKeyDown = captured.Action;
-                PaneActionRouter.Invoke(
-                    captured.Action,
-                    _tabManager,
-                    onTabCloseRequested: OnTabCloseRequestedFromKeyboard,
-                    onToggleVerticalTabsPinned: OnToggleVerticalTabsPinnedFromKeyboard);
+                _router.Invoke(captured.Action);
             };
             _tabHost.HostElement.KeyboardAccelerators.Add(accel);
         }
 
         _tabHost.HostElement.KeyUp += (_, _) => _acceleratorFiredThisKeyDown = null;
         _tabHost.HostElement.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
-    }
 
-    // Route a keyboard-driven full-tab close through the shared
-    // RequestCloseTabAsync path so the confirmation dialog is the
-    // same code path as the per-tab X button and the context-menu
-    // Close item.
-    //
-    // async void is unavoidable here: this is invoked from a
-    // synchronous Action<TabManager> boundary inside the router. An
-    // unhandled exception from an async void method tears down the
-    // whole process, so we log and surface — but we do NOT swallow
-    // silently: Debug.Fail in debug builds makes bugs noisy, and the
-    // release path still logs to the debug stream for post-mortem.
-    private async void OnTabCloseRequestedFromKeyboard(TabManager mgr)
-    {
-        try
+        // Listen for keyboard-driven full-tab close. Route through
+        // TabHost.RequestCloseTabAsync so the confirmation dialog
+        // is the same code path as the per-tab X button and the
+        // context-menu Close item — single source of truth for
+        // close confirmation lives in TabHost, which has XamlRoot.
+        _router.TabCloseRequestedFromKeyboard += async (_, _) =>
         {
-            if (!ReferenceEquals(mgr, _tabManager)) return;
             await _tabHost.RequestCloseTabAsync(_tabManager.ActiveTab);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine(
-                $"[MainWindow] OnTabCloseRequestedFromKeyboard failed: {ex}");
-            System.Diagnostics.Debug.Fail("Tab close from keyboard threw", ex.ToString());
-        }
-    }
+        };
 
-    // Vertical-tabs pinned toggle via Ctrl+Shift+Space. No-op
-    // when the layout is horizontal (TabHost) — the chord is
-    // registered globally but only VerticalTabHost responds.
-    private void OnToggleVerticalTabsPinnedFromKeyboard(TabManager mgr)
-    {
-        if (!ReferenceEquals(mgr, _tabManager)) return;
-        if (_tabHost is VerticalTabHost vth)
-            vth.TogglePinnedFromKeyboard();
+        // Vertical-tabs pinned toggle via Ctrl+Shift+Space. No-op
+        // when the layout is horizontal (TabHost) — the chord is
+        // registered globally but only VerticalTabHost responds.
+        _router.ToggleVerticalTabsPinnedRequested += (_, _) =>
+        {
+            if (_tabHost is VerticalTabHost vth)
+                vth.TogglePinnedFromKeyboard();
+        };
+
+        // Runtime tab-layout switch via Ctrl+Shift+Alt+V (and the
+        // title-bar icon + context menu, which share the event path).
+        _router.ToggleTabLayoutRequested += (_, _) => ToggleTabLayout();
     }
 }
