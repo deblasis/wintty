@@ -33,19 +33,7 @@ internal sealed class ColumnDragHandle : Grid
         // it. A 1px transparent strip is technically grabbable but
         // invisible, which was the original complaint.
         Width = 4;
-        // Look up the theme brush via TryGetValue and tolerate a missing
-        // or mistyped resource (some theme variants ship the key as a
-        // Color, not a SolidColorBrush). The fallback keeps the handle
-        // visible rather than throwing at ctor time.
-        if (Application.Current.Resources.TryGetValue("ControlStrokeColorDefaultBrush", out var res) &&
-            res is Brush brush)
-        {
-            Background = brush;
-        }
-        else
-        {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Gray);
-        }
+        Background = (SolidColorBrush)Application.Current.Resources["ControlStrokeColorDefaultBrush"];
         HorizontalAlignment = HorizontalAlignment.Right;
         VerticalAlignment = VerticalAlignment.Stretch;
         IsHitTestVisible = true;

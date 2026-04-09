@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 using Windows.System;
 
 namespace Ghostty.Input;
@@ -52,6 +53,29 @@ internal sealed class KeyBindings
     /// config-driven loader lands with 50+ bindings, switch to a
     /// Dictionary&lt;(mods,key), action&gt; built once in the ctor.
     /// </summary>
+    /// <summary>
+    /// Render the binding for <paramref name="action"/> as a
+    /// human-readable chord (e.g. <c>Ctrl+Shift+Alt+V</c>), or
+    /// <c>null</c> if no binding exists. Used for tooltips so the
+    /// chord text and the KeyboardAccelerator are sourced from the
+    /// same place.
+    /// </summary>
+    public string? Label(PaneAction action)
+    {
+        foreach (var b in _bindings)
+        {
+            if (b.Action != action) continue;
+            var sb = new StringBuilder();
+            if ((b.Modifiers & VirtualKeyModifiers.Control) != 0) sb.Append("Ctrl+");
+            if ((b.Modifiers & VirtualKeyModifiers.Shift) != 0)   sb.Append("Shift+");
+            if ((b.Modifiers & VirtualKeyModifiers.Menu) != 0)    sb.Append("Alt+");
+            if ((b.Modifiers & VirtualKeyModifiers.Windows) != 0) sb.Append("Win+");
+            sb.Append(b.Key);
+            return sb.ToString();
+        }
+        return null;
+    }
+
     public PaneAction? Match(VirtualKeyModifiers modifiers, VirtualKey key)
     {
         foreach (var b in _bindings)
@@ -97,5 +121,7 @@ internal sealed class KeyBindings
         // is enabled; PaneActionRouter no-ops if the host is not a
         // VerticalTabHost.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Space, PaneAction.ToggleVerticalTabsPinned),
+        // Runtime switch between horizontal and vertical tab layouts.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift | VirtualKeyModifiers.Menu, VirtualKey.V, PaneAction.ToggleTabLayout),
     });
 }

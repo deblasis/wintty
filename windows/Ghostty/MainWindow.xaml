@@ -6,13 +6,106 @@
     Title="Ghostty">
 
     <!--
-        RootGrid background matches a typical terminal background (Windows
-        Terminal's default #0C0C0C). Without this, the Window's default
-        white content background bleeds through during a resize: WinUI 3
-        grows the SwapChainPanel before DX12 finishes ResizeBuffers and
-        re-renders, leaving a visible white frame around the still-old
-        swap chain contents. A dark fill makes that gap effectively
-        invisible against any dark color scheme.
+        Declarative layout for the dual tab-host shell.
+
+        Row 0 hosts either the horizontal TabHost's tab strip (spans
+        both columns) OR the vertical-mode title bar (also spans both
+        columns), depending on the active layout.
+
+        Row 1 hosts the shared PaneHostContainer in column 1 — that
+        container is the single owner of every PaneHost in the visual
+        tree and is never re-parented, so the DCOMP SwapChainPanel
+        handoff stays intact across tab switches and layout switches.
+
+        Column 0 is the vertical strip lane: 0 px wide in horizontal
+        mode, 40 px (collapsed) / 220 px (pinned) wide in vertical
+        mode. Width is animated from code-behind because WinUI 3 has
+        no native GridLengthAnimation and converting to Star units
+        would force the horizontal strip into a separate row.
+
+        Layout-mode visibility is toggled by SnapLayoutState in code-
+        behind via Visibility on the two hosts and the title bar. A
+        VisualStateManager state group would be the textbook
+        declarative choice but VSM.GoToState targets a Control, and
+        Window.Content here is a Grid — wrapping in a UserControl for
+        VSM alone would add a layer the rest of the shell does not
+        need. The key anti-pattern (mutating RowDefinition /
+        ColumnDefinition sizes in code-behind) is already addressed
+        by declaring the row/column structure here instead of in
+        BuildLayout().
+
+        The cross-fade Storyboard in code-behind targets
+        RenderTransform on each host so it stays compositor-driven.
+
+        The #0C0C0C fill mirrors Windows Terminal's default background
+        and hides the brief uncovered area during interactive resize
+        before DX12 finishes its ResizeBuffers pass.
     -->
-    <Grid x:Name="RootGrid" Background="#0C0C0C" />
+    <Grid x:Name="RootGrid" Background="#0C0C0C">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="StripColumn" Width="0"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!--
+            Vertical-mode title bar. Spans both columns so the drag
+            region and title text fill the window width; the caption
+            inset on the right reserves room for the OS min/max/close
+            buttons. Width of that inset is kept in sync with
+            AppWindow.TitleBar.RightInset from code-behind.
+        -->
+        <Grid x:Name="VerticalTitleBar"
+              Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+              Height="32"
+              Background="Transparent"
+              Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition x:Name="VerticalCaptionInset" Width="146"/>
+            </Grid.ColumnDefinitions>
+
+            <Grid x:Name="VerticalTitleDragRegion"
+                  Grid.Column="0"
+                  Background="Transparent">
+
+                <Button x:Name="VerticalSwitchButton"
+                        Width="32" Height="32"
+                        Padding="0"
+                        Margin="44,0,0,0"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Center"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="OnVerticalSwitchButtonClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE8A9;"
+                              FontSize="{StaticResource BodyTextBlockFontSize}"/>
+                </Button>
+
+                <TextBlock x:Name="VerticalTitleText"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           FontSize="{StaticResource CaptionTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                           TextTrimming="CharacterEllipsis"
+                           IsHitTestVisible="False"/>
+            </Grid>
+        </Grid>
+
+        <!--
+            Shared PaneHostContainer: every PaneHost lives here as a
+            sibling and only the active tab's PaneHost is Visible.
+            Row 1, Column 1 — never moves.
+        -->
+        <Grid x:Name="PaneHostContainer"
+              Grid.Row="1"
+              Grid.Column="1"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Stretch"/>
+
+    </Grid>
 </Window>

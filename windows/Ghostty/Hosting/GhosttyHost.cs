@@ -26,21 +26,16 @@ internal sealed class GhosttyHost : IDisposable
     private GhosttyApp _app;
 
     /// <summary>
-    /// Monotonic millisecond tick of the most recent key event seen by
-    /// any <see cref="Ghostty.Controls.TerminalControl"/> bound to this
-    /// host. Read by <see cref="Tabs.VerticalTabHost"/>'s hover-expand
-    /// suppression to decide whether the user is mid-typing (popping
-    /// the sidebar in that case would feel jarring and could interfere
-    /// with an IME composition).
-    ///
-    /// <see cref="Environment.TickCount64"/> rather than
-    /// <see cref="DateTime.UtcNow"/>: monotonic, immune to NTP / DST
-    /// jumps, and a single read instead of a DateTime allocation on
-    /// every keystroke.
+    /// UTC timestamp of the most recent key event seen by any
+    /// <see cref="Ghostty.Controls.TerminalControl"/> bound to this
+    /// host. Read by <see cref="Tabs.VerticalTabHost"/>'s
+    /// hover-expand suppression to decide whether the user is
+    /// mid-typing (popping the sidebar in that case would feel
+    /// jarring and could interfere with an IME composition).
     /// </summary>
-    public long LastKeystrokeTick { get; private set; } = long.MinValue / 2;
+    public DateTime LastKeystrokeTimestamp { get; private set; } = DateTime.MinValue;
 
-    internal void NoteKeystroke() => LastKeystrokeTick = Environment.TickCount64;
+    internal void NoteKeystroke() => LastKeystrokeTimestamp = DateTime.UtcNow;
 
     // Delegates must be retained as fields; P/Invoke hands out native
     // function pointers the GC cannot track.
@@ -208,12 +203,9 @@ internal sealed class GhosttyHost : IDisposable
                 // inside ghostty_action_s. Layout:
                 //   int32 state  @ +8
                 //   int8  prog   @ +12  (-1 sentinel when no percent)
-                // Decode at the union offset via a pinned struct rather
-                // than manual offset math; keeps us honest if the upstream
-                // field order ever shifts.
-                var report = Marshal.PtrToStructure<GhosttyActionProgressReport>(actionPtr + 8);
-                var state = (GhosttyProgressState)report.State;
-                int pct = report.Progress < 0 ? 0 : report.Progress;
+                var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
+                var rawPct = (sbyte)Marshal.ReadByte(actionPtr, 12);
+                int pct = rawPct < 0 ? 0 : rawPct;
                 var tabState = state switch
                 {
                     GhosttyProgressState.Remove        => Ghostty.Core.Tabs.TabProgressState.None,

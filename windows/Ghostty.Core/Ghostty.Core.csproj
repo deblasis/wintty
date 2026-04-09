@@ -17,13 +17,4 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
-
-  <!-- InternalsVisibleTo as MSBuild items rather than [assembly: ...]
-       attributes in a source file: the attribute form relies on a
-       specific file staying in the project and on usings preceding
-       namespaces, both of which rot silently. -->
-  <ItemGroup>
-    <InternalsVisibleTo Include="Ghostty" />
-    <InternalsVisibleTo Include="Ghostty.Tests" />
-  </ItemGroup>
 </Project>

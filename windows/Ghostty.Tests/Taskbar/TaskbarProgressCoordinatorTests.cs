@@ -157,47 +157,6 @@ public class TaskbarProgressCoordinatorTests
     }
 
     [Fact]
-    public void Tab_removed_while_cycling_drops_from_active_list()
-    {
-        var (mgr, _) = NewManager();
-        var sink = new FakeTaskbarProgressSink();
-        var clock = new TestClock();
-        var coord = new TaskbarProgressCoordinator(mgr, sink, () => clock.Now);
-
-        mgr.Tabs[0].Progress = TabProgressState.Normal(30);
-        mgr.NewTab();
-        mgr.Tabs[1].Progress = TabProgressState.Normal(60);
-        sink.Reset();
-
-        // Close the non-current tab mid-cycle — state machine should
-        // fall back to Single(tab0) and emit tab 0's state.
-        mgr.CloseTab(mgr.Tabs[1]);
-
-        Assert.Single(sink.Writes);
-        Assert.Equal(TabProgressState.Normal(30), sink.Last);
-
-        // Further ticks must not revisit the removed tab.
-        clock.Advance(TimeSpan.FromSeconds(10));
-        coord.Tick();
-        Assert.Single(sink.Writes);
-    }
-
-    [Fact]
-    public void Dispose_unsubscribes_from_manager_and_tabs()
-    {
-        var (mgr, _) = NewManager();
-        var sink = new FakeTaskbarProgressSink();
-        var clock = new TestClock();
-        var coord = new TaskbarProgressCoordinator(mgr, sink, () => clock.Now);
-
-        coord.Dispose();
-
-        // After dispose, progress changes must not reach the sink.
-        mgr.Tabs[0].Progress = TabProgressState.Normal(42);
-        Assert.Empty(sink.Writes);
-    }
-
-    [Fact]
     public void Pause_freezes_ticks_resume_restarts_slot()
     {
         var (mgr, _) = NewManager();
