@@ -68,12 +68,34 @@ internal sealed class KeyBindings
     /// </summary>
     public static KeyBindings Default { get; } = new(new[]
     {
+        // Panes (#163)
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.D, PaneAction.SplitVertical),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.E, PaneAction.SplitHorizontal),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.W, PaneAction.ClosePane),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Left, PaneAction.FocusLeft),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Right, PaneAction.FocusRight),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Up, PaneAction.FocusUp),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Down, PaneAction.FocusDown),
+
+        // Tabs (this PR). Ctrl+Shift+W is now CloseActiveProgressive
+        // (pane -> tab -> window with confirmation), no longer plain ClosePane.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.T, PaneAction.NewTab),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.W, PaneAction.CloseActiveProgressive),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.PageDown, PaneAction.NextTab),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.PageUp, PaneAction.PrevTab),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number1, PaneAction.JumpTab1),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number2, PaneAction.JumpTab2),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number3, PaneAction.JumpTab3),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number4, PaneAction.JumpTab4),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number5, PaneAction.JumpTab5),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number6, PaneAction.JumpTab6),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number7, PaneAction.JumpTab7),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number8, PaneAction.JumpTab8),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number9, PaneAction.JumpTabLast),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.PageDown, PaneAction.MoveTabRight),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.PageUp, PaneAction.MoveTabLeft),
+        // Vertical tabs (plan 2). Only meaningful when vertical-tabs
+        // is enabled; PaneActionRouter no-ops if the host is not a
+        // VerticalTabHost.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Space, PaneAction.ToggleVerticalTabsPinned),
     });
 }
