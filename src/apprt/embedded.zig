@@ -1820,41 +1820,36 @@ pub const CAPI = struct {
         surface.draw();
     }
 
-    /// Return the GPU device pointer used by the renderer. For DX11 this
-    /// is the ID3D11Device; for DX12 it will be the ID3D12Device.
-    /// Shared texture consumers should open the DXGI shared handle on
-    /// this same device to avoid cross-device synchronization issues.
-    /// Returns null if the renderer backend has no device yet.
-    export fn ghostty_surface_get_d3d11_device(surface: *Surface) ?*anyopaque {
+    /// Return the ID3D12Device* used by this surface's renderer. Shared
+    /// texture consumers should call OpenSharedResource1 on this same
+    /// device to avoid cross-device synchronization issues.
+    /// Returns null on non-DX12 builds, or if the renderer device has not
+    /// finished initializing yet.
+    export fn ghostty_surface_get_d3d12_device(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
         const api = surface.core_surface.renderer.api;
-        if (comptime !@hasField(@TypeOf(api), "device")) return null;
-        const dev = api.device orelse return null;
+        // Only the DX12 renderer has a `dev` field holding an ID3D12Device.
+        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
+        const dev = api.dev orelse return null;
         return @ptrCast(dev.device);
     }
 
-    /// Return the device context pointer used for rendering. For DX11
-    /// this is the ID3D11DeviceContext. DX12 does not have this concept
-    /// (uses command lists instead) so it returns null.
-    /// Returns null if not applicable or if the device is not initialized.
-    export fn ghostty_surface_get_d3d11_context(surface: *Surface) ?*anyopaque {
-        if (comptime builtin.os.tag != .windows) return null;
-        const api = surface.core_surface.renderer.api;
-        if (comptime !@hasField(@TypeOf(api), "device")) return null;
-        const dev = api.device orelse return null;
-        return @ptrCast(dev.context);
-    }
-
-    /// Return the shared texture pointer that ghostty renders to in
-    /// shared texture mode. Same-process consumers can CopyResource
-    /// directly from this pointer using ghostty's device context.
-    /// Returns null if not in shared texture mode or not applicable.
-    export fn ghostty_surface_get_d3d11_texture(surface: *Surface) ?*anyopaque {
-        if (comptime builtin.os.tag != .windows) return null;
-        const api = surface.core_surface.renderer.api;
-        if (comptime !@hasField(@TypeOf(api), "shared_target")) return null;
-        const st = api.shared_target orelse return null;
-        return @ptrCast(st.texture orelse return null);
+    /// Return the ID3D12Resource* ghostty renders to in shared texture
+    /// mode. Same-process consumers can record a copy from this resource
+    /// on ghostty's command queue. The resource pointer changes on
+    /// resize -- re-read after ghostty_surface_set_size.
+    ///
+    /// NOTE: shared texture mode is not yet implemented on the DX12
+    /// renderer. This accessor currently always returns null; the ABI
+    /// slot is reserved for the upcoming implementation (tracked in
+    /// deblasis/ghostty#176).
+    export fn ghostty_surface_get_d3d12_shared_texture(surface: *Surface) ?*anyopaque {
+        // TODO(deblasis/ghostty#176): wire to the DX12 shared-texture
+        // surface mode in the follow-up PR. Kept as a reserved ABI slot
+        // so .NET consumers can bind the P/Invoke ahead of the
+        // implementation landing.
+        _ = surface;
+        return null;
     }
 
     /// Update the size of a surface. This will trigger resize notifications
