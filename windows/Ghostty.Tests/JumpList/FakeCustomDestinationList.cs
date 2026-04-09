@@ -17,18 +17,10 @@ internal sealed class FakeCustomDestinationList : ICustomDestinationListFacade
 
     public void SetAppId(string appId) => AppId = appId;
 
-    /// <summary>
-    /// Max slots returned from <see cref="BeginList"/>. Defaults to
-    /// <see cref="uint.MaxValue"/> ("no limit") so current tests don't
-    /// accidentally exercise a clamping path that doesn't exist yet;
-    /// future tests can override this to cover slot-limit behaviour.
-    /// </summary>
-    public uint MaxSlots { get; set; } = uint.MaxValue;
-
     public uint BeginList()
     {
         BeginListCalls++;
-        return MaxSlots;
+        return 10; // max slots; arbitrary for fake
     }
 
     public void AddTask(string exePath, string arguments, string title)

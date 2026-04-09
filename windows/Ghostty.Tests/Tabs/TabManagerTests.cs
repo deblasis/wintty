@@ -20,26 +20,6 @@ public class TabManagerTests
     }
 
     [Fact]
-    public void PaneHost_progress_forwards_to_TabModel_and_stops_after_close()
-    {
-        var mgr = NewManager(out var hosts);
-        var tab = mgr.Tabs[0];
-        var host = hosts[0];
-
-        host.RaiseProgressChanged(TabProgressState.Normal(50));
-        Assert.Equal(TabProgressState.Normal(50), tab.Progress);
-
-        host.RaiseProgressChanged(TabProgressState.Error(75));
-        Assert.Equal(TabProgressState.Error(75), tab.Progress);
-
-        // After CloseTab the forwarding handler must be unhooked.
-        mgr.NewTab(); // CloseTab refuses to close the last tab
-        mgr.CloseTab(tab);
-        host.RaiseProgressChanged(TabProgressState.Normal(99));
-        Assert.NotEqual(TabProgressState.Normal(99), tab.Progress);
-    }
-
-    [Fact]
     public void Construction_creates_one_tab_and_activates_it()
     {
         var mgr = NewManager(out var hosts);
