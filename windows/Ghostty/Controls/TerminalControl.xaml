@@ -22,6 +22,7 @@
     x:Class="Ghostty.Controls.TerminalControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
     IsTabStop="True"
     TabNavigation="Cycle"
     HorizontalAlignment="Stretch"
@@ -36,15 +37,51 @@
     KeyUp="OnKeyUp"
     CharacterReceived="OnCharacterReceived">
 
-    <SwapChainPanel
-        x:Name="Panel"
-        IsTabStop="False"
+    <!--
+        Overlay layout: the SwapChainPanel fills the cell; the ScrollBar
+        sits on top of it on the right edge. We deliberately avoid wrapping
+        the panel in a ScrollViewer because libghostty owns its own
+        viewport state and a XAML ScrollViewer would fight with it (and
+        eat wheel events before OnPointerWheelChanged fires).
+
+        The ScrollBar here is the bare Microsoft.UI.Xaml.Controls.Primitives
+        control, NOT a ScrollViewer: we drive Minimum/Maximum/ViewportSize/
+        Value from the GHOSTTY_ACTION_SCROLLBAR callback, and forward the
+        user's drag back into libghostty via the scroll_to_row binding
+        action. WinUI's default ScrollBar template already honors the
+        system IndicatorMode (Mouse vs Touch) and animates opacity on
+        hover/pointer-leave, so we get the native Windows 11 auto-fade
+        for free without a custom Storyboard.
+    -->
+    <Grid
         HorizontalAlignment="Stretch"
-        VerticalAlignment="Stretch"
-        SizeChanged="OnSizeChanged"
-        CompositionScaleChanged="OnCompositionScaleChanged"
-        PointerPressed="OnPointerPressed"
-        PointerMoved="OnPointerMoved"
-        PointerReleased="OnPointerReleased"
-        PointerWheelChanged="OnPointerWheelChanged" />
+        VerticalAlignment="Stretch">
+        <SwapChainPanel
+            x:Name="Panel"
+            IsTabStop="False"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch"
+            SizeChanged="OnSizeChanged"
+            CompositionScaleChanged="OnCompositionScaleChanged"
+            PointerPressed="OnPointerPressed"
+            PointerMoved="OnPointerMoved"
+            PointerReleased="OnPointerReleased"
+            PointerWheelChanged="OnPointerWheelChanged" />
+
+        <primitives:ScrollBar
+            x:Name="VerticalScrollBar"
+            Orientation="Vertical"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Stretch"
+            Minimum="0"
+            Maximum="0"
+            ViewportSize="1"
+            Value="0"
+            SmallChange="1"
+            LargeChange="1"
+            IndicatorMode="MouseIndicator"
+            Visibility="Collapsed"
+            Scroll="OnScrollBarScroll"
+            PointerWheelChanged="OnScrollBarPointerWheelChanged" />
+    </Grid>
 </UserControl>

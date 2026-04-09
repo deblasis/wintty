@@ -56,6 +56,24 @@ public sealed partial class TerminalControl : UserControl
     // requiring CharacterReceived to re-derive the original VirtualKey.
     private bool _suppressNextCharacter;
 
+    // Set while RaiseScrollbarChanged is writing into VerticalScrollBar.
+    // Prevents the resulting Scroll event from round-tripping back into
+    // libghostty as a "scroll_to_row" binding action (feedback loop).
+    private bool _suppressScrollEvent;
+
+    // Latest scrollbar state pushed from libghostty's thread. Read on
+    // the UI thread by FlushPendingScrollbar. Guarded by _scrollbarLock
+    // so the three row counts are read coherently.
+    private readonly object _scrollbarLock = new();
+    private ulong _pendingScrollbarTotal;
+    private ulong _pendingScrollbarOffset;
+    private ulong _pendingScrollbarLen;
+    private bool _pendingScrollbarDirty;
+
+    // Cached dispatcher delegate — avoids allocating a
+    // DispatcherQueueHandler on every scrollbar update.
+    private Microsoft.UI.Dispatching.DispatcherQueueHandler? _flushScrollbarHandler;
+
     // Pinned managed handle to `this`, passed to libghostty as the
     // per-surface userdata. Per-surface callbacks (close_surface_cb,
     // read/write clipboard) receive this pointer back so GhosttyHost can
@@ -99,6 +117,116 @@ public sealed partial class TerminalControl : UserControl
     {
         CurrentProgress = state;
         ProgressChanged?.Invoke(this, state);
+    }
+
+    // Called on the libghostty thread. Stashes the latest state and
+    // enqueues a single UI-thread flush. Coalescing: if libghostty
+    // emits multiple updates before the UI thread catches up, the
+    // cached delegate runs once and reads the most recent values.
+    internal void QueueScrollbarChanged(ulong total, ulong offset, ulong len)
+    {
+        bool needEnqueue;
+        lock (_scrollbarLock)
+        {
+            _pendingScrollbarTotal = total;
+            _pendingScrollbarOffset = offset;
+            _pendingScrollbarLen = len;
+            needEnqueue = !_pendingScrollbarDirty;
+            _pendingScrollbarDirty = true;
+        }
+        if (needEnqueue)
+        {
+            _flushScrollbarHandler ??= FlushPendingScrollbar;
+            DispatcherQueue.TryEnqueue(_flushScrollbarHandler);
+        }
+    }
+
+    // UI thread. Reads the latest coalesced state and writes it into
+    // the overlay ScrollBar. Guards against the feedback loop where
+    // assigning ScrollBar.Value re-fires Scroll and round-trips back
+    // into libghostty.
+    private void FlushPendingScrollbar()
+    {
+        ulong total, offset, len;
+        lock (_scrollbarLock)
+        {
+            total = _pendingScrollbarTotal;
+            offset = _pendingScrollbarOffset;
+            len = _pendingScrollbarLen;
+            _pendingScrollbarDirty = false;
+        }
+
+        // total <= len means there is nothing off-screen to scroll to;
+        // hide the bar entirely to match native "no overflow, no chrome"
+        // behavior (Explorer, Edge).
+        if (total <= len)
+        {
+            VerticalScrollBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        // ScrollBar uses double. uint64 row counts beyond 2^53 would lose
+        // precision but that would require a multi-petabyte scrollback.
+        var maximum = (double)(total - len);
+        var viewport = (double)len;
+        var value = Math.Min((double)offset, maximum);
+
+        _suppressScrollEvent = true;
+        try
+        {
+            VerticalScrollBar.Maximum = maximum;
+            VerticalScrollBar.ViewportSize = viewport;
+            // LargeChange = page, SmallChange = single row — matches the
+            // arrow-click / page-click behavior of native Windows apps.
+            VerticalScrollBar.LargeChange = viewport;
+            VerticalScrollBar.SmallChange = 1;
+            VerticalScrollBar.Value = value;
+            VerticalScrollBar.Visibility = Visibility.Visible;
+        }
+        finally
+        {
+            _suppressScrollEvent = false;
+        }
+    }
+
+    private void OnScrollBarScroll(
+        object sender,
+        Microsoft.UI.Xaml.Controls.Primitives.ScrollEventArgs e)
+    {
+        if (_suppressScrollEvent) return;
+        if (_surface.Handle == IntPtr.Zero) return;
+
+        // ScrollBar already clamps NewValue to [Minimum, Maximum].
+        var row = (ulong)Math.Round(e.NewValue);
+
+        // Zero-alloc path: drag events fire at pointer-move rates, so
+        // we format "scroll_to_row:N" straight into a stack buffer and
+        // hand libghostty a raw pointer. This is the GTK apprt's
+        // vadjustment-value-changed path (src/apprt/gtk/class/
+        // surface.zig::vadjValueChanged); libghostty de-duplicates
+        // identical rows internally so per-pixel drag noise is cheap.
+        unsafe
+        {
+            // 14 bytes prefix + max 20 digits for ulong = 34. Round up.
+            Span<byte> buf = stackalloc byte[48];
+            "scroll_to_row:"u8.CopyTo(buf);
+            if (!System.Buffers.Text.Utf8Formatter.TryFormat(row, buf[14..], out int digits))
+                return;
+            int total = 14 + digits;
+            fixed (byte* p = buf)
+            {
+                NativeMethods.SurfaceBindingAction(_surface, p, (UIntPtr)total);
+            }
+        }
+    }
+
+    // Forward wheel events that land on the ScrollBar overlay region
+    // back to the existing Panel handler, so spinning the wheel near
+    // the right edge still scrolls the terminal via libghostty's own
+    // viewport path rather than being eaten by the bar.
+    private void OnScrollBarPointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        OnPointerWheelChanged(Panel, e);
     }
 
     /// <summary>Most recent OSC 9;4 state reported for this leaf.</summary>
