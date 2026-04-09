@@ -98,6 +98,8 @@ internal sealed class TabManager
 
         tab.PaneHost.LeafFocused -= OnLeafFocused;
         tab.PropertyChanged -= OnTabPropertyChanged;
+        tab.OnClose?.Invoke();
+        tab.OnClose = null;
         tab.PaneHost.DisposeAllLeaves();
 
         _tabs.RemoveAt(index);
@@ -171,6 +173,12 @@ internal sealed class TabManager
         var host = _paneHostFactory();
         var tab = new TabModel(host);
         host.LeafFocused += OnLeafFocused;
+        // Forward the active-leaf's progress onto the tab model. The
+        // handler is captured as a local so CloseTab can unsubscribe
+        // without needing a shared dictionary.
+        EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
+        host.ProgressChanged += progressHandler;
+        tab.OnClose = () => host.ProgressChanged -= progressHandler;
         tab.PropertyChanged += OnTabPropertyChanged;
         return tab;
     }
