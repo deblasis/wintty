@@ -12,12 +12,11 @@ namespace Ghostty.JumpList;
 /// COM object via <see cref="ShellInterop.CoCreateInstance"/> on
 /// construction and forwards every facade call to it.
 ///
-/// The instance is single-use: one BeginList/Commit cycle per facade.
-/// Dispose after Commit to release the underlying STA RCW deterministically
-/// instead of waiting for the finalizer queue. Callers in App.xaml.cs
-/// wrap the facade in a <c>using</c> block.
+/// One instance per process is typical; <see cref="JumpListBuilder"/>
+/// calls <see cref="BeginList"/> and <see cref="Commit"/> in pairs
+/// to replace the list wholesale.
 /// </summary>
-internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade, IDisposable
+internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
 {
     private readonly ShellInterop.ICustomDestinationList _list;
     // AddUserTasks on ICustomDestinationList is a one-shot call per
@@ -29,15 +28,9 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
 
     public CustomDestinationListFacade()
     {
-        var clsid = ShellInterop.CLSID_DestinationList;
-        var iid = ShellInterop.IID_ICustomDestinationList;
-        ShellInterop.CoCreateInstance(
-            ref clsid,
-            IntPtr.Zero,
-            ShellInterop.CLSCTX_INPROC_SERVER,
-            ref iid,
-            out var obj);
-        _list = (ShellInterop.ICustomDestinationList)obj;
+        _list = (ShellInterop.ICustomDestinationList)ComCreate.Create(
+            ShellInterop.CLSID_DestinationList,
+            ShellInterop.IID_ICustomDestinationList);
     }
 
     public void SetAppId(string appId) => _list.SetAppID(appId);
@@ -45,7 +38,7 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
     public uint BeginList()
     {
         var iid = ShellInterop.IID_IObjectArray;
-        _list.BeginList(out var maxSlots, ref iid, out _);
+        _list.BeginList(out var maxSlots, in iid, out _);
         return maxSlots;
     }
 
@@ -58,77 +51,87 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
         foreach (var e in entries)
         {
             var link = CreateShellLink(e.exePath, e.args, e.title);
-            collection.AddObject(link);
+            AddObjectToCollection(collection, link);
         }
-        // QI cast: IObjectCollection inherits IObjectArray at the COM
-        // level but not in the C# type system (classic ComImport doesn't
-        // chain vtables), so this cast goes through the RCW's
-        // QueryInterface rather than a type-system coercion.
-        var array = (ShellInterop.IObjectArray)collection;
+        // The IObjectCollection IUnknown is also queryable as
+        // IObjectArray; cross-interface QI happens through the
+        // shared ComWrappers strategy.
+        var array = QueryAsObjectArray(collection);
         _list.AppendCategory(categoryName, array);
     }
 
     public void Commit()
     {
-        try
+        if (_pendingTasks.Count > 0)
         {
-            if (_pendingTasks.Count > 0)
+            var collection = CreateCollection();
+            foreach (var t in _pendingTasks)
             {
-                var collection = CreateCollection();
-                foreach (var t in _pendingTasks)
-                {
-                    var link = CreateShellLink(t.exe, t.args, t.title);
-                    collection.AddObject(link);
-                }
-                _list.AddUserTasks((ShellInterop.IObjectArray)collection);
+                var link = CreateShellLink(t.exe, t.args, t.title);
+                AddObjectToCollection(collection, link);
             }
-            _list.CommitList();
-        }
-        finally
-        {
-            // Always drop pending state, even on failure, so a retried
-            // Commit() on the same facade doesn't replay stale tasks.
+            _list.AddUserTasks(QueryAsObjectArray(collection));
             _pendingTasks.Clear();
         }
-    }
-
-    public void Dispose()
-    {
-        // Deterministically release the STA RCW so the underlying
-        // ICustomDestinationList doesn't sit on the finalizer queue.
-        Marshal.FinalReleaseComObject(_list);
+        _list.CommitList();
     }
 
     private static ShellInterop.IShellLinkW CreateShellLink(string exePath, string arguments, string title)
     {
-        var clsid = ShellInterop.CLSID_ShellLink;
-        var iid = ShellInterop.IID_IShellLinkW;
-        ShellInterop.CoCreateInstance(
-            ref clsid,
-            IntPtr.Zero,
-            ShellInterop.CLSCTX_INPROC_SERVER,
-            ref iid,
-            out var obj);
-        var link = (ShellInterop.IShellLinkW)obj;
+        var link = (ShellInterop.IShellLinkW)ComCreate.Create(
+            ShellInterop.CLSID_ShellLink,
+            ShellInterop.IID_IShellLinkW);
         link.SetPath(exePath);
         link.SetArguments(arguments);
-        // Title shown in the jump list comes from System.Title on the
-        // IPropertyStore side of this object — IShellLinkW.SetDescription
-        // is ignored by the Shell jump list UI on Win10+. Skip it.
+        link.SetDescription(title);
+        // Title shown in the jump list comes from System.Title, not
+        // the description. Set it via the IPropertyStore side of the
+        // same object.
         ShellInterop.SetShellLinkTitle(link, title);
         return link;
     }
 
     private static ShellInterop.IObjectCollection CreateCollection()
+        => (ShellInterop.IObjectCollection)ComCreate.Create(
+            ShellInterop.CLSID_EnumerableObjectCollection,
+            ShellInterop.IID_IObjectCollection);
+
+    /// <summary>
+    /// AddObject takes a raw IUnknown* under [GeneratedComInterface]
+    /// (the runtime-marshalled <c>UnmanagedType.IUnknown</c> path is
+    /// trim-unsafe). Bridge by calling Marshal.GetIUnknownForObject
+    /// for the duration of the call and releasing the reference
+    /// once the collection has AddRef'd it.
+    /// </summary>
+    private static void AddObjectToCollection(ShellInterop.IObjectCollection collection, object com)
     {
-        var clsid = ShellInterop.CLSID_EnumerableObjectCollection;
-        var iid = ShellInterop.IID_IObjectCollection;
-        ShellInterop.CoCreateInstance(
-            ref clsid,
-            IntPtr.Zero,
-            ShellInterop.CLSCTX_INPROC_SERVER,
-            ref iid,
-            out var obj);
-        return (ShellInterop.IObjectCollection)obj;
+        var unknown = ComCreate.GetIUnknown(com);
+        try
+        {
+            collection.AddObject(unknown);
+        }
+        finally
+        {
+            Marshal.Release(unknown);
+        }
+    }
+
+    /// <summary>
+    /// QueryInterface the IObjectCollection's underlying IUnknown
+    /// for IObjectArray and return the typed wrapper. The shared
+    /// ComWrappers strategy hands out a wrapper that implements both
+    /// interfaces against the same RCW identity.
+    /// </summary>
+    private static ShellInterop.IObjectArray QueryAsObjectArray(ShellInterop.IObjectCollection collection)
+    {
+        var unknown = ComCreate.GetIUnknown(collection);
+        try
+        {
+            return (ShellInterop.IObjectArray)ComCreate.Wrap(unknown);
+        }
+        finally
+        {
+            Marshal.Release(unknown);
+        }
     }
 }
