@@ -30,10 +30,10 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** DX12 renderer in progress (3 surface modes + DirectComposition), shared infrastructure from DX11 carried forward
+> **Status:** DX12 renderer in progress, WinUI 3 shell with tabs, splits, jump list, taskbar progress, and runtime layout switch landed
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████████████░░░] 85%`
+> `[█████████████████▌░░] 88%`
 >
 > **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
 > `[░░░░░░░░░░░░░░░░░░░░]  0%`
