@@ -72,6 +72,15 @@ public sealed partial class TerminalControl : UserControl
     internal GhosttyHost? Host { get; set; }
 
     /// <summary>
+    /// The raw libghostty surface handle for this control. Used by
+    /// <see cref="Ghostty.Hosting.GhosttyHost"/> to resolve a per-surface
+    /// userdata pointer back to the handle for clipboard callback completion.
+    /// Returns <see cref="IntPtr.Zero"/> before the surface is created or
+    /// after it is disposed.
+    /// </summary>
+    internal IntPtr SurfaceHandle => _surface.Handle;
+
+    /// <summary>
     /// Last title pushed by libghostty for this surface, or null if no
     /// title has been set yet. Used by MainWindow to update the window
     /// chrome immediately on focus change without waiting for the next
