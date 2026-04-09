@@ -86,6 +86,15 @@ public sealed partial class TerminalControl : UserControl
         TitleChanged?.Invoke(this, title);
     }
     internal void RaiseCloseRequested() => CloseRequested?.Invoke(this, EventArgs.Empty);
+    internal void RaiseProgressChanged(Ghostty.Core.Tabs.TabProgressState state)
+    {
+        CurrentProgress = state;
+        ProgressChanged?.Invoke(this, state);
+    }
+
+    /// <summary>Most recent OSC 9;4 state reported for this leaf.</summary>
+    internal Ghostty.Core.Tabs.TabProgressState CurrentProgress { get; private set; }
+        = Ghostty.Core.Tabs.TabProgressState.None;
 
     // Events raised from the runtime action callback. They always fire
     // on the UI thread: the callback itself runs on libghostty's thread
@@ -94,6 +103,7 @@ public sealed partial class TerminalControl : UserControl
     // MainWindow subscribes to update the window chrome.
     public event EventHandler<string>? TitleChanged;
     public event EventHandler? CloseRequested;
+    internal event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
 
     public TerminalControl()
     {
