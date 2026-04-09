@@ -396,6 +396,12 @@ public sealed partial class TerminalControl : UserControl
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // Stamp the shared host so VerticalTabHost's hover-expand
+        // suppression knows the user is mid-typing and holds back
+        // the sidebar pop-open. Unconditional: we want every key
+        // (including chords and IME composition keys) to count.
+        Host?.NoteKeystroke();
+
         // Reserved-chord short-circuit: if this chord is bound to an
         // application-level KeyboardAccelerator (registered by
         // MainWindow from KeyBindings.Default), do NOT forward it to

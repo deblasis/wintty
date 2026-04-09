@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="Ghostty.Tabs.RenameTabDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Rename tab"
+    PrimaryButtonText="OK"
+    SecondaryButtonText="Cancel"
+    DefaultButton="Primary">
+    <StackPanel Spacing="8">
+        <TextBlock Text="Leave blank to revert to the shell-reported title."
+                   TextWrapping="Wrap"/>
+        <TextBox x:Name="TitleBox" PlaceholderText="Custom title" />
+    </StackPanel>
+</ContentDialog>
