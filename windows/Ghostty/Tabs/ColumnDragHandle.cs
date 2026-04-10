@@ -17,7 +17,7 @@ namespace Ghostty.Tabs;
 /// model. The vertical tab strip has no such pair — it just owns
 /// one column width.
 /// </summary>
-internal sealed class ColumnDragHandle : Grid
+internal sealed partial class ColumnDragHandle : Grid
 {
     private readonly Action<double> _onWidthChanged;
     private readonly Func<double> _readCurrentWidth;

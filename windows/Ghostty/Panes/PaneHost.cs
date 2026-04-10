@@ -37,7 +37,7 @@ namespace Ghostty.Panes;
 ///   maintain <see cref="ActiveLeaf"/>. <see cref="LeafFocused"/> fires
 ///   when ActiveLeaf changes so MainWindow can re-route the title.
 /// </summary>
-internal sealed class PaneHost : UserControl, IPaneHost
+internal sealed partial class PaneHost : UserControl, IPaneHost
 {
     private readonly GhosttyHost _host;
     private readonly Func<TerminalControl> _terminalFactory;
