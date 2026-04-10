@@ -81,11 +81,11 @@ public sealed partial class MainWindow : Window
     // against any dark color scheme.
     private const int GCLP_HBRBACKGROUND = -10;
 
-    [DllImport("user32.dll", EntryPoint = "SetClassLongPtrW", SetLastError = true)]
-    private static extern IntPtr SetClassLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+    [LibraryImport("user32.dll", EntryPoint = "SetClassLongPtrW")]
+    private static partial IntPtr SetClassLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateSolidBrush(uint crColor);
+    [LibraryImport("gdi32.dll")]
+    private static partial IntPtr CreateSolidBrush(uint crColor);
 
     public MainWindow()
     {
