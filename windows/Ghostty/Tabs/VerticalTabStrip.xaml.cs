@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core;
 using Ghostty.Core.Tabs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -98,9 +99,48 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
     }
 
+    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        // Detach previous binding when the container recycles.
+        (args.ItemContainer.Tag as AotBinding)?.Dispose();
+
+        if (args.InRecycleQueue || args.Item is not TabModel tab)
+        {
+            args.ItemContainer.Tag = null;
+            return;
+        }
+
+        // Bind: update the row's visual elements from the model.
+        // Works for both collapsed (tooltip only) and expanded
+        // (title text + close button Tag + tooltip) templates.
+        // Only fires for title-related property changes.
+        args.ItemContainer.Tag = AotBinding.Create(tab, item =>
+        {
+            var t = (TabModel)item;
+            var root = args.ItemContainer.ContentTemplateRoot as FrameworkElement;
+            if (root is null) return;
+
+            // Tooltip on the outermost grid (both templates).
+            ToolTipService.SetToolTip(root, t.EffectiveTitle);
+
+            // Expanded template: title TextBlock in column 1.
+            if (root is Grid grid && grid.Children.Count >= 3)
+            {
+                if (grid.Children[1] is TextBlock titleBlock)
+                    titleBlock.Text = t.EffectiveTitle;
+                // Close button Tag -> TabModel for OnRowCloseClick.
+                if (grid.Children[2] is Button closeBtn)
+                    closeBtn.Tag = t;
+            }
+        },
+        nameof(TabModel.EffectiveTitle),
+        nameof(TabModel.ShellReportedTitle),
+        nameof(TabModel.UserOverrideTitle));
+    }
+
     private async void OnRowCloseClick(object sender, RoutedEventArgs e)
     {
-        // Tag is set to the bound TabModel in the expanded row template.
+        // Tag is set to the TabModel by OnContainerContentChanging.
         if (sender is FrameworkElement { Tag: TabModel tab } &&
             CloseRequestedFromRow is { } handler)
         {
