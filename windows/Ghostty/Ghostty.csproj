@@ -23,6 +23,11 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>true</PublishAot>
+    <!-- Use our own Program.Main with diagnostic error capture instead
+         of the XAML-generated entry point (App.g.i.cs). This lets us
+         catch NativeAOT startup failures that would otherwise exit
+         silently with code 0. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!--
       Allow [GeneratedComInterface] types to interop with the few
@@ -75,5 +80,23 @@
   <Target Name="WarnIfNoLibghostty" BeforeTargets="Build"
           Condition="!Exists('..\..\zig-out\lib\ghostty.dll')">
     <Warning Text="ghostty.dll not found at ..\..\zig-out\lib\. Run 'zig build -Dapp-runtime=none' from the repo root first, or the app will fail to start." />
+  </Target>
+
+  <!--
+    NativeAOT publish omits XAML binary resources (.xbf) and the
+    package resource index (.pri) from the publish output. Without
+    them Application.LoadComponent() cannot resolve ms-appx:/// URIs
+    and the app crashes at MainWindow.InitializeComponent(). Copy
+    them from the intermediate build output to the publish directory.
+  -->
+  <Target Name="CopyXamlResourcesForAot" AfterTargets="Publish"
+          Condition="'$(PublishAot)' == 'true'">
+    <ItemGroup>
+      <_XamlResources Include="$(OutputPath)**\*.xbf" />
+      <_XamlResources Include="$(OutputPath)$(AssemblyName).pri" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_XamlResources)"
+          DestinationFiles="@(_XamlResources->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
   </Target>
 </Project>
