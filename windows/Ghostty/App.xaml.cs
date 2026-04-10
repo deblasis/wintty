@@ -18,7 +18,7 @@ public partial class App : Application
         // libghostty.dll lives in a `native/` subdirectory next to this
         // assembly so its filename (ghostty.dll) does not collide with our
         // own managed Ghostty.dll on case-insensitive filesystems. The
-        // DllImport entries use "ghostty" so we resolve that name here.
+        // LibraryImport entries use "ghostty" so we resolve that name here.
         NativeLibrary.SetDllImportResolver(
             typeof(Interop.NativeMethods).Assembly,
             (name, assembly, path) =>
