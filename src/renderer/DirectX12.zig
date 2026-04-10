@@ -112,6 +112,12 @@ back_buffers: [device.Device.frame_count]?*d3d12.ID3D12Resource = .{ null, null,
 rtv_handles: [device.Device.frame_count]d3d12.D3D12_CPU_DESCRIPTOR_HANDLE =
     .{ .{ .ptr = 0 }, .{ .ptr = 0 }, .{ .ptr = 0 } },
 
+/// RTV for the shared-texture resource. Null for HWND and
+/// SwapChainPanel modes (which use the rtv_handles array above).
+/// Shared-texture mode has exactly one render target -- the shared
+/// ID3D12Resource -- so it gets a single RTV in heap slot 0.
+shared_rtv: ?d3d12.D3D12_CPU_DESCRIPTOR_HANDLE = null,
+
 /// Command list from the current beginFrame, executed in drawFrameEnd.
 /// Also temporarily set to the init command list during init() so that
 /// initAtlasTexture can record resource barriers for placeholder textures.
@@ -184,12 +190,10 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
     else if (w.swap_chain_panel) |panel|
         // panel is an opaque COM-compatible pointer from apprt; alignment is guaranteed.
         .{ .swap_chain_panel = @ptrCast(@alignCast(panel)) }
-    else if (w.shared_texture_out) |out_ptr|
-        // out_ptr is an opaque pointer from apprt; alignment is guaranteed.
+    else if (w.shared_texture.enabled)
         .{ .shared_texture = .{
-            .handle_out = @ptrCast(@alignCast(out_ptr)),
-            .width = w.texture_width,
-            .height = w.texture_height,
+            .width = w.shared_texture.width,
+            .height = w.shared_texture.height,
         } }
     else
         return error.NoWindowsSurface;
@@ -291,6 +295,15 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             dev_ptr.device.CreateRenderTargetView(resource, null, rtv_handle);
             result.rtv_handles[i] = rtv_handle;
         }
+    } else if (dev_ptr.shared_texture != null) {
+        // Shared-texture mode: one RTV pointing at the shared resource.
+        // Use RTV heap slot 0 -- we only ever need one slot because
+        // the shared resource is the sole render target and is never
+        // rotated with a back-buffer cycle.
+        const st = &dev_ptr.shared_texture.?;
+        const rtv_handle = result.rtv_heap.?.cpuHandle(0);
+        dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
+        result.shared_rtv = rtv_handle;
     }
     errdefer {
         for (&result.back_buffers) |*bb| {
@@ -352,9 +365,14 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         result.pending_command_list = init_cl;
     }
 
-    result.desired_size.store(packSize(size.width, size.height), .monotonic);
-    result.applied_width = size.width;
-    result.applied_height = size.height;
+    // For shared-texture mode, use the texture dimensions as the initial
+    // applied size so beginFrame doesn't trigger a redundant recreate on
+    // the first frame. For swap-chain modes, use the screen size.
+    const init_width = if (w.shared_texture.enabled) w.shared_texture.width else size.width;
+    const init_height = if (w.shared_texture.enabled) w.shared_texture.height else size.height;
+    result.desired_size.store(packSize(init_width, init_height), .monotonic);
+    result.applied_width = init_width;
+    result.applied_height = init_height;
 
     return result;
 }
@@ -495,13 +513,23 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     // Present may have already advanced the current back buffer.
     // Safe without sync because rendering is single-threaded per surface.
     const frame_idx = self.pending_frame_index;
-    dev_ptr.fence_value += 1;
+    const new_fence_value = dev_ptr.fence_value.fetchAdd(1, .release) + 1;
     if (self.gpu_frames[frame_idx]) |*f| {
-        f.fence_value = dev_ptr.fence_value;
+        f.fence_value = new_fence_value;
     }
-    const hr = dev_ptr.command_queue.Signal(dev_ptr.fence, dev_ptr.fence_value);
-    if (com.FAILED(hr)) {
-        log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+    const signal_hr = dev_ptr.command_queue.Signal(dev_ptr.fence, new_fence_value);
+    if (com.FAILED(signal_hr)) {
+        log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(signal_hr))});
+    }
+
+    // Shared-texture mode has no Present call to detect device-removed.
+    // Check after Signal so a TDR during this frame sets device_lost
+    // instead of letting the next beginFrame deadlock on the fence.
+    if (self.swap_chain3 == null) {
+        const reason = dev_ptr.device.GetDeviceRemovedReason();
+        if (com.FAILED(reason)) {
+            self.handleDeviceRemoved();
+        }
     }
 }
 
@@ -667,29 +695,76 @@ pub inline fn beginFrame(
     _ = self;
     const api: *DirectX12 = &renderer.api;
     if (api.device_lost) return error.DeviceLost;
-    // SharedTexture surfaces have no swap chain; they need a separate
-    // submission path that is not yet implemented.
-    const sc3 = api.swap_chain3 orelse return error.NoSwapChain;
     const dev_ptr = &(api.dev orelse return error.NoDevice);
 
     // If the apprt asked for a new surface size since the last frame,
-    // resize the swap chain now -- on the renderer thread, before any
-    // command list work. setTargetSize only records the desired size;
-    // it cannot touch GPU state because it runs on the apprt thread.
+    // resize now -- on the renderer thread, before any command list work.
+    // setTargetSize only records the desired size; it cannot touch GPU
+    // state because it runs on the apprt thread.
+    //
+    // Swap-chain mode calls ResizeBuffers and re-acquires back buffers.
+    // Shared-texture mode calls recreateSharedTexture and refreshes the
+    // single RTV at heap slot 0 so subsequent beginFrame calls use the
+    // new resource dimensions. The two paths are mutually exclusive.
+    const want = unpackSize(api.desired_size.load(.monotonic));
+    if (want.width != 0 and want.height != 0 and
+        (want.width != api.applied_width or want.height != api.applied_height))
     {
-        const want = unpackSize(api.desired_size.load(.monotonic));
-        if (want.width != 0 and want.height != 0 and
-            (want.width != api.applied_width or want.height != api.applied_height))
-        {
+        if (api.swap_chain3 != null) {
             api.resizeSwapChain(want.width, want.height) catch |err| {
                 log.err("DX12 swap chain resize failed: {}", .{err});
                 return error.ResizeFailed;
             };
+        } else if (dev_ptr.shared_texture != null) {
+            // Shared-texture mode has no swap chain to resize; recreate the
+            // shared resource, refresh the single RTV, and bump the version
+            // counter so consumers re-open their handle.
+            dev_ptr.recreateSharedTexture(want.width, want.height) catch |err| {
+                log.err("recreateSharedTexture failed: {}", .{err});
+                api.device_lost = true;
+                return error.ResizeFailed;
+            };
+            // Refresh the single RTV to point at the new resource.
+            // Slot 0 is the fixed shared-texture slot allocated in init();
+            // overwriting the descriptor is safe because waitForGpu inside
+            // recreateSharedTexture already drained all in-flight GPU work.
+            if (api.rtv_heap) |*heap| {
+                const st = &dev_ptr.shared_texture.?;
+                const rtv_handle = heap.cpuHandle(0);
+                dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
+                api.shared_rtv = rtv_handle;
+            }
+            // Reset stale frame fence values -- waitForGpu in
+            // recreateSharedTexture already drained all in-flight work,
+            // mirroring the reset in resizeSwapChain.
+            for (&api.gpu_frames) |*gf| {
+                if (gf.*) |*f| f.fence_value = 0;
+            }
+            api.applied_width = want.width;
+            api.applied_height = want.height;
         }
     }
 
-    // Which back buffer does the swap chain want us to render to?
-    const frame_idx = sc3.GetCurrentBackBufferIndex();
+    // Determine which frame slot and render target to use.
+    // Swap-chain mode rotates through back_buffers[]; shared-texture mode
+    // has a single render target and always uses slot 0.
+    const frame_idx: u32 = if (api.swap_chain3) |sc3|
+        sc3.GetCurrentBackBufferIndex()
+    else
+        0;
+
+    const rtv_handle: d3d12.D3D12_CPU_DESCRIPTOR_HANDLE = if (api.swap_chain3 != null)
+        api.rtv_handles[frame_idx]
+    else
+        api.shared_rtv orelse return error.NoRenderTarget;
+
+    // Shared-texture mode: the resource lives in D3D12_RESOURCE_STATE_COMMON
+    // (ALLOW_SIMULTANEOUS_ACCESS), so no PRESENT->RENDER_TARGET barrier is
+    // needed -- COMMON implicitly promotes for RT writes.
+    const render_target: ?*d3d12.ID3D12Resource = if (api.swap_chain3 != null)
+        api.back_buffers[frame_idx]
+    else
+        dev_ptr.shared_texture.?.resource;
 
     // Extract the frame for this slot and wait for its previous GPU work.
     var frame = api.gpu_frames[frame_idx] orelse return error.FrameNotReady;
@@ -700,9 +775,9 @@ pub inline fn beginFrame(
         _ = d3d12.WaitForSingleObject(dev_ptr.fence_event, d3d12.INFINITE);
     }
 
-    // Point the target at this back buffer.
-    target.resource = api.back_buffers[frame_idx];
-    target.rtv_handle = api.rtv_handles[frame_idx];
+    // Point the target at the chosen render target resource and RTV.
+    target.resource = render_target;
+    target.rtv_handle = rtv_handle;
 
     // Reset and open the command list for recording.
     try frame.reset();
@@ -900,4 +975,12 @@ test "device_lost flag is independent of device presence" {
     try std.testing.expect(api.dev == null);
     api.device_lost = true;
     try std.testing.expect(api.device_lost);
+}
+
+// Pull the directx12 integration test file into the test graph.
+// gpu_test.zig is otherwise orphaned -- it has no consumer outside
+// tests -- so without this @import it would never be compiled or
+// executed by `zig build test`.
+test {
+    _ = @import("directx12/gpu_test.zig");
 }

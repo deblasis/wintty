@@ -4,7 +4,6 @@
 //! - HWND: for standalone windows and test harnesses
 //! - SwapChainPanel: for WinUI 3 / XAML composition hosts
 //! - SharedTexture: for game engines and offscreen rendering
-const std = @import("std");
 const dxgi = @import("dxgi.zig");
 
 pub const HWND = dxgi.HWND;
@@ -16,10 +15,8 @@ pub const Surface = union(enum) {
 };
 
 pub const SharedTextureConfig = struct {
-    /// Output parameter: the shared handle will be written here after
-    /// device creation. The caller owns the storage and must keep it
-    /// alive until init returns.
-    handle_out: *?std.os.windows.HANDLE,
+    /// Initial pixel width of the shared render target.
     width: u32,
+    /// Initial pixel height of the shared render target.
     height: u32,
 };

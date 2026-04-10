@@ -18,6 +18,12 @@ const LPCWSTR = [*:0]const u16;
 pub const D3D_FEATURE_LEVEL_12_0: u32 = 0xc000;
 pub const D3D_FEATURE_LEVEL_12_1: u32 = 0xc100;
 
+// --- Win32 access rights ---
+
+/// Equivalent to the Win32 GENERIC_ALL access mask from winnt.h. Used
+/// as the `Access` parameter to CreateSharedHandle.
+pub const GENERIC_ALL: u32 = 0x10000000;
+
 // --- Enums ---
 
 pub const D3D12_COMMAND_LIST_TYPE = enum(u32) {
@@ -95,6 +101,17 @@ pub const D3D12_RESOURCE_FLAGS = enum(u32) {
     DENY_SHADER_RESOURCE = 0x8,
     ALLOW_CROSS_ADAPTER = 0x10,
     ALLOW_SIMULTANEOUS_ACCESS = 0x20,
+    _,
+};
+
+pub const D3D12_HEAP_FLAGS = enum(u32) {
+    NONE = 0,
+    SHARED = 0x1,
+    DENY_BUFFERS = 0x4,
+    ALLOW_DISPLAY = 0x8,
+    SHARED_CROSS_ADAPTER = 0x20,
+    DENY_RT_DS_TEXTURES = 0x40,
+    DENY_NON_RT_DS_TEXTURES = 0x80,
     _,
 };
 
@@ -1410,7 +1427,7 @@ pub const ID3D12Device = extern struct {
         // slot 30
         CreateReservedResource: Reserved,
         // slot 31
-        CreateSharedHandle: Reserved,
+        CreateSharedHandle: *const fn (*ID3D12Device, *IUnknown, ?*const anyopaque, u32, ?[*:0]const u16, *HANDLE) callconv(.winapi) HRESULT,
         // slot 32
         OpenSharedHandle: Reserved,
         // slot 33
@@ -1479,6 +1496,22 @@ pub const ID3D12Device = extern struct {
 
     pub inline fn CreateCommittedResource(self: *ID3D12Device, heap_props: *const D3D12_HEAP_PROPERTIES, heap_flags: u32, desc: *const D3D12_RESOURCE_DESC, initial_state: D3D12_RESOURCE_STATES, optimized_clear: ?*const anyopaque, riid: *const GUID, pp: *?*anyopaque) HRESULT {
         return self.vtable.CreateCommittedResource(self, heap_props, heap_flags, desc, initial_state, optimized_clear, riid, pp);
+    }
+
+    pub inline fn CreateSharedHandle(
+        self: *ID3D12Device,
+        object: *IUnknown,
+        access: u32,
+        handle_out: *HANDLE,
+    ) HRESULT {
+        return self.vtable.CreateSharedHandle(
+            self,
+            object,
+            null, // default security attributes
+            access,
+            null, // unnamed
+            handle_out,
+        );
     }
 
     pub inline fn CreateFence(self: *ID3D12Device, initial_value: u64, flags: D3D12_FENCE_FLAGS, riid: *const GUID, pp: *?*anyopaque) HRESULT {
