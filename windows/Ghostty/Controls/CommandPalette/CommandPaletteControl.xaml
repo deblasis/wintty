@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    CommandPaletteControl: A floating command palette with search, filtered
+    results, and keyboard navigation.
+
+    Layout philosophy: all data binding is done from code-behind via the
+    Bind(CommandPaletteViewModel) method. We deliberately avoid x:Bind here
+    because CommandPaletteViewModel is internal and lives in a different
+    namespace; x:Bind's AOT-generated code would require the type to be
+    public. Code-behind subscribes to PropertyChanged and pushes values
+    into the named UI elements directly.
+
+    The ListView's ItemsSource is also set from code-behind when
+    FilteredCommands changes. The DataTemplate accesses item properties
+    via Tag-forwarding: each container's Tag is set to the CommandItem by
+    code-behind after the items are loaded, so the template can reference
+    named elements that code-behind populates in ContainerContentChanging.
+    For simplicity we use a plain DataTemplate with TextBlock elements that
+    code-behind populates by hooking ContainerContentChanging.
+-->
+<UserControl
+    x:Class="Ghostty.Controls.CommandPalette.CommandPaletteControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:converters="using:Ghostty.Converters"
+    Width="560"
+    HorizontalAlignment="Center"
+    VerticalAlignment="Top">
+
+    <UserControl.Resources>
+        <converters:NullToCollapsedConverter x:Key="NullToCollapsed"/>
+
+        <!--
+            Item template for a single CommandItem row.
+            Elements are populated from code-behind via
+            ContainerContentChanging, not via Binding/x:Bind,
+            because CommandItem is an internal record type.
+
+            Layout: [color-dot] [icon] [title + description] [shortcut]
+        -->
+        <DataTemplate x:Key="CommandItemTemplate">
+            <Grid Height="44" Padding="8,0">
+                <Grid.ColumnDefinitions>
+                    <!-- Leading color dot -->
+                    <ColumnDefinition Width="12"/>
+                    <!-- Leading icon -->
+                    <ColumnDefinition Width="24"/>
+                    <!-- Title + description stack -->
+                    <ColumnDefinition Width="*"/>
+                    <!-- Shortcut -->
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Leading color dot: 8x8 Ellipse, filled from code-behind -->
+                <Ellipse x:Name="LeadingColorDot"
+                         Grid.Column="0"
+                         Width="8" Height="8"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center"
+                         Visibility="Collapsed"/>
+
+                <!-- Leading icon glyph: 16px FontIcon from LeadingIcon -->
+                <FontIcon x:Name="LeadingIcon"
+                          Grid.Column="1"
+                          FontFamily="{StaticResource SymbolThemeFontFamily}"
+                          FontSize="16"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Visibility="Collapsed"/>
+
+                <!-- Title + optional description -->
+                <StackPanel Grid.Column="2"
+                            VerticalAlignment="Center"
+                            Spacing="1">
+                    <TextBlock x:Name="ItemTitle"
+                               FontSize="{StaticResource BodyTextBlockFontSize}"
+                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="ItemDescription"
+                               FontSize="{StaticResource CaptionTextBlockFontSize}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextTrimming="CharacterEllipsis"
+                               Visibility="Collapsed"/>
+                </StackPanel>
+
+                <!-- Shortcut hint: simple TextBlock styled as a key cap -->
+                <Border x:Name="ShortcutBorder"
+                        Grid.Column="3"
+                        Padding="6,2"
+                        CornerRadius="4"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        VerticalAlignment="Center"
+                        Margin="8,0,0,0"
+                        Visibility="Collapsed">
+                    <TextBlock x:Name="ShortcutText"
+                               FontSize="{StaticResource CaptionTextBlockFontSize}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               FontFamily="Cascadia Code, Consolas, Courier New"/>
+                </Border>
+            </Grid>
+        </DataTemplate>
+
+        <!-- ListViewItem container style: subtle hover/selected states -->
+        <Style x:Key="CommandItemContainerStyle" TargetType="ListViewItem">
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="UseSystemFocusVisuals" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListViewItem">
+                        <Grid x:Name="ItemRoot">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal"/>
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="ItemBg.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="ItemBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Selected">
+                                        <VisualState.Setters>
+                                            <Setter Target="ItemBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                            <Setter Target="SelectionBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PointerOverSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="ItemBg.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                            <Setter Target="SelectionBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PressedSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="ItemBg.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                            <Setter Target="SelectionBar.Visibility" Value="Visible"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+
+                            <Border x:Name="ItemBg"
+                                    Background="Transparent"
+                                    CornerRadius="4"/>
+
+                            <!-- Left accent bar for selected state -->
+                            <Rectangle x:Name="SelectionBar"
+                                       Width="3"
+                                       HorizontalAlignment="Left"
+                                       Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                       RadiusX="1.5" RadiusY="1.5"
+                                       Visibility="Collapsed"/>
+
+                            <ContentPresenter
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                ContentTransitions="{TemplateBinding ContentTransitions}"
+                                HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Stretch"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <!--
+        Outer Border: floating card appearance.
+        ThemeShadow gives depth; AcrylicInAppFillColorDefaultBrush
+        provides the frosted-glass background.
+        CornerRadius=8 matches WinUI 3 flyout conventions.
+    -->
+    <Border x:Name="OuterBorder"
+            CornerRadius="8"
+            BorderThickness="1"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            Background="{ThemeResource AcrylicInAppFillColorDefaultBrush}"
+            Padding="0">
+        <Border.Shadow>
+            <ThemeShadow/>
+        </Border.Shadow>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <!-- Row 0: Header (mode label + pin button) -->
+                <RowDefinition Height="Auto"/>
+                <!-- Row 1: Search TextBox -->
+                <RowDefinition Height="Auto"/>
+                <!-- Row 2: Separator -->
+                <RowDefinition Height="Auto"/>
+                <!-- Row 3: Results ListView -->
+                <RowDefinition Height="Auto"/>
+                <!-- Row 4: Separator -->
+                <RowDefinition Height="Auto"/>
+                <!-- Row 5: Footer -->
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- ── Row 0: Header ── -->
+            <Grid Grid.Row="0" Padding="12,8,8,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Mode label: "Search" or "Command" -->
+                <TextBlock x:Name="ModeLabel"
+                           Grid.Column="0"
+                           Text="Search"
+                           FontSize="{StaticResource CaptionTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           VerticalAlignment="Center"/>
+
+                <!-- Pin toggle button -->
+                <ToggleButton x:Name="PinButton"
+                              Grid.Column="1"
+                              Width="28" Height="28"
+                              Padding="0"
+                              Background="Transparent"
+                              BorderThickness="0"
+                              ToolTipService.ToolTip="Keep open after executing a command (Pin)"
+                              Checked="OnPinChecked"
+                              Unchecked="OnPinUnchecked">
+                    <!-- Segoe Fluent Icons: U+E718 = Pin -->
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE718;"
+                              FontSize="14"/>
+                </ToggleButton>
+            </Grid>
+
+            <!-- ── Row 1: Search box ── -->
+            <TextBox x:Name="SearchBox"
+                     Grid.Row="1"
+                     Margin="8,0"
+                     Padding="8,10"
+                     PlaceholderText="Search commands or type &gt; for actions..."
+                     Background="Transparent"
+                     BorderThickness="0"
+                     FontSize="{StaticResource BodyTextBlockFontSize}"
+                     TextChanged="OnSearchTextChanged"
+                     KeyDown="OnSearchKeyDown"
+                     HorizontalAlignment="Stretch"/>
+
+            <!-- ── Row 2: Separator ── -->
+            <Border Grid.Row="2"
+                    Height="1"
+                    Background="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    Margin="0"/>
+
+            <!-- ── Row 3: Results list ── -->
+            <ListView x:Name="ResultsList"
+                      Grid.Row="3"
+                      MaxHeight="320"
+                      SelectionMode="Single"
+                      IsItemClickEnabled="True"
+                      Padding="4,4,4,4"
+                      ItemTemplate="{StaticResource CommandItemTemplate}"
+                      ItemContainerStyle="{StaticResource CommandItemContainerStyle}"
+                      ItemClick="OnItemClick"
+                      SelectionChanged="OnResultsSelectionChanged"
+                      ContainerContentChanging="OnContainerContentChanging"
+                      ScrollViewer.HorizontalScrollMode="Disabled"
+                      ScrollViewer.HorizontalScrollBarVisibility="Hidden"/>
+
+            <!-- ── Row 4: Separator (only shown when footer has content) ── -->
+            <Border x:Name="FooterSeparator"
+                    Grid.Row="4"
+                    Height="1"
+                    Background="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    Margin="0"/>
+
+            <!-- ── Row 5: Footer ── -->
+            <Grid Grid.Row="5" Padding="12,6,12,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Status text: "N commands" / "N actions" -->
+                <TextBlock x:Name="StatusLabel"
+                           Grid.Column="0"
+                           FontSize="{StaticResource CaptionTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           VerticalAlignment="Center"/>
+
+                <!-- Shortcut hints: Escape / Enter / Tab -->
+                <TextBlock x:Name="ShortcutHints"
+                           Grid.Column="1"
+                           FontSize="{StaticResource CaptionTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           VerticalAlignment="Center"
+                           Text="↑↓ navigate   ↵ run   Esc close"/>
+            </Grid>
+
+            <!--
+                Hidden live region for screen-reader announcements.
+                Sits outside the visual layout at z-order 0 with
+                Width/Height=0 so it consumes no space.
+                AutomationProperties.LiveSetting=Polite ensures
+                changes are announced after the user finishes their
+                current interaction, not immediately (which would be
+                Assertive).
+            -->
+            <TextBlock x:Name="LiveAnnouncer"
+                       Grid.Row="0" Grid.RowSpan="6"
+                       Width="0" Height="0"
+                       Opacity="0"
+                       IsHitTestVisible="False"
+                       AutomationProperties.LiveSetting="Polite"/>
+        </Grid>
+    </Border>
+</UserControl>
