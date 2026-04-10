@@ -10,7 +10,7 @@ const LipoStep = @import("LipoStep.zig");
 /// The step that generates the file.
 step: *std.Build.Step,
 
-/// The final library file (DLL or static .lib/.a).
+/// The final library file
 output: std.Build.LazyPath,
 /// The import library for DLL builds on Windows (.lib), null otherwise.
 implib: ?std.Build.LazyPath = null,
@@ -154,8 +154,8 @@ pub fn initShared(
     // pkg-config
     //
     // pkg-config's --static only expands Libs.private / Requires.private;
-    // it doesn't rewrite Libs: into an archive-only reference when both
-    // shared and static libraries are installed. Install a dedicated
+    // it doesn't change -lghostty into an archive-only reference when
+    // both shared and static libraries are installed. Install a dedicated
     // static module so consumers can request the archive explicitly.
     const pcs = pkgConfigFiles(b, deps);
 
@@ -214,14 +214,14 @@ pub fn install(self: *const GhosttyLib, name: []const u8) void {
         step.dependOn(&b.addInstallFileWithDir(
             pc,
             .prefix,
-            "share/pkgconfig/ghostty-internal.pc",
+            "share/pkgconfig/libghostty.pc",
         ).step);
     }
     if (self.pkg_config_static) |pc| {
         step.dependOn(&b.addInstallFileWithDir(
             pc,
             .prefix,
-            "share/pkgconfig/ghostty-internal-static.pc",
+            "share/pkgconfig/libghostty-static.pc",
         ).step);
     }
 }
@@ -248,28 +248,28 @@ fn pkgConfigFiles(
     const wf = b.addWriteFiles();
 
     return .{
-        .shared = wf.add("ghostty-internal.pc", b.fmt(
+        .shared = wf.add("libghostty.pc", b.fmt(
             \\prefix={s}
             \\includedir=${{prefix}}/include
             \\libdir=${{prefix}}/lib
             \\
-            \\Name: ghostty-internal
+            \\Name: libghostty
             \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty internal library (not for external use)
+            \\Description: Ghostty terminal emulator library
             \\Version: {f}
             \\Cflags: -I${{includedir}}
-            \\Libs: ${{libdir}}/{s}
+            \\Libs: -L${{libdir}} -lghostty
             \\Libs.private:
             \\Requires.private:
-        , .{ b.install_prefix, deps.config.version, sharedLibraryName(os_tag) })),
-        .static = wf.add("ghostty-internal-static.pc", b.fmt(
+        , .{ b.install_prefix, deps.config.version })),
+        .static = wf.add("libghostty-static.pc", b.fmt(
             \\prefix={s}
             \\includedir=${{prefix}}/include
             \\libdir=${{prefix}}/lib
             \\
-            \\Name: ghostty-internal-static
+            \\Name: libghostty-static
             \\URL: https://github.com/ghostty-org/ghostty
-            \\Description: Ghostty internal library, static (not for external use)
+            \\Description: Ghostty terminal emulator library (static)
             \\Version: {f}
             \\Cflags: -I${{includedir}}
             \\Libs: ${{libdir}}/{s}
@@ -279,16 +279,9 @@ fn pkgConfigFiles(
     };
 }
 
-fn sharedLibraryName(os_tag: std.Target.Os.Tag) []const u8 {
-    return if (os_tag == .windows)
-        "ghostty-internal.dll"
-    else
-        "ghostty-internal.so";
-}
-
 fn staticLibraryName(os_tag: std.Target.Os.Tag) []const u8 {
     return if (os_tag == .windows)
-        "ghostty-internal-static.lib"
+        "ghostty-static.lib"
     else
-        "ghostty-internal.a";
+        "libghostty.a";
 }
