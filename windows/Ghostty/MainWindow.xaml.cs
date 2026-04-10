@@ -1,9 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
+using Ghostty.Commands;
+using Ghostty.Controls;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Hosting;
 using Ghostty.Input;
+using Ghostty.Interop;
+using Ghostty.Core.Panes;
 using Ghostty.Panes;
 using Ghostty.Settings;
 using Ghostty.Shell;
@@ -54,6 +60,17 @@ public sealed partial class MainWindow : Window
     private readonly LayoutCoordinator _layout;
     private readonly TitleBarCoordinator _titleBar;
     private readonly TaskbarHost _taskbar;
+
+    private CommandPaletteViewModel? _commandPaletteVm;
+    private FrecencyStore? _frecencyStore;
+    private Controls.TerminalControl? _previousFocusSurface;
+
+    /// <summary>
+    /// Palette close state: prevents re-entrant close handling between
+    /// ViewModel.PropertyChanged and Popup.Closed callbacks.
+    /// </summary>
+    private enum PaletteCloseState { Idle, ClosingFromCommand, ClosingFromToggle }
+    private PaletteCloseState _paletteCloseState;
 
     // Dedup guard for KeyboardAccelerator double-dispatch. WinUI 3
     // fires accelerator Invoked twice for a single key event when the
@@ -195,6 +212,61 @@ public sealed partial class MainWindow : Window
         };
 
         InstallPaneAccelerators();
+
+        _commandPaletteVm = CreateCommandPaletteViewModel();
+        CommandPaletteUI.Bind(_commandPaletteVm);
+        CommandPaletteUI.ApplySettings(_uiSettings.CommandPaletteBackground);
+
+        // When the ViewModel closes itself (e.g. after executing a command),
+        // sync the Popup and focus state.
+        _commandPaletteVm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(CommandPaletteViewModel.IsOpen)) return;
+            if (_commandPaletteVm.IsOpen) return;
+            if (_paletteCloseState != PaletteCloseState.Idle) return;
+
+            _paletteCloseState = PaletteCloseState.ClosingFromCommand;
+            try
+            {
+                CommandPalettePopup.IsOpen = false;
+                SetCommandPaletteOpenOnAllTerminals(false);
+                _frecencyStore?.Save();
+
+                // Don't focus a surface that may have just been disposed
+                // by the command we executed (e.g. close pane).
+                // Let the tab/pane system handle focus naturally.
+            }
+            finally
+            {
+                _paletteCloseState = PaletteCloseState.Idle;
+            }
+        };
+
+        // When the Popup is light-dismissed (click outside), sync the ViewModel.
+        CommandPalettePopup.Closed += (_, _) =>
+        {
+            if (_paletteCloseState != PaletteCloseState.Idle) return;
+
+            _paletteCloseState = PaletteCloseState.ClosingFromCommand;
+            try
+            {
+                var wasOpen = _commandPaletteVm.IsOpen;
+                _commandPaletteVm.Close();
+                SetCommandPaletteOpenOnAllTerminals(false);
+                // Only restore previous focus for light-dismiss (Escape, click outside).
+                // For command execution, let the command's own focus handling win
+                // (e.g., PaneHost focuses the new split pane).
+                if (wasOpen)
+                    _previousFocusSurface?.Focus(FocusState.Programmatic);
+            }
+            finally
+            {
+                _paletteCloseState = PaletteCloseState.Idle;
+            }
+        };
+
+        _host.CommandPaletteToggleRequested += (_, _) =>
+            DispatcherQueue.TryEnqueue(ToggleCommandPalette);
 
         _tabManager.LastTabClosed += (_, _) => Close();
 
@@ -365,5 +437,122 @@ public sealed partial class MainWindow : Window
         // Runtime tab-layout switch via Ctrl+Shift+Alt+V (and the
         // title-bar icon + context menu, which share the event path).
         _router.ToggleTabLayoutRequested += (_, _) => ToggleTabLayout();
+
+        _router.CommandPaletteToggleRequested += (_, _) => ToggleCommandPalette();
+    }
+
+    private void ToggleCommandPalette()
+    {
+        if (_commandPaletteVm is not { } vm) return;
+
+        if (vm.IsOpen)
+        {
+            _paletteCloseState = PaletteCloseState.ClosingFromToggle;
+            try
+            {
+                vm.Close();
+                CommandPalettePopup.IsOpen = false;
+                SetCommandPaletteOpenOnAllTerminals(false);
+                _previousFocusSurface?.Focus(FocusState.Programmatic);
+            }
+            finally { _paletteCloseState = PaletteCloseState.Idle; }
+        }
+        else
+        {
+            _previousFocusSurface = FocusManager.GetFocusedElement(Content.XamlRoot) as Controls.TerminalControl;
+
+            var windowWidth = AppWindow.Size.Width;
+            var paletteWidth = Math.Min(600, windowWidth * 0.9);
+            CommandPalettePopup.HorizontalOffset = (windowWidth - paletteWidth) / 2;
+            CommandPalettePopup.VerticalOffset = 48;
+            CommandPaletteUI.Width = paletteWidth;
+
+            vm.Open();
+            CommandPalettePopup.IsOpen = true;
+            SetCommandPaletteOpenOnAllTerminals(true);
+
+            // WinUI Popups don't auto-focus their content. Dispatch the
+            // focus call so it runs after the Popup finishes layout.
+            DispatcherQueue.TryEnqueue(() => CommandPaletteUI.FocusSearchBox());
+        }
+    }
+
+    private void SetCommandPaletteOpenOnAllTerminals(bool isOpen)
+    {
+        foreach (var tab in _tabManager.Tabs)
+        {
+            var paneHost = (Panes.PaneHost)tab.PaneHost;
+            foreach (var leaf in PaneTree.Leaves(paneHost.RootNode))
+                leaf.Terminal().CommandPaletteIsOpen = isOpen;
+        }
+    }
+
+    private CommandPaletteViewModel CreateCommandPaletteViewModel()
+    {
+        _frecencyStore = FrecencyStore.Load();
+        var frecency = _frecencyStore;
+
+        // Defer command execution to the next dispatcher tick so the
+        // palette closes first, avoiding visual tree contention between
+        // Popup teardown and PaneHost Rebuild (e.g. close-pane).
+        var builtIn = new BuiltInCommandSource(
+            paneActionFactory: action => _ => DispatcherQueue.TryEnqueue(() => _router.Invoke(action)),
+            bindingActionFactory: actionKey => _ => DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)));
+
+        var jump = new JumpCommandSource(
+            _tabManager,
+            jumpAction: (tabIdx, _) => DispatcherQueue.TryEnqueue(() => _tabManager.JumpTo(tabIdx)));
+
+        var config = new ConfigCommandSource();
+
+        var sources = new List<ICommandSource> { builtIn, jump, config };
+
+        // Build the action autocompleter with a minimal set of action schemas.
+        var schemas = new Dictionary<string, ActionSchema>
+        {
+            ["reset"] = new() { Name = "reset", Description = "Reset the terminal", RequiresParameter = false },
+            ["copy_to_clipboard"] = new() { Name = "copy_to_clipboard", Description = "Copy selection to clipboard", RequiresParameter = false },
+            ["paste_from_clipboard"] = new() { Name = "paste_from_clipboard", Description = "Paste from clipboard", RequiresParameter = false },
+            ["select_all"] = new() { Name = "select_all", Description = "Select all terminal content", RequiresParameter = false },
+            ["increase_font_size"] = new() { Name = "increase_font_size", Description = "Increase font size", RequiresParameter = true, Parameters = ["1", "2"] },
+            ["decrease_font_size"] = new() { Name = "decrease_font_size", Description = "Decrease font size", RequiresParameter = true, Parameters = ["1", "2"] },
+            ["reset_font_size"] = new() { Name = "reset_font_size", Description = "Reset font size to default", RequiresParameter = false },
+            ["clear_screen"] = new() { Name = "clear_screen", Description = "Clear screen and scrollback", RequiresParameter = false },
+            ["scroll_to_top"] = new() { Name = "scroll_to_top", Description = "Scroll to top of scrollback", RequiresParameter = false },
+            ["scroll_to_bottom"] = new() { Name = "scroll_to_bottom", Description = "Scroll to bottom", RequiresParameter = false },
+            ["open_config"] = new() { Name = "open_config", Description = "Open configuration file", RequiresParameter = false },
+            ["reload_config"] = new() { Name = "reload_config", Description = "Reload configuration", RequiresParameter = false },
+            ["toggle_fullscreen"] = new() { Name = "toggle_fullscreen", Description = "Toggle fullscreen mode", RequiresParameter = false },
+            ["equalize_splits"] = new() { Name = "equalize_splits", Description = "Equalize split panes", RequiresParameter = false },
+            ["toggle_split_zoom"] = new() { Name = "toggle_split_zoom", Description = "Zoom current split", RequiresParameter = false },
+        };
+
+        var autoCompleter = new ActionAutoCompleter(schemas);
+
+        return new CommandPaletteViewModel(
+            sources,
+            frecency,
+            autoCompleter,
+            groupByCategory: _uiSettings.CommandPaletteGroupCommands);
+    }
+
+    private void ExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return;
+
+        var terminal = leaf.Terminal();
+        var surfaceHandle = terminal.SurfaceHandle;
+        if (surfaceHandle == IntPtr.Zero) return;
+
+        var surface = new GhosttySurface(surfaceHandle);
+        var actionBytes = Encoding.UTF8.GetBytes(actionKey);
+        unsafe
+        {
+            fixed (byte* p = actionBytes)
+            {
+                NativeMethods.SurfaceBindingAction(surface, p, (UIntPtr)actionBytes.Length);
+            }
+        }
     }
 }
