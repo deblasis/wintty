@@ -126,14 +126,23 @@ public sealed partial class MainWindow : Window
         // horizontal host spans both columns in row 0 so its TabView
         // strip can grow under the title bar area; the vertical host
         // anchors at col 0 and spans both rows.
-        Grid.SetRow((FrameworkElement)_horizontalTabHost.HostElement, 0);
-        Grid.SetColumn((FrameworkElement)_horizontalTabHost.HostElement, 0);
-        Grid.SetColumnSpan((FrameworkElement)_horizontalTabHost.HostElement, 2);
-        RootGrid.Children.Add(_horizontalTabHost.HostElement);
+        // Both tab hosts are inserted at the back of the Z-order so
+        // the XAML-declared VerticalTitleBar stays on top in the Row 0
+        // overlap region. Without this, the expanded vertical strip
+        // covers the layout-switch button in the title bar. The
+        // VerticalTitleBar's Background="Transparent" already enables
+        // hit-testing for its drag region and switch button.
+        var hostElement = (FrameworkElement)_horizontalTabHost.HostElement;
+        Grid.SetRow(hostElement, 0);
+        Grid.SetColumn(hostElement, 0);
+        Grid.SetColumnSpan(hostElement, 2);
+        Canvas.SetZIndex(hostElement, -1);
+        RootGrid.Children.Add(hostElement);
 
         Grid.SetRow(_verticalTabHost, 0);
         Grid.SetColumn(_verticalTabHost, 0);
         Grid.SetRowSpan(_verticalTabHost, 2);
+        Canvas.SetZIndex(_verticalTabHost, -1);
         RootGrid.Children.Add(_verticalTabHost);
 
         // Parent every existing and future PaneHost into the shared
@@ -159,6 +168,7 @@ public sealed partial class MainWindow : Window
 
         _layout = new LayoutCoordinator(
             StripColumn,
+            TitleBarStripMirror,
             (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
             VerticalTitleBar);
@@ -247,7 +257,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Toggle between horizontal and vertical tab layouts at runtime.
-    /// Triggered by Ctrl+Shift+Alt+V, the title-bar icon button, and
+    /// Triggered by Ctrl+Shift+, (comma), the title-bar icon button, and
     /// the strip context menu. Persists the choice via
     /// <see cref="UiSettings"/> so it survives the next launch.
     /// </summary>
@@ -258,8 +268,24 @@ public sealed partial class MainWindow : Window
         _uiSettings.VerticalTabs = toVertical;
         _uiSettings.Save();
         _tabHost = toVertical ? _verticalTabHost : _horizontalTabHost;
-        _layout.Animate(toVertical);
-        _titleBar.ApplyForCurrentMode();
+
+        // SetTitleBar requires the target element to be visible and
+        // in the visual tree. Calling it mid-animation hits
+        // COMException 0x800F1000 because the incoming host is still
+        // at opacity 0 / translated off-screen. Defer to the
+        // Completed callback where Snap() has finalized visibility.
+        //
+        // The crossfade changes tab-host visibility, which causes
+        // WinUI 3's focus manager to move focus away from the
+        // terminal pane. Restore focus to the active terminal after
+        // the animation settles.
+        _layout.Animate(toVertical, onCompleted: () =>
+        {
+            _titleBar.ApplyForCurrentMode();
+            var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+            if (leaf is not null)
+                leaf.Terminal().Focus(FocusState.Programmatic);
+        });
     }
 
     /// <summary>
@@ -286,6 +312,16 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void InstallPaneAccelerators()
     {
+        // Accelerators live on RootGrid (the common ancestor of both
+        // tab hosts and PaneHostContainer) so the focused
+        // TerminalControl -- which is a child of PaneHostContainer,
+        // NOT a descendant of any tab host -- is within scope.
+        // ScopeOwner is intentionally left unset. Double-dispatch is
+        // prevented by the _acceleratorFiredThisKeyDown guard below,
+        // not by ScopeOwner (which would over-constrain the scope
+        // and prevent the accelerator from firing at all when focus
+        // is inside PaneHostContainer).
+        // See https://github.com/deblasis/ghostty/issues/165.
         foreach (var binding in KeyBindings.Default.All)
         {
             var captured = binding;
@@ -293,33 +329,19 @@ public sealed partial class MainWindow : Window
             {
                 Modifiers = captured.Modifiers,
                 Key = captured.Key,
-                // Pin the accelerator scope to _tabHost. Without this,
-                // WinUI 3 dispatches the same accelerator twice for a
-                // single key event (once from the focused element's
-                // search up the tree, once from the host's search
-                // down), and Split runs twice per Ctrl+Shift+D.
-                ScopeOwner = _tabHost.HostElement,
             };
             accel.Invoked += (_, args) =>
             {
                 args.Handled = true;
-                // WinUI 3 fires Invoked twice per key event for an
-                // accelerator on a parent of the focused element even
-                // with Handled set and ScopeOwner pinned. Swallow the
-                // second dispatch inside the same physical keypress
-                // by remembering which action just fired; KeyUp on
-                // the host clears the flag so the next KeyDown
-                // dispatches normally.
-                // See https://github.com/deblasis/ghostty/issues/165.
                 if (_acceleratorFiredThisKeyDown == captured.Action) return;
                 _acceleratorFiredThisKeyDown = captured.Action;
                 _router.Invoke(captured.Action);
             };
-            _tabHost.HostElement.KeyboardAccelerators.Add(accel);
+            RootGrid.KeyboardAccelerators.Add(accel);
         }
 
-        _tabHost.HostElement.KeyUp += (_, _) => _acceleratorFiredThisKeyDown = null;
-        _tabHost.HostElement.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+        RootGrid.KeyUp += (_, _) => _acceleratorFiredThisKeyDown = null;
+        RootGrid.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
 
         // Listen for keyboard-driven full-tab close. Route through
         // TabHost.RequestCloseTabAsync so the confirmation dialog
