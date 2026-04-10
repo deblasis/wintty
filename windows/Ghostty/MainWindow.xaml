@@ -87,14 +87,14 @@
                         Click="OnVerticalSwitchButtonClick">
                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
                               Glyph="&#xE8A9;"
-                              FontSize="{StaticResource BodyTextBlockFontSize}"/>
+                              FontSize="14"/>
                 </Button>
 
                 <TextBlock x:Name="VerticalTitleText"
                            VerticalAlignment="Center"
                            HorizontalAlignment="Center"
-                           FontSize="{StaticResource CaptionTextBlockFontSize}"
-                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                           FontSize="12"
+                           Foreground="White"
                            TextTrimming="CharacterEllipsis"
                            IsHitTestVisible="False"/>
             </Grid>
