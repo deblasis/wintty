@@ -21,8 +21,7 @@
                  up at x≈110 once the strip is ever expanded. -->
             <Grid Width="40" Height="40"
                   HorizontalAlignment="Left"
-                  Background="Transparent"
-                  ToolTipService.ToolTip="{Binding EffectiveTitle}">
+                  Background="Transparent">
                 <TextBlock Text="T"
                            FontSize="16"
                            FontWeight="SemiBold"
@@ -56,7 +55,6 @@
                            VerticalAlignment="Center"/>
 
                 <TextBlock Grid.Column="1"
-                           Text="{Binding EffectiveTitle}"
                            Foreground="White"
                            VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis"
@@ -69,7 +67,6 @@
                         BorderThickness="0"
                         VerticalAlignment="Center"
                         HorizontalAlignment="Right"
-                        Tag="{Binding}"
                         Click="OnRowCloseClick">
                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
                               Glyph="&#xE894;"
@@ -198,6 +195,7 @@
                   ItemContainerStyle="{StaticResource VerticalRowContainerStyle}"
                   ItemTemplate="{StaticResource CollapsedRowTemplate}"
                   SelectionChanged="OnSelectionChanged"
+                  ContainerContentChanging="OnContainerContentChanging"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Hidden"/>
 
