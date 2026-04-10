@@ -49,6 +49,12 @@ internal sealed class PaneActionRouter
     public event EventHandler? ToggleTabLayoutRequested;
 
     /// <summary>
+    /// Raised when the Ctrl+Shift+P chord fires. MainWindow listens
+    /// and shows or hides the command palette overlay.
+    /// </summary>
+    public event EventHandler? CommandPaletteToggleRequested;
+
+    /// <summary>
     /// Raised when the keyboard close chord targets a full-tab close.
     /// MainWindow listens and shows the confirmation dialog (if needed)
     /// before calling <see cref="TabManager.CloseTab"/>.
@@ -57,6 +63,21 @@ internal sealed class PaneActionRouter
 
     public void Invoke(PaneAction action)
     {
+        // Event-only actions that don't need pane/tab state — handle
+        // before accessing ActiveTab.PaneHost to avoid null/cast issues.
+        switch (action)
+        {
+            case PaneAction.ToggleVerticalTabsPinned:
+                ToggleVerticalTabsPinnedRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ToggleTabLayout:
+                ToggleTabLayoutRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ToggleCommandPalette:
+                CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty);
+                return;
+        }
+
         var pane = _tabs.ActiveTab.PaneHost;
         var concrete = (PaneHost)pane;
         switch (action)
@@ -96,12 +117,6 @@ internal sealed class PaneActionRouter
                 if (i > 0) _tabs.Move(i, i - 1);
                 break;
             }
-            case PaneAction.ToggleVerticalTabsPinned:
-                ToggleVerticalTabsPinnedRequested?.Invoke(this, EventArgs.Empty);
-                break;
-            case PaneAction.ToggleTabLayout:
-                ToggleTabLayoutRequested?.Invoke(this, EventArgs.Empty);
-                break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }

@@ -3,6 +3,7 @@
     x:Class="Ghostty.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:cmdpalette="using:Ghostty.Controls.CommandPalette"
     Title="Ghostty">
 
     <!--
@@ -111,6 +112,15 @@
               Grid.Column="1"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch"/>
+
+        <!-- Command palette popup overlay -->
+        <Popup x:Name="CommandPalettePopup"
+               IsLightDismissEnabled="True"
+               ShouldConstrainToRootBounds="True"
+               Grid.Row="0" Grid.RowSpan="2"
+               Grid.Column="0" Grid.ColumnSpan="2">
+            <cmdpalette:CommandPaletteControl x:Name="CommandPaletteUI"/>
+        </Popup>
 
     </Grid>
 </Window>
