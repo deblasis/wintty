@@ -291,11 +291,7 @@ public sealed partial class TerminalControl : UserControl
         var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         surfaceConfig.Platform.Windows = new GhosttyPlatformWindows
         {
-            Hwnd = IntPtr.Zero,
             SwapChainPanel = panelPtr,
-            SharedTextureOut = IntPtr.Zero,
-            TextureWidth = 0,
-            TextureHeight = 0,
         };
         surfaceConfig.ScaleFactor = Panel.CompositionScaleX > 0 ? Panel.CompositionScaleX : 1.0;
         surfaceConfig.Context = GhosttySurfaceContext.Window;
