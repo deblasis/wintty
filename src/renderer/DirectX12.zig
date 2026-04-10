@@ -520,6 +520,16 @@ pub fn drawFrameEnd(self: *DirectX12) void {
     const signal_hr = dev_ptr.command_queue.Signal(dev_ptr.fence, new_fence_value);
     if (com.FAILED(signal_hr)) {
         log.err("fence Signal failed: 0x{x}", .{@as(u32, @bitCast(signal_hr))});
+        // A TDR between Present and Signal leaves the fence unsignaled.
+        // Without this check the next beginFrame would deadlock waiting
+        // on a fence that will never advance.
+        if (signal_hr == com.DXGI_ERROR_DEVICE_REMOVED or
+            signal_hr == com.DXGI_ERROR_DEVICE_HUNG or
+            signal_hr == com.DXGI_ERROR_DEVICE_RESET)
+        {
+            self.handleDeviceRemoved();
+            return;
+        }
     }
 
     // Shared-texture mode has no Present call to detect device-removed.
