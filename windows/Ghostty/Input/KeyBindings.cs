@@ -70,7 +70,7 @@ internal sealed class KeyBindings
             if ((b.Modifiers & VirtualKeyModifiers.Shift) != 0)   sb.Append("Shift+");
             if ((b.Modifiers & VirtualKeyModifiers.Menu) != 0)    sb.Append("Alt+");
             if ((b.Modifiers & VirtualKeyModifiers.Windows) != 0) sb.Append("Win+");
-            sb.Append(b.Key);
+            sb.Append(KeyDisplayName(b.Key));
             return sb.ToString();
         }
         return null;
@@ -121,7 +121,29 @@ internal sealed class KeyBindings
         // is enabled; PaneActionRouter no-ops if the host is not a
         // VerticalTabHost.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Space, PaneAction.ToggleVerticalTabsPinned),
-        // Runtime switch between horizontal and vertical tab layouts.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift | VirtualKeyModifiers.Menu, VirtualKey.V, PaneAction.ToggleTabLayout),
+        // Runtime switch between horizontal and vertical tab layouts
+        // (Ctrl+Shift+, -- same chord as Edge's vertical tabs toggle).
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)188, PaneAction.ToggleTabLayout),
     });
+
+    /// <summary>
+    /// Human-readable name for a <see cref="VirtualKey"/>. Named enum
+    /// members use ToString(); OEM keys that have no named member fall
+    /// back to a lookup table so tooltips show "," instead of "188".
+    /// </summary>
+    private static string KeyDisplayName(VirtualKey key) => (int)key switch
+    {
+        188 => ",",
+        190 => ".",
+        186 => ";",
+        191 => "/",
+        219 => "[",
+        221 => "]",
+        220 => "\\",
+        192 => "`",
+        189 => "-",
+        187 => "=",
+        222 => "'",
+        _ => key.ToString(),
+    };
 }
