@@ -110,14 +110,16 @@ internal struct GhosttyInputKey
     public bool Composing;
 }
 
+// GhosttySharedTextureConfig and GhosttySharedTextureSnapshot live in
+// Ghostty.Core/Interop/GhosttySharedTexture.cs so the test project can
+// pin their layouts without depending on the WinUI 3 app project.
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyPlatformWindows
 {
-    public IntPtr Hwnd;               // null for composition mode
-    public IntPtr SwapChainPanel;     // ISwapChainPanelNative*
-    public IntPtr SharedTextureOut;   // OUT: HANDLE
-    public uint TextureWidth;
-    public uint TextureHeight;
+    public IntPtr Hwnd;                        // null for composition mode
+    public IntPtr SwapChainPanel;              // ISwapChainPanelNative*
+    public GhosttySharedTextureConfig SharedTexture;
 }
 
 // ghostty_platform_u — explicit layout so all three variants share memory.
@@ -335,6 +337,12 @@ internal static partial class NativeMethods
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_size")]
     internal static extern GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_shared_texture")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool SurfaceSharedTexture(
+        GhosttySurface surface,
+        out GhosttySharedTextureSnapshot snapshot);
 
     // ---- surface input -------------------------------------------------
 
