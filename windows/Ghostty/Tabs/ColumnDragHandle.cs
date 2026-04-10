@@ -1,4 +1,6 @@
 using System;
+using Ghostty.Controls;
+using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -33,7 +35,9 @@ internal sealed partial class ColumnDragHandle : Grid
         // it. A 1px transparent strip is technically grabbable but
         // invisible, which was the original complaint.
         Width = 4;
-        Background = (SolidColorBrush)Application.Current.Resources["ControlStrokeColorDefaultBrush"];
+        Background = ThemeResources.Get<Brush>(
+            "ControlStrokeColorDefaultBrush",
+            new SolidColorBrush(Colors.Gray));
         HorizontalAlignment = HorizontalAlignment.Right;
         VerticalAlignment = VerticalAlignment.Stretch;
         IsHitTestVisible = true;
