@@ -128,6 +128,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public LeafPane ActiveLeaf => _activeLeaf;
 
+    internal PaneNode RootNode => _root;
+
     /// <summary>
     /// Number of leaves in the tree. Implemented via a tree walk; the
     /// trees are tiny (typically &lt;10 leaves) so this is cheap.
