@@ -379,6 +379,12 @@ internal static partial class NativeMethods
         GhosttySurface surface,
         out GhosttySharedTextureSnapshot snapshot);
 
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_shared_texture")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool SurfaceSharedTexture(
+        GhosttySurface surface,
+        out GhosttySharedTextureSnapshot snapshot);
+
     // ---- surface input -------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_key")]
