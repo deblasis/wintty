@@ -455,14 +455,24 @@ typedef struct {
 } ghostty_platform_ios_s;
 
 typedef struct {
+  // Exactly one of the surface mode fields below should be set:
+  //   - hwnd != NULL             -> HWND surface (DirectComposition)
+  //   - swap_chain_panel != NULL -> SwapChainPanel surface (WinUI 3)
+  //   - shared_texture.enabled   -> offscreen shared texture
   void* hwnd;
   void* swap_chain_panel;
-  // OUT: receives the DXGI shared handle for the render texture.
-  // Open with OpenSharedResource1 on the device returned by
-  // ghostty_surface_get_d3d12_device to avoid cross-device sync issues.
-  void* shared_texture_out;
-  uint32_t texture_width;
-  uint32_t texture_height;
+
+  // Shared-texture surface configuration. When `enabled` is true and
+  // both `hwnd` and `swap_chain_panel` are NULL, the renderer creates
+  // an offscreen ID3D12Resource at the given initial pixel dimensions.
+  // This sub-struct carries only the INITIAL configuration. Retrieve
+  // the current shared handle, fence, and dimensions via
+  // ghostty_surface_shared_texture().
+  struct {
+    bool enabled;
+    uint32_t width;
+    uint32_t height;
+  } shared_texture;
 } ghostty_platform_windows_s;
 
 typedef union {
@@ -1132,15 +1142,51 @@ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t)
 // cross-device synchronization issues. Returns NULL on non-DX12 builds or if
 // the renderer device is not yet initialized.
 GHOSTTY_API void* ghostty_surface_get_d3d12_device(ghostty_surface_t);
-// Returns the ID3D12Resource* ghostty renders to in shared texture mode.
-// Same-process consumers can record a copy from this directly on ghostty's
-// command queue. The resource pointer changes on resize -- re-read after
-// ghostty_surface_set_size. Returns NULL if not in shared texture mode.
+
+// Snapshot of the shared-texture state for a surface. All fields are
+// filled in atomically by a single ghostty_surface_shared_texture()
+// call so consumers never observe a torn read.
 //
-// NOTE: shared texture mode is not yet wired up on the DX12 renderer.
-// This accessor currently always returns NULL and is reserved for the
-// upcoming shared-texture implementation.
-GHOSTTY_API void* ghostty_surface_get_d3d12_shared_texture(ghostty_surface_t);
+// Ownership: ghostty retains both NT HANDLEs in this struct for the
+// surface lifetime -- do NOT CloseHandle either of them. The
+// ID3D12Resource and ID3D12Fence returned by OpenSharedHandle on the
+// consumer's device ARE owned by the consumer; Release() them when
+// done, and re-open the resource whenever `version` changes.
+typedef struct {
+  // NT HANDLE from CreateSharedHandle on the underlying ID3D12Resource.
+  // Consumers open via ID3D12Device::OpenSharedHandle on their own
+  // device (cross-device) or on ghostty's device (same-device).
+  void* resource_handle;
+
+  // NT HANDLE from CreateSharedHandle on ghostty's ID3D12Fence. Stable
+  // for the surface lifetime (does not change on resize).
+  void* fence_handle;
+
+  // Fence value ghostty will signal after completing the most recently
+  // submitted frame. Consumers Wait for this value on their own
+  // command queue before sampling the resource.
+  uint64_t fence_value;
+
+  // Pixel dimensions of the shared resource. These match the size the
+  // renderer most recently (re)created the resource at, and stay in
+  // sync with `version` -- they change in the same atomic snapshot.
+  uint32_t width;
+  uint32_t height;
+
+  // Monotonically increasing counter, incremented whenever the shared
+  // resource is recreated (initial creation, resize, device-removed
+  // recovery). Re-open the shared handle whenever this changes.
+  uint64_t version;
+} ghostty_surface_shared_texture_s;
+
+// Fill `out` with the current shared-texture state for this surface.
+// Returns true on success, false if the surface is not in shared
+// texture mode (in which case `out` is left untouched). The read is
+// atomic -- all fields correspond to the same renderer state snapshot.
+GHOSTTY_API bool ghostty_surface_shared_texture(
+    ghostty_surface_t,
+    ghostty_surface_shared_texture_s* out);
+
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);

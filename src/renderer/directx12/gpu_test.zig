@@ -84,7 +84,7 @@ fn createTestDevice() !TestDevice {
     var hr = d3d12.D3D12CreateDevice(
         null,
         d3d12.D3D_FEATURE_LEVEL_12_0,
-        &d3d12.IID_ID3D12Device,
+        &d3d12.ID3D12Device.IID,
         @ptrCast(&device),
     );
     if (com.FAILED(hr) or device == null) return error.DeviceCreationFailed;
@@ -100,7 +100,7 @@ fn createTestDevice() !TestDevice {
     };
     hr = device.?.CreateCommandQueue(
         &queue_desc,
-        &d3d12.IID_ID3D12CommandQueue,
+        &d3d12.ID3D12CommandQueue.IID,
         @ptrCast(&command_queue),
     );
     if (com.FAILED(hr) or command_queue == null) return error.CommandQueueCreationFailed;
@@ -110,7 +110,7 @@ fn createTestDevice() !TestDevice {
     var command_allocator: ?*d3d12.ID3D12CommandAllocator = null;
     hr = device.?.CreateCommandAllocator(
         .DIRECT,
-        &d3d12.IID_ID3D12CommandAllocator,
+        &d3d12.ID3D12CommandAllocator.IID,
         @ptrCast(&command_allocator),
     );
     if (com.FAILED(hr) or command_allocator == null) return error.CommandAllocatorCreationFailed;
@@ -123,7 +123,7 @@ fn createTestDevice() !TestDevice {
         .DIRECT,
         command_allocator.?,
         null,
-        &d3d12.IID_ID3D12GraphicsCommandList,
+        &d3d12.ID3D12GraphicsCommandList.IID,
         @ptrCast(&command_list),
     );
     if (com.FAILED(hr) or command_list == null) return error.CommandListCreationFailed;
@@ -134,7 +134,7 @@ fn createTestDevice() !TestDevice {
     hr = device.?.CreateFence(
         0,
         .NONE,
-        &d3d12.IID_ID3D12Fence,
+        &d3d12.ID3D12Fence.IID,
         @ptrCast(&fence),
     );
     if (com.FAILED(hr) or fence == null) return error.FenceCreationFailed;
@@ -452,7 +452,7 @@ test "Texture: replaceRegion updates sub-region" {
 
     // State should be back to PIXEL_SHADER_RESOURCE after replaceRegion.
     try std.testing.expectEqual(
-        d3d12.D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
         tex.state,
     );
 }
@@ -550,8 +550,11 @@ test "Frame: create, reset, deinit" {
     // Frame starts with command list closed. Reset opens it.
     try frame.reset();
 
-    // Close it again to verify the reset worked.
-    const hr = frame.command_list.Close();
+    // Close it again to verify the reset worked. command_list is
+    // optional on Frame because Frame.init may not have populated
+    // it yet; after frame.reset() it is guaranteed non-null.
+    const cl = frame.command_list orelse return error.CommandListMissing;
+    const hr = cl.Close();
     try std.testing.expect(!com.FAILED(hr));
 }
 
@@ -640,11 +643,7 @@ test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
 test "Device: shared texture mode has no swap chain or dcomp" {
     if (comptime builtin.os.tag != .windows) return;
 
-    const HANDLE = std.os.windows.HANDLE;
-    var shared_handle: ?HANDLE = null;
-
     var device = Device.init(.{ .shared_texture = .{
-        .handle_out = &shared_handle,
         .width = 640,
         .height = 480,
     } }, .{}) catch return;
@@ -655,6 +654,16 @@ test "Device: shared texture mode has no swap chain or dcomp" {
     try std.testing.expect(device.dcomp_device == null);
     try std.testing.expect(device.dcomp_target == null);
     try std.testing.expect(device.dcomp_visual == null);
+
+    // Shared texture state is populated with a non-null resource,
+    // both NT handles, and version starts at 1.
+    const st = device.shared_texture orelse return error.SharedTextureNotPopulated;
+    try std.testing.expect(@intFromPtr(st.resource) != 0);
+    try std.testing.expect(@intFromPtr(st.resource_handle) != 0);
+    try std.testing.expect(@intFromPtr(st.fence_handle) != 0);
+    try std.testing.expectEqual(@as(u64, 1), st.version);
+    try std.testing.expectEqual(@as(u32, 640), st.width);
+    try std.testing.expectEqual(@as(u32, 480), st.height);
 }
 
 // ---- Device.init edge case tests ----
@@ -662,19 +671,61 @@ test "Device: shared texture mode has no swap chain or dcomp" {
 test "Device: shared texture 0x0 dimensions does not crash" {
     if (comptime builtin.os.tag != .windows) return;
 
-    const HANDLE = std.os.windows.HANDLE;
-    var shared_handle: ?HANDLE = null;
-
     // SharedTexture mode has no swap chain, so 0x0 should not hit DXGI.
+    // SharedTextureState.init clamps both dimensions to 1.
     var device = Device.init(.{ .shared_texture = .{
-        .handle_out = &shared_handle,
         .width = 0,
         .height = 0,
     } }, .{}) catch return;
     defer device.deinit();
 
     try std.testing.expect(device.swap_chain == null);
-    try std.testing.expect(device.fence_value == 0);
+    try std.testing.expectEqual(@as(u64, 0), device.fence_value.load(.monotonic));
+
+    const st = device.shared_texture orelse return error.SharedTextureNotPopulated;
+    try std.testing.expectEqual(@as(u32, 1), st.width);
+    try std.testing.expectEqual(@as(u32, 1), st.height);
+}
+
+test "Device: recreateSharedTexture bumps version and changes handle" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    var device = Device.init(.{ .shared_texture = .{
+        .width = 320,
+        .height = 240,
+    } }, .{}) catch return;
+    defer device.deinit();
+
+    const st_before = device.shared_texture.?;
+    const version_before = st_before.version;
+    const handle_before = st_before.resource_handle;
+    const fence_handle_before = st_before.fence_handle;
+
+    device.recreateSharedTexture(800, 600) catch return;
+
+    const st_after = device.shared_texture.?;
+    try std.testing.expect(st_after.version > version_before);
+    try std.testing.expect(st_after.resource_handle != handle_before);
+    // Fence handle is stable across resize.
+    try std.testing.expectEqual(fence_handle_before, st_after.fence_handle);
+    try std.testing.expectEqual(@as(u32, 800), st_after.width);
+    try std.testing.expectEqual(@as(u32, 600), st_after.height);
+}
+
+test "Device: shared texture deinit does not leak" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    // Create + destroy several times; if handles leak, the OS will
+    // eventually refuse new allocations. This is a weak guarantee but
+    // catches gross mistakes.
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        var device = Device.init(.{ .shared_texture = .{
+            .width = 64,
+            .height = 64,
+        } }, .{}) catch return;
+        device.deinit();
+    }
 }
 
 test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {

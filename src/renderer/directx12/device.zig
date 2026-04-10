@@ -33,7 +33,7 @@ pub const frame_count: u32 = 3;
 device: *d3d12.ID3D12Device,
 command_queue: *d3d12.ID3D12CommandQueue,
 fence: *d3d12.ID3D12Fence,
-fence_value: u64,
+fence_value: std.atomic.Value(u64),
 fence_event: std.os.windows.HANDLE,
 
 swap_chain: ?*dxgi.IDXGISwapChain1,
@@ -42,6 +42,138 @@ swap_chain: ?*dxgi.IDXGISwapChain1,
 dcomp_device: ?*dcomp.IDCompositionDevice,
 dcomp_target: ?*dcomp.IDCompositionTarget,
 dcomp_visual: ?*dcomp.IDCompositionVisual,
+
+/// Null for HWND / SwapChainPanel modes. Readers must hold
+/// shared_texture_mutex.
+shared_texture: ?SharedTextureState = null,
+
+/// Guards shared_texture for atomic snapshot reads by
+/// ghostty_surface_shared_texture() on the apprt thread.
+shared_texture_mutex: std.Thread.Mutex = .{},
+
+/// Shared-texture mode state. Populated by Device.init when the
+/// surface variant is .shared_texture, torn down in Device.deinit,
+/// and recreated on resize.
+pub const SharedTextureState = struct {
+    /// The ID3D12Resource ghostty renders into. Owned by Device.
+    resource: *d3d12.ID3D12Resource,
+    /// NT HANDLE from CreateSharedHandle on `resource`. Owned by
+    /// Device. Closed and reborn on resize.
+    resource_handle: std.os.windows.HANDLE,
+    /// NT HANDLE from CreateSharedHandle on the Device's fence. Owned
+    /// by Device. Stable for the surface lifetime.
+    fence_handle: std.os.windows.HANDLE,
+    /// Pixel dimensions of `resource`.
+    width: u32,
+    height: u32,
+    /// Monotonically increasing; bumped by recreateSharedTexture.
+    version: u64,
+
+    /// Create a shared committed ID3D12Resource and NT handles for both
+    /// the resource and the given fence. Returns a populated
+    /// SharedTextureState ready to be stored on Device.
+    ///
+    /// Format is B8G8R8A8_UNORM to match the renderer's swap-chain path
+    /// (no shader or pipeline permutations required). Flags are
+    /// ALLOW_RENDER_TARGET (ghostty writes to it) plus
+    /// ALLOW_SIMULTANEOUS_ACCESS (consumers can read while ghostty writes
+    /// without explicit state transitions). Initial state is COMMON, the
+    /// only state ALLOW_SIMULTANEOUS_ACCESS resources are ever allowed to
+    /// be in on either device -- the fence is our sole synchronization
+    /// primitive.
+    ///
+    /// Width/height are clamped to a minimum of 1 because
+    /// CreateCommittedResource rejects zero dimensions.
+    pub fn init(
+        device: *d3d12.ID3D12Device,
+        fence: *d3d12.ID3D12Fence,
+        width: u32,
+        height: u32,
+    ) !SharedTextureState {
+        const w: u32 = @max(width, 1);
+        const h: u32 = @max(height, 1);
+
+        const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
+            .Type = .DEFAULT,
+            .CPUPageProperty = 0,
+            .MemoryPoolPreference = 0,
+            .CreationNodeMask = 0,
+            .VisibleNodeMask = 0,
+        };
+
+        const desc = d3d12.D3D12_RESOURCE_DESC{
+            .Dimension = .TEXTURE2D,
+            .Alignment = 0,
+            .Width = @as(u64, w),
+            .Height = h,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = .B8G8R8A8_UNORM,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Layout = .UNKNOWN,
+            .Flags = @enumFromInt(
+                @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_RENDER_TARGET) |
+                    @intFromEnum(d3d12.D3D12_RESOURCE_FLAGS.ALLOW_SIMULTANEOUS_ACCESS),
+            ),
+        };
+
+        var resource: ?*d3d12.ID3D12Resource = null;
+        {
+            const hr = device.CreateCommittedResource(
+                &heap_props,
+                @intFromEnum(d3d12.D3D12_HEAP_FLAGS.SHARED),
+                &desc,
+                .COMMON,
+                null,
+                &d3d12.ID3D12Resource.IID,
+                @ptrCast(&resource),
+            );
+            if (FAILED(hr)) {
+                log.err("CreateCommittedResource (shared) failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+                return error.SharedResourceCreationFailed;
+            }
+        }
+        const res = resource orelse return error.SharedResourceCreationFailed;
+        errdefer _ = res.Release();
+
+        var resource_handle: std.os.windows.HANDLE = undefined;
+        {
+            const hr = device.CreateSharedHandle(
+                @ptrCast(res),
+                d3d12.GENERIC_ALL,
+                &resource_handle,
+            );
+            if (FAILED(hr)) {
+                log.err("CreateSharedHandle (resource) failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+                return error.SharedHandleCreationFailed;
+            }
+        }
+        errdefer _ = d3d12.CloseHandle(resource_handle);
+
+        var fence_handle: std.os.windows.HANDLE = undefined;
+        {
+            const hr = device.CreateSharedHandle(
+                @ptrCast(fence),
+                d3d12.GENERIC_ALL,
+                &fence_handle,
+            );
+            if (FAILED(hr)) {
+                log.err("CreateSharedHandle (fence) failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+                return error.SharedHandleCreationFailed;
+            }
+        }
+        errdefer _ = d3d12.CloseHandle(fence_handle);
+
+        return .{
+            .resource = res,
+            .resource_handle = resource_handle,
+            .fence_handle = fence_handle,
+            .width = w,
+            .height = h,
+            .version = 1,
+        };
+    }
+};
 
 pub const InitOptions = struct {
     /// Initial back buffer width. Ignored for SharedTexture (uses its own size).
@@ -116,12 +248,22 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     }
     errdefer _ = command_queue.?.Release();
 
+    // Fence must be created with SHARED flag when we will later call
+    // CreateSharedHandle on it (shared-texture mode). The flag is
+    // noise for the HWND/SwapChainPanel paths but would prevent the
+    // debug layer from warning about attempting to share an unshared
+    // fence, and CreateFence itself does not care either way.
+    const fence_flags: d3d12.D3D12_FENCE_FLAGS = switch (surface) {
+        .hwnd, .swap_chain_panel => .NONE,
+        .shared_texture => .SHARED,
+    };
+
     // -- Fence --
     var fence: ?*d3d12.ID3D12Fence = null;
     {
         const hr = dev.CreateFence(
             0,
-            .NONE,
+            fence_flags,
             &d3d12.ID3D12Fence.IID,
             @ptrCast(&fence),
         );
@@ -143,6 +285,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     var dcomp_device_ptr: ?*dcomp.IDCompositionDevice = null;
     var dcomp_target_ptr: ?*dcomp.IDCompositionTarget = null;
     var dcomp_visual_ptr: ?*dcomp.IDCompositionVisual = null;
+    var result_shared_texture: ?SharedTextureState = null;
 
     switch (surface) {
         .hwnd => |hwnd| {
@@ -196,22 +339,41 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 return error.SwapChainPanelBindFailed;
             }
         },
-        .shared_texture => {
-            // SharedTexture: no swap chain, rendering goes to a shared texture.
-            // The shared texture resource will be created by the caller.
+        .shared_texture => |cfg| {
+            // SharedTexture: no swap chain. Create the shared committed
+            // resource + NT handles for the resource and the fence so the
+            // consumer device can OpenSharedHandle on both.
+            result_shared_texture = try SharedTextureState.init(
+                dev,
+                fence.?,
+                cfg.width,
+                cfg.height,
+            );
         },
     }
+    // If anything between here and the final `return` ever gains a
+    // fallible step, this errdefer tears down the shared texture state
+    // instead of leaking the resource and both NT handles. Today it is
+    // defensive -- nothing after this point can fail -- but the cost
+    // is nil and the alternative is a latent leak waiting for the next
+    // edit.
+    errdefer if (result_shared_texture) |st| {
+        _ = d3d12.CloseHandle(st.fence_handle);
+        _ = d3d12.CloseHandle(st.resource_handle);
+        _ = st.resource.Release();
+    };
 
     return .{
         .device = dev,
         .command_queue = command_queue.?,
         .fence = fence.?,
-        .fence_value = 0,
+        .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
         .swap_chain = swap_chain,
         .dcomp_device = dcomp_device_ptr,
         .dcomp_target = dcomp_target_ptr,
         .dcomp_visual = dcomp_visual_ptr,
+        .shared_texture = result_shared_texture,
     };
 }
 
@@ -228,6 +390,13 @@ pub fn deinit(self: *Device) void {
     if (self.dcomp_device) |d| _ = d.Release();
     if (self.swap_chain) |sc| _ = sc.Release();
 
+    if (self.shared_texture) |st| {
+        _ = d3d12.CloseHandle(st.fence_handle);
+        _ = d3d12.CloseHandle(st.resource_handle);
+        _ = st.resource.Release();
+        self.shared_texture = null;
+    }
+
     _ = self.device.Release();
 
     self.* = undefined;
@@ -235,8 +404,7 @@ pub fn deinit(self: *Device) void {
 
 /// Signal the fence from the command queue and block until the GPU catches up.
 pub fn waitForGpu(self: *Device) !void {
-    self.fence_value += 1;
-    const signal_value = self.fence_value;
+    const signal_value = self.fence_value.fetchAdd(1, .release) + 1;
 
     var hr = self.command_queue.Signal(self.fence, signal_value);
     if (FAILED(hr)) return error.FenceSignalFailed;
@@ -246,6 +414,78 @@ pub fn waitForGpu(self: *Device) !void {
         if (FAILED(hr)) return error.FenceSetEventFailed;
         _ = d3d12.WaitForSingleObject(self.fence_event, d3d12.INFINITE);
     }
+}
+
+/// Recreate the shared texture resource and its NT handle at a new
+/// size. Called by the renderer thread on resize. Blocks on
+/// waitForGpu to let any in-flight frame referencing the old
+/// resource drain, then swaps the state under shared_texture_mutex
+/// so ghostty_surface_shared_texture() readers observe either the
+/// old or new snapshot, never a mix.
+///
+/// The fence handle is preserved across resize -- the fence itself
+/// is stable for the surface lifetime, and re-issuing a shared
+/// handle for it would force every consumer to re-open the fence
+/// every time the window resized. SharedTextureState.init
+/// unavoidably produces a fresh fence handle as part of its output;
+/// we close it immediately.
+///
+/// Returns error.NotSharedTextureMode if the surface is not in
+/// shared-texture mode (programmer error -- the renderer should not
+/// call this for HWND or SwapChainPanel surfaces).
+pub fn recreateSharedTexture(self: *Device, width: u32, height: u32) !void {
+    // Drain GPU work referencing the old resource before releasing
+    // anything it might still touch. Log on failure so a TDR mid-
+    // resize leaves a trail in the renderer log; the caller still
+    // has to set device_lost, but at least the diagnostic is here.
+    self.waitForGpu() catch |err| {
+        log.err("waitForGpu failed during recreateSharedTexture: {}", .{err});
+        return err;
+    };
+
+    // Build a fresh state off-lock. SharedTextureState.init does
+    // its own errdefer cleanup on failure, so nothing leaks if this
+    // returns an error.
+    const new_state = try SharedTextureState.init(
+        self.device,
+        self.fence,
+        width,
+        height,
+    );
+
+    // Fence handle is stable across resize; discard the new one
+    // (see doc comment above).
+    _ = d3d12.CloseHandle(new_state.fence_handle);
+
+    self.shared_texture_mutex.lock();
+    defer self.shared_texture_mutex.unlock();
+
+    const old = self.shared_texture orelse {
+        // Caller violated the contract: this method only makes
+        // sense in shared-texture mode. Clean up the new state we
+        // just built before reporting the error.
+        _ = d3d12.CloseHandle(new_state.resource_handle);
+        _ = new_state.resource.Release();
+        return error.NotSharedTextureMode;
+    };
+
+    const next_version = old.version + 1;
+
+    // Swap. Close the old resource handle and release the old
+    // resource only AFTER the new state is fully staged, so any
+    // failure path above leaves the old state intact.
+    _ = d3d12.CloseHandle(old.resource_handle);
+    _ = old.resource.Release();
+
+    self.shared_texture = .{
+        .resource = new_state.resource,
+        .resource_handle = new_state.resource_handle,
+        // Preserved from the old state -- fence handle is stable.
+        .fence_handle = old.fence_handle,
+        .width = new_state.width,
+        .height = new_state.height,
+        .version = next_version,
+    };
 }
 
 // ---- Private helpers ----
