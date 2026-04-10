@@ -383,12 +383,17 @@ pub const Platform = union(PlatformTag) {
         hwnd: ?std.os.windows.HANDLE,
         /// ISwapChainPanelNative pointer for composition swap chain, or null.
         swap_chain_panel: ?*anyopaque = null,
-        /// OUT pointer for shared texture DXGI handle, or null.
-        shared_texture_out: ?*anyopaque = null,
-        /// Width of the shared texture in pixels. Required when shared_texture_out is set.
-        texture_width: u32 = 0,
-        /// Height of the shared texture in pixels. Required when shared_texture_out is set.
-        texture_height: u32 = 0,
+        /// Shared-texture surface configuration. Only honoured when
+        /// both `hwnd` and `swap_chain_panel` are null and
+        /// `shared_texture.enabled` is true. Mirrors the nested
+        /// `shared_texture` struct in ghostty_platform_windows_s.
+        shared_texture: SharedTexture = .{},
+
+        pub const SharedTexture = struct {
+            enabled: bool = false,
+            width: u32 = 0,
+            height: u32 = 0,
+        };
     } else void;
 
     // The C ABI compatible version of this union. The tag is expected
@@ -405,9 +410,15 @@ pub const Platform = union(PlatformTag) {
         windows: extern struct {
             hwnd: ?*anyopaque,
             swap_chain_panel: ?*anyopaque,
-            shared_texture_out: ?*anyopaque,
-            texture_width: u32,
-            texture_height: u32,
+            // Mirrors the anonymous `shared_texture` sub-struct in
+            // ghostty_platform_windows_s. The C side declares this as
+            // an anonymous nested struct; we flatten it into an inline
+            // extern struct here to preserve the same layout.
+            shared_texture: extern struct {
+                enabled: bool,
+                width: u32,
+                height: u32,
+            },
         },
     };
 
@@ -432,9 +443,11 @@ pub const Platform = union(PlatformTag) {
             .windows => if (Windows != void) .{ .windows = .{
                 .hwnd = c_platform.windows.hwnd,
                 .swap_chain_panel = c_platform.windows.swap_chain_panel,
-                .shared_texture_out = c_platform.windows.shared_texture_out,
-                .texture_width = c_platform.windows.texture_width,
-                .texture_height = c_platform.windows.texture_height,
+                .shared_texture = .{
+                    .enabled = c_platform.windows.shared_texture.enabled,
+                    .width = c_platform.windows.shared_texture.width,
+                    .height = c_platform.windows.shared_texture.height,
+                },
             } } else error.UnsupportedPlatform,
         };
     }
@@ -1834,22 +1847,43 @@ pub const CAPI = struct {
         return @ptrCast(dev.device);
     }
 
-    /// Return the ID3D12Resource* ghostty renders to in shared texture
-    /// mode. Same-process consumers can record a copy from this resource
-    /// on ghostty's command queue. The resource pointer changes on
-    /// resize -- re-read after ghostty_surface_set_size.
-    ///
-    /// NOTE: shared texture mode is not yet implemented on the DX12
-    /// renderer. This accessor currently always returns null; the ABI
-    /// slot is reserved for the upcoming implementation (tracked in
-    /// deblasis/ghostty#176).
-    export fn ghostty_surface_get_d3d12_shared_texture(surface: *Surface) ?*anyopaque {
-        // TODO(deblasis/ghostty#176): wire to the DX12 shared-texture
-        // surface mode in the follow-up PR. Kept as a reserved ABI slot
-        // so .NET consumers can bind the P/Invoke ahead of the
-        // implementation landing.
-        _ = surface;
-        return null;
+    /// Mirrors ghostty_surface_shared_texture_s in include/ghostty.h.
+    const SharedTextureSnapshotC = extern struct {
+        resource_handle: ?*anyopaque,
+        fence_handle: ?*anyopaque,
+        fence_value: u64,
+        width: u32,
+        height: u32,
+        version: u64,
+    };
+
+    /// Fill `out` with an atomic snapshot of the shared-texture state
+    /// for this surface. Returns false if the surface is not in
+    /// shared-texture mode (in which case `out` is untouched).
+    export fn ghostty_surface_shared_texture(
+        surface: *Surface,
+        out: *SharedTextureSnapshotC,
+    ) bool {
+        if (comptime builtin.os.tag != .windows) return false;
+        const api_ptr = &surface.core_surface.renderer.api;
+        if (comptime @TypeOf(api_ptr.*) != renderer.DirectX12) return false;
+        if (api_ptr.dev == null) return false;
+        const dev = &api_ptr.dev.?;
+
+        dev.shared_texture_mutex.lock();
+        defer dev.shared_texture_mutex.unlock();
+
+        const st = dev.shared_texture orelse return false;
+
+        out.* = .{
+            .resource_handle = @ptrCast(st.resource_handle),
+            .fence_handle = @ptrCast(st.fence_handle),
+            .fence_value = dev.fence_value.load(.acquire),
+            .width = st.width,
+            .height = st.height,
+            .version = st.version,
+        };
+        return true;
     }
 
     /// Update the size of a surface. This will trigger resize notifications
