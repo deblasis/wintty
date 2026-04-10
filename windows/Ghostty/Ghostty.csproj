@@ -22,6 +22,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!--
       Allow [GeneratedComInterface] types to interop with the few
@@ -44,12 +45,27 @@
   </ItemGroup>
 
   <!--
-    Copy libghostty.dll from the zig-out install dir produced by
-    `zig build -Dapp-runtime=none`. This mirrors how macos/Ghostty.xcodeproj
-    consumes the xcframework from zig-out. Zig installs shared libs to
-    zig-out/lib on Windows (not zig-out/bin). The path is relative to this csproj.
+    NativeAOT static linking: resolve all LibraryImport("ghostty") calls
+    as direct linker symbols from the static archive instead of loading
+    ghostty.dll at runtime. The linker (link.exe) consumes the .lib the
+    same way it would for any C/C++ static library.
   -->
   <ItemGroup>
+    <DirectPInvoke Include="ghostty" />
+    <NativeLibrary Include="..\..\zig-out\lib\ghostty-static.lib"
+                   Condition="Exists('..\..\zig-out\lib\ghostty-static.lib')" />
+    <!-- System libraries referenced by libghostty's DX12 renderer -->
+    <NativeLibrary Include="d3d12.lib" />
+    <NativeLibrary Include="dxgi.lib" />
+    <NativeLibrary Include="dcomp.lib" />
+  </ItemGroup>
+
+  <!--
+    Fallback: copy libghostty.dll for non-AOT builds (dotnet run / Debug).
+    When PublishAot is true and ghostty-static.lib is linked, the DLL is
+    not needed at runtime.
+  -->
+  <ItemGroup Condition="!Exists('..\..\zig-out\lib\ghostty-static.lib')">
     <None Include="..\..\zig-out\lib\ghostty.dll" Condition="Exists('..\..\zig-out\lib\ghostty.dll')">
       <Link>native\ghostty.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
