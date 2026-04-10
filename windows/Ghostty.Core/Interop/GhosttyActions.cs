@@ -19,6 +19,7 @@ namespace Ghostty.Core.Interop;
 // to "return false" in GhosttyHost.OnAction.
 internal enum GhosttyActionTag
 {
+    ToggleCommandPalette = 11,
     Scrollbar = 26,
     SetTitle = 32,
     CloseWindow = 49,
