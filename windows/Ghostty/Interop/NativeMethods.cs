@@ -106,8 +106,14 @@ internal struct GhosttyInputKey
     public uint Keycode;
     public IntPtr Text;              // const char*
     public uint UnshiftedCodepoint;
-    [MarshalAs(UnmanagedType.I1)]
-    public bool Composing;
+    // Zig bool is 1 byte; use byte to avoid SYSLIB1051 without
+    // assembly-wide DisableRuntimeMarshalling.
+    private byte _composing;
+    public bool Composing
+    {
+        readonly get => _composing != 0;
+        set => _composing = value ? (byte)1 : (byte)0;
+    }
 }
 
 // GhosttySharedTextureConfig and GhosttySharedTextureSnapshot live in
@@ -152,8 +158,12 @@ internal struct GhosttySurfaceConfig
     public IntPtr EnvVars;          // ghostty_env_var_s*
     public UIntPtr EnvVarCount;
     public IntPtr InitialInput;     // const char*
-    [MarshalAs(UnmanagedType.I1)]
-    public bool WaitAfterCommand;
+    private byte _waitAfterCommand; // Zig bool → byte (see GhosttyInputKey)
+    public bool WaitAfterCommand
+    {
+        readonly get => _waitAfterCommand != 0;
+        set => _waitAfterCommand = value ? (byte)1 : (byte)0;
+    }
     public GhosttySurfaceContext Context;
 }
 
@@ -243,8 +253,12 @@ internal struct GhosttyActionSetTitle
 internal struct GhosttyRuntimeConfig
 {
     public IntPtr Userdata;
-    [MarshalAs(UnmanagedType.I1)]
-    public bool SupportsSelectionClipboard;
+    private byte _supportsSelectionClipboard; // Zig bool → byte (see GhosttyInputKey)
+    public bool SupportsSelectionClipboard
+    {
+        readonly get => _supportsSelectionClipboard != 0;
+        set => _supportsSelectionClipboard = value ? (byte)1 : (byte)0;
+    }
     public IntPtr WakeupCb;              // function pointers held as IntPtr
     public IntPtr ActionCb;              // so we control the lifetime of the
     public IntPtr ReadClipboardCb;       // managed delegates they point at.
@@ -264,111 +278,138 @@ internal static partial class NativeMethods
 
     // ---- init ----------------------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_init")]
-    internal static extern int Init(UIntPtr argc, IntPtr argv);
+    [LibraryImport(Dll, EntryPoint = "ghostty_init")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial int Init(UIntPtr argc, IntPtr argv);
 
     // ---- config --------------------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_config_new")]
-    internal static extern GhosttyConfig ConfigNew();
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_new")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyConfig ConfigNew();
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_config_free")]
-    internal static extern void ConfigFree(GhosttyConfig config);
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_free")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigFree(GhosttyConfig config);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_config_load_default_files")]
-    internal static extern void ConfigLoadDefaultFiles(GhosttyConfig config);
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadDefaultFiles(GhosttyConfig config);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_config_finalize")]
-    internal static extern void ConfigFinalize(GhosttyConfig config);
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_finalize")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigFinalize(GhosttyConfig config);
 
     // ---- app -----------------------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_app_new")]
-    internal static extern GhosttyApp AppNew(in GhosttyRuntimeConfig runtime, GhosttyConfig config);
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_new")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyApp AppNew(in GhosttyRuntimeConfig runtime, GhosttyConfig config);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_app_free")]
-    internal static extern void AppFree(GhosttyApp app);
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_free")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppFree(GhosttyApp app);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_app_tick")]
-    internal static extern void AppTick(GhosttyApp app);
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_tick")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppTick(GhosttyApp app);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_app_set_focus")]
-    internal static extern void AppSetFocus(GhosttyApp app, [MarshalAs(UnmanagedType.I1)] bool focused);
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_set_focus")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppSetFocus(GhosttyApp app, [MarshalAs(UnmanagedType.I1)] bool focused);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_app_set_color_scheme")]
-    internal static extern void AppSetColorScheme(GhosttyApp app, GhosttyColorScheme scheme);
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_set_color_scheme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppSetColorScheme(GhosttyApp app, GhosttyColorScheme scheme);
 
     // ---- surface lifecycle ---------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_config_new")]
-    internal static extern GhosttySurfaceConfig SurfaceConfigNew();
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_config_new")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttySurfaceConfig SurfaceConfigNew();
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_new")]
-    internal static extern GhosttySurface SurfaceNew(GhosttyApp app, in GhosttySurfaceConfig config);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_new")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttySurface SurfaceNew(GhosttyApp app, in GhosttySurfaceConfig config);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_free")]
-    internal static extern void SurfaceFree(GhosttySurface surface);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_free")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceFree(GhosttySurface surface);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_refresh")]
-    internal static extern void SurfaceRefresh(GhosttySurface surface);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_refresh")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceRefresh(GhosttySurface surface);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_draw")]
-    internal static extern void SurfaceDraw(GhosttySurface surface);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_draw")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceDraw(GhosttySurface surface);
 
     // ---- surface size / scale / focus ----------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_size")]
-    internal static extern void SurfaceSetSize(GhosttySurface surface, uint width, uint height);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_size")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetSize(GhosttySurface surface, uint width, uint height);
 
     // MapVirtualKeyW for the keycode ScanCode==0 fallback in TerminalControl.
     // Win32 user32, not WinRT - bypasses any WinUI framework filtering.
     internal const uint MAPVK_VK_TO_VSC = 0;
-    [DllImport("user32.dll", EntryPoint = "MapVirtualKeyW")]
-    internal static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
+    [LibraryImport("user32.dll", EntryPoint = "MapVirtualKeyW")]
+    internal static partial uint MapVirtualKeyW(uint uCode, uint uMapType);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_content_scale")]
-    internal static extern void SurfaceSetContentScale(GhosttySurface surface, double x, double y);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_content_scale")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetContentScale(GhosttySurface surface, double x, double y);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_focus")]
-    internal static extern void SurfaceSetFocus(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool focused);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_focus")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetFocus(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool focused);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_set_occlusion")]
-    internal static extern void SurfaceSetOcclusion(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool occluded);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_occlusion")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetOcclusion(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool occluded);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_size")]
-    internal static extern GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_shared_texture")]
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_shared_texture")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool SurfaceSharedTexture(
+    internal static partial bool SurfaceSharedTexture(
         GhosttySurface surface,
         out GhosttySharedTextureSnapshot snapshot);
 
     // ---- surface input -------------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_key")]
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_key")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool SurfaceKey(GhosttySurface surface, GhosttyInputKey key);
+    internal static partial bool SurfaceKey(GhosttySurface surface, GhosttyInputKey key);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_text")]
-    internal static extern void SurfaceText(GhosttySurface surface, IntPtr utf8, UIntPtr len);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_text")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceText(GhosttySurface surface, IntPtr utf8, UIntPtr len);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_preedit")]
-    internal static extern void SurfacePreedit(GhosttySurface surface, IntPtr utf8, UIntPtr len);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_preedit")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfacePreedit(GhosttySurface surface, IntPtr utf8, UIntPtr len);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_mouse_button")]
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_button")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool SurfaceMouseButton(
+    internal static partial bool SurfaceMouseButton(
         GhosttySurface surface,
         GhosttyMouseState state,
         GhosttyMouseButton button,
         GhosttyMods mods);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_mouse_pos")]
-    internal static extern void SurfaceMousePos(GhosttySurface surface, double x, double y, GhosttyMods mods);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_pos")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceMousePos(GhosttySurface surface, double x, double y, GhosttyMods mods);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_mouse_scroll")]
-    internal static extern void SurfaceMouseScroll(GhosttySurface surface, double x, double y, int scrollMods);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_scroll")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceMouseScroll(GhosttySurface surface, double x, double y, int scrollMods);
 
     // ghostty_surface_binding_action takes a non-NUL-terminated UTF-8
     // string plus length and runs it through input.Binding.Action.parse.
@@ -380,30 +421,29 @@ internal static partial class NativeMethods
     // caller owns the UTF-8 buffer (typically stackalloc'd) and passes
     // its length in bytes. No NUL terminator required on the native
     // side — libghostty takes (ptr, len).
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_binding_action")]
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_binding_action")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern unsafe bool SurfaceBindingAction(
+    internal static unsafe partial bool SurfaceBindingAction(
         GhosttySurface surface,
         byte* action,
         UIntPtr actionLen);
 
     // ---- surface misc --------------------------------------------------
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_request_close")]
-    internal static extern void SurfaceRequestClose(GhosttySurface surface);
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_request_close")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceRequestClose(GhosttySurface surface);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_process_exited")]
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_process_exited")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool SurfaceProcessExited(GhosttySurface surface);
+    internal static partial bool SurfaceProcessExited(GhosttySurface surface);
 
     // ghostty_surface_complete_clipboard_request(surface, text, state, confirmed)
     // Called once per read/confirm request to return clipboard text to libghostty
     // and release its internal request state. Must be called exactly once even on
     // error paths -- skipping it leaks state inside libghostty.
-    //
-    // Source-generated via [LibraryImport] so this entry point is AOT-friendly
-    // and produces no IL stub. The rest of the file still uses [DllImport]; the
-    // standing migration TODO covers those.
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request",
         StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -420,7 +460,7 @@ internal static partial class NativeMethods
     // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-messagebeep
     internal const uint MB_OK = 0x00000000;
 
-    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool MessageBeep(uint uType);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)] // Win32 BOOL is 4 bytes, not 1
+    internal static partial bool MessageBeep(uint uType);
 }
