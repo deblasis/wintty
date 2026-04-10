@@ -25,13 +25,10 @@ public partial class App : Application
             {
                 if (!string.Equals(name, "ghostty", StringComparison.OrdinalIgnoreCase))
                     return IntPtr.Zero;
-                // Prefer AppContext.BaseDirectory: assembly.Location is empty
-                // under single-file publish and Native AOT, which is where
-                // this shell will eventually run.
-                var baseDir = AppContext.BaseDirectory;
-                if (string.IsNullOrEmpty(baseDir))
-                    baseDir = Path.GetDirectoryName(assembly.Location) ?? string.Empty;
-                var candidate = Path.Combine(baseDir, "native", "ghostty.dll");
+                // AppContext.BaseDirectory works in all deployment modes
+                // (framework-dependent, single-file, Native AOT).
+                // assembly.Location returns empty under single-file and AOT.
+                var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
                 return NativeLibrary.Load(candidate);
             });
     }
