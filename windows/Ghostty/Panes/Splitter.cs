@@ -25,7 +25,7 @@ namespace Ghostty.Panes;
 /// renderer can re-apply the Grid row/column definitions. It does NOT
 /// reach into the visual tree itself.
 /// </summary>
-internal sealed class Splitter : Grid
+internal sealed partial class Splitter : Grid
 {
     // Clamp range: prevents either side from being dragged to zero,
     // which would lose the pane visually and make it impossible to
