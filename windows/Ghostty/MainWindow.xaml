@@ -52,30 +52,34 @@
         </Grid.ColumnDefinitions>
 
         <!--
-            Vertical-mode title bar. Spans both columns so the drag
-            region and title text fill the window width; the caption
-            inset on the right reserves room for the OS min/max/close
-            buttons. Width of that inset is kept in sync with
-            AppWindow.TitleBar.RightInset from code-behind.
+            Vertical-mode title bar. Three columns:
+            Col 0 mirrors StripColumn so the drag region starts after
+            the tab strip, avoiding a Z-order fight with the chevron
+            button inside VerticalTabHost. Col 1 is the draggable
+            area with the layout-switch button and window title.
+            Col 2 reserves room for the OS caption buttons.
+
+            No Background on the outer Grid so clicks in Col 0 pass
+            through to the VerticalTabHost (chevron) below.
         -->
         <Grid x:Name="VerticalTitleBar"
               Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
               Height="32"
-              Background="Transparent"
               Visibility="Collapsed">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="TitleBarStripMirror" Width="0"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition x:Name="VerticalCaptionInset" Width="146"/>
             </Grid.ColumnDefinitions>
 
             <Grid x:Name="VerticalTitleDragRegion"
-                  Grid.Column="0"
+                  Grid.Column="1"
                   Background="Transparent">
 
                 <Button x:Name="VerticalSwitchButton"
                         Width="32" Height="32"
                         Padding="0"
-                        Margin="44,0,0,0"
+                        Margin="4,0,0,0"
                         HorizontalAlignment="Left"
                         VerticalAlignment="Center"
                         Background="Transparent"
