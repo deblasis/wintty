@@ -65,6 +65,7 @@
         <Grid x:Name="VerticalTitleBar"
               Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
               Height="32"
+              RequestedTheme="Dark"
               Visibility="Collapsed">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="TitleBarStripMirror" Width="0"/>
@@ -87,14 +88,14 @@
                         Click="OnVerticalSwitchButtonClick">
                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
                               Glyph="&#xE8A9;"
-                              FontSize="14"/>
+                              FontSize="{StaticResource BodyTextBlockFontSize}"/>
                 </Button>
 
                 <TextBlock x:Name="VerticalTitleText"
                            VerticalAlignment="Center"
                            HorizontalAlignment="Center"
-                           FontSize="12"
-                           Foreground="White"
+                           FontSize="{StaticResource CaptionTextBlockFontSize}"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            TextTrimming="CharacterEllipsis"
                            IsHitTestVisible="False"/>
             </Grid>
