@@ -124,6 +124,8 @@ internal sealed class KeyBindings
         // Runtime switch between horizontal and vertical tab layouts
         // (Ctrl+Shift+, -- same chord as Edge's vertical tabs toggle).
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)188, PaneAction.ToggleTabLayout),
+        // Command palette
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.P, PaneAction.ToggleCommandPalette),
     });
 
     /// <summary>
