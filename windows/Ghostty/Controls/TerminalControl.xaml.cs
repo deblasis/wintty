@@ -22,6 +22,14 @@ namespace Ghostty.Controls;
 /// </summary>
 public sealed partial class TerminalControl : UserControl
 {
+    /// <summary>
+    /// Set by MainWindow when the command palette opens/closes. When true,
+    /// OnKeyDown returns immediately so keystrokes go to the palette's
+    /// TextBox instead of libghostty. Instance-scoped so multi-window
+    /// does not suppress input in unrelated windows.
+    /// </summary>
+    internal bool CommandPaletteIsOpen { get; set; }
+
     // Handles ------------------------------------------------------------
 
     private GhosttySurface _surface;
@@ -590,6 +598,8 @@ public sealed partial class TerminalControl : UserControl
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (CommandPaletteIsOpen) return;
+
         // Stamp the shared host so VerticalTabHost's hover-expand
         // suppression knows the user is mid-typing and holds back
         // the sidebar pop-open. Unconditional: we want every key
