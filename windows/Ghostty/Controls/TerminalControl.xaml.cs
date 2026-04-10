@@ -756,6 +756,6 @@ public sealed partial class TerminalControl : UserControl
     private const int VK_CAPITAL = 0x14;
     private const int VK_NUMLOCK = 0x90;
 
-    [DllImport("user32.dll")]
-    private static extern short GetKeyState(int vKey);
+    [LibraryImport("user32.dll")]
+    private static partial short GetKeyState(int vKey);
 }
