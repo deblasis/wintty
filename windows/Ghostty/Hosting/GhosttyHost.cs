@@ -41,6 +41,8 @@ internal sealed class GhosttyHost : IDisposable
 
     internal void NoteKeystroke() => LastKeystrokeTimestamp = DateTime.UtcNow;
 
+    public event EventHandler? CommandPaletteToggleRequested;
+
     private ClipboardBridge? _clipboardBridge;
 
     // Delegates must be retained as fields; P/Invoke hands out native
@@ -189,6 +191,11 @@ internal sealed class GhosttyHost : IDisposable
         var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
         switch (tag)
         {
+            case GhosttyActionTag.ToggleCommandPalette:
+                _dispatcher.TryEnqueue(() =>
+                    CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
+                return true;
+
             case GhosttyActionTag.SetTitle:
             {
                 var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);

@@ -32,4 +32,5 @@ internal enum PaneAction
     MoveTabLeft,
     ToggleVerticalTabsPinned,
     ToggleTabLayout,
+    ToggleCommandPalette,
 }

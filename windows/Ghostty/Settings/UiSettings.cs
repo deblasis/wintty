@@ -26,6 +26,8 @@ namespace Ghostty.Settings;
 internal sealed class UiSettings
 {
     public bool VerticalTabs { get; set; }
+    public bool CommandPaletteGroupCommands { get; set; }
+    public string CommandPaletteBackground { get; set; } = "acrylic";
 
     private static string FilePath
     {
