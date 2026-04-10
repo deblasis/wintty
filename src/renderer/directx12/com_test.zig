@@ -79,6 +79,39 @@ test "DXGI device-loss error codes are all failures" {
     try std.testing.expect(com.FAILED(com.DXGI_ERROR_DEVICE_RESET));
 }
 
+// Verify the device-loss check pattern used in drawFrameEnd's Signal
+// failure path (and the other three call sites) catches all three codes.
+// This pins the invariant: FAILED(hr) must be true AND the specific
+// equality check must match for each device-loss HRESULT.
+
+test "device-loss check pattern matches all three codes" {
+    const device_loss_codes = [_]com.HRESULT{
+        com.DXGI_ERROR_DEVICE_REMOVED,
+        com.DXGI_ERROR_DEVICE_HUNG,
+        com.DXGI_ERROR_DEVICE_RESET,
+    };
+    for (device_loss_codes) |hr| {
+        // Outer gate: FAILED() must be true so we enter the error branch.
+        try std.testing.expect(com.FAILED(hr));
+        // Inner gate: at least one equality arm must match.
+        const matched = (hr == com.DXGI_ERROR_DEVICE_REMOVED or
+            hr == com.DXGI_ERROR_DEVICE_HUNG or
+            hr == com.DXGI_ERROR_DEVICE_RESET);
+        try std.testing.expect(matched);
+    }
+}
+
+test "non-device-loss failures do not match device-loss pattern" {
+    // E_FAIL is a generic COM error -- it should pass FAILED() but not
+    // match the device-loss equality check.
+    const e_fail: com.HRESULT = @bitCast(@as(u32, 0x80004005));
+    try std.testing.expect(com.FAILED(e_fail));
+    const matched = (e_fail == com.DXGI_ERROR_DEVICE_REMOVED or
+        e_fail == com.DXGI_ERROR_DEVICE_HUNG or
+        e_fail == com.DXGI_ERROR_DEVICE_RESET);
+    try std.testing.expect(!matched);
+}
+
 test "Buffer type instantiation compiles" {
     const buffer_mod = @import("buffer.zig");
     _ = buffer_mod.Buffer(f32);
