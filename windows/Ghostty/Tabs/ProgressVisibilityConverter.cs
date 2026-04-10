@@ -10,7 +10,7 @@ namespace Ghostty.Tabs;
 /// reporting progress (state == None) and shows it otherwise. Bound
 /// in the TabHost header template.
 /// </summary>
-internal sealed class ProgressVisibilityConverter : IValueConverter
+internal sealed partial class ProgressVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, string language)
     {
