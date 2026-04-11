@@ -61,6 +61,13 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? TabCloseRequestedFromKeyboard;
 
+    /// <summary>
+    /// Raised when <see cref="PaneAction.ToggleFullscreen"/> fires.
+    /// MainWindow listens and toggles
+    /// <c>AppWindow.SetPresenter(FullScreen/Default)</c>.
+    /// </summary>
+    public event EventHandler? ToggleFullscreenRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -90,6 +97,8 @@ internal sealed class PaneActionRouter
             case PaneAction.FocusRight:      concrete.FocusDirection(FocusDirection.Right); break;
             case PaneAction.FocusUp:         concrete.FocusDirection(FocusDirection.Up); break;
             case PaneAction.FocusDown:       concrete.FocusDirection(FocusDirection.Down); break;
+            case PaneAction.EqualizeSplits:  concrete.EqualizeSplits(); break;
+            case PaneAction.ToggleSplitZoom: concrete.ToggleSplitZoom(); break;
 
             // Tabs
             case PaneAction.NewTab: _tabs.NewTab(); break;
