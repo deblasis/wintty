@@ -1,0 +1,22 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.ColorsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="8" MaxWidth="600">
+            <TextBlock Text="Colors" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+
+            <AutoSuggestBox
+                x:Name="ThemeSearch"
+                Header="Theme"
+                PlaceholderText="Search themes..."
+                QueryIcon="Find" />
+
+            <TextBox Header="Foreground" PlaceholderText="#cdd6f4" LostFocus="Foreground_LostFocus" />
+            <TextBox Header="Background" PlaceholderText="#1e1e2e" LostFocus="Background_LostFocus" />
+            <TextBox Header="Cursor color" PlaceholderText="#f5e0dc" LostFocus="CursorColor_LostFocus" />
+            <TextBox Header="Selection color" PlaceholderText="#585b70" LostFocus="SelectionColor_LostFocus" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -3720,6 +3720,23 @@ else
 /// Available since: 1.1.0
 @"gtk-custom-css": RepeatablePath = .{},
 
+/// Automatically reload the configuration when the config file
+/// changes on disk. Uses a platform-specific file watcher (e.g.
+/// FileSystemWatcher on Windows). When false, config is only
+/// reloaded via explicit keybind or menu action.
+///
+/// Available since: 1.1.1
+@"auto-reload-config": bool = false,
+
+/// Enable the built-in Settings UI on Windows. On other platforms,
+/// this option has no effect. When false, the "open config" action
+/// opens the config file in the default editor (matching macOS
+/// behavior). When true, opens the built-in settings window with
+/// structured editing.
+///
+/// Available since: 1.1.1
+@"windows-settings-ui": bool = false,
+
 /// If `true` (default), applications running in the terminal can show desktop
 /// notifications using certain escape sequences such as OSC 9 or OSC 777.
 @"desktop-notifications": bool = true,
