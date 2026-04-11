@@ -12,25 +12,28 @@ namespace Ghostty.Input;
 internal enum PaneAction
 {
     // Pane operations (#163)
-    SplitVertical,
-    SplitHorizontal,
-    ClosePane, // legacy: pane-only close, no chord points to it after tabs landed
-    FocusLeft,
-    FocusRight,
-    FocusUp,
-    FocusDown,
+    SplitVertical = 0,
+    SplitHorizontal = 1,
+    ClosePane = 2, // legacy: pane-only close, no chord points to it after tabs landed
+    FocusLeft = 3,
+    FocusRight = 4,
+    FocusUp = 5,
+    FocusDown = 6,
+    EqualizeSplits = 7,
+    ToggleSplitZoom = 8,
+    ToggleFullscreen = 9,
 
     // Tab operations (this PR)
-    NewTab,
-    CloseActiveProgressive, // pane -> tab -> window with confirmation
-    NextTab,
-    PrevTab,
-    JumpTab1, JumpTab2, JumpTab3, JumpTab4,
-    JumpTab5, JumpTab6, JumpTab7, JumpTab8,
-    JumpTabLast,
-    MoveTabRight,
-    MoveTabLeft,
-    ToggleVerticalTabsPinned,
-    ToggleTabLayout,
-    ToggleCommandPalette,
+    NewTab = 10,
+    CloseActiveProgressive = 11, // pane -> tab -> window with confirmation
+    NextTab = 12,
+    PrevTab = 13,
+    JumpTab1 = 14, JumpTab2 = 15, JumpTab3 = 16, JumpTab4 = 17,
+    JumpTab5 = 18, JumpTab6 = 19, JumpTab7 = 20, JumpTab8 = 21,
+    JumpTabLast = 22,
+    MoveTabRight = 23,
+    MoveTabLeft = 24,
+    ToggleVerticalTabsPinned = 25,
+    ToggleTabLayout = 26,
+    ToggleCommandPalette = 27,
 }
