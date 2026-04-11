@@ -48,6 +48,8 @@ namespace Ghostty;
 public sealed partial class MainWindow : Window
 {
     private readonly GhosttyHost _host;
+    private readonly ConfigService _configService;
+    private readonly ConfigFileEditor _configEditor;
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
@@ -63,6 +65,7 @@ public sealed partial class MainWindow : Window
     private readonly LayoutCoordinator _layout;
     private readonly TitleBarCoordinator _titleBar;
     private readonly TaskbarHost _taskbar;
+    private readonly WindowThemeManager _themeManager;
 
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
@@ -110,6 +113,9 @@ public sealed partial class MainWindow : Window
     internal MainWindow(ConfigService configService)
     {
         InitializeComponent();
+
+        _configService = configService;
+        _configEditor = new ConfigFileEditor(configService.ConfigFilePath);
 
         _host = new GhosttyHost(DispatcherQueue, configService.ConfigHandle);
         configService.SetApp(_host.App);
@@ -159,6 +165,16 @@ public sealed partial class MainWindow : Window
         // TabHost is parented so the content area is sized without
         // the default title bar row.
         ExtendsContentIntoTitleBar = true;
+
+        // Apply window-theme from config. The manager resolves the
+        // config value ("light"/"dark"/"system"/"auto") to a concrete
+        // dark/light choice and sets both ElementTheme on the XAML root
+        // and the DWM immersive dark mode attribute for the title bar
+        // caption buttons (which XAML cannot control when
+        // ExtendsContentIntoTitleBar is true).
+        _themeManager = new WindowThemeManager(configService, DispatcherQueue);
+        ApplyTheme();
+        _themeManager.ThemeChanged += _ => ApplyTheme();
 
         _factory = new PaneHostFactory(_host);
         _tabManager = new TabManager(() => _factory.Create());
@@ -339,6 +355,9 @@ public sealed partial class MainWindow : Window
 
         _host.ReloadConfigRequested += (_, _) => configService.Reload();
 
+        // Ctrl+Shift+Scroll wheel opacity adjustment from any terminal surface.
+        _host.OpacityAdjustRequested += (_, direction) => AdjustOpacity(direction);
+
         _tabManager.LastTabClosed += (_, _) => Close();
 
         Closed += OnClosedAsync;
@@ -360,6 +379,7 @@ public sealed partial class MainWindow : Window
         }
 
         _taskbar.Dispose();
+        _themeManager.Dispose();
 
         // Surface lifetime is decoupled from Loaded/Unloaded
         // (see TerminalControl.DisposeSurface), so we have to
@@ -516,6 +536,18 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Apply the resolved window theme to the XAML visual tree and the
+    /// DWM non-client area. Called once at startup and again whenever
+    /// the <see cref="WindowThemeManager"/> detects a change.
+    /// </summary>
+    private void ApplyTheme()
+    {
+        if (Content is FrameworkElement root)
+            root.RequestedTheme = _themeManager.ElementTheme;
+        _themeManager.ApplyToWindow(this);
+    }
+
+    /// <summary>
     /// Toggle between fullscreen and default window presenter. Uses
     /// <see cref="Microsoft.UI.Windowing.AppWindowPresenterKind"/> so
     /// the window chrome (title bar, borders) is hidden in fullscreen
@@ -528,6 +560,31 @@ public sealed partial class MainWindow : Window
             kind == Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen
                 ? Microsoft.UI.Windowing.AppWindowPresenterKind.Default
                 : Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen);
+    }
+
+    /// <summary>
+    /// Adjust background opacity by a step. Direction: +1 = increase,
+    /// -1 = decrease, 0 = reset to 1.0. Writes the new value to the
+    /// config file and triggers a reload so all surfaces pick it up.
+    /// Step size matches the Settings UI slider (0.05).
+    /// </summary>
+    private void AdjustOpacity(int direction)
+    {
+        const double step = 0.05;
+        var current = _configService.BackgroundOpacity;
+        var next = direction switch
+        {
+            0 => 1.0,
+            _ => Math.Clamp(current + direction * step, 0.0, 1.0),
+        };
+
+        // Skip the write+reload round-trip when nothing changed.
+        if (Math.Abs(next - current) < 0.001) return;
+
+        _configService.SuppressWatcher(true);
+        _configEditor.SetValue("background-opacity", next.ToString("F2"));
+        _configService.SuppressWatcher(false);
+        _configService.Reload();
     }
 
     private void ToggleCommandPalette()
@@ -586,7 +643,8 @@ public sealed partial class MainWindow : Window
         // Popup teardown and PaneHost Rebuild (e.g. close-pane).
         var builtIn = new BuiltInCommandSource(
             paneActionFactory: action => _ => DispatcherQueue.TryEnqueue(() => _router.Invoke(action)),
-            bindingActionFactory: actionKey => _ => DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)));
+            bindingActionFactory: actionKey => _ => DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)),
+            opacityAction: direction => DispatcherQueue.TryEnqueue(() => AdjustOpacity(direction)));
 
         var jump = new JumpCommandSource(
             _tabManager,
