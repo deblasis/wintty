@@ -15,7 +15,7 @@ namespace Ghostty.Services;
 ///
 /// Subscribe to <see cref="ThemeChanged"/> for live-reload updates.
 /// </summary>
-internal sealed class WindowThemeManager : IDisposable
+internal sealed partial class WindowThemeManager : IDisposable
 {
     private readonly IConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
