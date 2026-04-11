@@ -75,6 +75,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     private PaneNode _root;
     private LeafPane _activeLeaf;
+    // When non-null, the active leaf is "zoomed" â€” it fills the entire
+    // host and the rest of the tree is hidden. Mirrors upstream's
+    // toggle_split_zoom keybind. Unzoom restores the tree via Rebuild.
+    private LeafPane? _zoomedLeaf;
     // Set once the last leaf has been closed and the window is tearing
     // down. DisposeAllLeaves honors it so it does not walk a tree that
     // has already been disposed leaf-by-leaf in CloseLeaf.
@@ -222,6 +226,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void Split(PaneOrientation orientation)
     {
+        // Unzoom before splitting so the new sub-Grid is inserted into
+        // the full tree, not into the zoomed single-leaf visual.
+        if (_zoomedLeaf is not null)
+        {
+            _zoomedLeaf = null;
+            Rebuild();
+        }
+
         var oldActive = _activeLeaf;
         var wasRoot = ReferenceEquals(_root, oldActive);
         var newTerminal = CreateTerminal();
@@ -330,6 +342,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // do it explicitly here.
         leaf.Terminal().DisposeSurface();
 
+        // Detach the closed terminal from its visual parent Grid so the
+        // old split Grid does not hold a reference that keeps the WinUI
+        // compositor rendering a ghost DXGI swap chain surface. Without
+        // this, the disposed TerminalControl stays in the old Grid's
+        // Children and can remain visually rendered even after the Grid
+        // itself is removed from the host. (#185)
+        DetachFromParent(leaf.Terminal());
+
         var newRoot = PaneTree.Close(_root, leaf);
         if (newRoot is null)
         {
@@ -342,6 +362,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
 
         _root = newRoot;
+        // Clear zoom if the zoomed leaf was closed or if only one leaf
+        // remains (zoom is meaningless on a single pane).
+        if (_zoomedLeaf is not null
+            && (ReferenceEquals(_zoomedLeaf, leaf) || _root is LeafPane))
+        {
+            _zoomedLeaf = null;
+        }
+
         // Focus the first leaf of the (former) sibling subtree. We
         // pick the parent's sibling first so the focus stays close to
         // where the closed pane was.
@@ -353,12 +381,67 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// Reset every split ratio to 0.5, giving all panes equal space.
+    /// Mirrors upstream's <c>equalize_splits</c> keybind.
+    /// </summary>
+    public void EqualizeSplits()
+    {
+        PaneTree.Equalize(_root);
+        // When zoomed, only update ratios — ToggleSplitZoom.Rebuild()
+        // will apply them when the user unzooms.
+        if (_zoomedLeaf is not null) return;
+        Rebuild();
+        UpdateHighlightPosition();
+    }
+
+    /// <summary>
+    /// Toggle zoom on the active leaf. When zoomed, the active leaf
+    /// fills the entire host and the rest of the tree is hidden. When
+    /// unzoomed, the tree visual is restored. No-op on a single leaf.
+    /// Mirrors upstream's <c>toggle_split_zoom</c> keybind.
+    /// </summary>
+    public void ToggleSplitZoom()
+    {
+        if (PaneCount <= 1) return;
+
+        if (_zoomedLeaf is not null)
+        {
+            // Unzoom: restore the full tree visual.
+            _zoomedLeaf = null;
+            Rebuild();
+            UpdateHighlightPosition();
+            DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
+        }
+        else
+        {
+            // Zoom: replace the tree visual with just the active leaf.
+            _zoomedLeaf = _activeLeaf;
+            if (Content is not Grid hostGrid) return;
+            ClearVisualTree(_treeRoot);
+            hostGrid.Children.Remove(_treeRoot);
+            DetachFromParent(_activeLeaf.Terminal());
+            _treeRoot = _activeLeaf.Terminal();
+            hostGrid.Children.Insert(0, _treeRoot);
+            _highlightOverlay.Visibility = Visibility.Collapsed;
+            DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
+        }
+    }
+
+    /// <summary>
+    /// Whether the active leaf is currently zoomed to fill the host.
+    /// </summary>
+    public bool IsZoomed => _zoomedLeaf is not null;
+
+    /// <summary>
     /// Move focus to the leaf nearest the active leaf in the requested
     /// direction. Geometric (uses rendered rects), not tree-order.
     /// No-op if no leaf lies in that direction.
     /// </summary>
     public void FocusDirection(FocusDirection direction)
     {
+        // No-op while zoomed -- only one leaf is visible.
+        if (_zoomedLeaf is not null) return;
+
         var allLeaves = PaneTree.Leaves(_root).ToList();
         if (allLeaves.Count <= 1) return;
 
@@ -549,9 +632,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Split (and for Close); incremental splits mutate the
         // visual tree directly without a full rebuild.
         if (Content is not Grid hostGrid) return;
+
+        // Clear old tree children recursively before removal so the
+        // compositor drops all references to stale swap chain panels.
+        // Without this, removed Grids that still contain child elements
+        // can leave ghost visuals on screen. (#185)
+        ClearVisualTree(_treeRoot);
+
         hostGrid.Children.Remove(_treeRoot);
         _treeRoot = BuildVisual(_root);
         hostGrid.Children.Insert(0, _treeRoot);
+        // Restore the highlight overlay after unzoom (zoom hides it).
+        _highlightOverlay.Visibility = Visibility.Visible;
     }
 
     private FrameworkElement BuildVisual(PaneNode node)
@@ -641,6 +733,24 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                 grid.RowDefinitions[1].Height = new GridLength(1 - split.Ratio, GridUnitType.Star);
             }
         }
+    }
+
+    /// <summary>
+    /// Recursively clear all children from a visual subtree. This breaks
+    /// compositor references to stale DXGI swap chain panels so removed
+    /// Grids do not leave ghost visuals on screen. Surviving
+    /// TerminalControls are re-parented by <see cref="BuildVisual"/>
+    /// immediately after this runs.
+    /// </summary>
+    private static void ClearVisualTree(FrameworkElement element)
+    {
+        if (element is not Panel panel) return;
+        for (var i = panel.Children.Count - 1; i >= 0; i--)
+        {
+            if (panel.Children[i] is FrameworkElement child)
+                ClearVisualTree(child);
+        }
+        panel.Children.Clear();
     }
 
     private static void DetachFromParent(FrameworkElement child)

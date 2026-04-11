@@ -151,4 +151,19 @@ internal static class PaneTree
         else gpSplit.Child2 = sibling;
         return root;
     }
+
+    /// <summary>
+    /// Reset every <see cref="SplitPane.Ratio"/> in the tree to 0.5,
+    /// giving all leaves equal space. Mirrors upstream's
+    /// <c>equalize_splits</c> keybind (both Zig and Swift). No-op on
+    /// a single leaf.
+    /// </summary>
+    public static void Equalize(PaneNode root)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        if (root is not SplitPane split) return;
+        split.Ratio = 0.5;
+        Equalize(split.Child1);
+        Equalize(split.Child2);
+    }
 }

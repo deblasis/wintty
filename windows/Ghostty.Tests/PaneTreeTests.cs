@@ -1,3 +1,4 @@
+using System.Linq;
 using Ghostty.Core.Panes;
 using Xunit;
 
@@ -53,6 +54,17 @@ public sealed class PaneTreeTests
         Assert.NotNull(parentOfC);
         Assert.Same(inner, parentOfC!.Value.Parent);
         Assert.False(parentOfC.Value.TargetIsChild1);
+    }
+
+    [Fact]
+    public void FindParent_NodeNotInTree_ReturnsNull()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+        var outsider = new LeafPane();
+
+        Assert.Null(PaneTree.FindParent(root, outsider));
     }
 
     // FirstLeaf --------------------------------------------------------
@@ -149,6 +161,18 @@ public sealed class PaneTreeTests
     }
 
     [Fact]
+    public void Close_ParentIsRoot_ClosingChild2_SiblingBecomesRoot()
+    {
+        var sibling = new LeafPane();
+        var target = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Horizontal, sibling, target);
+
+        var newRoot = PaneTree.Close(root, target);
+
+        Assert.Same(sibling, newRoot);
+    }
+
+    [Fact]
     public void Close_NestedTarget_CollapsesParentInPlace()
     {
         // root = V(a, H(target, c))
@@ -187,6 +211,77 @@ public sealed class PaneTreeTests
         Assert.Same(e, ((SplitPane)root.Child2).Child2);
     }
 
+    [Fact]
+    public void Close_ThreeLevelsDeep_CollapsesCorrectly()
+    {
+        // root = V(a, H(V(target, b), c))
+        // closing target should leave root = V(a, H(b, c)).
+        var a = new LeafPane();
+        var target = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var deepSplit = new SplitPane(PaneOrientation.Vertical, target, b);
+        var mid = new SplitPane(PaneOrientation.Horizontal, deepSplit, c);
+        var root = new SplitPane(PaneOrientation.Vertical, a, mid);
+
+        var newRoot = PaneTree.Close(root, target);
+
+        Assert.Same(root, newRoot);
+        Assert.Same(a, root.Child1);
+        var midAfter = Assert.IsType<SplitPane>(root.Child2);
+        Assert.Same(b, midAfter.Child1);
+        Assert.Same(c, midAfter.Child2);
+    }
+
+    [Fact]
+    public void Close_TargetNotInTree_ReturnsOriginalRoot()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+        var outsider = new LeafPane();
+
+        var newRoot = PaneTree.Close(root, outsider);
+
+        Assert.Same(root, newRoot);
+    }
+
+    [Fact]
+    public void Close_LeavesAfterClose_ReflectsCollapsedTree()
+    {
+        // root = V(a, H(target, c)) -> after close -> V(a, c)
+        var a = new LeafPane();
+        var target = new LeafPane();
+        var c = new LeafPane();
+        var inner = new SplitPane(PaneOrientation.Horizontal, target, c);
+        var root = new SplitPane(PaneOrientation.Vertical, a, inner);
+
+        var newRoot = PaneTree.Close(root, target)!;
+
+        Assert.Equal(new[] { a, c }, PaneTree.Leaves(newRoot).ToArray());
+    }
+
+    [Fact]
+    public void Close_ThenSplit_RoundTrip()
+    {
+        // Start with V(a, b), close a -> b is root.
+        // Split b -> V(b, c) is new root.
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+
+        var afterClose = PaneTree.Close(root, a)!;
+        Assert.Same(b, afterClose);
+
+        var c = new LeafPane();
+        var afterSplit = PaneTree.Split(afterClose, b, c, PaneOrientation.Horizontal);
+
+        var split = Assert.IsType<SplitPane>(afterSplit);
+        Assert.Same(b, split.Child1);
+        Assert.Same(c, split.Child2);
+        Assert.Equal(new[] { b, c }, PaneTree.Leaves(afterSplit).ToArray());
+    }
+
     // Leaves -----------------------------------------------------------
 
     [Fact]
@@ -209,5 +304,60 @@ public sealed class PaneTreeTests
             new SplitPane(PaneOrientation.Horizontal, c, d));
 
         Assert.Equal(new[] { a, b, c, d }, PaneTree.Leaves(root));
+    }
+
+    [Fact]
+    public void Leaves_Count_MatchesManualCount()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var root = new SplitPane(
+            PaneOrientation.Vertical, a,
+            new SplitPane(PaneOrientation.Horizontal, b, c));
+
+        Assert.Equal(3, PaneTree.Leaves(root).Count());
+    }
+
+    // Equalize ---------------------------------------------------------
+
+    [Fact]
+    public void Equalize_SingleLeaf_NoOp()
+    {
+        var leaf = new LeafPane();
+        PaneTree.Equalize(leaf); // should not throw
+    }
+
+    [Fact]
+    public void Equalize_ResetsRatiosToHalf()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var inner = new SplitPane(PaneOrientation.Horizontal, b, c, ratio: 0.3);
+        var root = new SplitPane(PaneOrientation.Vertical, a, inner) { Ratio = 0.7 };
+
+        PaneTree.Equalize(root);
+
+        Assert.Equal(0.5, root.Ratio);
+        Assert.Equal(0.5, inner.Ratio);
+    }
+
+    [Fact]
+    public void Equalize_DeepTree_ResetsAllLevels()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var d = new LeafPane();
+        var deep = new SplitPane(PaneOrientation.Vertical, c, d, ratio: 0.2);
+        var mid = new SplitPane(PaneOrientation.Horizontal, b, deep) { Ratio = 0.8 };
+        var root = new SplitPane(PaneOrientation.Vertical, a, mid) { Ratio = 0.6 };
+
+        PaneTree.Equalize(root);
+
+        Assert.Equal(0.5, root.Ratio);
+        Assert.Equal(0.5, mid.Ratio);
+        Assert.Equal(0.5, deep.Ratio);
     }
 }
