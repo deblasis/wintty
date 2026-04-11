@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using Ghostty.Services;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 
 namespace Ghostty;
@@ -127,7 +129,9 @@ public partial class App : Application
             // Jump list is nice-to-have; failure here does not block startup.
         }
 
-        _window = new MainWindow();
+        var configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
+
+        _window = new MainWindow(configService);
         _window.Activate();
     }
 }

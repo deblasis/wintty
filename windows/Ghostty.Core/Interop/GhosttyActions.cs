@@ -22,6 +22,8 @@ internal enum GhosttyActionTag
     ToggleCommandPalette = 11,
     Scrollbar = 26,
     SetTitle = 32,
+    OpenConfig = 40,
+    ReloadConfig = 47,
     CloseWindow = 49,
     RingBell = 50,
     ProgressReport = 56,

@@ -4,6 +4,11 @@
 *.log
 .DS_Store
 .vscode/
+.vs/
+
+# .NET build output (scoped to windows/ to avoid masking Zig build paths)
+windows/**/bin/
+windows/**/obj/
 .direnv/
 .envrc.local
 .flatpak-builder/

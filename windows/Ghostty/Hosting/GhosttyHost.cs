@@ -42,6 +42,8 @@ internal sealed class GhosttyHost : IDisposable
     internal void NoteKeystroke() => LastKeystrokeTimestamp = DateTime.UtcNow;
 
     public event EventHandler? CommandPaletteToggleRequested;
+    public event EventHandler? OpenConfigRequested;
+    public event EventHandler? ReloadConfigRequested;
 
     private ClipboardBridge? _clipboardBridge;
 
@@ -62,15 +64,10 @@ internal sealed class GhosttyHost : IDisposable
 
     public GhosttyApp App => _app;
 
-    public GhosttyHost(DispatcherQueue dispatcher)
+    public GhosttyHost(DispatcherQueue dispatcher, GhosttyConfig config)
     {
         _dispatcher = dispatcher;
-
-        NativeMethods.Init(UIntPtr.Zero, IntPtr.Zero);
-
-        _config = NativeMethods.ConfigNew();
-        NativeMethods.ConfigLoadDefaultFiles(_config);
-        NativeMethods.ConfigFinalize(_config);
+        _config = config;
 
         _wakeupCb = OnWakeup;
         _actionCb = OnAction;
@@ -129,7 +126,7 @@ internal sealed class GhosttyHost : IDisposable
         // teardown miss the lookup and become harmless no-ops.
         _surfaces.Clear();
         if (_app.Handle != IntPtr.Zero) NativeMethods.AppFree(_app);
-        if (_config.Handle != IntPtr.Zero) NativeMethods.ConfigFree(_config);
+        // Config lifetime is owned by ConfigService; do not free here.
         _app = default;
         _config = default;
         _wakeupCb = null;
@@ -181,14 +178,35 @@ internal sealed class GhosttyHost : IDisposable
         // handle silently misses every dictionary lookup.
         if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return false;
 
+        // ghostty_action_s layout: { int32 tag; <union> action; }
+        // Union starts at offset 8 (8-byte aligned on x64).
+        var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
         var targetTag = Marshal.ReadInt32(targetPtr);
+        // App-level actions (target = GHOSTTY_TARGET_APP) don't carry
+        // a surface handle. Handle them before the surface lookup.
+        if (targetTag == GhosttyTargetApp)
+        {
+            switch (tag)
+            {
+                case GhosttyActionTag.OpenConfig:
+                    _dispatcher.TryEnqueue(() =>
+                        OpenConfigRequested?.Invoke(this, EventArgs.Empty));
+                    return true;
+
+                case GhosttyActionTag.ReloadConfig:
+                    _dispatcher.TryEnqueue(() =>
+                        ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
         if (targetTag != GhosttyTargetSurface) return false;
         var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
         if (!_surfaces.TryGetValue(surfaceHandle, out var control)) return false;
 
-        // ghostty_action_s layout: { int32 tag; <union> action; }
-        // Union starts at offset 8 (8-byte aligned on x64).
-        var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
         switch (tag)
         {
             case GhosttyActionTag.ToggleCommandPalette:

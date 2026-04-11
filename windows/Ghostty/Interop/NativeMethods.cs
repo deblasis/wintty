@@ -250,6 +250,31 @@ internal struct GhosttyActionSetTitle
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyDiagnostic
+{
+    public IntPtr Message;  // const char*
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyString
+{
+    public IntPtr Ptr;      // const char*
+    public UIntPtr Len;
+    // Zig c.String has a trailing bool (1 byte) for sentinel, but we
+    // only use Ptr and Len. The struct has trailing padding to pointer
+    // alignment so the bool sits in padding space on x64.
+    private byte _sentinel;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyInputTrigger
+{
+    public int Tag;         // 0=physical, 1=unicode, 2=catch_all
+    public uint Key;        // union: translated, physical, or unicode
+    public uint Mods;       // modifier flags
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyRuntimeConfig
 {
     public IntPtr Userdata;
@@ -300,6 +325,31 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigFinalize(GhosttyConfig config);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_clone")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyConfig ConfigClone(GhosttyConfig config);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_get")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static partial bool ConfigGet(GhosttyConfig config, IntPtr output, IntPtr key, UIntPtr keyLen);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_trigger")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyInputTrigger ConfigTrigger(GhosttyConfig config, IntPtr action, UIntPtr actionLen);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_diagnostics_count")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial uint ConfigDiagnosticsCount(GhosttyConfig config);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_get_diagnostic")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyDiagnostic ConfigGetDiagnostic(GhosttyConfig config, uint index);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_open_path")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigOpenPath();
+
     // ---- app -----------------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_new")]
@@ -321,6 +371,10 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_app_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void AppSetColorScheme(GhosttyApp app, GhosttyColorScheme scheme);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_app_update_config")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void AppUpdateConfig(GhosttyApp app, GhosttyConfig config);
 
     // ---- surface lifecycle ---------------------------------------------
 
