@@ -439,6 +439,24 @@ public sealed partial class MainWindow : Window
         _router.ToggleTabLayoutRequested += (_, _) => ToggleTabLayout();
 
         _router.CommandPaletteToggleRequested += (_, _) => ToggleCommandPalette();
+
+        // Fullscreen toggle via F11.
+        _router.ToggleFullscreenRequested += (_, _) => ToggleFullscreen();
+    }
+
+    /// <summary>
+    /// Toggle between fullscreen and default window presenter. Uses
+    /// <see cref="Microsoft.UI.Windowing.AppWindowPresenterKind"/> so
+    /// the window chrome (title bar, borders) is hidden in fullscreen
+    /// and restored on exit.
+    /// </summary>
+    private void ToggleFullscreen()
+    {
+        var kind = AppWindow.Presenter.Kind;
+        AppWindow.SetPresenter(
+            kind == Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen
+                ? Microsoft.UI.Windowing.AppWindowPresenterKind.Default
+                : Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen);
     }
 
     private void ToggleCommandPalette()

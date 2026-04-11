@@ -90,6 +90,9 @@ internal sealed class KeyBindings
     /// muscle memory: Ctrl+Shift+D / E for splits, Ctrl+Shift+W to
     /// close, Alt+Arrows for directional focus.
     /// </summary>
+    // OEM virtual-key codes that lack a named VirtualKey member.
+    private const VirtualKey VkEquals = (VirtualKey)187;
+
     public static KeyBindings Default { get; } = new(new[]
     {
         // Panes (#163)
@@ -99,6 +102,9 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Right, PaneAction.FocusRight),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Up, PaneAction.FocusUp),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Down, PaneAction.FocusDown),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Enter, PaneAction.ToggleSplitZoom),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VkEquals, PaneAction.EqualizeSplits),
+        new KeyBinding(VirtualKeyModifiers.None, VirtualKey.F11, PaneAction.ToggleFullscreen),
 
         // Tabs (this PR). Ctrl+Shift+W is now CloseActiveProgressive
         // (pane -> tab -> window with confirmation), no longer plain ClosePane.
