@@ -546,6 +546,19 @@ public sealed partial class TerminalControl : UserControl
         var rawDelta = pt.Properties.MouseWheelDelta;
         var isHorizontal = pt.Properties.IsHorizontalMouseWheel;
 
+        // Ctrl+Shift+Wheel adjusts background opacity (matches Windows
+        // Terminal). Intercept before the normal scroll path so the
+        // terminal viewport does not move.
+        var mods = CurrentMods();
+        if (!isHorizontal
+            && (mods & GhosttyMods.Ctrl) != 0
+            && (mods & GhosttyMods.Shift) != 0)
+        {
+            Host?.RequestOpacityAdjust(rawDelta > 0 ? 1 : -1);
+            e.Handled = true;
+            return;
+        }
+
         // Detect precision input (touchpad) vs discrete mouse wheel.
         // PointerDeviceType.Touchpad is only reported when the user has a
         // precision-touchpad driver; legacy touchpads masquerade as Mouse
