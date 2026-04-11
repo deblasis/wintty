@@ -6,9 +6,13 @@
 .vscode/
 .vs/
 
-# .NET build output (scoped to windows/ to avoid masking Zig build paths)
+# .NET build output (scoped to known .NET project roots to avoid
+# masking Zig build paths). windows/ is the WinUI 3 shell; dist/windows/
+# is the IconGen build tool and its tests.
 windows/**/bin/
 windows/**/obj/
+dist/windows/**/bin/
+dist/windows/**/obj/
 .direnv/
 .envrc.local
 .flatpak-builder/
@@ -34,3 +38,5 @@ glad.zip
 
 vgcore.*
 
+# IconGen preview output from `just branding-preview`
+/dist/windows/preview/
