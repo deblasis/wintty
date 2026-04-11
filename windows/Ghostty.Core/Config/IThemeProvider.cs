@@ -13,7 +13,6 @@ public interface IThemeProvider
     uint ForegroundColor { get; }
     uint CursorColor { get; }
     uint SelectionColor { get; }
-    double BackgroundOpacity { get; }
     string? FontFamily { get; }
     double FontSize { get; }
     string? ThemeName { get; }

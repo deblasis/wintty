@@ -4,7 +4,12 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
-    xmlns:tabs="using:Ghostty.Tabs">
+    xmlns:tabs="using:Ghostty.Tabs"
+    RequestedTheme="Dark">
+    <!-- RequestedTheme="Dark" is a fallback default. WindowThemeManager
+         overrides this at runtime per the window-theme config value
+         (see issue #195). Removing it entirely would flash white on
+         startup before the manager applies the resolved theme. -->
     <!--
       Application.Resources here SHADOWS the framework's automatic
       load of the WinUI 3 controls theme resources unless we
