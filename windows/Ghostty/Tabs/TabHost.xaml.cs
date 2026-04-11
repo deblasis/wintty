@@ -6,6 +6,9 @@ using Ghostty.Input;
 using Ghostty.Panes;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
 
 namespace Ghostty.Tabs;
 
@@ -85,7 +88,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             Header = headerPanel,
             Content = null,
-            ContextFlyout = TabContextMenuBuilder.Build(_manager, tab, RequestCloseTabAsync, _router, _dialogs),
+            ContextFlyout = TabContextMenuBuilder.Build(_manager, tab, RequestCloseTabAsync, _dialogs),
             DataContext = tab,
         };
         tab.PropertyChanged += (_, e) =>
@@ -140,18 +143,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _suppressSelectionEvent = false;
     }
 
-    private void RefreshHeader(TabViewItem item, TabModel tab)
-    {
-        // EffectiveTitle is a computed property; INPC events fire for
-        // ShellReportedTitle / UserOverrideTitle. Re-set Header to
-        // force the simple binding to re-read.
-        item.Header = tab.EffectiveTitle;
-    }
-
     private void OnAddTabButtonClick(TabView sender, object args) => _manager.NewTab();
-
-    private void OnSwitchLayoutClick(object sender, RoutedEventArgs e)
-        => _router.RequestToggleTabLayout();
 
     private async void OnTabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
     {
@@ -208,6 +200,32 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 if (vi == item) { _manager.Activate(model); return; }
             }
         }
+    }
+
+    private void OnTabViewContextRequested(
+        UIElement sender, ContextRequestedEventArgs e)
+    {
+        // If the right-click landed on a TabViewItem, the per-item
+        // ContextFlyout from TabContextMenuBuilder handles it. Bail out.
+        var source = e.OriginalSource as DependencyObject;
+        if (VisualTreeHelperEx.FindAncestor<TabViewItem>(source) is not null)
+            return;
+
+        var flyout = StripContextMenuBuilder.Build(
+            _manager, _router, isVertical: false);
+
+        var anchor = (FrameworkElement)sender;
+        if (e.TryGetPosition(anchor, out Point position))
+        {
+            flyout.ShowAt(anchor, new FlyoutShowOptions { Position = position });
+        }
+        else
+        {
+            // Keyboard-triggered (Shift+F10 or context menu key).
+            // Show at the sender so keyboard users get a usable anchor.
+            flyout.ShowAt(anchor);
+        }
+        e.Handled = true;
     }
 
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)

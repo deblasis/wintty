@@ -525,8 +525,9 @@ public sealed partial class MainWindow : Window
                 vth.TogglePinnedFromKeyboard();
         };
 
-        // Runtime tab-layout switch via Ctrl+Shift+Alt+V (and the
-        // title-bar icon + context menu, which share the event path).
+        // Runtime tab-layout switch via Ctrl+Shift+, (and the strip
+        // context menu's "Switch to vertical/horizontal tabs" item,
+        // which share the same event path through PaneActionRouter).
         _router.ToggleTabLayoutRequested += (_, _) => ToggleTabLayout();
 
         _router.CommandPaletteToggleRequested += (_, _) => ToggleCommandPalette();
