@@ -14,7 +14,6 @@ internal sealed class ThemeProvider : IThemeProvider, IDisposable
     public uint ForegroundColor { get; private set; } = 0xFFCDD6F4;
     public uint CursorColor { get; private set; } = 0xFFF5E0DC;
     public uint SelectionColor { get; private set; } = 0xFF585B70;
-    public double BackgroundOpacity { get; private set; } = 1.0;
     public string? FontFamily { get; private set; }
     public double FontSize { get; private set; } = 13.0;
     public string? ThemeName { get; private set; }
