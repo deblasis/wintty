@@ -1,0 +1,24 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.RawEditorPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Padding="24" RowDefinitions="Auto,*,Auto">
+        <TextBlock Text="Raw Config Editor" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+
+        <TextBox
+            x:Name="Editor"
+            Grid.Row="1"
+            AcceptsReturn="True"
+            TextWrapping="NoWrap"
+            FontFamily="Cascadia Code, Consolas, monospace"
+            FontSize="13"
+            IsSpellCheckEnabled="False" />
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,16,0,0">
+            <Button Content="Save and Reload" Style="{StaticResource AccentButtonStyle}" Click="SaveButton_Click" />
+            <Button Content="Revert" Click="RevertButton_Click" />
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" Margin="16,0,0,0" />
+        </StackPanel>
+    </Grid>
+</Page>
