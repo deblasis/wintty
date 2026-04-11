@@ -9,7 +9,9 @@ using Ghostty.Panes;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
 
 namespace Ghostty.Tabs;
 
@@ -242,6 +244,38 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     }
 
     // Active-tab title tracking moved to MainWindow in #171.
+
+    private void OnStripContextRequested(
+        UIElement sender, ContextRequestedEventArgs e)
+    {
+        // If the right-click landed on a ListViewItem (a tab), leave it
+        // to whatever per-item flyout exists (or to future per-tab menu
+        // work). Strip menu is only for empty sidebar space.
+        var source = e.OriginalSource as DependencyObject;
+        if (VisualTreeHelperEx.FindAncestor<ListViewItem>(source) is not null)
+            return;
+
+        // Collapsed == not pinned. If pinned, the sidebar is expanded;
+        // if unpinned, it's collapsed.
+        bool collapsed = !_pinnedExpanded;
+
+        var flyout = StripContextMenuBuilder.Build(
+            _manager,
+            _router,
+            isVertical: true,
+            isSidebarCollapsed: collapsed);
+
+        var anchor = (FrameworkElement)sender;
+        if (e.TryGetPosition(anchor, out Point position))
+        {
+            flyout.ShowAt(anchor, new FlyoutShowOptions { Position = position });
+        }
+        else
+        {
+            flyout.ShowAt(anchor);
+        }
+        e.Handled = true;
+    }
 
     /// <inheritdoc/>
     public async Task RequestCloseTabAsync(TabModel tab)
