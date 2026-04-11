@@ -8,14 +8,17 @@ internal sealed class BuiltInCommandSource : ICommandSource
 {
     private readonly Func<PaneAction, Action<CommandItem>> _paneActionFactory;
     private readonly Func<string, Action<CommandItem>> _bindingActionFactory;
+    private readonly Action<int>? _opacityAction;
     private List<CommandItem>? _cache;
 
     public BuiltInCommandSource(
         Func<PaneAction, Action<CommandItem>> paneActionFactory,
-        Func<string, Action<CommandItem>> bindingActionFactory)
+        Func<string, Action<CommandItem>> bindingActionFactory,
+        Action<int>? opacityAction = null)
     {
         _paneActionFactory = paneActionFactory;
         _bindingActionFactory = bindingActionFactory;
+        _opacityAction = opacityAction;
     }
 
     public IReadOnlyList<CommandItem> GetCommands()
@@ -64,6 +67,41 @@ internal sealed class BuiltInCommandSource : ICommandSource
         // AddBindingCommand(commands, "toggle_fullscreen", "Toggle Fullscreen", "Enter or exit fullscreen mode", CommandCategory.Terminal, "\uE740");
         // AddBindingCommand(commands, "equalize_splits", "Equalize Splits", "Make all split panes equal size", CommandCategory.Pane);
         // AddBindingCommand(commands, "toggle_split_zoom", "Toggle Split Zoom", "Zoom the current split to fill the tab", CommandCategory.Pane);
+
+        // Opacity adjustment (Ctrl+Shift+Scroll, or from palette)
+        if (_opacityAction is not null)
+        {
+            var adjust = _opacityAction;
+            commands.Add(new CommandItem
+            {
+                Id = "shell:increase_opacity",
+                Title = "Increase Opacity",
+                Description = "Increase background opacity by 5%",
+                Subtitle = "Ctrl+Shift+Scroll Up",
+                Category = CommandCategory.Terminal,
+                LeadingIcon = "\uE706",
+                Execute = _ => adjust(1),
+            });
+            commands.Add(new CommandItem
+            {
+                Id = "shell:decrease_opacity",
+                Title = "Decrease Opacity",
+                Description = "Decrease background opacity by 5%",
+                Subtitle = "Ctrl+Shift+Scroll Down",
+                Category = CommandCategory.Terminal,
+                LeadingIcon = "\uE708",
+                Execute = _ => adjust(-1),
+            });
+            commands.Add(new CommandItem
+            {
+                Id = "shell:reset_opacity",
+                Title = "Reset Opacity",
+                Description = "Reset background opacity to 100%",
+                Category = CommandCategory.Terminal,
+                LeadingIcon = "\uE7A5",
+                Execute = _ => adjust(0),
+            });
+        }
 
         return commands;
     }

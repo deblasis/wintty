@@ -29,6 +29,9 @@ internal sealed class ConfigService : IConfigService
     public string ConfigFilePath { get; }
     public bool AutoReloadEnabled { get; private set; }
     public bool SettingsUiEnabled { get; private set; }
+    public double BackgroundOpacity { get; private set; } = 1.0;
+    public string WindowTheme { get; private set; } = "auto";
+    public uint BackgroundColor { get; private set; } = 0x001E1E2E;
     public int DiagnosticsCount { get; private set; }
 
     /// <summary>
@@ -136,6 +139,12 @@ internal sealed class ConfigService : IConfigService
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
         SettingsUiEnabled = GetBool("windows-settings-ui");
+        // Clamp here so all consumers get a safe [0,1] value without
+        // needing their own validation. WindowTransparencyState also
+        // clamps defensively as a standalone value type.
+        BackgroundOpacity = Math.Clamp(GetDouble("background-opacity", 1.0), 0.0, 1.0);
+        WindowTheme = GetString("window-theme", "auto");
+        BackgroundColor = GetColor("background", 0x001E1E2E);
     }
 
     private unsafe bool GetBool(string key)
@@ -151,6 +160,68 @@ internal sealed class ConfigService : IConfigService
                 (UIntPtr)keyBytes.Length);
             return found && result != 0;
         }
+    }
+
+    private unsafe double GetDouble(string key, double defaultValue)
+    {
+        double result = 0;
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)(&result),
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            return found ? result : defaultValue;
+        }
+    }
+
+    /// <summary>
+    /// Read a string-typed config value (enums are returned as
+    /// NUL-terminated UTF-8 strings by <c>ghostty_config_get</c>).
+    /// </summary>
+    private unsafe string GetString(string key, string defaultValue)
+    {
+        IntPtr result = IntPtr.Zero;
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)(&result),
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            if (!found || result == IntPtr.Zero) return defaultValue;
+            return Marshal.PtrToStringUTF8(result) ?? defaultValue;
+        }
+    }
+
+    /// <summary>
+    /// Read a color config value. libghostty returns colors as
+    /// <c>ghostty_config_color_s { r: u8, g: u8, b: u8 }</c>.
+    /// We pack it into 0x00RRGGBB for easy consumption.
+    /// </summary>
+    private unsafe uint GetColor(string key, uint defaultValue)
+    {
+        // ghostty_config_color_s is 3 bytes: r, g, b (no padding).
+        byte r = 0, g = 0, b = 0;
+        // Stack a 3-byte buffer for the color struct.
+        byte* colorBuf = stackalloc byte[3];
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)colorBuf,
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            if (!found) return defaultValue;
+            r = colorBuf[0];
+            g = colorBuf[1];
+            b = colorBuf[2];
+        }
+        return ((uint)r << 16) | ((uint)g << 8) | b;
     }
 
     private void StartWatcher()

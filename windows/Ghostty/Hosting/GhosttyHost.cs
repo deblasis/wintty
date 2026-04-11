@@ -45,6 +45,24 @@ internal sealed class GhosttyHost : IDisposable
     public event EventHandler? OpenConfigRequested;
     public event EventHandler? ReloadConfigRequested;
 
+    /// <summary>
+    /// Raised when a terminal surface requests an opacity adjustment
+    /// (Ctrl+Shift+scroll wheel). The int argument is the direction:
+    /// +1 = increase, -1 = decrease.
+    /// </summary>
+    public event EventHandler<int>? OpacityAdjustRequested;
+
+    /// <summary>
+    /// Called by <see cref="TerminalControl"/> when Ctrl+Shift+Wheel
+    /// is detected. Dispatches to the UI thread and raises
+    /// <see cref="OpacityAdjustRequested"/>.
+    /// </summary>
+    internal void RequestOpacityAdjust(int direction)
+    {
+        _dispatcher.TryEnqueue(() =>
+            OpacityAdjustRequested?.Invoke(this, direction));
+    }
+
     private ClipboardBridge? _clipboardBridge;
 
     // Delegates must be retained as fields; P/Invoke hands out native

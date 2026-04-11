@@ -22,6 +22,24 @@ public interface IConfigService : IDisposable
     bool SettingsUiEnabled { get; }
 
     /// <summary>
+    /// Background opacity from config (0.0 fully transparent, 1.0 opaque).
+    /// </summary>
+    double BackgroundOpacity { get; }
+
+    /// <summary>
+    /// Window theme from config: "light", "dark", "system", or "auto".
+    /// Controls both the XAML ElementTheme and the DWM title bar chrome.
+    /// </summary>
+    string WindowTheme { get; }
+
+    /// <summary>
+    /// Background color from config as packed 0x00RRGGBB (no alpha).
+    /// Used by the "auto" window-theme mode to derive light/dark from
+    /// the terminal background luminance.
+    /// </summary>
+    uint BackgroundColor { get; }
+
+    /// <summary>
     /// Re-read config from disk and apply it. Returns true on
     /// success, false if the reload failed (old config stays active).
     /// </summary>

@@ -241,6 +241,7 @@ pub const Shaders = struct {
             .root_signature = root_sig,
             .vs_bytecode = shader_bytecode.bg_color_vs,
             .ps_bytecode = shader_bytecode.bg_color_ps,
+            .blend = .premultiplied_alpha,
         });
         pipelines.cell_bg = try Pipeline.init(.{
             .device = dev,
