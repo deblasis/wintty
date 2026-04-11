@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Branding.AppIconBadge"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Button x:Name="ClickTarget"
+            Padding="4"
+            MinWidth="28"
+            MinHeight="28"
+            Background="Transparent"
+            BorderThickness="0"
+            Click="OnClick"
+            AutomationProperties.Name="Application menu"
+            ToolTipService.ToolTip="Application menu">
+        <ImageIcon Width="16"
+                   Height="16"
+                   Source="{x:Bind IconSource, Mode=OneTime}" />
+    </Button>
+</UserControl>
