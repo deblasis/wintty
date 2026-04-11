@@ -1,0 +1,36 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.TerminalPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="8" MaxWidth="600">
+            <TextBlock Text="Terminal" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+
+            <NumberBox
+                x:Name="ScrollbackBox"
+                Header="Scrollback limit"
+                Value="10000"
+                Minimum="0"
+                Maximum="1000000"
+                SpinButtonPlacementMode="Compact"
+                ValueChanged="Scrollback_ValueChanged" />
+
+            <ComboBox
+                x:Name="CursorStyleBox"
+                Header="Cursor style"
+                PlaceholderText="Select..."
+                SelectionChanged="CursorStyle_SelectionChanged" />
+
+            <ToggleSwitch
+                x:Name="CursorBlinkToggle"
+                Header="Cursor blink"
+                Toggled="CursorBlink_Toggled" />
+
+            <ToggleSwitch
+                x:Name="MouseHideToggle"
+                Header="Hide mouse while typing"
+                Toggled="MouseHide_Toggled" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

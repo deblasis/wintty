@@ -23,7 +23,7 @@ pub const Options = struct {
 pub fn config(alloc: Allocator, opts: Options) ![]u8 {
     return try dir(alloc, opts, .{
         .env = "XDG_CONFIG_HOME",
-        .windows_env = "LOCALAPPDATA",
+        .windows_env = "APPDATA",
         .default_subdir = ".config",
     });
 }
@@ -69,7 +69,8 @@ fn dir(
 
     // First check the env var. On Windows we have to allocate so this tracks
     // both whether we have the env var and whether we own it.
-    // on Windows we treat `LOCALAPPDATA` as a fallback for `XDG_CONFIG_HOME`
+    // on Windows we treat `APPDATA` (config) or `LOCALAPPDATA` (cache/state)
+    // as a fallback for the corresponding XDG variable
     const env_ = try env_os.getenvNotEmpty(alloc, internal_opts.env) orelse switch (builtin.os.tag) {
         else => null,
         .windows => try env_os.getenvNotEmpty(alloc, internal_opts.windows_env),

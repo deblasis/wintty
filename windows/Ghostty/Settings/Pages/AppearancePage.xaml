@@ -1,0 +1,35 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.AppearancePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="8" MaxWidth="600">
+            <TextBlock Text="Appearance" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+
+            <AutoSuggestBox
+                x:Name="FontFamilySearch"
+                Header="Font family"
+                PlaceholderText="Search fonts..."
+                QueryIcon="Find" />
+
+            <NumberBox
+                x:Name="FontSizeBox"
+                Header="Font size"
+                Value="13"
+                Minimum="6"
+                Maximum="72"
+                SpinButtonPlacementMode="Compact"
+                ValueChanged="FontSize_ValueChanged" />
+
+            <!-- Background opacity: not yet supported by the DX12
+                 renderer (see issue 194). Hidden until implemented. -->
+
+            <TextBox
+                x:Name="ShaderPathBox"
+                Header="Custom shader path"
+                PlaceholderText="Path to .glsl shader file"
+                LostFocus="ShaderPath_LostFocus" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>
