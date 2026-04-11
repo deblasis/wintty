@@ -7,6 +7,16 @@
         <StackPanel Spacing="8" MaxWidth="600">
             <TextBlock Text="Appearance" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
 
+            <ComboBox
+                x:Name="WindowThemeCombo"
+                Header="Window theme"
+                SelectionChanged="WindowTheme_SelectionChanged">
+                <ComboBoxItem Content="Auto" Tag="auto" />
+                <ComboBoxItem Content="System" Tag="system" />
+                <ComboBoxItem Content="Light" Tag="light" />
+                <ComboBoxItem Content="Dark" Tag="dark" />
+            </ComboBox>
+
             <AutoSuggestBox
                 x:Name="FontFamilySearch"
                 Header="Font family"
@@ -22,8 +32,16 @@
                 SpinButtonPlacementMode="Compact"
                 ValueChanged="FontSize_ValueChanged" />
 
-            <!-- Background opacity: not yet supported by the DX12
-                 renderer (see issue 194). Hidden until implemented. -->
+            <Slider
+                x:Name="OpacitySlider"
+                Header="Background opacity"
+                Minimum="0"
+                Maximum="1"
+                StepFrequency="0.05"
+                TickFrequency="0.1"
+                TickPlacement="BottomRight"
+                Value="1"
+                ValueChanged="Opacity_ValueChanged" />
 
             <TextBox
                 x:Name="ShaderPathBox"
