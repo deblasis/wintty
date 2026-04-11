@@ -55,7 +55,7 @@ internal sealed class KeyBindings
     /// </summary>
     /// <summary>
     /// Render the binding for <paramref name="action"/> as a
-    /// human-readable chord (e.g. <c>Ctrl+Shift+Alt+V</c>), or
+    /// human-readable chord (e.g. <c>Ctrl+Shift+,</c>), or
     /// <c>null</c> if no binding exists. Used for tooltips so the
     /// chord text and the KeyboardAccelerator are sourced from the
     /// same place.
