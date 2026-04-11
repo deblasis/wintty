@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:branding="using:Ghostty.Branding"
     RequestedTheme="Dark"
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch"
@@ -50,25 +51,11 @@
             IsAddTabButtonVisible="True"
             AddTabButtonClick="OnAddTabButtonClick"
             TabCloseRequested="OnTabCloseRequested"
+            ContextRequested="OnTabViewContextRequested"
             SelectionChanged="OnSelectionChanged"
             TabDragCompleted="OnTabDragCompleted">
-            <!-- Small button on the left side of the strip that
-                 switches to the vertical layout. Lives in the
-                 TabStripHeader slot (before the tabs) so it does not
-                 compete with the system caption buttons in the
-                 footer. -->
             <controls:TabView.TabStripHeader>
-                <Button x:Name="SwitchToVerticalButton"
-                        Width="32" Height="32"
-                        Padding="0"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        ToolTipService.ToolTip="Switch to vertical tabs (Ctrl+Shift+Alt+V)"
-                        Click="OnSwitchLayoutClick">
-                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
-                              Glyph="&#xE89F;"
-                              FontSize="14"/>
-                </Button>
+                <branding:AppIconBadge />
             </controls:TabView.TabStripHeader>
             <!--
                 TabStripFooter is a right-side spacer that reserves

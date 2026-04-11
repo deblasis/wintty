@@ -3,6 +3,7 @@
     x:Class="Ghostty.Tabs.VerticalTabHost"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:branding="using:Ghostty.Branding"
     RequestedTheme="Dark"
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch">
@@ -10,14 +11,27 @@
          title text and the switch-layout button) moved up to
          MainWindow so it can span the full window width even when
          this UserControl is constrained to the strip column. -->
-    <Grid Background="Transparent">
+    <Grid Background="Transparent" ContextRequested="OnStripContextRequested">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="StripColumn" Width="40"/>
         </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-        <ContentPresenter x:Name="StripHost" Grid.Column="0"/>
+        <branding:AppIconBadge
+            Grid.Row="0"
+            Grid.Column="0"
+            HorizontalAlignment="Left"
+            Margin="4,4,0,4"/>
+
+        <ContentPresenter x:Name="StripHost"
+                          Grid.Row="1"
+                          Grid.Column="0"/>
 
         <Grid x:Name="HandleHost"
+              Grid.Row="1"
               Grid.Column="0"
               HorizontalAlignment="Right"/>
     </Grid>
