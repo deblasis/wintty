@@ -7,9 +7,10 @@ using Ghostty.Controls;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Hosting;
-using Ghostty.Input;
 using Ghostty.Interop;
+using Ghostty.Input;
 using Ghostty.Core.Panes;
+using Ghostty.Services;
 using Ghostty.Panes;
 using Ghostty.Settings;
 using Ghostty.Shell;
@@ -52,6 +53,8 @@ public sealed partial class MainWindow : Window
     private readonly PaneActionRouter _router;
     private readonly DialogTracker _dialogs = new();
     private readonly UiSettings _uiSettings;
+    // Kept as a field so the ColorValuesChanged subscription is not GC'd.
+    private readonly Windows.UI.ViewManagement.UISettings _systemUiSettings;
 
     private readonly TabHost _horizontalTabHost;
     private readonly VerticalTabHost _verticalTabHost;
@@ -104,11 +107,37 @@ public sealed partial class MainWindow : Window
     [LibraryImport("gdi32.dll")]
     private static partial IntPtr CreateSolidBrush(uint crColor);
 
-    public MainWindow()
+    internal MainWindow(ConfigService configService)
     {
         InitializeComponent();
 
-        _host = new GhosttyHost(DispatcherQueue);
+        _host = new GhosttyHost(DispatcherQueue, configService.ConfigHandle);
+        configService.SetApp(_host.App);
+
+        // Detect initial system theme and notify libghostty so conditional
+        // config blocks (e.g. palette dark/light) take effect immediately.
+        // UISettings.Foreground is white in dark mode and black in light mode,
+        // so R > 128 reliably distinguishes the two without needing the UWP
+        // ApplicationTheme enum (which isn't available outside a UWP package).
+        _systemUiSettings = new Windows.UI.ViewManagement.UISettings();
+        var initialFg = _systemUiSettings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
+        var initialDark = initialFg.R > 128;
+        Ghostty.Interop.NativeMethods.AppSetColorScheme(
+            _host.App,
+            initialDark ? Ghostty.Interop.GhosttyColorScheme.Dark : Ghostty.Interop.GhosttyColorScheme.Light);
+
+        // Subscribe to runtime theme changes. ColorValuesChanged fires on a
+        // background thread, so dispatch back to the UI thread before calling
+        // into libghostty (which expects UI-thread callers for App-level ops).
+        _systemUiSettings.ColorValuesChanged += (s, _) =>
+        {
+            var fg = s.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
+            var dark = fg.R > 128;
+            DispatcherQueue.TryEnqueue(() =>
+                Ghostty.Interop.NativeMethods.AppSetColorScheme(
+                    _host.App,
+                    dark ? Ghostty.Interop.GhosttyColorScheme.Dark : Ghostty.Interop.GhosttyColorScheme.Light));
+        };
 
         // Match the RootGrid background (#0C0C0C). Win32 COLORREF is 0x00BBGGRR.
         var hwnd = WindowNative.GetWindowHandle(this);
@@ -267,6 +296,48 @@ public sealed partial class MainWindow : Window
 
         _host.CommandPaletteToggleRequested += (_, _) =>
             DispatcherQueue.TryEnqueue(ToggleCommandPalette);
+
+        _host.OpenConfigRequested += (_, _) =>
+        {
+            if (configService.SettingsUiEnabled)
+            {
+                var editor = new ConfigFileEditor(configService.ConfigFilePath);
+                var keybindings = new KeyBindingsProvider(configService);
+                var themeProvider = new ThemeProvider(configService);
+                var settingsWin = new Ghostty.Settings.SettingsWindow(
+                    configService, editor, keybindings, themeProvider);
+                settingsWin.Activate();
+                return;
+            }
+
+            var path = configService.ConfigFilePath;
+            if (string.IsNullOrEmpty(path)) return;
+            try
+            {
+                // The config file has no extension so UseShellExecute
+                // may fail to find an associated program. Try shell
+                // execute first (respects user file associations), then
+                // fall back to notepad which can always open text files.
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = path,
+                        UseShellExecute = true,
+                    });
+                }
+                catch
+                {
+                    System.Diagnostics.Process.Start("notepad.exe", path);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainWindow] Failed to open config file: {ex.Message}");
+            }
+        };
+
+        _host.ReloadConfigRequested += (_, _) => configService.Reload();
 
         _tabManager.LastTabClosed += (_, _) => Close();
 
