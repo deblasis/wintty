@@ -319,28 +319,6 @@ public sealed partial class TerminalControl : UserControl
         // Focus lives on the UserControl now, not the panel.
         this.Focus(FocusState.Programmatic);
 
-        // Walk our visual ancestors and disable IsTabStop on any
-        // ScrollViewer we find. WinUI 3 implicitly inserts a
-        // Microsoft.UI.Xaml.Controls.ScrollViewer above our content
-        // (likely from the Window's XAML host); without this, every
-        // pointer click on the SwapChainPanel routes through the
-        // framework's hit-test focus path -> ScrollViewer, gets bounced
-        // back by OnPointerPressed -> UserControl, and surfaces to
-        // libghostty as a focused=false / focused=true pair on every
-        // click. Removing the ScrollViewer from the focus chain at
-        // load time prevents the storm at the source, with no per-event
-        // cost and no global FocusManager subscription.
-        DisableAncestorScrollViewerTabStop();
-    }
-
-    private void DisableAncestorScrollViewerTabStop()
-    {
-        DependencyObject? node = this;
-        while (node is not null)
-        {
-            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
-            if (node is ScrollViewer sv) sv.IsTabStop = false;
-        }
     }
 
     private void DisableAncestorScrollViewerTabStop()
@@ -722,7 +700,7 @@ public sealed partial class TerminalControl : UserControl
             Keycode = scancode,
             Text = IntPtr.Zero,
             UnshiftedCodepoint = 0,
-            Composing = false,
+            Composing = 0,
         };
         var handled = NativeMethods.SurfaceKey(_surface, key);
         if (handled) e.Handled = true;
