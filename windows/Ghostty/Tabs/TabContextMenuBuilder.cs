@@ -10,14 +10,18 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 namespace Ghostty.Tabs;
 
 /// <summary>
+/// Information the picker needs when "Move Tab to Zone" is clicked.
+/// Supplied by the TabHost caller so TabContextMenuBuilder does not
+/// have to reach into WinUI windowing APIs itself.
+/// </summary>
+internal readonly record struct SnapZoneSource(
+    int WorkAreaWidth,
+    int WorkAreaHeight);
+
+/// <summary>
 /// Builds the per-tab right-click menu. Attached via
 /// <see cref="TabViewItem.ContextFlyout"/> on each item, not on the
 /// parent <see cref="TabView"/>: that gives an unambiguous target.
-///
-/// "Move to New Window" is intentionally absent. It needs reparent-
-/// safe PaneHost work and a cross-window GhosttyHost handoff; that
-/// is a follow-up PR.
-/// TODO(tabs): detach-to-new-window
 /// </summary>
 internal static class TabContextMenuBuilder
 {
@@ -25,7 +29,10 @@ internal static class TabContextMenuBuilder
         TabManager manager,
         TabModel tab,
         Func<TabModel, Task> requestClose,
-        DialogTracker dialogs)
+        Action<TabModel> requestDetachToNewWindow,
+        DialogTracker dialogs,
+        Func<SnapZoneSource>? getSnapSource = null,
+        Action<TabModel, SnapZone>? detachWithZone = null)
     {
         var flyout = new MenuFlyout();
 
@@ -66,6 +73,57 @@ internal static class TabContextMenuBuilder
         var dup = new MenuFlyoutItem { Text = "Duplicate Tab" };
         dup.Click += (_, _) => manager.NewTab(); // TODO(config): respect ProfileId once profiles exist
         flyout.Items.Add(dup);
+
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
+        var detach = new MenuFlyoutItem { Text = "Move Tab to New Window" };
+        detach.IsEnabled = manager.Tabs.Count > 1;
+        detach.Click += (_, _) => requestDetachToNewWindow(tab);
+        flyout.Items.Add(detach);
+
+        // "Move Tab to Zone" opens a visual picker for Snap Layouts
+        // zones. Only shown when both snap callbacks are wired and
+        // there is more than one tab (detaching the last tab is a no-op).
+        MenuFlyoutItem? moveToZone = null;
+        if (getSnapSource is not null && detachWithZone is not null)
+        {
+            moveToZone = new MenuFlyoutItem { Text = "Move Tab to Zone" };
+            moveToZone.IsEnabled = manager.Tabs.Count > 1;
+            moveToZone.Click += (_, _) =>
+            {
+                var target = flyout.Target;
+                if (target?.XamlRoot is null) return;
+
+                var source = getSnapSource();
+                var picker = new SnapZonePicker();
+                picker.Render(source.WorkAreaWidth, source.WorkAreaHeight);
+
+                var pickerFlyout = new Flyout
+                {
+                    Content = picker,
+                    Placement = FlyoutPlacementMode.Bottom,
+                };
+
+                picker.ZoneSelected += (_, zone) =>
+                {
+                    pickerFlyout.Hide();
+                    detachWithZone(tab, zone);
+                };
+
+                pickerFlyout.ShowAt(target);
+            };
+            flyout.Items.Add(moveToZone);
+        }
+
+        // Re-evaluate IsEnabled on each open so tabs closed after
+        // the flyout was built (but before the user right-clicked)
+        // are reflected in the grey state. Matches Windows Terminal.
+        flyout.Opening += (_, _) =>
+        {
+            detach.IsEnabled = manager.Tabs.Count > 1;
+            if (moveToZone is not null)
+                moveToZone.IsEnabled = manager.Tabs.Count > 1;
+        };
 
         flyout.Items.Add(new MenuFlyoutSeparator());
 
