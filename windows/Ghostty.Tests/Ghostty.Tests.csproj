@@ -20,6 +20,16 @@
     <LangVersion>latest</LangVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!--
+      Analyzer triad: surface AOT / trim / single-file incompatibilities
+      at build time. Tests are never AOT-published, but the analyzers
+      catch helpers that do something AOT-unsafe before it gets copy-pasted
+      into production code. Issue # 204.
+    -->
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
   </PropertyGroup>
 
   <ItemGroup>
