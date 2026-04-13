@@ -1,0 +1,14 @@
+// CsWin32 API list for Ghostty.Core. Used by
+// DWriteFontEnumerator.EnumerateMigrated, which lives here so the
+// equivalence test in Ghostty.Tests can call both the reference
+// raw-vtable path and the migrated CsWin32 path on the same DWrite
+// factory without pulling in the WinUI 3 Ghostty assembly.
+
+// dwrite
+DWriteCreateFactory
+DWRITE_FACTORY_TYPE
+IDWriteFactory
+IDWriteFontCollection
+IDWriteFontFamily
+IDWriteFontList
+IDWriteLocalizedStrings
