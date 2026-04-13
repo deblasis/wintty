@@ -161,7 +161,11 @@ internal sealed class ConfigService : IConfigService
     private void ReadFlags()
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
-        SettingsUiEnabled = GetBool("windows-settings-ui");
+        // windows-settings-ui is a Windows-only key not in the Zig
+        // config schema, so read it from the config file directly.
+        SettingsUiEnabled = string.Equals(
+            GetFileValue("windows-settings-ui", "false"),
+            "true", StringComparison.OrdinalIgnoreCase);
         // Clamp here so all consumers get a safe [0,1] value without
         // needing their own validation. WindowTransparencyState also
         // clamps defensively as a standalone value type.
