@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.TabColorPalettePicker"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+    <StackPanel Orientation="Vertical"
+                Spacing="4"
+                Padding="8">
+        <TextBlock Text="Tab Color"
+                   FontWeight="SemiBold"
+                   Margin="2,0,0,4"/>
+        <!--
+            Rows are built in code-behind from TabColorPalette.PaletteRows
+            so the macOS ordering stays the single source of truth. The
+            StackPanels below are just layout scaffolding.
+        -->
+        <StackPanel x:Name="Row0" Orientation="Horizontal" Spacing="4"/>
+        <StackPanel x:Name="Row1" Orientation="Horizontal" Spacing="4"/>
+    </StackPanel>
+</UserControl>
