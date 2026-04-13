@@ -109,6 +109,32 @@ public class MarshalComplianceTests
         Assert.Single(tokenHits);
     }
 
+    // Unit test: the CsWin32 boundary allowlist skips lines that
+    // reference a Windows.Win32.* type, but still flags lines that
+    // carry a [MarshalAs] with no CsWin32 marker. This pins the
+    // behavior of IsCsWin32Boundary so a future edit that loosens or
+    // tightens the rule trips this test.
+    [Fact]
+    public void Scanner_AllowsCsWin32BoundaryButFlagsBareMarshalAs()
+    {
+        const string sample =
+            "public partial struct Fake\n" +
+            "{\n" +
+            "    [MarshalAs(UnmanagedType.Bool)] public Windows.Win32.Foundation.BOOL Allowed;\n" +
+            "    [MarshalAs(UnmanagedType.Bool)] public bool Flagged;\n" +
+            "}\n";
+
+        var attrHits = ScanForBannedAttribute(sample, BannedAttribute);
+        var tokenHits = ScanForBannedTokens(sample, BannedUnmanagedTypes);
+
+        // Exactly one violation: the bare-bool line. The CsWin32
+        // boundary line is allowlisted.
+        Assert.Single(attrHits);
+        Assert.Contains("Flagged", attrHits[0].Text);
+        Assert.Single(tokenHits);
+        Assert.Contains("Flagged", tokenHits[0].Text);
+    }
+
     // Strip trailing `//` line comments from each source line before
     // searching, so commentary like `// [MarshalAs] was removed here`
     // does not trigger a false positive. The cheapest correct
@@ -116,12 +142,26 @@ public class MarshalComplianceTests
     // This is NOT a full C# tokenizer: it does not understand string
     // literals containing `//`, but NativeMethods.cs has no such
     // lines today and adding one would be obviously wrong anyway.
+    //
+    // PR 202 allowlist: lines that reference a Windows.Win32.* type
+    // are CsWin32-generated boundaries where BOOL is the strongly-
+    // typed Windows.Win32.Foundation.BOOL struct (4 bytes, implicit
+    // bool conversion). The two BOOL conventions coexist by scope:
+    // hand-written [LibraryImport] uses int + != 0 (PR 203), CsWin32
+    // call sites use BOOL via implicit conversion. Today this scanner
+    // only reads NativeMethods.cs (libghostty surface, no CsWin32),
+    // so the rule is a future-proofing measure for if/when the scan
+    // scope ever widens to other interop files.
+    private static bool IsCsWin32Boundary(string strippedLine)
+        => strippedLine.Contains("Windows.Win32.", StringComparison.Ordinal);
+
     private static List<(int Number, string Text)> ScanForBannedAttribute(string source, string banned)
     {
         var hits = new List<(int Number, string Text)>();
         foreach (var pair in EnumerateLines(source))
         {
             var stripped = StripLineComment(pair.Text);
+            if (IsCsWin32Boundary(stripped)) continue;
             if (stripped.Contains(banned, StringComparison.Ordinal))
             {
                 hits.Add(pair);
@@ -136,6 +176,7 @@ public class MarshalComplianceTests
         foreach (var pair in EnumerateLines(source))
         {
             var stripped = StripLineComment(pair.Text);
+            if (IsCsWin32Boundary(stripped)) continue;
             if (bannedTokens.Any(bt => stripped.Contains(bt, StringComparison.Ordinal)))
             {
                 hits.Add(pair);
