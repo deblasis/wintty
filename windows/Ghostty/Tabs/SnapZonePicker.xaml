@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.SnapZonePicker"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!--
+        The picker is a fixed-pixel miniature of the current monitor.
+        Width/Height are set from code-behind so the miniature matches
+        the monitor's aspect ratio exactly; the Canvas is the layout
+        surface for zone Buttons positioned by SetLeft/SetTop.
+    -->
+    <Border
+        x:Name="PickerBorder"
+        Background="{ThemeResource SystemControlBackgroundChromeMediumBrush}"
+        BorderBrush="{ThemeResource SystemControlForegroundBaseMediumLowBrush}"
+        BorderThickness="1"
+        CornerRadius="8"
+        Padding="12">
+        <Canvas
+            x:Name="PickerCanvas"
+            Width="220"
+            Height="140" />
+    </Border>
+</UserControl>
