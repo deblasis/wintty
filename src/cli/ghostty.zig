@@ -41,6 +41,9 @@ pub const Action = enum {
     /// List available themes
     @"list-themes",
 
+    /// List available themes (always use the terminal TUI, never in-process)
+    @"list-themes-tui",
+
     /// List named RGB colors
     @"list-colors",
 
@@ -144,7 +147,7 @@ pub const Action = enum {
             .help => try help.run(alloc),
             .@"list-fonts" => try list_fonts.run(alloc),
             .@"list-keybinds" => try list_keybinds.run(alloc),
-            .@"list-themes" => try list_themes.run(alloc),
+            .@"list-themes", .@"list-themes-tui" => try list_themes.run(alloc),
             .@"list-colors" => try list_colors.run(alloc),
             .@"list-actions" => try list_actions.run(alloc),
             .@"ssh-cache" => try ssh_cache.run(alloc),
@@ -164,6 +167,9 @@ pub const Action = enum {
     /// path from the root src/ directory.
     pub fn file(comptime self: Action) []const u8 {
         comptime {
+            // Aliases share the same source file as their canonical action.
+            if (self == .@"list-themes-tui") return "cli/list_themes.zig";
+
             const filename = filename: {
                 const tag = @tagName(self);
                 var filename: [tag.len]u8 = undefined;
@@ -185,7 +191,7 @@ pub const Action = enum {
                 .help => help.Options,
                 .@"list-fonts" => list_fonts.Options,
                 .@"list-keybinds" => list_keybinds.Options,
-                .@"list-themes" => list_themes.Options,
+                .@"list-themes", .@"list-themes-tui" => list_themes.Options,
                 .@"list-colors" => list_colors.Options,
                 .@"list-actions" => list_actions.Options,
                 .@"ssh-cache" => ssh_cache.Options,

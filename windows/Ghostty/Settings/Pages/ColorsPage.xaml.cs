@@ -1,4 +1,5 @@
 using Ghostty.Core.Config;
+using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -18,6 +19,11 @@ internal sealed partial class ColorsPage : Page
         InitializeComponent();
         _themeList = new SearchableList(ThemeSearch, chosen => OnValueChanged("theme", chosen));
         _themeList.SetItems(theme.AvailableThemes);
+
+        // Show the current theme in the search box.
+        if (configService is ConfigService cs && !string.IsNullOrEmpty(cs.CurrentTheme))
+            ThemeSearch.Text = cs.CurrentTheme;
+
         _loading = false;
     }
 

@@ -127,6 +127,36 @@ pub export fn ghostty_cli_try_action() void {
     posix.exit(0);
 }
 
+/// Runs the CLI action (if any) and returns the exit code instead of
+/// calling exit. Returns -1 if no action was specified. Lets the host
+/// (e.g. a C# WinUI app) handle process termination cleanly, avoiding
+/// DLL_PROCESS_DETACH crashes from posix.exit/ExitProcess.
+pub export fn ghostty_cli_run_action() c_int {
+    const action = state.action orelse return -1;
+    std.log.info("executing CLI action={}", .{action});
+    return @intCast(action.run(state.alloc) catch |err| {
+        std.log.err("CLI action failed error={}", .{err});
+        return 1;
+    });
+}
+
+/// Set an optional callback that the +list-themes TUI invokes when the
+/// selected theme changes (preview) or is accepted (confirmed). This
+/// lets embedders update their app chrome (title bar, tabs, etc.) to
+/// match the previewed theme without writing to the config file.
+///
+/// The callback receives:
+///   - name:      null-terminated UTF-8 theme name
+///   - confirmed: false while browsing (preview), true on accept
+///
+/// Pass null to clear the callback. Must be called before
+/// ghostty_cli_run_action.
+pub export fn ghostty_cli_set_theme_callback(
+    cb: ?*const fn ([*:0]const u8, bool) callconv(.c) void,
+) void {
+    @import("cli/list_themes.zig").setThemeCallback(cb);
+}
+
 /// Return metadata about Ghostty, such as version, build mode, etc.
 pub export fn ghostty_info() Info {
     return .{

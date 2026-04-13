@@ -42,6 +42,13 @@ internal sealed class ConfigFileEditor : IConfigFileEditor
         WriteAtomic(content);
     }
 
+    public void SetRepeatableValues(string key, string[] values)
+    {
+        var lines = ReadLines();
+        var updated = ConfigFileParser.SetRepeatableValues(lines, key, values);
+        WriteAtomic(updated);
+    }
+
     private string[] ReadLines()
     {
         return File.Exists(FilePath) ? File.ReadAllLines(FilePath) : Array.Empty<string>();

@@ -892,6 +892,32 @@ pub fn draw(self: *Surface) !void {
     try self.renderer.drawFrame(true);
 }
 
+/// Write raw VT bytes into this surface's terminal, as if they came
+/// from the PTY. Used by in-process features (theme picker) that
+/// render into the terminal without a subprocess.
+pub fn writeVt(self: *Surface, data: []const u8) void {
+    self.io.processOutput(data);
+}
+
+/// Write bytes to the PTY input (the subprocess stdin). Used by
+/// in-process features to nudge the shell after restoring the
+/// terminal (e.g. send a newline so cmd.exe redraws its prompt).
+pub fn writePtyInput(self: *Surface, data: []const u8) void {
+    if (data.len == 0) return;
+    const small_cap = @typeInfo(termio.Message.WriteReq.Small.Array).array.len;
+    if (data.len <= small_cap) {
+        var arr: termio.Message.WriteReq.Small.Array = undefined;
+        @memcpy(arr[0..data.len], data);
+        self.queueIo(.{ .write_small = .{
+            .data = arr,
+            .len = @intCast(data.len),
+        } }, .unlocked);
+    } else {
+        const msg = termio.Message.writeReq(self.alloc, data) catch return;
+        self.queueIo(msg, .unlocked);
+    }
+}
+
 /// Activate the inspector. This will begin collecting inspection data.
 /// This will not affect the GUI. The GUI must use performAction to
 /// show/hide the inspector UI.
@@ -2481,6 +2507,7 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
 
     // Mail the IO thread
     self.queueIo(.{ .resize = self.size }, .unlocked);
+
 }
 
 /// Recalculate the balanced padding if needed.
@@ -2673,6 +2700,7 @@ pub fn keyCallback(
         event,
         if (insp_ev) |*ev| ev else null,
     )) |v| return v;
+
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
         self.renderer_state.mutex.lock();
