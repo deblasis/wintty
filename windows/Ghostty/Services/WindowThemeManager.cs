@@ -1,8 +1,10 @@
 using System;
-using System.Runtime.InteropServices;
 using Ghostty.Core.Config;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.Graphics.Dwm;
 using WinRT.Interop;
 
 namespace Ghostty.Services;
@@ -15,7 +17,7 @@ namespace Ghostty.Services;
 ///
 /// Subscribe to <see cref="ThemeChanged"/> for live-reload updates.
 /// </summary>
-internal sealed partial class WindowThemeManager : IDisposable
+internal sealed class WindowThemeManager : IDisposable
 {
     private readonly IConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
@@ -59,12 +61,15 @@ internal sealed partial class WindowThemeManager : IDisposable
     /// Apply the current theme to a window's DWM non-client area.
     /// Must be called from the UI thread.
     /// </summary>
-    public void ApplyToWindow(Window window)
+    public unsafe void ApplyToWindow(Window window)
     {
-        var hwnd = WindowNative.GetWindowHandle(window);
-        int useDarkMode = IsDarkMode ? 1 : 0;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            in useDarkMode, sizeof(int));
+        var hwnd = new HWND(WindowNative.GetWindowHandle(window));
+        BOOL useDarkMode = IsDarkMode;
+        PInvoke.DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE.DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &useDarkMode,
+            (uint)sizeof(BOOL));
     }
 
     private void OnConfigChanged(IConfigService _)
@@ -136,10 +141,4 @@ internal sealed partial class WindowThemeManager : IDisposable
         return luminance < 0.5;
     }
 
-    // DWM interop
-    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-
-    [LibraryImport("dwmapi.dll")]
-    private static partial int DwmSetWindowAttribute(
-        IntPtr hwnd, int dwAttribute, in int pvAttribute, int cbAttribute);
 }
