@@ -5,23 +5,21 @@ using System.Runtime.InteropServices.Marshalling;
 namespace Ghostty.Interop;
 
 /// <summary>
-/// Trim/AOT-safe replacement for the legacy
-/// <c>CoCreateInstance(out object)</c> P/Invoke. Returns the raw
-/// IUnknown* via <c>out IntPtr</c> and lets a
-/// <see cref="StrategyBasedComWrappers"/> instance wrap it into a
-/// strongly-typed managed interface.
+/// Thin wrapper around a single process-wide
+/// <see cref="StrategyBasedComWrappers"/> instance. Used for
+/// cross-interface QI across <c>[GeneratedComInterface]</c>
+/// types - for example queueing a jump-list <c>IShellLinkW</c> up
+/// for its <c>IPropertyStore</c> facet, where
+/// <c>Marshal.GetIUnknownForObject</c> is a runtime-only SYSLIB1099
+/// against generated COM types.
 ///
-/// Why this exists: <c>[GeneratedComInterface]</c> types are the
-/// modern way to declare COM contracts on .NET 8+ and the only
-/// path that survives <c>PublishAot</c> (CsWinRT #1927). The legacy
-/// <c>[MarshalAs(UnmanagedType.Interface)] out object</c> signature
-/// requires runtime marshalling and silently breaks under the
-/// trimmer. Migrating CoCreateInstance to <c>out IntPtr</c> + a
-/// shared <see cref="ComWrappers"/> instance lets every call site
-/// use the generated COM path without each one re-implementing
-/// QueryInterface.
+/// CoCreateInstance callers migrated to CsWin32 coclass factories
+/// (DestinationList, ShellLink, EnumerableObjectCollection,
+/// TaskbarList) and no longer need <c>ComCreate.Create</c>; only
+/// <see cref="Wrap"/> and <see cref="GetComInterfaceForObject"/>
+/// survive.
 /// </summary>
-internal static partial class ComCreate
+internal static class ComCreate
 {
     /// <summary>
     /// Shared ComWrappers instance. Strategy-based wrappers handle
@@ -31,58 +29,42 @@ internal static partial class ComCreate
     /// </summary>
     private static readonly StrategyBasedComWrappers s_wrappers = new();
 
-    public const uint CLSCTX_INPROC_SERVER = 0x1;
-
-    [LibraryImport("ole32.dll")]
-    private static partial int CoCreateInstance(
-        in Guid rclsid,
-        IntPtr pUnkOuter,
-        uint dwClsContext,
-        in Guid riid,
-        out IntPtr ppv);
-
     /// <summary>
-    /// Activate <paramref name="clsid"/> and query for
-    /// <paramref name="iid"/>, then wrap the resulting IUnknown* in
-    /// a strongly-typed managed object. Caller is expected to cast
-    /// the returned object to the matching <c>[GeneratedComInterface]</c>
-    /// type. Throws on HRESULT failure.
+    /// Wraps a raw COM interface pointer with the shared
+    /// <see cref="StrategyBasedComWrappers"/> strategy and returns
+    /// an RCW.
     /// </summary>
-    public static object Create(Guid clsid, Guid iid)
-    {
-        var hr = CoCreateInstance(in clsid, IntPtr.Zero, CLSCTX_INPROC_SERVER, in iid, out var ppv);
-        Marshal.ThrowExceptionForHR(hr);
-        try
-        {
-            return s_wrappers.GetOrCreateObjectForComInstance(ppv, CreateObjectFlags.None);
-        }
-        finally
-        {
-            // GetOrCreateObjectForComInstance AddRefs the unknown for
-            // its own lifetime tracking, so we release the reference
-            // CoCreateInstance gave us.
-            Marshal.Release(ppv);
-        }
-    }
-
-    /// <summary>
-    /// Wrap an existing IUnknown* in a managed object. Used when
-    /// QueryInterface'ing across <c>[GeneratedComInterface]</c>
-    /// types — e.g. an <c>IShellLinkW</c> instance also exposing
-    /// <c>IPropertyStore</c>.
-    /// </summary>
+    /// <remarks>
+    /// OWNERSHIP CONTRACT: the caller retains ownership of
+    /// <paramref name="unknown"/>. This method AddRefs internally
+    /// via GetOrCreateObjectForComInstance, so the caller MUST
+    /// still Release the original pointer when finished. Do not
+    /// pass ownership in.
+    /// </remarks>
     public static object Wrap(IntPtr unknown)
         => s_wrappers.GetOrCreateObjectForComInstance(unknown, CreateObjectFlags.None);
 
     /// <summary>
-    /// Reverse of <see cref="Wrap"/>: hand back the IUnknown* for a
-    /// managed RCW that was created via the shared
-    /// <see cref="StrategyBasedComWrappers"/>. Replacement for the
-    /// runtime-only <see cref="Marshal.GetIUnknownForObject"/>,
-    /// which warns SYSLIB1099 against <c>[GeneratedComInterface]</c>
-    /// targets. Caller owns the returned reference and must
-    /// <see cref="Marshal.Release"/> it.
+    /// Returns a raw COM interface pointer for <paramref name="com"/>
+    /// suitable for passing to Marshal.QueryInterface or re-wrapping
+    /// via <see cref="Wrap"/>. The returned pointer is whatever facet
+    /// the object's ComputeVtables override produced - at slot 0 it
+    /// dispatches QueryInterface so any COM facet reachable via QI
+    /// works after a subsequent Wrap call. Caller MUST Release the
+    /// returned pointer when finished.
     /// </summary>
-    public static IntPtr GetIUnknown(object com)
+    /// <remarks>
+    /// Replacement for the runtime-only
+    /// <see cref="Marshal.GetIUnknownForObject"/>, which warns
+    /// SYSLIB1099 against <c>[GeneratedComInterface]</c> targets.
+    /// Renamed from <c>GetIUnknown</c>: the old name implied slot-0
+    /// IUnknown specifically, but what
+    /// <see cref="StrategyBasedComWrappers.GetOrCreateComInterfaceForObject"/>
+    /// actually returns is whatever facet the object's
+    /// <c>ComputeVtables</c> override produced. It still works for
+    /// cross-interface QI because every COM interface dispatches
+    /// QueryInterface at slot 0.
+    /// </remarks>
+    public static IntPtr GetComInterfaceForObject(object com)
         => s_wrappers.GetOrCreateComInterfaceForObject(com, CreateComInterfaceFlags.None);
 }

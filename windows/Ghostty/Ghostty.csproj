@@ -22,6 +22,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <CsWin32RunAsBuildTask>true</CsWin32RunAsBuildTask>
     <PublishAot>true</PublishAot>
     <!--
       Analyzer triad: surface AOT / trim / single-file incompatibilities
@@ -40,14 +41,6 @@
          silently with code 0. -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!--
-      Allow [GeneratedComInterface] types to interop with the few
-      remaining [ComImport] surfaces (e.g. WinRT projections, the
-      ISwapChainPanelNative shim) during the transition to fully
-      AOT-safe COM. The interop shim is on by default in .NET 9 but
-      we set it explicitly so the contract is documented in the csproj.
-    -->
-    <EnableGeneratedComInterfaceComImportInterop>true</EnableGeneratedComInterfaceComImportInterop>
     <!--
       Channel selects the app icon variant at build time. Debug builds
       default to Nightly so local dev is always visually distinguishable
@@ -72,6 +65,7 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260317003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

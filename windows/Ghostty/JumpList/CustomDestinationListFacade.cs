@@ -3,14 +3,17 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Ghostty.Core.JumpList;
 using Ghostty.Interop;
+using Windows.Win32;
+using Windows.Win32.UI.Shell;
+using Windows.Win32.UI.Shell.Common;
 
 namespace Ghostty.JumpList;
 
 /// <summary>
 /// Real implementation of <see cref="ICustomDestinationListFacade"/>.
-/// Creates the underlying <see cref="ShellInterop.ICustomDestinationList"/>
-/// COM object via <see cref="ShellInterop.CoCreateInstance"/> on
-/// construction and forwards every facade call to it.
+/// Creates the underlying <see cref="ICustomDestinationList"/> COM
+/// object via the CsWin32-generated DestinationList coclass factory
+/// and forwards every facade call to it.
 ///
 /// One instance per process is typical; <see cref="JumpListBuilder"/>
 /// calls <see cref="BeginList"/> and <see cref="Commit"/> in pairs
@@ -18,9 +21,9 @@ namespace Ghostty.JumpList;
 /// </summary>
 internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
 {
-    private readonly ShellInterop.ICustomDestinationList _list;
+    private readonly ICustomDestinationList _list;
     // AddUserTasks on ICustomDestinationList is a one-shot call per
-    // BeginList/Commit cycle — it creates the Tasks slot in the shell
+    // BeginList/Commit cycle - it creates the Tasks slot in the shell
     // store and a second invocation returns 0x800700B7 ALREADY_EXISTS.
     // So we buffer every AddTask call and flush a single AddUserTasks
     // in Commit.
@@ -28,16 +31,17 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
 
     public CustomDestinationListFacade()
     {
-        _list = (ShellInterop.ICustomDestinationList)ComCreate.Create(
-            ShellInterop.CLSID_DestinationList,
-            ShellInterop.IID_ICustomDestinationList);
+        _list = DestinationList.CreateInstance<ICustomDestinationList>();
     }
 
     public void SetAppId(string appId) => _list.SetAppID(appId);
 
     public uint BeginList()
     {
-        var iid = ShellInterop.IID_IObjectArray;
+        // Friendly extension overload accepts `in Guid` and pins
+        // internally; we just discard the removed-destinations
+        // IObjectArray (the existing facade does the same).
+        var iid = typeof(IObjectArray).GUID;
         _list.BeginList(out var maxSlots, in iid, out _);
         return maxSlots;
     }
@@ -76,44 +80,33 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
         _list.CommitList();
     }
 
-    private static ShellInterop.IShellLinkW CreateShellLink(string exePath, string arguments, string title)
+    private static IShellLinkW CreateShellLink(string exePath, string arguments, string title)
     {
-        var link = (ShellInterop.IShellLinkW)ComCreate.Create(
-            ShellInterop.CLSID_ShellLink,
-            ShellInterop.IID_IShellLinkW);
+        var link = ShellLink.CreateInstance<IShellLinkW>();
         link.SetPath(exePath);
         link.SetArguments(arguments);
         link.SetDescription(title);
         // Title shown in the jump list comes from System.Title, not
         // the description. Set it via the IPropertyStore side of the
         // same object.
-        ShellInterop.SetShellLinkTitle(link, title);
+        ShellLinkTitleHelper.SetTitle(link, title);
         return link;
     }
 
-    private static ShellInterop.IObjectCollection CreateCollection()
-        => (ShellInterop.IObjectCollection)ComCreate.Create(
-            ShellInterop.CLSID_EnumerableObjectCollection,
-            ShellInterop.IID_IObjectCollection);
+    private static IObjectCollection CreateCollection()
+        => EnumerableObjectCollection.CreateInstance<IObjectCollection>();
 
     /// <summary>
     /// AddObject takes a raw IUnknown* under [GeneratedComInterface]
     /// (the runtime-marshalled <c>UnmanagedType.IUnknown</c> path is
-    /// trim-unsafe). Bridge by calling Marshal.GetIUnknownForObject
-    /// for the duration of the call and releasing the reference
-    /// once the collection has AddRef'd it.
+    /// trim-unsafe). The CsWin32 generated signature wraps this
+    /// behind <c>[MarshalAs(UnmanagedType.Interface)] object punk</c>
+    /// where the COM source generator handles QI internally, so we
+    /// can pass the typed RCW directly.
     /// </summary>
-    private static void AddObjectToCollection(ShellInterop.IObjectCollection collection, object com)
+    private static void AddObjectToCollection(IObjectCollection collection, object com)
     {
-        var unknown = ComCreate.GetIUnknown(com);
-        try
-        {
-            collection.AddObject(unknown);
-        }
-        finally
-        {
-            Marshal.Release(unknown);
-        }
+        collection.AddObject(com);
     }
 
     /// <summary>
@@ -122,12 +115,12 @@ internal sealed class CustomDestinationListFacade : ICustomDestinationListFacade
     /// ComWrappers strategy hands out a wrapper that implements both
     /// interfaces against the same RCW identity.
     /// </summary>
-    private static ShellInterop.IObjectArray QueryAsObjectArray(ShellInterop.IObjectCollection collection)
+    private static IObjectArray QueryAsObjectArray(IObjectCollection collection)
     {
-        var unknown = ComCreate.GetIUnknown(collection);
+        var unknown = ComCreate.GetComInterfaceForObject(collection);
         try
         {
-            return (ShellInterop.IObjectArray)ComCreate.Wrap(unknown);
+            return (IObjectArray)ComCreate.Wrap(unknown);
         }
         finally
         {
