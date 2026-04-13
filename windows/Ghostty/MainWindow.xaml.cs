@@ -920,12 +920,18 @@ public sealed partial class MainWindow : Window
         tb.ButtonHoverBackgroundColor = _shellTheme.TabBarBackground;
         tb.ButtonHoverForegroundColor = _shellTheme.TitleBarForeground;
 
+        // When a transparent backdrop (frosted/crystal) is active, the
+        // RootGrid must stay transparent so the SystemBackdrop shows
+        // through. An opaque shell theme background would mask it.
+        var needsTransparent = _currentBackdropStyle is "frosted" or "crystal";
         RootGrid.Background = new SolidColorBrush(
-            Microsoft.UI.ColorHelper.FromArgb(
-                _shellTheme.TitleBarBackground.A,
-                _shellTheme.TitleBarBackground.R,
-                _shellTheme.TitleBarBackground.G,
-                _shellTheme.TitleBarBackground.B));
+            needsTransparent
+                ? Windows.UI.Color.FromArgb(0, 0, 0, 0)
+                : Microsoft.UI.ColorHelper.FromArgb(
+                    _shellTheme.TitleBarBackground.A,
+                    _shellTheme.TitleBarBackground.R,
+                    _shellTheme.TitleBarBackground.G,
+                    _shellTheme.TitleBarBackground.B));
 
         VerticalTitleText.Foreground = new SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
