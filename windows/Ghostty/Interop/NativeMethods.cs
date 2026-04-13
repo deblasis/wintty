@@ -106,14 +106,12 @@ internal struct GhosttyInputKey
     public uint Keycode;
     public IntPtr Text;              // const char*
     public uint UnshiftedCodepoint;
-    // Zig bool is 1 byte; use byte to avoid SYSLIB1051 without
-    // assembly-wide DisableRuntimeMarshalling.
-    private byte _composing;
-    public bool Composing
-    {
-        readonly get => _composing != 0;
-        set => _composing = value ? (byte)1 : (byte)0;
-    }
+    // libghostty types this as C99 _Bool (1 byte). byte + IsComposing
+    // helper matches GhosttySharedTextureConfig.Enabled + IsEnabled
+    // under [assembly: DisableRuntimeMarshalling].
+    public byte Composing;
+
+    public bool IsComposing => Composing != 0;
 }
 
 // GhosttySharedTextureConfig and GhosttySharedTextureSnapshot live in
@@ -158,12 +156,8 @@ internal struct GhosttySurfaceConfig
     public IntPtr EnvVars;          // ghostty_env_var_s*
     public UIntPtr EnvVarCount;
     public IntPtr InitialInput;     // const char*
-    private byte _waitAfterCommand; // Zig bool → byte (see GhosttyInputKey)
-    public bool WaitAfterCommand
-    {
-        readonly get => _waitAfterCommand != 0;
-        set => _waitAfterCommand = value ? (byte)1 : (byte)0;
-    }
+    // C99 _Bool on the C side; byte on the managed side.
+    public byte WaitAfterCommand;
     public GhosttySurfaceContext Context;
 }
 
@@ -188,13 +182,13 @@ internal delegate void GhosttyWakeupCb(IntPtr userdata);
 // are larger than 8 bytes, so on the Windows x64 ABI they are passed by
 // hidden pointer. We take both as IntPtr and decode the fields we need
 // with Marshal.PtrToStructure / Marshal.ReadIntPtr.
+// Returns C99 _Bool on the Zig side, exposed here as byte. The
+// managed handler on GhosttyHost returns 1 or 0 directly.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-[return: MarshalAs(UnmanagedType.I1)]
-internal delegate bool GhosttyActionCb(GhosttyApp app, IntPtr targetPtr, IntPtr actionPtr);
+internal delegate byte GhosttyActionCb(GhosttyApp app, IntPtr targetPtr, IntPtr actionPtr);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-[return: MarshalAs(UnmanagedType.I1)]
-internal delegate bool GhosttyReadClipboardCb(IntPtr userdata, GhosttyClipboard kind, IntPtr state);
+internal delegate byte GhosttyReadClipboardCb(IntPtr userdata, GhosttyClipboard kind, IntPtr state);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void GhosttyConfirmReadClipboardCb(
@@ -209,12 +203,12 @@ internal delegate void GhosttyWriteClipboardCb(
     GhosttyClipboard kind,
     IntPtr content,  // const ghostty_clipboard_content_s*
     UIntPtr count,
-    [MarshalAs(UnmanagedType.I1)] bool confirm);
+    byte confirm);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void GhosttyCloseSurfaceCb(
     IntPtr userdata,
-    [MarshalAs(UnmanagedType.I1)] bool processAlive);
+    byte processAlive);
 
 // Mirrors ghostty_target_s in include/ghostty.h:
 //   typedef struct { ghostty_target_tag_e tag; ghostty_target_u target; }
@@ -278,12 +272,8 @@ internal struct GhosttyInputTrigger
 internal struct GhosttyRuntimeConfig
 {
     public IntPtr Userdata;
-    private byte _supportsSelectionClipboard; // Zig bool → byte (see GhosttyInputKey)
-    public bool SupportsSelectionClipboard
-    {
-        readonly get => _supportsSelectionClipboard != 0;
-        set => _supportsSelectionClipboard = value ? (byte)1 : (byte)0;
-    }
+    // C99 _Bool on the C side; byte on the managed side.
+    public byte SupportsSelectionClipboard;
     public IntPtr WakeupCb;              // function pointers held as IntPtr
     public IntPtr ActionCb;              // so we control the lifetime of the
     public IntPtr ReadClipboardCb;       // managed delegates they point at.
@@ -329,10 +319,14 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyConfig ConfigClone(GhosttyConfig config);
 
+    // Raw P/Invoke returns byte (C99 _Bool). The internal wrapper below
+    // converts to bool so call sites in ConfigService stay idiomatic.
     [LibraryImport(Dll, EntryPoint = "ghostty_config_get")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static partial bool ConfigGet(GhosttyConfig config, IntPtr output, IntPtr key, UIntPtr keyLen);
+    private static partial byte ConfigGetNative(GhosttyConfig config, IntPtr output, IntPtr key, UIntPtr keyLen);
+
+    internal static bool ConfigGet(GhosttyConfig config, IntPtr output, IntPtr key, UIntPtr keyLen)
+        => ConfigGetNative(config, output, key, keyLen) != 0;
 
     [LibraryImport(Dll, EntryPoint = "ghostty_config_trigger")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -366,7 +360,10 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_set_focus")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void AppSetFocus(GhosttyApp app, [MarshalAs(UnmanagedType.I1)] bool focused);
+    private static partial void AppSetFocusNative(GhosttyApp app, byte focused);
+
+    internal static void AppSetFocus(GhosttyApp app, bool focused)
+        => AppSetFocusNative(app, focused ? (byte)1 : (byte)0);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_app_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -406,8 +403,12 @@ internal static partial class NativeMethods
 
     // MapVirtualKeyW for the keycode ScanCode==0 fallback in TerminalControl.
     // Win32 user32, not WinRT - bypasses any WinUI framework filtering.
+    // [DefaultDllImportSearchPaths(System32)] matches the
+    // SystemMenuInterop.cs hardening convention for Win32 imports so
+    // the DLL resolves from %WINDIR%\System32, not a hijacked PATH.
     internal const uint MAPVK_VK_TO_VSC = 0;
     [LibraryImport("user32.dll", EntryPoint = "MapVirtualKeyW")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     internal static partial uint MapVirtualKeyW(uint uCode, uint uMapType);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_content_scale")]
@@ -416,11 +417,17 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_focus")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void SurfaceSetFocus(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool focused);
+    private static partial void SurfaceSetFocusNative(GhosttySurface surface, byte focused);
+
+    internal static void SurfaceSetFocus(GhosttySurface surface, bool focused)
+        => SurfaceSetFocusNative(surface, focused ? (byte)1 : (byte)0);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_occlusion")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void SurfaceSetOcclusion(GhosttySurface surface, [MarshalAs(UnmanagedType.I1)] bool occluded);
+    private static partial void SurfaceSetOcclusionNative(GhosttySurface surface, byte occluded);
+
+    internal static void SurfaceSetOcclusion(GhosttySurface surface, bool occluded)
+        => SurfaceSetOcclusionNative(surface, occluded ? (byte)1 : (byte)0);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -428,23 +435,21 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_shared_texture")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static partial bool SurfaceSharedTexture(
+    private static partial byte SurfaceSharedTextureNative(
         GhosttySurface surface,
         out GhosttySharedTextureSnapshot snapshot);
 
-    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "ghostty_surface_shared_texture")]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool SurfaceSharedTexture(
-        GhosttySurface surface,
-        out GhosttySharedTextureSnapshot snapshot);
+    internal static bool SurfaceSharedTexture(GhosttySurface surface, out GhosttySharedTextureSnapshot snapshot)
+        => SurfaceSharedTextureNative(surface, out snapshot) != 0;
 
     // ---- surface input -------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_key")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static partial bool SurfaceKey(GhosttySurface surface, GhosttyInputKey key);
+    private static partial byte SurfaceKeyNative(GhosttySurface surface, GhosttyInputKey key);
+
+    internal static bool SurfaceKey(GhosttySurface surface, GhosttyInputKey key)
+        => SurfaceKeyNative(surface, key) != 0;
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_text")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -456,12 +461,18 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_button")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static partial bool SurfaceMouseButton(
+    private static partial byte SurfaceMouseButtonNative(
         GhosttySurface surface,
         GhosttyMouseState state,
         GhosttyMouseButton button,
         GhosttyMods mods);
+
+    internal static bool SurfaceMouseButton(
+        GhosttySurface surface,
+        GhosttyMouseState state,
+        GhosttyMouseButton button,
+        GhosttyMods mods)
+        => SurfaceMouseButtonNative(surface, state, button, mods) != 0;
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_pos")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -483,11 +494,16 @@ internal static partial class NativeMethods
     // side — libghostty takes (ptr, len).
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_binding_action")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static unsafe partial bool SurfaceBindingAction(
+    private static unsafe partial byte SurfaceBindingActionNative(
         GhosttySurface surface,
         byte* action,
         UIntPtr actionLen);
+
+    internal static unsafe bool SurfaceBindingAction(
+        GhosttySurface surface,
+        byte* action,
+        UIntPtr actionLen)
+        => SurfaceBindingActionNative(surface, action, actionLen) != 0;
 
     // ---- surface misc --------------------------------------------------
 
@@ -497,47 +513,79 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_process_exited")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    [return: MarshalAs(UnmanagedType.I1)]
-    internal static partial bool SurfaceProcessExited(GhosttySurface surface);
+    private static partial byte SurfaceProcessExitedNative(GhosttySurface surface);
+
+    internal static bool SurfaceProcessExited(GhosttySurface surface)
+        => SurfaceProcessExitedNative(surface) != 0;
 
     // ghostty_surface_complete_clipboard_request(surface, text, state, confirmed)
     // Called once per read/confirm request to return clipboard text to libghostty
     // and release its internal request state. Must be called exactly once even on
     // error paths -- skipping it leaks state inside libghostty.
+    // StringMarshalling.Utf8 is a first-class [LibraryImport] option and
+    // is NOT a [MarshalAs] attribute, so it coexists cleanly with
+    // DisableRuntimeMarshalling. Only `confirmed` needed the fix.
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request",
         StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void SurfaceCompleteClipboardRequest(
+    private static partial void SurfaceCompleteClipboardRequestNative(
         IntPtr surface,
         string text,
         IntPtr state,
-        [MarshalAs(UnmanagedType.I1)] bool confirmed);
+        byte confirmed);
 
-    // ghostty_surface_complete_clipboard_request(surface, text, state, confirmed)
-    // Called once per read/confirm request to return clipboard text to libghostty
-    // and release its internal request state. Must be called exactly once even on
-    // error paths -- skipping it leaks state inside libghostty.
-    //
-    // Source-generated via [LibraryImport] so this entry point is AOT-friendly
-    // and produces no IL stub. The rest of the file still uses [DllImport]; the
-    // standing migration TODO covers those.
-    [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request",
-        StringMarshalling = StringMarshalling.Utf8)]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void SurfaceCompleteClipboardRequest(
+    internal static void SurfaceCompleteClipboardRequest(
         IntPtr surface,
         string text,
         IntPtr state,
-        [MarshalAs(UnmanagedType.I1)] bool confirmed);
+        bool confirmed)
+        => SurfaceCompleteClipboardRequestNative(surface, text, state, confirmed ? (byte)1 : (byte)0);
+
+
+    // ---- inline theme picker ---------------------------------------------
+
+    // Callback for the inline theme picker. Fired from the Zig/apprt
+    // thread for each preview/confirm event.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void InlineThemeCallback(IntPtr namePtr, byte confirmed);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_list_themes")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial IntPtr SurfaceListThemes(GhosttySurface surface, IntPtr callback);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_list_themes_should_quit")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceListThemesShouldQuitNative(IntPtr handle);
+
+    internal static bool SurfaceListThemesShouldQuit(IntPtr handle)
+        => SurfaceListThemesShouldQuitNative(handle) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_list_themes_deinit")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceListThemesDeinit(GhosttySurface surface, IntPtr handle);
+
+    // ---- CLI actions (PR 218) -------------------------------------------
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_cli_run_action")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial int CliRunAction();
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_cli_set_theme_callback")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void CliSetThemeCallback(IntPtr callback);
 
     // ---- user32 --------------------------------------------------------
 
     // MessageBeep is thread-safe and minimal-dependency. Used by the
     // action callback for RING_BELL without any dispatcher hop.
     // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-messagebeep
+    //
+    // Return type is `int`, matching the Win32 BOOL = 4-byte convention
+    // used by SystemMenuInterop.cs. The sole caller at GhosttyHost.cs
+    // RingBell discards the return value.
     internal const uint MB_OK = 0x00000000;
 
     [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)] // Win32 BOOL is 4 bytes, not 1
-    internal static partial bool MessageBeep(uint uType);
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    internal static partial int MessageBeep(uint uType);
 }
