@@ -6,11 +6,13 @@ using Ghostty.Dialogs;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Panes;
+using Ghostty.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 
 namespace Ghostty.Tabs;
@@ -302,5 +304,47 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
             }
         }
         _manager.CloseTab(tab);
+    }
+
+    /// <summary>
+    /// Apply palette-derived colors to the vertical tab strip.
+    /// Called by MainWindow when shell theme changes.
+    /// </summary>
+    internal void ApplyShellTheme(ShellThemeService theme)
+    {
+        if (!theme.IsEnabled) return;
+
+        var tabBg = Microsoft.UI.ColorHelper.FromArgb(
+            theme.TabBarBackground.A, theme.TabBarBackground.R,
+            theme.TabBarBackground.G, theme.TabBarBackground.B);
+
+        _strip.Background = new SolidColorBrush(tabBg);
+    }
+
+    internal void ClearShellTheme()
+    {
+        _strip.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+    }
+
+    internal void SetRequestedTheme(ElementTheme theme)
+    {
+        RequestedTheme = theme;
+    }
+
+    /// <summary>
+    /// Set the accent color for the vertical tab strip's selected
+    /// indicator bar. Driven by cursor-color from the terminal config.
+    /// </summary>
+    internal void SetAccentColor(Windows.UI.Color color)
+    {
+        // Update the shared StripAccentBrush defined in VerticalTabStrip.xaml.
+        // Since all AccentBar rectangles reference this same brush instance
+        // via StaticResource, changing its Color updates them all immediately.
+        if (_strip.Resources.TryGetValue("StripAccentBrush", out var res)
+            && res is SolidColorBrush brush)
+        {
+            brush.Color = Microsoft.UI.ColorHelper.FromArgb(
+                color.A, color.R, color.G, color.B);
+        }
     }
 }
