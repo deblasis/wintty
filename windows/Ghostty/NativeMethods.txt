@@ -1,0 +1,77 @@
+// CsWin32 API list. Grouped by area. See
+// docs/superpowers/plans/2026-04-12-pr202-plan.md.
+//
+// NativeMethods.json sets useSafeHandles: false. We use raw
+// HWND/HMENU/HBRUSH structs (not SafeHandle wrappers) because
+// WinRT.Interop.WindowNative returns IntPtr and the WinUI 3
+// framework owns handle lifetimes, not us.
+
+// user32
+ClientToScreen
+GetKeyState
+GetSystemMenu
+GetWindowLong
+GetWindowPlacement
+MapVirtualKey
+MessageBeep
+SendMessage
+SetForegroundWindow
+ShowWindow
+TrackPopupMenu
+TRACK_POPUP_MENU_FLAGS
+VIRTUAL_KEY
+SHOW_WINDOW_CMD
+WINDOW_STYLE
+WINDOWPLACEMENT
+WM_SYSCOMMAND
+
+// gdi32 - CreateSolidBrush and SetClassLongPtr are not in CsWin32
+// 0.3.269 metadata for this platform target; hand-written in MainWindow.
+
+// dwmapi
+DwmSetWindowAttribute
+DWMWINDOWATTRIBUTE
+
+// taskbar
+ITaskbarList3
+TaskbarList
+TBPFLAG
+
+// shell32
+SetCurrentProcessExplicitAppUserModelID
+
+// ole32
+PropVariantClear
+
+// shell COM
+ICustomDestinationList
+IObjectArray
+IObjectCollection
+IPropertyStore
+IShellLinkW
+DestinationList
+EnumerableObjectCollection
+ShellLink
+
+// property system
+PROPERTYKEY
+PROPVARIANT
+VARENUM
+
+// xaml interop: ISwapChainPanelNative is hand-written. CsWin32
+// generates an ISwapChainPanelNative under
+// Windows.Win32.System.WinRT.Xaml with IID
+// F92F19D2-3ADE-45A6-A20C-F6F1EA90554B, but the WinUI 3
+// SwapChainPanel responds to QueryInterface for IID
+// 63aad0b8-7c24-40ff-85a8-640d944cc325 (the legacy XAML interop
+// IID). The two are NOT interchangeable - the Ghostty DX12
+// renderer relies on the legacy IID and would silently break if
+// we switched. The hand-written shim moves from [ComImport] to
+// [GeneratedComInterface] to keep the AOT story intact while
+// retaining the correct IID.
+
+// Note: DWrite types are listed in windows/Ghostty.Core/NativeMethods.txt
+// (not here) because DWriteFontEnumerator.EnumerateMigrated lives in
+// Ghostty.Core so the equivalence test in Ghostty.Tests can call it
+// without pulling in the WinUI 3 Ghostty assembly. AppearancePage
+// delegates to Ghostty.Core.
