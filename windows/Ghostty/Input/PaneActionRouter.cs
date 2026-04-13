@@ -83,6 +83,9 @@ internal sealed class PaneActionRouter
             case PaneAction.ToggleCommandPalette:
                 CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty);
                 return;
+            case PaneAction.ToggleFullscreen:
+                ToggleFullscreenRequested?.Invoke(this, EventArgs.Empty);
+                return;
         }
 
         var pane = _tabs.ActiveTab.PaneHost;
