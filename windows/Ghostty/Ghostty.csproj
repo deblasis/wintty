@@ -89,11 +89,12 @@
   </ItemGroup>
 
   <!--
-    Fallback: copy libghostty.dll for non-AOT builds (dotnet run / Debug).
-    When PublishAot is true and ghostty-static.lib is linked, the DLL is
-    not needed at runtime.
+    Copy libghostty.dll for non-AOT builds (dotnet run / Debug).
+    Always copy regardless of whether the static lib also exists:
+    zig build produces both artifacts, and Debug builds load the DLL
+    at runtime even when the static lib is present on disk.
   -->
-  <ItemGroup Condition="!Exists('..\..\zig-out\lib\ghostty-static.lib')">
+  <ItemGroup>
     <None Include="..\..\zig-out\lib\ghostty.dll" Condition="Exists('..\..\zig-out\lib\ghostty.dll')">
       <Link>native\ghostty.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
