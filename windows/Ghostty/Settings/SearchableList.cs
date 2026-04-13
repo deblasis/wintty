@@ -44,6 +44,33 @@ internal sealed class SearchableList
     private void OnGotFocus(object sender, RoutedEventArgs e)
     {
         if (_items.Count == 0) return;
+
+        // If there's already a value, rotate the list so items start
+        // from the current selection. This way arrow-down continues
+        // from where the user is instead of jumping to the top.
+        var text = _box.Text;
+        if (!string.IsNullOrEmpty(text))
+        {
+            var idx = -1;
+            for (int i = 0; i < _items.Count; i++)
+            {
+                if (string.Equals(_items[i], text, StringComparison.OrdinalIgnoreCase))
+                {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx >= 0)
+            {
+                var rotated = new List<string>(_items.Count);
+                for (int i = idx; i < _items.Count; i++) rotated.Add(_items[i]);
+                for (int i = 0; i < idx; i++) rotated.Add(_items[i]);
+                _box.ItemsSource = rotated;
+                _box.IsSuggestionListOpen = true;
+                return;
+            }
+        }
+
         _box.ItemsSource = _items;
         _box.IsSuggestionListOpen = true;
     }

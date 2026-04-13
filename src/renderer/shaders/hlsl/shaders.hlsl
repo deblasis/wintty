@@ -123,19 +123,26 @@ float4 unpack_u32_rgba(uint packed)
     ) / 255.0;
 }
 
-// load_color: simplified -- converts a packed uint8x4 (RGBA) to float4.
-// Does NOT linearize, convert to Display P3, or apply premultiplication.
-// TODO: port full load_color() from shaders.metal
+// load_color: converts a packed uint8x4 (RGBA) to premultiplied float4.
+// Premultiplication is required because the blend state uses
+// SrcBlend=ONE (not SRC_ALPHA), so RGB must already be scaled by alpha.
+// Without this, transparent cells (alpha=0) would still add their RGB
+// to the render target, covering content drawn by earlier passes.
+// TODO: port full load_color() from shaders.metal (linearize, Display P3)
 float4 load_color(uint packed)
 {
-    return unpack_u32_rgba(packed);
+    float4 c = unpack_u32_rgba(packed);
+    c.rgb *= c.a;
+    return c;
 }
 
 // Variant for colors that arrived via hardware R8G8B8A8_UNORM conversion
 // (e.g. the CellText color instance attribute). Already in [0, 1].
+// Premultiply to match load_color() -- the blend state uses SrcBlend=ONE.
 // TODO: linearize, Display P3, min-contrast -- port from Metal
 float4 load_color_f4(float4 color)
 {
+    color.rgb *= color.a;
     return color;
 }
 
@@ -236,12 +243,13 @@ float4 CellBgPS(FullScreenVSOut input) : SV_TARGET
     uint idx = (uint)grid_pos.y * gs.x + (uint)grid_pos.x;
     float4 bg = load_color(cell_bg_colors[idx]);
 
-    // Composite over the global background so the result is fully opaque.
-    // On Metal/OpenGL this compositing happens via hardware blending, but
-    // The blend state is unreliable for this.  Doing it in the shader
-    // produces the same result: out = cell_bg + bg_color * (1 - cell_bg.a).
-    float4 global_bg = load_color(bg_color_packed);
-    bg = float4(bg.rgb + global_bg.rgb * (1.0 - bg.a), 1.0);
+    // Output the per-cell background directly. The hardware blend
+    // state (premultiplied alpha: src*ONE + dst*INV_SRC_ALPHA)
+    // composites this over the global background that BgColorPS
+    // already wrote to the render target. Cells with no custom
+    // background are transparent (0,0,0,0) after premultiplication,
+    // so the blend is a no-op and the global bg shows through
+    // unchanged -- including its alpha for background-opacity.
     return bg;
 }
 
@@ -333,12 +341,16 @@ CellTextVSOut CellTextVS(uint vid : SV_VertexID, CellTextVSIn inst)
     // TODO: linearize, Display P3, min-contrast -- port from Metal
     o.color = load_color_f4(inst.color);
 
-    // Per-cell background color blended with the global background.
+    // Per-cell background color composited over the global background
+    // (premultiplied alpha). Preserves alpha for transparency support.
     uint2 gs = unpack_grid_size();
     uint bg_idx = inst.grid_pos.y * gs.x + inst.grid_pos.x;
     float4 cell_bg   = load_color(ct_cell_bg_colors[bg_idx]);
     float4 global_bg = load_color(bg_color_packed);
-    o.bg_color = cell_bg + global_bg * (1.0 - cell_bg.a);
+    float comp_a = cell_bg.a + global_bg.a * (1.0 - cell_bg.a);
+    o.bg_color = float4(
+        cell_bg.rgb + global_bg.rgb * (1.0 - cell_bg.a),
+        comp_a);
 
     // Cursor color override: if this cell sits at the cursor position but is
     // not itself the cursor glyph, replace the fg color with cursor_color.

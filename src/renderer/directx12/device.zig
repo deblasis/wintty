@@ -254,7 +254,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     // debug layer from warning about attempting to share an unshared
     // fence, and CreateFence itself does not care either way.
     const fence_flags: d3d12.D3D12_FENCE_FLAGS = switch (surface) {
-        .hwnd, .swap_chain_panel => .NONE,
+        .hwnd, .swap_chain_panel, .composition => .NONE,
         .shared_texture => .SHARED,
     };
 
@@ -338,6 +338,19 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 log.err("ISwapChainPanelNative.SetSwapChain failed: 0x{x}", .{@as(u32, @bitCast(hr))});
                 return error.SwapChainPanelBindFailed;
             }
+        },
+        .composition => {
+            // Composition surface: create the swap chain but don't bind
+            // it to a panel or HWND. The embedder retrieves the pointer
+            // via ghostty_surface_get_swap_chain and binds it to a
+            // Windows.UI.Composition visual for per-pixel alpha.
+            swap_chain = try createCompositionSwapChain(
+                factory.?,
+                command_queue.?,
+                opts.width,
+                opts.height,
+            );
+            errdefer _ = swap_chain.?.Release();
         },
         .shared_texture => |cfg| {
             // SharedTexture: no swap chain. Create the shared committed
@@ -536,7 +549,11 @@ fn createCompositionSwapChain(
         // GPU) the stretch becomes a visible smear -- accept that as a
         // graceful degradation rather than a black bar.
         .Scaling = .STRETCH,
-        .SwapEffect = .FLIP_DISCARD,
+        // FLIP_SEQUENTIAL is required for premultiplied alpha to
+        // composite correctly through SwapChainPanel. FLIP_DISCARD
+        // may discard back buffer contents between presents, breaking
+        // premultiplied alpha compositing through DWM.
+        .SwapEffect = .FLIP_SEQUENTIAL,
         .AlphaMode = .PREMULTIPLIED,
         .Flags = 0,
     };
