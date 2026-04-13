@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 
 namespace Ghostty.Tabs;
 
@@ -65,7 +67,45 @@ internal static class TabContextMenuBuilder
         dup.Click += (_, _) => manager.NewTab(); // TODO(config): respect ProfileId once profiles exist
         flyout.Items.Add(dup);
 
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
+        // "Tab Color..." opens a secondary Flyout anchored to the
+        // right-clicked TabViewItem. We use a plain MenuFlyoutItem
+        // (not MenuFlyoutSubItem) because the swatch grid needs a
+        // real Flyout host to avoid MenuFlyoutItem hit-testing
+        // quirks on WinAppSDK 1.6.
+        var colorPick = new MenuFlyoutItem { Text = "Tab Color..." };
+        colorPick.Click += (_, _) =>
+        {
+            var target = flyout.Target as FrameworkElement;
+            if (target is null) return;
+            ShowColorPicker(target, tab);
+        };
+        flyout.Items.Add(colorPick);
+
         return flyout;
+    }
+
+    private static void ShowColorPicker(FrameworkElement anchor, TabModel tab)
+    {
+        // Build the secondary flyout fresh each invocation. Cheap, and
+        // avoids any stale selection-ring state from the previous
+        // right-click.
+        var picker = new TabColorPalettePicker(tab.Color);
+        var subFlyout = new Flyout
+        {
+            Content = picker,
+            Placement = FlyoutPlacementMode.Bottom,
+            ShouldConstrainToRootBounds = true,
+        };
+
+        picker.ColorSelected += (_, color) =>
+        {
+            tab.Color = color;
+            subFlyout.Hide();
+        };
+
+        subFlyout.ShowAt(anchor);
     }
 
     private static void CloseOthers(TabManager manager, TabModel keep)
