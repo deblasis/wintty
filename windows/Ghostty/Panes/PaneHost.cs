@@ -39,7 +39,10 @@ namespace Ghostty.Panes;
 /// </summary>
 internal sealed partial class PaneHost : UserControl, IPaneHost
 {
-    private readonly GhosttyHost _host;
+    // Not readonly: RehostTo writes this during cross-window tab
+    // detach. UI-thread-only -- all reads and writes happen on the
+    // dispatcher queue, so no synchronization is needed.
+    private GhosttyHost _host;
     private readonly Func<TerminalControl> _terminalFactory;
 
     // Pane highlight system, rendered as an overlay Canvas above the
@@ -313,6 +316,35 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
+    /// Switch every <see cref="TerminalControl"/> leaf in this tree to
+    /// report to <paramref name="newHost"/>. Called by
+    /// <see cref="MainWindow.DetachTabToNewWindow"/> after the PaneHost
+    /// has been removed from the old window's visual parent and before
+    /// it is added to the new window's. UI thread only.
+    ///
+    /// Per-leaf Detach-then-Adopt moves each surface handle between
+    /// the two hosts' per-window <c>_surfaces</c> dictionaries AND
+    /// rewrites the process-wide <c>_hostBySurface</c> routing map so
+    /// libghostty callbacks post-move reach the destination host. The
+    /// spec accepts the one-update-lost race (Risk 3): a callback
+    /// arriving between Detach and Adopt for the same handle looks up,
+    /// misses, drops. An async progress state resyncs on the next
+    /// OSC 9;4.
+    /// </summary>
+    internal void RehostTo(GhosttyHost newHost)
+    {
+        foreach (var leaf in PaneTree.Leaves(_root))
+        {
+            var terminal = leaf.Terminal();
+            var surface = new Interop.GhosttySurface(terminal.SurfaceHandle);
+            _host.Detach(surface);
+            newHost.Adopt(surface, terminal);
+            terminal.Host = newHost;
+        }
+        _host = newHost;
+    }
+
+    /// <summary>
     /// Tear down every leaf's libghostty surface. Called by
     /// <see cref="MainWindow"/> when the window is closing, since
     /// surface lifetime is decoupled from <c>Unloaded</c> events and
@@ -393,7 +425,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     public void EqualizeSplits()
     {
         PaneTree.Equalize(_root);
-        // When zoomed, only update ratios � ToggleSplitZoom.Rebuild()
+        // When zoomed, only update ratios - ToggleSplitZoom.Rebuild()
         // will apply them when the user unzooms.
         if (_zoomedLeaf is not null) return;
         Rebuild();
