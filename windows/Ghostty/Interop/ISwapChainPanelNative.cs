@@ -9,18 +9,32 @@
 // ISwapChainPanelNative), so nothing on the C# side actually calls
 // SetSwapChain - but we keep the interface here for any case where the
 // shell needs to present its own swap chain (overlays, inspector, etc).
+//
+// Why hand-written instead of CsWin32-generated:
+//
+// CsWin32 0.3.269 emits an ISwapChainPanelNative under
+// Windows.Win32.System.WinRT.Xaml with IID
+// F92F19D2-3ADE-45A6-A20C-F6F1EA90554B from the Microsoft.UI.Xaml
+// metadata, but the WinUI 3 SwapChainPanel responds to QueryInterface
+// for IID 63aad0b8-7c24-40ff-85a8-640d944cc325 (the legacy XAML interop
+// IID). The two are NOT interchangeable; using the generated interface
+// would QI for the wrong IID and either return E_NOINTERFACE or hand
+// back an unrelated vtable.
+//
+// Migrated from [ComImport] to [GeneratedComInterface] in PR 202 so
+// the file is AOT-safe and we can drop
+// EnableGeneratedComInterfaceComImportInterop from the csproj.
 
 using System;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using WinRT;
 
 namespace Ghostty.Interop;
 
-[ComImport]
+[GeneratedComInterface]
 [Guid("63aad0b8-7c24-40ff-85a8-640d944cc325")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface ISwapChainPanelNative
+internal partial interface ISwapChainPanelNative
 {
     [PreserveSig]
     int SetSwapChain(IntPtr swapChain); // IDXGISwapChain*

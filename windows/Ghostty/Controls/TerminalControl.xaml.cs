@@ -9,6 +9,9 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
+using Windows.Win32;
+using Windows.Win32.UI.Input.KeyboardAndMouse;
+
 namespace Ghostty.Controls;
 
 /// <summary>
@@ -685,7 +688,7 @@ public sealed partial class TerminalControl : UserControl
         {
             // Recover the OEM scancode from the VirtualKey. This handles
             // Tab and any other key WinUI 3 strips ScanCode for.
-            scancode = NativeMethods.MapVirtualKeyW((uint)e.Key, NativeMethods.MAPVK_VK_TO_VSC);
+            scancode = PInvoke.MapVirtualKey((uint)e.Key, MAP_VIRTUAL_KEY_TYPE.MAPVK_VK_TO_VSC);
         }
         if (e.KeyStatus.IsExtendedKey)
         {
@@ -750,30 +753,17 @@ public sealed partial class TerminalControl : UserControl
         // flags in ghostty_mods_e are set correctly - these matter for
         // keybinds that distinguish "right alt" (AltGr) from "left alt".
         var mods = GhosttyMods.None;
-        if ((GetKeyState(VK_LSHIFT) & 0x8000) != 0) mods |= GhosttyMods.Shift;
-        if ((GetKeyState(VK_RSHIFT) & 0x8000) != 0) mods |= GhosttyMods.Shift | GhosttyMods.ShiftRight;
-        if ((GetKeyState(VK_LCONTROL) & 0x8000) != 0) mods |= GhosttyMods.Ctrl;
-        if ((GetKeyState(VK_RCONTROL) & 0x8000) != 0) mods |= GhosttyMods.Ctrl | GhosttyMods.CtrlRight;
-        if ((GetKeyState(VK_LMENU) & 0x8000) != 0) mods |= GhosttyMods.Alt;
-        if ((GetKeyState(VK_RMENU) & 0x8000) != 0) mods |= GhosttyMods.Alt | GhosttyMods.AltRight;
-        if ((GetKeyState(VK_LWIN) & 0x8000) != 0) mods |= GhosttyMods.Super;
-        if ((GetKeyState(VK_RWIN) & 0x8000) != 0) mods |= GhosttyMods.Super | GhosttyMods.SuperRight;
-        if ((GetKeyState(VK_CAPITAL) & 0x0001) != 0) mods |= GhosttyMods.Caps;
-        if ((GetKeyState(VK_NUMLOCK) & 0x0001) != 0) mods |= GhosttyMods.Num;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_LSHIFT) & 0x8000) != 0) mods |= GhosttyMods.Shift;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_RSHIFT) & 0x8000) != 0) mods |= GhosttyMods.Shift | GhosttyMods.ShiftRight;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_LCONTROL) & 0x8000) != 0) mods |= GhosttyMods.Ctrl;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_RCONTROL) & 0x8000) != 0) mods |= GhosttyMods.Ctrl | GhosttyMods.CtrlRight;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_LMENU) & 0x8000) != 0) mods |= GhosttyMods.Alt;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_RMENU) & 0x8000) != 0) mods |= GhosttyMods.Alt | GhosttyMods.AltRight;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_LWIN) & 0x8000) != 0) mods |= GhosttyMods.Super;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_RWIN) & 0x8000) != 0) mods |= GhosttyMods.Super | GhosttyMods.SuperRight;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_CAPITAL) & 0x0001) != 0) mods |= GhosttyMods.Caps;
+        if ((PInvoke.GetKeyState((int)VIRTUAL_KEY.VK_NUMLOCK) & 0x0001) != 0) mods |= GhosttyMods.Num;
         return mods;
     }
 
-    private const int VK_LSHIFT = 0xA0;
-    private const int VK_RSHIFT = 0xA1;
-    private const int VK_LCONTROL = 0xA2;
-    private const int VK_RCONTROL = 0xA3;
-    private const int VK_LMENU = 0xA4; // left Alt
-    private const int VK_RMENU = 0xA5; // right Alt / AltGr
-    private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5C;
-    private const int VK_CAPITAL = 0x14;
-    private const int VK_NUMLOCK = 0x90;
-
-    [LibraryImport("user32.dll")]
-    private static partial short GetKeyState(int vKey);
 }
