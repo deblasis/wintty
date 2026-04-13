@@ -23,6 +23,17 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>true</PublishAot>
+    <!--
+      Analyzer triad: surface AOT / trim / single-file incompatibilities
+      at build time instead of only at publish time. TrimmerSingleWarn=false
+      expands the default per-assembly aggregate rollup into per-callsite
+      diagnostics so future warnings land with actionable locations.
+      Issue # 204.
+    -->
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
     <!-- Use our own Program.Main with diagnostic error capture instead
          of the XAML-generated entry point (App.g.i.cs). This lets us
          catch NativeAOT startup failures that would otherwise exit
