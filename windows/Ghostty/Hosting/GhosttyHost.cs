@@ -9,6 +9,8 @@ using Ghostty.Core.Interop;
 using Ghostty.Interop;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Windows.Win32;
+using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Ghostty.Hosting;
 
@@ -249,7 +251,7 @@ internal sealed class GhosttyHost : IDisposable
 
             case GhosttyActionTag.RingBell:
             {
-                NativeMethods.MessageBeep(NativeMethods.MB_OK);
+                PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
                 return 1;
             }
 

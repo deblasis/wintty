@@ -1,4 +1,3 @@
-using Ghostty.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -28,6 +27,6 @@ public sealed partial class AppIconBadge : UserControl
     {
         var window = WindowHelper.GetWindow(this);
         if (window is null) return;
-        SystemMenuInterop.ShowAt(window, ClickTarget);
+        SystemMenuPopup.ShowAt(window, ClickTarget);
     }
 }

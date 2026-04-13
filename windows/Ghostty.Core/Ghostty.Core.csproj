@@ -25,5 +25,24 @@
     -->
     <IsAotCompatible>true</IsAotCompatible>
     <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <!--
+      Required by Ghostty.Core.DirectWrite.DWriteFontEnumerator's
+      raw-vtable reference path. The migrated CsWin32 path also uses
+      stackalloc + PWSTR in unsafe blocks, so this applies to both
+      enumeration helpers.
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!--
+      CsWin32 emits as a build task (not a source generator) so the
+      generated [LibraryImport] / [GeneratedComInterface] surfaces
+      coexist with [assembly: DisableRuntimeMarshalling]. Used by
+      DWriteFontEnumerator.EnumerateMigrated for the equivalence
+      test in Ghostty.Tests.
+    -->
+    <CsWin32RunAsBuildTask>true</CsWin32RunAsBuildTask>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
+  </ItemGroup>
 </Project>
