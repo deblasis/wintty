@@ -18,6 +18,17 @@ const SMALL_LIST_THRESHOLD = 10;
 
 const ColorScheme = enum { all, dark, light };
 
+/// Theme change callback type. Called with the theme name and whether the
+/// selection is confirmed (accept) or just a preview (browsing).
+pub const ThemeCallback = *const fn ([*:0]const u8, bool) callconv(.c) void;
+
+/// Set by the embedder via setThemeCallback before run().
+var theme_callback: ?ThemeCallback = null;
+
+pub fn setThemeCallback(cb: ?ThemeCallback) void {
+    theme_callback = cb;
+}
+
 pub const Options = struct {
     /// If true, print the full path to the theme.
     path: bool = false,
@@ -306,6 +317,8 @@ const Preview = struct {
         if (self.vx.caps.color_scheme_updates)
             try self.vx.subscribeToColorSchemeUpdates(writer);
 
+        var prev_theme_idx: ?usize = null;
+
         while (!self.should_quit) {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
@@ -315,6 +328,27 @@ const Preview = struct {
             while (loop.tryEvent()) |event| {
                 try self.update(event, alloc);
             }
+
+            // Notify the embedder when the selected theme changes.
+            if (theme_callback) |cb| {
+                const cur_idx: ?usize = if (self.filtered.items.len > 0 and self.current < self.filtered.items.len)
+                    self.filtered.items[self.current]
+                else
+                    null;
+                if (cur_idx != prev_theme_idx) {
+                    prev_theme_idx = cur_idx;
+                    if (cur_idx) |idx| {
+                        const name = self.themes[idx].theme;
+                        if (name.len < 256) {
+                            var buf: [256]u8 = undefined;
+                            @memcpy(buf[0..name.len], name);
+                            buf[name.len] = 0;
+                            cb(@ptrCast(&buf), false);
+                        }
+                    }
+                }
+            }
+
             try self.draw(alloc);
 
             try self.vx.render(writer);
@@ -444,8 +478,27 @@ const Preview = struct {
                             self.mode = .help;
                         if (key.matches('/', .{}))
                             self.mode = .search;
-                        if (key.matchesAny(&.{ vaxis.Key.enter, vaxis.Key.kp_enter }, .{}))
-                            self.mode = .save;
+                        if (key.matchesAny(&.{ vaxis.Key.enter, vaxis.Key.kp_enter }, .{})) {
+                            // When an embedder callback is registered, Enter
+                            // confirms the selection directly (the embedder
+                            // handles persistence). Without a callback, show
+                            // the default save instructions screen.
+                            if (theme_callback) |cb| {
+                                if (self.filtered.items.len > 0 and self.current < self.filtered.items.len) {
+                                    const idx = self.filtered.items[self.current];
+                                    const name = self.themes[idx].theme;
+                                    if (name.len < 256) {
+                                        var buf: [256]u8 = undefined;
+                                        @memcpy(buf[0..name.len], name);
+                                        buf[name.len] = 0;
+                                        cb(@ptrCast(&buf), true);
+                                    }
+                                }
+                                self.should_quit = true;
+                            } else {
+                                self.mode = .save;
+                            }
+                        }
                         if (key.matchesAny(&.{ 'x', '/' }, .{ .ctrl = true })) {
                             self.text_input.buf.clearRetainingCapacity();
                             try self.updateFiltered();
@@ -1704,6 +1757,13 @@ const Preview = struct {
         writeAutoThemeFile(self.allocator, theme.theme) catch {
             return;
         };
+
+        // Notify the embedder that the theme was accepted.
+        if (theme_callback) |cb| {
+            const name_z = self.allocator.dupeZ(u8, theme.theme) catch return;
+            defer self.allocator.free(name_z);
+            cb(name_z, true);
+        }
     }
 };
 
