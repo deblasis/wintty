@@ -16,5 +16,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <!--
+      IsAotCompatible is the composite library-project knob that flips
+      EnableTrimAnalyzer, EnableAotAnalyzer, EnableSingleFileAnalyzer,
+      and IsTrimmable together. TrimmerSingleWarn=false expands the
+      default per-assembly aggregate rollup into per-callsite diagnostics
+      so future warnings land with actionable locations. Issue # 204.
+    -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
   </PropertyGroup>
 </Project>
