@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Ghostty.Clipboard;
 using Ghostty.Controls;
 using Ghostty.Core.Clipboard;
+using Ghostty.Core.Hosting;
 using Ghostty.Core.Interop;
 using Ghostty.Interop;
 using Microsoft.UI.Dispatching;
@@ -15,21 +16,37 @@ using Windows.Win32.UI.WindowsAndMessaging;
 namespace Ghostty.Hosting;
 
 /// <summary>
-/// Per-window owner of the libghostty config + app handles and the
-/// runtime callback surface. Holds a dictionary mapping
-/// <see cref="GhosttySurface"/> handles to the <see cref="TerminalControl"/>
-/// that owns them so action-callback <c>target</c> arguments can be routed
-/// to the correct leaf.
+/// Per-window owner of the libghostty surface registry and the runtime
+/// callback surface. Each host has its OWN per-window
+/// <see cref="_surfaces"/> dictionary. The bootstrap host additionally
+/// owns the libghostty callback delegates and the <c>ghostty_app_t</c>.
 ///
-/// Lifetime: created once by <see cref="MainWindow"/> before any terminal
-/// surface is constructed, disposed when the window closes. The app handle
-/// is passed to each <see cref="TerminalControl"/> via its
-/// <see cref="TerminalControl.Host"/> property before it is loaded.
+/// Bootstrap vs per-window:
+///   - Bootstrap host: created once by <see cref="App.OnLaunched"/> via
+///     the legacy ctor. Owns the <c>_wakeupCb</c>, <c>_actionCb</c>,
+///     etc. delegate fields. Libghostty calls these. Their bodies
+///     consult <see cref="App.TryGetHostForSurface"/> to find the
+///     per-window host that currently owns a given surface, then forward
+///     there. Owns <c>ghostty_app_t</c> and calls <c>AppFree</c> on
+///     Dispose.
+///   - Per-window host: created by each <see cref="MainWindow"/> via
+///     the shared-app ctor. Has NO delegate fields, NO <c>AppNew</c>
+///     call. Wraps the same <c>ghostty_app_t</c> (borrowed, not owned).
+///     Dispose does NOT call <c>AppFree</c>.
+///
+/// Lifetime: the <see cref="HostLifetimeSupervisor"/> enforces the
+/// drain-last invariant -- every per-window host must Dispose before
+/// the bootstrap host.
 /// </summary>
 internal sealed class GhosttyHost : IDisposable
 {
     private GhosttyConfig _config;
     private GhosttyApp _app;
+
+    // Lifetime state. The bootstrap host gets a HostLifetimeState
+    // marked IsBootstrap = true; per-window hosts get PerWindow().
+    // Dispose consults this instead of a bare _sharesApp bool.
+    private readonly IAppHandleOwnership _ownership;
 
     /// <summary>
     /// UTC timestamp of the most recent key event seen by any
@@ -68,7 +85,8 @@ internal sealed class GhosttyHost : IDisposable
     private ClipboardBridge? _clipboardBridge;
 
     // Delegates must be retained as fields; P/Invoke hands out native
-    // function pointers the GC cannot track.
+    // function pointers the GC cannot track. Only the BOOTSTRAP host
+    // assigns these; per-window hosts leave them null.
     private GhosttyWakeupCb? _wakeupCb;
     private GhosttyActionCb? _actionCb;
     private GhosttyReadClipboardCb? _readClipboardCb;
@@ -76,17 +94,29 @@ internal sealed class GhosttyHost : IDisposable
     private GhosttyWriteClipboardCb? _writeClipboardCb;
     private GhosttyCloseSurfaceCb? _closeSurfaceCb;
 
-    // ConcurrentDictionary: Register/Unregister run on the UI thread but
-    // lookups happen on libghostty's callback thread in OnAction and
-    // OnCloseSurface. A plain Dictionary would race here.
+    // Per-window surface dictionary. ALWAYS per-host, never shared.
+    // Callbacks routed to this host (by App.xaml.cs's _hostBySurface
+    // map) consult this dictionary to resolve XamlRoot and dispatcher.
+    // The legacy ctor and the shared-app ctor both create a fresh
+    // dictionary; nothing is passed in.
     private readonly ConcurrentDictionary<IntPtr, TerminalControl> _surfaces = new();
     private readonly DispatcherQueue _dispatcher;
 
     public GhosttyApp App => _app;
 
-    public GhosttyHost(DispatcherQueue dispatcher, GhosttyConfig config)
+    /// <summary>
+    /// Bootstrap ctor: owns <c>ghostty_app_t</c>, used by
+    /// <c>App.OnLaunched</c> exactly once. This is the one host
+    /// libghostty invokes. Its callback bodies consult
+    /// <see cref="App.TryGetHostForSurface"/> to forward to whichever
+    /// per-window host owns the target surface.
+    /// </summary>
+    public GhosttyHost(DispatcherQueue dispatcher, GhosttyConfig config, HostLifetimeSupervisor supervisor)
     {
         _dispatcher = dispatcher;
+        _ownership = new SupervisedOwnership(
+            supervisor.RegisterBootstrap(),
+            supervisor);
         _config = config;
 
         _wakeupCb = OnWakeup;
@@ -97,10 +127,6 @@ internal sealed class GhosttyHost : IDisposable
         _closeSurfaceCb = OnCloseSurface;
 
         // Build the clipboard bridge after all delegate fields are assigned.
-        // The bridge takes lambdas that close over `this`, so the delegates
-        // themselves are not captured -- the ordering relative to the runtime
-        // config struct does not matter for correctness, but keeping it here
-        // makes the construction visually adjacent to the callbacks it serves.
         var clipboardBackend = new WinUiClipboardBackend(_dispatcher);
         var clipboardConfirmer = new DialogClipboardConfirmer(
             _dispatcher,
@@ -127,25 +153,153 @@ internal sealed class GhosttyHost : IDisposable
         _app = NativeMethods.AppNew(runtime, _config);
     }
 
+    /// <summary>
+    /// Construct a per-window GhosttyHost that wraps an existing
+    /// process-global <see cref="GhosttyApp"/> owned by
+    /// <c>App.xaml.cs</c>. Each per-window host has its OWN per-window
+    /// <see cref="_surfaces"/> dictionary. The app handle is NOT freed
+    /// on <see cref="Dispose"/>.
+    ///
+    /// CRITICAL: This ctor does NOT assign callback delegates
+    /// (<c>_wakeupCb</c>, <c>_actionCb</c>, etc). Libghostty's
+    /// <c>AppNew</c> was called in the BOOTSTRAP host and bound to the
+    /// bootstrap's delegate instances. The bootstrap host is the
+    /// callback receiver; it forwards to the correct per-window host
+    /// via <c>App._hostBySurface</c>.
+    /// </summary>
+    public GhosttyHost(
+        DispatcherQueue dispatcher,
+        IntPtr sharedApp,
+        HostLifetimeSupervisor supervisor)
+    {
+        _dispatcher = dispatcher;
+        _ownership = new SupervisedOwnership(
+            supervisor.RegisterPerWindow(),
+            supervisor);
+        _app = new GhosttyApp(sharedApp);
+        // Per-window hosts do not own or read _config; the bootstrap host
+        // manages the single GhosttyConfig. Left as default intentionally.
+
+        // NOTE: NO callback delegate assignments here. See the ctor
+        // docstring above for the full reason. Libghostty calls the
+        // bootstrap host's _actionCb etc, not ours.
+
+        var clipboardBackend = new WinUiClipboardBackend(_dispatcher);
+        var clipboardConfirmer = new DialogClipboardConfirmer(
+            _dispatcher,
+            xamlRootProvider: ResolveXamlRootForSurface);
+        var clipboardService = new ClipboardService(clipboardBackend, clipboardConfirmer);
+        _clipboardBridge = new ClipboardBridge(
+            _dispatcher,
+            clipboardService,
+            resolveSurface: ResolveSurfaceFromUserdata,
+            isSurfaceAlive: IsSurfaceAlive);
+    }
+
+    /// <summary>
+    /// Returns true if <paramref name="control"/> is registered in this
+    /// host's per-window surface dictionary. Used by the process-wide
+    /// <see cref="App.TryFindHostForControl"/> search.
+    /// </summary>
+    internal bool ContainsControl(TerminalControl control)
+    {
+        foreach (var tc in _surfaces.Values)
+        {
+            if (ReferenceEquals(tc, control))
+                return true;
+        }
+        return false;
+    }
+
     public void Register(GhosttySurface surface, TerminalControl control)
     {
         if (surface.Handle == IntPtr.Zero) return;
         var added = _surfaces.TryAdd(surface.Handle, control);
         Debug.Assert(added, "surface handle collision in GhosttyHost registry");
+        Ghostty.App.RegisterSurfaceRoute(surface.Handle, this);
     }
 
     public void Unregister(GhosttySurface surface)
     {
         if (surface.Handle == IntPtr.Zero) return;
         _surfaces.TryRemove(surface.Handle, out _);
+        Ghostty.App.UnregisterSurfaceRoute(surface.Handle, this);
     }
 
+    /// <summary>
+    /// Move a surface-handle registration into this host's per-window
+    /// dictionary, and update the process-wide routing map so the
+    /// bootstrap host's callbacks will route to this host next. Mirror
+    /// of <see cref="Unregister"/> on the source host plus
+    /// <see cref="Register"/> on this one, intended for cross-window
+    /// pane reparenting via <see cref="Ghostty.Panes.PaneHost.RehostTo"/>.
+    /// UI thread only.
+    ///
+    /// Race window: between the source host's <see cref="Detach"/> and
+    /// this host's <see cref="Adopt"/>, a libghostty callback for the
+    /// moving surface can arrive, consult <see cref="App.TryGetHostForSurface"/>,
+    /// miss, and silently drop. The spec (Risk 3) already accepts this:
+    /// "one update lost is tolerable". An async progress state will
+    /// resynchronize on the next OSC 9;4.
+    /// </summary>
+    public void Adopt(GhosttySurface surface, TerminalControl control)
+    {
+        if (surface.Handle == IntPtr.Zero) return;
+        _surfaces[surface.Handle] = control;
+        Ghostty.App.RegisterSurfaceRoute(surface.Handle, this);
+    }
+
+    /// <summary>
+    /// Remove a surface-handle registration from this host's per-window
+    /// dictionary and the process-wide routing map. Pair with
+    /// <see cref="Adopt"/> on the target host. UI thread only.
+    /// </summary>
+    public void Detach(GhosttySurface surface)
+    {
+        if (surface.Handle == IntPtr.Zero) return;
+        _surfaces.TryRemove(surface.Handle, out _);
+        Ghostty.App.UnregisterSurfaceRoute(surface.Handle, this);
+    }
+
+    /// <summary>
+    /// Bootstrap/per-window dispose invariant: the bootstrap host
+    /// (<see cref="IAppHandleOwnership.State"/>.<c>IsBootstrap</c>)
+    /// MUST be disposed LAST, after every per-window host. App.xaml.cs's
+    /// <c>OnAnyWindowClosedInternal</c> handler enforces this by only
+    /// disposing the bootstrap host when <c>WindowsByRoot</c> is empty.
+    /// Disposing out of order trips the
+    /// <see cref="HostLifetimeSupervisor.NotifyDisposed"/> guard.
+    /// </summary>
     public void Dispose()
     {
-        // Clear before AppFree so any late callbacks libghostty emits during
-        // teardown miss the lookup and become harmless no-ops.
+        // Clear this host's surfaces before touching the app.
         _surfaces.Clear();
-        if (_app.Handle != IntPtr.Zero) NativeMethods.AppFree(_app);
+
+        // Remove any entries we own from the process-wide routing map.
+        Ghostty.App.UnregisterHostSurfaces(this);
+
+        // Mark disposed BEFORE notifying the supervisor. If
+        // NotifyDisposed throws (drain-last violation), the state
+        // is still correctly flagged as disposed.
+        _ownership.State.MarkDisposed();
+        _ownership.NotifyDisposed();
+
+        // Only the bootstrap host frees the app. The drain-last
+        // invariant (enforced by _ownership.NotifyDisposed above)
+        // guarantees every per-window host has already cleared its
+        // _surfaces and its _hostBySurface entries by the time we
+        // reach this line, so AppFree is safe.
+        if (_ownership.State.OwnsApp && _app.Handle != IntPtr.Zero)
+        {
+            // Hard assert: no stray surface entries remain in the
+            // routing map. If this fires, some per-window host
+            // leaked a Register without a matching Detach.
+            Debug.Assert(
+                Ghostty.App.HostBySurfaceCount == 0,
+                "Bootstrap host disposing with live routing entries.");
+            NativeMethods.AppFree(_app);
+        }
+
         // Config lifetime is owned by ConfigService; do not free here.
         _app = default;
         _config = default;
@@ -172,38 +326,35 @@ internal sealed class GhosttyHost : IDisposable
     private const int GhosttyTargetApp = 0;
     private const int GhosttyTargetSurface = 1;
 
+    /// <summary>
+    /// Try to resolve the per-window host that currently owns the
+    /// given surface handle. Checks this host's own _surfaces first
+    /// (fast path for single-window), then falls back to the
+    /// process-wide App._hostBySurface routing map.
+    /// </summary>
+    private bool TryResolveControl(IntPtr surfaceHandle, out TerminalControl? control)
+    {
+        // Fast path: surface is in this host's own dictionary.
+        if (_surfaces.TryGetValue(surfaceHandle, out control))
+            return true;
+
+        // Multi-window path: consult the process-wide routing map.
+        if (Ghostty.App.TryGetHostForSurface(surfaceHandle, out var targetHost) && targetHost is not null)
+        {
+            if (targetHost._surfaces.TryGetValue(surfaceHandle, out control))
+                return true;
+        }
+
+        control = null;
+        return false;
+    }
+
     private byte OnAction(GhosttyApp _, IntPtr targetPtr, IntPtr actionPtr)
     {
-        // ABI note: ghostty_runtime_action_cb is declared as
-        //
-        //   bool action_cb(ghostty_app_t, ghostty_target_s, ghostty_action_s);
-        //
-        // Both target and action are passed BY VALUE in C, but on the Windows
-        // x64 calling convention any struct larger than 8 bytes is passed via
-        // a hidden pointer to a caller-allocated copy. ghostty_target_s is
-        // 16 bytes:
-        //
-        //   struct ghostty_target_s {
-        //     ghostty_target_tag_e tag;   // int32 at offset 0
-        //     // 4 bytes padding
-        //     union {                     // 8-byte aligned
-        //       ghostty_surface_t surface; // pointer at offset 8
-        //     } target;
-        //   };
-        //
-        // ghostty_action_s is similarly oversized. The C# delegate therefore
-        // declares both as IntPtr - the actual pointers we receive point at
-        // ephemeral stack copies of the structs and must be DEREFERENCED to
-        // get at their contents. Treating targetPtr as if it were the surface
-        // handle silently misses every dictionary lookup.
         if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return 0;
 
-        // ghostty_action_s layout: { int32 tag; <union> action; }
-        // Union starts at offset 8 (8-byte aligned on x64).
         var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
         var targetTag = Marshal.ReadInt32(targetPtr);
-        // App-level actions (target = GHOSTTY_TARGET_APP) don't carry
-        // a surface handle. Handle them before the surface lookup.
         if (targetTag == GhosttyTargetApp)
         {
             switch (tag)
@@ -225,7 +376,7 @@ internal sealed class GhosttyHost : IDisposable
 
         if (targetTag != GhosttyTargetSurface) return 0;
         var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
-        if (!_surfaces.TryGetValue(surfaceHandle, out var control)) return 0;
+        if (!TryResolveControl(surfaceHandle, out var control) || control is null) return 0;
 
         switch (tag)
         {
@@ -238,12 +389,9 @@ internal sealed class GhosttyHost : IDisposable
             {
                 var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
                 var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
-                // Capture the surface handle, not `control`: by the time the
-                // dispatched lambda runs the control may have unregistered
-                // and torn down. Re-check the dictionary on the UI thread.
                 _dispatcher.TryEnqueue(() =>
                 {
-                    if (_surfaces.TryGetValue(surfaceHandle, out var c))
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                         c.RaiseTitleChanged(title);
                 });
                 return 1;
@@ -259,7 +407,7 @@ internal sealed class GhosttyHost : IDisposable
             {
                 _dispatcher.TryEnqueue(() =>
                 {
-                    if (_surfaces.TryGetValue(surfaceHandle, out var c))
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                         c.RaiseCloseRequested();
                 });
                 return 1;
@@ -267,11 +415,6 @@ internal sealed class GhosttyHost : IDisposable
 
             case GhosttyActionTag.Scrollbar:
             {
-                // ghostty_action_scrollbar_s sits at union offset 8.
-                // Layout is authoritative in GhosttyActionScrollbar;
-                // read it as a single blit instead of three offset
-                // reads so the struct declaration is the single source
-                // of truth.
                 GhosttyActionScrollbar s;
                 unsafe
                 {
@@ -279,22 +422,13 @@ internal sealed class GhosttyHost : IDisposable
                         (void*)(actionPtr + 8));
                 }
 
-                // TerminalControl coalesces updates on its own side
-                // and hops to the UI thread with a cached delegate,
-                // so we don't need the dispatcher here — just resolve
-                // the surface and hand off. If the surface has already
-                // been disposed we silently drop the update.
-                if (_surfaces.TryGetValue(surfaceHandle, out var c))
+                if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                     c.QueueScrollbarChanged(s.Total, s.Offset, s.Len);
                 return 1;
             }
 
             case GhosttyActionTag.ProgressReport:
             {
-                // ghostty_action_progress_report_s sits at union offset 8
-                // inside ghostty_action_s. Layout:
-                //   int32 state  @ +8
-                //   int8  prog   @ +12  (-1 sentinel when no percent)
                 var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
                 var rawPct = (sbyte)Marshal.ReadByte(actionPtr, 12);
                 int pct = rawPct < 0 ? 0 : rawPct;
@@ -309,7 +443,7 @@ internal sealed class GhosttyHost : IDisposable
                 };
                 _dispatcher.TryEnqueue(() =>
                 {
-                    if (_surfaces.TryGetValue(surfaceHandle, out var c))
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                         c.RaiseProgressChanged(tabState);
                 });
                 return 1;
@@ -331,27 +465,8 @@ internal sealed class GhosttyHost : IDisposable
 
     private void OnCloseSurface(IntPtr userdata, byte processAlive)
     {
-        // userdata is the GCHandle.ToIntPtr value the owning TerminalControl
-        // pinned for itself before SurfaceNew. Decode it back to the managed
-        // control and raise CloseRequested on the UI thread; MainWindow's
-        // CloseRequested handler is what actually closes the window.
-        //
-        // This callback fires from libghostty's thread on two paths today:
-        // (1) the user typed `exit` in the shell and then pressed any key,
-        //     which makes Surface.zig encode the keystroke, notice
-        //     child_exited, and call self.close().
-        // (2) a binding action ran .close_surface or .close_window.
-        //
-        // We deliberately ignore processAlive here. Confirm-on-close lives
-        // at the libghostty layer and only invokes us once the user has
-        // already agreed (or wait_after_command was off).
         if (userdata == IntPtr.Zero) return;
 
-        // Decode the GCHandle, then confirm the resulting control is still
-        // registered. If Unregister already ran on the UI thread the surface
-        // is being torn down and this callback is a late arrival we drop.
-        // Using the thread-safe ConcurrentDictionary lookup avoids a race
-        // with a GCHandle that has been freed by OnUnloaded.
         var control = GCHandle.FromIntPtr(userdata).Target as TerminalControl;
         if (control is null) return;
         if (!IsRegistered(control)) return;
@@ -363,8 +478,16 @@ internal sealed class GhosttyHost : IDisposable
 
     private bool IsRegistered(TerminalControl control)
     {
+        // Check this host's own _surfaces first.
         foreach (var c in _surfaces.Values)
             if (ReferenceEquals(c, control)) return true;
+
+        // Check all per-window hosts via the process-wide routing map.
+        // This handles the case where a surface was moved to another
+        // window's host but the callback still arrived on the bootstrap.
+        if (Ghostty.App.TryFindHostForControl(control, out _))
+            return true;
+
         return false;
     }
 
@@ -385,32 +508,37 @@ internal sealed class GhosttyHost : IDisposable
 
     private bool IsSurfaceAlive(IntPtr surface)
     {
-        // The _surfaces dictionary is the authoritative live-surface registry.
-        // Checking it here is cheap (ConcurrentDictionary ContainsKey), and
-        // guards against a TerminalControl whose DisposeSurface() ran between
-        // the bridge's dispatch and the async continuation completing.
-        return surface != IntPtr.Zero && _surfaces.ContainsKey(surface);
+        if (surface == IntPtr.Zero) return false;
+        // Check this host's own dictionary first.
+        if (_surfaces.ContainsKey(surface)) return true;
+        // Fall back to process-wide routing map for multi-window.
+        return Ghostty.App.TryGetHostForSurface(surface, out _);
     }
 
     private XamlRoot? ResolveXamlRootForSurface(IntPtr surface)
     {
         // Look up the TerminalControl that owns this specific surface so
-        // the confirmation dialog lands on the originating window. In a
-        // multi-window host, falling back to any live XamlRoot would put
-        // an OSC 52 dialog from a background window on top of the
-        // foreground one.
-        //
-        // If the surface is not (or no longer) registered, fall back to
-        // any live control so a request during a focus-change race still
-        // gets a dialog rather than silently auto-denying. If nothing is
-        // live, return null and let DialogClipboardConfirmer auto-deny --
-        // the safe fallback for a security-relevant dialog.
-        if (surface != IntPtr.Zero && _surfaces.TryGetValue(surface, out var owner))
+        // the confirmation dialog lands on the originating window.
+        if (surface != IntPtr.Zero)
         {
-            var ownerRoot = owner.XamlRoot;
-            if (ownerRoot is not null) return ownerRoot;
+            // Check this host first.
+            if (_surfaces.TryGetValue(surface, out var owner))
+            {
+                var ownerRoot = owner.XamlRoot;
+                if (ownerRoot is not null) return ownerRoot;
+            }
+            // Fall back to process-wide routing.
+            if (Ghostty.App.TryGetHostForSurface(surface, out var targetHost) && targetHost is not null)
+            {
+                if (targetHost._surfaces.TryGetValue(surface, out var remoteOwner))
+                {
+                    var remoteRoot = remoteOwner.XamlRoot;
+                    if (remoteRoot is not null) return remoteRoot;
+                }
+            }
         }
 
+        // Last resort: any live control in this host.
         foreach (var ctrl in _surfaces.Values)
         {
             var root = ctrl.XamlRoot;
