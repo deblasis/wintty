@@ -62,6 +62,18 @@ internal sealed partial class CrystalBackdrop : SystemBackdrop
     {
         base.OnTargetDisconnected(target);
 
+        // Disable DWM blur-behind so switching to a different backdrop
+        // (solid/frosted) doesn't leave stale transparency state.
+        if (_hwnd != 0)
+        {
+            var bb = new Win32Interop.DWM_BLURBEHIND
+            {
+                DwFlags = Win32Interop.DWM_BLURBEHIND.DWM_BB_ENABLE,
+                FEnable = 0,
+            };
+            Win32Interop.DwmEnableBlurBehindWindow(_hwnd, ref bb);
+        }
+
         if (_blurRegion != 0)
         {
             Win32Interop.DeleteObject(_blurRegion);
