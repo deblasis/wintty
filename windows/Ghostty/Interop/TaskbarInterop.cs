@@ -30,6 +30,12 @@ internal static partial class TaskbarInterop
         void ActivateTab(IntPtr hwnd);
         void SetActiveAlt(IntPtr hwnd);
         // ITaskbarList2
+        // TODO(# 203): Deferred from the DisableRuntimeMarshalling audit.
+        // This is a [GeneratedComInterface] method, not a [LibraryImport],
+        // which is a different source-generator path with its own
+        // marshalling rules and is not governed by DisableRuntimeMarshalling.
+        // It is also never called from our code today. Revisit if and when
+        // we start invoking ITaskbarList3::MarkFullscreenWindow.
         void MarkFullscreenWindow(IntPtr hwnd, [MarshalAs(UnmanagedType.Bool)] bool fFullscreen);
         // ITaskbarList3 — only SetProgressValue / SetProgressState used
         void SetProgressValue(IntPtr hwnd, ulong ullCompleted, ulong ullTotal);
