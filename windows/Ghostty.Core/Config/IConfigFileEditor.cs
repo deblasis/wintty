@@ -26,4 +26,10 @@ public interface IConfigFileEditor
 
     /// <summary>Write raw text content to the config file atomically.</summary>
     void WriteRaw(string content);
+
+    /// <summary>
+    /// Replace all values for a repeatable key. Comments out existing
+    /// entries and appends new ones.
+    /// </summary>
+    void SetRepeatableValues(string key, string[] values);
 }
