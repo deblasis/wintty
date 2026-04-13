@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Commands;
 using Ghostty.Controls;
+using Ghostty.Core.Hosting;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Hosting;
@@ -132,15 +133,68 @@ public sealed partial class MainWindow : Window
     // GetWindowLong, GetWindowPlacement, ShowWindow, WINDOWPLACEMENT,
     // WINDOW_STYLE, and SHOW_WINDOW_CMD are provided by CsWin32.
 
-    internal MainWindow(ConfigService configService)
+    // Captured from Content.XamlRoot at registration time (in the
+    // one-shot Content.Loaded handler). Read by App.OnAnyWindowClosedInternal
+    // on Window.Closed to remove the WindowsByRoot entry; reading
+    // Content.XamlRoot directly at Closed time can return null because
+    // WinUI 3 tears Content down before Closed fires.
+    internal XamlRoot? RegisteredRoot { get; private set; }
+
+    internal MainWindow(ConfigService configService, GhosttyHost bootstrapHost, HostLifetimeSupervisor supervisor)
+        : this(configService, bootstrapHost, supervisor, seedTab: null)
+    {
+    }
+
+    /// <summary>
+    /// Full ctor. <paramref name="seedTab"/>, when non-null, is
+    /// adopted as the sole initial tab (used by Move Tab to New
+    /// Window); when null, the normal "create a fresh tab via the
+    /// factory" path runs. <paramref name="bootstrapHost"/> is the
+    /// app-owning GhosttyHost built once in App.xaml.cs; this window
+    /// constructs its OWN per-window GhosttyHost from it using the
+    /// shared-app ctor.
+    /// </summary>
+    private MainWindow(
+        ConfigService configService,
+        GhosttyHost bootstrapHost,
+        HostLifetimeSupervisor supervisor,
+        TabModel? seedTab)
     {
         InitializeComponent();
 
         _configService = configService;
         _configEditor = new ConfigFileEditor(configService.ConfigFilePath);
 
-        _host = new GhosttyHost(DispatcherQueue, configService.ConfigHandle);
-        configService.SetApp(_host.App);
+        // Build this window's per-window GhosttyHost around the shared
+        // app. Each per-window host has its OWN per-window surface
+        // dictionary; routing to this host from the bootstrap host's
+        // libghostty callbacks happens via App._hostBySurface (populated
+        // by the per-window host's Register / Adopt paths).
+        _host = new GhosttyHost(
+            DispatcherQueue,
+            bootstrapHost.App.Handle,
+            supervisor);
+        // NOTE: configService.SetApp is already done by App.xaml.cs on
+        // the bootstrap host. We do NOT call it again here.
+
+        // Register with App.WindowsByRoot once the XamlRoot is live.
+        // We capture the XamlRoot into RegisteredRoot so the
+        // App.OnAnyWindowClosedInternal handler can remove the entry on
+        // Window.Closed even if Content.XamlRoot has gone null by then
+        // (which WinUI 3 does during window teardown).
+        if (Content is FrameworkElement fe)
+        {
+            fe.Loaded += OnContentLoadedOnce;
+            void OnContentLoadedOnce(object s, RoutedEventArgs e)
+            {
+                fe.Loaded -= OnContentLoadedOnce;
+                RegisteredRoot = fe.XamlRoot;
+                if (RegisteredRoot != null)
+                {
+                    App.WindowsByRoot[RegisteredRoot] = this;
+                }
+            }
+        }
 
         // Detect initial system theme and notify libghostty so conditional
         // config blocks (e.g. palette dark/light) take effect immediately.
@@ -196,7 +250,9 @@ public sealed partial class MainWindow : Window
         _themePreview.ListThemesRequested += OnListThemesRequested;
 
         _factory = new PaneHostFactory(_host);
-        _tabManager = new TabManager(() => _factory.Create());
+        _tabManager = new TabManager(
+            () => _factory.Create(),
+            seed: seedTab);
         _router = new PaneActionRouter(_tabManager);
         _uiSettings = UiSettings.Load();
         RestoreWindowPlacement();
@@ -308,10 +364,6 @@ public sealed partial class MainWindow : Window
                 CommandPalettePopup.IsOpen = false;
                 SetCommandPaletteOpenOnAllTerminals(false);
                 _frecencyStore?.Save();
-
-                // Don't focus a surface that may have just been disposed
-                // by the command we executed (e.g. close pane).
-                // Let the tab/pane system handle focus naturally.
             }
             finally
             {
@@ -330,9 +382,6 @@ public sealed partial class MainWindow : Window
                 var wasOpen = _commandPaletteVm.IsOpen;
                 _commandPaletteVm.Close();
                 SetCommandPaletteOpenOnAllTerminals(false);
-                // Only restore previous focus for light-dismiss (Escape, click outside).
-                // For command execution, let the command's own focus handling win
-                // (e.g., PaneHost focuses the new split pane).
                 if (wasOpen)
                     _previousFocusSurface?.Focus(FocusState.Programmatic);
             }
@@ -417,6 +466,152 @@ public sealed partial class MainWindow : Window
         Closed += OnClosedAsync;
     }
 
+    /// <summary>
+    /// Build a <see cref="MainWindow"/> that adopts an existing
+    /// <see cref="TabModel"/> as its sole initial tab, WITHOUT
+    /// activating. Caller is responsible for positioning the window
+    /// (via <see cref="Microsoft.UI.Windowing.AppWindow.MoveAndResize"/>
+    /// or the like) and then calling <see cref="Window.Activate"/>.
+    ///
+    /// Used today by <see cref="DetachTabToNewWindow"/> for cursor-
+    /// anchored placement. PR 201 Snap Layouts will call this same
+    /// factory to install a snap rect before first activation so there
+    /// is no visible placement flicker.
+    /// </summary>
+    internal static MainWindow CreateForAdoption(
+        ConfigService configService,
+        GhosttyHost bootstrapHost,
+        HostLifetimeSupervisor supervisor,
+        TabModel adoptedTab)
+    {
+        return new MainWindow(configService, bootstrapHost, supervisor, seedTab: adoptedTab);
+    }
+
+    /// <summary>
+    /// Pre-activation hook for Snap Layouts placement. PR 199's
+    /// detach flow constructs a MainWindow but MUST NOT call
+    /// Activate until any snap target has been applied, otherwise
+    /// the window flashes at the wrong origin. Call this once
+    /// placement is done.
+    /// </summary>
+    internal void ActivateAfterPlacement() => Activate();
+
+    /// <summary>
+    /// Move <paramref name="tab"/> out of this window into a brand
+    /// new <see cref="MainWindow"/>. The new window is positioned
+    /// near the current mouse cursor on the monitor the cursor is
+    /// currently on. Disabled (via the menu <c>IsEnabled</c> guard)
+    /// when this window has only one tab, because moving the sole
+    /// tab into a new window would be a no-op.
+    /// </summary>
+    internal void DetachTabToNewWindow(TabModel tab)
+    {
+        DetachTabToWindow(tab, newWindow =>
+        {
+            // Cursor-anchored placement. Size = this window's current size
+            // so there is no jarring resize.
+            var placement = ComputeCursorAnchoredPlacement(newWindow);
+            var rect = new Windows.Graphics.RectInt32(
+                placement.X, placement.Y, placement.Width, placement.Height);
+            newWindow.AppWindow.MoveAndResize(rect);
+        });
+    }
+
+    /// <summary>
+    /// Detach <paramref name="tab"/> into a new window and snap it to
+    /// the given <paramref name="zone"/> on the current monitor BEFORE
+    /// activation, so there is no visible placement flicker.
+    /// </summary>
+    internal void DetachTabToZone(TabModel tab, Ghostty.Core.Tabs.SnapZone zone)
+    {
+        DetachTabToWindow(tab, newWindow =>
+        {
+            // Snap to zone on the source window's monitor. MoveAndResize
+            // BEFORE Activate so the window never flashes at the default
+            // origin.
+            var display = Tabs.SnapPlacement.ResolveDisplayFor(AppWindow);
+            Tabs.SnapPlacement.ApplyZone(newWindow.AppWindow, display, zone);
+        });
+    }
+
+    /// <summary>
+    /// Shared detach-rehost-activate logic. Detaches <paramref name="tab"/>
+    /// from this window, creates a new <see cref="MainWindow"/>, rehosts
+    /// the pane tree, runs <paramref name="placementAction"/> for
+    /// positioning, then activates the new window.
+    /// </summary>
+    private void DetachTabToWindow(TabModel tab, Action<MainWindow> placementAction)
+    {
+        if (_tabManager.Tabs.Count <= 1)
+            throw new InvalidOperationException(
+                "DetachTabToWindow: guarded menu fired on single-tab window.");
+
+        // Source-side: detach the model. The manager's TabRemoved
+        // subscribers already drain visual state (RemovePaneHost in
+        // this MainWindow, RemoveItem in each tab host).
+        var detached = _tabManager.DetachTab(tab);
+
+        var bootstrap = App.BootstrapHost
+            ?? throw new InvalidOperationException(
+                "DetachTabToWindow: no bootstrap host; App.OnLaunched did not run.");
+        var supervisor = App.LifetimeSupervisor
+            ?? throw new InvalidOperationException(
+                "DetachTabToWindow: no lifetime supervisor; App.OnLaunched did not run.");
+
+        // Rehost the pane tree's terminals to a fresh per-window host
+        // built inside the new window. RehostTo is what actually moves
+        // the surface entries out of this window's _surfaces into the
+        // new window's _surfaces AND rewrites App._hostBySurface.
+        var newWindow = MainWindow.CreateForAdoption(_configService, bootstrap, supervisor, detached);
+        var newHost = newWindow._host;
+        ((Panes.PaneHost)detached.PaneHost).RehostTo(newHost);
+
+        placementAction(newWindow);
+
+        // Subscribe the new window to the process-wide last-window-exit
+        // handler. WindowsByRoot insertion happens inside the new
+        // window's own Content.Loaded handler.
+        newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+
+        newWindow.Activate();
+    }
+
+    /// <summary>
+    /// Compute the cursor-anchored target rect for a newly built
+    /// <see cref="MainWindow"/>. Queries <c>GetCursorPos</c> (via
+    /// CsWin32), resolves the monitor the cursor is on via
+    /// <see cref="Microsoft.UI.Windowing.DisplayArea.GetFromPoint"/>,
+    /// and delegates the clamping math to
+    /// <see cref="Ghostty.Core.Windows.CursorWindowPlacement.Compute"/>.
+    ///
+    /// DPI contract: <c>GetCursorPos</c> returns physical pixel
+    /// coordinates in virtual desktop space. <c>DisplayArea.GetFromPoint</c>
+    /// consumes physical pixels. The two line up without scaling.
+    /// </summary>
+    private Ghostty.Core.Windows.PlacementRect ComputeCursorAnchoredPlacement(MainWindow target)
+    {
+        PInvoke.GetCursorPos(out var pt);
+
+        var cursorPoint = new Windows.Graphics.PointInt32(pt.X, pt.Y);
+        var display = Microsoft.UI.Windowing.DisplayArea.GetFromPoint(
+            cursorPoint,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Nearest);
+
+        var work = display?.WorkArea
+            ?? new Windows.Graphics.RectInt32(0, 0, 1920, 1080);
+
+        // Inherit the source window's current size.
+        var size = AppWindow.Size;
+
+        return Ghostty.Core.Windows.CursorWindowPlacement.Compute(
+            cursorX: pt.X,
+            cursorY: pt.Y,
+            windowWidth: size.Width,
+            windowHeight: size.Height,
+            workArea: new Ghostty.Core.Windows.WorkAreaRect(
+                work.X, work.Y, work.Width, work.Height));
+    }
+
     private async void OnClosedAsync(object sender, WindowEventArgs args)
     {
         // Persist window placement for next launch. Skip when
@@ -455,7 +650,7 @@ public sealed partial class MainWindow : Window
         _settingsWindow = null;
 
         // Let any in-flight ContentDialog complete before tearing
-        // down the libghostty host. files-community/Files #17363
+        // down the libghostty host. files-community/Files # 17363
         // documents the COMException that fires otherwise.
         try
         {
@@ -600,7 +795,7 @@ public sealed partial class MainWindow : Window
         // Listen for keyboard-driven full-tab close. Route through
         // TabHost.RequestCloseTabAsync so the confirmation dialog
         // is the same code path as the per-tab X button and the
-        // context-menu Close item — single source of truth for
+        // context-menu Close item -- single source of truth for
         // close confirmation lives in TabHost, which has XamlRoot.
         _router.TabCloseRequestedFromKeyboard += async (_, _) =>
         {
@@ -608,7 +803,7 @@ public sealed partial class MainWindow : Window
         };
 
         // Vertical-tabs pinned toggle via Ctrl+Shift+Space. No-op
-        // when the layout is horizontal (TabHost) — the chord is
+        // when the layout is horizontal (TabHost) -- the chord is
         // registered globally but only VerticalTabHost responds.
         _router.ToggleVerticalTabsPinnedRequested += (_, _) =>
         {
