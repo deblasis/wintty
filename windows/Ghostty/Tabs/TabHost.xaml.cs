@@ -4,10 +4,12 @@ using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Input;
 using Ghostty.Panes;
+using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 
 namespace Ghostty.Tabs;
@@ -243,6 +245,105 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     return;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Apply palette-derived colors to the tab strip.
+    /// Called by MainWindow when shell theme changes.
+    /// </summary>
+    internal void ApplyShellTheme(ShellThemeService theme)
+    {
+        if (!theme.IsEnabled) return;
+
+        var accentBrush = new SolidColorBrush(theme.AccentColor);
+        var activeTextBrush = new SolidColorBrush(theme.ActiveTabText);
+        var tabBgBrush = new SolidColorBrush(theme.TabBarBackground);
+
+        // Background resources on TabViewControl work with a theme toggle.
+        TabViewControl.Resources["TabViewBackground"] = tabBgBrush;
+        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = accentBrush;
+
+        // Toggle theme to force WinUI to re-read background resources.
+        TabViewControl.RequestedTheme = ElementTheme.Light;
+        TabViewControl.RequestedTheme = _cachedTheme;
+
+        // For foreground: use a HeaderTemplate with a TextBlock whose
+        // Foreground is bound to our brush. This survives Header
+        // re-assignments (title changes) because the template is
+        // persistent -- only the Header string changes, not the
+        // template that renders it.
+        _shellActiveTextBrush = activeTextBrush;
+        var template = CreateColoredHeaderTemplate(activeTextBrush);
+        foreach (var item in TabViewControl.TabItems)
+        {
+            if (item is TabViewItem tvi)
+                tvi.HeaderTemplate = template;
+        }
+    }
+
+    private SolidColorBrush? _shellActiveTextBrush;
+
+    private static DataTemplate CreateColoredHeaderTemplate(SolidColorBrush brush)
+    {
+        // Build a DataTemplate programmatically: a TextBlock that
+        // displays the Header string with our foreground color.
+        var c = brush.Color;
+        var xaml = $@"<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
+            <TextBlock Text='{{Binding}}' Foreground='#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}'
+                       TextTrimming='CharacterEllipsis'/>
+        </DataTemplate>";
+        return (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(xaml);
+    }
+
+    private ElementTheme _cachedTheme = ElementTheme.Default;
+
+
+    /// <summary>
+    /// Remove shell theme overrides so the TabView reverts to
+    /// its default theme resources.
+    /// </summary>
+    internal void ClearShellTheme()
+    {
+        TabViewControl.Resources.Remove("TabViewBackground");
+        TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
+        _shellActiveTextBrush = null;
+
+        // Remove custom header templates so tabs revert to default rendering.
+        foreach (var item in TabViewControl.TabItems)
+        {
+            if (item is TabViewItem tvi)
+                tvi.ClearValue(TabViewItem.HeaderTemplateProperty);
+        }
+
+        TabViewControl.RequestedTheme = ElementTheme.Light;
+        TabViewControl.RequestedTheme = _cachedTheme;
+    }
+
+    internal void SetRequestedTheme(ElementTheme theme)
+    {
+        _cachedTheme = theme;
+        RequestedTheme = theme;
+    }
+
+    /// <summary>
+    /// Set the accent color used for the selected tab indicator.
+    /// Driven by cursor-color from the terminal config.
+    /// </summary>
+    internal void SetAccentColor(Windows.UI.Color color)
+    {
+        var c = Microsoft.UI.ColorHelper.FromArgb(color.A, color.R, color.G, color.B);
+        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
+            new SolidColorBrush(c);
+        // Force re-apply by toggling selection so the TabView picks
+        // up the new brush. Suppress the event to avoid side effects.
+        if (TabViewControl.SelectedItem is not null)
+        {
+            _suppressSelectionEvent = true;
+            var selected = TabViewControl.SelectedItem;
+            TabViewControl.SelectedItem = null;
+            TabViewControl.SelectedItem = selected;
+            _suppressSelectionEvent = false;
         }
     }
 

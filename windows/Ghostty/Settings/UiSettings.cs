@@ -29,6 +29,14 @@ internal sealed class UiSettings
     public bool CommandPaletteGroupCommands { get; set; }
     public string CommandPaletteBackground { get; set; } = "acrylic";
 
+    // Window placement -- saved on close, restored on next launch.
+    // Null means "use system default" (first launch or corrupt data).
+    public int? WindowX { get; set; }
+    public int? WindowY { get; set; }
+    public int? WindowWidth { get; set; }
+    public int? WindowHeight { get; set; }
+    public bool WindowMaximized { get; set; }
+
     private static string FilePath
     {
         get

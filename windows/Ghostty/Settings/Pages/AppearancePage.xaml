@@ -17,6 +17,11 @@
                 <ComboBoxItem Content="Dark" Tag="dark" />
             </ComboBox>
 
+            <ToggleSwitch
+                x:Name="ShellThemeToggle"
+                Header="Shell follows terminal theme"
+                Toggled="ShellTheme_Toggled" />
+
             <AutoSuggestBox
                 x:Name="FontFamilySearch"
                 Header="Font family"
@@ -48,6 +53,105 @@
                 Header="Custom shader path"
                 PlaceholderText="Path to .glsl shader file"
                 LostFocus="ShaderPath_LostFocus" />
+
+            <TextBlock Text="Background Style" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,8" />
+
+            <ComboBox x:Name="BackgroundStyleCombo" Header="Backdrop preset"
+                      SelectionChanged="BackgroundStyle_SelectionChanged">
+                <ComboBoxItem Content="Solid (Mica)" Tag="solid" />
+                <ComboBoxItem Content="Frosted (Acrylic)" Tag="frosted" />
+                <ComboBoxItem Content="Crystal (Zero blur)" Tag="crystal" />
+            </ComboBox>
+
+            <ToggleSwitch
+                x:Name="BlurFollowsOpacityToggle"
+                Header="Background blur follows opacity"
+                Toggled="BlurFollowsOpacity_Toggled" />
+
+            <TextBox
+                x:Name="TintColorBox"
+                Header="Acrylic tint color"
+                PlaceholderText="#RRGGBB"
+                LostFocus="TintColor_LostFocus" />
+
+            <Slider
+                x:Name="TintOpacitySlider"
+                Header="Acrylic tint opacity"
+                Minimum="0"
+                Maximum="1"
+                StepFrequency="0.05"
+                TickFrequency="0.1"
+                TickPlacement="BottomRight"
+                Value="0.3"
+                ValueChanged="TintOpacity_ValueChanged" />
+
+            <Slider
+                x:Name="LuminosityOpacitySlider"
+                Header="Acrylic luminosity opacity"
+                Minimum="0"
+                Maximum="1"
+                StepFrequency="0.05"
+                TickFrequency="0.1"
+                TickPlacement="BottomRight"
+                Value="0.3"
+                ValueChanged="LuminosityOpacity_ValueChanged" />
+
+            <TextBlock Text="Gradient Tint" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,8" />
+
+            <ToggleSwitch x:Name="GradientEnabledToggle"
+                          Header="Enable gradient tint"
+                          IsOn="False"
+                          Toggled="GradientEnabled_Toggled" />
+
+            <!-- Gradient settings panel, visible only when enabled -->
+            <StackPanel x:Name="GradientSettingsPanel" Spacing="8" Visibility="Collapsed">
+
+                <ComboBox x:Name="GradientBlendCombo" Header="Blend mode"
+                          SelectionChanged="GradientBlend_SelectionChanged">
+                    <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
+                    <ComboBoxItem Content="Underlay (behind content)" Tag="underlay" />
+                </ComboBox>
+
+                <Slider x:Name="GradientOpacitySlider"
+                        Header="Gradient opacity"
+                        Minimum="0" Maximum="1" StepFrequency="0.01"
+                        TickFrequency="0.1" TickPlacement="BottomRight"
+                        Value="0.05"
+                        ValueChanged="GradientOpacity_ValueChanged" />
+
+                <!-- Animation mode picker -->
+                <TextBlock Text="Position animation" Margin="0,8,0,4" />
+                <RadioButtons x:Name="PositionAnimRadio" SelectedIndex="0"
+                              SelectionChanged="AnimationMode_Changed">
+                    <RadioButton Content="None" Tag="" />
+                    <RadioButton Content="Drift (subtle)" Tag="drift" />
+                    <RadioButton Content="Orbit (circular)" Tag="orbit" />
+                    <RadioButton Content="Wander (random)" Tag="wander" />
+                    <RadioButton Content="Bounce (edges)" Tag="bounce" />
+                </RadioButtons>
+
+                <CheckBox x:Name="BreatheCheck" Content="Breathe (pulsing size)"
+                          Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+                <CheckBox x:Name="ColorCycleCheck" Content="Color cycle (hue rotation)"
+                          Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+
+                <Slider x:Name="GradientSpeedSlider"
+                        Header="Animation speed"
+                        Minimum="0.1" Maximum="3" StepFrequency="0.1"
+                        Value="1"
+                        ValueChanged="GradientSpeed_ValueChanged" />
+
+                <!-- Gradient points editor -->
+                <TextBlock Text="Gradient points" Margin="0,12,0,4" />
+                <TextBlock Text="Up to 5 color points. Each has position (x,y), color, and radius."
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                <StackPanel x:Name="PointsPanel" Spacing="8" />
+
+                <Button Content="Add point" Click="AddPoint_Click"
+                        x:Name="AddPointButton" />
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

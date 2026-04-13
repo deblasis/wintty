@@ -70,4 +70,18 @@ public static class ConfigFileParser
         result[lines.Length] = $"keybind = {bindingValue}";
         return result;
     }
+
+    /// <summary>
+    /// Replace all occurrences of a repeatable key with new values.
+    /// Comments out existing lines and appends new ones.
+    /// </summary>
+    public static string[] SetRepeatableValues(string[] lines, string key, string[] values)
+    {
+        var result = RemoveValue(lines, key);
+        var newResult = new string[result.Length + values.Length];
+        Array.Copy(result, newResult, result.Length);
+        for (int i = 0; i < values.Length; i++)
+            newResult[result.Length + i] = $"{key} = {values[i]}";
+        return newResult;
+    }
 }
