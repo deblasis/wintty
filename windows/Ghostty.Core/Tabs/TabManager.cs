@@ -54,12 +54,49 @@ internal sealed class TabManager
     public event EventHandler? LastTabClosed;
     public event EventHandler? WindowTitleChanged;
 
+    /// <summary>
+    /// Raised AFTER the tab's manager subscriptions have been unwired
+    /// but BEFORE the tab is removed from <see cref="Tabs"/>. Fired
+    /// from <see cref="DetachTab"/> only; close paths do not fire it.
+    /// </summary>
+    public event EventHandler<TabModel>? TabDetaching;
+
     public TabManager(Func<IPaneHost> paneHostFactory)
+        : this(paneHostFactory, seed: null) { }
+
+    /// <summary>
+    /// Seeded constructor. If <paramref name="seed"/> is non-null the
+    /// manager adopts it as its initial tab and skips the factory call.
+    /// If <paramref name="seed"/> is null the legacy path runs.
+    ///
+    /// Seeded construction does NOT raise <see cref="TabAdded"/> for
+    /// the seed: it is the initial tab, and TabAdded is for growth.
+    /// Both <c>TabHost.xaml.cs</c> and <c>VerticalTabStrip.xaml.cs</c>
+    /// already iterate <see cref="Tabs"/> on construction before they
+    /// subscribe to <see cref="TabAdded"/>, so a seeded tab is visible
+    /// in the window's UI on first render.
+    ///
+    /// Seeded construction also does NOT raise
+    /// <see cref="ActiveTabChanged"/> or <see cref="WindowTitleChanged"/>
+    /// for the seed. This matches the legacy factory path, which
+    /// assigns <see cref="ActiveTab"/> directly without events because
+    /// no listener is wired at ctor time.
+    /// </summary>
+    public TabManager(Func<IPaneHost> paneHostFactory, TabModel? seed)
     {
         _paneHostFactory = paneHostFactory;
-        var first = CreateTab();
-        _tabs.Add(first);
-        _activeTab = first;
+        if (seed is null)
+        {
+            var first = CreateTab();
+            _tabs.Add(first);
+            _activeTab = first;
+        }
+        else
+        {
+            WireAdoptedTab(seed);
+            _tabs.Add(seed);
+            _activeTab = seed;
+        }
     }
 
     public TabModel NewTab()
@@ -95,7 +132,7 @@ internal sealed class TabManager
 
         tab.PaneHost.LeafFocused -= OnLeafFocused;
         tab.PropertyChanged -= OnTabPropertyChanged;
-        tab.OnClose?.Invoke();
+        UnsubscribeProgressForwarder(tab);
         tab.OnClose = null;
         tab.PaneHost.DisposeAllLeaves();
 
@@ -203,5 +240,111 @@ internal sealed class TabManager
         {
             WindowTitleChanged?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    /// <summary>
+    /// Remove <paramref name="tab"/> from this manager without tearing
+    /// down its pane host. Caller takes ownership of the returned model
+    /// and must hand it to another manager via <see cref="AdoptTab"/>.
+    /// Raises <see cref="TabDetaching"/>, then <see cref="TabRemoved"/>,
+    /// then either <see cref="LastTabClosed"/> (if it was the last tab)
+    /// or <see cref="ActiveTabChanged"/> / <see cref="WindowTitleChanged"/>
+    /// (if it was the active tab of more than one).
+    /// </summary>
+    public TabModel DetachTab(TabModel tab)
+    {
+        if (_tabs.Count <= 1)
+            throw new InvalidOperationException("Cannot detach the last tab.");
+
+        var index = _tabs.IndexOf(tab);
+        if (index < 0)
+            throw new InvalidOperationException(
+                "DetachTab: tab not owned by this manager.");
+
+        TabDetaching?.Invoke(this, tab);
+
+        // Unwire manager-side subscriptions. Intentionally do NOT call
+        // tab.OnClose or tab.PaneHost.DisposeAllLeaves: the tab is
+        // moving, not dying. The progress-forwarder unsubscribe is
+        // shared with the close path via UnsubscribeProgressForwarder
+        // so this detach path never has to name OnClose.
+        tab.PaneHost.LeafFocused -= OnLeafFocused;
+        tab.PropertyChanged -= OnTabPropertyChanged;
+        UnsubscribeProgressForwarder(tab);
+        // tab.OnClose is intentionally LEFT ALONE. WireAdoptedTab on
+        // the destination manager overwrites it as part of adoption.
+
+        _tabs.RemoveAt(index);
+        TabRemoved?.Invoke(this, tab);
+
+        if (_tabs.Count == 0)
+        {
+            LastTabClosed?.Invoke(this, EventArgs.Empty);
+            return tab;
+        }
+
+        if (ReferenceEquals(_activeTab, tab))
+        {
+            var next = _tabs[Math.Min(index, _tabs.Count - 1)];
+            _activeTab = next;
+            ActiveTabChanged?.Invoke(this, next);
+            WindowTitleChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        return tab;
+    }
+
+    /// <summary>
+    /// Attach an externally-sourced <see cref="TabModel"/> to this
+    /// manager. Rewires <see cref="TabModel.OnClose"/>,
+    /// <see cref="IPaneHost.LeafFocused"/>, progress forwarding, and
+    /// property-change forwarding to the adopter's event graph.
+    /// Raises <see cref="TabAdded"/> and activates the tab.
+    /// </summary>
+    public void AdoptTab(TabModel tab)
+    {
+        if (_tabs.Contains(tab))
+            throw new InvalidOperationException("AdoptTab: tab already owned.");
+
+        WireAdoptedTab(tab);
+        _tabs.Add(tab);
+        TabAdded?.Invoke(this, tab);
+        Activate(tab);
+    }
+
+    /// <summary>
+    /// Shared rewire used by both <see cref="AdoptTab"/> and the
+    /// seeded constructor. Does NOT touch _tabs, does NOT raise any
+    /// events; the caller owns activation and TabAdded.
+    /// </summary>
+    private void WireAdoptedTab(TabModel tab)
+    {
+        tab.PaneHost.LeafFocused += OnLeafFocused;
+        EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
+        tab.PaneHost.ProgressChanged += progressHandler;
+        // OnClose stores the unsubscribe action so DetachTab /
+        // CloseTab can walk back the progress wiring without needing
+        // to re-capture the handler delegate.
+        tab.OnClose = () => tab.PaneHost.ProgressChanged -= progressHandler;
+        tab.PropertyChanged += OnTabPropertyChanged;
+    }
+
+    /// <summary>
+    /// Walk back the progress-forwarder subscription installed by
+    /// <see cref="CreateTab"/> or <see cref="WireAdoptedTab"/>. Shared
+    /// between <see cref="CloseTab"/> and <see cref="DetachTab"/> so
+    /// neither path has to spell out "invoke OnClose and null it";
+    /// in particular, <see cref="DetachTab"/> must NOT invoke OnClose
+    /// (per spec) because OnClose is the close-signal hook,
+    /// not the detach hook.
+    /// </summary>
+    private void UnsubscribeProgressForwarder(TabModel tab)
+    {
+        // OnClose is the unsubscribe action. Running it detaches the
+        // progress handler from PaneHost.ProgressChanged. On DetachTab
+        // we run this helper instead of tab.OnClose?.Invoke() at the
+        // call site so the semantics are obvious: we are dismantling
+        // ONE specific subscription, not running the full close.
+        tab.OnClose?.Invoke();
     }
 }

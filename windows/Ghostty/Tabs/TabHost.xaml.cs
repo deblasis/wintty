@@ -97,7 +97,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             Header = headerPanel,
             Content = null,
-            ContextFlyout = TabContextMenuBuilder.Build(_manager, tab, RequestCloseTabAsync, _dialogs),
+            ContextFlyout = TabContextMenuBuilder.Build(
+                _manager,
+                tab,
+                RequestCloseTabAsync,
+                requestDetachToNewWindow: RequestDetachToNewWindow,
+                _dialogs,
+                getSnapSource: GetSnapSource,
+                detachWithZone: DetachWithZone),
             DataContext = tab,
         };
         tab.PropertyChanged += (_, e) =>
@@ -193,6 +200,48 @@ internal sealed partial class TabHost : UserControl, ITabHost
         var alpha = selected ? SelectedTabAlpha : UnselectedTabAlpha;
         headerPanel.Background = new SolidColorBrush(
             Windows.UI.Color.FromArgb(alpha, drawing.R, drawing.G, drawing.B));
+    }
+
+    /// <summary>
+    /// Route a per-tab "Move Tab to New Window" click back to the
+    /// owning <see cref="MainWindow"/>. TabHost is a UserControl with
+    /// no direct MainWindow reference; <see cref="App.WindowsByRoot"/>
+    /// is keyed by <see cref="XamlRoot"/>, so the lookup is O(1).
+    /// </summary>
+    private void RequestDetachToNewWindow(TabModel tab)
+    {
+        var xamlRoot = XamlRoot;
+        if (xamlRoot is null) return;
+
+        if (App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
+            main.DetachTabToNewWindow(tab);
+    }
+
+    /// <summary>
+    /// Resolve the source window's current monitor work area for the
+    /// snap zone picker miniature.
+    /// </summary>
+    private SnapZoneSource GetSnapSource()
+    {
+        var xamlRoot = XamlRoot;
+        if (xamlRoot is not null && App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
+        {
+            var display = SnapPlacement.ResolveDisplayFor(main.AppWindow);
+            var w = display.WorkArea;
+            return new SnapZoneSource(w.Width, w.Height);
+        }
+        // Fallback: standard 1080p.
+        return new SnapZoneSource(1920, 1080);
+    }
+
+    /// <summary>
+    /// Detach a tab into a new window snapped to the chosen zone.
+    /// </summary>
+    private void DetachWithZone(TabModel tab, Ghostty.Core.Tabs.SnapZone zone)
+    {
+        var xamlRoot = XamlRoot;
+        if (xamlRoot is not null && App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
+            main.DetachTabToZone(tab, zone);
     }
 
     private void OnAddTabButtonClick(TabView sender, object args) => _manager.NewTab();
