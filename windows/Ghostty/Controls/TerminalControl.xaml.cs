@@ -9,13 +9,12 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
-
 namespace Ghostty.Controls;
 
 /// <summary>
-/// Single libghostty-backed terminal surface, hosted via the WinUI 3
-/// SwapChainPanel composition path (null HWND). Matches how macOS's
-/// Ghostty.Surface.swift owns one ghostty_surface_t per SwiftUI view.
+/// Single libghostty-backed terminal surface, hosted via WinUI 3
+/// SwapChainPanel. Matches how macOS's Ghostty.Surface.swift owns
+/// one ghostty_surface_t per SwiftUI view.
 ///
 /// Config and app handle ownership lives in <see cref="Ghostty.Hosting.GhosttyHost"/>,
 /// which is constructed by MainWindow and assigned via the Host property before load.
@@ -279,24 +278,19 @@ public sealed partial class TerminalControl : UserControl
 
         var app = Host.App;
 
-        // Surface config. swap_chain_panel takes an ISwapChainPanelNative*
-        //    which libghostty's DX12 device init uses synchronously (it calls
-        //    SetSwapChain once and never stores it - see
-        //    src/renderer/directx12/device.zig). We Release the COM ptr right
-        //    after SurfaceNew returns to avoid leaking a ref per open/close.
-        //
-        //    The string fields (working_directory, command, initial_input)
-        //    must be non-null: Zig dereferences them unconditionally. We
-        //    allocate three independent UTF-8 empty strings rather than
-        //    aliasing one buffer - aliasing was a footgun if Zig ever wrote
-        //    through any of them. These live until the surface is freed.
+        // Surface config. The string fields (working_directory, command,
+        //    initial_input) must be non-null: Zig dereferences them
+        //    unconditionally. We allocate three independent UTF-8 empty
+        //    strings rather than aliasing one buffer - aliasing was a
+        //    footgun if Zig ever wrote through any of them. These live
+        //    until the surface is freed.
         _workingDirectoryUtf8 = AllocEmptyUtf8();
         _commandUtf8 = AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
 
+        var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         var surfaceConfig = NativeMethods.SurfaceConfigNew();
         surfaceConfig.PlatformTag = GhosttyPlatform.Windows;
-        var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         surfaceConfig.Platform.Windows = new GhosttyPlatformWindows
         {
             SwapChainPanel = panelPtr,
@@ -317,7 +311,7 @@ public sealed partial class TerminalControl : UserControl
         surfaceConfig.Userdata = GCHandle.ToIntPtr(_selfHandle);
 
         _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
-        // Drop our ref to the panel: libghostty did not retain it.
+        // Drop our ref: libghostty does not retain the panel pointer.
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);
 
