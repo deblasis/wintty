@@ -486,8 +486,47 @@ pub const Surface = struct {
     else
         void = if (builtin.os.tag == .windows) .{0} ** 128 else {},
 
+    /// Input redirect for in-process features (e.g., theme picker).
+    /// Windows-only; eliminated by comptime on other platforms.
+    input_redirect: if (builtin.os.tag == .windows)
+        ?InputRedirect
+    else
+        void = if (builtin.os.tag == .windows) null else {},
+
+    scroll_redirect: if (builtin.os.tag == .windows)
+        ?ScrollRedirect
+    else
+        void = if (builtin.os.tag == .windows) null else {},
+
+    resize_redirect: if (builtin.os.tag == .windows)
+        ?ResizeRedirect
+    else
+        void = if (builtin.os.tag == .windows) null else {},
+
     const PendingKey = struct {
         event: App.KeyEvent,
+    };
+
+    /// Redirect types for in-process features (e.g., inline theme picker).
+    /// Windows-only: intercepted at the apprt boundary before events
+    /// reach core Surface.
+    const InputRedirect = struct {
+        callback: *const fn (ud: ?*anyopaque, event: *const input.KeyEvent) bool,
+        userdata: ?*anyopaque,
+    };
+
+    /// Scroll redirect for in-process features. yoff is positive for
+    /// scroll-up, negative for scroll-down. Return true if consumed.
+    const ScrollRedirect = struct {
+        callback: *const fn (ud: ?*anyopaque, yoff: f64) bool,
+        userdata: ?*anyopaque,
+    };
+
+    /// Resize redirect for in-process features. Called after the core
+    /// surface recalculates its grid so cols/rows reflect the new size.
+    const ResizeRedirect = struct {
+        callback: *const fn (ud: ?*anyopaque, cols: u16, rows: u16) void,
+        userdata: ?*anyopaque,
     };
 
     /// Surface initialization options.
@@ -879,6 +918,14 @@ pub const Surface = struct {
             log.err("error in size callback err={}", .{err});
             return;
         };
+
+        // Notify in-process features after the grid has been recalculated.
+        if (comptime builtin.os.tag == .windows) {
+            if (self.resize_redirect) |redirect| {
+                const grid = self.core_surface.size.grid();
+                redirect.callback(redirect.userdata, @intCast(grid.columns), @intCast(grid.rows));
+            }
+        }
     }
 
     pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) void {
@@ -917,6 +964,13 @@ pub const Surface = struct {
         yoff: f64,
         mods: input.ScrollMods,
     ) void {
+        if (comptime builtin.os.tag == .windows) {
+            if (self.scroll_redirect) |redirect| {
+                if (redirect.callback(redirect.userdata, yoff))
+                    return;
+            }
+        }
+
         self.core_surface.scrollCallback(xoff, yoff, mods) catch |err| {
             log.err("error in scroll callback err={}", .{err});
             return;
@@ -1815,6 +1869,147 @@ pub const CAPI = struct {
         surface.draw();
     }
 
+    /// Write raw VT bytes into the surface's terminal parser. The bytes
+    /// are processed as if they came from the PTY -- VT sequences update
+    /// the terminal grid, cursor, colors, etc. Thread-safe.
+    export fn ghostty_surface_vt_write(
+        surface: *Surface,
+        data: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.writeVt(data[0..len]);
+    }
+
+    /// Run the inline theme picker on a surface. The picker renders
+    /// into the surface's terminal (alt screen) and intercepts input
+    /// via the surface's input redirect. The theme_callback fires on
+    /// preview (browsing) and confirm (Enter).
+    ///
+    /// This is a non-blocking call: it sets up the picker state and
+    /// input redirect. The picker renders on each key event. The
+    /// embedder should call ghostty_surface_list_themes_deinit when
+    /// the picker signals completion (should_quit).
+    ///
+    /// Returns an opaque pointer to the picker, or null on error.
+    export fn ghostty_surface_list_themes(
+        surface: *Surface,
+        theme_cb: ?*const fn ([*:0]const u8, bool) callconv(.c) void,
+    ) ?*anyopaque {
+        const picker_mod = @import("../cli/inline_theme_picker.zig");
+        const alloc = global.alloc;
+
+        // Discover themes using an arena.
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        const arena_alloc = arena.allocator();
+
+        const themes = picker_mod.discoverThemes(arena_alloc) catch return null;
+        if (themes.len == 0) {
+            arena.deinit();
+            return null;
+        }
+
+        const grid = surface.core_surface.size.grid();
+
+        // Write callback: feeds VT bytes into the surface's terminal.
+        const write_cb = struct {
+            fn write(ud: ?*anyopaque, data: [*]const u8, len: usize) void {
+                const cs: *CoreSurface = @ptrCast(@alignCast(ud));
+                cs.writeVt(data[0..len]);
+            }
+        }.write;
+
+        const picker = picker_mod.InlineThemePicker.init(
+            alloc,
+            themes,
+            arena,
+            @intCast(grid.columns),
+            @intCast(grid.rows),
+            write_cb,
+            @ptrCast(&surface.core_surface),
+            theme_cb,
+        ) catch {
+            arena.deinit();
+            return null;
+        };
+
+        // Set up input redirect so keys go to the picker.
+        const input_cb = struct {
+            fn handle(ud: ?*anyopaque, event: *const input.KeyEvent) bool {
+                const p: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(ud));
+                return p.handleKey(event);
+            }
+        }.handle;
+
+        surface.input_redirect = .{
+            .callback = input_cb,
+            .userdata = @ptrCast(picker),
+        };
+
+        // Set up scroll redirect so mouse wheel goes to the picker.
+        const scroll_cb = struct {
+            fn handle(ud: ?*anyopaque, yoff: f64) bool {
+                const p: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(ud));
+                return p.handleScroll(yoff);
+            }
+        }.handle;
+
+        surface.scroll_redirect = .{
+            .callback = scroll_cb,
+            .userdata = @ptrCast(picker),
+        };
+
+        // Set up resize redirect so the picker redraws on window resize.
+        const resize_cb = struct {
+            fn handle(ud: ?*anyopaque, cols: u16, rows: u16) void {
+                const p: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(ud));
+                p.resize(cols, rows);
+            }
+        }.handle;
+
+        surface.resize_redirect = .{
+            .callback = resize_cb,
+            .userdata = @ptrCast(picker),
+        };
+
+        // Enter alt screen and render initial frame.
+        picker.enter();
+
+        return @ptrCast(picker);
+    }
+
+    /// Check if the inline theme picker has finished (user confirmed
+    /// or cancelled). Returns true if the picker wants to quit.
+    export fn ghostty_surface_list_themes_should_quit(picker_ptr: ?*anyopaque) bool {
+        const picker_mod = @import("../cli/inline_theme_picker.zig");
+        const picker: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(picker_ptr orelse return true));
+        return picker.should_quit;
+    }
+
+    /// Clean up the inline theme picker and restore the surface.
+    /// Must be called after the picker signals should_quit.
+    export fn ghostty_surface_list_themes_deinit(
+        surface: *Surface,
+        picker_ptr: ?*anyopaque,
+    ) void {
+        const picker_mod = @import("../cli/inline_theme_picker.zig");
+        const picker: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(picker_ptr orelse return));
+
+        // Clear input, scroll, and resize redirects.
+        surface.input_redirect = null;
+        surface.scroll_redirect = null;
+        surface.resize_redirect = null;
+
+        // Exit alt screen and restore terminal.
+        picker.exit();
+
+        // Send a newline to the shell's stdin so it redraws its
+        // prompt. The picker ran in-process while the shell was
+        // waiting for input -- it needs this nudge.
+        surface.core_surface.writePtyInput("\r");
+
+        picker.deinit();
+    }
+
     /// Return the ID3D12Device* used by this surface's renderer. Shared
     /// texture consumers should call OpenSharedResource1 on this same
     /// device to avoid cross-device synchronization issues.
@@ -1827,6 +2022,20 @@ pub const CAPI = struct {
         if (comptime !@hasField(@TypeOf(api), "dev")) return null;
         const dev = api.dev orelse return null;
         return @ptrCast(dev.device);
+    }
+
+    /// Return the IDXGISwapChain1* used by this surface's renderer.
+    /// The embedder can bind this to a Windows.UI.Composition visual
+    /// via ICompositorInterop.CreateCompositionSurfaceForSwapChain.
+    /// Returns null on non-DX12 builds or if the swap chain has not
+    /// been created yet.
+    export fn ghostty_surface_get_swap_chain(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const api = surface.core_surface.renderer.api;
+        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
+        const dev = api.dev orelse return null;
+        const sc = dev.swap_chain orelse return null;
+        return @ptrCast(sc);
     }
 
     /// Mirrors ghostty_surface_shared_texture_s in include/ghostty.h.
@@ -1970,6 +2179,14 @@ pub const CAPI = struct {
         const key_event = event.keyEvent();
 
         if (comptime builtin.os.tag == .windows) {
+            // If input is redirected (e.g., theme picker active), send
+            // there before keybinding resolution or key buffering.
+            if (surface.input_redirect) |redirect| {
+                const core_event = key_event.core() orelse return false;
+                if (redirect.callback(redirect.userdata, &core_event))
+                    return true;
+            }
+
             // Flush any previous pending key that never got text
             // (e.g. arrow keys, function keys, backspace).
             surface.flushPendingKey();

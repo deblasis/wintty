@@ -107,11 +107,6 @@ build-win:
 # bash shebang to `exec` the .exe, which forced git-bash on Windows for no
 # reason - launching a Windows .exe works fine from pwsh.
 
-# Recipe body has no shebang so it runs under the platform shell selected by
-# `set windows-shell` above (pwsh on Windows). The previous version used a
-# bash shebang to `exec` the .exe, which forced git-bash on Windows for no
-# reason - launching a Windows .exe works fine from pwsh.
-
 # Build the DLL and the shell, then launch it.
 [windows]
 run-win: build-dll build-win
