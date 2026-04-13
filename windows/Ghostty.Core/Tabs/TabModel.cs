@@ -62,6 +62,19 @@ internal sealed class TabModel : INotifyPropertyChanged
         set { if (!_progress.Equals(value)) { _progress = value; Raise(); } }
     }
 
+    private TabColor _color = TabColor.None;
+    /// <summary>
+    /// Preset tint applied to this tab's header. In-memory only;
+    /// resets to <see cref="TabColor.None"/> on app restart. True
+    /// cross-session persistence needs a durable tab id and a
+    /// startup restore hook (out of scope, tracked as a followup).
+    /// </summary>
+    public TabColor Color
+    {
+        get => _color;
+        set { if (_color != value) { _color = value; Raise(); } }
+    }
+
     public string EffectiveTitle =>
         UserOverrideTitle ?? ShellReportedTitle ?? "Ghostty";
 
