@@ -113,7 +113,7 @@ internal sealed class GhosttyHost : IDisposable
         var runtime = new GhosttyRuntimeConfig
         {
             Userdata = IntPtr.Zero,
-            SupportsSelectionClipboard = false,
+            SupportsSelectionClipboard = 0,
             WakeupCb = Marshal.GetFunctionPointerForDelegate(_wakeupCb),
             ActionCb = Marshal.GetFunctionPointerForDelegate(_actionCb),
             ReadClipboardCb = Marshal.GetFunctionPointerForDelegate(_readClipboardCb),
@@ -170,7 +170,7 @@ internal sealed class GhosttyHost : IDisposable
     private const int GhosttyTargetApp = 0;
     private const int GhosttyTargetSurface = 1;
 
-    private bool OnAction(GhosttyApp _, IntPtr targetPtr, IntPtr actionPtr)
+    private byte OnAction(GhosttyApp _, IntPtr targetPtr, IntPtr actionPtr)
     {
         // ABI note: ghostty_runtime_action_cb is declared as
         //
@@ -194,7 +194,7 @@ internal sealed class GhosttyHost : IDisposable
         // ephemeral stack copies of the structs and must be DEREFERENCED to
         // get at their contents. Treating targetPtr as if it were the surface
         // handle silently misses every dictionary lookup.
-        if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return false;
+        if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return 0;
 
         // ghostty_action_s layout: { int32 tag; <union> action; }
         // Union starts at offset 8 (8-byte aligned on x64).
@@ -209,28 +209,28 @@ internal sealed class GhosttyHost : IDisposable
                 case GhosttyActionTag.OpenConfig:
                     _dispatcher.TryEnqueue(() =>
                         OpenConfigRequested?.Invoke(this, EventArgs.Empty));
-                    return true;
+                    return 1;
 
                 case GhosttyActionTag.ReloadConfig:
                     _dispatcher.TryEnqueue(() =>
                         ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
-                    return true;
+                    return 1;
 
                 default:
-                    return false;
+                    return 0;
             }
         }
 
-        if (targetTag != GhosttyTargetSurface) return false;
+        if (targetTag != GhosttyTargetSurface) return 0;
         var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
-        if (!_surfaces.TryGetValue(surfaceHandle, out var control)) return false;
+        if (!_surfaces.TryGetValue(surfaceHandle, out var control)) return 0;
 
         switch (tag)
         {
             case GhosttyActionTag.ToggleCommandPalette:
                 _dispatcher.TryEnqueue(() =>
                     CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
-                return true;
+                return 1;
 
             case GhosttyActionTag.SetTitle:
             {
@@ -244,13 +244,13 @@ internal sealed class GhosttyHost : IDisposable
                     if (_surfaces.TryGetValue(surfaceHandle, out var c))
                         c.RaiseTitleChanged(title);
                 });
-                return true;
+                return 1;
             }
 
             case GhosttyActionTag.RingBell:
             {
                 NativeMethods.MessageBeep(NativeMethods.MB_OK);
-                return true;
+                return 1;
             }
 
             case GhosttyActionTag.CloseWindow:
@@ -260,7 +260,7 @@ internal sealed class GhosttyHost : IDisposable
                     if (_surfaces.TryGetValue(surfaceHandle, out var c))
                         c.RaiseCloseRequested();
                 });
-                return true;
+                return 1;
             }
 
             case GhosttyActionTag.Scrollbar:
@@ -284,7 +284,7 @@ internal sealed class GhosttyHost : IDisposable
                 // been disposed we silently drop the update.
                 if (_surfaces.TryGetValue(surfaceHandle, out var c))
                     c.QueueScrollbarChanged(s.Total, s.Offset, s.Len);
-                return true;
+                return 1;
             }
 
             case GhosttyActionTag.ProgressReport:
@@ -310,24 +310,24 @@ internal sealed class GhosttyHost : IDisposable
                     if (_surfaces.TryGetValue(surfaceHandle, out var c))
                         c.RaiseProgressChanged(tabState);
                 });
-                return true;
+                return 1;
             }
 
             default:
-                return false;
+                return 0;
         }
     }
 
-    private bool OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
-        => _clipboardBridge?.HandleRead(userdata, kind, state) ?? false;
+    private byte OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
+        => (_clipboardBridge?.HandleRead(userdata, kind, state) ?? false) ? (byte)1 : (byte)0;
 
     private void OnConfirmReadClipboard(IntPtr userdata, IntPtr str, IntPtr state, GhosttyClipboardRequest request)
         => _clipboardBridge?.HandleConfirm(userdata, str, state, request);
 
-    private void OnWriteClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr content, UIntPtr count, bool confirm)
-        => _clipboardBridge?.HandleWrite(userdata, kind, content, count, confirm);
+    private void OnWriteClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr content, UIntPtr count, byte confirm)
+        => _clipboardBridge?.HandleWrite(userdata, kind, content, count, confirm != 0);
 
-    private void OnCloseSurface(IntPtr userdata, bool processAlive)
+    private void OnCloseSurface(IntPtr userdata, byte processAlive)
     {
         // userdata is the GCHandle.ToIntPtr value the owning TerminalControl
         // pinned for itself before SurfaceNew. Decode it back to the managed
