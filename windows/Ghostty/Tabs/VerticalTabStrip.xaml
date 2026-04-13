@@ -7,6 +7,8 @@
 
     <UserControl.Resources>
 
+        <SolidColorBrush x:Key="StripAccentBrush" Color="{ThemeResource SystemAccentColor}" />
+
         <!--
             Collapsed row: 40x40 centered glyph, nothing else. The "T"
             placeholder stays until plan 3 wires real per-profile icons.
@@ -25,7 +27,7 @@
                 <TextBlock Text="T"
                            FontSize="16"
                            FontWeight="SemiBold"
-                           Foreground="White"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            HorizontalAlignment="Center"
                            VerticalAlignment="Center"/>
             </Grid>
@@ -50,12 +52,12 @@
                            Text="T"
                            FontSize="14"
                            FontWeight="SemiBold"
-                           Foreground="White"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            HorizontalAlignment="Center"
                            VerticalAlignment="Center"/>
 
                 <TextBlock Grid.Column="1"
-                           Foreground="White"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis"
                            Margin="6,0,4,0"/>
@@ -139,7 +141,7 @@
                             <Rectangle x:Name="AccentBar"
                                        Width="3"
                                        HorizontalAlignment="Left"
-                                       Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                       Fill="{StaticResource StripAccentBrush}"
                                        Visibility="Collapsed"/>
 
                             <!-- TemplateBindings are required on the

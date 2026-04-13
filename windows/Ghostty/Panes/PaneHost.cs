@@ -62,10 +62,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
-    // TODO: route through a theme resource once the config layer
-    // exists so a light theme does not end up with a dark film over
-    // inactive panes and an accent-agnostic border over the active one.
-    private static readonly Brush ActiveBorderBrush =
+    private static readonly Brush DefaultActiveBorderBrush =
         new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
     // Subtle dark film over inactive panes. ~22% black matches the
     // weight of VSCode's inactive editor group tint and is visible
@@ -138,6 +135,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// Number of leaves in the tree. Implemented via a tree walk; the
     /// trees are tiny (typically &lt;10 leaves) so this is cheap.
     /// </summary>
+    /// <summary>
+    /// Override the active pane border color. Pass null to revert
+    /// to the default DodgerBlue.
+    /// </summary>
+    public void SetActiveBorderBrush(Brush? brush)
+    {
+        _activeBorderRect.Stroke = brush ?? DefaultActiveBorderBrush;
+    }
+
     public int PaneCount
     {
         get
@@ -168,7 +174,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         _activeBorderRect = new Rectangle
         {
-            Stroke = ActiveBorderBrush,
+            Stroke = DefaultActiveBorderBrush,
             StrokeThickness = 1.5,
             Fill = null,
             IsHitTestVisible = false,
@@ -387,7 +393,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     public void EqualizeSplits()
     {
         PaneTree.Equalize(_root);
-        // When zoomed, only update ratios — ToggleSplitZoom.Rebuild()
+        // When zoomed, only update ratios ï¿½ ToggleSplitZoom.Rebuild()
         // will apply them when the user unzooms.
         if (_zoomedLeaf is not null) return;
         Rebuild();
