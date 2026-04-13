@@ -32,4 +32,16 @@
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      Embed the hand-written P/Invoke surface as a manifest resource so
+      MarshalComplianceTests can text-scan it without a project reference
+      to Ghostty.csproj (which would drag WinAppSDK targets into a plain
+      net9.0 test assembly).
+    -->
+    <EmbeddedResource Include="..\Ghostty\Interop\NativeMethods.cs"
+                      Link="Interop\NativeMethods.cs"
+                      LogicalName="Ghostty.Tests.Interop.NativeMethods.cs" />
+  </ItemGroup>
+
 </Project>
