@@ -394,55 +394,64 @@ public sealed partial class MainWindow : Window
         _host.CommandPaletteToggleRequested += (_, _) =>
             DispatcherQueue.TryEnqueue(ToggleCommandPalette);
 
-        _host.OpenConfigRequested += (_, _) =>
+        // App-targeted actions (OpenConfig, ReloadConfig) fire on the
+        // bootstrap host because libghostty sends them with target=app,
+        // not target=surface. The per-window _host never receives them.
+        // Only the primary window subscribes; adopted windows (tab detach)
+        // skip this to avoid stacking duplicate handlers.
+        if (seedTab is null)
         {
-            if (configService.SettingsUiEnabled)
+            var appHost = Ghostty.App.BootstrapHost!;
+            appHost.OpenConfigRequested += (_, _) =>
             {
-                var editor = new ConfigFileEditor(configService.ConfigFilePath);
-                var keybindings = new KeyBindingsProvider(configService);
-                var themeProvider = new ThemeProvider(configService);
-                // Reuse existing settings window if still open.
-                if (_settingsWindow is not null)
+                if (configService.SettingsUiEnabled)
                 {
-                    _settingsWindow.Activate();
+                    var editor = new ConfigFileEditor(configService.ConfigFilePath);
+                    var keybindings = new KeyBindingsProvider(configService);
+                    var themeProvider = new ThemeProvider(configService);
+                    // Reuse existing settings window if still open.
+                    if (_settingsWindow is not null)
+                    {
+                        _settingsWindow.Activate();
+                        return;
+                    }
+                    var settingsWin = new Ghostty.Settings.SettingsWindow(
+                        configService, editor, keybindings, themeProvider);
+                    settingsWin.Closed += (_, _) => _settingsWindow = null;
+                    _settingsWindow = settingsWin;
+                    settingsWin.Activate();
                     return;
                 }
-                var settingsWin = new Ghostty.Settings.SettingsWindow(
-                    configService, editor, keybindings, themeProvider);
-                settingsWin.Closed += (_, _) => _settingsWindow = null;
-                _settingsWindow = settingsWin;
-                settingsWin.Activate();
-                return;
-            }
 
-            var path = configService.ConfigFilePath;
-            if (string.IsNullOrEmpty(path)) return;
-            try
-            {
-                // The config file has no extension so UseShellExecute
-                // may fail to find an associated program. Try shell
-                // execute first (respects user file associations), then
-                // fall back to notepad which can always open text files.
+                var path = configService.ConfigFilePath;
+                if (string.IsNullOrEmpty(path)) return;
                 try
                 {
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    // The config file has no extension so UseShellExecute
+                    // may fail to find an associated program. Try shell
+                    // execute first (respects user file associations), then
+                    // fall back to notepad which can always open text files.
+                    try
                     {
-                        FileName = path,
-                        UseShellExecute = true,
-                    });
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = path,
+                            UseShellExecute = true,
+                        });
+                    }
+                    catch
+                    {
+                        System.Diagnostics.Process.Start("notepad.exe", path);
+                    }
                 }
-                catch
+                catch (System.Exception ex)
                 {
-                    System.Diagnostics.Process.Start("notepad.exe", path);
+                    System.Diagnostics.Debug.WriteLine($"[MainWindow] Failed to open config file: {ex.Message}");
                 }
-            }
-            catch (System.Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[MainWindow] Failed to open config file: {ex.Message}");
-            }
-        };
+            };
 
-        _host.ReloadConfigRequested += (_, _) => configService.Reload();
+            appHost.ReloadConfigRequested += (_, _) => configService.Reload();
+        }
 
         // Ctrl+Shift+Scroll wheel opacity adjustment from any terminal surface.
         _host.OpacityAdjustRequested += (_, direction) => AdjustOpacity(direction);
