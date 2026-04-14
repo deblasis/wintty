@@ -88,6 +88,14 @@ public sealed partial class MainWindow : Window
     private enum ClassBrushKind { Transparent, Opaque }
     private ClassBrushKind? _lastClassBrushKind;
 
+    // True when the HBRUSH currently installed as GCLP_HBRBACKGROUND
+    // was allocated by CreateSolidBrush (and therefore must be
+    // DeleteObject'd when replaced). False when it is a stock object
+    // (e.g. NULL_BRUSH from GetStockObject) or the default brush the
+    // WNDCLASS was registered with -- stock objects are owned by the
+    // system and MUST NOT be deleted. See # 242.
+    private bool _classBrushOwned;
+
     // Last color written to RootGrid.Background. ApplyRootGridBackground
     // is the single source of truth for that property; this cache
     // skips allocating a new SolidColorBrush when nothing changed.
@@ -168,6 +176,8 @@ public sealed partial class MainWindow : Window
     [LibraryImport("gdi32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial IntPtr CreateSolidBrush(uint crColor);
+
+    // DeleteObject is in Win32Interop.
 
     // GetWindowLong, GetWindowPlacement, ShowWindow, WINDOWPLACEMENT,
     // WINDOW_STYLE, and SHOW_WINDOW_CMD are provided by CsWin32.
@@ -1205,11 +1215,12 @@ public sealed partial class MainWindow : Window
     /// <see cref="ApplyRootGridBackground"/>, the single source of
     /// truth for the RootGrid background color.
     ///
-    /// HBRUSH lifetime: CreateSolidBrush allocates a GDI object
-    /// that is never DeleteObject'd when replaced by a later
-    /// SetClassLongPtr call -- tracked in # 242. The brush cache
-    /// below bounds the leak to one HBRUSH per Transparent/Opaque
-    /// toggle, so in practice it is tiny, but it is still a leak.
+    /// HBRUSH lifetime: SetClassLongPtr returns the previously
+    /// installed HBRUSH. When we previously installed a
+    /// CreateSolidBrush result, we must DeleteObject it; when it was
+    /// a stock brush (NULL_BRUSH) or the default WNDCLASS brush, we
+    /// must not. <see cref="_classBrushOwned"/> tracks that
+    /// distinction. See # 242.
     /// </summary>
     private void ApplyWindowClassBrush(ClassBrushKind kind)
     {
@@ -1217,16 +1228,19 @@ public sealed partial class MainWindow : Window
         _lastClassBrushKind = kind;
 
         var hwnd = WindowNative.GetWindowHandle(this);
-        var brush = kind switch
+        var (brush, owned) = kind switch
         {
             ClassBrushKind.Transparent =>
-                Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH),
+                (Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH), false),
             ClassBrushKind.Opaque =>
-                CreateSolidBrush(0x000C0C0Cu),
+                (CreateSolidBrush(0x000C0C0Cu), true),
             _ => throw new System.Diagnostics.UnreachableException(
                 $"Unknown ClassBrushKind: {kind}"),
         };
-        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
+        var previous = SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
+        if (_classBrushOwned && previous != IntPtr.Zero)
+            Win32Interop.DeleteObject(previous);
+        _classBrushOwned = owned;
     }
 
     /// <summary>
