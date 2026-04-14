@@ -71,6 +71,26 @@ internal sealed class ConfigService : IConfigService
     public int DiagnosticsCount { get; private set; }
 
     /// <summary>
+    /// Snapshot of the config file's key/value lines, populated at the
+    /// top of <see cref="ReadFlags"/> and cleared when it exits. Every
+    /// file-read helper on this class reads from here instead of
+    /// reopening the file; otherwise one reload turns into one
+    /// <see cref="File.ReadLines"/> per key looked up, which the config
+    /// watcher then amplifies on every save. Keys are case-insensitive
+    /// (matches ghostty's own config parser), each key maps to the
+    /// list of raw values in the order they appear in the file.
+    /// </summary>
+    private Dictionary<string, List<string>>? _configFileCache;
+
+    /// <summary>
+    /// Same idea as <see cref="_configFileCache"/> but for the active
+    /// theme file resolved from the config (handling the light:X,dark:Y
+    /// split on the OS scheme). Null when there's no active theme or
+    /// the theme file is missing.
+    /// </summary>
+    private Dictionary<string, List<string>>? _activeThemeFileCache;
+
+    /// <summary>
     /// The current config handle. Passed to <see cref="GhosttyHost"/>
     /// so it can create the app with the loaded config.
     /// </summary>
@@ -173,6 +193,29 @@ internal sealed class ConfigService : IConfigService
 
     private void ReadFlags()
     {
+        // Snapshot the config file once up front, and the active theme
+        // file once after we know which one to read. Everything below
+        // that looks up Windows-only keys or theme colors goes through
+        // these caches, so the whole reload is bounded by at most two
+        // File.ReadLines calls regardless of how many keys we probe.
+        _configFileCache = LoadIniFile(ConfigFilePath);
+        var activeTheme = ResolveActiveThemeName();
+        var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
+        _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
+
+        try
+        {
+            ReadFlagsCore();
+        }
+        finally
+        {
+            _configFileCache = null;
+            _activeThemeFileCache = null;
+        }
+    }
+
+    private void ReadFlagsCore()
+    {
         AutoReloadEnabled = GetBool("auto-reload-config");
         // windows-settings-ui is a Windows-only key not in the Zig
         // config schema, so read it from the config file directly.
@@ -245,7 +288,7 @@ internal sealed class ConfigService : IConfigService
         }
 
         CurrentTheme = GetFileValue("theme", "");
-        var (parsedLight, parsedDark) = ParseThemePair(CurrentTheme);
+        var (parsedLight, parsedDark) = ThemeParser.ParseThemePair(CurrentTheme);
         LightTheme = parsedLight;
         DarkTheme = parsedDark;
 
@@ -330,13 +373,22 @@ internal sealed class ConfigService : IConfigService
         var userVal = GetFileValue(key, "");
         if (!string.IsNullOrEmpty(userVal)) return userVal;
 
-        // Resolve the active theme name (handles light:X,dark:Y pairs).
-        var theme = ResolveActiveThemeName();
-        if (string.IsNullOrEmpty(theme)) return null;
-
-        var themePath = ResolveThemePath(theme);
-        return themePath is null ? null : ReadKeyFromFile(themePath, key);
+        // Fall through to the active theme file snapshot captured at
+        // the start of the reload.
+        return GetActiveThemeValue(key);
     }
+
+    /// <summary>
+    /// Read the first value for <paramref name="key"/> from the active
+    /// theme file cache, or null when there's no active theme or the
+    /// key isn't set.
+    /// </summary>
+    private string? GetActiveThemeValue(string key)
+        => _activeThemeFileCache is not null
+            && _activeThemeFileCache.TryGetValue(key, out var list)
+            && list.Count > 0
+            ? list[0]
+            : null;
 
     /// <summary>
     /// Resolve the active theme name from the config file. For a
@@ -348,7 +400,7 @@ internal sealed class ConfigService : IConfigService
         var raw = GetFileValue("theme", "");
         if (string.IsNullOrEmpty(raw)) return "";
 
-        var (light, dark) = ParseThemePair(raw);
+        var (light, dark) = ThemeParser.ParseThemePair(raw);
         if (light is null || dark is null) return raw;
 
         return IsOsDark() ? dark : light;
@@ -376,50 +428,19 @@ internal sealed class ConfigService : IConfigService
     {
         // 1. User config override.
         var userVal = GetFileValue(key, "");
-        if (!string.IsNullOrEmpty(userVal))
-        {
-            if (ThemeParser.TryParseHexRgb(userVal, out var packed))
-                return packed;
-        }
+        if (!string.IsNullOrEmpty(userVal)
+            && ThemeParser.TryParseHexRgb(userVal, out var userPacked))
+            return userPacked;
 
-        // 2. Active theme file (resolves light:X,dark:Y by OS state).
-        var themeName = ResolveActiveThemeName();
-        if (!string.IsNullOrEmpty(themeName))
-        {
-            var themePath = ResolveThemePath(themeName);
-            if (themePath is not null)
-            {
-                var themeVal = ReadKeyFromFile(themePath, key);
-                if (!string.IsNullOrEmpty(themeVal)
-                    && ThemeParser.TryParseHexRgb(themeVal, out var packed))
-                    return packed;
-            }
-        }
+        // 2. Active theme file (resolved once at reload start).
+        var themeVal = GetActiveThemeValue(key);
+        if (!string.IsNullOrEmpty(themeVal)
+            && ThemeParser.TryParseHexRgb(themeVal, out var themePacked))
+            return themePacked;
 
         // 3. Fall back to libghostty's resolved value (light variant or
         // hard default).
         return GetColor(key, defaultValue);
-    }
-
-    /// <summary>
-    /// Read a single config key's value from a file. Returns null when
-    /// the key is not found or the file is unreadable.
-    /// </summary>
-    private static string? ReadKeyFromFile(string path, string key)
-    {
-        if (!File.Exists(path)) return null;
-        foreach (var line in File.ReadLines(path))
-        {
-            var trimmed = line.TrimStart();
-            if (trimmed.StartsWith('#')) continue;
-            var eqIndex = trimmed.IndexOf('=');
-            if (eqIndex < 0) continue;
-            var k = trimmed[..eqIndex].Trim();
-            if (k != key) continue;
-            var v = trimmed[(eqIndex + 1)..].Trim();
-            if (v.Length > 0) return v;
-        }
-        return null;
     }
 
     /// <summary>
@@ -430,52 +451,61 @@ internal sealed class ConfigService : IConfigService
     private static bool IsOsDark() => OsTheme.IsDark();
 
     /// <summary>
-    /// Read a Windows-only config key directly from the config file.
-    /// Keys not in the Zig config schema cannot be read via
-    /// <c>ghostty_config_get</c>, so we parse the file ourselves.
+    /// Read the first non-empty value for a Windows-only config key
+    /// from the cached snapshot of the config file populated by
+    /// <see cref="ReadFlags"/>. Keys not in the Zig config schema
+    /// cannot be read via <c>ghostty_config_get</c>, so we parse the
+    /// file ourselves.
     /// </summary>
     private string GetFileValue(string key, string defaultValue)
-    {
-        if (string.IsNullOrEmpty(ConfigFilePath) || !File.Exists(ConfigFilePath))
-            return defaultValue;
-
-        foreach (var line in File.ReadLines(ConfigFilePath))
-        {
-            var trimmed = line.TrimStart();
-            if (trimmed.StartsWith('#')) continue;
-            var eqIndex = trimmed.IndexOf('=');
-            if (eqIndex < 0) continue;
-            var k = trimmed[..eqIndex].Trim();
-            if (k != key) continue;
-            var v = trimmed[(eqIndex + 1)..].Trim();
-            return v.Length > 0 ? v : defaultValue;
-        }
-        return defaultValue;
-    }
+        => _configFileCache is not null
+            && _configFileCache.TryGetValue(key, out var list)
+            && list.Count > 0
+            ? list[0]
+            : defaultValue;
 
     /// <summary>
-    /// Read all values for a repeatable Windows-only config key.
-    /// Returns every matching line's value in order. Keys not in
-    /// the Zig config schema are parsed from the file directly.
+    /// Read all values for a repeatable Windows-only config key from
+    /// the cached snapshot. Returns each matching line's value in file
+    /// order.
     /// </summary>
-    private List<string> GetAllFileValues(string key)
-    {
-        var results = new List<string>();
-        if (string.IsNullOrEmpty(ConfigFilePath) || !File.Exists(ConfigFilePath))
-            return results;
+    private IReadOnlyList<string> GetAllFileValues(string key)
+        => _configFileCache is not null
+            && _configFileCache.TryGetValue(key, out var list)
+            ? list
+            : Array.Empty<string>();
 
-        foreach (var line in File.ReadLines(ConfigFilePath))
+    /// <summary>
+    /// Load a ghostty-style ini file into a key/value dictionary. Empty
+    /// lines and #-prefixed comments are skipped, empty values are
+    /// ignored entirely (matching the old per-key scanners), and keys
+    /// are matched case-insensitively. Returns an empty dictionary if
+    /// the path is missing or unreadable.
+    /// </summary>
+    private static Dictionary<string, List<string>> LoadIniFile(string? path)
+    {
+        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            return dict;
+
+        foreach (var line in File.ReadLines(path))
         {
             var trimmed = line.TrimStart();
-            if (trimmed.StartsWith('#')) continue;
+            if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;
             var eqIndex = trimmed.IndexOf('=');
             if (eqIndex < 0) continue;
             var k = trimmed[..eqIndex].Trim();
-            if (k != key) continue;
+            if (k.Length == 0) continue;
             var v = trimmed[(eqIndex + 1)..].Trim();
-            if (v.Length > 0) results.Add(v);
+            if (v.Length == 0) continue;
+            if (!dict.TryGetValue(k, out var list))
+            {
+                list = new List<string>(1);
+                dict[k] = list;
+            }
+            list.Add(v);
         }
-        return results;
+        return dict;
     }
 
     /// <summary>
@@ -541,19 +571,14 @@ internal sealed class ConfigService : IConfigService
             0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
         ];
 
-        // Apply theme palette first (lower priority).
-        var themeName = ResolveActiveThemeName();
-        if (!string.IsNullOrEmpty(themeName))
-        {
-            var themePath = ResolveThemePath(themeName);
-            if (themePath is not null)
-                ThemeParser.ApplyPaletteFromLines(File.ReadLines(themePath), defaults);
-        }
+        // Apply theme palette first (lower priority). Use the cached
+        // theme file lines; re-reading the theme file here would be
+        // its fifth-ish scan inside a single reload.
+        if (_activeThemeFileCache is not null
+            && _activeThemeFileCache.TryGetValue("palette", out var themePalette))
+            ThemeParser.ApplyPaletteFromValues(themePalette, defaults);
 
-        // Then apply user-config palette overrides on top. The values
-        // from GetAllFileValues are already raw "N=#RRGGBB" entries,
-        // so use the Values overload instead of re-prefixing every
-        // entry with "palette = " just to let the parser re-match it.
+        // Then apply user-config palette overrides on top.
         ThemeParser.ApplyPaletteFromValues(GetAllFileValues("palette"), defaults);
 
         return defaults;
@@ -593,13 +618,6 @@ internal sealed class ConfigService : IConfigService
         }
         catch (FormatException) { return null; }
     }
-
-    /// <summary>
-    /// Parse a theme config value into light/dark components.
-    /// Delegates to <see cref="ThemeParser.ParseThemePair"/>.
-    /// </summary>
-    internal static (string? light, string? dark) ParseThemePair(string theme)
-        => ThemeParser.ParseThemePair(theme);
 
     private static float? ParseFloat(string value)
     {
