@@ -105,21 +105,21 @@ internal sealed class WindowThemeManager : IDisposable
             "dark" => true,
             "system" => IsSystemDark(),
             "auto" => IsBackgroundDark(),
+            // ghostty: chrome colors come from the palette via ShellThemeService,
+            // so XAML theme follows palette luminance just like "auto".
+            "ghostty" => IsBackgroundDark(),
             _ => true, // default to dark
         };
     }
 
     /// <summary>
-    /// Check whether the OS is currently in dark mode by reading
-    /// the foreground color from UISettings. White foreground means
-    /// dark mode (light text on dark background).
+    /// Check whether the OS is currently in dark mode. Uses the
+    /// shared <see cref="OsTheme"/> helper; we keep the
+    /// <see cref="_uiSettings"/> instance for the ColorValuesChanged
+    /// subscription but route the actual dark-mode read through the
+    /// shared heuristic so it can't diverge from ConfigService.
     /// </summary>
-    private bool IsSystemDark()
-    {
-        var fg = _uiSettings.GetColorValue(
-            Windows.UI.ViewManagement.UIColorType.Foreground);
-        return fg.R > 128;
-    }
+    private static bool IsSystemDark() => OsTheme.IsDark();
 
     /// <summary>
     /// Derive theme from the terminal background color luminance,

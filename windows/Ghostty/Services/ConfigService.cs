@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Ghostty.Core.Config;
@@ -53,8 +54,20 @@ internal sealed class ConfigService : IConfigService
     public uint? CursorColor { get; private set; }
     public uint? CursorTextColor { get; private set; }
     public uint[] AnsiPalette { get; private set; } = new uint[16];
-    public bool ShellThemeEnabled { get; private set; }
     public string CurrentTheme { get; private set; } = "";
+
+    /// <summary>
+    /// Parsed light theme name from a conditional theme pair, or null
+    /// if the theme is a single (non-conditional) value.
+    /// </summary>
+    public string? LightTheme { get; private set; }
+
+    /// <summary>
+    /// Parsed dark theme name from a conditional theme pair, or null
+    /// if the theme is a single (non-conditional) value.
+    /// </summary>
+    public string? DarkTheme { get; private set; }
+
     public int DiagnosticsCount { get; private set; }
 
     /// <summary>
@@ -193,8 +206,14 @@ internal sealed class ConfigService : IConfigService
         GradientBlend = GetFileValue("background-gradient-blend", "overlay");
         GradientOpacity = ParseFloat(GetFileValue("background-gradient-opacity", "")) ?? 0.05f;
         WindowTheme = GetString("window-theme", "auto");
-        BackgroundColor = GetColor("background", 0x001E1E2E);
-        ForegroundColor = GetColor("foreground", 0x00FFFFFF);
+
+        // For background and foreground we go through GetThemeValue first
+        // because libghostty's _config was finalized with the default
+        // (.light) conditional state, so for a pair theme in dark mode
+        // it would return the LIGHT theme's colors. GetThemeValue resolves
+        // the active theme name (light vs dark) based on OS state.
+        BackgroundColor = ResolveThemedColor("background", 0x001E1E2E);
+        ForegroundColor = ResolveThemedColor("foreground", 0x00FFFFFF);
 
         // cursor-color is a TerminalColor (tagged union) in the Zig
         // config, so it can't be read via ghostty_config_get as a
@@ -225,10 +244,10 @@ internal sealed class ConfigService : IConfigService
             CursorTextColor = BackgroundColor;
         }
 
-        ShellThemeEnabled = string.Equals(
-            GetFileValue("windows-shell-theme", "false"),
-            "true", StringComparison.OrdinalIgnoreCase);
         CurrentTheme = GetFileValue("theme", "");
+        var (parsedLight, parsedDark) = ParseThemePair(CurrentTheme);
+        LightTheme = parsedLight;
+        DarkTheme = parsedDark;
 
         AnsiPalette = GetAllPaletteColors();
     }
@@ -311,17 +330,85 @@ internal sealed class ConfigService : IConfigService
         var userVal = GetFileValue(key, "");
         if (!string.IsNullOrEmpty(userVal)) return userVal;
 
-        // Check the active theme file.
-        var theme = GetFileValue("theme", "");
+        // Resolve the active theme name (handles light:X,dark:Y pairs).
+        var theme = ResolveActiveThemeName();
         if (string.IsNullOrEmpty(theme)) return null;
 
+        var themePath = ResolveThemePath(theme);
+        return themePath is null ? null : ReadKeyFromFile(themePath, key);
+    }
+
+    /// <summary>
+    /// Resolve the active theme name from the config file. For a
+    /// conditional theme (light:X,dark:Y), picks X or Y based on the
+    /// current OS color scheme. For a single theme, returns it as-is.
+    /// </summary>
+    private string ResolveActiveThemeName()
+    {
+        var raw = GetFileValue("theme", "");
+        if (string.IsNullOrEmpty(raw)) return "";
+
+        var (light, dark) = ParseThemePair(raw);
+        if (light is null || dark is null) return raw;
+
+        return IsOsDark() ? dark : light;
+    }
+
+    /// <summary>
+    /// Find the theme file on disk by name. Looks in the user themes
+    /// directory next to the config file. Returns null if not found.
+    /// </summary>
+    private string? ResolveThemePath(string themeName)
+    {
         var configDir = Path.GetDirectoryName(ConfigFilePath);
         if (string.IsNullOrEmpty(configDir)) return null;
+        var themePath = Path.Combine(configDir, "themes", themeName);
+        return File.Exists(themePath) ? themePath : null;
+    }
 
-        var themePath = Path.Combine(configDir, "themes", theme);
-        if (!File.Exists(themePath)) return null;
+    /// <summary>
+    /// Read a color, preferring user config over the active theme file
+    /// over the libghostty default. This is needed because libghostty's
+    /// _config is finalized with the default (.light) conditional state,
+    /// so for pair themes in dark mode it returns the wrong colors.
+    /// </summary>
+    private uint ResolveThemedColor(string key, uint defaultValue)
+    {
+        // 1. User config override.
+        var userVal = GetFileValue(key, "");
+        if (!string.IsNullOrEmpty(userVal))
+        {
+            if (ThemeParser.TryParseHexRgb(userVal, out var packed))
+                return packed;
+        }
 
-        foreach (var line in File.ReadLines(themePath))
+        // 2. Active theme file (resolves light:X,dark:Y by OS state).
+        var themeName = ResolveActiveThemeName();
+        if (!string.IsNullOrEmpty(themeName))
+        {
+            var themePath = ResolveThemePath(themeName);
+            if (themePath is not null)
+            {
+                var themeVal = ReadKeyFromFile(themePath, key);
+                if (!string.IsNullOrEmpty(themeVal)
+                    && ThemeParser.TryParseHexRgb(themeVal, out var packed))
+                    return packed;
+            }
+        }
+
+        // 3. Fall back to libghostty's resolved value (light variant or
+        // hard default).
+        return GetColor(key, defaultValue);
+    }
+
+    /// <summary>
+    /// Read a single config key's value from a file. Returns null when
+    /// the key is not found or the file is unreadable.
+    /// </summary>
+    private static string? ReadKeyFromFile(string path, string key)
+    {
+        if (!File.Exists(path)) return null;
+        foreach (var line in File.ReadLines(path))
         {
             var trimmed = line.TrimStart();
             if (trimmed.StartsWith('#')) continue;
@@ -334,6 +421,13 @@ internal sealed class ConfigService : IConfigService
         }
         return null;
     }
+
+    /// <summary>
+    /// Detect OS dark mode via the shared <see cref="OsTheme"/> helper
+    /// so this and <see cref="WindowThemeManager"/> can't drift on the
+    /// "which byte means dark" heuristic.
+    /// </summary>
+    private static bool IsOsDark() => OsTheme.IsDark();
 
     /// <summary>
     /// Read a Windows-only config key directly from the config file.
@@ -432,9 +526,10 @@ internal sealed class ConfigService : IConfigService
     }
 
     /// <summary>
-    /// Read all 16 palette colors. Reads the config file once and
-    /// parses all "palette = N=#COLOR" entries, falling back to
-    /// xterm defaults for missing indices.
+    /// Read all 16 palette colors. Loads the active theme's palette
+    /// first (resolving light:X,dark:Y to the OS-active variant), then
+    /// applies user-config overrides on top. Falls back to xterm
+    /// defaults for indices that neither source sets.
     /// </summary>
     private uint[] GetAllPaletteColors()
     {
@@ -446,21 +541,20 @@ internal sealed class ConfigService : IConfigService
             0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
         ];
 
-        var allPalette = GetAllFileValues("palette");
-        foreach (var entry in allPalette)
+        // Apply theme palette first (lower priority).
+        var themeName = ResolveActiveThemeName();
+        if (!string.IsNullOrEmpty(themeName))
         {
-            var eqIdx = entry.IndexOf('=');
-            if (eqIdx < 0) continue;
-            var idxStr = entry[..eqIdx].Trim();
-            if (!int.TryParse(idxStr, out var parsedIdx)) continue;
-            if (parsedIdx is < 0 or >= 16) continue;
-            var colorStr = entry[(eqIdx + 1)..].Trim();
-            var parsed = ParseHexColor(colorStr);
-            if (parsed is not null)
-                defaults[parsedIdx] = ((uint)parsed.Value.R << 16)
-                                    | ((uint)parsed.Value.G << 8)
-                                    | parsed.Value.B;
+            var themePath = ResolveThemePath(themeName);
+            if (themePath is not null)
+                ThemeParser.ApplyPaletteFromLines(File.ReadLines(themePath), defaults);
         }
+
+        // Then apply user-config palette overrides on top. The values
+        // from GetAllFileValues are already raw "N=#RRGGBB" entries,
+        // so use the Values overload instead of re-prefixing every
+        // entry with "palette = " just to let the parser re-match it.
+        ThemeParser.ApplyPaletteFromValues(GetAllFileValues("palette"), defaults);
 
         return defaults;
     }
@@ -499,6 +593,13 @@ internal sealed class ConfigService : IConfigService
         }
         catch (FormatException) { return null; }
     }
+
+    /// <summary>
+    /// Parse a theme config value into light/dark components.
+    /// Delegates to <see cref="ThemeParser.ParseThemePair"/>.
+    /// </summary>
+    internal static (string? light, string? dark) ParseThemePair(string theme)
+        => ThemeParser.ParseThemePair(theme);
 
     private static float? ParseFloat(string value)
     {
