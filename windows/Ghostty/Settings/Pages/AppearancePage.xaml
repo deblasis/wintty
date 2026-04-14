@@ -15,12 +15,8 @@
                 <ComboBoxItem Content="System" Tag="system" />
                 <ComboBoxItem Content="Light" Tag="light" />
                 <ComboBoxItem Content="Dark" Tag="dark" />
+                <ComboBoxItem Content="Ghostty" Tag="ghostty" />
             </ComboBox>
-
-            <ToggleSwitch
-                x:Name="ShellThemeToggle"
-                Header="Shell follows terminal theme"
-                Toggled="ShellTheme_Toggled" />
 
             <AutoSuggestBox
                 x:Name="FontFamilySearch"

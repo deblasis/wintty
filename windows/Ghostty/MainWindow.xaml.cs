@@ -80,6 +80,15 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
+    // Tracks the last applied caption-button colors so we can skip
+    // redundant TitleBar property writes. WinUI 3 marshals each
+    // property setter to DWM separately, and rapid sequential writes
+    // can cause a brief flash to the system accent color (blue) while
+    // DWM is between updates.
+    private (Windows.UI.Color? Bg, Windows.UI.Color? Fg, Windows.UI.Color? InactiveBg,
+             Windows.UI.Color? InactiveFg, Windows.UI.Color? HoverBg, Windows.UI.Color? HoverFg,
+             Windows.UI.Color? PressedBg, Windows.UI.Color? PressedFg) _lastButtonColors;
+
     private GradientTintVisual? _gradientVisual;
     private Window? _settingsWindow;
 
@@ -204,9 +213,14 @@ public sealed partial class MainWindow : Window
         _systemUiSettings = new Windows.UI.ViewManagement.UISettings();
         var initialFg = _systemUiSettings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
         var initialDark = initialFg.R > 128;
-        Ghostty.Interop.NativeMethods.AppSetColorScheme(
-            _host.App,
-            initialDark ? Ghostty.Interop.GhosttyColorScheme.Dark : Ghostty.Interop.GhosttyColorScheme.Light);
+        var initialScheme = initialDark
+            ? Ghostty.Interop.GhosttyColorScheme.Dark
+            : Ghostty.Interop.GhosttyColorScheme.Light;
+        Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, initialScheme);
+        // NotifyColorSchemeChanged is not called here because no surfaces
+        // exist yet at window construction time. Each surface picks up the
+        // app-level scheme when it initializes. The runtime handler below
+        // covers post-init OS theme changes.
 
         // Subscribe to runtime theme changes. ColorValuesChanged fires on a
         // background thread, so dispatch back to the UI thread before calling
@@ -216,9 +230,13 @@ public sealed partial class MainWindow : Window
             var fg = s.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
             var dark = fg.R > 128;
             DispatcherQueue.TryEnqueue(() =>
-                Ghostty.Interop.NativeMethods.AppSetColorScheme(
-                    _host.App,
-                    dark ? Ghostty.Interop.GhosttyColorScheme.Dark : Ghostty.Interop.GhosttyColorScheme.Light));
+            {
+                var scheme = dark
+                    ? Ghostty.Interop.GhosttyColorScheme.Dark
+                    : Ghostty.Interop.GhosttyColorScheme.Light;
+                Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
+                _host.NotifyColorSchemeChanged(scheme);
+            });
         };
 
         // Apply initial backdrop (Mica when opaque, transparent when
@@ -845,25 +863,28 @@ public sealed partial class MainWindow : Window
         // Caption button colors must be set explicitly when
         // ExtendsContentIntoTitleBar is true, otherwise WinUI 3
         // fills them with the system accent color.
-        var tb = AppWindow.TitleBar;
         var fg = _themeManager.IsDarkMode
             ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
         var fgInactive = _themeManager.IsDarkMode
             ? Windows.UI.Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x66, 0x00, 0x00, 0x00);
-        tb.ButtonBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-        tb.ButtonInactiveBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-        tb.ButtonForegroundColor = fg;
-        tb.ButtonInactiveForegroundColor = fgInactive;
-        tb.ButtonHoverBackgroundColor = _themeManager.IsDarkMode
+        var hoverBg = _themeManager.IsDarkMode
             ? Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x33, 0x00, 0x00, 0x00);
-        tb.ButtonHoverForegroundColor = fg;
-        tb.ButtonPressedBackgroundColor = _themeManager.IsDarkMode
+        var pressedBg = _themeManager.IsDarkMode
             ? Windows.UI.Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x22, 0x00, 0x00, 0x00);
-        tb.ButtonPressedForegroundColor = fg;
+
+        ApplyButtonColors(
+            bg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            fg: fg,
+            inactiveBg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            inactiveFg: fgInactive,
+            hoverBg: hoverBg,
+            hoverFg: fg,
+            pressedBg: pressedBg,
+            pressedFg: fg);
 
         // Propagate theme to tab hosts so their text/icons adapt.
         // Guard: tab hosts are created after the first ApplyTheme call.
@@ -876,23 +897,14 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Apply palette-derived colors to the window chrome when
-    /// windows-shell-theme is enabled.
+    /// window-theme=ghostty is set.
     /// </summary>
     private void ApplyShellTheme()
     {
         if (!_shellTheme.IsEnabled)
         {
-            // Revert to standard chrome. Clear custom title bar
-            // button colors back to null (system default).
-            var titleBar = AppWindow.TitleBar;
-            titleBar.ButtonBackgroundColor = null;
-            titleBar.ButtonForegroundColor = null;
-            titleBar.ButtonInactiveBackgroundColor = null;
-            titleBar.ButtonInactiveForegroundColor = null;
-            titleBar.ButtonHoverBackgroundColor = null;
-            titleBar.ButtonHoverForegroundColor = null;
-
-            // Reset VerticalTitleText to theme default.
+            // Revert to standard chrome. Reset VerticalTitleText so
+            // it picks up the element-theme default again.
             VerticalTitleText.ClearValue(TextBlock.ForegroundProperty);
 
             // Force ApplyBackdropStyle to re-run by clearing its
@@ -900,6 +912,12 @@ public sealed partial class MainWindow : Window
             // SetTransparentChrome/SetOpaqueChrome.
             _currentBackdropStyle = "";
             ApplyBackdropStyle();
+
+            // Let ApplyTheme write the standard caption-button colors
+            // directly. Pre-clearing the buttons to null here would
+            // briefly show the system accent (blue) on close/min/max
+            // before ApplyTheme overwrites them, producing a visible
+            // flash on every config reload.
             ApplyTheme();
 
             _horizontalTabHost.ClearShellTheme();
@@ -907,18 +925,19 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var tb = AppWindow.TitleBar;
         // Transparent backgrounds let the caption buttons blend
         // with whatever backdrop (Mica/Acrylic) is behind them.
-        tb.ButtonBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-        tb.ButtonForegroundColor = _shellTheme.TitleBarForeground;
-        tb.ButtonInactiveBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-        tb.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(
-            128, _shellTheme.TitleBarForeground.R,
-            _shellTheme.TitleBarForeground.G,
-            _shellTheme.TitleBarForeground.B);
-        tb.ButtonHoverBackgroundColor = _shellTheme.TabBarBackground;
-        tb.ButtonHoverForegroundColor = _shellTheme.TitleBarForeground;
+        var fg = _shellTheme.TitleBarForeground;
+        var fgInactive = Windows.UI.Color.FromArgb(128, fg.R, fg.G, fg.B);
+        ApplyButtonColors(
+            bg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            fg: fg,
+            inactiveBg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            inactiveFg: fgInactive,
+            hoverBg: _shellTheme.TabBarBackground,
+            hoverFg: fg,
+            pressedBg: _shellTheme.TabBarBackground,
+            pressedFg: fg);
 
         // When a transparent backdrop (frosted/crystal) is active, the
         // RootGrid must stay transparent so the SystemBackdrop shows
@@ -943,6 +962,41 @@ public sealed partial class MainWindow : Window
         // Push theme to both tab hosts.
         _horizontalTabHost.ApplyShellTheme(_shellTheme);
         _verticalTabHost.ApplyShellTheme(_shellTheme);
+    }
+
+    /// <summary>
+    /// Apply caption-button colors only when they actually change, and
+    /// write each property only when its individual value changed.
+    /// WinUI 3 marshals each TitleBar property setter to DWM separately;
+    /// rapid sequential writes cause a brief flash to the system accent
+    /// color (blue) on the close/min/max buttons while DWM is between
+    /// updates. Skipping no-op writes minimizes that window.
+    /// </summary>
+    private void ApplyButtonColors(
+        Windows.UI.Color? bg, Windows.UI.Color? fg,
+        Windows.UI.Color? inactiveBg, Windows.UI.Color? inactiveFg,
+        Windows.UI.Color? hoverBg, Windows.UI.Color? hoverFg,
+        Windows.UI.Color? pressedBg, Windows.UI.Color? pressedFg)
+    {
+        var next = (bg, fg, inactiveBg, inactiveFg, hoverBg, hoverFg, pressedBg, pressedFg);
+        if (next == _lastButtonColors) return;
+
+        var prev = _lastButtonColors;
+        _lastButtonColors = next;
+
+        var tb = AppWindow.TitleBar;
+        // Only write properties that actually changed. WinUI 3 sends each
+        // setter individually to DWM and each write can trigger a brief
+        // redraw with default (system accent) colors before the new value
+        // takes effect.
+        if (prev.Bg != bg) tb.ButtonBackgroundColor = bg;
+        if (prev.InactiveBg != inactiveBg) tb.ButtonInactiveBackgroundColor = inactiveBg;
+        if (prev.HoverBg != hoverBg) tb.ButtonHoverBackgroundColor = hoverBg;
+        if (prev.PressedBg != pressedBg) tb.ButtonPressedBackgroundColor = pressedBg;
+        if (prev.Fg != fg) tb.ButtonForegroundColor = fg;
+        if (prev.InactiveFg != inactiveFg) tb.ButtonInactiveForegroundColor = inactiveFg;
+        if (prev.HoverFg != hoverFg) tb.ButtonHoverForegroundColor = hoverFg;
+        if (prev.PressedFg != pressedFg) tb.ButtonPressedForegroundColor = pressedFg;
     }
 
     /// <summary>

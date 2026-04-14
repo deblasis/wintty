@@ -369,6 +369,10 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void AppSetColorScheme(GhosttyApp app, GhosttyColorScheme scheme);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_color_scheme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetColorScheme(GhosttySurface surface, GhosttyColorScheme scheme);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_app_update_config")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void AppUpdateConfig(GhosttyApp app, GhosttyConfig config);

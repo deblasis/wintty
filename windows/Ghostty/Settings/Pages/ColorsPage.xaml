@@ -7,11 +7,38 @@
         <StackPanel Spacing="8" MaxWidth="600">
             <TextBlock Text="Colors" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
 
+            <!-- Theme mode selector: single theme or separate light/dark -->
+            <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,0,0,4">
+                <TextBlock Text="Theme" VerticalAlignment="Center"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <RadioButton x:Name="SingleModeRadio" Content="Single"
+                             GroupName="ThemeMode" IsChecked="True"
+                             Checked="ThemeMode_Changed" />
+                <RadioButton x:Name="PairModeRadio" Content="Light &amp; Dark"
+                             GroupName="ThemeMode"
+                             Checked="ThemeMode_Changed" />
+            </StackPanel>
+
+            <!-- Single theme picker (visible in single mode) -->
             <AutoSuggestBox
                 x:Name="ThemeSearch"
                 Header="Theme"
                 PlaceholderText="Search themes..."
                 QueryIcon="Find" />
+
+            <!-- Light/dark theme pickers (visible in pair mode) -->
+            <StackPanel x:Name="PairThemePanel" Spacing="8" Visibility="Collapsed">
+                <AutoSuggestBox
+                    x:Name="LightThemeSearch"
+                    Header="Light theme"
+                    PlaceholderText="Search themes..."
+                    QueryIcon="Find" />
+                <AutoSuggestBox
+                    x:Name="DarkThemeSearch"
+                    Header="Dark theme"
+                    PlaceholderText="Search themes..."
+                    QueryIcon="Find" />
+            </StackPanel>
 
             <TextBox Header="Foreground" PlaceholderText="#cdd6f4" LostFocus="Foreground_LostFocus" />
             <TextBox Header="Background" PlaceholderText="#1e1e2e" LostFocus="Background_LostFocus" />
