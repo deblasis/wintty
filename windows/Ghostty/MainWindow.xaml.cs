@@ -85,9 +85,17 @@ public sealed partial class MainWindow : Window
     // property setter to DWM separately, and rapid sequential writes
     // can cause a brief flash to the system accent color (blue) while
     // DWM is between updates.
-    private (Windows.UI.Color? Bg, Windows.UI.Color? Fg, Windows.UI.Color? InactiveBg,
-             Windows.UI.Color? InactiveFg, Windows.UI.Color? HoverBg, Windows.UI.Color? HoverFg,
-             Windows.UI.Color? PressedBg, Windows.UI.Color? PressedFg) _lastButtonColors;
+    private readonly record struct CaptionColors(
+        Windows.UI.Color? Bg,
+        Windows.UI.Color? Fg,
+        Windows.UI.Color? InactiveBg,
+        Windows.UI.Color? InactiveFg,
+        Windows.UI.Color? HoverBg,
+        Windows.UI.Color? HoverFg,
+        Windows.UI.Color? PressedBg,
+        Windows.UI.Color? PressedFg);
+
+    private CaptionColors _lastButtonColors;
 
     private GradientTintVisual? _gradientVisual;
     private Window? _settingsWindow;
@@ -965,12 +973,12 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Apply caption-button colors only when they actually change, and
-    /// write each property only when its individual value changed.
-    /// WinUI 3 marshals each TitleBar property setter to DWM separately;
-    /// rapid sequential writes cause a brief flash to the system accent
-    /// color (blue) on the close/min/max buttons while DWM is between
-    /// updates. Skipping no-op writes minimizes that window.
+    /// Apply caption-button colors, writing each TitleBar property
+    /// only when its individual value changed. WinUI 3 marshals each
+    /// setter to DWM separately; rapid sequential writes cause a brief
+    /// flash to the system accent color (blue) on the close/min/max
+    /// buttons while DWM is between updates. Skipping no-op writes
+    /// minimizes that window.
     /// </summary>
     private void ApplyButtonColors(
         Windows.UI.Color? bg, Windows.UI.Color? fg,
@@ -978,17 +986,11 @@ public sealed partial class MainWindow : Window
         Windows.UI.Color? hoverBg, Windows.UI.Color? hoverFg,
         Windows.UI.Color? pressedBg, Windows.UI.Color? pressedFg)
     {
-        var next = (bg, fg, inactiveBg, inactiveFg, hoverBg, hoverFg, pressedBg, pressedFg);
-        if (next == _lastButtonColors) return;
-
         var prev = _lastButtonColors;
-        _lastButtonColors = next;
+        _lastButtonColors = new CaptionColors(
+            bg, fg, inactiveBg, inactiveFg, hoverBg, hoverFg, pressedBg, pressedFg);
 
         var tb = AppWindow.TitleBar;
-        // Only write properties that actually changed. WinUI 3 sends each
-        // setter individually to DWM and each write can trigger a brief
-        // redraw with default (system accent) colors before the new value
-        // takes effect.
         if (prev.Bg != bg) tb.ButtonBackgroundColor = bg;
         if (prev.InactiveBg != inactiveBg) tb.ButtonInactiveBackgroundColor = inactiveBg;
         if (prev.HoverBg != hoverBg) tb.ButtonHoverBackgroundColor = hoverBg;
