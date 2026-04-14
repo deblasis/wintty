@@ -13,6 +13,7 @@ using Ghostty.Hosting;
 using Ghostty.Interop;
 using Ghostty.Input;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Shell;
 using Ghostty.Services;
 using Ghostty.Panes;
 using Ghostty.Settings;
@@ -80,15 +81,26 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
-    // Tracks whether ApplyShellTheme's enabled branch last ran.
-    // The disabled branch only needs to reset RootGrid.Background
-    // (via the cache-clear + ApplyBackdropStyle re-entry below) on
-    // an enabled -> disabled transition. Without this guard, every
-    // config reload forces SystemBackdrop = new AcrylicBackdrop(...),
-    // and DWM briefly paints the acrylic FallbackColor (transparent
-    // black) between the old controller's disconnect and the new
-    // one's connect -- the flash in issue #239.
-    private bool _lastShellThemeEnabled;
+    // Win32 class-brush kind currently applied via SetClassLongPtr.
+    // Cached so repeated reloads on the same style don't re-invoke
+    // the Win32 call (and, for the opaque case, don't leak a fresh
+    // GDI brush per reload).
+    private enum ClassBrushKind { Transparent, Opaque }
+    private ClassBrushKind? _lastClassBrushKind;
+
+    // Last color written to RootGrid.Background. ApplyRootGridBackground
+    // is the single source of truth for that property; this cache
+    // skips allocating a new SolidColorBrush when nothing changed.
+    private Windows.UI.Color? _lastRootBackground;
+
+    // Last structural gradient config (points, blend, static opacity).
+    // ApplyGradientTint rebuilds the SpriteVisual only when these
+    // change; opacity/animation updates run in place on every reload.
+    // Snapshot the points list into a private List so later config
+    // reloads can't mutate what we are comparing against.
+    private List<Ghostty.Services.GradientPoint>? _lastGradientPoints;
+    private string? _lastGradientBlend;
+    private float _lastGradientOpacity;
 
     // Tracks the last applied caption-button colors so we can skip
     // redundant TitleBar property writes. WinUI 3 marshals each
@@ -281,7 +293,7 @@ public sealed partial class MainWindow : Window
         _themeManager.ThemeChanged += _ => ApplyTheme();
 
         _shellTheme = new ShellThemeService(configService);
-        _shellTheme.ThemeChanged += ApplyShellTheme;
+        _shellTheme.ThemeChanged += OnShellThemeChanged;
         _themePreview = new ThemePreviewService(configService, DispatcherQueue);
         _themePreview.ListThemesRequested += OnListThemesRequested;
 
@@ -319,8 +331,10 @@ public sealed partial class MainWindow : Window
         Canvas.SetZIndex(_verticalTabHost, -1);
         RootGrid.Children.Add(_verticalTabHost);
 
-        // Apply initial shell theme now that tab hosts exist.
+        // Apply initial shell theme now that tab hosts exist, then
+        // paint RootGrid.Background from the resolved state.
         ApplyShellTheme();
+        ApplyRootGridBackground();
 
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
@@ -494,16 +508,23 @@ public sealed partial class MainWindow : Window
 
         // Re-evaluate transparency state after every config reload so
         // Ctrl+Shift+Scroll and Settings UI changes take effect live.
+        // Each step owns exactly one piece of chrome state:
+        //   - ApplyBackdropStyle: SystemBackdrop + Win32 class brush
+        //   - UpdateAcrylicTuning: live acrylic tint/opacity (in place)
+        //   - ApplyGradientTint:   gradient visual
+        //   - UpdateCursorAccentColors: pane borders + tab accents
+        //   - ApplyShellTheme:     caption buttons + tab host theming
+        //   - ApplyRootGridBackground: RootGrid.Background
+        // Keeping these disjoint prevents any step from piggybacking
+        // on another's side effects (the original cause of # 239).
         _configService.ConfigChanged += _ =>
         {
             ApplyBackdropStyle();
             UpdateAcrylicTuning();
             ApplyGradientTint();
             UpdateCursorAccentColors();
-
-            // Re-apply shell theme after backdrop style, since
-            // ApplyBackdropStyle may override RootGrid.Background.
             ApplyShellTheme();
+            ApplyRootGridBackground();
         };
 
         _tabManager.LastTabClosed += (_, _) => Close();
@@ -925,23 +946,6 @@ public sealed partial class MainWindow : Window
             // it picks up the element-theme default again.
             VerticalTitleText.ClearValue(TextBlock.ForegroundProperty);
 
-            // Only reset RootGrid.Background when we are actually
-            // transitioning from shell-theme-enabled to disabled.
-            // The enabled branch below writes RootGrid.Background to
-            // an opaque shell-theme color; we need to undo that here.
-            // On a steady-state reload (shell theme already off), the
-            // first ApplyBackdropStyle() call in the ConfigChanged
-            // chain already set RootGrid.Background correctly via
-            // SetTransparentChrome/SetOpaqueChrome, so we must NOT
-            // clear the cache and force a SystemBackdrop rebuild.
-            // Rebuilding on every reload is the root cause of #239.
-            if (_lastShellThemeEnabled)
-            {
-                _currentBackdropStyle = "";
-                ApplyBackdropStyle();
-            }
-            _lastShellThemeEnabled = false;
-
             // Let ApplyTheme write the standard caption-button colors
             // directly. Pre-clearing the buttons to null here would
             // briefly show the system accent (blue) on close/min/max
@@ -953,8 +957,6 @@ public sealed partial class MainWindow : Window
             _verticalTabHost.ClearShellTheme();
             return;
         }
-
-        _lastShellThemeEnabled = true;
 
         // Transparent backgrounds let the caption buttons blend
         // with whatever backdrop (Mica/Acrylic) is behind them.
@@ -970,19 +972,6 @@ public sealed partial class MainWindow : Window
             pressedBg: _shellTheme.TabBarBackground,
             pressedFg: fg);
 
-        // When a transparent backdrop (frosted/crystal) is active, the
-        // RootGrid must stay transparent so the SystemBackdrop shows
-        // through. An opaque shell theme background would mask it.
-        var needsTransparent = _currentBackdropStyle is "frosted" or "crystal";
-        RootGrid.Background = new SolidColorBrush(
-            needsTransparent
-                ? Windows.UI.Color.FromArgb(0, 0, 0, 0)
-                : Microsoft.UI.ColorHelper.FromArgb(
-                    _shellTheme.TitleBarBackground.A,
-                    _shellTheme.TitleBarBackground.R,
-                    _shellTheme.TitleBarBackground.G,
-                    _shellTheme.TitleBarBackground.B));
-
         VerticalTitleText.Foreground = new SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
                 _shellTheme.TitleBarForeground.A,
@@ -990,7 +979,8 @@ public sealed partial class MainWindow : Window
                 _shellTheme.TitleBarForeground.G,
                 _shellTheme.TitleBarForeground.B));
 
-        // Push theme to both tab hosts.
+        // Push theme to both tab hosts. RootGrid.Background is owned
+        // by ApplyRootGridBackground and refreshed by the caller.
         _horizontalTabHost.ApplyShellTheme(_shellTheme);
         _verticalTabHost.ApplyShellTheme(_shellTheme);
     }
@@ -1058,8 +1048,8 @@ public sealed partial class MainWindow : Window
         // If the user's configured style is acrylic-based, keep the
         // acrylic backdrop alive even at opacity=1.0 so Ctrl+Shift+Scroll
         // doesn't flash between Mica and acrylic at the boundary.
-        var style = (opacity >= 1.0 && configStyle != "frosted")
-            ? "solid"
+        var style = (opacity >= 1.0 && configStyle != BackdropStyles.Frosted)
+            ? BackdropStyles.Solid
             : configStyle;
 
         // Skip if the effective style hasn't changed.
@@ -1074,27 +1064,27 @@ public sealed partial class MainWindow : Window
 
         switch (style)
         {
-            case "frosted":
+            case BackdropStyles.Frosted:
                 if (DesktopAcrylicController.IsSupported())
                     SystemBackdrop = new AcrylicBackdrop(
                         tintColor, tintOpacity, luminosityOpacity);
                 else
-                    goto case "solid";
-                SetTransparentChrome(hwnd);
+                    goto case BackdropStyles.Solid;
+                ApplyWindowClassBrush(ClassBrushKind.Transparent);
                 break;
 
-            case "crystal":
+            case BackdropStyles.Crystal:
                 SystemBackdrop = new CrystalBackdrop(hwnd);
-                SetTransparentChrome(hwnd);
+                ApplyWindowClassBrush(ClassBrushKind.Transparent);
                 break;
 
-            case "solid":
+            case BackdropStyles.Solid:
             default:
                 if (MicaController.IsSupported())
                     SystemBackdrop = new MicaBackdrop();
                 else
                     SystemBackdrop = null;
-                SetOpaqueChrome(hwnd);
+                ApplyWindowClassBrush(ClassBrushKind.Opaque);
                 break;
         }
     }
@@ -1106,7 +1096,7 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateAcrylicTuning()
     {
-        if (_currentBackdropStyle != "frosted") return;
+        if (_currentBackdropStyle != BackdropStyles.Frosted) return;
         if (SystemBackdrop is not AcrylicBackdrop current) return;
 
         var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
@@ -1149,6 +1139,13 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// Create, update, or remove the gradient tint visual based on
     /// the current config. Called on startup and config reload.
+    /// Rebuilds the SpriteVisual only when structural config
+    /// (points, blend, static gradient-opacity) changes; opacity and
+    /// animation updates apply in place. Without this gate, every
+    /// config reload tears down and recreates the visual, which
+    /// visibly re-flashes the gradient on high-frequency reloads
+    /// such as Ctrl+Shift+scroll for users with a gradient
+    /// configured -- same bug class as # 239.
     /// </summary>
     private void ApplyGradientTint()
     {
@@ -1158,47 +1155,119 @@ public sealed partial class MainWindow : Window
         {
             _gradientVisual?.Dispose();
             _gradientVisual = null;
+            // Reset the full cache key together so the three fields
+            // never drift out of sync; a later non-empty apply will
+            // trip structuralChange on points==null and rebuild.
+            _lastGradientPoints = null;
+            _lastGradientBlend = null;
+            _lastGradientOpacity = 0f;
             return;
         }
 
-        var isOverlay = _configService.GradientBlend == "overlay";
+        var blend = _configService.GradientBlend ?? "underlay";
+        var isOverlay = blend == "overlay";
         var gradientOpacity = _configService.GradientOpacity;
 
-        // Recreate if blend mode changed.
-        if (_gradientVisual is not null)
-        {
-            _gradientVisual.Dispose();
-            _gradientVisual = null;
-        }
+        var structuralChange = _gradientVisual is null
+            || _lastGradientBlend != blend
+            || _lastGradientOpacity != gradientOpacity
+            || _lastGradientPoints is null
+            || !_lastGradientPoints.SequenceEqual(points);
 
-        _gradientVisual = new GradientTintVisual(
-            RootGrid, points, isOverlay, gradientOpacity);
+        if (structuralChange)
+        {
+            _gradientVisual?.Dispose();
+            _gradientVisual = new GradientTintVisual(
+                RootGrid, points, isOverlay, gradientOpacity);
+            _lastGradientPoints = [.. points];
+            _lastGradientBlend = blend;
+            _lastGradientOpacity = gradientOpacity;
+        }
 
         // Track opacity if blur-follows-opacity is on.
         if (_configService.BackgroundBlurFollowsOpacity)
-            _gradientVisual.SetOpacity((float)_configService.BackgroundOpacity);
+            _gradientVisual!.SetOpacity((float)_configService.BackgroundOpacity);
         else if (!isOverlay)
-            _gradientVisual.SetOpacity(1f);
+            _gradientVisual!.SetOpacity(1f);
 
-        _gradientVisual.ApplyAnimation(
+        _gradientVisual!.ApplyAnimation(
             _configService.GradientAnimation,
             _configService.GradientSpeed);
     }
 
-    private void SetTransparentChrome(IntPtr hwnd)
+    /// <summary>
+    /// Set the Win32 class background brush for the main window.
+    /// The class brush is what DWM uses for the WM_ERASEBKGND fill
+    /// before XAML paints; it must match the backdrop kind so there
+    /// is no black flash between Win32 fill and XAML frame compose.
+    ///
+    /// RootGrid.Background is NOT set here -- that is the job of
+    /// <see cref="ApplyRootGridBackground"/>, the single source of
+    /// truth for the RootGrid background color.
+    ///
+    /// HBRUSH lifetime: CreateSolidBrush allocates a GDI object
+    /// that is never DeleteObject'd when replaced by a later
+    /// SetClassLongPtr call -- tracked in # 242. The brush cache
+    /// below bounds the leak to one HBRUSH per Transparent/Opaque
+    /// toggle, so in practice it is tiny, but it is still a leak.
+    /// </summary>
+    private void ApplyWindowClassBrush(ClassBrushKind kind)
     {
-        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND,
-            Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH));
-        RootGrid.Background = new SolidColorBrush(
-            Windows.UI.Color.FromArgb(0, 0, 0, 0));
+        if (_lastClassBrushKind == kind) return;
+        _lastClassBrushKind = kind;
+
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var brush = kind switch
+        {
+            ClassBrushKind.Transparent =>
+                Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH),
+            ClassBrushKind.Opaque =>
+                CreateSolidBrush(0x000C0C0Cu),
+            _ => throw new System.Diagnostics.UnreachableException(
+                $"Unknown ClassBrushKind: {kind}"),
+        };
+        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
     }
 
-    private void SetOpaqueChrome(IntPtr hwnd)
+    /// <summary>
+    /// ShellThemeService.ThemeChanged handler. Re-applies the shell
+    /// theme (caption buttons, tab hosts, title text) and refreshes
+    /// the single RootGrid.Background source of truth.
+    /// </summary>
+    private void OnShellThemeChanged()
     {
-        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND,
-            CreateSolidBrush(0x000C0C0Cu));
-        RootGrid.Background = new SolidColorBrush(
-            Microsoft.UI.ColorHelper.FromArgb(0xFF, 0x0C, 0x0C, 0x0C));
+        ApplyShellTheme();
+        ApplyRootGridBackground();
+    }
+
+    /// <summary>
+    /// Paint RootGrid.Background based on current backdrop style and
+    /// shell-theme state. Single source of truth so
+    /// ApplyBackdropStyle and ApplyShellTheme never write this
+    /// property directly. Caches the last color to avoid allocating
+    /// a new SolidColorBrush on reloads where nothing changed.
+    /// </summary>
+    private void ApplyRootGridBackground()
+    {
+        var bg = _shellTheme.TitleBarBackground;
+        uint shellBgArgb =
+            ((uint)bg.A << 24) |
+            ((uint)bg.R << 16) |
+            ((uint)bg.G << 8) |
+            bg.B;
+
+        var argb = RootBackgroundResolver.Resolve(
+            _currentBackdropStyle, _shellTheme.IsEnabled, shellBgArgb);
+
+        var next = Windows.UI.Color.FromArgb(
+            (byte)(argb >> 24),
+            (byte)(argb >> 16),
+            (byte)(argb >> 8),
+            (byte)argb);
+
+        if (_lastRootBackground == next) return;
+        _lastRootBackground = next;
+        RootGrid.Background = new SolidColorBrush(next);
     }
 
     /// <summary>
