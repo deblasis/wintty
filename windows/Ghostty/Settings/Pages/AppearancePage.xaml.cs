@@ -33,7 +33,6 @@ internal sealed partial class AppearancePage : Page
         // runtime type is different (e.g. in tests).
         if (configService is ConfigService cs)
         {
-            ShellThemeToggle.IsOn = cs.ShellThemeEnabled;
             SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle);
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
             if (cs.BackgroundTintColor.HasValue)
@@ -197,12 +196,6 @@ internal sealed partial class AppearancePage : Page
     {
         if (sender is ToggleSwitch ts)
             OnValueChanged("background-blur-follows-opacity", ts.IsOn ? "true" : "false");
-    }
-
-    private void ShellTheme_Toggled(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleSwitch ts)
-            OnValueChanged("windows-shell-theme", ts.IsOn ? "true" : "false");
     }
 
     private void TintColor_LostFocus(object sender, RoutedEventArgs e)
