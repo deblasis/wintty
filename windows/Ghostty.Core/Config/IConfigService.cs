@@ -27,8 +27,9 @@ public interface IConfigService : IDisposable
     double BackgroundOpacity { get; }
 
     /// <summary>
-    /// Window theme from config: "light", "dark", "system", or "auto".
-    /// Controls both the XAML ElementTheme and the DWM title bar chrome.
+    /// Window theme from config: "light", "dark", "system", "auto", or
+    /// "ghostty" (palette-derived chrome). Controls both the XAML
+    /// ElementTheme and the DWM title bar chrome.
     /// </summary>
     string WindowTheme { get; }
 
