@@ -262,6 +262,28 @@ internal sealed class GhosttyHost : IDisposable
     }
 
     /// <summary>
+    /// Notify all surfaces owned by this host that the OS color scheme
+    /// changed. Mirrors GTK's handleStyleManagerDark which calls
+    /// surface.core().colorSchemeCallback() for each surface after
+    /// the app-level colorSchemeEvent.
+    ///
+    /// UI thread only. <see cref="Adopt"/> / <see cref="Detach"/>
+    /// mutate <see cref="_surfaces"/> on the UI thread by contract; the
+    /// only background-thread writers that can coexist are the
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/>'s own snapshot
+    /// enumerator guarantees. Called from <c>MainWindow</c> inside a
+    /// <c>DispatcherQueue.TryEnqueue</c> after <c>UISettings.ColorValuesChanged</c>.
+    /// </summary>
+    internal void NotifyColorSchemeChanged(GhosttyColorScheme scheme)
+    {
+        foreach (var (handle, _) in _surfaces)
+        {
+            var surface = new GhosttySurface(handle);
+            NativeMethods.SurfaceSetColorScheme(surface, scheme);
+        }
+    }
+
+    /// <summary>
     /// Bootstrap/per-window dispose invariant: the bootstrap host
     /// (<see cref="IAppHandleOwnership.State"/>.<c>IsBootstrap</c>)
     /// MUST be disposed LAST, after every per-window host. App.xaml.cs's
