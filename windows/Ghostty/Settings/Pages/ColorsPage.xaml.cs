@@ -58,7 +58,14 @@ internal sealed partial class ColorsPage : Page
     {
         if (_loading) return;
 
-        if (PairModeRadio.IsChecked == true)
+        // Route by the specific radio that became checked rather than
+        // falling through a two-branch if/else. Both radios share this
+        // handler, so adding a third ThemeMode option later (or wiring
+        // Unchecked) doesn't silently pick the wrong branch; unrelated
+        // senders fall out here cleanly.
+        if (sender is not RadioButton { IsChecked: true } rb) return;
+
+        if (rb == PairModeRadio)
         {
             // Switching to pair mode: seed both boxes from the current
             // single theme so the user sees their selection carried over.
@@ -72,7 +79,7 @@ internal sealed partial class ColorsPage : Page
             ThemeSearch.Visibility = Visibility.Collapsed;
             PairThemePanel.Visibility = Visibility.Visible;
         }
-        else
+        else if (rb == SingleModeRadio)
         {
             // Switching to single mode: pick the dark theme as default
             // (most users run dark mode), falling back to light.
