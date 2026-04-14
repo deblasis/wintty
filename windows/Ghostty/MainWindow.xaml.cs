@@ -80,6 +80,16 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
+    // Tracks whether ApplyShellTheme's enabled branch last ran.
+    // The disabled branch only needs to reset RootGrid.Background
+    // (via the cache-clear + ApplyBackdropStyle re-entry below) on
+    // an enabled -> disabled transition. Without this guard, every
+    // config reload forces SystemBackdrop = new AcrylicBackdrop(...),
+    // and DWM briefly paints the acrylic FallbackColor (transparent
+    // black) between the old controller's disconnect and the new
+    // one's connect -- the flash in issue #239.
+    private bool _lastShellThemeEnabled;
+
     // Tracks the last applied caption-button colors so we can skip
     // redundant TitleBar property writes. WinUI 3 marshals each
     // property setter to DWM separately, and rapid sequential writes
@@ -915,11 +925,22 @@ public sealed partial class MainWindow : Window
             // it picks up the element-theme default again.
             VerticalTitleText.ClearValue(TextBlock.ForegroundProperty);
 
-            // Force ApplyBackdropStyle to re-run by clearing its
-            // cache. It sets RootGrid.Background via
-            // SetTransparentChrome/SetOpaqueChrome.
-            _currentBackdropStyle = "";
-            ApplyBackdropStyle();
+            // Only reset RootGrid.Background when we are actually
+            // transitioning from shell-theme-enabled to disabled.
+            // The enabled branch below writes RootGrid.Background to
+            // an opaque shell-theme color; we need to undo that here.
+            // On a steady-state reload (shell theme already off), the
+            // first ApplyBackdropStyle() call in the ConfigChanged
+            // chain already set RootGrid.Background correctly via
+            // SetTransparentChrome/SetOpaqueChrome, so we must NOT
+            // clear the cache and force a SystemBackdrop rebuild.
+            // Rebuilding on every reload is the root cause of #239.
+            if (_lastShellThemeEnabled)
+            {
+                _currentBackdropStyle = "";
+                ApplyBackdropStyle();
+            }
+            _lastShellThemeEnabled = false;
 
             // Let ApplyTheme write the standard caption-button colors
             // directly. Pre-clearing the buttons to null here would
@@ -932,6 +953,8 @@ public sealed partial class MainWindow : Window
             _verticalTabHost.ClearShellTheme();
             return;
         }
+
+        _lastShellThemeEnabled = true;
 
         // Transparent backgrounds let the caption buttons blend
         // with whatever backdrop (Mica/Acrylic) is behind them.
