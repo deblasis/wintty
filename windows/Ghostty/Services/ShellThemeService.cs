@@ -22,7 +22,7 @@ internal sealed class ShellThemeService
     public Windows.UI.Color ScrollbarTrack { get; private set; }
     public Windows.UI.Color ScrollbarThumb { get; private set; }
 
-    public bool IsEnabled => _configService.ShellThemeEnabled;
+    public bool IsEnabled => string.Equals(_configService.WindowTheme, "ghostty", StringComparison.OrdinalIgnoreCase);
 
     private bool _wasEnabled;
 
