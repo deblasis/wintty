@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Xaml;
@@ -17,6 +18,13 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
 
     private DesktopAcrylicController? _controller;
     private SystemBackdropConfiguration? _config;
+
+    // Logged once per instance the first time the broken base hook
+    // fires, so when a future WinUI 3 update changes that behaviour we
+    // can tell at a glance (the trace will either stop appearing or
+    // start appearing with a valid target) whether the override is
+    // still load-bearing.
+    private bool _defaultConfigWarnedOnce;
 
     /// <param name="tintColor">Tint overlay color.</param>
     /// <param name="tintOpacity">0.0 = no tint, 1.0 = full tint color.</param>
@@ -111,5 +119,13 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
         XamlRoot xamlRoot)
     {
         // Intentionally do not call base. See remarks above.
+        if (!_defaultConfigWarnedOnce)
+        {
+            _defaultConfigWarnedOnce = true;
+            Debug.WriteLine(
+                "[AcrylicBackdrop] OnDefaultSystemBackdropConfigurationChanged fired; "
+              + $"controllerConnected={_controller is not null}, targetNull={target is null}. "
+                + "The override is suppressing the base impl to avoid the WinUI 3 ArgumentException.");
+        }
     }
 }
