@@ -1,49 +1,95 @@
 <Page
     x:Class="Ghostty.Settings.Pages.ColorsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="8" MaxWidth="600">
-            <TextBlock Text="Colors" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="Colors" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
 
-            <!-- Theme mode selector: single theme or separate light/dark -->
-            <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,0,0,4">
-                <TextBlock Text="Theme" VerticalAlignment="Center"
-                           Style="{StaticResource BodyStrongTextBlockStyle}" />
-                <RadioButton x:Name="SingleModeRadio" Content="Single"
-                             GroupName="ThemeMode" IsChecked="True"
-                             Checked="ThemeMode_Changed" />
-                <RadioButton x:Name="PairModeRadio" Content="Light &amp; Dark"
-                             GroupName="ThemeMode"
-                             Checked="ThemeMode_Changed" />
-            </StackPanel>
+            <ctrl:SettingsGroup Header="Theme"
+                                Description="Choose a single palette or separate light and dark themes that follow the system.">
+                <!--
+                  Theme mode radios are a mini section header rather than a
+                  control-in-a-card because they govern which picker below
+                  is visible, not a single config value.
+                -->
+                <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,0,0,8">
+                    <RadioButton x:Name="SingleModeRadio" Content="Single"
+                                 GroupName="ThemeMode" IsChecked="True"
+                                 Checked="ThemeMode_Changed" />
+                    <RadioButton x:Name="PairModeRadio" Content="Light &amp; Dark"
+                                 GroupName="ThemeMode"
+                                 Checked="ThemeMode_Changed" />
+                </StackPanel>
 
-            <!-- Single theme picker (visible in single mode) -->
-            <AutoSuggestBox
-                x:Name="ThemeSearch"
-                Header="Theme"
-                PlaceholderText="Search themes..."
-                QueryIcon="Find" />
+                <ctrl:SettingsCard
+                    x:Name="SingleThemeCard"
+                    Header="Theme"
+                    Description="Named theme file loaded from the themes directory."
+                    ctrl:SettingsCard.ConfigKey="theme">
+                    <AutoSuggestBox
+                        x:Name="ThemeSearch"
+                        PlaceholderText="Search themes..."
+                        QueryIcon="Find"
+                        MinWidth="260" />
+                </ctrl:SettingsCard>
 
-            <!-- Light/dark theme pickers (visible in pair mode) -->
-            <StackPanel x:Name="PairThemePanel" Spacing="8" Visibility="Collapsed">
-                <AutoSuggestBox
-                    x:Name="LightThemeSearch"
+                <ctrl:SettingsCard
+                    x:Name="LightThemeCard"
                     Header="Light theme"
-                    PlaceholderText="Search themes..."
-                    QueryIcon="Find" />
-                <AutoSuggestBox
-                    x:Name="DarkThemeSearch"
-                    Header="Dark theme"
-                    PlaceholderText="Search themes..."
-                    QueryIcon="Find" />
-            </StackPanel>
+                    Description="Used when the system is in light mode."
+                    Visibility="Collapsed">
+                    <AutoSuggestBox
+                        x:Name="LightThemeSearch"
+                        PlaceholderText="Search themes..."
+                        QueryIcon="Find"
+                        MinWidth="260" />
+                </ctrl:SettingsCard>
 
-            <TextBox Header="Foreground" PlaceholderText="#cdd6f4" LostFocus="Foreground_LostFocus" />
-            <TextBox Header="Background" PlaceholderText="#1e1e2e" LostFocus="Background_LostFocus" />
-            <TextBox Header="Cursor color" PlaceholderText="#f5e0dc" LostFocus="CursorColor_LostFocus" />
-            <TextBox Header="Selection color" PlaceholderText="#585b70" LostFocus="SelectionColor_LostFocus" />
+                <ctrl:SettingsCard
+                    x:Name="DarkThemeCard"
+                    Header="Dark theme"
+                    Description="Used when the system is in dark mode."
+                    Visibility="Collapsed">
+                    <AutoSuggestBox
+                        x:Name="DarkThemeSearch"
+                        PlaceholderText="Search themes..."
+                        QueryIcon="Find"
+                        MinWidth="260" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup Header="Terminal Colors"
+                                Description="Override individual colors. Takes precedence over the theme.">
+                <!--
+                  Color boxes are unnamed on purpose: seeding them with
+                  current values is deferred to Phase 2 (ColorPickerControl).
+                  Until then the placeholder text hints at the expected
+                  hex format.
+                -->
+                <ctrl:SettingsCard Header="Foreground"
+                                   Description="Default text color."
+                                   ctrl:SettingsCard.ConfigKey="foreground">
+                    <TextBox PlaceholderText="#cdd6f4" MinWidth="160" LostFocus="Foreground_LostFocus" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Background"
+                                   Description="Default background color."
+                                   ctrl:SettingsCard.ConfigKey="background">
+                    <TextBox PlaceholderText="#1e1e2e" MinWidth="160" LostFocus="Background_LostFocus" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Cursor color"
+                                   Description="Color of the cursor glyph."
+                                   ctrl:SettingsCard.ConfigKey="cursor-color">
+                    <TextBox PlaceholderText="#f5e0dc" MinWidth="160" LostFocus="CursorColor_LostFocus" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Selection background"
+                                   Description="Background color of selected text."
+                                   ctrl:SettingsCard.ConfigKey="selection-background">
+                    <TextBox PlaceholderText="#585b70" MinWidth="160" LostFocus="SelectionColor_LostFocus" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>

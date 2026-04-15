@@ -1,28 +1,43 @@
 <Page
     x:Class="Ghostty.Settings.Pages.GeneralPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="8" MaxWidth="600">
-            <TextBlock Text="General" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="General" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
 
-            <ToggleSwitch
-                x:Name="AutoReloadToggle"
-                Header="Auto-reload config"
-                OffContent="Manual reload only"
-                OnContent="Watch file for changes"
-                Toggled="AutoReloadToggle_Toggled" />
+            <ctrl:SettingsGroup Header="App Behavior">
+                <ctrl:SettingsCard
+                    Header="Auto-reload config"
+                    Description="Watch the config file for changes and reload automatically."
+                    ctrl:SettingsCard.ConfigKey="auto-reload-config">
+                    <ToggleSwitch
+                        x:Name="AutoReloadToggle"
+                        OffContent="Manual reload only"
+                        OnContent="Watch file for changes"
+                        Toggled="AutoReloadToggle_Toggled" />
+                </ctrl:SettingsCard>
 
-            <ToggleSwitch
-                x:Name="VerticalTabsToggle"
-                Header="Vertical tabs"
-                OffContent="Horizontal tab bar"
-                OnContent="Vertical tab sidebar"
-                Toggled="VerticalTabsToggle_Toggled" />
+                <ctrl:SettingsCard
+                    Header="Vertical tabs"
+                    Description="Arrange tabs in a sidebar instead of a horizontal bar.">
+                    <ToggleSwitch
+                        x:Name="VerticalTabsToggle"
+                        OffContent="Horizontal tab bar"
+                        OnContent="Vertical tab sidebar"
+                        Toggled="VerticalTabsToggle_Toggled" />
+                </ctrl:SettingsCard>
 
-            <Button Content="Reload Configuration" Click="ReloadButton_Click" Margin="0,16,0,0" />
-            <Button Content="Open Config File" Click="OpenFileButton_Click" />
+                <ctrl:SettingsCard Header="Configuration"
+                                   Description="Reload from disk or open the config file in your default editor.">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Reload" Click="ReloadButton_Click" />
+                        <Button Content="Open File" Click="OpenFileButton_Click" />
+                    </StackPanel>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>
