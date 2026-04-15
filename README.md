@@ -83,11 +83,11 @@
 > - [x] DirectComposition bindings (DWM composition -- carried from DX11)
 > - [x] COM helpers and test infrastructure (carried from DX11)
 > - [x] HLSL shaders (5 pipelines, SM 6.0 via dxc.exe)
-> - [ ] D3D12 COM interface bindings
-> - [ ] DX12 device lifecycle (command queue, fence, descriptor heaps)
-> - [ ] DX12 render pipeline (PSOs, root signatures, command lists)
-> - [ ] DX12 GPU primitives (upload heap buffers, textures, samplers)
-> - [ ] Backend enum with `directx12` variant
+> - [x] D3D12 COM interface bindings
+> - [x] DX12 device lifecycle (command queue, fence, descriptor heaps)
+> - [x] DX12 render pipeline (PSOs, root signatures, command lists)
+> - [x] DX12 GPU primitives (upload heap buffers, textures, samplers)
+> - [x] Backend enum with `directx12` variant
 >
 > **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
 >
@@ -112,15 +112,6 @@
 > The device picks the path based on what the caller provides. No compile-time flags.
 >
 > ### What is next
->
-> - [ ] DX12 renderer: device, command queue, fence, descriptor heaps
-> - [ ] DX12 render pipelines: PSOs, root signatures, command list recording
-> - [ ] DX12 GPU primitives: upload heap buffers, textures, samplers
-> - [ ] DX12 clear-to-color: first pixels via DX12
-> - [ ] DX12 cell rendering: wire all 5 HLSL pipelines through DX12
-> - [ ] DirectWrite font backend (currently FreeType fallback, no font discovery)
-> - [ ] Clipboard (read/write stubs, not yet wired to Win32 clipboard API)
-> - [ ] Per-monitor DPI (handled but manifest not linked in example), dark/light mode theming
 >
 > **Feature parity** (later)
 >
