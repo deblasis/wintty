@@ -16,6 +16,19 @@ internal sealed partial class TerminalPage : Page
         _editor = editor;
         InitializeComponent();
         CursorStyleBox.ItemsSource = new[] { "block", "bar", "underline" };
+
+        // Load current values so the UI reflects config on open, not
+        // hard-coded defaults. Windows-only terminal properties are on
+        // the concrete ConfigService; fall back to schema defaults if
+        // the runtime type is different (e.g. in tests).
+        if (configService is Ghostty.Services.ConfigService cs)
+        {
+            ScrollbackBox.Value = cs.ScrollbackLimit;
+            CursorStyleBox.SelectedItem = cs.CursorStyle;
+            CursorBlinkToggle.IsOn = cs.CursorBlink;
+            MouseHideToggle.IsOn = cs.MouseHideWhileTyping;
+        }
+
         _loading = false;
     }
 

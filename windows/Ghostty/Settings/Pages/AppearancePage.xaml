@@ -1,153 +1,203 @@
 <Page
     x:Class="Ghostty.Settings.Pages.AppearancePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="8" MaxWidth="600">
-            <TextBlock Text="Appearance" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="Appearance" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
 
-            <ComboBox
-                x:Name="WindowThemeCombo"
-                Header="Window theme"
-                SelectionChanged="WindowTheme_SelectionChanged">
-                <ComboBoxItem Content="Auto" Tag="auto" />
-                <ComboBoxItem Content="System" Tag="system" />
-                <ComboBoxItem Content="Light" Tag="light" />
-                <ComboBoxItem Content="Dark" Tag="dark" />
-                <ComboBoxItem Content="Ghostty" Tag="ghostty" />
-            </ComboBox>
+            <ctrl:SettingsGroup Header="Window Mode"
+                                Description="How the window chrome and title bar look.">
+                <ctrl:SettingsCard Header="Window mode"
+                                   Description="Auto derives from background luminosity. Ghostty colors the title bar from the terminal palette."
+                                   ctrl:SettingsCard.ConfigKey="window-theme">
+                    <ComboBox x:Name="WindowThemeCombo" MinWidth="260"
+                              SelectionChanged="WindowTheme_SelectionChanged">
+                        <ComboBoxItem Tag="auto">
+                            <StackPanel>
+                                <TextBlock Text="Auto" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Derive from terminal background luminosity."
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </ComboBoxItem>
+                        <ComboBoxItem Tag="system">
+                            <StackPanel>
+                                <TextBlock Text="System" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Follow Windows light/dark setting."
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </ComboBoxItem>
+                        <ComboBoxItem Tag="light">
+                            <StackPanel>
+                                <TextBlock Text="Light" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Force light title bar and chrome."
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </ComboBoxItem>
+                        <ComboBoxItem Tag="dark">
+                            <StackPanel>
+                                <TextBlock Text="Dark" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Force dark title bar and chrome."
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </ComboBoxItem>
+                        <ComboBoxItem Tag="ghostty">
+                            <StackPanel>
+                                <TextBlock Text="Ghostty" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Color title bar from the terminal palette."
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                        </ComboBoxItem>
+                    </ComboBox>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
-            <AutoSuggestBox
-                x:Name="FontFamilySearch"
-                Header="Font family"
-                PlaceholderText="Search fonts..."
-                QueryIcon="Find" />
+            <ctrl:SettingsGroup Header="Font"
+                                Description="Typography used by terminal content.">
+                <ctrl:SettingsCard Header="Font family"
+                                   ctrl:SettingsCard.ConfigKey="font-family">
+                    <AutoSuggestBox x:Name="FontFamilySearch"
+                                    PlaceholderText="Search fonts..."
+                                    QueryIcon="Find"
+                                    MinWidth="260" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Font size"
+                                   ctrl:SettingsCard.ConfigKey="font-size">
+                    <NumberBox x:Name="FontSizeBox" Value="13"
+                               Minimum="6" Maximum="72"
+                               SpinButtonPlacementMode="Compact"
+                               MinWidth="100"
+                               ValueChanged="FontSize_ValueChanged" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
-            <NumberBox
-                x:Name="FontSizeBox"
-                Header="Font size"
-                Value="13"
-                Minimum="6"
-                Maximum="72"
-                SpinButtonPlacementMode="Compact"
-                ValueChanged="FontSize_ValueChanged" />
+            <ctrl:SettingsGroup Header="Background Material"
+                                Description="Window transparency, blur, and tint.">
+                <ctrl:SettingsCard Header="Background opacity"
+                                   Description="0 is fully transparent, 1 is opaque."
+                                   ctrl:SettingsCard.ConfigKey="background-opacity">
+                    <Slider x:Name="OpacitySlider"
+                            Minimum="0" Maximum="1" StepFrequency="0.05"
+                            TickFrequency="0.1" TickPlacement="BottomRight"
+                            Value="1" MinWidth="240"
+                            ValueChanged="Opacity_ValueChanged" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Custom shader"
+                                   Description="Path to a GLSL post-process shader."
+                                   ctrl:SettingsCard.ConfigKey="custom-shader">
+                    <TextBox x:Name="ShaderPathBox"
+                             PlaceholderText="Path to .glsl shader file"
+                             MinWidth="300"
+                             LostFocus="ShaderPath_LostFocus" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Backdrop preset"
+                                   Description="Mica, Acrylic, or no-blur Crystal."
+                                   ctrl:SettingsCard.ConfigKey="background-style">
+                    <ComboBox x:Name="BackgroundStyleCombo" MinWidth="180"
+                              SelectionChanged="BackgroundStyle_SelectionChanged">
+                        <ComboBoxItem Content="Solid (Mica)" Tag="solid" />
+                        <ComboBoxItem Content="Frosted (Acrylic)" Tag="frosted" />
+                        <ComboBoxItem Content="Crystal (Zero blur)" Tag="crystal" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Blur follows opacity"
+                                   Description="Reduce blur automatically as opacity rises."
+                                   ctrl:SettingsCard.ConfigKey="background-blur-follows-opacity">
+                    <ToggleSwitch x:Name="BlurFollowsOpacityToggle"
+                                  Toggled="BlurFollowsOpacity_Toggled" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Acrylic tint color"
+                                   ctrl:SettingsCard.ConfigKey="background-tint-color">
+                    <TextBox x:Name="TintColorBox" PlaceholderText="#RRGGBB"
+                             MinWidth="160" LostFocus="TintColor_LostFocus" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Acrylic tint opacity"
+                                   ctrl:SettingsCard.ConfigKey="background-tint-opacity">
+                    <Slider x:Name="TintOpacitySlider"
+                            Minimum="0" Maximum="1" StepFrequency="0.05"
+                            TickFrequency="0.1" TickPlacement="BottomRight"
+                            Value="0.3" MinWidth="240"
+                            ValueChanged="TintOpacity_ValueChanged" />
+                </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Acrylic luminosity opacity"
+                                   ctrl:SettingsCard.ConfigKey="background-luminosity-opacity">
+                    <Slider x:Name="LuminosityOpacitySlider"
+                            Minimum="0" Maximum="1" StepFrequency="0.05"
+                            TickFrequency="0.1" TickPlacement="BottomRight"
+                            Value="0.3" MinWidth="240"
+                            ValueChanged="LuminosityOpacity_ValueChanged" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
-            <Slider
-                x:Name="OpacitySlider"
-                Header="Background opacity"
-                Minimum="0"
-                Maximum="1"
-                StepFrequency="0.05"
-                TickFrequency="0.1"
-                TickPlacement="BottomRight"
-                Value="1"
-                ValueChanged="Opacity_ValueChanged" />
+            <ctrl:SettingsGroup Header="Gradient"
+                                Description="Optional animated radial gradient overlay.">
+                <ctrl:SettingsCard Header="Enable gradient tint">
+                    <ToggleSwitch x:Name="GradientEnabledToggle"
+                                  IsOn="False"
+                                  Toggled="GradientEnabled_Toggled" />
+                </ctrl:SettingsCard>
 
-            <TextBox
-                x:Name="ShaderPathBox"
-                Header="Custom shader path"
-                PlaceholderText="Path to .glsl shader file"
-                LostFocus="ShaderPath_LostFocus" />
+                <!--
+                  The gradient sub-panel is preserved from the original
+                  AppearancePage. The numeric-only gradient point editor
+                  is slated for replacement in Phase 4 with a visual editor.
+                -->
+                <StackPanel x:Name="GradientSettingsPanel" Spacing="8" Visibility="Collapsed">
 
-            <TextBlock Text="Background Style" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,8" />
+                    <ComboBox x:Name="GradientBlendCombo" Header="Blend mode"
+                              SelectionChanged="GradientBlend_SelectionChanged">
+                        <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
+                        <ComboBoxItem Content="Underlay (behind content)" Tag="underlay" />
+                    </ComboBox>
 
-            <ComboBox x:Name="BackgroundStyleCombo" Header="Backdrop preset"
-                      SelectionChanged="BackgroundStyle_SelectionChanged">
-                <ComboBoxItem Content="Solid (Mica)" Tag="solid" />
-                <ComboBoxItem Content="Frosted (Acrylic)" Tag="frosted" />
-                <ComboBoxItem Content="Crystal (Zero blur)" Tag="crystal" />
-            </ComboBox>
+                    <Slider x:Name="GradientOpacitySlider"
+                            Header="Gradient opacity"
+                            Minimum="0" Maximum="1" StepFrequency="0.01"
+                            TickFrequency="0.1" TickPlacement="BottomRight"
+                            Value="0.05"
+                            ValueChanged="GradientOpacity_ValueChanged" />
 
-            <ToggleSwitch
-                x:Name="BlurFollowsOpacityToggle"
-                Header="Background blur follows opacity"
-                Toggled="BlurFollowsOpacity_Toggled" />
+                    <!-- Animation mode picker -->
+                    <TextBlock Text="Position animation" Margin="0,8,0,4" />
+                    <RadioButtons x:Name="PositionAnimRadio" SelectedIndex="0"
+                                  SelectionChanged="AnimationMode_Changed">
+                        <RadioButton Content="None" Tag="" />
+                        <RadioButton Content="Drift (subtle)" Tag="drift" />
+                        <RadioButton Content="Orbit (circular)" Tag="orbit" />
+                        <RadioButton Content="Wander (random)" Tag="wander" />
+                        <RadioButton Content="Bounce (edges)" Tag="bounce" />
+                    </RadioButtons>
 
-            <TextBox
-                x:Name="TintColorBox"
-                Header="Acrylic tint color"
-                PlaceholderText="#RRGGBB"
-                LostFocus="TintColor_LostFocus" />
+                    <CheckBox x:Name="BreatheCheck" Content="Breathe (pulsing size)"
+                              Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+                    <CheckBox x:Name="ColorCycleCheck" Content="Color cycle (hue rotation)"
+                              Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
 
-            <Slider
-                x:Name="TintOpacitySlider"
-                Header="Acrylic tint opacity"
-                Minimum="0"
-                Maximum="1"
-                StepFrequency="0.05"
-                TickFrequency="0.1"
-                TickPlacement="BottomRight"
-                Value="0.3"
-                ValueChanged="TintOpacity_ValueChanged" />
+                    <Slider x:Name="GradientSpeedSlider"
+                            Header="Animation speed"
+                            Minimum="0.1" Maximum="3" StepFrequency="0.1"
+                            Value="1"
+                            ValueChanged="GradientSpeed_ValueChanged" />
 
-            <Slider
-                x:Name="LuminosityOpacitySlider"
-                Header="Acrylic luminosity opacity"
-                Minimum="0"
-                Maximum="1"
-                StepFrequency="0.05"
-                TickFrequency="0.1"
-                TickPlacement="BottomRight"
-                Value="0.3"
-                ValueChanged="LuminosityOpacity_ValueChanged" />
+                    <!-- Gradient points editor -->
+                    <TextBlock Text="Gradient points" Margin="0,12,0,4" />
+                    <TextBlock Text="Up to 5 color points. Each has position (x,y), color, and radius."
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
-            <TextBlock Text="Gradient Tint" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,8" />
+                    <StackPanel x:Name="PointsPanel" Spacing="8" />
 
-            <ToggleSwitch x:Name="GradientEnabledToggle"
-                          Header="Enable gradient tint"
-                          IsOn="False"
-                          Toggled="GradientEnabled_Toggled" />
-
-            <!-- Gradient settings panel, visible only when enabled -->
-            <StackPanel x:Name="GradientSettingsPanel" Spacing="8" Visibility="Collapsed">
-
-                <ComboBox x:Name="GradientBlendCombo" Header="Blend mode"
-                          SelectionChanged="GradientBlend_SelectionChanged">
-                    <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
-                    <ComboBoxItem Content="Underlay (behind content)" Tag="underlay" />
-                </ComboBox>
-
-                <Slider x:Name="GradientOpacitySlider"
-                        Header="Gradient opacity"
-                        Minimum="0" Maximum="1" StepFrequency="0.01"
-                        TickFrequency="0.1" TickPlacement="BottomRight"
-                        Value="0.05"
-                        ValueChanged="GradientOpacity_ValueChanged" />
-
-                <!-- Animation mode picker -->
-                <TextBlock Text="Position animation" Margin="0,8,0,4" />
-                <RadioButtons x:Name="PositionAnimRadio" SelectedIndex="0"
-                              SelectionChanged="AnimationMode_Changed">
-                    <RadioButton Content="None" Tag="" />
-                    <RadioButton Content="Drift (subtle)" Tag="drift" />
-                    <RadioButton Content="Orbit (circular)" Tag="orbit" />
-                    <RadioButton Content="Wander (random)" Tag="wander" />
-                    <RadioButton Content="Bounce (edges)" Tag="bounce" />
-                </RadioButtons>
-
-                <CheckBox x:Name="BreatheCheck" Content="Breathe (pulsing size)"
-                          Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
-                <CheckBox x:Name="ColorCycleCheck" Content="Color cycle (hue rotation)"
-                          Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
-
-                <Slider x:Name="GradientSpeedSlider"
-                        Header="Animation speed"
-                        Minimum="0.1" Maximum="3" StepFrequency="0.1"
-                        Value="1"
-                        ValueChanged="GradientSpeed_ValueChanged" />
-
-                <!-- Gradient points editor -->
-                <TextBlock Text="Gradient points" Margin="0,12,0,4" />
-                <TextBlock Text="Up to 5 color points. Each has position (x,y), color, and radius."
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-
-                <StackPanel x:Name="PointsPanel" Spacing="8" />
-
-                <Button Content="Add point" Click="AddPoint_Click"
-                        x:Name="AddPointButton" />
-            </StackPanel>
+                    <Button Content="Add point" Click="AddPoint_Click"
+                            x:Name="AddPointButton" />
+                </StackPanel>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>
