@@ -151,51 +151,61 @@
                 -->
                 <StackPanel x:Name="GradientSettingsPanel" Spacing="8" Visibility="Collapsed">
 
-                    <ComboBox x:Name="GradientBlendCombo" Header="Blend mode"
-                              SelectionChanged="GradientBlend_SelectionChanged">
-                        <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
-                        <ComboBoxItem Content="Underlay (behind content)" Tag="underlay" />
-                    </ComboBox>
+                    <ctrl:SettingsCard Header="Blend mode"
+                                       ctrl:SettingsCard.ConfigKey="background-gradient-blend-mode">
+                        <ComboBox x:Name="GradientBlendCombo"
+                                  SelectionChanged="GradientBlend_SelectionChanged">
+                            <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
+                            <ComboBoxItem Content="Underlay (behind content)" Tag="underlay" />
+                        </ComboBox>
+                    </ctrl:SettingsCard>
 
-                    <Slider x:Name="GradientOpacitySlider"
-                            Header="Gradient opacity"
-                            Minimum="0" Maximum="1" StepFrequency="0.01"
-                            TickFrequency="0.1" TickPlacement="BottomRight"
-                            Value="0.05"
-                            ValueChanged="GradientOpacity_ValueChanged" />
+                    <ctrl:SettingsCard Header="Gradient opacity"
+                                       ctrl:SettingsCard.ConfigKey="background-gradient-opacity">
+                        <Slider x:Name="GradientOpacitySlider"
+                                Width="240"
+                                Minimum="0" Maximum="1" StepFrequency="0.01"
+                                TickFrequency="0.1" TickPlacement="BottomRight"
+                                Value="0.05"
+                                ValueChanged="GradientOpacity_ValueChanged" />
+                    </ctrl:SettingsCard>
 
                     <!-- Animation mode picker -->
-                    <TextBlock Text="Position animation" Margin="0,8,0,4" />
-                    <RadioButtons x:Name="PositionAnimRadio" SelectedIndex="0"
-                                  SelectionChanged="AnimationMode_Changed">
-                        <RadioButton Content="None" Tag="" />
-                        <RadioButton Content="Drift (subtle)" Tag="drift" />
-                        <RadioButton Content="Orbit (circular)" Tag="orbit" />
-                        <RadioButton Content="Wander (random)" Tag="wander" />
-                        <RadioButton Content="Bounce (edges)" Tag="bounce" />
-                    </RadioButtons>
+                    <ctrl:SettingsCard Header="Position animation"
+                                       ctrl:SettingsCard.ConfigKey="background-gradient-animation">
+                        <RadioButtons x:Name="PositionAnimRadio" SelectedIndex="0"
+                                      SelectionChanged="AnimationMode_Changed">
+                            <RadioButton Content="None" Tag="" />
+                            <RadioButton Content="Drift (subtle)" Tag="drift" />
+                            <RadioButton Content="Orbit (circular)" Tag="orbit" />
+                            <RadioButton Content="Wander (random)" Tag="wander" />
+                            <RadioButton Content="Bounce (edges)" Tag="bounce" />
+                        </RadioButtons>
+                    </ctrl:SettingsCard>
 
-                    <CheckBox x:Name="BreatheCheck" Content="Breathe (pulsing size)"
-                              Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
-                    <CheckBox x:Name="ColorCycleCheck" Content="Color cycle (hue rotation)"
-                              Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+                    <ctrl:SettingsCard Header="Additional effects"
+                                       Description="Combine with any position animation above.">
+                        <StackPanel Spacing="4">
+                            <CheckBox x:Name="BreatheCheck" Content="Breathe (pulsing size)"
+                                      Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+                            <CheckBox x:Name="ColorCycleCheck" Content="Color cycle (hue rotation)"
+                                      Checked="AnimationMode_Changed" Unchecked="AnimationMode_Changed" />
+                        </StackPanel>
+                    </ctrl:SettingsCard>
 
-                    <Slider x:Name="GradientSpeedSlider"
-                            Header="Animation speed"
-                            Minimum="0.1" Maximum="3" StepFrequency="0.1"
-                            Value="1"
-                            ValueChanged="GradientSpeed_ValueChanged" />
+                    <ctrl:SettingsCard Header="Animation speed"
+                                       ctrl:SettingsCard.ConfigKey="background-gradient-speed">
+                        <Slider x:Name="GradientSpeedSlider"
+                                Width="240"
+                                Minimum="0.1" Maximum="3" StepFrequency="0.1"
+                                TickFrequency="0.5" TickPlacement="BottomRight"
+                                Value="1"
+                                ValueChanged="GradientSpeed_ValueChanged" />
+                    </ctrl:SettingsCard>
 
-                    <!-- Gradient points editor -->
-                    <TextBlock Text="Gradient points" Margin="0,12,0,4" />
-                    <TextBlock Text="Up to 5 color points. Each has position (x,y), color, and radius."
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-
-                    <StackPanel x:Name="PointsPanel" Spacing="8" />
-
-                    <Button Content="Add point" Click="AddPoint_Click"
-                            x:Name="AddPointButton" />
+                    <!-- Gradient points editor (Phase 4): visual 2D canvas. -->
+                    <ctrl:GradientPointsEditor x:Name="GradientEditor"
+                                               ctrl:SettingsCard.ConfigKey="background-gradient-point" />
                 </StackPanel>
             </ctrl:SettingsGroup>
         </StackPanel>
