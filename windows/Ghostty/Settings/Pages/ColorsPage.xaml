@@ -63,31 +63,65 @@
 
             <ctrl:SettingsGroup Header="Terminal Colors"
                                 Description="Override individual colors. Takes precedence over the theme.">
-                <!--
-                  Color boxes are unnamed on purpose: seeding them with
-                  current values is deferred to Phase 2 (ColorPickerControl).
-                  Until then the placeholder text hints at the expected
-                  hex format.
-                -->
                 <ctrl:SettingsCard Header="Foreground"
                                    Description="Default text color."
                                    ctrl:SettingsCard.ConfigKey="foreground">
-                    <TextBox PlaceholderText="#cdd6f4" MinWidth="160" LostFocus="Foreground_LostFocus" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="ForegroundPicker"
+                                                 ColorChanged="Foreground_ColorChanged" />
+                        <Button x:Name="ForegroundResetButton"
+                                Click="Foreground_Reset"
+                                ToolTipService.ToolTip="Use the theme's value"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Background"
                                    Description="Default background color."
                                    ctrl:SettingsCard.ConfigKey="background">
-                    <TextBox PlaceholderText="#1e1e2e" MinWidth="160" LostFocus="Background_LostFocus" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="BackgroundPicker"
+                                                 ColorChanged="Background_ColorChanged" />
+                        <Button x:Name="BackgroundResetButton"
+                                Click="Background_Reset"
+                                ToolTipService.ToolTip="Use the theme's value"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Cursor color"
                                    Description="Color of the cursor glyph."
                                    ctrl:SettingsCard.ConfigKey="cursor-color">
-                    <TextBox PlaceholderText="#f5e0dc" MinWidth="160" LostFocus="CursorColor_LostFocus" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="CursorColorPicker"
+                                                 ColorChanged="CursorColor_ColorChanged" />
+                        <Button x:Name="CursorColorResetButton"
+                                Click="CursorColor_Reset"
+                                ToolTipService.ToolTip="Use the theme's value"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Selection background"
                                    Description="Background color of selected text."
                                    ctrl:SettingsCard.ConfigKey="selection-background">
-                    <TextBox PlaceholderText="#585b70" MinWidth="160" LostFocus="SelectionColor_LostFocus" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="SelectionColorPicker"
+                                                 ColorChanged="SelectionColor_ColorChanged" />
+                        <Button x:Name="SelectionColorResetButton"
+                                Click="SelectionColor_Reset"
+                                ToolTipService.ToolTip="Use the theme's value"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
                 </ctrl:SettingsCard>
             </ctrl:SettingsGroup>
         </StackPanel>
