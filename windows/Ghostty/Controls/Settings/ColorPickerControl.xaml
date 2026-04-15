@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Controls.Settings.ColorPickerControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      Inline swatch + hex TextBox + dropdown chevron. The flyout hosts
+      the WinUI ColorPicker (HSV square, hue slider, RGB/hex inputs).
+      Consumers see a Color property (#RRGGBB string) and a ColorChanged
+      event fired only on commit (flyout close or hex box LostFocus),
+      not on every pointer move inside the picker.
+    -->
+    <StackPanel Orientation="Horizontal" Spacing="8">
+        <DropDownButton x:Name="PickerButton" Padding="8,4">
+            <Border x:Name="SwatchBorder" Width="20" Height="20" CornerRadius="2"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1" />
+            <DropDownButton.Flyout>
+                <Flyout x:Name="PickerFlyout"
+                        Opening="PickerFlyout_Opening"
+                        Closed="PickerFlyout_Closed">
+                    <ColorPicker x:Name="Picker"
+                                 IsMoreButtonVisible="False"
+                                 IsHexInputVisible="True"
+                                 IsAlphaEnabled="False"
+                                 ColorChanged="Picker_ColorChanged" />
+                </Flyout>
+            </DropDownButton.Flyout>
+        </DropDownButton>
+        <TextBox x:Name="HexBox"
+                 MinWidth="110"
+                 MaxLength="7"
+                 VerticalAlignment="Center"
+                 KeyDown="HexBox_KeyDown"
+                 LostFocus="HexBox_LostFocus" />
+    </StackPanel>
+</UserControl>
