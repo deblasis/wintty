@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Controls.Settings.GradientPointsEditor"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="8">
+        <TextBlock Text="Gradient points"
+                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+        <TextBlock Text="Drag dots on the canvas. Double-click empty space to add. Up to 5 points."
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+        <!-- 2D canvas. Aspect is enforced in code-behind in a later task. -->
+        <Border x:Name="CanvasBorder"
+                BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="4"
+                Background="#111827">
+            <Canvas x:Name="PointsCanvas"
+                    Height="220"
+                    HorizontalAlignment="Stretch"
+                    IsDoubleTapEnabled="True" />
+        </Border>
+
+        <!-- Compact rows per point. Built imperatively in code-behind. -->
+        <StackPanel x:Name="RowsPanel" Spacing="4" />
+
+        <Button x:Name="AddPointButton" Content="Add point" />
+    </StackPanel>
+</UserControl>
