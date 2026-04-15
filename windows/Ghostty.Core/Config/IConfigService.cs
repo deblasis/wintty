@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Ghostty.Core.Config;
 
@@ -53,9 +54,22 @@ public interface IConfigService : IDisposable
     /// </summary>
     void SuppressWatcher(bool suppress);
 
-    /// <summary>Number of diagnostics from the last load/reload.</summary>
+    /// <summary>
+    /// Number of real diagnostics from the last load/reload. This
+    /// excludes "unknown field" noise for keys we know are
+    /// Windows-only (see <see cref="WindowsOnlyKeys"/>); those are
+    /// surfaced separately via <see cref="WindowsOnlyKeysUsed"/>.
+    /// </summary>
     int DiagnosticsCount { get; }
 
     /// <summary>Get diagnostic message at the given index.</summary>
     string GetDiagnostic(int index);
+
+    /// <summary>
+    /// Windows-only config keys that appeared in the user's config
+    /// during the last load/reload. libghostty flags these as unknown
+    /// but we handle them ourselves, so the settings UI surfaces them
+    /// as an informational notice (not an error).
+    /// </summary>
+    IReadOnlyList<string> WindowsOnlyKeysUsed { get; }
 }
