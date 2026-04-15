@@ -1,0 +1,38 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.SearchResultsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      Search results pane, shown in place of a regular page whenever the
+      AutoSuggestBox has a non-empty query. The visible children are
+      built in code-behind (SearchResultsPage.xaml.cs) from
+      SettingsSearch hits, because the groupings are dynamic and
+      a XAML DataTemplateSelector would be heavier than the one-off
+      layout needs.
+    -->
+    <ScrollViewer Padding="24">
+        <StackPanel MaxWidth="800">
+            <TextBlock
+                x:Name="TitleText"
+                Style="{StaticResource TitleTextBlockStyle}"
+                Margin="0,0,0,20" />
+
+            <!-- Filled imperatively with group headers + result rows. -->
+            <StackPanel x:Name="ResultsPanel" />
+
+            <!-- Empty state: "No settings match 'xyz'. [Clear search]". -->
+            <StackPanel
+                x:Name="EmptyPanel"
+                Visibility="Collapsed"
+                Spacing="12"
+                Margin="0,24,0,0">
+                <TextBlock
+                    x:Name="EmptyText"
+                    Style="{StaticResource BodyTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Button x:Name="ClearButton" Content="Clear search" Click="ClearButton_Click" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>
