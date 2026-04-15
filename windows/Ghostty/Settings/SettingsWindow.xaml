@@ -12,33 +12,48 @@
         PaneDisplayMode="Left"
         SelectionChanged="NavView_SelectionChanged">
 
+        <NavigationView.AutoSuggestBox>
+            <!--
+              Standard WinUI 3 pattern: NavigationView renders an
+              AutoSuggestBox at the top of the pane. Used here as a
+              plain search field (QueryIcon, no suggestions). Ctrl+F
+              focuses it; Esc clears it and restores the previous page.
+            -->
+            <AutoSuggestBox
+                x:Name="SearchBox"
+                PlaceholderText="Search settings"
+                QueryIcon="Find"
+                TextChanged="SearchBox_TextChanged"
+                KeyDown="SearchBox_KeyDown" />
+        </NavigationView.AutoSuggestBox>
+
         <NavigationView.MenuItems>
-            <NavigationViewItem Content="General" Tag="general">
+            <NavigationViewItem x:Name="NavGeneral" Content="General" Tag="general">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Setting" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Appearance" Tag="appearance">
+            <NavigationViewItem x:Name="NavAppearance" Content="Appearance" Tag="appearance">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Font" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Colors" Tag="colors">
+            <NavigationViewItem x:Name="NavColors" Content="Colors" Tag="colors">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Highlight" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Terminal" Tag="terminal">
+            <NavigationViewItem x:Name="NavTerminal" Content="Terminal" Tag="terminal">
                 <NavigationViewItem.Icon>
                     <FontIcon Glyph="&#xE756;" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Keybindings" Tag="keybindings">
+            <NavigationViewItem x:Name="NavKeybindings" Content="Keybindings" Tag="keybindings">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Keyboard" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Advanced" Tag="advanced">
+            <NavigationViewItem x:Name="NavAdvanced" Content="Advanced" Tag="advanced">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Repair" />
                 </NavigationViewItem.Icon>
@@ -46,17 +61,31 @@
 
             <NavigationViewItemSeparator />
 
-            <NavigationViewItem Content="Raw Editor" Tag="raw">
+            <NavigationViewItem x:Name="NavRaw" Content="Raw Editor" Tag="raw">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Edit" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem Content="Diagnostics" Tag="diagnostics">
+            <NavigationViewItem x:Name="NavDiagnostics" Content="Diagnostics" Tag="diagnostics">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Important" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
         </NavigationView.MenuItems>
+
+        <NavigationView.PaneFooter>
+            <!--
+              Only visible while searching. Spec: "Total result count at
+              the bottom of the sidebar." Hidden when no query; pane
+              footer layout collapses cleanly with zero-opacity text.
+            -->
+            <TextBlock
+                x:Name="ResultCountText"
+                Margin="12,4,12,12"
+                Style="{StaticResource CaptionTextBlockStyle}"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Visibility="Collapsed" />
+        </NavigationView.PaneFooter>
 
         <Frame x:Name="ContentFrame" />
     </NavigationView>
