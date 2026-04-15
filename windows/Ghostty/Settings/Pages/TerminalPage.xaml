@@ -1,36 +1,57 @@
 <Page
     x:Class="Ghostty.Settings.Pages.TerminalPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="8" MaxWidth="600">
-            <TextBlock Text="Terminal" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="Terminal" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
 
-            <NumberBox
-                x:Name="ScrollbackBox"
-                Header="Scrollback limit"
-                Value="10000"
-                Minimum="0"
-                Maximum="1000000"
-                SpinButtonPlacementMode="Compact"
-                ValueChanged="Scrollback_ValueChanged" />
+            <ctrl:SettingsGroup Header="Scrollback">
+                <ctrl:SettingsCard
+                    Header="Scrollback limit (bytes)"
+                    Description="Maximum bytes retained per surface. Ghostty default is 10 MB (10000000)."
+                    ctrl:SettingsCard.ConfigKey="scrollback-limit">
+                    <NumberBox
+                        x:Name="ScrollbackBox"
+                        Value="10000000"
+                        Minimum="0"
+                        Maximum="2147483647"
+                        SpinButtonPlacementMode="Compact"
+                        MinWidth="160"
+                        ValueChanged="Scrollback_ValueChanged" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
-            <ComboBox
-                x:Name="CursorStyleBox"
-                Header="Cursor style"
-                PlaceholderText="Select..."
-                SelectionChanged="CursorStyle_SelectionChanged" />
+            <ctrl:SettingsGroup Header="Cursor">
+                <ctrl:SettingsCard
+                    Header="Cursor style"
+                    Description="Shape of the text cursor."
+                    ctrl:SettingsCard.ConfigKey="cursor-style">
+                    <ComboBox
+                        x:Name="CursorStyleBox"
+                        PlaceholderText="Select..."
+                        MinWidth="140"
+                        SelectionChanged="CursorStyle_SelectionChanged" />
+                </ctrl:SettingsCard>
 
-            <ToggleSwitch
-                x:Name="CursorBlinkToggle"
-                Header="Cursor blink"
-                Toggled="CursorBlink_Toggled" />
+                <ctrl:SettingsCard
+                    Header="Cursor blink"
+                    Description="Blink the cursor when it has focus."
+                    ctrl:SettingsCard.ConfigKey="cursor-style-blink">
+                    <ToggleSwitch x:Name="CursorBlinkToggle" Toggled="CursorBlink_Toggled" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
-            <ToggleSwitch
-                x:Name="MouseHideToggle"
-                Header="Hide mouse while typing"
-                Toggled="MouseHide_Toggled" />
+            <ctrl:SettingsGroup Header="Mouse">
+                <ctrl:SettingsCard
+                    Header="Hide mouse while typing"
+                    Description="Hide the pointer during keyboard input."
+                    ctrl:SettingsCard.ConfigKey="mouse-hide-while-typing">
+                    <ToggleSwitch x:Name="MouseHideToggle" Toggled="MouseHide_Toggled" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>

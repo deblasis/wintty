@@ -38,7 +38,19 @@ internal sealed partial class SettingsWindow : Window
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
         var appWindow = AppWindow.GetFromWindowId(windowId);
-        appWindow.Resize(new Windows.Graphics.SizeInt32(900, 650));
+        // Settings window is centered on the display the cursor is on,
+        // sized to give room for the new sub-sectioned pages. The
+        // DisplayArea API is the WinUI 3 equivalent of macOS's
+        // NSScreen.mainScreen and handles multi-monitor correctly.
+        const int width = 1100;
+        const int height = 750;
+        var display = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(
+            windowId,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Primary);
+        var work = display.WorkArea;
+        var x = work.X + (work.Width - width) / 2;
+        var y = work.Y + (work.Height - height) / 2;
+        appWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
 
         Closed += OnClosed;
         NavView.SelectedItem = NavView.MenuItems[0];
