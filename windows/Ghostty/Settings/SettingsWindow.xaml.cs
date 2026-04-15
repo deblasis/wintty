@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
+using Ghostty.Services;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -29,6 +30,7 @@ internal sealed partial class SettingsWindow : Window
     private readonly IConfigFileEditor _editor;
     private readonly IKeyBindingsProvider _keybindings;
     private readonly IThemeProvider _theme;
+    private readonly WindowThemeManager _themeManager;
     private readonly Dictionary<string, Page> _pageCache = new();
     private readonly DispatcherTimer _searchTimer;
     private readonly IReadOnlyList<PageMapping> _pageMappings;
@@ -74,6 +76,16 @@ internal sealed partial class SettingsWindow : Window
         var y = work.Y + (work.Height - height) / 2;
         appWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, width, height));
 
+        // Settings UI follows the OS theme unless window-theme is
+        // explicitly "light" or "dark". Unlike the terminal chrome,
+        // the config pane should feel OS-native by default; a user on
+        // window-theme=ghostty with a dark palette might still prefer
+        // a bright settings window if their OS is in light mode.
+        _themeManager = new WindowThemeManager(
+            _configService, DispatcherQueue, ThemeFallbackStyle.System);
+        ApplyTheme();
+        _themeManager.ThemeChanged += OnThemeChanged;
+
         _searchTimer = new DispatcherTimer { Interval = SearchDebounce };
         _searchTimer.Tick += OnSearchTimerTick;
 
@@ -85,9 +97,8 @@ internal sealed partial class SettingsWindow : Window
             new PageMapping("terminal", "Terminal", NavTerminal),
             new PageMapping("keybindings", "Keybindings", NavKeybindings),
             new PageMapping("advanced", "Advanced", NavAdvanced),
-            // Raw Editor + Diagnostics don't host SettingsIndex entries yet.
+            // Raw Editor doesn't host SettingsIndex entries; diagnostics live inline.
             new PageMapping("raw", null, NavRaw),
-            new PageMapping("diagnostics", null, NavDiagnostics),
         };
 
         // Ctrl+F from anywhere in the window focuses the search box.
@@ -107,9 +118,19 @@ internal sealed partial class SettingsWindow : Window
 
         // Unsubscribe providers from ConfigChanged to avoid leaking
         // event subscriptions back to the long-lived ConfigService.
+        _themeManager.ThemeChanged -= OnThemeChanged;
+        _themeManager.Dispose();
         (_keybindings as IDisposable)?.Dispose();
         (_theme as IDisposable)?.Dispose();
         _pageCache.Clear();
+    }
+
+    private void OnThemeChanged(bool _) => ApplyTheme();
+
+    private void ApplyTheme()
+    {
+        NavView.RequestedTheme = _themeManager.ElementTheme;
+        _themeManager.ApplyToWindow(this);
     }
 
     private void NavView_SelectionChanged(
@@ -144,7 +165,6 @@ internal sealed partial class SettingsWindow : Window
                 "keybindings" => new Pages.KeybindingsPage(_keybindings),
                 "advanced" => new Pages.AdvancedPage(_configService, _editor),
                 "raw" => new Pages.RawEditorPage(_configService, _editor),
-                "diagnostics" => new Pages.DiagnosticsPage(_configService),
                 _ => null,
             };
             if (page != null) _pageCache[tag] = page;
