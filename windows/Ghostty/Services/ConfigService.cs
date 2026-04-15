@@ -56,6 +56,18 @@ internal sealed class ConfigService : IConfigService
     public uint[] AnsiPalette { get; private set; } = new uint[16];
     public string CurrentTheme { get; private set; } = "";
 
+    // Terminal settings snapshot (for settings UI to display current values).
+    public string CursorStyle { get; private set; } = "block";
+    public bool CursorBlink { get; private set; }
+    public bool MouseHideWhileTyping { get; private set; }
+    // scrollback-limit is bytes in ghostty, not lines. Zig default is
+    // 10_000_000 (10 MB) per terminal surface -- see Config.zig.
+    public int ScrollbackLimit { get; private set; } = 10_000_000;
+
+    // Font settings snapshot (for settings UI to display current values).
+    public string FontFamily { get; private set; } = "";
+    public double FontSize { get; private set; } = 13.0;
+
     /// <summary>
     /// Parsed light theme name from a conditional theme pair, or null
     /// if the theme is a single (non-conditional) value.
@@ -291,6 +303,53 @@ internal sealed class ConfigService : IConfigService
         var (parsedLight, parsedDark) = ThemeParser.ParseThemePair(CurrentTheme);
         LightTheme = parsedLight;
         DarkTheme = parsedDark;
+
+        // Terminal settings (used by settings UI for initial display).
+        // Read from the config file cache instead of ghostty_config_get:
+        // some keys (booleans, enums, repeatable lists like font-family)
+        // don't round-trip cleanly through the native getter.
+        CursorStyle = GetFileValue("cursor-style", "block");
+        CursorBlink = string.Equals(
+            GetFileValue("cursor-style-blink", "false"),
+            "true", StringComparison.OrdinalIgnoreCase);
+        MouseHideWhileTyping = string.Equals(
+            GetFileValue("mouse-hide-while-typing", "false"),
+            "true", StringComparison.OrdinalIgnoreCase);
+        if (int.TryParse(
+                GetFileValue("scrollback-limit", "10000000"),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var scrollback))
+        {
+            // Upper bound is int.MaxValue (~2 GB) so we don't silently
+            // truncate realistic byte values. Zig uses usize which is
+            // wider, but the settings UI only needs to display what the
+            // user typed; anything bigger than 2 GB is exotic.
+            ScrollbackLimit = Math.Clamp(scrollback, 0, int.MaxValue);
+        }
+        else
+        {
+            ScrollbackLimit = 10_000_000;
+        }
+
+        // Font settings (used by settings UI for initial display).
+        // font-family is a repeatable list in Zig; the file cache gives
+        // us the first user-set value, which is what the settings UI
+        // wants to display. font-size is f32 in Zig, but we parse the
+        // raw string to avoid the f32/f64 reinterpret pitfall.
+        FontFamily = GetFileValue("font-family", "");
+        if (double.TryParse(
+                GetFileValue("font-size", "13"),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var fontSize))
+        {
+            FontSize = Math.Clamp(fontSize, 6.0, 72.0);
+        }
+        else
+        {
+            FontSize = 13.0;
+        }
 
         AnsiPalette = GetAllPaletteColors();
     }
