@@ -10,6 +10,19 @@ using WinRT.Interop;
 namespace Ghostty.Services;
 
 /// <summary>
+/// How the manager resolves <c>window-theme</c> values that aren't
+/// explicitly <c>light</c> or <c>dark</c> (i.e. <c>auto</c>,
+/// <c>ghostty</c>). MainWindow uses Palette so terminal chrome tracks
+/// the active palette. SettingsWindow uses System so the config UI
+/// feels OS-native regardless of the terminal's color scheme.
+/// </summary>
+internal enum ThemeFallbackStyle
+{
+    Palette,
+    System,
+}
+
+/// <summary>
 /// Maps the libghostty <c>window-theme</c> config value to WinUI 3
 /// ElementTheme and the DWM immersive dark mode attribute. Handles
 /// "light", "dark", "system" (follows OS), and "auto" (derives from
@@ -21,8 +34,10 @@ internal sealed class WindowThemeManager : IDisposable
 {
     private readonly IConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
+    private readonly ThemeFallbackStyle _fallback;
 
-    // System theme tracking for "system" mode.
+    // System theme tracking for "system" mode (and any non-explicit
+    // mode when the fallback is System).
     private readonly Windows.UI.ViewManagement.UISettings _uiSettings;
 
     /// <summary>
@@ -39,10 +54,14 @@ internal sealed class WindowThemeManager : IDisposable
     /// </summary>
     public ElementTheme ElementTheme => IsDarkMode ? ElementTheme.Dark : ElementTheme.Light;
 
-    public WindowThemeManager(IConfigService configService, DispatcherQueue dispatcher)
+    public WindowThemeManager(
+        IConfigService configService,
+        DispatcherQueue dispatcher,
+        ThemeFallbackStyle fallback = ThemeFallbackStyle.Palette)
     {
         _configService = configService;
         _dispatcher = dispatcher;
+        _fallback = fallback;
         _uiSettings = new Windows.UI.ViewManagement.UISettings();
 
         _configService.ConfigChanged += OnConfigChanged;
@@ -86,9 +105,10 @@ internal sealed class WindowThemeManager : IDisposable
         // ColorValuesChanged fires on a background thread.
         _dispatcher.TryEnqueue(() =>
         {
-            // System theme changes only affect "system" mode. "Auto"
-            // derives from the config background color, not the OS.
-            if (_configService.WindowTheme != "system") return;
+            // System theme flips only matter when the resolved mode
+            // consults the OS. Explicit light/dark never do; "system"
+            // always does; auto/ghostty do only when fallback=System.
+            if (!TracksSystem(_configService.WindowTheme)) return;
 
             var previous = IsDarkMode;
             Resolve();
@@ -97,6 +117,13 @@ internal sealed class WindowThemeManager : IDisposable
         });
     }
 
+    private bool TracksSystem(string windowTheme) => windowTheme switch
+    {
+        "light" or "dark" => false,
+        "system" => true,
+        _ => _fallback == ThemeFallbackStyle.System,
+    };
+
     private void Resolve()
     {
         IsDarkMode = _configService.WindowTheme switch
@@ -104,11 +131,12 @@ internal sealed class WindowThemeManager : IDisposable
             "light" => false,
             "dark" => true,
             "system" => IsSystemDark(),
-            "auto" => IsBackgroundDark(),
-            // ghostty: chrome colors come from the palette via ShellThemeService,
-            // so XAML theme follows palette luminance just like "auto".
-            "ghostty" => IsBackgroundDark(),
-            _ => true, // default to dark
+            // auto/ghostty (and any unknown value): consult the fallback.
+            // Palette matches the terminal's chrome to the active palette;
+            // System makes the window feel OS-native regardless.
+            _ => _fallback == ThemeFallbackStyle.System
+                ? IsSystemDark()
+                : IsBackgroundDark(),
         };
     }
 
