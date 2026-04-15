@@ -39,7 +39,8 @@ internal sealed class ConfigFileEditor : IConfigFileEditor
 
     public void WriteRaw(string content)
     {
-        WriteAtomic(content);
+        // See ConfigText.NormalizeLineEndings for why this is required.
+        WriteAtomic(ConfigText.NormalizeLineEndings(content));
     }
 
     public void SetRepeatableValues(string key, string[] values)

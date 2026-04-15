@@ -66,11 +66,6 @@
                     <SymbolIcon Symbol="Edit" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
-            <NavigationViewItem x:Name="NavDiagnostics" Content="Diagnostics" Tag="diagnostics">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Important" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
         </NavigationView.MenuItems>
 
         <NavigationView.PaneFooter>
