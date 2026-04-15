@@ -115,8 +115,8 @@
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Acrylic tint color"
                                    ctrl:SettingsCard.ConfigKey="background-tint-color">
-                    <TextBox x:Name="TintColorBox" PlaceholderText="#RRGGBB"
-                             MinWidth="160" LostFocus="TintColor_LostFocus" />
+                    <ctrl:ColorPickerControl x:Name="TintColorPicker"
+                                             ColorChanged="TintColor_ColorChanged" />
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Acrylic tint opacity"
                                    ctrl:SettingsCard.ConfigKey="background-tint-opacity">
