@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Controls.Settings.SettingsGroup"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      Vertical section: bold section title, optional muted subtitle,
+      then a stack of SettingsCard children. The container itself is
+      an ItemsControl so XAML consumers can drop cards directly as
+      children without nesting in a StackPanel.
+    -->
+    <StackPanel Spacing="4" Margin="0,0,0,20">
+        <TextBlock
+            x:Name="HeaderText"
+            Style="{StaticResource BodyStrongTextBlockStyle}"
+            FontSize="16"
+            Margin="0,0,0,2" />
+        <TextBlock
+            x:Name="DescriptionText"
+            Style="{StaticResource CaptionTextBlockStyle}"
+            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+            TextWrapping="Wrap"
+            Margin="0,0,0,4"
+            Visibility="Collapsed" />
+        <ItemsControl x:Name="CardsPresenter" />
+    </StackPanel>
+</UserControl>
