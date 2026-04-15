@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Ghostty.Controls.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.DirectWrite;
+using Ghostty.Core.Settings;
 using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -46,7 +48,7 @@ internal sealed partial class AppearancePage : Page
             if (cs.BackgroundTintColor.HasValue)
             {
                 var c = cs.BackgroundTintColor.Value;
-                TintColorBox.Text = $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+                TintColorPicker.Color = new Rgb(c.R, c.G, c.B).ToHex();
             }
             TintOpacitySlider.Value = cs.BackgroundTintOpacity ?? 0.3;
             LuminosityOpacitySlider.Value = cs.BackgroundLuminosityOpacity ?? 0.3;
@@ -177,8 +179,8 @@ internal sealed partial class AppearancePage : Page
     {
         if (_loading) return;
         _configService.SuppressWatcher(true);
-        _editor.SetValue(key, value);
-        _configService.SuppressWatcher(false);
+        try { _editor.SetValue(key, value); }
+        finally { _configService.SuppressWatcher(false); }
         _configService.Reload();
     }
 
@@ -215,10 +217,8 @@ internal sealed partial class AppearancePage : Page
             OnValueChanged("background-blur-follows-opacity", ts.IsOn ? "true" : "false");
     }
 
-    private void TintColor_LostFocus(object sender, RoutedEventArgs e)
-    {
-        if (sender is TextBox tb) OnValueChanged("background-tint-color", tb.Text);
-    }
+    private void TintColor_ColorChanged(object? sender, string hex)
+        => OnValueChanged("background-tint-color", hex);
 
     private void TintOpacity_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
@@ -256,8 +256,8 @@ internal sealed partial class AppearancePage : Page
         if (!enabled)
         {
             _configService.SuppressWatcher(true);
-            _editor.RemoveValue("background-gradient-point");
-            _configService.SuppressWatcher(false);
+            try { _editor.RemoveValue("background-gradient-point"); }
+            finally { _configService.SuppressWatcher(false); }
             _configService.Reload();
             _pointEditors.Clear();
             PointsPanel.Children.Clear();
@@ -286,7 +286,7 @@ internal sealed partial class AppearancePage : Page
             RemovePointEditor);
         editor.XSlider.Value = x;
         editor.YSlider.Value = y;
-        editor.ColorBox.Text = color;
+        editor.ColorPicker.Color = color;
         editor.RadiusSlider.Value = radius;
         _pointEditors.Add(editor);
         PointsPanel.Children.Add(editor.Panel);
@@ -319,8 +319,8 @@ internal sealed partial class AppearancePage : Page
         if (_loading) return;
         var values = _pointEditors.Select(e => e.ToConfigValue()).ToArray();
         _configService.SuppressWatcher(true);
-        _editor.SetRepeatableValues("background-gradient-point", values);
-        _configService.SuppressWatcher(false);
+        try { _editor.SetRepeatableValues("background-gradient-point", values); }
+        finally { _configService.SuppressWatcher(false); }
         _configService.Reload();
     }
 
@@ -352,7 +352,7 @@ internal sealed partial class AppearancePage : Page
     {
         public Slider XSlider { get; }
         public Slider YSlider { get; }
-        public TextBox ColorBox { get; }
+        public ColorPickerControl ColorPicker { get; }
         public Slider RadiusSlider { get; }
         public Button RemoveButton { get; }
         public StackPanel Panel { get; }
@@ -401,9 +401,18 @@ internal sealed partial class AppearancePage : Page
             YSlider.ValueChanged += (_, _) => onChanged();
             Panel.Children.Add(YSlider);
 
-            ColorBox = new TextBox { Header = "Color", PlaceholderText = "#RRGGBB", Text = "#FF6B35" };
-            ColorBox.LostFocus += (_, _) => onChanged();
-            Panel.Children.Add(ColorBox);
+            // ColorPickerControl has no built-in Header property like TextBox
+            // does, so emit a small caption above it to match the surrounding
+            // sliders' "X position", "Y position" labels.
+            Panel.Children.Add(new TextBlock
+            {
+                Text = "Color",
+                Style = (Style)Microsoft.UI.Xaml.Application.Current.Resources["CaptionTextBlockStyle"],
+                Margin = new Thickness(0, 4, 0, 2)
+            });
+            ColorPicker = new ColorPickerControl { Color = "#FF6B35" };
+            ColorPicker.ColorChanged += (_, _) => onChanged();
+            Panel.Children.Add(ColorPicker);
 
             RadiusSlider = new Slider
             {
@@ -419,7 +428,8 @@ internal sealed partial class AppearancePage : Page
 
         public string ToConfigValue()
         {
-            var color = ColorBox.Text.Trim();
+            var color = ColorPicker.Color;
+            if (string.IsNullOrEmpty(color)) color = "#FF6B35";
             if (!color.StartsWith('#')) color = "#" + color;
             return $"{XSlider.Value:F2},{YSlider.Value:F2},{color},{RadiusSlider.Value:F2}";
         }
