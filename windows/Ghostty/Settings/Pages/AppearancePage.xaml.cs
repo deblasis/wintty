@@ -28,6 +28,14 @@ internal sealed partial class AppearancePage : Page
         OpacitySlider.Value = configService.BackgroundOpacity;
         SelectWindowTheme(configService.WindowTheme);
 
+        // Seed font size from current config before the loading guard
+        // flips off so the ValueChanged handler doesn't fire a redundant
+        // write back to disk.
+        if (configService is ConfigService csFont)
+        {
+            FontSizeBox.Value = csFont.FontSize;
+        }
+
         // Windows-only properties are on the concrete ConfigService, not IConfigService.
         // Cast to read current values for initialization; fall back to defaults if the
         // runtime type is different (e.g. in tests).
@@ -131,6 +139,15 @@ internal sealed partial class AppearancePage : Page
             {
                 _fontList.SetItems(fonts);
                 FontFamilySearch.PlaceholderText = $"Search {fonts.Count} fonts...";
+
+                // Display the currently-configured font so the user sees
+                // what's in use, not an empty placeholder. Reading from
+                // the concrete ConfigService since font-family isn't on
+                // IConfigService.
+                if (_configService is ConfigService cs && !string.IsNullOrEmpty(cs.FontFamily))
+                {
+                    FontFamilySearch.Text = cs.FontFamily;
+                }
             });
         });
     }

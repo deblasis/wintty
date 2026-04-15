@@ -38,8 +38,9 @@ internal sealed partial class ColorsPage : Page
                 // Pair mode.
                 SingleModeRadio.IsChecked = false;
                 PairModeRadio.IsChecked = true;
-                ThemeSearch.Visibility = Visibility.Collapsed;
-                PairThemePanel.Visibility = Visibility.Visible;
+                SingleThemeCard.Visibility = Visibility.Collapsed;
+                LightThemeCard.Visibility = Visibility.Visible;
+                DarkThemeCard.Visibility = Visibility.Visible;
                 LightThemeSearch.Text = cs.LightTheme;
                 DarkThemeSearch.Text = cs.DarkTheme;
             }
@@ -76,8 +77,9 @@ internal sealed partial class ColorsPage : Page
                 DarkThemeSearch.Text = current;
             }
 
-            ThemeSearch.Visibility = Visibility.Collapsed;
-            PairThemePanel.Visibility = Visibility.Visible;
+            SingleThemeCard.Visibility = Visibility.Collapsed;
+            LightThemeCard.Visibility = Visibility.Visible;
+            DarkThemeCard.Visibility = Visibility.Visible;
         }
         else if (rb == SingleModeRadio)
         {
@@ -87,8 +89,9 @@ internal sealed partial class ColorsPage : Page
             if (string.IsNullOrEmpty(fallback))
                 fallback = LightThemeSearch.Text.Trim();
 
-            ThemeSearch.Visibility = Visibility.Visible;
-            PairThemePanel.Visibility = Visibility.Collapsed;
+            SingleThemeCard.Visibility = Visibility.Visible;
+            LightThemeCard.Visibility = Visibility.Collapsed;
+            DarkThemeCard.Visibility = Visibility.Collapsed;
 
             if (!string.IsNullOrEmpty(fallback))
             {
