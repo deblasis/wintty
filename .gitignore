@@ -13,6 +13,12 @@ windows/**/bin/
 windows/**/obj/
 dist/windows/**/bin/
 dist/windows/**/obj/
+# MSBuild binary log, created at repo root by `dotnet build -bl` and by
+# some Visual Studio workflows. The legitimate solution is
+# windows/Ghostty/Ghostty.sln; a root-level ghostty.sln is usually an
+# accidental `dotnet new sln` at the top of the tree.
+/ghostty.sln
+*.binlog
 .direnv/
 .envrc.local
 .flatpak-builder/
