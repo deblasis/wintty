@@ -879,6 +879,15 @@ pub fn addSimd(
     const optimize = m.optimize.?;
     const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
+    // MSVC's C++ static-init pass populates simdutf's implementation
+    // singleton; the upstream no_libcxx path compiles that out with
+    // -fno-exceptions -fno-rtti, which leaves get_default_implementation()
+    // returning null and AVs on the first UTF-8 decode. Keep no_libcxx
+    // and -DSIMDUTF_NO_LIBCXX off on MSVC; simdutf's own build.zig
+    // already skips linkLibCpp there, so libghostty-vt still depends
+    // only on libc.
+    const is_msvc = target.result.abi == .msvc;
+
     // Simdutf
     if (b.systemIntegrationOption("simdutf", .{})) {
         m.linkSystemLibrary("simdutf", dynamic_link_opts);
@@ -886,7 +895,7 @@ pub fn addSimd(
         if (b.lazyDependency("simdutf", .{
             .target = target,
             .optimize = optimize,
-            .no_libcxx = true,
+            .no_libcxx = !is_msvc,
         })) |simdutf_dep| {
             m.linkLibrary(simdutf_dep.artifact("simdutf"));
             if (static_libs) |v| try v.append(
@@ -954,8 +963,9 @@ pub fn addSimd(
 
         // When using the vendored simdutf, build its headers in no-libcxx
         // mode so we don't need C++ standard library headers at all.
-        // System simdutf headers may not support this define.
-        if (!b.systemIntegrationOption("simdutf", .{})) try flags.append(
+        // System simdutf headers may not support this define. Skipped on
+        // MSVC for the same static-init reason as the library build above.
+        if (!b.systemIntegrationOption("simdutf", .{}) and !is_msvc) try flags.append(
             b.allocator,
             "-DSIMDUTF_NO_LIBCXX",
         );
