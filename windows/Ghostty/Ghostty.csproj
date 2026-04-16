@@ -35,6 +35,31 @@
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
     <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <!--
+      NativeAOT treeshaking: drop BCL features this app never uses so the
+      linker can eliminate their implementations and data tables. Each
+      flag below encodes an assumption about our runtime surface; revisit
+      if any of them become false. Closes # 258.
+    -->
+    <!-- Desktop GUI talks to libghostty via P/Invoke and does not route
+         user text through managed culture-sensitive APIs (string compare,
+         ToUpper, DateTime parsing, etc.). Drops the ICU data payload.
+         Any new parsing added to this app MUST pass
+         CultureInfo.InvariantCulture explicitly: under invariant mode
+         the current culture IS invariant, so culture-sensitive calls
+         silently take the invariant path with no warning. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- No ETW / EventSource providers are consumed or emitted by this
+         app; libghostty has its own logging and we do not subscribe to
+         runtime event sources. -->
+    <EventSourceSupport>false</EventSourceSupport>
+    <!-- No outbound HTTP today. When the sponsor-gated update channel
+         lands it will use WinHTTP directly, not HttpClient with
+         DiagnosticSource activity propagation. -->
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+    <!-- No System.Diagnostics.Metrics instruments are registered; we
+         have no OpenTelemetry / metrics pipeline. -->
+    <MetricsSupport>false</MetricsSupport>
     <!-- Use our own Program.Main with diagnostic error capture instead
          of the XAML-generated entry point (App.g.i.cs). This lets us
          catch NativeAOT startup failures that would otherwise exit
