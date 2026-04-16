@@ -181,48 +181,80 @@ public partial class App : Application
     {
         InitializeComponent();
 
-        // Surface unhandled exceptions to stderr before the process dies.
-        // Without this, a managed exception on the UI thread silently exits
-        // with a non-descriptive code and we have nothing to debug from.
-        // Stays enabled in Debug builds only -- in Release we want WER to
-        // capture a real crash dump instead.
-#if DEBUG
+        // Surface unhandled exceptions to stderr AND to a file under
+        // %LOCALAPPDATA%\Ghostty\ before the process dies. Without
+        // this, a managed exception on the UI thread silently exits
+        // with a non-descriptive code and we have nothing to debug
+        // from -- especially in Release, where WER captures a dump
+        // but the user is left without a human-readable pointer to
+        // it. The file path is stable across Debug and Release so
+        // the same path works for dev debugging and for a user who
+        // needs to attach logs to a bug report.
         UnhandledException += (s, e) =>
         {
-            try
-            {
-                Console.Error.WriteLine("[Ghostty] UNHANDLED EXCEPTION on UI thread:");
-                Console.Error.WriteLine(e.Exception.ToString());
-                Console.Error.Flush();
-            }
-            catch { /* logging must not throw */ }
-            // Leave Handled=false so the runtime still tears the app down --
-            // we just wanted to see the exception first.
+            LogUnhandled("UI-THREAD UNHANDLED", e.Exception.ToString());
+            // Leave Handled=false so the runtime still tears the app
+            // down -- we just wanted to record the exception first.
         };
 
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
         {
-            try
-            {
-                Console.Error.WriteLine("[Ghostty] UNHANDLED EXCEPTION (AppDomain):");
-                Console.Error.WriteLine(e.ExceptionObject?.ToString() ?? "(null)");
-                Console.Error.Flush();
-            }
-            catch { /* logging must not throw */ }
+            LogUnhandled("APPDOMAIN UNHANDLED", e.ExceptionObject?.ToString() ?? "(null)");
         };
 
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) =>
         {
-            try
-            {
-                Console.Error.WriteLine("[Ghostty] UNOBSERVED TASK EXCEPTION:");
-                Console.Error.WriteLine(e.Exception.ToString());
-                Console.Error.Flush();
-            }
-            catch { /* logging must not throw */ }
+            LogUnhandled("UNOBSERVED TASK", e.Exception.ToString());
         };
-#endif
     }
+
+    private static void LogUnhandled(string tag, string detail)
+    {
+        // stderr mirror for terminal launches (Program.Main's
+        // FreeConsole gate keeps the console attached in that case).
+        try
+        {
+            Console.Error.WriteLine($"[Ghostty] {tag}:");
+            Console.Error.WriteLine(detail);
+            Console.Error.Flush();
+        }
+        catch { /* logging must not throw */ }
+
+        // File log for GUI launches and packaged releases where there
+        // is no readable console. Append so repeated crashes during
+        // one session accumulate into one file.
+        //
+        // Three handlers (UI thread, AppDomain, TaskScheduler) can
+        // fire on three different threads in quick succession during
+        // a cascading crash; serialize the write or they race on the
+        // file open and at least one `AppendAllText` throws an
+        // `IOException`. A dead crash logger silently swallowing the
+        // exception we were trying to record is exactly the failure
+        // mode this whole helper was built to prevent.
+        //
+        // LocalApplicationData is a per-user folder. For packaged
+        // (MSIX) builds Windows virtualizes this to the package's
+        // private app-data directory; the file still lands somewhere
+        // the user can find via the Settings app, just not the literal
+        // `%LOCALAPPDATA%\Ghostty\`.
+        try
+        {
+            var localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            var dir = Path.Combine(localAppData, "Ghostty");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "crash.log");
+            lock (_crashLogLock)
+            {
+                File.AppendAllText(
+                    path,
+                    $"{DateTimeOffset.UtcNow:O} [{tag}]\n{detail}\n\n");
+            }
+        }
+        catch { /* logging must not throw */ }
+    }
+
+    private static readonly object _crashLogLock = new();
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
