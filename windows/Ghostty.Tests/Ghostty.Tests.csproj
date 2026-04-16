@@ -12,7 +12,7 @@
       are explicit fakes that live in this project; they are NOT parallel
       type definitions of production types.
     -->
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Ghostty.Tests</RootNamespace>
     <AssemblyName>Ghostty.Tests</AssemblyName>
     <Nullable>enable</Nullable>
