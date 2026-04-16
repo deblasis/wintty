@@ -9,9 +9,8 @@ namespace Ghostty.Core.Tabs;
 /// One tab's worth of state. Pure C# (no WinUI types) so the test
 /// project can reference it directly via the Ghostty.Core ProjectReference.
 ///
-/// INPC is hand-rolled here rather than depending on
-/// CommunityToolkit.Mvvm: only two reactive properties, not worth a
-/// NuGet dependency.
+/// INPC is hand-rolled with the C# 14 <c>field</c> keyword: no source
+/// generator dependency, no per-property backing field declarations.
 ///
 /// EffectiveTitle is a computed property; the model raises
 /// PropertyChanged for both UserOverrideTitle and ShellReportedTitle so
@@ -27,14 +26,13 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// because the config layer does not exist; reserved for plan 3.</summary>
     public string? ProfileId { get; set; }
 
-    private string? _userOverrideTitle;
     public string? UserOverrideTitle
     {
-        get => _userOverrideTitle;
+        get;
         set
         {
-            if (_userOverrideTitle == value) return;
-            _userOverrideTitle = value;
+            if (field == value) return;
+            field = value;
             Raise();
             // EffectiveTitle is computed; classic bindings listen for
             // the exact property name, so raise it explicitly.
@@ -42,27 +40,24 @@ internal sealed class TabModel : INotifyPropertyChanged
         }
     }
 
-    private string? _shellReportedTitle;
     public string? ShellReportedTitle
     {
-        get => _shellReportedTitle;
+        get;
         set
         {
-            if (_shellReportedTitle == value) return;
-            _shellReportedTitle = value;
+            if (field == value) return;
+            field = value;
             Raise();
             Raise(nameof(EffectiveTitle));
         }
     }
 
-    private TabProgressState _progress = TabProgressState.None;
     public TabProgressState Progress
     {
-        get => _progress;
-        set { if (!_progress.Equals(value)) { _progress = value; Raise(); } }
-    }
+        get;
+        set { if (!field.Equals(value)) { field = value; Raise(); } }
+    } = TabProgressState.None;
 
-    private TabColor _color = TabColor.None;
     /// <summary>
     /// Preset tint applied to this tab's header. In-memory only;
     /// resets to <see cref="TabColor.None"/> on app restart. True
@@ -71,9 +66,9 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// </summary>
     public TabColor Color
     {
-        get => _color;
-        set { if (_color != value) { _color = value; Raise(); } }
-    }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    } = TabColor.None;
 
     public string EffectiveTitle =>
         UserOverrideTitle ?? ShellReportedTitle ?? "Ghostty";
