@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Ghostty.Controls;
+using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
 using Ghostty.Hosting;
 using Ghostty.Services;
@@ -46,6 +47,8 @@ public partial class App : Application
     // both always agree; the duplication is the lesser evil compared
     // to casting Application.Current everywhere.
     private ConfigService? _configService;
+    private ConfigFileEditor? _configEditor;
+    private ConfigWriteScheduler? _configWriteScheduler;
     private GhosttyHost? _bootstrapHost;
     private HostLifetimeSupervisor? _lifetimeSupervisor;
 
@@ -67,6 +70,23 @@ public partial class App : Application
 
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
+
+    /// <summary>
+    /// Process-wide debounced config write scheduler. All settings-UI
+    /// writes to Windows-only keys go through here so rapid edits
+    /// (slider drags, quick toggle mashing) coalesce to a single disk
+    /// write per debounce window. Null before OnLaunched runs.
+    /// </summary>
+    internal static IConfigWriteScheduler? ConfigWriteScheduler { get; private set; }
+
+    /// <summary>
+    /// Shared ConfigFileEditor wrapping the user's ghostty config
+    /// file. Settings pages read-modify-write through this; the
+    /// Closed handler flushes and disposes after the last window
+    /// shuts.
+    /// </summary>
+    internal static IConfigFileEditor? ConfigFileEditor { get; private set; }
+
     internal static HostLifetimeSupervisor? LifetimeSupervisor { get; private set; }
 
     // Process-wide callback routing: surface handle -> per-window host.
@@ -243,6 +263,52 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
+        // One editor + one scheduler per process. Keeping them here
+        // (instead of per-settings-window) means rapid edits coalesce
+        // across window lifetimes and the file watcher sees a single
+        // batched write rather than a burst. The 150ms debounce is
+        // short enough that toggle clicks still feel instant when
+        // committed, long enough to absorb a slider drag.
+        _configEditor = new ConfigFileEditor(_configService.ConfigFilePath);
+        ConfigFileEditor = _configEditor;
+
+        var uiDispatcher = DispatcherQueue.GetForCurrentThread();
+        _configWriteScheduler = new ConfigWriteScheduler(
+            _configEditor,
+            new SystemSchedulerTimer(),
+            debounce: TimeSpan.FromMilliseconds(150),
+            onFlushed: () =>
+            {
+                // Scheduler fires on a threadpool thread. Reload()
+                // raises ConfigChanged on the UI thread, so marshal
+                // back; suppress the watcher so our own write does
+                // not trigger a spurious second reload on top of the
+                // one we explicitly request.
+                //
+                // Dispose() explicitly passes signal:false so the
+                // common shutdown path never lands here, but a timer
+                // callback that fires concurrently with Dispose (the
+                // tail race) can still enqueue after _configService
+                // is nulled in the shutdown finally. Re-read the
+                // field on the UI thread and bail if shutdown won.
+                uiDispatcher.TryEnqueue(() =>
+                {
+                    var cs = _configService;
+                    if (cs is null) return;
+                    cs.SuppressWatcher(true);
+                    try { cs.Reload(); }
+                    finally { cs.SuppressWatcher(false); }
+                });
+            });
+        ConfigWriteScheduler = _configWriteScheduler;
+
+        // One-shot migration of the legacy ui-settings.json into the
+        // real config + a placement-only window-state.json. Runs
+        // before the first window opens so MainWindow's initial reads
+        // of VerticalTabs / CommandPalette* see the migrated values.
+        // No-op after the first successful run (detects the new file).
+        Ghostty.Settings.WindowStateMigration.TryRun(_configService, _configEditor);
+
         // One supervisor per process. Threads lifecycle invariants
         // through every host that ever lives, including the bootstrap.
         _lifetimeSupervisor = new HostLifetimeSupervisor();
@@ -290,18 +356,39 @@ public partial class App : Application
         {
             try
             {
+                // Flush any pending debounced writes before the editor
+                // is gone. Dispose waits for an in-flight timer
+                // callback so disk writes happen-before the host tears
+                // down the ghostty app.
+                _configWriteScheduler?.Dispose();
+
                 // Bootstrap host is the LAST host. Its Dispose drains
                 // _hostBySurface (asserts empty), notifies the
                 // supervisor (which throws if anything is still live),
                 // and calls AppFree.
                 _bootstrapHost?.Dispose();
+
+                // Dispose ConfigService last: it outlives every host
+                // (by design, so reload round-trips work across
+                // detached windows) but does own a FileSystemWatcher
+                // thread and the native config handle. Disposing here
+                // stops the watcher before the process exits and frees
+                // the libghostty config struct symmetrically with
+                // ConfigNew + ConfigLoadDefaultFiles.
+                _configService?.Dispose();
             }
             finally
             {
+                _configWriteScheduler = null;
+                ConfigWriteScheduler = null;
+                _configEditor = null;
+                ConfigFileEditor = null;
                 _bootstrapHost = null;
                 BootstrapHost = null;
                 _lifetimeSupervisor = null;
                 LifetimeSupervisor = null;
+                _configService = null;
+                ConfigService = null;
                 Exit();
             }
         }
