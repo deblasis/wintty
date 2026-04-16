@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Commands;
 using Ghostty.Controls;
+using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
@@ -57,14 +58,22 @@ public sealed partial class MainWindow : Window
 {
     private readonly GhosttyHost _host;
     private readonly ConfigService _configService;
-    private readonly ConfigFileEditor _configEditor;
+    // Single process-wide editor (owned by App). The per-instance
+    // RMW lock only serializes if every writer hits the SAME editor,
+    // so anything in this window that needs to mutate the config file
+    // goes through App.ConfigFileEditor rather than building its own.
+    private readonly IConfigFileEditor _configEditor;
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
     private readonly DialogTracker _dialogs = new();
-    private readonly UiSettings _uiSettings;
+    private readonly WindowState _windowState;
     // Kept as a field so the ColorValuesChanged subscription is not GC'd.
     private readonly Windows.UI.ViewManagement.UISettings _systemUiSettings;
+    // Mirrors the current tab-strip orientation so we can detect when
+    // a config reload or settings-toggle callback actually changed the
+    // visible state (vs. echoing the same value we already apply).
+    private bool _verticalTabsVisible;
 
     private readonly TabHost _horizontalTabHost;
     private readonly VerticalTabHost _verticalTabHost;
@@ -212,7 +221,10 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
 
         _configService = configService;
-        _configEditor = new ConfigFileEditor(configService.ConfigFilePath);
+        _configEditor = App.ConfigFileEditor
+            ?? throw new InvalidOperationException(
+                "MainWindow: App.ConfigFileEditor is null. " +
+                "App.OnLaunched must initialize it before constructing a window.");
 
         // Build this window's per-window GhosttyHost around the shared
         // app. Each per-window host has its OWN per-window surface
@@ -312,7 +324,7 @@ public sealed partial class MainWindow : Window
             () => _factory.Create(),
             seed: seedTab);
         _router = new PaneActionRouter(_tabManager);
-        _uiSettings = UiSettings.Load();
+        _windowState = WindowState.Load();
         RestoreWindowPlacement();
 
         _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
@@ -374,7 +386,8 @@ public sealed partial class MainWindow : Window
                 ? "Switch to horizontal tabs"
                 : $"Switch to horizontal tabs ({chord})");
 
-        _tabHost = _uiSettings.VerticalTabs ? _verticalTabHost : _horizontalTabHost;
+        _verticalTabsVisible = _configService.VerticalTabs;
+        _tabHost = _verticalTabsVisible ? _verticalTabHost : _horizontalTabHost;
 
         _layout = new LayoutCoordinator(
             StripColumn,
@@ -382,7 +395,7 @@ public sealed partial class MainWindow : Window
             (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
             VerticalTitleBar);
-        _layout.Snap(_uiSettings.VerticalTabs);
+        _layout.Snap(_verticalTabsVisible);
 
         _titleBar = new TitleBarCoordinator(
             this,
@@ -408,7 +421,7 @@ public sealed partial class MainWindow : Window
 
         _commandPaletteVm = CreateCommandPaletteViewModel();
         CommandPaletteUI.Bind(_commandPaletteVm);
-        CommandPaletteUI.ApplySettings(_uiSettings.CommandPaletteBackground);
+        CommandPaletteUI.ApplySettings(_configService.CommandPaletteBackground);
 
         // When the ViewModel closes itself (e.g. after executing a command),
         // sync the Popup and focus state.
@@ -466,7 +479,7 @@ public sealed partial class MainWindow : Window
             {
                 if (configService.SettingsUiEnabled)
                 {
-                    var editor = new ConfigFileEditor(configService.ConfigFilePath);
+                    var editor = App.ConfigFileEditor!;
                     var keybindings = new KeyBindingsProvider(configService);
                     var themeProvider = new ThemeProvider(configService);
                     // Reuse existing settings window if still open.
@@ -539,7 +552,51 @@ public sealed partial class MainWindow : Window
 
         _tabManager.LastTabClosed += (_, _) => Close();
 
+        // Settings page raises this the moment the user flips the
+        // vertical-tabs toggle so we animate without waiting for the
+        // debounced write + ConfigChanged round-trip. The config
+        // reload handler below runs the same animation for external
+        // edits (raw editor save, file-watcher, external config
+        // change); the _verticalTabsVisible mirror prevents double
+        // animation when both paths observe the same transition.
+        Ghostty.Settings.Pages.GeneralPage.VerticalTabsToggled
+            += OnVerticalTabsToggledFromSettings;
+        _configService.ConfigChanged += OnConfigReloaded;
+
         Closed += OnClosedAsync;
+    }
+
+    private void OnVerticalTabsToggledFromSettings(bool vertical)
+    {
+        if (_verticalTabsVisible == vertical) return;
+        AnimateTabLayoutTo(vertical);
+    }
+
+    private void OnConfigReloaded(IConfigService cfg)
+    {
+        // Re-apply the command-palette backdrop live. Group-by and
+        // ViewModel-construction-time settings are picked up the next
+        // time the palette is instantiated, so nothing to do here for
+        // CommandPaletteGroupCommands.
+        CommandPaletteUI.ApplySettings(cfg.CommandPaletteBackground);
+
+        var vertical = cfg.VerticalTabs;
+        if (_verticalTabsVisible == vertical) return;
+        AnimateTabLayoutTo(vertical);
+    }
+
+    private void AnimateTabLayoutTo(bool vertical)
+    {
+        if (_layout.IsSwitching) return;
+        _verticalTabsVisible = vertical;
+        _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
+        _layout.Animate(vertical, onCompleted: () =>
+        {
+            _titleBar.ApplyForCurrentMode();
+            var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+            if (leaf is not null)
+                leaf.Terminal().Focus(FocusState.Programmatic);
+        });
     }
 
     /// <summary>
@@ -690,6 +747,17 @@ public sealed partial class MainWindow : Window
 
     private async void OnClosedAsync(object sender, WindowEventArgs args)
     {
+        // Detach from process-global event sources before we tear
+        // down the dispatcher-bound state below. The ConfigService
+        // outlives individual MainWindows, so a lingering subscription
+        // would fire on a dead XamlRoot on the next reload. The
+        // static settings-page event has the same lifetime problem
+        // (multiple windows / detached tabs each leave one dangling
+        // entry if not explicitly removed).
+        Ghostty.Settings.Pages.GeneralPage.VerticalTabsToggled
+            -= OnVerticalTabsToggledFromSettings;
+        _configService.ConfigChanged -= OnConfigReloaded;
+
         // Persist window placement for next launch. Skip when
         // fullscreen -- restore to the normal size instead.
         if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
@@ -697,7 +765,7 @@ public sealed partial class MainWindow : Window
             var hwnd = new HWND(WindowNative.GetWindowHandle(this));
             var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
             var isMaximized = (style & WINDOW_STYLE.WS_MAXIMIZE) != 0;
-            _uiSettings.WindowMaximized = isMaximized;
+            _windowState.WindowMaximized = isMaximized;
 
             // Save the restored (non-maximized) bounds so we don't
             // persist a maximized rect that fills the whole monitor.
@@ -706,19 +774,19 @@ public sealed partial class MainWindow : Window
                 var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
                 PInvoke.GetWindowPlacement(hwnd, ref placement);
                 var rc = placement.rcNormalPosition;
-                _uiSettings.WindowX = rc.left;
-                _uiSettings.WindowY = rc.top;
-                _uiSettings.WindowWidth = rc.right - rc.left;
-                _uiSettings.WindowHeight = rc.bottom - rc.top;
+                _windowState.WindowX = rc.left;
+                _windowState.WindowY = rc.top;
+                _windowState.WindowWidth = rc.right - rc.left;
+                _windowState.WindowHeight = rc.bottom - rc.top;
             }
             else
             {
-                _uiSettings.WindowX = AppWindow.Position.X;
-                _uiSettings.WindowY = AppWindow.Position.Y;
-                _uiSettings.WindowWidth = AppWindow.Size.Width;
-                _uiSettings.WindowHeight = AppWindow.Size.Height;
+                _windowState.WindowX = AppWindow.Position.X;
+                _windowState.WindowY = AppWindow.Position.Y;
+                _windowState.WindowWidth = AppWindow.Size.Width;
+                _windowState.WindowHeight = AppWindow.Size.Height;
             }
-            _uiSettings.Save();
+            _windowState.Save();
         }
 
         // Close settings window if open.
@@ -784,33 +852,22 @@ public sealed partial class MainWindow : Window
     /// Toggle between horizontal and vertical tab layouts at runtime.
     /// Triggered by Ctrl+Shift+, (comma), the title-bar icon button, and
     /// the strip context menu. Persists the choice via
-    /// <see cref="UiSettings"/> so it survives the next launch.
+    /// the shared debounced config writer so it survives the next
+    /// launch after the standard reload pipeline picks the key up.
     /// </summary>
     internal void ToggleTabLayout()
     {
         if (_layout.IsSwitching) return;
-        var toVertical = !_uiSettings.VerticalTabs;
-        _uiSettings.VerticalTabs = toVertical;
-        _uiSettings.Save();
-        _tabHost = toVertical ? _verticalTabHost : _horizontalTabHost;
+        var toVertical = !_verticalTabsVisible;
 
-        // SetTitleBar requires the target element to be visible and
-        // in the visual tree. Calling it mid-animation hits
-        // COMException 0x800F1000 because the incoming host is still
-        // at opacity 0 / translated off-screen. Defer to the
-        // Completed callback where Snap() has finalized visibility.
-        //
-        // The crossfade changes tab-host visibility, which causes
-        // WinUI 3's focus manager to move focus away from the
-        // terminal pane. Restore focus to the active terminal after
-        // the animation settles.
-        _layout.Animate(toVertical, onCompleted: () =>
-        {
-            _titleBar.ApplyForCurrentMode();
-            var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
-            if (leaf is not null)
-                leaf.Terminal().Focus(FocusState.Programmatic);
-        });
+        // Persist through the shared debounced scheduler so rapid
+        // toggling (Ctrl+Shift+, held down, or the context-menu
+        // sibling firing at the same time as the settings toggle)
+        // still resolves to one disk write with the last value.
+        Ghostty.App.ConfigWriteScheduler?.Schedule(
+            "vertical-tabs", toVertical ? "true" : "false");
+
+        AnimateTabLayoutTo(toVertical);
     }
 
     /// <summary>
@@ -1306,12 +1363,12 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void RestoreWindowPlacement()
     {
-        var w = _uiSettings.WindowWidth;
-        var h = _uiSettings.WindowHeight;
+        var w = _windowState.WindowWidth;
+        var h = _windowState.WindowHeight;
         if (w is null || h is null || w < 200 || h < 150) return;
 
-        var x = _uiSettings.WindowX ?? 0;
-        var y = _uiSettings.WindowY ?? 0;
+        var x = _windowState.WindowX ?? 0;
+        var y = _windowState.WindowY ?? 0;
 
         // Ensure the window's top-left quadrant is on a live monitor.
         // DisplayArea.GetFromPoint returns the nearest display if the
@@ -1333,7 +1390,7 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new Windows.Graphics.SizeInt32(w.Value, h.Value));
         AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
 
-        if (_uiSettings.WindowMaximized)
+        if (_windowState.WindowMaximized)
             PInvoke.ShowWindow(new HWND(WindowNative.GetWindowHandle(this)), SHOW_WINDOW_CMD.SW_SHOWMAXIMIZED);
     }
 
@@ -1455,7 +1512,7 @@ public sealed partial class MainWindow : Window
             sources,
             frecency,
             autoCompleter,
-            groupByCategory: _uiSettings.CommandPaletteGroupCommands);
+            groupByCategory: _configService.CommandPaletteGroupCommands);
     }
 
     private void ExecuteBindingAction(string actionKey)
