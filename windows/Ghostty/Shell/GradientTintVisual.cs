@@ -149,8 +149,7 @@ internal sealed class GradientTintVisual : IDisposable
     /// </summary>
     internal void SetOverlayOpacity(float opacity)
     {
-        if (_overlayCanvas is not null)
-            _overlayCanvas.Opacity = opacity;
+        _overlayCanvas?.Opacity = opacity;
     }
 
     /// <summary>
