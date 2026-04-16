@@ -43,9 +43,11 @@ internal sealed partial class CommandPaletteControl : UserControl
     /// </summary>
     public void Bind(CommandPaletteViewModel viewModel)
     {
-        if (_vm is not null)
-            _vm.PropertyChanged -= OnViewModelPropertyChanged;
+        _vm?.PropertyChanged -= OnViewModelPropertyChanged;
 
+        // The subscribe below skips ?. on purpose: _vm was just
+        // assigned the non-nullable viewModel parameter on the
+        // previous line.
         _vm = viewModel;
         _vm.PropertyChanged += OnViewModelPropertyChanged;
 
@@ -371,12 +373,12 @@ internal sealed partial class CommandPaletteControl : UserControl
 
     private void OnPinChecked(object sender, RoutedEventArgs e)
     {
-        if (_vm is not null) _vm.IsPinned = true;
+        _vm?.IsPinned = true;
     }
 
     private void OnPinUnchecked(object sender, RoutedEventArgs e)
     {
-        if (_vm is not null) _vm.IsPinned = false;
+        _vm?.IsPinned = false;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
