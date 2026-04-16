@@ -14,9 +14,9 @@ internal enum PaletteMode
 
 /// <summary>
 /// Backs the command palette control. Pure code-behind binding
-/// (see <c>CommandPaletteControl.Bind</c>), so the type stays internal
-/// and INPC is hand-rolled for the same reason as <c>TabModel</c>:
-/// not worth a NuGet dependency for one consumer.
+/// (see <c>CommandPaletteControl.Bind</c>), so the type stays internal.
+/// INPC is hand-rolled with the C# 14 <c>field</c> keyword for the
+/// same reason as <c>TabModel</c>: no source generator dependency.
 /// </summary>
 internal class CommandPaletteViewModel : INotifyPropertyChanged
 {
@@ -26,76 +26,67 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
     private readonly bool _groupByCategory;
     private List<CommandItem> _allCommands = [];
 
-    private bool _isOpen;
     public bool IsOpen
     {
-        get => _isOpen;
-        set { if (_isOpen != value) { _isOpen = value; Raise(); } }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
     }
 
-    private string _searchText = "";
     public string SearchText
     {
-        get => _searchText;
+        get;
         set
         {
-            if (_searchText == value) return;
-            _searchText = value;
+            if (field == value) return;
+            field = value;
             Raise();
             OnSearchTextChanged(value);
         }
-    }
+    } = "";
 
-    private PaletteMode _mode = PaletteMode.Search;
     public PaletteMode Mode
     {
-        get => _mode;
-        set { if (_mode != value) { _mode = value; Raise(); } }
-    }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    } = PaletteMode.Search;
 
-    private bool _isPinned;
     public bool IsPinned
     {
-        get => _isPinned;
-        set { if (_isPinned != value) { _isPinned = value; Raise(); } }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
     }
 
-    private CommandItem? _selectedCommand;
     public CommandItem? SelectedCommand
     {
-        get => _selectedCommand;
-        set { if (_selectedCommand != value) { _selectedCommand = value; Raise(); } }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
     }
 
-    private List<CommandItem> _filteredCommands = [];
     public List<CommandItem> FilteredCommands
     {
         // Always a fresh list from ApplyFilter/ApplyCommandLineFilter,
         // so no reference-equality guard: it would always pass anyway.
-        get => _filteredCommands;
-        set { _filteredCommands = value; Raise(); }
-    }
+        get;
+        set { field = value; Raise(); }
+    } = [];
 
-    private string? _ghostText;
     public string? GhostText
     {
-        get => _ghostText;
-        set { if (_ghostText != value) { _ghostText = value; Raise(); } }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
     }
 
-    private string _statusText = "";
     public string StatusText
     {
-        get => _statusText;
-        set { if (_statusText != value) { _statusText = value; Raise(); } }
-    }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    } = "";
 
-    private string _modeLabel = "Search";
     public string ModeLabel
     {
-        get => _modeLabel;
-        set { if (_modeLabel != value) { _modeLabel = value; Raise(); } }
-    }
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    } = "Search";
 
     public CommandPaletteViewModel(
         IReadOnlyList<ICommandSource> sources,

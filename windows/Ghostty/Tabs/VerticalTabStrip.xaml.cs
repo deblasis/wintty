@@ -21,7 +21,6 @@ internal sealed partial class VerticalTabStrip : UserControl
 {
     private readonly TabManager _manager;
     private bool _syncing;
-    private bool _isExpanded;
 
     /// <summary>Raised when the user clicks the chevron toggle.</summary>
     public event EventHandler? ChevronToggled;
@@ -42,11 +41,11 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     public bool IsExpanded
     {
-        get => _isExpanded;
+        get;
         set
         {
-            if (_isExpanded == value) return;
-            _isExpanded = value;
+            if (field == value) return;
+            field = value;
             TabList.ItemTemplate = (DataTemplate)Resources[
                 value ? "ExpandedRowTemplate" : "CollapsedRowTemplate"];
             // Chevron points in the direction the strip will go on

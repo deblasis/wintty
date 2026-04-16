@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -22,6 +23,12 @@ namespace Ghostty.Services;
 /// </summary>
 internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
 {
+    // Path.GetInvalidFileNameChars() allocates a fresh char[] on each
+    // call (defensive copy); SearchValues caches the set once and picks
+    // an optimal scanner for the 41 invalid chars on Windows.
+    private static readonly SearchValues<char> InvalidFileNameChars =
+        SearchValues.Create(Path.GetInvalidFileNameChars());
+
     private readonly ConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
     private readonly CancellationTokenSource _cts = new();
@@ -168,7 +175,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
         // Validate: theme names are filenames, reject anything suspicious.
         if (themeName.Length > 255 ||
             themeName.Contains("..") ||
-            themeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            themeName.AsSpan().IndexOfAny(InvalidFileNameChars) >= 0)
         {
             Debug.WriteLine($"[theme-preview] rejected invalid name: {themeName}");
             return;

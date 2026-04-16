@@ -106,8 +106,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     {
         var next = _activeLeaf.Terminal();
         if (ReferenceEquals(next, _progressBoundTerminal)) return;
-        if (_progressBoundTerminal is not null)
-            _progressBoundTerminal.ProgressChanged -= OnActiveLeafProgressChanged;
+        _progressBoundTerminal?.ProgressChanged -= OnActiveLeafProgressChanged;
         _progressBoundTerminal = next;
         next.ProgressChanged += OnActiveLeafProgressChanged;
         // Re-emit the new leaf's last known state so subscribers see
