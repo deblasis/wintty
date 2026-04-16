@@ -10,7 +10,7 @@
       hand-written stubs that drift. The previous PaneStubs.cs +
       Compile Include trick is replaced by this assembly.
     -->
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Ghostty.Core</RootNamespace>
     <AssemblyName>Ghostty.Core</AssemblyName>
     <Nullable>enable</Nullable>
