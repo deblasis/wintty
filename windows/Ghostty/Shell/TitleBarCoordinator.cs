@@ -112,11 +112,9 @@ internal sealed class TitleBarCoordinator
 
     private void RebindVerticalTitle()
     {
-        if (_boundTab is not null)
-            _boundTab.PropertyChanged -= OnBoundTabPropertyChanged;
+        _boundTab?.PropertyChanged -= OnBoundTabPropertyChanged;
         _boundTab = _tabs.ActiveTab;
-        if (_boundTab is not null)
-            _boundTab.PropertyChanged += OnBoundTabPropertyChanged;
+        _boundTab?.PropertyChanged += OnBoundTabPropertyChanged;
         UpdateVerticalTitleText();
     }
 
