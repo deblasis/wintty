@@ -28,6 +28,27 @@ public interface IConfigService : IDisposable
     double BackgroundOpacity { get; }
 
     /// <summary>
+    /// Windows-only: true when tabs render in a vertical sidebar
+    /// instead of the default horizontal strip. Default false.
+    /// Backed by the "vertical-tabs" key in the user's config file.
+    /// </summary>
+    bool VerticalTabs { get; }
+
+    /// <summary>
+    /// Windows-only: true when the command palette groups entries
+    /// by category. Default false. Backed by the
+    /// "command-palette-group-commands" key.
+    /// </summary>
+    bool CommandPaletteGroupCommands { get; }
+
+    /// <summary>
+    /// Windows-only: backdrop material for the command palette.
+    /// One of "acrylic", "mica", "opaque". Default "acrylic".
+    /// Backed by the "command-palette-background" key.
+    /// </summary>
+    string CommandPaletteBackground { get; }
+
+    /// <summary>
     /// Window theme from config: "light", "dark", "system", "auto", or
     /// "ghostty" (palette-derived chrome). Controls both the XAML
     /// ElementTheme and the DWM title bar chrome.

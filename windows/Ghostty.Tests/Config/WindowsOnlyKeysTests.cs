@@ -16,6 +16,9 @@ public class WindowsOnlyKeysTests
     [InlineData("background-gradient-speed")]
     [InlineData("background-gradient-blend")]
     [InlineData("background-gradient-opacity")]
+    [InlineData("vertical-tabs")]
+    [InlineData("command-palette-group-commands")]
+    [InlineData("command-palette-background")]
     public void Contains_KnownKey(string key)
     {
         Assert.True(WindowsOnlyKeys.Contains(key));

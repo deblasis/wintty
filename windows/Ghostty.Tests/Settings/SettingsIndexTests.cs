@@ -19,6 +19,9 @@ public class SettingsIndexTests
     {
         // General
         "auto-reload-config",
+        "vertical-tabs",
+        "command-palette-background",
+        "command-palette-group-commands",
         // Appearance
         "window-theme",
         "font-family",
