@@ -38,6 +38,19 @@ internal sealed class ConfigService : IConfigService
     public bool AutoReloadEnabled { get; private set; }
     public bool SettingsUiEnabled { get; private set; }
     public double BackgroundOpacity { get; private set; } = 1.0;
+
+    // Cached during ReadFlagsCore while _configFileCache is populated;
+    // the cache is nulled in ReadFlags' finally, so expression-bodied
+    // getters reading GetFileValue would always return defaults outside
+    // of reload. Backing-field pattern matches the existing
+    // BackgroundStyle / BackgroundTint* properties below.
+    public bool VerticalTabs { get; private set; }
+    public bool CommandPaletteGroupCommands { get; private set; }
+    public string CommandPaletteBackground { get; private set; } = "acrylic";
+
+    private static readonly string[] CommandPaletteBackgroundAllowed =
+        { "acrylic", "mica", "opaque" };
+
     public string BackgroundStyle { get; private set; } = "frosted";
     public Windows.UI.Color? BackgroundTintColor { get; private set; }
     public float? BackgroundTintOpacity { get; private set; }
@@ -284,6 +297,20 @@ internal sealed class ConfigService : IConfigService
         // needing their own validation. WindowTransparencyState also
         // clamps defensively as a standalone value type.
         BackgroundOpacity = Math.Clamp(GetDouble("background-opacity", 1.0), 0.0, 1.0);
+        // Windows-only UI keys migrated from the legacy ui-settings.json
+        // shim. Cached here because GetFileValue only works while
+        // _configFileCache is populated (ReadFlags' scope).
+        VerticalTabs = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("vertical-tabs", ""),
+            defaultValue: false);
+        CommandPaletteGroupCommands = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("command-palette-group-commands", ""),
+            defaultValue: false);
+        CommandPaletteBackground = WindowsOnlyKeyParsers.ParseStringAllowed(
+            GetFileValue("command-palette-background", ""),
+            allowed: CommandPaletteBackgroundAllowed,
+            defaultValue: "acrylic");
+
         // background-style is a Windows-only key not in the Zig config
         // schema, so we read it directly from the config file.
         BackgroundStyle = GetFileValue("background-style", "frosted");

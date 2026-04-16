@@ -50,6 +50,12 @@ public static class WindowsOnlyKeys
             "Whether the gradient renders over or under terminal text."),
         new("background-gradient-opacity",
             "Strength of the gradient tint layer."),
+        new("vertical-tabs",
+            "Tab strip orientation. When true, tabs render in a vertical sidebar instead of the default horizontal strip."),
+        new("command-palette-group-commands",
+            "Group entries in the command palette by category instead of listing them flat."),
+        new("command-palette-background",
+            "Backdrop material for the command palette (acrylic / mica / opaque)."),
     ];
 
     public static readonly FrozenSet<string> Set =
