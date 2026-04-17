@@ -1,7 +1,6 @@
 using System;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Taskbar;
-using Ghostty.Logging;
 using Ghostty.Taskbar;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
@@ -29,7 +28,7 @@ internal sealed class TaskbarHost : IDisposable
 
     public bool IsAvailable => _coordinator is not null;
 
-    public TaskbarHost(Window window, TabManager tabs)
+    public TaskbarHost(Window window, TabManager tabs, ILogger<TaskbarHost> logger)
     {
         try
         {
@@ -48,7 +47,7 @@ internal sealed class TaskbarHost : IDisposable
         }
         catch (Exception ex)
         {
-            StaticLoggers.TaskbarHost.LogTaskbarWiringFailed(ex);
+            logger.LogTaskbarWiringFailed(ex);
         }
     }
 
