@@ -1,9 +1,10 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
 using Ghostty.Interop;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
 namespace Ghostty.Hosting;
@@ -31,8 +32,6 @@ namespace Ghostty.Hosting;
 /// shortly after, and libghostty cleans up the request state via the
 /// surface destroy path.
 /// </summary>
-// TODO(logging): replace Debug.WriteLine with ILogger<T> once the
-// Windows port has structured logging infrastructure.
 internal sealed class ClipboardBridge
 {
     private readonly DispatcherQueue _dispatcher;
@@ -74,7 +73,7 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[clipboard] read handler failed: {ex.Message}");
+                StaticLoggers.ClipboardBridge.LogReadHandlerFailed(ex);
             }
             finally
             {
@@ -122,7 +121,7 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[clipboard] confirm handler failed: {ex.Message}");
+                StaticLoggers.ClipboardBridge.LogConfirmHandlerFailed(ex);
             }
             finally
             {
@@ -167,8 +166,29 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[clipboard] write handler failed: {ex.Message}");
+                StaticLoggers.ClipboardBridge.LogWriteHandlerFailed(ex);
             }
         });
     }
+}
+
+internal static partial class ClipboardBridgeLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.ReadHandlerErr,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] read handler failed")]
+    internal static partial void LogReadHandlerFailed(
+        this ILogger<ClipboardBridge> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.ConfirmHandlerErr,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] confirm handler failed")]
+    internal static partial void LogConfirmHandlerFailed(
+        this ILogger<ClipboardBridge> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.WriteHandlerErr,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] write handler failed")]
+    internal static partial void LogWriteHandlerFailed(
+        this ILogger<ClipboardBridge> logger, System.Exception ex);
 }
