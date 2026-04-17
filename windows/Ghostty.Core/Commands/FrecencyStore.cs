@@ -1,13 +1,14 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Ghostty.Core.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Commands;
 
-internal sealed class FrecencyStore
+internal sealed partial class FrecencyStore
 {
     public Dictionary<string, FrecencyEntry> Entries { get; set; } = [];
 
@@ -55,7 +56,7 @@ internal sealed class FrecencyStore
         }
         catch (JsonException ex)
         {
-            Debug.WriteLine($"FrecencyStore parse failed: {ex.Message}");
+            CoreStaticLoggers.FrecencyStore.LogParseFailed(ex);
             return new FrecencyStore();
         }
     }
@@ -76,7 +77,7 @@ internal sealed class FrecencyStore
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"FrecencyStore load failed: {ex.Message}");
+            CoreStaticLoggers.FrecencyStore.LogLoadFailed(ex);
             return new FrecencyStore();
         }
     }
@@ -91,7 +92,7 @@ internal sealed class FrecencyStore
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"FrecencyStore save failed: {ex.Message}");
+            CoreStaticLoggers.FrecencyStore.LogSaveFailed(ex);
         }
     }
 }
@@ -106,4 +107,25 @@ internal sealed class FrecencyEntry
 [JsonSerializable(typeof(FrecencyStore))]
 internal partial class FrecencyStoreContext : JsonSerializerContext
 {
+}
+
+internal static partial class FrecencyStoreLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Frecency.ParseFailed,
+                   Level = LogLevel.Warning,
+                   Message = "FrecencyStore parse failed")]
+    internal static partial void LogParseFailed(
+        this ILogger<FrecencyStore> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Frecency.LoadFailed,
+                   Level = LogLevel.Warning,
+                   Message = "FrecencyStore load failed")]
+    internal static partial void LogLoadFailed(
+        this ILogger<FrecencyStore> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Frecency.SaveFailed,
+                   Level = LogLevel.Warning,
+                   Message = "FrecencyStore save failed")]
+    internal static partial void LogSaveFailed(
+        this ILogger<FrecencyStore> logger, System.Exception ex);
 }

@@ -1,5 +1,7 @@
 using System;
 using Ghostty.Core.Config;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -77,7 +79,16 @@ internal sealed partial class GeneralPage : Page
         }
         catch (System.Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Failed to open config file: {ex.Message}");
+            StaticLoggers.GeneralPage.LogConfigOpenFailed(ex);
         }
     }
+}
+
+internal static partial class GeneralPageLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SettingsUi.ConfigOpenFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to open config file")]
+    internal static partial void LogConfigOpenFailed(
+        this ILogger<GeneralPage> logger, System.Exception ex);
 }

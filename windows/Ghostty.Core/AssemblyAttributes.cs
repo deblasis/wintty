@@ -4,3 +4,10 @@
 // under NativeAOT. Without this guard, a hand-written [DllImport] added
 // later would silently bring back the runtime marshaller.
 [assembly: System.Runtime.CompilerServices.DisableRuntimeMarshalling]
+
+// #259 logging: Ghostty (WinUI shell) and Ghostty.Tests both consume
+// internal logging types defined in this assembly (LogEvents constants,
+// LoggingBootstrap, FilterState, CapturingLoggerProvider). Both
+// consumers already reference Ghostty.Core via ProjectReference.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Ghostty")]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Ghostty.Tests")]

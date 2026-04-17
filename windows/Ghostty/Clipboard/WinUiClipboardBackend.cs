@@ -1,19 +1,15 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Windows.ApplicationModel.DataTransfer;
 using WinClipboard = Windows.ApplicationModel.DataTransfer.Clipboard;
 
 namespace Ghostty.Clipboard;
-
-// TODO(logging): replace Debug.WriteLine with ILogger<T> once the
-// Windows port has structured logging infrastructure. Debug.WriteLine
-// disappears in Release builds, so production failures here are
-// currently invisible.
 
 /// <summary>
 /// Production IClipboardBackend backed by Windows.ApplicationModel.
@@ -46,7 +42,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         catch (COMException ex)
         {
             // Clipboard locked by another process. Treated as "no text".
-            Debug.WriteLine($"[clipboard] read failed: 0x{ex.HResult:X8}");
+            StaticLoggers.WinUiClipboardBackend.LogReadFailed(ex, ex.HResult);
             return null;
         }
     }
@@ -59,7 +55,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         }
         catch (COMException ex)
         {
-            Debug.WriteLine($"[clipboard] write failed: 0x{ex.HResult:X8}");
+            StaticLoggers.WinUiClipboardBackend.LogWriteFailed(ex, ex.HResult);
 
             // CO_E_NOTINITIALIZED is a known WinUI 3 startup race: the
             // clipboard broker is not ready yet. Retry once on the next
@@ -77,7 +73,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
                     try { WinClipboard.SetContent(BuildPackage(payloads)); }
                     catch (COMException retryEx)
                     {
-                        Debug.WriteLine($"[clipboard] write retry failed: 0x{retryEx.HResult:X8}");
+                        StaticLoggers.WinUiClipboardBackend.LogWriteRetryFailed(retryEx, retryEx.HResult);
                     }
                 });
             }
@@ -109,4 +105,25 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         }
         return package;
     }
+}
+
+internal static partial class WinUiClipboardBackendLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.ReadFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] read failed: 0x{HResult:X8}")]
+    internal static partial void LogReadFailed(
+        this ILogger<WinUiClipboardBackend> logger, System.Exception ex, int hresult);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.WriteFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] write failed: 0x{HResult:X8}")]
+    internal static partial void LogWriteFailed(
+        this ILogger<WinUiClipboardBackend> logger, System.Exception ex, int hresult);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.WriteRetryFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] write retry failed: 0x{HResult:X8}")]
+    internal static partial void LogWriteRetryFailed(
+        this ILogger<WinUiClipboardBackend> logger, System.Exception ex, int hresult);
 }

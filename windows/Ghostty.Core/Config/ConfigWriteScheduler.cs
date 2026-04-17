@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using Ghostty.Core.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Core.Config;
 
@@ -13,12 +14,13 @@ namespace Ghostty.Core.Config;
 /// host uses to invoke <see cref="IConfigService.Reload"/> on the
 /// dispatcher queue.
 /// </summary>
-public sealed class ConfigWriteScheduler : IConfigWriteScheduler
+public sealed partial class ConfigWriteScheduler : IConfigWriteScheduler
 {
     private readonly IConfigFileEditor _editor;
     private readonly ISchedulerTimer _timer;
     private readonly TimeSpan _debounce;
     private readonly Action _onFlushed;
+    private readonly ILogger<ConfigWriteScheduler> _logger;
     // OrdinalIgnoreCase matches ghostty's own config parser, so
     // Schedule("vertical-tabs") and Schedule("Vertical-Tabs") coalesce
     // the same way the downstream reader would treat them.
@@ -31,16 +33,19 @@ public sealed class ConfigWriteScheduler : IConfigWriteScheduler
         IConfigFileEditor editor,
         ISchedulerTimer timer,
         TimeSpan debounce,
-        Action onFlushed)
+        Action onFlushed,
+        ILogger<ConfigWriteScheduler> logger)
     {
         ArgumentNullException.ThrowIfNull(editor);
         ArgumentNullException.ThrowIfNull(timer);
         ArgumentNullException.ThrowIfNull(onFlushed);
+        ArgumentNullException.ThrowIfNull(logger);
 
         _editor = editor;
         _timer = timer;
         _debounce = debounce;
         _onFlushed = onFlushed;
+        _logger = logger;
         _timer.Callback = FlushFromTimer;
     }
 
@@ -82,8 +87,7 @@ public sealed class ConfigWriteScheduler : IConfigWriteScheduler
             try { _editor.SetValue(kv.Key, kv.Value); }
             catch (Exception ex)
             {
-                Debug.WriteLine(
-                    $"[ConfigWriteScheduler] SetValue('{kv.Key}') failed: {ex.Message}");
+                LogWriteFailed(ex, kv.Key);
             }
         }
     }
@@ -104,4 +108,9 @@ public sealed class ConfigWriteScheduler : IConfigWriteScheduler
         DrainAndWrite(signal: false);
         _timer.Dispose();
     }
+
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.WriteSchedulerErr,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigWriteScheduler] SetValue('{Key}') failed")]
+    private partial void LogWriteFailed(System.Exception ex, string key);
 }
