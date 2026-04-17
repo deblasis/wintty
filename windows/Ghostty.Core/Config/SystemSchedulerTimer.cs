@@ -1,6 +1,7 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
+using Ghostty.Core.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Core.Config;
 
@@ -10,12 +11,15 @@ namespace Ghostty.Core.Config;
 /// threadpool thread; the caller is responsible for marshaling onto
 /// the UI thread if needed.
 /// </summary>
-public sealed class SystemSchedulerTimer : ISchedulerTimer
+public sealed partial class SystemSchedulerTimer : ISchedulerTimer
 {
     private readonly Timer _timer;
+    private readonly ILogger<SystemSchedulerTimer> _logger;
 
-    public SystemSchedulerTimer()
+    public SystemSchedulerTimer(ILogger<SystemSchedulerTimer> logger)
     {
+        ArgumentNullException.ThrowIfNull(logger);
+        _logger = logger;
         _timer = new Timer(_ => Callback?.Invoke(), null, Timeout.Infinite, Timeout.Infinite);
     }
 
@@ -42,6 +46,11 @@ public sealed class SystemSchedulerTimer : ISchedulerTimer
         using var done = new ManualResetEvent(false);
         _timer.Dispose(done);
         if (!done.WaitOne(TimeSpan.FromSeconds(2)))
-            Debug.WriteLine("[SystemSchedulerTimer] Dispose timed out waiting for callback");
+            LogDisposeTimedOut();
     }
+
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.TimerDisposeSlow,
+                   Level = LogLevel.Warning,
+                   Message = "[SystemSchedulerTimer] Dispose timed out waiting for callback")]
+    private partial void LogDisposeTimedOut();
 }
