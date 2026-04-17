@@ -2,7 +2,6 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
-using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -26,12 +25,17 @@ internal sealed class DialogClipboardConfirmer : IClipboardConfirmer
 
     private readonly DispatcherQueue _dispatcher;
     private readonly Func<IntPtr, XamlRoot?> _xamlRootProvider;
+    private readonly ILogger<DialogClipboardConfirmer> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public DialogClipboardConfirmer(DispatcherQueue dispatcher, Func<IntPtr, XamlRoot?> xamlRootProvider)
+    public DialogClipboardConfirmer(
+        DispatcherQueue dispatcher,
+        Func<IntPtr, XamlRoot?> xamlRootProvider,
+        ILogger<DialogClipboardConfirmer> logger)
     {
         _dispatcher = dispatcher;
         _xamlRootProvider = xamlRootProvider;
+        _logger = logger;
     }
 
     public async ValueTask<bool> ConfirmAsync(string preview, ClipboardConfirmRequest request, IntPtr originSurface)
@@ -95,7 +99,7 @@ internal sealed class DialogClipboardConfirmer : IClipboardConfirmer
                 }
                 catch (Exception ex)
                 {
-                    StaticLoggers.DialogClipboardConfirmer.LogConfirmDialogFailed(ex);
+                    _logger.LogConfirmDialogFailed(ex);
                     tcs.TrySetResult(false);
                 }
             });
