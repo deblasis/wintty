@@ -1,4 +1,3 @@
-using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
@@ -20,6 +19,8 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
     private DesktopAcrylicController? _controller;
     private SystemBackdropConfiguration? _config;
 
+    private readonly ILogger<AcrylicBackdrop> _logger;
+
     // Logged once per instance the first time the broken base hook
     // fires, so when a future WinUI 3 update changes that behaviour we
     // can tell at a glance (the trace will either stop appearing or
@@ -30,14 +31,17 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
     /// <param name="tintColor">Tint overlay color.</param>
     /// <param name="tintOpacity">0.0 = no tint, 1.0 = full tint color.</param>
     /// <param name="luminosityOpacity">0.0 = no luminosity, 1.0 = full luminosity layer.</param>
+    /// <param name="logger">Logger for the OnDefaultSystemBackdropConfigurationChanged diagnostic.</param>
     internal AcrylicBackdrop(
         Windows.UI.Color tintColor,
         float tintOpacity,
-        float luminosityOpacity)
+        float luminosityOpacity,
+        ILogger<AcrylicBackdrop> logger)
     {
         _tintColor = tintColor;
         _tintOpacity = tintOpacity;
         _luminosityOpacity = luminosityOpacity;
+        _logger = logger;
     }
 
     protected override void OnTargetConnected(
@@ -123,7 +127,7 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
         if (!_defaultConfigWarnedOnce)
         {
             _defaultConfigWarnedOnce = true;
-            StaticLoggers.AcrylicBackdrop.LogDefaultConfigFired(
+            _logger.LogDefaultConfigFired(
                 _controller is not null, target is null);
         }
     }
