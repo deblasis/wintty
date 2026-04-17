@@ -8,6 +8,7 @@ using Ghostty.Core.Clipboard;
 using Ghostty.Core.Hosting;
 using Ghostty.Core.Interop;
 using Ghostty.Interop;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Windows.Win32;
@@ -111,7 +112,11 @@ internal sealed class GhosttyHost : IDisposable
     /// <see cref="App.TryGetHostForSurface"/> to forward to whichever
     /// per-window host owns the target surface.
     /// </summary>
-    public GhosttyHost(DispatcherQueue dispatcher, GhosttyConfig config, HostLifetimeSupervisor supervisor)
+    public GhosttyHost(
+        DispatcherQueue dispatcher,
+        GhosttyConfig config,
+        HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory)
     {
         _dispatcher = dispatcher;
         _ownership = new SupervisedOwnership(
@@ -127,16 +132,20 @@ internal sealed class GhosttyHost : IDisposable
         _closeSurfaceCb = OnCloseSurface;
 
         // Build the clipboard bridge after all delegate fields are assigned.
-        var clipboardBackend = new WinUiClipboardBackend(_dispatcher);
+        var clipboardBackend = new WinUiClipboardBackend(
+            _dispatcher,
+            loggerFactory.CreateLogger<WinUiClipboardBackend>());
         var clipboardConfirmer = new DialogClipboardConfirmer(
             _dispatcher,
-            xamlRootProvider: ResolveXamlRootForSurface);
+            xamlRootProvider: ResolveXamlRootForSurface,
+            loggerFactory.CreateLogger<DialogClipboardConfirmer>());
         var clipboardService = new ClipboardService(clipboardBackend, clipboardConfirmer);
         _clipboardBridge = new ClipboardBridge(
             _dispatcher,
             clipboardService,
             resolveSurface: ResolveSurfaceFromUserdata,
-            isSurfaceAlive: IsSurfaceAlive);
+            isSurfaceAlive: IsSurfaceAlive,
+            loggerFactory.CreateLogger<ClipboardBridge>());
 
         var runtime = new GhosttyRuntimeConfig
         {
@@ -170,7 +179,8 @@ internal sealed class GhosttyHost : IDisposable
     public GhosttyHost(
         DispatcherQueue dispatcher,
         IntPtr sharedApp,
-        HostLifetimeSupervisor supervisor)
+        HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory)
     {
         _dispatcher = dispatcher;
         _ownership = new SupervisedOwnership(
@@ -184,16 +194,20 @@ internal sealed class GhosttyHost : IDisposable
         // docstring above for the full reason. Libghostty calls the
         // bootstrap host's _actionCb etc, not ours.
 
-        var clipboardBackend = new WinUiClipboardBackend(_dispatcher);
+        var clipboardBackend = new WinUiClipboardBackend(
+            _dispatcher,
+            loggerFactory.CreateLogger<WinUiClipboardBackend>());
         var clipboardConfirmer = new DialogClipboardConfirmer(
             _dispatcher,
-            xamlRootProvider: ResolveXamlRootForSurface);
+            xamlRootProvider: ResolveXamlRootForSurface,
+            loggerFactory.CreateLogger<DialogClipboardConfirmer>());
         var clipboardService = new ClipboardService(clipboardBackend, clipboardConfirmer);
         _clipboardBridge = new ClipboardBridge(
             _dispatcher,
             clipboardService,
             resolveSurface: ResolveSurfaceFromUserdata,
-            isSurfaceAlive: IsSurfaceAlive);
+            isSurfaceAlive: IsSurfaceAlive,
+            loggerFactory.CreateLogger<ClipboardBridge>());
     }
 
     /// <summary>
