@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using Ghostty.Core.Config;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Settings;
 
@@ -110,11 +111,11 @@ internal static class WindowStateMigration
             // does not block startup. WindowState.Load already prefers
             // the new path when both exist.
             try { File.Delete(legacyPath); }
-            catch (Exception ex) { Debug.WriteLine($"WindowStateMigration: legacy delete failed: {ex.Message}"); }
+            catch (Exception ex) { StaticLoggers.WindowStateMigration.LogLegacyDeleteFailed(ex); }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"WindowStateMigration failed: {ex.Message}");
+            StaticLoggers.WindowStateMigration.LogMigrationFailed(ex);
         }
     }
 
@@ -150,8 +151,29 @@ internal static class WindowStateMigration
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"WindowStateMigration: config scan failed: {ex.Message}");
+            StaticLoggers.WindowStateMigration.LogScanFailed(ex);
         }
         return set;
     }
+}
+
+internal static partial class WindowStateMigrationLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.MigrationFailed,
+                   Level = LogLevel.Warning,
+                   Message = "WindowStateMigration failed")]
+    internal static partial void LogMigrationFailed(
+        this ILogger logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.MigrationLegacyDeleteFailed,
+                   Level = LogLevel.Warning,
+                   Message = "WindowStateMigration: legacy delete failed")]
+    internal static partial void LogLegacyDeleteFailed(
+        this ILogger logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.MigrationScanFailed,
+                   Level = LogLevel.Warning,
+                   Message = "WindowStateMigration: config scan failed")]
+    internal static partial void LogScanFailed(
+        this ILogger logger, System.Exception ex);
 }

@@ -1,8 +1,9 @@
 using System;
-using System.Diagnostics;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Taskbar;
+using Ghostty.Logging;
 using Ghostty.Taskbar;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -47,7 +48,7 @@ internal sealed class TaskbarHost : IDisposable
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"Taskbar progress wiring failed: {ex.Message}");
+            StaticLoggers.TaskbarHost.LogTaskbarWiringFailed(ex);
         }
     }
 
@@ -72,4 +73,13 @@ internal sealed class TaskbarHost : IDisposable
     {
         _tickTimer?.Stop();
     }
+}
+
+internal static partial class TaskbarHostLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Shell.TaskbarWiringFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Taskbar progress wiring failed")]
+    internal static partial void LogTaskbarWiringFailed(
+        this ILogger<TaskbarHost> logger, System.Exception ex);
 }
