@@ -49,6 +49,23 @@ public interface IConfigService : IDisposable
     string CommandPaletteBackground { get; }
 
     /// <summary>
+    /// Minimum log level for the Windows shell's diagnostic logger,
+    /// read from the <c>log-level</c> config key. One of
+    /// <c>trace</c>, <c>debug</c>, <c>info</c>, <c>warn</c>, <c>error</c>,
+    /// <c>off</c>. Defaults to <c>info</c> when unset.
+    /// Parsed into a <c>LoggerFilterOptions.MinLevel</c> by
+    /// <c>Ghostty.Core.Logging.LoggingBootstrap</c>.
+    /// </summary>
+    string LogLevel { get; }
+
+    /// <summary>
+    /// Comma-separated <c>CATEGORY=LEVEL</c> pairs overriding
+    /// <see cref="LogLevel"/> per-category, read from the
+    /// <c>log-filter</c> config key. Empty when unset.
+    /// </summary>
+    string LogFilter { get; }
+
+    /// <summary>
     /// Window theme from config: "light", "dark", "system", "auto", or
     /// "ghostty" (palette-derived chrome). Controls both the XAML
     /// ElementTheme and the DWM title bar chrome.

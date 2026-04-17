@@ -49,10 +49,11 @@
          the current culture IS invariant, so culture-sensitive calls
          silently take the invariant path with no warning. -->
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- No ETW / EventSource providers are consumed or emitted by this
-         app; libghostty has its own logging and we do not subscribe to
-         runtime event sources. -->
-    <EventSourceSupport>false</EventSourceSupport>
+    <!-- ETW support is required by Microsoft.Extensions.Logging.EventSource,
+         the Windows-native diagnostic sink adopted in #259. Capture via
+         the Microsoft-Extensions-Logging provider. Previous assumption
+         (#258) that this app emits no EventSources is now false. -->
+    <EventSourceSupport>true</EventSourceSupport>
     <!-- No outbound HTTP today. When the sponsor-gated update channel
          lands it will use WinHTTP directly, not HttpClient with
          DiagnosticSource activity propagation. -->
