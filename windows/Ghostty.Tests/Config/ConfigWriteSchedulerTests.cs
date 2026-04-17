@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Ghostty.Core.Config;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace Ghostty.Tests.Config;
@@ -39,7 +40,8 @@ public class ConfigWriteSchedulerTests
         var editor = new FakeEditor();
         var onFlush = 0;
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++);
+            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++,
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Schedule("vertical-tabs", "false");
@@ -61,7 +63,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(100), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(100), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Schedule("command-palette-background", "mica");
@@ -84,7 +87,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(100), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(100), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         // Ghostty's config parser is case-insensitive, so the two
         // spellings must land on the same pending entry with last-wins.
@@ -103,7 +107,8 @@ public class ConfigWriteSchedulerTests
         var editor = new FakeEditor();
         var onFlush = 0;
         var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++);
+            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++,
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Dispose();
@@ -123,7 +128,8 @@ public class ConfigWriteSchedulerTests
         var editor = new ThrowingEditor(throwOnKey: "vertical-tabs");
         var onFlush = 0;
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(50), () => onFlush++);
+            editor, timer, TimeSpan.FromMilliseconds(50), () => onFlush++,
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");    // will throw
         scheduler.Schedule("command-palette-background", "mica"); // must still land
@@ -156,7 +162,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Flush();
@@ -171,7 +178,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Dispose();
@@ -187,7 +195,8 @@ public class ConfigWriteSchedulerTests
         var editor = new FakeEditor();
         var onFlush = 0;
         using var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++);
+            editor, timer, TimeSpan.FromMilliseconds(200), () => onFlush++,
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Flush();
 
@@ -202,7 +211,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Dispose();
         scheduler.Schedule("vertical-tabs", "true");
@@ -217,7 +227,8 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         var scheduler = new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(200), () => { });
+            editor, timer, TimeSpan.FromMilliseconds(200), () => { },
+            NullLogger<ConfigWriteScheduler>.Instance);
 
         scheduler.Dispose();
         scheduler.Dispose();   // second call must not re-dispose the timer
@@ -231,12 +242,15 @@ public class ConfigWriteSchedulerTests
         var timer = new FakeTimer();
         var editor = new FakeEditor();
         Action noop = () => { };
+        var logger = NullLogger<ConfigWriteScheduler>.Instance;
 
         Assert.Throws<ArgumentNullException>(() => new ConfigWriteScheduler(
-            null!, timer, TimeSpan.FromMilliseconds(1), noop));
+            null!, timer, TimeSpan.FromMilliseconds(1), noop, logger));
         Assert.Throws<ArgumentNullException>(() => new ConfigWriteScheduler(
-            editor, null!, TimeSpan.FromMilliseconds(1), noop));
+            editor, null!, TimeSpan.FromMilliseconds(1), noop, logger));
         Assert.Throws<ArgumentNullException>(() => new ConfigWriteScheduler(
-            editor, timer, TimeSpan.FromMilliseconds(1), null!));
+            editor, timer, TimeSpan.FromMilliseconds(1), null!, logger));
+        Assert.Throws<ArgumentNullException>(() => new ConfigWriteScheduler(
+            editor, timer, TimeSpan.FromMilliseconds(1), noop, null!));
     }
 }
