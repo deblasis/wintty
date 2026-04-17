@@ -1,4 +1,5 @@
-using System.Diagnostics;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Xaml;
@@ -122,10 +123,21 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
         if (!_defaultConfigWarnedOnce)
         {
             _defaultConfigWarnedOnce = true;
-            Debug.WriteLine(
-                "[AcrylicBackdrop] OnDefaultSystemBackdropConfigurationChanged fired; "
-              + $"controllerConnected={_controller is not null}, targetNull={target is null}. "
-                + "The override is suppressing the base impl to avoid the WinUI 3 ArgumentException.");
+            StaticLoggers.AcrylicBackdrop.LogDefaultConfigFired(
+                _controller is not null, target is null);
         }
     }
+}
+
+internal static partial class AcrylicBackdropLogExtensions
+{
+    // Logged once per instance on the first OnDefaultSystemBackdropConfigurationChanged
+    // callback. See the method docstring for why the base implementation is skipped.
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Shell.AcrylicDefaultConfigFired,
+                   Level = LogLevel.Warning,
+                   Message = "[AcrylicBackdrop] OnDefaultSystemBackdropConfigurationChanged fired; " +
+                             "controllerConnected={ControllerConnected}, targetNull={TargetNull}. " +
+                             "The override is suppressing the base impl to avoid the WinUI 3 ArgumentException.")]
+    internal static partial void LogDefaultConfigFired(
+        this ILogger<AcrylicBackdrop> logger, bool controllerConnected, bool targetNull);
 }
