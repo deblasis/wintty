@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Ghostty.Core.Config;
 using Ghostty.Interop;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
 namespace Ghostty.Services;
@@ -47,6 +48,8 @@ internal sealed class ConfigService : IConfigService
     public bool VerticalTabs { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
     public string CommandPaletteBackground { get; private set; } = "acrylic";
+    public string LogLevel { get; private set; } = "info";
+    public string LogFilter { get; private set; } = string.Empty;
 
     private static readonly string[] CommandPaletteBackgroundAllowed =
         { "acrylic", "mica", "opaque" };
@@ -195,7 +198,7 @@ internal sealed class ConfigService : IConfigService
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[ConfigService] Reload failed to create new config: {ex.Message}");
+            StaticLoggers.ConfigService.LogReloadFailed(ex);
             return false;
         }
 
@@ -310,6 +313,11 @@ internal sealed class ConfigService : IConfigService
             GetFileValue("command-palette-background", ""),
             allowed: CommandPaletteBackgroundAllowed,
             defaultValue: "acrylic");
+        // Windows-only logger keys. Parsing into LogLevel/filter rules
+        // happens in LoggingBootstrap; here we just surface the raw
+        // strings so reloads can re-read them without parser knowledge.
+        LogLevel = GetFileValue("log-level", "info");
+        LogFilter = GetFileValue("log-filter", string.Empty);
 
         // background-style is a Windows-only key not in the Zig config
         // schema, so we read it directly from the config file.
@@ -851,4 +859,16 @@ internal sealed class ConfigService : IConfigService
         if (_config.Handle != IntPtr.Zero)
             NativeMethods.ConfigFree(_config);
     }
+}
+
+internal static partial class ConfigServiceLogExtensions
+{
+    // LogLevel.Error (not Warning) because a failed reload leaves the
+    // previous config in place; the user's edit silently stops being
+    // applied, which is a genuine functional degradation.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ReloadFailed,
+                   Level = LogLevel.Error,
+                   Message = "[ConfigService] Reload failed to create new config")]
+    internal static partial void LogReloadFailed(
+        this ILogger<ConfigService> logger, System.Exception ex);
 }

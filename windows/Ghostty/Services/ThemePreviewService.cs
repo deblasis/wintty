@@ -1,10 +1,11 @@
 using System;
 using System.Buffers;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Threading;
 using System.Threading.Tasks;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
 namespace Ghostty.Services;
@@ -91,9 +92,9 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
 
-                Debug.WriteLine($"[theme-preview] pipe server waiting: \\\\.\\pipe\\{PipeName}");
+                StaticLoggers.ThemePreviewService.LogPipeWaiting(PipeName);
                 await server.WaitForConnectionAsync(ct);
-                Debug.WriteLine("[theme-preview] client connected");
+                StaticLoggers.ThemePreviewService.LogClientConnected();
 
                 // Snapshot current colors for revert on cancel.
                 SaveCurrentColors();
@@ -130,12 +131,12 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
 
                 if (!confirmed)
                 {
-                    Debug.WriteLine("[theme-preview] cancelled, reverting");
+                    StaticLoggers.ThemePreviewService.LogPreviewCancelled();
                     RevertColors();
                 }
                 else
                 {
-                    Debug.WriteLine("[theme-preview] confirmed");
+                    StaticLoggers.ThemePreviewService.LogPreviewConfirmed();
                 }
             }
             catch (OperationCanceledException)
@@ -146,7 +147,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
             {
                 // Pipe broken, client disconnected. Loop back to accept
                 // next connection.
-                Debug.WriteLine($"[theme-preview] pipe error: {ex.Message}");
+                StaticLoggers.ThemePreviewService.LogPipeError(ex);
             }
         }
     }
@@ -177,7 +178,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
             themeName.Contains("..") ||
             themeName.AsSpan().IndexOfAny(InvalidFileNameChars) >= 0)
         {
-            Debug.WriteLine($"[theme-preview] rejected invalid name: {themeName}");
+            StaticLoggers.ThemePreviewService.LogInvalidThemeName(themeName);
             return;
         }
 
@@ -246,4 +247,47 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
         return s.Length == 6 &&
             uint.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out color);
     }
+}
+
+internal static partial class ThemePreviewServiceLogExtensions
+{
+    // Message keeps the pipe name as a structured parameter; the UNC
+    // prefix (\\.\pipe\) is documented here rather than in the text so
+    // the Microsoft.Extensions.Logging source generator does not have
+    // to re-emit a backslash-heavy format string (CS1009 escape errors).
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PipeWaiting,
+                   Level = LogLevel.Debug,
+                   Message = "[theme-preview] pipe server waiting (pipe name={PipeName})")]
+    internal static partial void LogPipeWaiting(
+        this ILogger<ThemePreviewService> logger, string pipeName);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.ClientConnected,
+                   Level = LogLevel.Debug,
+                   Message = "[theme-preview] client connected")]
+    internal static partial void LogClientConnected(
+        this ILogger<ThemePreviewService> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PreviewCancelled,
+                   Level = LogLevel.Debug,
+                   Message = "[theme-preview] cancelled, reverting")]
+    internal static partial void LogPreviewCancelled(
+        this ILogger<ThemePreviewService> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PreviewConfirmed,
+                   Level = LogLevel.Debug,
+                   Message = "[theme-preview] confirmed")]
+    internal static partial void LogPreviewConfirmed(
+        this ILogger<ThemePreviewService> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PipeError,
+                   Level = LogLevel.Warning,
+                   Message = "[theme-preview] pipe error")]
+    internal static partial void LogPipeError(
+        this ILogger<ThemePreviewService> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.InvalidThemeName,
+                   Level = LogLevel.Warning,
+                   Message = "[theme-preview] rejected invalid name: {ThemeName}")]
+    internal static partial void LogInvalidThemeName(
+        this ILogger<ThemePreviewService> logger, string themeName);
 }

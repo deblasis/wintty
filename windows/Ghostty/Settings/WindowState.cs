@@ -1,8 +1,9 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Settings;
 
@@ -73,7 +74,7 @@ internal sealed class WindowState
         {
             // A malformed or inaccessible state file must never block
             // startup. Fall back to defaults and trace for post-mortem.
-            Debug.WriteLine($"WindowState load failed, using defaults: {ex.Message}");
+            StaticLoggers.WindowState.LogLoadFailed(ex);
             return new WindowState();
         }
     }
@@ -87,7 +88,7 @@ internal sealed class WindowState
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"WindowState save failed: {ex.Message}");
+            StaticLoggers.WindowState.LogSaveFailed(ex);
         }
     }
 }
@@ -96,4 +97,19 @@ internal sealed class WindowState
 [JsonSerializable(typeof(WindowState))]
 internal partial class WindowStateContext : JsonSerializerContext
 {
+}
+
+internal static partial class WindowStateLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.LoadFailed,
+                   Level = LogLevel.Warning,
+                   Message = "WindowState load failed, using defaults")]
+    internal static partial void LogLoadFailed(
+        this ILogger<WindowState> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.SaveFailed,
+                   Level = LogLevel.Warning,
+                   Message = "WindowState save failed")]
+    internal static partial void LogSaveFailed(
+        this ILogger<WindowState> logger, System.Exception ex);
 }
