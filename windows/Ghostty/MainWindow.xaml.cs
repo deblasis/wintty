@@ -65,6 +65,17 @@ public sealed partial class MainWindow : Window
     // so anything in this window that needs to mutate the config file
     // goes through App.ConfigFileEditor rather than building its own.
     private readonly IConfigFileEditor _configEditor;
+    // Narrower than holding ILoggerFactory: AcrylicBackdrop is rebuilt
+    // per backdrop-style change in ApplyBackdropStyle(), and that is
+    // the ONLY reason this window needed a way to mint loggers after
+    // construction. Capturing the delegate once keeps the logger
+    // surface on MainWindow honest about its scope and avoids a
+    // field that a future reader could reach into for unrelated
+    // things. The detach-to-new-window path reads App.LoggerFactory
+    // statically (same shape as App.BootstrapHost / App.LifetimeSupervisor
+    // just above it in DetachTabToNewWindow).
+    private readonly Func<ILogger<AcrylicBackdrop>> _newAcrylicLogger;
+    private readonly ILogger<MainWindow> _logger;
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
@@ -200,8 +211,12 @@ public sealed partial class MainWindow : Window
     // WinUI 3 tears Content down before Closed fires.
     internal XamlRoot? RegisteredRoot { get; private set; }
 
-    internal MainWindow(ConfigService configService, GhosttyHost bootstrapHost, HostLifetimeSupervisor supervisor)
-        : this(configService, bootstrapHost, supervisor, seedTab: null)
+    internal MainWindow(
+        ConfigService configService,
+        GhosttyHost bootstrapHost,
+        HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory)
+        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null)
     {
     }
 
@@ -212,12 +227,17 @@ public sealed partial class MainWindow : Window
     /// factory" path runs. <paramref name="bootstrapHost"/> is the
     /// app-owning GhosttyHost built once in App.xaml.cs; this window
     /// constructs its OWN per-window GhosttyHost from it using the
-    /// shared-app ctor.
+    /// shared-app ctor. <paramref name="loggerFactory"/> is the
+    /// process-wide factory built in App.OnLaunched; MainWindow holds
+    /// it to construct loggers for the per-window components it owns
+    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop,
+    /// ThemePreviewService).
     /// </summary>
     private MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory,
         TabModel? seedTab)
     {
         InitializeComponent();
@@ -227,6 +247,8 @@ public sealed partial class MainWindow : Window
             ?? throw new InvalidOperationException(
                 "MainWindow: App.ConfigFileEditor is null. " +
                 "App.OnLaunched must initialize it before constructing a window.");
+        _newAcrylicLogger = loggerFactory.CreateLogger<AcrylicBackdrop>;
+        _logger = loggerFactory.CreateLogger<MainWindow>();
 
         // Build this window's per-window GhosttyHost around the shared
         // app. Each per-window host has its OWN per-window surface
@@ -236,7 +258,8 @@ public sealed partial class MainWindow : Window
         _host = new GhosttyHost(
             DispatcherQueue,
             bootstrapHost.App.Handle,
-            supervisor);
+            supervisor,
+            loggerFactory);
         // NOTE: configService.SetApp is already done by App.xaml.cs on
         // the bootstrap host. We do NOT call it again here.
 
@@ -318,7 +341,10 @@ public sealed partial class MainWindow : Window
 
         _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
-        _themePreview = new ThemePreviewService(configService, DispatcherQueue);
+        _themePreview = new ThemePreviewService(
+            configService,
+            DispatcherQueue,
+            loggerFactory.CreateLogger<ThemePreviewService>());
         _themePreview.ListThemesRequested += OnListThemesRequested;
 
         _factory = new PaneHostFactory(_host);
@@ -411,7 +437,7 @@ public sealed partial class MainWindow : Window
         _titleBar.ApplyForCurrentMode();
         _titleBar.SyncCaptionInset();
 
-        _taskbar = new TaskbarHost(this, _tabManager);
+        _taskbar = new TaskbarHost(this, _tabManager, loggerFactory.CreateLogger<TaskbarHost>());
 
         AppWindow.Changed += (_, _) =>
         {
@@ -521,7 +547,7 @@ public sealed partial class MainWindow : Window
                 }
                 catch (System.Exception ex)
                 {
-                    StaticLoggers.MainWindow.LogConfigOpenFailed(ex);
+                    _logger.LogConfigOpenFailed(ex);
                 }
             };
 
@@ -617,9 +643,10 @@ public sealed partial class MainWindow : Window
         ConfigService configService,
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory,
         TabModel adoptedTab)
     {
-        return new MainWindow(configService, bootstrapHost, supervisor, seedTab: adoptedTab);
+        return new MainWindow(configService, bootstrapHost, supervisor, loggerFactory, seedTab: adoptedTab);
     }
 
     /// <summary>
@@ -697,7 +724,15 @@ public sealed partial class MainWindow : Window
         // built inside the new window. RehostTo is what actually moves
         // the surface entries out of this window's _surfaces into the
         // new window's _surfaces AND rewrites App._hostBySurface.
-        var newWindow = MainWindow.CreateForAdoption(_configService, bootstrap, supervisor, detached);
+        // Same App.* static-read shape as the bootstrap/supervisor
+        // pulls just above: the detach path is an App-level concern
+        // (moves a tab between windows that the App owns), so reaching
+        // into App for the process-wide factory is consistent.
+        var factory = App.LoggerFactory
+            ?? throw new InvalidOperationException(
+                "DetachTabToWindow: no logger factory; App.OnLaunched did not run.");
+        var newWindow = MainWindow.CreateForAdoption(
+            _configService, bootstrap, supervisor, factory, detached);
         var newHost = newWindow._host;
         ((Panes.PaneHost)detached.PaneHost).RehostTo(newHost);
 
@@ -805,7 +840,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            StaticLoggers.MainWindow.LogDialogDrainFailed(ex);
+            _logger.LogDialogDrainFailed(ex);
         }
 
         _gradientVisual?.Dispose();
@@ -1136,7 +1171,8 @@ public sealed partial class MainWindow : Window
             case BackdropStyles.Frosted:
                 if (DesktopAcrylicController.IsSupported())
                     SystemBackdrop = new AcrylicBackdrop(
-                        tintColor, tintOpacity, luminosityOpacity);
+                        tintColor, tintOpacity, luminosityOpacity,
+                        _newAcrylicLogger());
                 else
                     goto case BackdropStyles.Solid;
                 ApplyWindowClassBrush(ClassBrushKind.Transparent);
