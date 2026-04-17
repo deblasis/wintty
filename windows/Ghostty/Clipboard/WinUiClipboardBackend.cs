@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
-using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Windows.ApplicationModel.DataTransfer;
@@ -24,10 +23,12 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
     private const int CO_E_NOTINITIALIZED = unchecked((int)0x800401F0);
 
     private readonly DispatcherQueue _dispatcher;
+    private readonly ILogger<WinUiClipboardBackend> _logger;
 
-    public WinUiClipboardBackend(DispatcherQueue dispatcher)
+    public WinUiClipboardBackend(DispatcherQueue dispatcher, ILogger<WinUiClipboardBackend> logger)
     {
         _dispatcher = dispatcher;
+        _logger = logger;
     }
 
     public async ValueTask<string?> ReadTextAsync()
@@ -42,7 +43,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         catch (COMException ex)
         {
             // Clipboard locked by another process. Treated as "no text".
-            StaticLoggers.WinUiClipboardBackend.LogReadFailed(ex, ex.HResult);
+            _logger.LogReadFailed(ex, ex.HResult);
             return null;
         }
     }
@@ -55,7 +56,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         }
         catch (COMException ex)
         {
-            StaticLoggers.WinUiClipboardBackend.LogWriteFailed(ex, ex.HResult);
+            _logger.LogWriteFailed(ex, ex.HResult);
 
             // CO_E_NOTINITIALIZED is a known WinUI 3 startup race: the
             // clipboard broker is not ready yet. Retry once on the next
@@ -73,7 +74,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
                     try { WinClipboard.SetContent(BuildPackage(payloads)); }
                     catch (COMException retryEx)
                     {
-                        StaticLoggers.WinUiClipboardBackend.LogWriteRetryFailed(retryEx, retryEx.HResult);
+                        _logger.LogWriteRetryFailed(retryEx, retryEx.HResult);
                     }
                 });
             }
