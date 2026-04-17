@@ -16,10 +16,12 @@ using Ghostty.Input;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Shell;
 using Ghostty.Services;
+using Ghostty.Logging;
 using Ghostty.Panes;
 using Ghostty.Settings;
 using Ghostty.Shell;
 using Ghostty.Tabs;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -519,7 +521,7 @@ public sealed partial class MainWindow : Window
                 }
                 catch (System.Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainWindow] Failed to open config file: {ex.Message}");
+                    StaticLoggers.MainWindow.LogConfigOpenFailed(ex);
                 }
             };
 
@@ -803,7 +805,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"DialogTracker drain failed: {ex.Message}");
+            StaticLoggers.MainWindow.LogDialogDrainFailed(ex);
         }
 
         _gradientVisual?.Dispose();
@@ -1598,4 +1600,19 @@ public sealed partial class MainWindow : Window
         };
         timer.Start();
     }
+}
+
+internal static partial class MainWindowLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.ConfigOpenFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[MainWindow] Failed to open config file")]
+    internal static partial void LogConfigOpenFailed(
+        this ILogger<MainWindow> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.DialogDrainFailed,
+                   Level = LogLevel.Warning,
+                   Message = "DialogTracker drain failed")]
+    internal static partial void LogDialogDrainFailed(
+        this ILogger<MainWindow> logger, System.Exception ex);
 }

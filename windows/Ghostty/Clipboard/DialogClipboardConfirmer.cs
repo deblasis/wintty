@@ -1,8 +1,9 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
+using Ghostty.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -94,7 +95,7 @@ internal sealed class DialogClipboardConfirmer : IClipboardConfirmer
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[clipboard] confirm dialog failed: {ex.Message}");
+                    StaticLoggers.DialogClipboardConfirmer.LogConfirmDialogFailed(ex);
                     tcs.TrySetResult(false);
                 }
             });
@@ -123,4 +124,13 @@ internal sealed class DialogClipboardConfirmer : IClipboardConfirmer
             "A terminal application is asking to write the following text to your clipboard."),
         _ => ("Clipboard", "Confirm clipboard access."),
     };
+}
+
+internal static partial class DialogClipboardConfirmerLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Clipboard.ConfirmDialogErr,
+                   Level = LogLevel.Warning,
+                   Message = "[clipboard] confirm dialog failed")]
+    internal static partial void LogConfirmDialogFailed(
+        this ILogger<DialogClipboardConfirmer> logger, System.Exception ex);
 }
