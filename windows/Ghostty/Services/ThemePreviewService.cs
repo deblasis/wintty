@@ -4,7 +4,6 @@ using System.IO;
 using System.IO.Pipes;
 using System.Threading;
 using System.Threading.Tasks;
-using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
@@ -32,6 +31,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
 
     private readonly ConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
+    private readonly ILogger<ThemePreviewService> _logger;
     private readonly CancellationTokenSource _cts = new();
     private Task? _serverTask;
 
@@ -51,10 +51,12 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
 
     public ThemePreviewService(
         ConfigService configService,
-        DispatcherQueue dispatcher)
+        DispatcherQueue dispatcher,
+        ILogger<ThemePreviewService> logger)
     {
         _configService = configService;
         _dispatcher = dispatcher;
+        _logger = logger;
         _serverTask = Task.Run(() => RunServer(_cts.Token));
     }
 
@@ -92,9 +94,9 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
 
-                StaticLoggers.ThemePreviewService.LogPipeWaiting(PipeName);
+                _logger.LogPipeWaiting(PipeName);
                 await server.WaitForConnectionAsync(ct);
-                StaticLoggers.ThemePreviewService.LogClientConnected();
+                _logger.LogClientConnected();
 
                 // Snapshot current colors for revert on cancel.
                 SaveCurrentColors();
@@ -131,12 +133,12 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
 
                 if (!confirmed)
                 {
-                    StaticLoggers.ThemePreviewService.LogPreviewCancelled();
+                    _logger.LogPreviewCancelled();
                     RevertColors();
                 }
                 else
                 {
-                    StaticLoggers.ThemePreviewService.LogPreviewConfirmed();
+                    _logger.LogPreviewConfirmed();
                 }
             }
             catch (OperationCanceledException)
@@ -147,7 +149,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
             {
                 // Pipe broken, client disconnected. Loop back to accept
                 // next connection.
-                StaticLoggers.ThemePreviewService.LogPipeError(ex);
+                _logger.LogPipeError(ex);
             }
         }
     }
@@ -178,7 +180,7 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
             themeName.Contains("..") ||
             themeName.AsSpan().IndexOfAny(InvalidFileNameChars) >= 0)
         {
-            StaticLoggers.ThemePreviewService.LogInvalidThemeName(themeName);
+            _logger.LogInvalidThemeName(themeName);
             return;
         }
 

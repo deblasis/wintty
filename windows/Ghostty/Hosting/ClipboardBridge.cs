@@ -3,7 +3,6 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
 using Ghostty.Interop;
-using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
@@ -38,17 +37,20 @@ internal sealed class ClipboardBridge
     private readonly ClipboardService _service;
     private readonly Func<IntPtr, IntPtr> _resolveSurface;   // userdata -> surface
     private readonly Func<IntPtr, bool> _isSurfaceAlive;     // surface  -> alive?
+    private readonly ILogger<ClipboardBridge> _logger;
 
     public ClipboardBridge(
         DispatcherQueue dispatcher,
         ClipboardService service,
         Func<IntPtr, IntPtr> resolveSurface,
-        Func<IntPtr, bool> isSurfaceAlive)
+        Func<IntPtr, bool> isSurfaceAlive,
+        ILogger<ClipboardBridge> logger)
     {
         _dispatcher = dispatcher;
         _service = service;
         _resolveSurface = resolveSurface;
         _isSurfaceAlive = isSurfaceAlive;
+        _logger = logger;
     }
 
     // read_clipboard_cb
@@ -73,7 +75,7 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                StaticLoggers.ClipboardBridge.LogReadHandlerFailed(ex);
+                _logger.LogReadHandlerFailed(ex);
             }
             finally
             {
@@ -121,7 +123,7 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                StaticLoggers.ClipboardBridge.LogConfirmHandlerFailed(ex);
+                _logger.LogConfirmHandlerFailed(ex);
             }
             finally
             {
@@ -166,7 +168,7 @@ internal sealed class ClipboardBridge
             }
             catch (Exception ex)
             {
-                StaticLoggers.ClipboardBridge.LogWriteHandlerFailed(ex);
+                _logger.LogWriteHandlerFailed(ex);
             }
         });
     }

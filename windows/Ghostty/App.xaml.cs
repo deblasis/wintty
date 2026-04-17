@@ -405,11 +405,12 @@ public partial class App : Application
         _bootstrapHost = new GhosttyHost(
             DispatcherQueue.GetForCurrentThread(),
             _configService.ConfigHandle,
-            _lifetimeSupervisor);
+            _lifetimeSupervisor,
+            factory);
         BootstrapHost = _bootstrapHost;
         _configService.SetApp(_bootstrapHost.App);
 
-        var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor);
+        var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
         window.Closed += OnAnyWindowClosedInternal;
         window.Activate();
     }
