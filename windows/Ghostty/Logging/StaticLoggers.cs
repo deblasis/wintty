@@ -6,10 +6,11 @@ namespace Ghostty.Logging;
 
 /// <summary>
 /// Static accessor for <see cref="ILogger{T}"/> instances used by
-/// <c>Ghostty</c>-project types whose call sites are static methods
-/// or whose construction happens before the logger factory exists
-/// (see <c>ConfigService</c>, which the factory reads its filter
-/// config from at build time).
+/// <c>Ghostty</c>-project types whose call sites genuinely cannot
+/// receive a logger through a constructor argument. Every remaining
+/// entry here has a documented reason below; new components should
+/// take <c>ILogger&lt;T&gt;</c> in their ctor via the <see cref="ILoggerFactory"/>
+/// threaded through <see cref="App.OnLaunched"/>, not grow this class.
 ///
 /// Populated once from <c>App.OnLaunched</c> via
 /// <see cref="Initialize(ILoggerFactory)"/>. Before that call every
@@ -18,9 +19,28 @@ namespace Ghostty.Logging;
 /// <see cref="WindowStateMigration"/> entry), so early call sites
 /// are safe no-ops.
 ///
-/// Tests (if any are added in the future) should use
-/// <see cref="Install"/> which returns an <see cref="IDisposable"/>
-/// scope that restores the pre-install state on disposal.
+/// Why each remaining site stays here:
+///   - <see cref="App"/>: logs AUMID/jump-list failures in
+///     <c>App.OnLaunched</c> BEFORE the factory is built. No ctor
+///     available in the early-startup scope.
+///   - <see cref="ConfigService"/>: constructed before the factory
+///     exists because the factory reads <c>log-level</c> /
+///     <c>log-filter</c> off <c>ConfigService</c>. Chicken-and-egg,
+///     so ctor injection is impossible.
+///   - <see cref="WindowStateMigration"/>: <c>static class</c>, so
+///     there is no ctor to inject into.
+///   - <see cref="WindowState"/>: data class deserialized by
+///     <c>System.Text.Json</c> via a static <c>Load()</c> method.
+///     Ctor injection would require threading a logger through
+///     every deserialization site.
+///   - <see cref="GeneralPage"/>: XAML page constructed by the
+///     WinUI 3 Frame via a parameterless ctor; ctor injection
+///     requires a DI-enabled <c>Frame</c> which is a larger
+///     refactor than this slot is worth.
+///
+/// Tests should use <see cref="Install"/> which returns an
+/// <see cref="IDisposable"/> scope that restores the pre-install
+/// state on disposal.
 ///
 /// Note: <c>Ghostty.Settings.WindowStateMigration</c> is a
 /// <c>static class</c> so it cannot appear as a type argument to
@@ -31,17 +51,8 @@ namespace Ghostty.Logging;
 /// </summary>
 internal static class StaticLoggers
 {
-    // Phase 3 (this file's initial population)
-    private static ILogger<Ghostty.Clipboard.WinUiClipboardBackend>? _winUiClipboardBackend;
-    private static ILogger<Ghostty.Clipboard.DialogClipboardConfirmer>? _dialogClipboardConfirmer;
-    private static ILogger<Ghostty.Hosting.ClipboardBridge>? _clipboardBridge;
-    private static ILogger<Ghostty.MainWindow>? _mainWindow;
-    private static ILogger<Ghostty.Shell.TaskbarHost>? _taskbarHost;
-    private static ILogger<Ghostty.Shell.AcrylicBackdrop>? _acrylicBackdrop;
-    private static ILogger<Ghostty.Services.ThemePreviewService>? _themePreviewService;
     private static ILogger<Ghostty.Services.ConfigService>? _configService;
 
-    // Phase 4 (prefilled so Phase 4 is a drop-in migration).
     // WindowStateMigration is a static class, so it uses the non-generic
     // ILogger with an explicit category name; see class docstring.
     private const string WindowStateMigrationCategory = "Ghostty.Settings.WindowStateMigration";
@@ -50,20 +61,6 @@ internal static class StaticLoggers
     private static ILogger<Ghostty.Settings.Pages.GeneralPage>? _generalPage;
     private static ILogger<App>? _app;
 
-    internal static ILogger<Ghostty.Clipboard.WinUiClipboardBackend> WinUiClipboardBackend
-        => _winUiClipboardBackend ?? NullLogger<Ghostty.Clipboard.WinUiClipboardBackend>.Instance;
-    internal static ILogger<Ghostty.Clipboard.DialogClipboardConfirmer> DialogClipboardConfirmer
-        => _dialogClipboardConfirmer ?? NullLogger<Ghostty.Clipboard.DialogClipboardConfirmer>.Instance;
-    internal static ILogger<Ghostty.Hosting.ClipboardBridge> ClipboardBridge
-        => _clipboardBridge ?? NullLogger<Ghostty.Hosting.ClipboardBridge>.Instance;
-    internal static ILogger<Ghostty.MainWindow> MainWindow
-        => _mainWindow ?? NullLogger<Ghostty.MainWindow>.Instance;
-    internal static ILogger<Ghostty.Shell.TaskbarHost> TaskbarHost
-        => _taskbarHost ?? NullLogger<Ghostty.Shell.TaskbarHost>.Instance;
-    internal static ILogger<Ghostty.Shell.AcrylicBackdrop> AcrylicBackdrop
-        => _acrylicBackdrop ?? NullLogger<Ghostty.Shell.AcrylicBackdrop>.Instance;
-    internal static ILogger<Ghostty.Services.ThemePreviewService> ThemePreviewService
-        => _themePreviewService ?? NullLogger<Ghostty.Services.ThemePreviewService>.Instance;
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
         => _configService ?? NullLogger<Ghostty.Services.ConfigService>.Instance;
     internal static ILogger WindowStateMigration
@@ -77,13 +74,6 @@ internal static class StaticLoggers
 
     internal static void Initialize(ILoggerFactory factory)
     {
-        _winUiClipboardBackend = factory.CreateLogger<Ghostty.Clipboard.WinUiClipboardBackend>();
-        _dialogClipboardConfirmer = factory.CreateLogger<Ghostty.Clipboard.DialogClipboardConfirmer>();
-        _clipboardBridge = factory.CreateLogger<Ghostty.Hosting.ClipboardBridge>();
-        _mainWindow = factory.CreateLogger<Ghostty.MainWindow>();
-        _taskbarHost = factory.CreateLogger<Ghostty.Shell.TaskbarHost>();
-        _acrylicBackdrop = factory.CreateLogger<Ghostty.Shell.AcrylicBackdrop>();
-        _themePreviewService = factory.CreateLogger<Ghostty.Services.ThemePreviewService>();
         _configService = factory.CreateLogger<Ghostty.Services.ConfigService>();
         _windowStateMigration = factory.CreateLogger(WindowStateMigrationCategory);
         _windowState = factory.CreateLogger<Ghostty.Settings.WindowState>();
@@ -99,19 +89,9 @@ internal static class StaticLoggers
     }
 
     private static Snapshot CaptureSnapshot() => new(
-        _winUiClipboardBackend, _dialogClipboardConfirmer, _clipboardBridge,
-        _mainWindow, _taskbarHost, _acrylicBackdrop,
-        _themePreviewService, _configService,
-        _windowStateMigration, _windowState, _generalPage, _app);
+        _configService, _windowStateMigration, _windowState, _generalPage, _app);
 
     private readonly record struct Snapshot(
-        ILogger<Ghostty.Clipboard.WinUiClipboardBackend>? WinUiClipboardBackend,
-        ILogger<Ghostty.Clipboard.DialogClipboardConfirmer>? DialogClipboardConfirmer,
-        ILogger<Ghostty.Hosting.ClipboardBridge>? ClipboardBridge,
-        ILogger<Ghostty.MainWindow>? MainWindow,
-        ILogger<Ghostty.Shell.TaskbarHost>? TaskbarHost,
-        ILogger<Ghostty.Shell.AcrylicBackdrop>? AcrylicBackdrop,
-        ILogger<Ghostty.Services.ThemePreviewService>? ThemePreviewService,
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
         ILogger? WindowStateMigration,
         ILogger<Ghostty.Settings.WindowState>? WindowState,
@@ -125,13 +105,6 @@ internal static class StaticLoggers
 
         public void Dispose()
         {
-            _winUiClipboardBackend = _prior.WinUiClipboardBackend;
-            _dialogClipboardConfirmer = _prior.DialogClipboardConfirmer;
-            _clipboardBridge = _prior.ClipboardBridge;
-            _mainWindow = _prior.MainWindow;
-            _taskbarHost = _prior.TaskbarHost;
-            _acrylicBackdrop = _prior.AcrylicBackdrop;
-            _themePreviewService = _prior.ThemePreviewService;
             _configService = _prior.ConfigService;
             _windowStateMigration = _prior.WindowStateMigration;
             _windowState = _prior.WindowState;
