@@ -41,6 +41,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
+    <ProjectReference Include="..\..\dist\windows\Bench\Ghostty.Bench\Ghostty.Bench.csproj" />
   </ItemGroup>
 
   <ItemGroup>
