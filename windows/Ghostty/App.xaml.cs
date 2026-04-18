@@ -55,6 +55,17 @@ public partial class App : Application
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
     private Ghostty.Core.Logging.FileLoggerProvider? _fileLogSink;
     private Ghostty.Core.Logging.FilterState? _logFilters;
+#if SPONSOR_BUILD
+    private Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? _sponsorOverlay;
+    internal Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? SponsorOverlay => _sponsorOverlay;
+    // Eagerly-initialized so MainWindow.CreateCommandPaletteViewModel
+    // (which runs inside the MainWindow ctor, before _sponsorOverlay is
+    // wired below) can still see a live simulator and register its
+    // palette commands. The bootstrapper reuses this same instance.
+    private Ghostty.Sponsor.Update.UpdateSimulator? _sharedSimulator;
+    internal Ghostty.Sponsor.Update.UpdateSimulator SharedSimulator =>
+        _sharedSimulator ??= new Ghostty.Sponsor.Update.UpdateSimulator();
+#endif
 
     // Top-level window registry keyed by XamlRoot. Replaces the old
     // singular RootWindow and the earlier List<Window> draft: XamlRoot
@@ -410,8 +421,49 @@ public partial class App : Application
         BootstrapHost = _bootstrapHost;
         _configService.SetApp(_bootstrapHost.App);
 
+        Uri? activationUri = null;
+        try
+        {
+            var activated = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
+            if (activated.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.Protocol
+                && activated.Data is Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs proto)
+            {
+                activationUri = proto.Uri;
+            }
+            else
+            {
+                // Unpackaged fallback: command line --uri <url>.
+                var argv = Environment.GetCommandLineArgs();
+                for (int i = 0; i < argv.Length - 1; i++)
+                {
+                    if (string.Equals(argv[i], "--uri", StringComparison.Ordinal)
+                        && Uri.TryCreate(argv[i + 1], UriKind.Absolute, out var u))
+                    {
+                        activationUri = u;
+                        break;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[app] protocol activation probe failed: {ex.Message}");
+        }
+
         var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
         window.Closed += OnAnyWindowClosedInternal;
+#if SPONSOR_BUILD
+        // SharedSimulator was already materialized during MainWindow's
+        // ctor (CreateCommandPaletteViewModel reads it to register the
+        // palette commands). Pass that same instance to Wire so there's
+        // one simulator driving both the palette and the update pipeline.
+        _sponsorOverlay = Ghostty.Sponsor.Update.SponsorOverlayBootstrapper.Wire(
+            window, _configService, DispatcherQueue.GetForCurrentThread(), SharedSimulator);
+        if (activationUri is not null)
+        {
+            _sponsorOverlay?.Router.HandleUri(activationUri);
+        }
+#endif
         window.Activate();
     }
 
@@ -457,6 +509,10 @@ public partial class App : Application
                 // _hostBySurface (asserts empty), notifies the
                 // supervisor (which throws if anything is still live),
                 // and calls AppFree.
+#if SPONSOR_BUILD
+                _sponsorOverlay?.Dispose();
+                _sponsorOverlay = null;
+#endif
                 _bootstrapHost?.Dispose();
 
                 // Dispose ConfigService last: it outlives every host
