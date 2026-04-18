@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!--
-      Plain net9.0. References Ghostty.Core directly for the real
+      Plain net10.0. References Ghostty.Core directly for the real
       pure-logic types (PaneTree, IPaneHost, TabManager, etc.). Does NOT
       reference Ghostty.csproj, which would drag the WinAppSDK MRT/PRI
       build targets in. WinUI-side types are not exercised by this test
@@ -41,7 +41,19 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />
-    <ProjectReference Include="..\..\dist\windows\Bench\Ghostty.Bench\Ghostty.Bench.csproj" />
+    <ProjectReference Include="..\Ghostty.Bench\Ghostty.Bench.csproj" />
+    <!--
+      EchoChild is the spawn target for ConPtyTransportTests. The regression
+      test resolves it by file name next to the test assembly, so we copy the
+      child exe into this project's output without referencing its assembly.
+      Ghostty.Bench pulls EchoChild the same way, but copy-only transitive
+      references do not cascade through ProjectReference, so we repeat it here.
+    -->
+    <ProjectReference Include="..\Ghostty.Bench.EchoChild\Ghostty.Bench.EchoChild.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Content"
+                      CopyToOutputDirectory="PreserveNewest"
+                      SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -49,7 +61,7 @@
       Embed the hand-written P/Invoke surface as a manifest resource so
       MarshalComplianceTests can text-scan it without a project reference
       to Ghostty.csproj (which would drag WinAppSDK targets into a plain
-      net9.0 test assembly).
+      net10.0 test assembly).
     -->
     <EmbeddedResource Include="..\Ghostty\Interop\NativeMethods.cs"
                       Link="Interop\NativeMethods.cs"
