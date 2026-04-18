@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Sponsor.Update.UpdatePill"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Ghostty.Sponsor.Update"
+    AutomationProperties.Name="Update status">
+    <Button x:Name="PillButton"
+            Padding="8,2,10,2"
+            MinHeight="24"
+            CornerRadius="6"
+            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+            AutomationProperties.LiveSetting="Polite">
+        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Grid Width="14" Height="14">
+                <FontIcon x:Name="PillIcon"
+                          FontFamily="{StaticResource SymbolThemeFontFamily}"
+                          FontSize="12"/>
+                <ProgressRing x:Name="PillProgress"
+                              IsIndeterminate="False"
+                              Minimum="0"
+                              Maximum="1"
+                              Width="14" Height="14"
+                              Visibility="Collapsed"/>
+            </Grid>
+            <TextBlock x:Name="PillLabel" FontSize="12" VerticalAlignment="Center"/>
+        </StackPanel>
+        <Button.Flyout>
+            <Flyout Placement="Bottom">
+                <local:UpdatePopover x:Name="PillPopover"/>
+            </Flyout>
+        </Button.Flyout>
+    </Button>
+</UserControl>
