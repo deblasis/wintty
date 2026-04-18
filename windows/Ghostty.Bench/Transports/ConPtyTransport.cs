@@ -17,6 +17,7 @@ namespace Ghostty.Bench.Transports;
 //   our copies immediately after CreatePseudoConsole returns,
 //   otherwise the child's stdout pipe never gets EOF on exit and
 //   the reader hangs forever.
+// Audited against microsoft/terminal/samples/ConPTY/MiniTerm on 2026-04-17.
 [SupportedOSPlatform("windows")]
 public sealed class ConPtyTransport : ITransport
 {
@@ -79,12 +80,11 @@ public sealed class ConPtyTransport : ITransport
             throw new TransportException($"InitializeProcThreadAttributeList failed: 0x{initErr:X8}");
         }
 
-        IntPtr hpconValue = _hpcon;
         if (!UpdateProcThreadAttribute(
                 _attrList,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                ref hpconValue,
+                _hpcon,
                 (IntPtr)IntPtr.Size,
                 IntPtr.Zero,
                 IntPtr.Zero))
@@ -102,7 +102,7 @@ public sealed class ConPtyTransport : ITransport
         si.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
         si.lpAttributeList = _attrList;
 
-        string cmdLine = "\"" + childExePath + "\"";
+        string cmdLine = $"\"{childExePath}\"";
 
         if (!CreateProcess(
                 null,
@@ -139,6 +139,10 @@ public sealed class ConPtyTransport : ITransport
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
+        // Dispose must not throw. Each call site below is individually
+        // wrapped so a failure in one step (e.g. a double-free racing with
+        // a crashing child) does not skip the remaining cleanup.
+        //
         // Order matters: ClosePseudoConsole first, then streams. The
         // reverse order can hang on some Windows builds.
         try { ClosePseudoConsole(_hpcon); } catch { }
@@ -240,7 +244,7 @@ public sealed class ConPtyTransport : ITransport
         IntPtr lpAttributeList,
         uint dwFlags,
         IntPtr Attribute,
-        ref IntPtr lpValue,
+        IntPtr lpValue,
         IntPtr cbSize,
         IntPtr lpPreviousValue,
         IntPtr lpReturnSize);
