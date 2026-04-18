@@ -69,3 +69,32 @@ the type is absent.
 Windows reclaims process-scope handles on exit. State transitions are infrequent
 in practice, so the leak is bounded. D.3 may cache the three icons if profiling
 shows a hot path.
+
+## D.2 - real driver
+
+Run with `$env:WINTTY_DEV_JWT` set to a dev JWT (mint via
+`../wintty-release/worker/scripts/smoke-mint-jwt.ts`). Open the palette
+and run "Check for updates (real)" to drive the real Velopack-backed
+`UpdateManager` against `api.wintty.io/manifest/stable`. Full walkthrough
+in `docs/dev/smoke-update.md`.
+
+The simulator palette entries ("Simulate: *") remain in DEBUG builds as
+a secondary driver attached to `UpdateService`; they still emit into
+the pill / taskbar / toast pipeline for UI exercise without network.
+
+### Palette re-registration wart
+
+`SponsorUpdateCommandSource` is constructed inside `MainWindow`'s ctor,
+which runs *before* `Wire()`. So the "Check for updates (real)" entry
+(which needs `UpdateService`) is added via a post-Wire re-registration:
+`App.OnLaunched` calls `window.RegisterSponsorService(_sponsorOverlay.Service)`
+which in turn calls `_sponsorSource.SetService(service)` + `Refresh()`.
+Same wart as D.1; D.3 is the right time to move palette construction
+to post-Wire and drop the re-register.
+
+### Apply-and-restart is un-testable on dev
+
+Clicking "Restart Now" correctly errors with "Couldn't apply the update"
+because Velopack's on-disk stub (`Update.exe`) isn't present in a dev
+checkout. Real apply-and-restart validation lands with Plan C's signed
+`Setup.exe`. This is documented, not a bug.
