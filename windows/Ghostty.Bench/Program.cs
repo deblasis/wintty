@@ -46,12 +46,16 @@ public static class Program
         // honest enforcement is a fire-and-forget Task that calls
         // Environment.Exit after the deadline. Per-probe budgets:
         //   round-trip: 30s (100 warmup + 1000 iterations)
-        //   throughput: 60s (3 runs of 100 MB each)
+        //   throughput: 180s (3 iterations of 1 MB, per-iteration
+        //                     deadline is 120s — three iterations cannot
+        //                     usefully exceed 3x per-iteration budget, but
+        //                     we leave slack for cold start + 60Hz conhost
+        //                     refresh settling after burst completion)
         //   all:        10 minutes (8 probes in sequence)
         TimeSpan budget =
             probeName == "all"                 ? TimeSpan.FromMinutes(10) :
             probeName.Contains("roundtrip")    ? TimeSpan.FromSeconds(30) :
-            probeName.Contains("throughput")   ? TimeSpan.FromSeconds(60) :
+            probeName.Contains("throughput")   ? TimeSpan.FromSeconds(180) :
                                                  TimeSpan.FromSeconds(30);
         _ = Task.Run(async () =>
         {
@@ -70,6 +74,15 @@ public static class Program
             if (probeName == "conpty-roundtrip-verify")
             {
                 return RunConPtyVerify();
+            }
+
+            if (probeName == "conpty-throughput-verify")
+            {
+                // Optional payload size in KB: `conpty-throughput-verify 1024`
+                int kb = 4;
+                if (args.Length >= 2 && int.TryParse(args[1], out int parsed) && parsed > 0)
+                    kb = parsed;
+                return RunConPtyThroughputVerify(kb);
             }
 
             ResultJson? result = RunSingleByName(probeName);
@@ -131,12 +144,12 @@ public static class Program
         {
             "conpty-roundtrip" => new RoundTripProbe("conpty_roundtrip", "conpty").Run(t, host, ts),
             "direct-pipe-roundtrip" => new RoundTripProbe("direct_pipe_roundtrip", "direct_pipe").Run(t, host, ts),
-            "conpty-throughput-ascii" => new ThroughputProbe("conpty_throughput_ascii", "conpty", "ascii", Payloads.Ascii100Mb()).Run(t, host, ts),
-            "conpty-throughput-sgr" => new ThroughputProbe("conpty_throughput_sgr", "conpty", "sgr", Payloads.Sgr100Mb()).Run(t, host, ts),
-            "conpty-throughput-stress" => new ThroughputProbe("conpty_throughput_stress", "conpty", "stress", Payloads.Stress100Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-ascii" => new ThroughputProbe("direct_pipe_throughput_ascii", "direct_pipe", "ascii", Payloads.Ascii100Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-sgr" => new ThroughputProbe("direct_pipe_throughput_sgr", "direct_pipe", "sgr", Payloads.Sgr100Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-stress" => new ThroughputProbe("direct_pipe_throughput_stress", "direct_pipe", "stress", Payloads.Stress100Mb()).Run(t, host, ts),
+            "conpty-throughput-ascii" => new ThroughputProbe("conpty_throughput_ascii", "conpty", "ascii", Payloads.Ascii1Mb()).Run(t, host, ts),
+            "conpty-throughput-sgr" => new ThroughputProbe("conpty_throughput_sgr", "conpty", "sgr", Payloads.Sgr1Mb()).Run(t, host, ts),
+            "conpty-throughput-stress" => new ThroughputProbe("conpty_throughput_stress", "conpty", "stress", Payloads.Stress1Mb()).Run(t, host, ts),
+            "direct-pipe-throughput-ascii" => new ThroughputProbe("direct_pipe_throughput_ascii", "direct_pipe", "ascii", Payloads.Ascii1Mb()).Run(t, host, ts),
+            "direct-pipe-throughput-sgr" => new ThroughputProbe("direct_pipe_throughput_sgr", "direct_pipe", "sgr", Payloads.Sgr1Mb()).Run(t, host, ts),
+            "direct-pipe-throughput-stress" => new ThroughputProbe("direct_pipe_throughput_stress", "direct_pipe", "stress", Payloads.Stress1Mb()).Run(t, host, ts),
             _ => null,
         };
     }
@@ -246,6 +259,7 @@ public static class Program
         foreach (var p in AllProbeNames) w.WriteLine($"  {p}");
         w.WriteLine("  all                         -- run every probe, write results/<probe>.json + summary.json");
         w.WriteLine("  conpty-roundtrip-verify     -- 5-iteration diagnostic that proves conpty-roundtrip numbers are honest");
+        w.WriteLine("  conpty-throughput-verify    -- small-payload diagnostic: shows what conhost emits for a single payload+terminator burst");
     }
 
     // Diagnostic variant of conpty-roundtrip. Runs 5 iterations with a
@@ -330,6 +344,140 @@ public static class Program
         Console.Out.WriteLine("Each iteration found ITS OWN unique payload letter; leftover bytes from prior iterations would show the wrong letter.");
 
         return 0;
+    }
+
+    // Small-payload diagnostic for the throughput probe protocol. Writes a
+    // 4 KB ASCII payload + the same "\r\n~ENDOFBURST_<nonce>~" terminator the
+    // real throughput probe uses, then reads conhost's hOutput for up to
+    // 10 s, reporting:
+    //   - total bytes read
+    //   - whether the terminator appears anywhere in the accumulated stream
+    //   - hexdump-style rendering of the first 256 and last 512 bytes
+    // The goal is to see whether conhost emits the terminator at all, and
+    // if so, whether it is byte-contiguous or interrupted by VT framing
+    // (cursor-move / erase-in-line / SGR sequences mid-row).
+    private static int RunConPtyThroughputVerify(int payloadKb)
+    {
+        string childExe = ResolveChildExe();
+        using ITransport t = new ConPtyTransport(childExe);
+        t.WaitReady(TimeSpan.FromSeconds(2));
+
+        string nonce = Guid.NewGuid().ToString("N").Substring(0, 16);
+        byte[] terminator = System.Text.Encoding.ASCII.GetBytes(
+            "\r\n~ENDOFBURST_" + nonce + "~");
+        byte[] payload = new byte[payloadKb * 1024];
+        Array.Fill(payload, (byte)'A');
+
+        // Read window scales with payload: 2 s baseline + 2 s per 100 KB
+        // extrapolated from the 4 KB = ~80 ms observation, with a cap.
+        int readSeconds = Math.Min(180, 2 + payloadKb / 50);
+
+        Console.Out.WriteLine($"conpty-throughput-verify: {payloadKb} KB ASCII + terminator, {readSeconds} s read window");
+        Console.Out.WriteLine($"payload: {payload.Length} bytes of 'A'");
+        Console.Out.Write("terminator bytes: ");
+        DumpBytes(Console.Out, terminator);
+        Console.Out.WriteLine();
+        Console.Out.WriteLine();
+
+        // Parallel reader: start draining hOutput BEFORE writing the payload
+        // so conhost's emit side never backpressures (which, sequentially,
+        // deadlocks at >4 KB because the hOutput pipe fills up).
+        byte[] scratch = new byte[64 * 1024];
+        var all = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+        long totalRead = 0;
+        int readCalls = 0;
+        var found = new ManualResetEventSlim(false);
+        int foundOffset = -1;
+        var cts = new CancellationTokenSource(TimeSpan.FromSeconds(readSeconds));
+
+        var reader = Task.Run(async () =>
+        {
+            // Simple accumulator that scans after each read. Uses the full
+            // accumulated buffer for scanning so cross-read matches work
+            // without implementing the production probe's carryover trick.
+            var accum = new List<byte>(payloadKb * 1024);
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    int n = await t.Output.ReadAsync(scratch.AsMemory(0, scratch.Length), cts.Token).ConfigureAwait(false);
+                    if (n == 0) return;
+                    Interlocked.Add(ref totalRead, n);
+                    Interlocked.Increment(ref readCalls);
+                    for (int j = 0; j < n; j++) accum.Add(scratch[j]);
+
+                    int hit = CollectionsMarshal.AsSpan(accum).IndexOf(terminator.AsSpan());
+                    if (hit >= 0)
+                    {
+                        foundOffset = hit;
+                        all.Enqueue(accum.ToArray());
+                        found.Set();
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            all.Enqueue(accum.ToArray());
+        }, cts.Token);
+
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        t.Input.Write(payload);
+        t.Input.Write(terminator);
+        t.Input.Flush();
+
+        // Wait for either the terminator to appear or the deadline to fire.
+        bool matched = found.Wait(TimeSpan.FromSeconds(readSeconds));
+        cts.Cancel();
+        try { reader.Wait(TimeSpan.FromSeconds(2)); } catch { }
+
+        // Reassemble accumulated bytes (single item in queue).
+        byte[] accumBytes = all.TryDequeue(out var first) ? first : Array.Empty<byte>();
+
+        if (matched && foundOffset >= 0)
+        {
+            double us = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+            Console.Out.WriteLine($"TERMINATOR FOUND at offset {foundOffset} after {readCalls} read call(s), {accumBytes.Length} total bytes, {us:F0} us");
+            Console.Out.WriteLine();
+            DumpThroughputVerifySlicesArr(accumBytes);
+            return 0;
+        }
+
+        double elapsedUs = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Console.Out.WriteLine($"TERMINATOR NOT FOUND after {readCalls} read call(s), {accumBytes.Length} total bytes, {elapsedUs:F0} us");
+        Console.Out.WriteLine();
+        DumpThroughputVerifySlicesArr(accumBytes);
+
+        byte[] prefix = System.Text.Encoding.ASCII.GetBytes("~ENDOFBURST_");
+        int prefixIdx = accumBytes.AsSpan().IndexOf(prefix.AsSpan());
+        if (prefixIdx >= 0)
+        {
+            Console.Out.WriteLine($"DIAGNOSIS: ~ENDOFBURST_ prefix DOES appear at offset {prefixIdx}; the 16-char nonce or trailing '~' must be split by VT framing. Next 64 bytes from that offset:");
+            int len = Math.Min(64, accumBytes.Length - prefixIdx);
+            DumpBytes(Console.Out, accumBytes.AsSpan(prefixIdx, len));
+            Console.Out.WriteLine();
+        }
+        else
+        {
+            Console.Out.WriteLine("DIAGNOSIS: the literal substring '~ENDOFBURST_' does NOT appear anywhere in what conhost emitted. The terminator is either not reaching hOutput or being mangled beyond substring match.");
+        }
+
+        return 1;
+    }
+
+    private static void DumpThroughputVerifySlicesArr(byte[] all)
+    {
+        int firstLen = Math.Min(256, all.Length);
+        Console.Out.WriteLine($"FIRST {firstLen} BYTES of emission:");
+        DumpBytes(Console.Out, all.AsSpan(0, firstLen));
+        Console.Out.WriteLine();
+        Console.Out.WriteLine();
+
+        int lastLen = Math.Min(512, all.Length);
+        int lastStart = all.Length - lastLen;
+        Console.Out.WriteLine($"LAST {lastLen} BYTES of emission (offset {lastStart}..{all.Length}):");
+        DumpBytes(Console.Out, all.AsSpan(lastStart, lastLen));
+        Console.Out.WriteLine();
+        Console.Out.WriteLine();
     }
 
     // Compact per-byte dump: printable ASCII as the char, else \xNN.
