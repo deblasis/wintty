@@ -13,9 +13,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "IconGen", "..\dist\windows\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "IconGen.Tests", "..\dist\windows\IconGen.Tests\IconGen.Tests.csproj", "{47E7F454-2EA0-4297-B34D-B1E62A8D57DB}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Ghostty.Bench", "..\dist\windows\Bench\Ghostty.Bench\Ghostty.Bench.csproj", "{B55C7C4D-CD33-4A75-8F59-697075D2F215}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Ghostty.Bench", "Ghostty.Bench\Ghostty.Bench.csproj", "{B55C7C4D-CD33-4A75-8F59-697075D2F215}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Ghostty.Bench.EchoChild", "..\dist\windows\Bench\Ghostty.Bench.EchoChild\Ghostty.Bench.EchoChild.csproj", "{7B693675-9174-4E33-B2CE-D4E93AD012D5}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Ghostty.Bench.EchoChild", "Ghostty.Bench.EchoChild\Ghostty.Bench.EchoChild.csproj", "{7B693675-9174-4E33-B2CE-D4E93AD012D5}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -148,7 +148,5 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{951A721F-A83C-4E9B-8203-751F0E1AF1EA} = {AC15D111-0E66-69FF-AB22-C1C2B24C9B2F}
 		{47E7F454-2EA0-4297-B34D-B1E62A8D57DB} = {AC15D111-0E66-69FF-AB22-C1C2B24C9B2F}
-		{B55C7C4D-CD33-4A75-8F59-697075D2F215} = {AC15D111-0E66-69FF-AB22-C1C2B24C9B2F}
-		{7B693675-9174-4E33-B2CE-D4E93AD012D5} = {AC15D111-0E66-69FF-AB22-C1C2B24C9B2F}
 	EndGlobalSection
 EndGlobal
