@@ -61,6 +61,21 @@ public static partial class Program
     [STAThread]
     static int Main(string[] args)
     {
+#if SPONSOR_BUILD
+        // Velopack's update/rollback/first-run handlers must intercept
+        // before WinUI 3 spins up. VelopackBootstrap.Run() forwards args
+        // to Velopack; if the process is a Velopack utility invocation
+        // (--veloapp-install / --veloapp-uninstall / etc.) Velopack
+        // handles it and exits the process itself. Otherwise it returns
+        // and we continue into the real Main body.
+        return Ghostty.Sponsor.Update.VelopackBootstrap.Run(args, () => MainImpl(args));
+#else
+        return MainImpl(args);
+#endif
+    }
+
+    static int MainImpl(string[] args)
+    {
         // CLI actions are delegated to libghostty, matching the macOS
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
