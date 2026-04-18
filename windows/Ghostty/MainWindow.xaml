@@ -98,6 +98,11 @@
                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            TextTrimming="CharacterEllipsis"
                            IsHitTestVisible="False"/>
+
+                <ContentPresenter x:Name="SponsorOverlayHost"
+                                  HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Margin="0,0,8,0"/>
             </Grid>
         </Grid>
 

@@ -1524,6 +1524,16 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config };
 
+#if SPONSOR_BUILD && DEBUG
+        // SharedSimulator is lazily materialized on first access (App.xaml.cs),
+        // so it's live here even though the full SponsorOverlay gets wired
+        // later in App.OnLaunched. Same instance flows into the bootstrapper.
+        if ((Microsoft.UI.Xaml.Application.Current as App)?.SharedSimulator is { } sim)
+        {
+            sources.Add(new Ghostty.Sponsor.Update.SponsorUpdateCommandSource(sim));
+        }
+#endif
+
         // Build the action autocompleter with a minimal set of action schemas.
         var schemas = new Dictionary<string, ActionSchema>
         {

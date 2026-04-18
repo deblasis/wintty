@@ -124,6 +124,8 @@ internal sealed class GhosttyHost : IDisposable
             supervisor);
         _config = config;
 
+        Debug.WriteLine($"[Ghostty] SPONSOR_BUILD={BuildFlags.IsSponsorBuild}");
+
         _wakeupCb = OnWakeup;
         _actionCb = OnAction;
         _readClipboardCb = OnReadClipboard;
