@@ -98,4 +98,110 @@ public static class Runner
 
     public static double TicksToMicroseconds(long ticks) =>
         ticks * 1_000_000.0 / Stopwatch.Frequency;
+
+    // Runs one timed throughput iteration: writes payload + terminator to the
+    // transport, reads output until the terminator substring is observed in
+    // the return stream, returns (elapsedTicks, emitBytes). Emit counts every
+    // byte read during the window including the terminator and any bytes
+    // that arrived in the same read as the terminator's last byte; at 1 MB
+    // payload scale this is ~31 bytes of noise.
+    //
+    // `scratch` is caller-owned and reused across iterations. The method
+    // uses the first (terminator.Length - 1) bytes of scratch as cross-read
+    // carryover storage, so scratch.Length must be > terminator.Length. The
+    // recommended size is 64 KB to amortize Read syscalls over 1 MB
+    // payloads.
+    //
+    // Throws:
+    //  - EndOfStreamException if Output reaches EOF before the terminator.
+    //  - TimeoutException / OperationCanceledException if `deadline` elapses.
+    //  - The reader task's exception propagates via Task.Wait on the CTS.
+    public static (long elapsedTicks, long emitBytes) RunThroughputIteration(
+        ITransport transport,
+        ReadOnlyMemory<byte> payload,
+        ReadOnlyMemory<byte> terminator,
+        TimeSpan deadline,
+        byte[] scratch)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(scratch);
+        if (terminator.Length == 0)
+            throw new ArgumentException("terminator must not be empty", nameof(terminator));
+        if (scratch.Length <= terminator.Length)
+            throw new ArgumentException(
+                $"scratch.Length ({scratch.Length}) must be greater than terminator.Length ({terminator.Length})",
+                nameof(scratch));
+
+        using var cts = new CancellationTokenSource(deadline);
+        var ct = cts.Token;
+
+        // ReadAsync with a CancellationToken is the only way to abort a
+        // blocking pipe read on deadline. Stream.Read (synchronous) does
+        // not observe the token, so a stuck transport would hang past the
+        // deadline forever. NamedPipeClientStream + anonymous pipes both
+        // support ReadAsync(Memory<byte>, CancellationToken) on .NET 10.
+        var reader = Task.Run<long>(async () =>
+        {
+            int tailLen = terminator.Length - 1;
+            int carryoverLen = 0;
+            long emit = 0;
+
+            while (true)
+            {
+                int n = await transport.Output.ReadAsync(
+                    scratch.AsMemory(carryoverLen, scratch.Length - carryoverLen),
+                    ct).ConfigureAwait(false);
+                if (n == 0)
+                    throw new EndOfStreamException("peer closed during throughput read");
+
+                emit += n;
+                int scanLen = carryoverLen + n;
+
+                int idx = scratch.AsSpan(0, scanLen).IndexOf(terminator.Span);
+                if (idx >= 0)
+                    return emit;
+
+                // Carry over the last (terminator.Length - 1) bytes: that is
+                // the largest suffix that could form the prefix of a terminator
+                // straddling this read and the next. Anything shorter loses
+                // cross-boundary matches; anything longer wastes space.
+                // Span.CopyTo is memmove-safe for overlapping source and
+                // destination in the same buffer.
+                int keep = Math.Min(tailLen, scanLen);
+                if (keep > 0)
+                    scratch.AsSpan(scanLen - keep, keep).CopyTo(scratch.AsSpan(0, keep));
+                carryoverLen = keep;
+            }
+        }, ct);
+
+        long start = Stopwatch.GetTimestamp();
+        transport.Input.Write(payload.Span);
+        transport.Input.Write(terminator.Span);
+        transport.Input.Flush();
+
+        long emitBytes;
+        try
+        {
+            // GetResult is safe here: Task.Run dispatches the async lambda on
+            // the threadpool with no captured SynchronizationContext, so no
+            // deadlock can form regardless of the caller's context. xunit's
+            // test host has no context, console / bench host has none either.
+            emitBytes = reader.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            // Only convert cancellations caused by OUR deadline CTS. The guard
+            // isn't perfect: any OCE raised after the CTS has fired looks the
+            // same from here. In practice, ReadAsync on NamedPipeClientStream /
+            // anonymous pipes only cancels via the caller's token, so the
+            // conversion is correct. If a future transport raises OCE for a
+            // different reason, revisit: split the wait into a timeout vs
+            // exception path using `cts.Token.WaitHandle`.
+            throw new TimeoutException(
+                $"throughput terminator not observed within {deadline.TotalSeconds:F1}s");
+        }
+
+        long elapsed = Stopwatch.GetTimestamp() - start;
+        return (elapsed, emitBytes);
+    }
 }
