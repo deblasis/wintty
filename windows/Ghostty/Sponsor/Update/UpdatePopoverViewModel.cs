@@ -45,12 +45,18 @@ internal sealed class UpdatePopoverViewModel : NotifyBase, IDisposable
             RaiseClose();
             await _service.CheckNowAsync();
         }, CanRetry);
+        CancelDownloadCommand = new RelayCommand(() =>
+        {
+            RaiseClose();
+            _ = _service.CancelDownloadAsync();
+        });
 
         var c = _service.Current;
         State = c.State;
         TargetVersion = c.TargetVersion;
         ErrorMessage = c.ErrorMessage;
         ReleaseNotesUrl = c.ReleaseNotesUrl;
+        TechnicalDetail = c.TechnicalDetail;
 
         _service.StateChanged += OnStateChanged;
     }
@@ -79,10 +85,26 @@ internal sealed class UpdatePopoverViewModel : NotifyBase, IDisposable
         private set { if (field == value) return; field = value; Raise(); }
     }
 
+    /// <summary>
+    /// Driver-supplied technical detail (exception type, HTTP status,
+    /// simulator label). Popover shows it in a Debug-only second line
+    /// so it's available for bug reports without cluttering release UX.
+    /// </summary>
+    public string? TechnicalDetail
+    {
+        get;
+        private set { if (field == value) return; field = value; Raise(); }
+    }
+
+    // Regular computed property; raised manually in OnStateChanged because
+    // the C# 14 field-keyword pattern doesn't apply to derived properties.
+    public bool ShowCancel => State == UpdateState.Downloading;
+
     public RelayCommand SkipCommand { get; }
     public AsyncRelayCommand InstallAndRelaunchCommand { get; }
     public AsyncRelayCommand RestartNowCommand { get; }
     public AsyncRelayCommand RetryCommand { get; }
+    public RelayCommand CancelDownloadCommand { get; }
 
     /// <summary>
     /// Raised when the popover should be dismissed. The pill control
@@ -132,6 +154,8 @@ internal sealed class UpdatePopoverViewModel : NotifyBase, IDisposable
             TargetVersion = snap.TargetVersion;
             ErrorMessage = snap.ErrorMessage;
             ReleaseNotesUrl = snap.ReleaseNotesUrl;
+            TechnicalDetail = snap.TechnicalDetail;
+            Raise(nameof(ShowCancel));
             SkipCommand.RaiseCanExecuteChanged();
             InstallAndRelaunchCommand.RaiseCanExecuteChanged();
             RestartNowCommand.RaiseCanExecuteChanged();
