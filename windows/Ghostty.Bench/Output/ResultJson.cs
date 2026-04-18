@@ -12,9 +12,12 @@ public sealed record ResultJson(
     [property: JsonPropertyName("p50_us")] double? P50Us,
     [property: JsonPropertyName("p95_us")] double? P95Us,
     [property: JsonPropertyName("p99_us")] double? P99Us,
-    [property: JsonPropertyName("p50_mbps")] double? P50Mbps,
-    [property: JsonPropertyName("min_mbps")] double? MinMbps,
-    [property: JsonPropertyName("max_mbps")] double? MaxMbps,
+    [property: JsonPropertyName("ingest_p50_mbps")] double? IngestP50Mbps,
+    [property: JsonPropertyName("ingest_min_mbps")] double? IngestMinMbps,
+    [property: JsonPropertyName("ingest_max_mbps")] double? IngestMaxMbps,
+    [property: JsonPropertyName("emit_p50_mbps")] double? EmitP50Mbps,
+    [property: JsonPropertyName("emit_min_mbps")] double? EmitMinMbps,
+    [property: JsonPropertyName("emit_max_mbps")] double? EmitMaxMbps,
     [property: JsonPropertyName("samples")] int Samples,
     [property: JsonPropertyName("warmup")] int? Warmup,
     [property: JsonPropertyName("payload_bytes")] long? PayloadBytes,
@@ -54,7 +57,8 @@ public sealed record ResultJson(
             Probe: probe,
             Unit: "microseconds",
             P50Us: p50Us, P95Us: p95Us, P99Us: p99Us,
-            P50Mbps: null, MinMbps: null, MaxMbps: null,
+            IngestP50Mbps: null, IngestMinMbps: null, IngestMaxMbps: null,
+            EmitP50Mbps: null,   EmitMinMbps: null,   EmitMaxMbps: null,
             Samples: samples,
             Warmup: warmup,
             PayloadBytes: null,
@@ -65,14 +69,23 @@ public sealed record ResultJson(
             TimestampUtc: FormatUtc(timestampUtc),
             BenchVersion: CurrentVersion);
 
+    // Throughput now reports paired ingest / emit rates. Ingest = "how fast
+    // did N payload bytes reach the other side of the transport." Emit =
+    // "how many bytes did the transport produce on the return path during
+    // that same window." Under DirectPipe they are approximately equal;
+    // under ConPTY they diverge because conhost VT-renders screen state
+    // rather than byte-echoing, and the divergence is informative signal.
     public static ResultJson Throughput(
         string probe,
         string transport,
         string payload,
         long payloadBytes,
-        double p50Mbps,
-        double minMbps,
-        double maxMbps,
+        double ingestP50Mbps,
+        double ingestMinMbps,
+        double ingestMaxMbps,
+        double emitP50Mbps,
+        double emitMinMbps,
+        double emitMaxMbps,
         int samples,
         HostInfo host,
         DateTime timestampUtc) =>
@@ -80,7 +93,12 @@ public sealed record ResultJson(
             Probe: probe,
             Unit: "megabytes_per_second",
             P50Us: null, P95Us: null, P99Us: null,
-            P50Mbps: p50Mbps, MinMbps: minMbps, MaxMbps: maxMbps,
+            IngestP50Mbps: ingestP50Mbps,
+            IngestMinMbps: ingestMinMbps,
+            IngestMaxMbps: ingestMaxMbps,
+            EmitP50Mbps: emitP50Mbps,
+            EmitMinMbps: emitMinMbps,
+            EmitMaxMbps: emitMaxMbps,
             Samples: samples,
             Warmup: null,
             PayloadBytes: payloadBytes,
