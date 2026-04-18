@@ -155,6 +155,9 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
+#if SPONSOR_BUILD && DEBUG
+    private Ghostty.Sponsor.Update.SponsorUpdateCommandSource? _sponsorSource;
+#endif
 
     /// <summary>
     /// Palette close state: prevents re-entrant close handling between
@@ -1530,7 +1533,8 @@ public sealed partial class MainWindow : Window
         // later in App.OnLaunched. Same instance flows into the bootstrapper.
         if ((Microsoft.UI.Xaml.Application.Current as App)?.SharedSimulator is { } sim)
         {
-            sources.Add(new Ghostty.Sponsor.Update.SponsorUpdateCommandSource(sim));
+            _sponsorSource = new Ghostty.Sponsor.Update.SponsorUpdateCommandSource(sim);
+            sources.Add(_sponsorSource);
         }
 #endif
 
@@ -1562,6 +1566,21 @@ public sealed partial class MainWindow : Window
             autoCompleter,
             groupByCategory: _configService.CommandPaletteGroupCommands);
     }
+
+#if SPONSOR_BUILD && DEBUG
+    /// <summary>
+    /// Path A re-registration: called from App.OnLaunched after Wire() so
+    /// the palette gains the real-service entry without a rebuild cycle.
+    /// GetCommands() is read on each palette open, so no separate
+    /// notification to CommandPaletteViewModel is needed.
+    /// </summary>
+    internal void RegisterSponsorService(Ghostty.Sponsor.Update.UpdateService service)
+    {
+        if (_sponsorSource is null) return;
+        _sponsorSource.SetService(service);
+        _sponsorSource.Refresh();
+    }
+#endif
 
     private void ExecuteBindingAction(string actionKey)
     {

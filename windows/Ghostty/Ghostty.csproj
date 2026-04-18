@@ -106,6 +106,14 @@
     <WindowsSdkPackageVersion>10.0.26100.57</WindowsSdkPackageVersion>
   </PropertyGroup>
 
+  <!--
+    Velopack update client. SPONSOR_BUILD only. Pin exact version for
+    reproducibility; no `*` or open ranges.
+  -->
+  <ItemGroup Condition="'$(SponsorBuild)'=='true'">
+    <PackageReference Include="Velopack" Version="0.0.1298" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260317003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
