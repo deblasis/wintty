@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
@@ -169,6 +170,48 @@ public sealed class ConPtyTransport : ITransport
             try { DeleteProcThreadAttributeList(_attrList); } catch { }
             try { Marshal.FreeHGlobal(_attrList); } catch { }
         }
+    }
+
+    // Drains conhost's output pipe until the "RDY" sentinel emitted by
+    // Ghostty.Bench.EchoChild is seen, then returns. Everything up to and
+    // including "RDY" is discarded; subsequent Read calls on Output start
+    // clean. Throws TransportException on timeout or pipe EOF.
+    //
+    // Implementation note: we rely on conhost emitting the child's printable
+    // ASCII bytes literally in its VT output stream (true for any sequence
+    // of non-control characters at known cursor positions). See the spec for
+    // why "RDY" is safe and "0x01" (the pre-8762af4ed sentinel) was not.
+    public void WaitReady(TimeSpan timeout)
+    {
+        ReadOnlySpan<byte> ready = "RDY"u8;
+        long deadline = Stopwatch.GetTimestamp()
+                        + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+
+        // Window holds the accumulated drain bytes. Conhost's preamble is
+        // small (< 64 bytes in practice) plus the 3-byte RDY, so a List<byte>
+        // with modest reserve is fine; this is not a hot path.
+        var window = new List<byte>(256);
+        Span<byte> buf = stackalloc byte[256];
+
+        while (Stopwatch.GetTimestamp() < deadline)
+        {
+            int n = _outputStream.Read(buf);
+            if (n <= 0)
+            {
+                throw new TransportException(
+                    "ConPty output stream EOF before ready sentinel");
+            }
+
+            window.AddRange(buf[..n]);
+
+            if (CollectionsMarshal.AsSpan(window).IndexOf(ready) >= 0)
+            {
+                return;
+            }
+        }
+
+        throw new TransportException(
+            $"ConPty child did not emit ready sentinel within {timeout.TotalSeconds:F1}s");
     }
 
     // --- Win32 types and imports ---
