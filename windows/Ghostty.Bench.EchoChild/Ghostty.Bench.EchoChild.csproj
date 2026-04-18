@@ -6,9 +6,12 @@
     <AssemblyName>Ghostty.Bench.EchoChild</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Required by [LibraryImport] source-generated PInvokes (SYSLIB1062). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PublishAot>false</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
     <IsPackable>false</IsPackable>
     <IsPublishable>false</IsPublishable>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 </Project>
