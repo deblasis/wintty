@@ -26,6 +26,15 @@ public sealed record UpdateStateSnapshot(
     /// </summary>
     public string? ReleaseNotesUrl { get; init; }
 
+    /// <summary>
+    /// Optional technical detail for diagnostics (exception type, HTTP
+    /// status, inner-exception chain). Debug-only popover copy surfaces
+    /// this verbatim; release builds ignore it. Set by
+    /// <c>UpdateStateMapping.FromError</c> when mapping a caught
+    /// <see cref="UpdateCheckException"/> to an Error snapshot.
+    /// </summary>
+    public string? TechnicalDetail { get; init; }
+
     /// <summary>Idle snapshot with a now-timestamp.</summary>
     public static UpdateStateSnapshot Idle() =>
         new(UpdateState.Idle, null, null, null, DateTimeOffset.UtcNow);
