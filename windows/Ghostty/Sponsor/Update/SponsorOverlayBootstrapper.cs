@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using Ghostty.Core.Config;
 using Ghostty.Core.Sponsor.Update;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -26,9 +27,14 @@ internal sealed class SponsorOverlayBootstrapper : IDisposable
     private readonly UpdateJumpListProvider _jumpList;
     private readonly RestartPendingExitInterceptor _exitInterceptor;
     private readonly SponsorActivationRouter _router;
+    // Owned lifetime resources that UpdateService deliberately doesn't
+    // take ownership of. Disposed in reverse construction order.
+    private readonly Ghostty.Core.Sponsor.Update.VelopackUpdateDriver _driver;
+    private readonly System.Net.Http.HttpClient _http;
 
     public SponsorActivationRouter Router => _router;
     public UpdateSimulator Simulator => _simulator;
+    public UpdateService Service => _service;
 
     private SponsorOverlayBootstrapper(
         UpdateService service,
@@ -39,7 +45,9 @@ internal sealed class SponsorOverlayBootstrapper : IDisposable
         UpdateToastPublisher toast,
         UpdateJumpListProvider jumpList,
         RestartPendingExitInterceptor exitInterceptor,
-        SponsorActivationRouter router)
+        SponsorActivationRouter router,
+        Ghostty.Core.Sponsor.Update.VelopackUpdateDriver driver,
+        System.Net.Http.HttpClient http)
     {
         _service = service;
         _simulator = simulator;
@@ -50,15 +58,45 @@ internal sealed class SponsorOverlayBootstrapper : IDisposable
         _jumpList = jumpList;
         _exitInterceptor = exitInterceptor;
         _router = router;
+        _driver = driver;
+        _http = http;
     }
 
     public static SponsorOverlayBootstrapper Wire(
         Window mainWindow,
         IConfigService config,
         DispatcherQueue dispatcher,
-        UpdateSimulator simulator)
+        UpdateSimulator simulator,
+        Ghostty.Core.Sponsor.Auth.ISponsorTokenProvider tokens,
+        ILoggerFactory? loggerFactory = null)
     {
-        var service = new UpdateService(simulator, config);
+        var http = new System.Net.Http.HttpClient(
+            new System.Net.Http.HttpClientHandler
+            {
+                // Bearer must be stripped on the R2 hop (presigned URL
+                // carries its own signature, and R2 rejects extra Authorization
+                // headers). WinttyManifestClient follows the 302 manually.
+                AllowAutoRedirect = false,
+            })
+        {
+            Timeout = System.TimeSpan.FromSeconds(30),
+        };
+        var source = new WinttyUpdateSource(
+            http, tokens,
+            channel: "stable",
+            apiBase: new System.Uri("https://api.wintty.io"));
+        var adapter = new VelopackManagerAdapter(source);  // Velopack 0.0.1298 ctor has no logger param
+        var driverLogger = loggerFactory?.CreateLogger<Ghostty.Core.Sponsor.Update.VelopackUpdateDriver>()
+            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Ghostty.Core.Sponsor.Update.VelopackUpdateDriver>.Instance;
+        var driver = new Ghostty.Core.Sponsor.Update.VelopackUpdateDriver(adapter, tokens, driverLogger);
+
+#if DEBUG
+        // DEBUG builds keep the simulator as a secondary driver so the
+        // palette "Simulate: *" entries still emit into UpdateService.
+        var service = new UpdateService(driver, config, secondary: simulator);
+#else
+        var service = new UpdateService(driver, config);
+#endif
 
         var localAppData = Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData);
@@ -103,7 +141,7 @@ internal sealed class SponsorOverlayBootstrapper : IDisposable
         service.Start();
         return new SponsorOverlayBootstrapper(
             service, simulator, pillVm, popoverVm,
-            taskbar, toast, jumpList, exit, router);
+            taskbar, toast, jumpList, exit, router, driver, http);
     }
 
     public void Dispose()
@@ -114,6 +152,13 @@ internal sealed class SponsorOverlayBootstrapper : IDisposable
         _taskbar.Dispose();
         _popoverVm.Dispose();
         _pillVm.Dispose();
+        // Service first - stops the poll loop and unsubscribes StateChanged
+        // - before the driver releases its semaphore and token subscription.
         _service.Dispose();
+        _driver.Dispose();
+        // HttpClient last: the driver may still have an in-flight request
+        // when UpdateService.Dispose() returns; disposing the client before
+        // the driver would crash those requests.
+        _http.Dispose();
     }
 }

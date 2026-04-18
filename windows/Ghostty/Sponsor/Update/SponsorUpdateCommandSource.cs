@@ -14,16 +14,32 @@ namespace Ghostty.Sponsor.Update;
 internal sealed class SponsorUpdateCommandSource : ICommandSource
 {
     private readonly UpdateSimulator _simulator;
+    private UpdateService? _service;
+    // Mutable list so Refresh() can splice in real-service entries after
+    // SponsorOverlayBootstrapper.Wire() runs (which happens after this
+    // source is first built inside MainWindow's ctor).
     private readonly List<CommandItem> _items;
 
-    public SponsorUpdateCommandSource(UpdateSimulator simulator)
+    public SponsorUpdateCommandSource(UpdateSimulator simulator, UpdateService? service = null)
     {
         _simulator = simulator;
+        _service = service;
         _items = Build();
     }
 
+    /// <summary>
+    /// Supplies the real <see cref="UpdateService"/> after Wire() has run.
+    /// Call <see cref="Refresh"/> afterwards to surface the new entries.
+    /// </summary>
+    internal void SetService(UpdateService service) { _service = service; }
+
     public IReadOnlyList<CommandItem> GetCommands() => _items;
-    public void Refresh() { /* static set */ }
+
+    public void Refresh()
+    {
+        _items.Clear();
+        _items.AddRange(Build());
+    }
 
     private List<CommandItem> Build()
     {
@@ -58,6 +74,19 @@ internal sealed class SponsorUpdateCommandSource : ICommandSource
         Add("sponsor.sim.restart-pending", "Simulate: Restart Pending",            UpdateState.RestartPending,
             version: "1.4.2", releaseNotesUrl: releasesBase + "v1.4.2");
         Add("sponsor.sim.error",           "Simulate: Error",                      UpdateState.Error, error: "Simulated failure");
+
+        if (_service is not null)
+        {
+            list.Add(new CommandItem
+            {
+                Id = "sponsor.update.check-real",
+                Title = "Check for updates (real)",
+                Description = "Call api.wintty.io with the JWT from WINTTY_DEV_JWT and drive the real state machine.",
+                Category = CommandCategory.Custom,
+                Execute = _item => { var __ = _service.CheckNowAsync(); },
+            });
+        }
+
         return list;
     }
 }
