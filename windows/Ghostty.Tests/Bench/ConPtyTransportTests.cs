@@ -55,4 +55,18 @@ public class ConPtyTransportTests
 
         Assert.True(bytesRead > 0, "ConPtyTransport output pipe EOF'd before conhost sent its VT preamble");
     }
+
+    // Note: WaitReady end-to-end validation is NOT a xunit integration test.
+    // Under `dotnet test`'s testhost-spawned parent, the child's stdio
+    // does not attach to the pseudo-console the same way as under a
+    // `dotnet run` invocation from a native Windows console terminal, so
+    // EchoChild's GetConsoleMode check returns false and the "RDY" sentinel
+    // is never emitted. This is a context-specific property of the Windows
+    // console subsystem, not a bug in WaitReady or EchoChild. End-to-end
+    // coverage for the handshake lives in the manual validation step
+    // documented in the PR: run `dotnet run --project dist/windows/Bench/
+    // Ghostty.Bench -- conpty-roundtrip` from a real PowerShell terminal
+    // (Windows Terminal or pwsh.exe) and confirm valid JSON output. Unit-
+    // level coverage of the WaitReady drain logic lives in HarnessTests
+    // via FakeTransport.
 }
