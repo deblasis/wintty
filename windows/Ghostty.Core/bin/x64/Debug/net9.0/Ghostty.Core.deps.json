@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {
+      "Ghostty.Core/1.0.0": {
+        "runtime": {
+          "Ghostty.Core.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Ghostty.Core/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
