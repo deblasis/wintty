@@ -12,27 +12,37 @@ namespace Ghostty.Sponsor.Update;
 /// state transitions for five WinUI-aware consumers (pill, taskbar,
 /// toast, jump list, exit interceptor). In D.1 the poll timer is a
 /// stub; the simulator drives state directly via the driver API.
-/// D.2 will wire the timer to <c>_driver.CheckAsync</c> and branch on
+/// D.2 will wire the timer to <c>_primary.CheckAsync</c> and branch on
 /// the <c>auto-update</c> config key.
+/// <para>
+/// An optional <paramref name="secondary"/> driver (typically the
+/// <see cref="UpdateSimulator"/> in DEBUG builds) receives state-change
+/// events alongside the primary so palette "Simulate: *" entries still
+/// feed into the service without replacing the real driver.
+/// </para>
 /// </summary>
 internal sealed class UpdateService : IDisposable
 {
-    private readonly IUpdateDriver _driver;
+    private readonly IUpdateDriver _primary;
+    private readonly IUpdateDriver? _secondary;
     private readonly IConfigService _config;
     private readonly CancellationTokenSource _cts = new();
     private PeriodicTimer? _timer;
     private Task? _pollLoop;
 
-    public UpdateService(IUpdateDriver driver, IConfigService config)
+    public UpdateService(IUpdateDriver primary, IConfigService config, IUpdateDriver? secondary = null)
     {
-        _driver = driver;
+        _primary = primary;
+        _secondary = secondary;
         _config = config;
-        _driver.StateChanged += OnDriverStateChanged;
+        _primary.StateChanged += OnDriverStateChanged;
+        if (_secondary is not null)
+            _secondary.StateChanged += OnDriverStateChanged;
         _config.ConfigChanged += OnConfigChanged;
     }
 
     /// <summary>Current state snapshot.</summary>
-    public UpdateStateSnapshot Current => _driver.Current;
+    public UpdateStateSnapshot Current => _primary.Current;
 
     /// <summary>Raised on every state transition, on the driver's thread.</summary>
     public event EventHandler<UpdateStateSnapshot>? StateChanged;
@@ -55,7 +65,7 @@ internal sealed class UpdateService : IDisposable
         {
             while (await _timer!.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
-                // D.2: call _driver.CheckAsync(ct) here, branching on
+                // D.2: call _primary.CheckAsync(ct) here, branching on
                 // the auto-update config key.
                 Debug.WriteLine("[sponsor/update] poll tick (D.1 no-op)");
             }
@@ -63,10 +73,11 @@ internal sealed class UpdateService : IDisposable
         catch (OperationCanceledException) { /* expected on dispose */ }
     }
 
-    public Task CheckNowAsync() => _driver.CheckAsync(_cts.Token);
-    public Task DownloadAsync() => _driver.DownloadAsync(_cts.Token);
-    public Task ApplyAndRestartAsync() => _driver.ApplyAndRestartAsync();
-    public Task DismissAsync() => _driver.DismissAsync(_cts.Token);
+    public Task CheckNowAsync() => _primary.CheckAsync(_cts.Token);
+    public Task DownloadAsync() => _primary.DownloadAsync(_cts.Token);
+    public Task ApplyAndRestartAsync() => _primary.ApplyAndRestartAsync();
+    public Task DismissAsync() => _primary.DismissAsync(_cts.Token);
+    public Task CancelDownloadAsync() => _primary.CancelDownloadAsync(_cts.Token);
 
     private void OnDriverStateChanged(object? sender, UpdateStateSnapshot snap)
     {
@@ -83,7 +94,9 @@ internal sealed class UpdateService : IDisposable
     {
         _cts.Cancel();
         _timer?.Dispose();
-        _driver.StateChanged -= OnDriverStateChanged;
+        _primary.StateChanged -= OnDriverStateChanged;
+        if (_secondary is not null)
+            _secondary.StateChanged -= OnDriverStateChanged;
         _config.ConfigChanged -= OnConfigChanged;
         // Cancel() makes WaitForNextTickAsync throw OperationCanceledException
         // synchronously, so PollLoopAsync observes cancellation in its existing

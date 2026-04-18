@@ -34,6 +34,7 @@ internal sealed partial class UpdatePopover : UserControl
         // Click+CanExecuteChanged instead of Button.Command -- WinUI 3 +
         // CsWinRT CCW tables aren't emitted for managed ICommand impls
         // assigned in code-behind. See UpdatePill.WireCommand.
+        WireCommand(CancelButton,  vm.CancelDownloadCommand);
         WireCommand(SkipButton,    vm.SkipCommand);
         WireCommand(InstallButton, vm.InstallAndRelaunchCommand);
         WireCommand(RetryButton,   vm.RetryCommand);
@@ -145,6 +146,7 @@ internal sealed partial class UpdatePopover : UserControl
         SkipButton.Content = string.IsNullOrEmpty(_vm.TargetVersion)
             ? "Skip this version"
             : $"Skip {_vm.TargetVersion}";
+        CancelButton.Visibility = _vm.ShowCancel ? Visibility.Visible : Visibility.Collapsed;
         SkipButton.Visibility = ShowFor(_vm.State, UpdateState.UpdateAvailable);
         InstallButton.Visibility = ShowFor(_vm.State, UpdateState.UpdateAvailable);
         RestartButton.Visibility = ShowFor(_vm.State, UpdateState.RestartPending);
@@ -158,6 +160,17 @@ internal sealed partial class UpdatePopover : UserControl
         var hasNotes = !string.IsNullOrEmpty(_vm.ReleaseNotesUrl);
         ReleaseNotesDivider.Visibility = hasNotes ? Visibility.Visible : Visibility.Collapsed;
         ReleaseNotesLink.Visibility = hasNotes ? Visibility.Visible : Visibility.Collapsed;
+
+        // Technical detail - Debug builds only. Never ship raw driver
+        // output to release users. Keeping this off `BodyBlock` means
+        // the body stays a clean one-paragraph friendly message.
+#if DEBUG
+        var hasDetail = !string.IsNullOrWhiteSpace(_vm.TechnicalDetail);
+        TechnicalDetailBlock.Text = hasDetail ? $"Technical detail: {_vm.TechnicalDetail}" : string.Empty;
+        TechnicalDetailBlock.Visibility = hasDetail ? Visibility.Visible : Visibility.Collapsed;
+#else
+        TechnicalDetailBlock.Visibility = Visibility.Collapsed;
+#endif
     }
 
     private static string HeaderFromState(UpdateState s) => s switch
@@ -176,28 +189,18 @@ internal sealed partial class UpdatePopover : UserControl
     {
         UpdateState.UpdateAvailable => $"Version {v ?? "?"} is ready to install.",
         UpdateState.RestartPending => "Restart to apply the downloaded update.",
-        UpdateState.Error => FriendlyError(err),
+        // `err` is already a user-friendly sentence from UpdateStateMapping.FromError
+        // (e.g. "Update server is having a hiccup. Try again later."). Don't wrap it.
+        // The raw exception info goes on TechnicalDetailBlock in Debug builds.
+        UpdateState.Error => string.IsNullOrWhiteSpace(err)
+            ? "Something went wrong checking for updates."
+            : err,
         UpdateState.NoUpdatesFound => "You are running the latest version of wintty.",
         UpdateState.Downloading => "Retrieving the update package from the release server.",
         UpdateState.Extracting => "Verifying and extracting the downloaded package.",
         UpdateState.Installing => "Applying the update to the on-disk install. This usually takes a few seconds.",
         _ => string.Empty,
     };
-
-    // Lead with a plain-language sentence. In Debug builds we append the
-    // driver-supplied detail so devs can see what the simulator / real
-    // driver actually reported; in Release the raw error (HTTP code, etc.)
-    // stays in the log, not the user-facing body.
-    private static string FriendlyError(string? err)
-    {
-        const string friendly = "We couldn't finish downloading the update. Check your internet connection and try Retry.";
-#if DEBUG
-        return string.IsNullOrWhiteSpace(err) ? friendly : $"{friendly}\n\nTechnical detail: {err}";
-#else
-        _ = err;
-        return friendly;
-#endif
-    }
 
     private static Visibility ShowFor(UpdateState current, UpdateState expected) =>
         current == expected ? Visibility.Visible : Visibility.Collapsed;

@@ -44,4 +44,13 @@ public interface IUpdateDriver
     /// stuck Error without waiting for the next check cycle.
     /// </summary>
     Task DismissAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Cancel an in-flight download. No-op if no download is active.
+    /// On success the driver reverts to <c>UpdateAvailable</c> (the
+    /// update bytes are still available for a retry) rather than
+    /// <c>Idle</c>. UI binds this to the popover's Cancel button shown
+    /// during <c>Downloading</c> state.
+    /// </summary>
+    Task CancelDownloadAsync(CancellationToken cancellationToken = default);
 }
