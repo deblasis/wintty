@@ -42,6 +42,11 @@ public sealed class DirectPipeTransport : ITransport
     public Stream Input => _proc.StandardInput.BaseStream;
     public Stream Output => _proc.StandardOutput.BaseStream;
 
+    // No-op: raw-pipe transport has no conhost preamble to drain. The
+    // child's stdout is piped directly; first byte we read is a byte
+    // the child wrote. See ConPtyTransport.WaitReady for the ConPTY case.
+    public void WaitReady(TimeSpan timeout) { }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

@@ -67,6 +67,11 @@ public static class Program
                 return RunAll(outPath);
             }
 
+            if (probeName == "conpty-roundtrip-verify")
+            {
+                return RunConPtyVerify();
+            }
+
             ResultJson? result = RunSingleByName(probeName);
             if (result is null)
             {
@@ -115,6 +120,12 @@ public static class Program
             "direct_pipe" => new DirectPipeTransport(childExe),
             _ => throw new TransportException($"unknown transport label: {transportLabel}"),
         };
+
+        // Drain any startup preamble (conhost VT preamble on ConPTY, no-op
+        // on direct pipe) before the probe starts timing iterations. 2s is
+        // ~10x a warm-machine conhost startup; longer means a broken spawn
+        // or raw-mode activation, which deserves a fast distinct error.
+        t.WaitReady(TimeSpan.FromSeconds(2));
 
         return probeName switch
         {
@@ -233,6 +244,102 @@ public static class Program
         w.WriteLine("usage: Ghostty.Bench <probe> [--out <path>]");
         w.WriteLine("probes:");
         foreach (var p in AllProbeNames) w.WriteLine($"  {p}");
-        w.WriteLine("  all            -- run every probe, write results/<probe>.json + summary.json");
+        w.WriteLine("  all                         -- run every probe, write results/<probe>.json + summary.json");
+        w.WriteLine("  conpty-roundtrip-verify     -- 5-iteration diagnostic that proves conpty-roundtrip numbers are honest");
+    }
+
+    // Diagnostic variant of conpty-roundtrip. Runs 5 iterations with a
+    // unique 3-byte payload per iteration ("!~A", "!~B", ..., "!~E"), so
+    // each matched echo is provably from THIS iteration (a false match on
+    // leftover bytes would show the wrong payload letter). Dumps per-
+    // iteration: payload bytes written, every byte read until match, the
+    // offset of the match, and the elapsed time. The goal is to show a
+    // skeptical reader that the 15ms-level ConPTY round-trip timings from
+    // conpty-roundtrip represent real byte-through-child round-trips,
+    // not pipe-drain noise or VT-parameter false matches.
+    private static int RunConPtyVerify()
+    {
+        string childExe = ResolveChildExe();
+        using ITransport t = new ConPtyTransport(childExe);
+        t.WaitReady(TimeSpan.FromSeconds(2));
+
+        Console.Out.WriteLine("conpty-roundtrip-verify: 5 iterations with unique-per-iteration payloads");
+        Console.Out.WriteLine("Payload shape: '!' '~' <letter>, where <letter> increments A..E per iteration.");
+        Console.Out.WriteLine("A match of iteration N's payload proves the child received + echoed THIS iteration's bytes.");
+        Console.Out.WriteLine();
+
+        byte[] scratch = new byte[1024];
+        long[] timings = new long[5];
+
+        for (int i = 0; i < 5; i++)
+        {
+            byte letter = (byte)('A' + i);
+            byte[] payload = [(byte)'!', (byte)'~', letter];
+
+            Console.Out.WriteLine($"--- iteration {i} (letter '{(char)letter}') ---");
+            Console.Out.Write("write: ");
+            DumpBytes(Console.Out, payload);
+            Console.Out.WriteLine();
+
+            t.Input.Write(payload);
+            t.Input.Flush();
+
+            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            long deadline = start + (long)(1.0 * System.Diagnostics.Stopwatch.Frequency);
+
+            var window = new List<byte>(256);
+            int readCalls = 0;
+            int matchOffset = -1;
+
+            while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline)
+            {
+                int n = t.Output.Read(scratch, 0, scratch.Length);
+                readCalls++;
+                if (n == 0) { Console.Out.WriteLine("  UNEXPECTED EOF"); return 1; }
+                window.AddRange(scratch.AsSpan(0, n));
+
+                int idx = CollectionsMarshal.AsSpan(window).IndexOf(payload.AsSpan());
+                if (idx >= 0) { matchOffset = idx; break; }
+            }
+
+            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - start;
+            double us = elapsed * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+            if (matchOffset < 0)
+            {
+                Console.Out.WriteLine($"  NO MATCH after {readCalls} read calls, window={window.Count} bytes:");
+                DumpBytes(Console.Out, CollectionsMarshal.AsSpan(window));
+                Console.Out.WriteLine();
+                return 1;
+            }
+
+            Console.Out.Write($"read  ({readCalls} read call(s), {window.Count} bytes): ");
+            DumpBytes(Console.Out, CollectionsMarshal.AsSpan(window));
+            Console.Out.WriteLine();
+            Console.Out.WriteLine($"match at offset {matchOffset} (payload bytes {(char)'!'}{(char)'~'}{(char)letter} = 0x21 0x7E 0x{letter:X2})");
+            Console.Out.WriteLine($"elapsed: {us:F1} us ({elapsed} Stopwatch ticks)");
+            Console.Out.WriteLine();
+
+            timings[i] = elapsed;
+        }
+
+        Array.Sort(timings);
+        long med = timings[timings.Length / 2];
+        double medUs = med * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Console.Out.WriteLine($"summary: median {medUs:F1} us, min {timings[0] * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency:F1} us, max {timings[4] * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency:F1} us");
+        Console.Out.WriteLine("Each iteration found ITS OWN unique payload letter; leftover bytes from prior iterations would show the wrong letter.");
+
+        return 0;
+    }
+
+    // Compact per-byte dump: printable ASCII as the char, else \xNN.
+    private static void DumpBytes(TextWriter w, ReadOnlySpan<byte> bytes)
+    {
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            byte b = bytes[i];
+            if (b >= 0x20 && b < 0x7F) w.Write((char)b);
+            else w.Write($"\\x{b:X2}");
+        }
     }
 }
