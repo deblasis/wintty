@@ -75,6 +75,13 @@
     -->
     <Channel Condition="'$(Channel)' == '' and '$(Configuration)' == 'Debug'">Nightly</Channel>
     <Channel Condition="'$(Channel)' == ''">Stable</Channel>
+    <!-- SPONSOR_BUILD compile gate.
+         When $(SponsorBuild) is 'true' (set by the SPONSOR_BUILD env var or -p:SponsorBuild=true),
+         the SPONSOR_BUILD preprocessor symbol is defined and code under Sponsor/ is compiled in.
+         Otherwise the flag is dormant and the Sponsor/ directory is excluded via <Compile Remove>
+         further down in this file. -->
+    <SponsorBuild Condition="'$(SponsorBuild)'==''">$(SPONSOR_BUILD)</SponsorBuild>
+    <SponsorBuild Condition="'$(SponsorBuild)'==''">false</SponsorBuild>
     <!--
       Channel is part of the path so switching variants (e.g.
       -p:Channel=Nightly after a Stable build) regenerates the icon
@@ -85,6 +92,18 @@
     -->
     <GeneratedBrandingDir>$(BaseIntermediateOutputPath)$(Platform)\$(Configuration)\$(TargetFramework)\Branding\$(Channel)\</GeneratedBrandingDir>
     <ApplicationIcon>$(GeneratedBrandingDir)ghostty.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SponsorBuild)'=='true'">
+    <DefineConstants>$(DefineConstants);SPONSOR_BUILD</DefineConstants>
+    <!--
+      FocusSessionManager (Windows.UI.Shell) was introduced in Windows 11 (SDK 22000).
+      The base TFM uses the 19041 projection which doesn't include it. Sponsor builds
+      need the 26100 projection so FocusAssistProbe.cs can reference it statically.
+      The type is guarded at runtime by IsSupported + a try/catch so the binary still
+      runs on Win10 19041 devices.
+    -->
+    <WindowsSdkPackageVersion>10.0.26100.57</WindowsSdkPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -171,6 +190,21 @@
       <Link>Assets\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
+    </Content>
+  </ItemGroup>
+
+  <!-- Exclude the Sponsor/ subtree from compilation when the gate is off.
+       All sponsor-gated code must live under Sponsor/ for this one rule to cover it. -->
+  <ItemGroup Condition="'$(SponsorBuild)'!='true'">
+    <Compile Remove="Sponsor/**/*.cs" />
+    <Page    Remove="Sponsor/**/*.xaml" />
+    <None    Remove="Sponsor/**/*" />
+  </ItemGroup>
+
+  <!-- Sponsor/Update placeholder taskbar overlay icons, D.1; final art in D.3 -->
+  <ItemGroup Condition="'$(SponsorBuild)' == 'true'">
+    <Content Include="Sponsor/Update/Assets/*.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 </Project>
