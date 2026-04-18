@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Sponsor.Update.UpdatePopover"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    MinWidth="300">
+    <StackPanel Spacing="0">
+        <StackPanel Spacing="12" Padding="12">
+            <TextBlock x:Name="HeaderBlock" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock x:Name="BodyBlock" TextWrapping="Wrap" FontSize="12"/>
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                <Button x:Name="SkipButton" Content="Skip this version"/>
+                <Button x:Name="DismissButton" Content="Dismiss"/>
+                <Button x:Name="InstallButton" Content="Install and Relaunch"
+                        Style="{ThemeResource AccentButtonStyle}"/>
+                <Button x:Name="RestartButton" Content="Restart Now"
+                        Style="{ThemeResource AccentButtonStyle}"/>
+                <Button x:Name="RetryButton" Content="Retry"/>
+            </StackPanel>
+        </StackPanel>
+        <!--
+          Release notes link, shown only when the driver provides a URL.
+          HyperlinkButton opens the URL in the default browser. Full-width
+          row with a subtle divider mirrors upstream Ghostty's popover.
+        -->
+        <Border x:Name="ReleaseNotesDivider"
+                Height="1"
+                Background="{ThemeResource DividerStrokeColorDefaultBrush}"
+                Visibility="Collapsed"/>
+        <HyperlinkButton x:Name="ReleaseNotesLink"
+                         Visibility="Collapsed"
+                         HorizontalAlignment="Stretch"
+                         HorizontalContentAlignment="Left"
+                         Padding="12,8,12,8">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                          Glyph="&#xE7C3;" FontSize="12"/>
+                <TextBlock Text="See what's new" FontSize="12"/>
+            </StackPanel>
+        </HyperlinkButton>
+    </StackPanel>
+</UserControl>
