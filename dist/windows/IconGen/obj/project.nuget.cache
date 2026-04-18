@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "Eu2MXeDjtC0=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\Alessandro\\CODE\\OSS\\ghostty\\dist\\windows\\IconGen\\IconGen.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Alessandro\\.nuget\\packages\\microsoft.win32.systemevents\\9.0.0\\microsoft.win32.systemevents.9.0.0.nupkg.sha512",
+    "C:\\Users\\Alessandro\\.nuget\\packages\\system.drawing.common\\9.0.0\\system.drawing.common.9.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}

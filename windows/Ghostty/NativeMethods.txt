@@ -9,10 +9,12 @@
 // user32
 ClientToScreen
 GetCursorPos
+GetForegroundWindow
 GetKeyState
 GetSystemMenu
 GetWindowLong
 GetWindowPlacement
+LoadImage
 MapVirtualKey
 MessageBeep
 SendMessage
@@ -40,6 +42,8 @@ TBPFLAG
 
 // shell32
 SetCurrentProcessExplicitAppUserModelID
+SHQueryUserNotificationState
+QUERY_USER_NOTIFICATION_STATE
 
 // ole32
 PropVariantClear

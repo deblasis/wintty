@@ -1,0 +1,12 @@
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\bin\Debug\net9.0\Ghostty.Core.deps.json
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\bin\Debug\net9.0\Ghostty.Core.dll
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\bin\Debug\net9.0\Ghostty.Core.pdb
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.AssemblyInfoInputs.cache
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.AssemblyInfo.cs
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.csproj.CoreCompileInputs.cache
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.sourcelink.json
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.dll
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\refint\Ghostty.Core.dll
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\Ghostty.Core.pdb
+C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty.Core\obj\Debug\net9.0\ref\Ghostty.Core.dll
