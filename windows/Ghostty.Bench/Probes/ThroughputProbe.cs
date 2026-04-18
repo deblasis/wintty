@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using Ghostty.Bench.Harness;
 using Ghostty.Bench.Output;
 using Ghostty.Bench.Transports;
@@ -8,6 +9,19 @@ namespace Ghostty.Bench.Probes;
 public sealed class ThroughputProbe : Probe
 {
     private const int Samples = 3;
+
+    // 60 s per iteration. At ConPTY's measured scroll-ASCII throughput of
+    // ~100 KB/s, 1 MB takes ~10 s. 60 s gives 6x headroom for slow
+    // machines, SGR / stress parser cost, and cold-start warmup. Tight
+    // enough to catch a stuck pipe within one iteration instead of
+    // burning the outer harness watchdog.
+    private static readonly TimeSpan IterationDeadline = TimeSpan.FromSeconds(60);
+
+    // 64 KB read buffer. Large enough to amortize Read syscalls over
+    // 1 MB payloads while staying small enough that the per-iteration
+    // scratch footprint is negligible.
+    private const int ScratchSize = 64 * 1024;
+
     private readonly ReadOnlyMemory<byte> _payload;
 
     public ThroughputProbe(string name, string transport, string payloadLabel, ReadOnlyMemory<byte> payload)
@@ -24,53 +38,53 @@ public sealed class ThroughputProbe : Probe
 
     public override ResultJson Run(ITransport transport, HostInfo host, DateTime timestampUtc)
     {
-        double[] mbps = new double[Samples];
-        // Each Read() fills the buffer to readBuf.Length before we stop, so
-        // we don't need to zero it between samples.
-        byte[] readBuf = new byte[_payload.Length];
+        double[] ingestMBps = new double[Samples];
+        double[] emitMBps = new double[Samples];
+        byte[] scratch = new byte[ScratchSize];
 
         for (int i = 0; i < Samples; i++)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            // transport.Output.Read is a blocking synchronous call that the
-            // CTS cannot interrupt. If the 20s deadline fires, Wait throws
-            // but the reader task stays parked until the transport is
-            // disposed at the top of Program.Main. Program.RunAll then
-            // kills the child, which is the real unblock mechanism. For
-            // that reason we don't bother awaiting the task on the error
-            // path.
-            var readerTask = Task.Run(() =>
-            {
-                int read = 0;
-                while (read < readBuf.Length)
-                {
-                    cts.Token.ThrowIfCancellationRequested();
-                    int n = transport.Output.Read(readBuf, read, readBuf.Length - read);
-                    if (n == 0) throw new EndOfStreamException("peer closed during throughput read");
-                    read += n;
-                }
-            }, cts.Token);
+            // Fresh 16-hex-char nonce per iteration. Guid.NewGuid() is v4
+            // (random); 64 bits of nonce entropy rules out any accidental
+            // match from a leftover terminator lingering in conhost's
+            // screen buffer between iterations.
+            string nonce = Guid.NewGuid().ToString("N").Substring(0, 16);
+            byte[] terminator = Encoding.ASCII.GetBytes("\r\n~ENDOFBURST_" + nonce + "~");
 
-            long start = Stopwatch.GetTimestamp();
-            transport.Input.Write(_payload.Span);
-            transport.Input.Flush();
-            readerTask.Wait(cts.Token);
-            long elapsedTicks = Stopwatch.GetTimestamp() - start;
+            (long elapsedTicks, long emitBytes) = Runner.RunThroughputIteration(
+                transport: transport,
+                payload: _payload,
+                terminator: terminator,
+                deadline: IterationDeadline,
+                scratch: scratch);
 
             double seconds = elapsedTicks / (double)Stopwatch.Frequency;
-            double megabytes = _payload.Length / (1024.0 * 1024.0);
-            mbps[i] = megabytes / seconds;
+            double payloadMB = _payload.Length / (1024.0 * 1024.0);
+            double emitMB = emitBytes / (1024.0 * 1024.0);
+
+            // Ingest counts only the payload bytes: the 31-byte terminator
+            // is scan infrastructure, not user data. Emit counts every byte
+            // read during the window, including any that arrived alongside
+            // the terminator in the final read; at 1 MB scale that is
+            // noise.
+            ingestMBps[i] = payloadMB / seconds;
+            emitMBps[i] = emitMB / seconds;
         }
 
-        Array.Sort(mbps);
+        Array.Sort(ingestMBps);
+        Array.Sort(emitMBps);
+
         return ResultJson.Throughput(
             probe: Name,
             transport: TransportLabel,
             payload: PayloadLabel,
             payloadBytes: _payload.Length,
-            p50Mbps: Math.Round(mbps[Samples / 2], 2),
-            minMbps: Math.Round(mbps[0], 2),
-            maxMbps: Math.Round(mbps[Samples - 1], 2),
+            ingestP50Mbps: Math.Round(ingestMBps[Samples / 2], 2),
+            ingestMinMbps: Math.Round(ingestMBps[0], 2),
+            ingestMaxMbps: Math.Round(ingestMBps[Samples - 1], 2),
+            emitP50Mbps:   Math.Round(emitMBps[Samples / 2], 2),
+            emitMinMbps:   Math.Round(emitMBps[0], 2),
+            emitMaxMbps:   Math.Round(emitMBps[Samples - 1], 2),
             samples: Samples,
             host: host,
             timestampUtc: timestampUtc);
