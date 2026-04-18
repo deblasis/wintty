@@ -379,6 +379,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // do it explicitly here.
         leaf.Terminal().DisposeSurface();
 
+        // Capture the leaf's visual parent BEFORE detaching. This is
+        // the Grid that visualizes the PaneTree split about to collapse;
+        // we reuse it as the in-place splice point for the surviving
+        // sibling visual instead of rebuilding the whole tree. See the
+        // incremental-close branch below.
+        var leafParentGrid = leaf.Terminal().Parent as Grid;
+
         // Detach the closed terminal from its visual parent Grid so the
         // old split Grid does not hold a reference that keeps the WinUI
         // compositor rendering a ghost DXGI swap chain surface. Without
@@ -412,9 +419,85 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // where the closed pane was.
         var nextActive = PaneTree.FirstLeaf(newRoot);
         _activeLeaf = nextActive;
-        Rebuild();
+
+        // INCREMENTAL rebuild: splice the surviving sibling visual into
+        // the collapsed parent Grid's former slot instead of tearing
+        // down and rebuilding the whole visual tree. A full Rebuild
+        // works for 2-pane trees (#185 fix) but regresses to ghost
+        // visuals once the tree is 3+ levels deep - the same WinUI 3
+        // "child already has a parent" / stale-DCOMP-visual behavior
+        // that Split mitigates via its non-root incremental path.
+        // Falls back to a full Rebuild for the root-replacement case
+        // where there is no nested visual structure to confuse the
+        // framework. (#282)
+        if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
         UpdateHighlightPosition();
         DispatcherQueue.TryEnqueue(() => nextActive.Terminal().Focus(FocusState.Programmatic));
+    }
+
+    /// <summary>
+    /// Replace the Grid that visualized the now-collapsed parent split
+    /// with the surviving sibling visual, in place. Mirrors the
+    /// incremental splice Split uses on its non-root path. Returns
+    /// false when the caller must fall back to <see cref="Rebuild"/>
+    /// (root replacement, zoomed, or any unexpected state).
+    /// </summary>
+    private bool TryIncrementalCloseRebuild(Grid? leafParentGrid)
+    {
+        // Zoom hides everything but the active leaf, so the visual
+        // parent chain does not mirror the tree. Full Rebuild is the
+        // only sane path: it rewires _treeRoot from scratch against
+        // the unzoomed state the caller already restored.
+        if (_zoomedLeaf is not null) return false;
+
+        // leafParentGrid is null when the closed leaf was the sole
+        // child of PaneHost.Content (i.e. _treeRoot was the leaf's
+        // TerminalControl itself). Only happens on root-replacement
+        // paths, which full Rebuild handles correctly.
+        if (leafParentGrid is null) return false;
+
+        // Find the sibling visual: whatever non-splitter child remains
+        // in leafParentGrid after the closing leaf was detached.
+        FrameworkElement? siblingVisual = null;
+        foreach (var ch in leafParentGrid.Children)
+        {
+            if (ch is Splitter) continue;
+            if (ch is FrameworkElement fe) { siblingVisual = fe; break; }
+        }
+        if (siblingVisual is null) return false;
+
+        // Splice in place. Two cases:
+        //   1. leafParentGrid IS the _treeRoot - sibling becomes the
+        //      new _treeRoot inside hostGrid.
+        //   2. leafParentGrid is nested inside another Grid - sibling
+        //      takes leafParentGrid's row/column slot in that
+        //      grandparent.
+        // In both cases we ClearVisualTree the collapsed leafParentGrid
+        // so the compositor drops every reference to the now-dead
+        // split Grid and its splitter (same reason as the #185 fix).
+        if (ReferenceEquals(leafParentGrid, _treeRoot))
+        {
+            if (Content is not Grid hostGrid) return false;
+            leafParentGrid.Children.Remove(siblingVisual);
+            ClearVisualTree(leafParentGrid);
+            hostGrid.Children.Remove(leafParentGrid);
+            _treeRoot = siblingVisual;
+            hostGrid.Children.Insert(0, _treeRoot);
+            _highlightOverlay.Visibility = Visibility.Visible;
+            return true;
+        }
+
+        if (leafParentGrid.Parent is not Grid grandparentGrid) return false;
+
+        int col = Grid.GetColumn(leafParentGrid);
+        int row = Grid.GetRow(leafParentGrid);
+        leafParentGrid.Children.Remove(siblingVisual);
+        ClearVisualTree(leafParentGrid);
+        grandparentGrid.Children.Remove(leafParentGrid);
+        Grid.SetColumn(siblingVisual, col);
+        Grid.SetRow(siblingVisual, row);
+        grandparentGrid.Children.Add(siblingVisual);
+        return true;
     }
 
     /// <summary>
