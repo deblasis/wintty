@@ -158,6 +158,9 @@ public sealed partial class MainWindow : Window
 #if SPONSOR_BUILD && DEBUG
     private Ghostty.Sponsor.Update.SponsorUpdateCommandSource? _sponsorSource;
 #endif
+#if SPONSOR_BUILD
+    private Ghostty.Sponsor.Auth.SponsorAuthCommandSource? _sponsorAuthSource;
+#endif
 
     /// <summary>
     /// Palette close state: prevents re-entrant close handling between
@@ -851,6 +854,11 @@ public sealed partial class MainWindow : Window
         _taskbar.Dispose();
         _themeManager.Dispose();
 
+#if SPONSOR_BUILD
+        _sponsorAuthSource?.Dispose();
+        _sponsorAuthSource = null;
+#endif
+
         // Surface lifetime is decoupled from Loaded/Unloaded
         // (see TerminalControl.DisposeSurface), so we have to
         // free every leaf in every tab explicitly before tearing
@@ -1535,6 +1543,20 @@ public sealed partial class MainWindow : Window
         {
             _sponsorSource = new Ghostty.Sponsor.Update.SponsorUpdateCommandSource(sim);
             sources.Add(_sponsorSource);
+        }
+#endif
+
+#if SPONSOR_BUILD
+        // Auth palette entries (sign-in / sign-out). Ships in release
+        // sponsor builds. Separate from the DEBUG-only simulator source
+        // above because users need these entries to activate / revoke
+        // their sponsor session; simulator entries are QA-only.
+        if ((Microsoft.UI.Xaml.Application.Current as App)?.SharedTokens is { } tokens)
+        {
+            var authLogger = App.LoggerFactory?.CreateLogger<Ghostty.Sponsor.Auth.SponsorAuthCommandSource>()
+                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Ghostty.Sponsor.Auth.SponsorAuthCommandSource>.Instance;
+            _sponsorAuthSource = new Ghostty.Sponsor.Auth.SponsorAuthCommandSource(tokens, authLogger);
+            sources.Add(_sponsorAuthSource);
         }
 #endif
 
