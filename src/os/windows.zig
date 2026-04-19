@@ -20,6 +20,7 @@ pub const INFINITE = windows.INFINITE;
 pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
 pub const MAX_PATH = windows.MAX_PATH;
 pub const OPEN_EXISTING = windows.OPEN_EXISTING;
+pub const OVERLAPPED = windows.OVERLAPPED;
 pub const PIPE_ACCESS_OUTBOUND = windows.PIPE_ACCESS_OUTBOUND;
 pub const PIPE_TYPE_BYTE = windows.PIPE_TYPE_BYTE;
 pub const PROCESS_INFORMATION = windows.PROCESS_INFORMATION;
@@ -29,8 +30,19 @@ pub const STARTUPINFOW = windows.STARTUPINFOW;
 pub const STARTF_USESTDHANDLES = windows.STARTF_USESTDHANDLES;
 pub const SYNCHRONIZE = windows.SYNCHRONIZE;
 pub const WAIT_FAILED = windows.WAIT_FAILED;
+pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
 pub const FALSE = windows.FALSE;
 pub const TRUE = windows.TRUE;
+
+/// GetHandleInformation is not wrapped in Zig std yet (std only wraps
+/// SetHandleInformation). Expose a small wrapper here so callers can
+/// verify handle inheritance flags without reaching into kernel32
+/// directly.
+pub fn GetHandleInformation(handle: windows.HANDLE, flags: *windows.DWORD) !void {
+    if (exp.kernel32.GetHandleInformation(handle, flags) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+}
 
 pub const exp = struct {
     pub const HPCON = windows.LPVOID;
@@ -54,6 +66,18 @@ pub const exp = struct {
             hWritePipe: *windows.HANDLE,
             lpPipeAttributes: ?*const windows.SECURITY_ATTRIBUTES,
             nSize: windows.DWORD,
+        ) callconv(.winapi) windows.BOOL;
+        // std.os.windows.kernel32 only exposes CreateEventExW; add the
+        // classic CreateEventW for overlapped I/O wait events.
+        pub extern "kernel32" fn CreateEventW(
+            lpEventAttributes: ?*windows.SECURITY_ATTRIBUTES,
+            bManualReset: windows.BOOL,
+            bInitialState: windows.BOOL,
+            lpName: ?windows.LPCWSTR,
+        ) callconv(.winapi) ?windows.HANDLE;
+        pub extern "kernel32" fn GetHandleInformation(
+            hObject: windows.HANDLE,
+            lpdwFlags: *windows.DWORD,
         ) callconv(.winapi) windows.BOOL;
         pub extern "kernel32" fn CreatePseudoConsole(
             size: windows.COORD,
@@ -118,6 +142,7 @@ pub const exp = struct {
     pub const PROC_THREAD_ATTRIBUTE_ADDITIVE = 0x00040000;
 
     pub const ProcThreadAttributeNumber = enum(windows.DWORD) {
+        ProcThreadAttributeHandleList = 2,
         ProcThreadAttributePseudoConsole = 22,
         _,
     };
@@ -136,4 +161,5 @@ pub const exp = struct {
     }
 
     pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = ProcThreadAttributeValue(.ProcThreadAttributePseudoConsole, false, true, false);
+    pub const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = ProcThreadAttributeValue(.ProcThreadAttributeHandleList, false, true, false);
 };
