@@ -13,6 +13,7 @@ const apprt = @import("apprt.zig");
 
 const App = @import("App.zig");
 const Ghostty = @import("main_c.zig").Ghostty;
+const log_bridge = @import("log_bridge.zig");
 const state = &@import("global.zig").state;
 
 /// The return type for main() depends on the build artifact. The lib build
@@ -118,6 +119,14 @@ fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    // Embedder bridge. When the embedder (e.g. the Windows C# shell)
+    // has registered a callback via ghostty_log_set_callback, render
+    // the formatted message once and hand it over. Runs on every
+    // platform when a callback is set; on Windows this is the only
+    // sink that reaches a reader because the GUI-subsystem exe has no
+    // console and macOS unified log is unavailable.
+    log_bridge.dispatch(level, scope, format, args);
+
     // On Mac, we use unified logging. To view this:
     //
     //   sudo log stream --level debug --predicate 'subsystem=="com.mitchellh.ghostty"'
@@ -190,6 +199,7 @@ test {
     _ = @import("surface_mouse.zig");
 
     // Libraries
+    _ = @import("log_bridge.zig");
     _ = @import("tripwire.zig");
     _ = @import("benchmark/main.zig");
     _ = @import("crash/main.zig");

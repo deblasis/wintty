@@ -43,6 +43,11 @@ comptime {
     // Our benchmark API. We probably want to gate this on a build
     // config in the future but for now we always just export it.
     _ = @import("benchmark/main.zig").CApi;
+
+    // Embedder log callback bridge. Referenced here so the
+    // ghostty_log_set_callback export lands in libghostty even when
+    // main_ghostty.zig imports log_bridge only via logFn.
+    _ = @import("log_bridge.zig");
 }
 
 /// ghostty_info_s
