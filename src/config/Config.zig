@@ -2952,6 +2952,21 @@ keybind: Keybinds = .{},
 /// `xterm-256color` with environment variables if terminfo installation fails.
 @"shell-integration-features": ShellIntegrationFeatures = .{},
 
+/// Controls how Windows terminal sessions communicate with the child
+/// shell. `auto` picks the bypass path (raw stdin/stdout/stderr
+/// pipes, no CreatePseudoConsole) for VT-aware shells like pwsh,
+/// wsl, ssh, bash, and nu, and keeps ConPTY for cmd.exe and
+/// PowerShell 5.1. `always` forces the bypass path; `never` forces
+/// ConPTY. Has no effect on non-Windows platforms.
+///
+/// Bypass enables Kitty graphics and avoids conhost's VT mangling,
+/// at the cost of losing ConPTY's compatibility shims for Win32
+/// Console API programs. Resize signalling under bypass is
+/// best-effort via CSI 8;rows;cols t; use `conpty-mode = never` if
+/// precise resize behavior matters.
+@"conpty-mode": if (builtin.os.tag == .windows) ConptyMode else void =
+    if (builtin.os.tag == .windows) .auto else {},
+
 /// Custom entries into the command palette.
 ///
 /// Each entry requires the title, the corresponding action, and an optional
@@ -8769,6 +8784,8 @@ pub const ShellIntegrationFeatures = packed struct {
     @"ssh-terminfo": bool = false,
     path: bool = true,
 };
+
+pub const ConptyMode = enum { auto, always, never };
 
 pub const SplitPreserveZoom = packed struct {
     navigation: bool = false,
