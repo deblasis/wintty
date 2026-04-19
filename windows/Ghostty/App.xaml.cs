@@ -55,6 +55,15 @@ public partial class App : Application
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
     private Ghostty.Core.Logging.FileLoggerProvider? _fileLogSink;
     private Ghostty.Core.Logging.FilterState? _logFilters;
+    // Bridge for libghostty's Zig std.log output. Installed after the
+    // factory is built so Zig log lines emitted after bootstrap (config
+    // reloads, surface / PTY spawns, render errors, transport verdicts)
+    // land in the same file + ETW sinks as C# logs. The tiny window
+    // before installation - covering state.init() banner lines inside
+    // ConfigService's constructor - is an accepted gap; those banners
+    // are one-shot startup info and the workaround would be to capture
+    // into a pre-factory buffer that is then replayed.
+    private Ghostty.Core.Logging.LibghosttyLogBridge? _zigLogBridge;
 #if SPONSOR_BUILD
     private Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? _sponsorOverlay;
     internal Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? SponsorOverlay => _sponsorOverlay;
@@ -346,6 +355,13 @@ public partial class App : Application
         LoggerFactory = factory;
         _configService.ConfigChanged += OnConfigChanged_ApplyLogFilters;
 
+        // Install the libghostty log bridge now that the factory
+        // exists. After this point every Zig std.log call is delivered
+        // to an ILogger under category "Ghostty.Zig.<scope>".
+        _zigLogBridge = new Ghostty.Core.Logging.LibghosttyLogBridge(
+            factory, new Ghostty.Logging.LibghosttyLogInstaller());
+        _zigLogBridge.Install();
+
         // #259 logging: populate Core-side static logger accessors
         // for types whose call sites are static (e.g., FrecencyStore
         // static methods that can't take a ctor-injected logger).
@@ -534,6 +550,15 @@ public partial class App : Application
                 // ConfigNew + ConfigLoadDefaultFiles.
                 _configService?.Dispose();
 
+                // Dispose the libghostty log bridge before the factory.
+                // Bridge.Dispose clears the native callback and sets an
+                // internal disposed flag, so any Zig thread that already
+                // latched the function pointer still returns to OnLog
+                // but then bails on the flag check. That guarantee lets
+                // the factory tear-down below proceed without racing an
+                // inbound Zig log into a disposed ILoggerFactory.
+                _zigLogBridge?.Dispose();
+
                 // #259 logging: dispose the factory after the config
                 // service so any ConfigChanged callbacks fired during
                 // ConfigService.Dispose don't race a disposed factory.
@@ -565,6 +590,7 @@ public partial class App : Application
                 _configService = null;
                 ConfigService = null;
 
+                _zigLogBridge = null;
                 _fileLogSink = null;
                 _loggerFactory = null;
                 LoggerFactory = null;
