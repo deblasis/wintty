@@ -103,8 +103,18 @@ pub fn threadEnter(
     };
     errdefer self.subprocess.stop();
 
-    // Watcher to detect subprocess exit
-    var process: ?xev.Process = if (self.subprocess.process) |v| switch (v) {
+    // Watcher to detect subprocess exit.
+    //
+    // On Windows we never use xev.Process because under ConPTY the child
+    // process is already assigned to ConPTY's internal job object before we
+    // get here. xev.Process.init calls CreateJobObject + AssignProcessToJobObject
+    // which silently no-ops (the process cannot be moved to a new job), so the
+    // IOCP completion never fires and processExitCommon is never called. We
+    // replace the whole mechanism with a dedicated WaitForSingleObject thread
+    // (see winProcessWaitThread below) that works regardless of job assignment.
+    var process: ?xev.Process = if (comptime builtin.os.tag == .windows)
+        null
+    else if (self.subprocess.process) |v| switch (v) {
         .fork_exec => |cmd| try xev.Process.init(
             cmd.pid orelse return error.ProcessNoPid,
         ),
@@ -116,6 +126,32 @@ pub fn threadEnter(
         .flatpak => null,
     } else return error.ProcessNotStarted;
     errdefer if (process) |*p| p.deinit();
+
+    // On Windows, get a duplicated process handle for the wait thread.
+    // We duplicate so that the wait thread owns its copy and can close it
+    // independently of the Command's handle.
+    const win_proc_handle: if (builtin.os.tag == .windows) windows.HANDLE else void =
+        if (comptime builtin.os.tag == .windows) blk: {
+        const cmd = switch (self.subprocess.process orelse return error.ProcessNotStarted) {
+            .fork_exec => |c| c,
+            .flatpak => unreachable, // Flatpak is Linux-only
+        };
+        const src = cmd.pid orelse return error.ProcessNoPid;
+        var dup: windows.HANDLE = undefined;
+        const self_proc = windows.kernel32.GetCurrentProcess();
+        if (windows.kernel32.DuplicateHandle(
+            self_proc,
+            src,
+            self_proc,
+            &dup,
+            0,
+            windows.FALSE,
+            windows.DUPLICATE_SAME_ACCESS,
+        ) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        break :blk dup;
+    } else {};
 
     // Track our process start time for abnormal exits
     const process_start = try std.time.Instant.now();
@@ -154,6 +190,24 @@ pub fn threadEnter(
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
     } };
+
+    // On Windows, spawn a dedicated thread that blocks on WaitForSingleObject
+    // for the child process. This replaces the xev.Process watcher which does
+    // not work under ConPTY because the child is already in ConPTY's job object
+    // before we can assign it to our own.
+    if (comptime builtin.os.tag == .windows) {
+        const ctx = try io.alloc.create(WinProcessWaitCtx);
+        ctx.* = .{ .handle = win_proc_handle, .td = td };
+        // On error: close the dup handle and free ctx. The thread takes
+        // ownership of both once it starts.
+        errdefer {
+            windows.CloseHandle(ctx.handle);
+            io.alloc.destroy(ctx);
+        }
+        const wt = try std.Thread.spawn(.{}, winProcessWaitThread, .{ io.alloc, ctx });
+        wt.setName("proc-wait") catch {};
+        td.backend.exec.process_wait_thread = wt;
+    }
 
     // Start our process watcher. If we have an xev.Process use it.
     if (process) |*p| p.wait(
@@ -226,6 +280,16 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     }
 
     exec.read_thread.join();
+
+    // Join the Windows process-exit watcher thread. If the child already
+    // exited naturally, winProcessWaitThread has already called
+    // processExitCommon and returned. If we killed it via subprocess.stop()
+    // above, it will call processExitCommon now - the extra child_exited
+    // push is harmless because td is still valid until join() returns and
+    // surface_mailbox is thread-safe.
+    if (comptime builtin.os.tag == .windows) {
+        if (exec.process_wait_thread) |wt| wt.join();
+    }
 }
 
 pub fn focusGained(
@@ -276,6 +340,9 @@ pub fn resize(
 fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     assert(td.backend == .exec);
     const execdata = &td.backend.exec;
+    // Non-atomic write is intentional and matches the POSIX xev-callback-thread
+    // pattern. Single-byte writes are architecturally atomic on x86/ARM and the
+    // read in queueWrite tolerates a stale value for one cycle.
     execdata.exited = true;
 
     // Determine how long the process was running for.
@@ -534,6 +601,12 @@ pub const ThreadData = struct {
     read_thread: std.Thread,
     read_thread_pipe: posix.fd_t,
     read_thread_fd: posix.fd_t,
+
+    /// Dedicated Windows process-exit watcher thread. Null on POSIX.
+    /// Must be joined in threadExit before td is freed. Only valid when
+    /// builtin.os.tag == .windows; always null on other platforms.
+    process_wait_thread: if (builtin.os.tag == .windows) ?std.Thread else void =
+        if (builtin.os.tag == .windows) null else {},
 
     /// The timer to detect termios state changes.
     termios_timer: xev.Timer,
@@ -1317,6 +1390,47 @@ const Subprocess = struct {
     }
 };
 
+/// Context passed to winProcessWaitThread. Heap-allocated and owned by the
+/// thread; the thread frees it before returning.
+const WinProcessWaitCtx = struct {
+    /// Duplicated process HANDLE. The thread owns this copy and must close it.
+    handle: windows.HANDLE,
+    /// Pointer to the io thread's ThreadData. Valid for the lifetime of the
+    /// io thread (see threadExit which joins process_wait_thread before td
+    /// is freed).
+    td: *termio.Termio.ThreadData,
+};
+
+/// Dedicated Windows process-exit watcher. Blocks on WaitForSingleObject and
+/// calls processExitCommon when the child exits. Used instead of xev.Process
+/// on Windows because xev.Process uses CreateJobObject + AssignProcessToJobObject,
+/// which silently no-ops when the child is already in ConPTY's job object.
+fn winProcessWaitThread(alloc: Allocator, ctx: *WinProcessWaitCtx) void {
+    defer alloc.destroy(ctx);
+    defer windows.CloseHandle(ctx.handle);
+
+    switch (windows.kernel32.WaitForSingleObject(ctx.handle, windows.INFINITE)) {
+        windows.WAIT_OBJECT_0 => {},
+        windows.WAIT_FAILED => {
+            log.err("proc-wait: WaitForSingleObject failed err={}", .{windows.kernel32.GetLastError()});
+            return;
+        },
+        else => |r| {
+            log.err("proc-wait: WaitForSingleObject unexpected result={x}", .{r});
+            return;
+        },
+    }
+
+    var exit_code: windows.DWORD = 1;
+    if (windows.kernel32.GetExitCodeProcess(ctx.handle, &exit_code) == 0) {
+        log.err("proc-wait: GetExitCodeProcess failed err={}", .{windows.kernel32.GetLastError()});
+        // processExitCommon with a best-effort code of 1
+    }
+
+    log.debug("proc-wait: child exited code={}", .{exit_code});
+    processExitCommon(ctx.td, exit_code);
+}
+
 /// The read thread sits in a loop doing the following pseudo code:
 ///
 ///   while (true) { blocking_read(); exit_if_eof(); process(); }
@@ -1454,14 +1568,30 @@ pub const ReadThread = struct {
                 if (windows.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
                     const err = windows.kernel32.GetLastError();
                     switch (err) {
-                        // Check for a quit signal
+                        // CancelIoEx was called (threadExit signaling shutdown)
                         .OPERATION_ABORTED => break,
 
+                        // All writers closed the write end of the pipe.
+                        // The child has exited and the PTY output pipe is done.
+                        .BROKEN_PIPE => {
+                            log.info("io reader: pipe EOF (BROKEN_PIPE), child exited", .{});
+                            return;
+                        },
+
                         else => {
+                            // Any other error is unexpected. Log it and return
+                            // rather than hitting unreachable (which is UB in
+                            // ReleaseFast and a panic in Debug).
                             log.err("io reader error err={}", .{err});
-                            unreachable;
+                            return;
                         },
                     }
+                }
+
+                if (n == 0) {
+                    // ReadFile succeeded with zero bytes: all writers have closed.
+                    log.info("io reader: zero-byte read, pipe EOF", .{});
+                    return;
                 }
 
                 @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
@@ -1471,7 +1601,8 @@ pub const ReadThread = struct {
             if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == 0) {
                 const err = windows.kernel32.GetLastError();
                 log.err("quit pipe reader error err={}", .{err});
-                unreachable;
+                // Return rather than crash; the loop will clean up via defer.
+                return;
             }
 
             if (quit_bytes > 0) {
