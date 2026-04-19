@@ -913,6 +913,7 @@ const Subprocess = struct {
             alloc,
             shell_command,
             internal_os.passwd,
+            cfg.conpty_mode,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -1632,6 +1633,10 @@ fn execCommand(
     alloc: Allocator,
     command: configpkg.Command,
     comptime passwdpkg: type,
+    /// Configured transport mode; used only on Windows to decide whether
+    /// to inject the ConPTY UTF-8 preamble (# 302). Ignored on other
+    /// platforms.
+    conpty_mode: configpkg.Config.ConptyMode,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
@@ -1756,7 +1761,17 @@ fn execCommand(
 
     return switch (command) {
         // We need to clone the command since there's no guarantee the config remains valid.
-        .direct => |_| (try command.clone(alloc)).direct,
+        .direct => |_| direct: {
+            const cloned = (try command.clone(alloc)).direct;
+            if (comptime builtin.os.tag == .windows) {
+                break :direct try maybeInjectUtf8Preamble(
+                    alloc,
+                    cloned,
+                    conpty_mode,
+                );
+            }
+            break :direct cloned;
+        },
 
         .shell => |v| shell: {
             if (comptime builtin.os.tag == .windows) {
@@ -1813,7 +1828,12 @@ fn execCommand(
                         } else |_| {}
                     }
 
-                    break :shell try args.toOwnedSlice(alloc);
+                    const direct_args = try args.toOwnedSlice(alloc);
+                    break :shell try maybeInjectUtf8Preamble(
+                        alloc,
+                        direct_args,
+                        conpty_mode,
+                    );
                 }
 
                 // Command contains cmd.exe metacharacters (or parsing
@@ -1836,9 +1856,25 @@ fn execCommand(
                     "cmd.exe",
                 });
 
+                // cmd.exe is always `console_api` so `auto` + `never`
+                // both pick ConPTY here, and `always` picks the raw-pipe
+                // bypass (which already gets UTF-8 from PR # 301).
+                // Prepend `chcp 65001 >nul && ` to the /C script in the
+                // ConPTY cases so the whole pipeline runs UTF-8.
+                const mode = resolveConptyMode(conpty_mode, cmd);
+                const script: [:0]const u8 = if (mode == .conpty)
+                    try std.fmt.allocPrintSentinel(
+                        alloc,
+                        "chcp 65001 >nul && {s}",
+                        .{v},
+                        0,
+                    )
+                else
+                    try alloc.dupeZ(u8, v);
+
                 try args.append(alloc, cmd);
                 try args.append(alloc, "/C");
-                try args.append(alloc, v);
+                try args.append(alloc, script);
                 break :shell try args.toOwnedSlice(alloc);
             }
 
@@ -1867,6 +1903,97 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
         '&', '|', '<', '>', '(', ')', '^', '%', '!' => return true,
         else => {},
     };
+    return false;
+}
+
+/// Windows-only. If the configured transport will resolve to ConPTY
+/// for this argv and the shell is known to benefit from a UTF-8
+/// preamble (# 302), return a new argv with the preamble suffix
+/// appended. Returns `args` unchanged otherwise.
+///
+/// Why the injection happens here and not later: we need to emit the
+/// preamble *argv-level*, before the shell has read any input. The
+/// raw-pipe bypass already gets UTF-8 from PR # 301 (parent console
+/// inheritance), but CreatePseudoConsole spawns its own conhost that
+/// starts at the system OEM CP regardless of what the parent has set.
+///
+/// Callers own both the input `args` and the returned slice; when no
+/// injection is needed the returned slice aliases `args` (no copy).
+fn maybeInjectUtf8Preamble(
+    alloc: Allocator,
+    args: []const [:0]const u8,
+    conpty_mode: configpkg.Config.ConptyMode,
+) Allocator.Error![]const [:0]const u8 {
+    if (comptime builtin.os.tag != .windows) return args;
+    if (args.len == 0) return args;
+
+    const mode = resolveConptyMode(conpty_mode, args[0]);
+    if (mode != .conpty) return args;
+
+    const preamble = internal_os.windows_shell.utf8Preamble(args[0]);
+    if (preamble == .none) return args;
+    if (preambleArgsConflict(args, preamble)) return args;
+
+    const suffix = preamble.suffix();
+    const out = try alloc.alloc([:0]const u8, args.len + suffix.len);
+    @memcpy(out[0..args.len], args);
+    // The suffix elements are `.rodata` string literals; they outlive
+    // any arena and spawning reads them during CreateProcess. No dupe
+    // needed, matching how `"/C"` is appended inline elsewhere here.
+    @memcpy(out[args.len..], suffix);
+    return out;
+}
+
+/// Returns true if the existing argv already contains a flag that
+/// would conflict with our preamble suffix. We bail out in that case
+/// rather than silently duplicating `-Command` / `/C` and breaking
+/// whatever the user configured.
+fn preambleArgsConflict(
+    args: []const [:0]const u8,
+    preamble: internal_os.windows_shell.Preamble,
+) bool {
+    if (args.len <= 1) return false;
+    return switch (preamble) {
+        .none => false,
+        .cmd => for (args[1..]) |arg| {
+            // Only `/C` and `/K` consume "the rest of the command line"
+            // and would swallow our preamble. Single-dash `-c` is not
+            // recognized by cmd.exe.
+            if (arg.len != 2 or arg[0] != '/') continue;
+            const c = std.ascii.toLower(arg[1]);
+            if (c == 'c' or c == 'k') break true;
+        } else false,
+        .pwsh => for (args[1..]) |arg| {
+            if (pwshFlagConflicts(arg)) break true;
+        } else false,
+    };
+}
+
+/// Returns true if `arg` is a PowerShell flag whose presence would
+/// conflict with appending `-NoExit -Command <setup>`. We detect the
+/// flags by prefix because PowerShell accepts any unambiguous prefix
+/// of a flag name (e.g. `-Com` for `-Command`).
+fn pwshFlagConflicts(arg: []const u8) bool {
+    if (arg.len < 2 or arg[0] != '-') return false;
+
+    var buf: [32]u8 = undefined;
+    const tail_len = arg.len - 1;
+    // Anything longer than a real PS flag name cannot be a conflict.
+    if (tail_len > buf.len) return false;
+    const lower = std.ascii.lowerString(buf[0..tail_len], arg[1..]);
+
+    // Exact matches for short forms and unambiguous 2-letter abbreviations.
+    if (std.mem.eql(u8, lower, "c")) return true;
+    if (std.mem.eql(u8, lower, "f")) return true;
+    if (std.mem.eql(u8, lower, "ec")) return true;
+    if (std.mem.eql(u8, lower, "enc")) return true;
+
+    // Prefix matches (length >= 3 avoids colliding with -ConfigurationName
+    // which also starts with -C, or -Format* which starts with -F).
+    if (lower.len >= 3 and std.mem.startsWith(u8, "command", lower)) return true;
+    if (lower.len >= 3 and std.mem.startsWith(u8, "file", lower)) return true;
+    if (lower.len >= 4 and std.mem.startsWith(u8, "encodedcommand", lower)) return true;
+
     return false;
 }
 
@@ -1922,7 +2049,7 @@ test "execCommand darwin: shell command" {
                 .name = "testuser",
             };
         }
-    });
+    }, .auto);
 
     try testing.expectEqual(8, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
@@ -1952,7 +2079,7 @@ test "execCommand darwin: direct command" {
                 .name = "testuser",
             };
         }
-    });
+    }, .auto);
 
     try testing.expectEqual(5, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
@@ -1980,6 +2107,7 @@ test "execCommand: shell command, empty passwd" {
                 return .{};
             }
         },
+        .auto,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2006,6 +2134,7 @@ test "execCommand: shell command, error passwd" {
                 return error.Fail;
             }
         },
+        .auto,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2033,7 +2162,7 @@ test "execCommand: direct command, error passwd" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, .auto);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings(result[0], "foo");
@@ -2063,7 +2192,7 @@ test "execCommand: direct command, config freed" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, .auto);
 
     command_arena.deinit();
 
@@ -2102,6 +2231,8 @@ test "execCommand windows: shell command, single token spawns directly" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    // always mode forces the bypass path so we get the bare argv without
+    // UTF-8 preamble injection - the original behavior the test covers.
     const result = try execCommand(
         alloc,
         .{ .shell = "pwsh.exe" },
@@ -2110,6 +2241,7 @@ test "execCommand windows: shell command, single token spawns directly" {
                 return .{};
             }
         },
+        .always,
     );
 
     // No cmd.exe /C wrapper: args[0] is the configured shell itself.
@@ -2133,6 +2265,7 @@ test "execCommand windows: shell command, args split without cmd wrap" {
                 return .{};
             }
         },
+        .always,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2157,6 +2290,7 @@ test "execCommand windows: shell command, quoted path kept as one arg" {
                 return .{};
             }
         },
+        .always,
     );
 
     try testing.expectEqual(2, result.len);
@@ -2175,6 +2309,8 @@ test "execCommand windows: shell command with pipe falls back to cmd.exe" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    // always mode forces bypass so the cmd-wrap path does not pick up
+    // the ConPTY UTF-8 preamble injection covered in its own test.
     const result = try execCommand(
         alloc,
         .{ .shell = "dir | findstr foo" },
@@ -2183,6 +2319,7 @@ test "execCommand windows: shell command with pipe falls back to cmd.exe" {
                 return .{};
             }
         },
+        .always,
     );
 
     // Metachar present: wrap with cmd.exe /C so cmd handles the pipe.
@@ -2208,6 +2345,7 @@ test "execCommand windows: shell command with redirect falls back to cmd.exe" {
                 return .{};
             }
         },
+        .always,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2298,4 +2436,257 @@ test "resolveConptyMode: auto handles path-prefixed shell" {
 test "resolveConptyMode: auto handles quoted shell" {
     try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "\"pwsh.exe\""));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "'cmd.exe'"));
+}
+
+// --- # 302 UTF-8 preamble injection tests -----------------------------------
+//
+// These check the argv that execCommand hands back when the resolved
+// transport is ConPTY. The preamble's *content* is covered by
+// `utf8Preamble` tests in os/windows_shell.zig; here we only assert
+// the injection decision (when do we inject? on what shells?) and the
+// argv shape (length + flag markers).
+
+fn testExecWindowsShell(
+    alloc: Allocator,
+    shell: [:0]const u8,
+    conpty_mode: configpkg.Config.ConptyMode,
+) ![]const [:0]const u8 {
+    return try execCommand(
+        alloc,
+        .{ .shell = shell },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        conpty_mode,
+    );
+}
+
+test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe", .auto);
+
+    // auto + cmd (console_api) → ConPTY → cmd preamble appended.
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("cmd.exe", result[0]);
+    try testing.expectEqualStrings("/K", result[1]);
+    try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
+}
+
+test "execCommand windows: pwsh under auto mode (bypass) has no preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .auto);
+
+    // auto + pwsh (vt_aware) → bypass → PR # 301's parent console CP
+    // does the work. No preamble.
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+}
+
+test "execCommand windows: pwsh under forced never mode gets pwsh preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .never);
+
+    // never → ConPTY even for vt_aware shells. pwsh is identified as
+    // the powershell family, so we inject the Console encoding setup.
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+    try testing.expectEqualStrings("-NoExit", result[1]);
+    try testing.expectEqualStrings("-Command", result[2]);
+    try testing.expect(std.mem.indexOf(u8, result[3], "[Console]::OutputEncoding") != null);
+}
+
+test "execCommand windows: powershell 5.1 under auto mode gets pwsh preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "powershell.exe", .auto);
+
+    // Windows PowerShell 5.1 is console_api → auto picks ConPTY → pwsh
+    // preamble (same [Console]::*Encoding API as pwsh 7).
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("powershell.exe", result[0]);
+    try testing.expectEqualStrings("-NoExit", result[1]);
+    try testing.expectEqualStrings("-Command", result[2]);
+}
+
+test "execCommand windows: unknown shell under ConPTY has no preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "my-custom.exe", .never);
+
+    // Unknown → no preamble even under forced ConPTY; we don't know
+    // what syntax to inject.
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("my-custom.exe", result[0]);
+}
+
+test "execCommand windows: vt-aware non-powershell (bash) under ConPTY has no preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "bash.exe", .never);
+
+    // bash et al. don't care about the Windows console CP; they decode
+    // their own output.
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("bash.exe", result[0]);
+}
+
+test "execCommand windows: always mode (bypass) never injects preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const cmd_result = try testExecWindowsShell(arena.allocator(), "cmd.exe", .always);
+    try testing.expectEqual(@as(usize, 1), cmd_result.len);
+    try testing.expectEqualStrings("cmd.exe", cmd_result[0]);
+
+    const pwsh_result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .always);
+    try testing.expectEqual(@as(usize, 1), pwsh_result.len);
+    try testing.expectEqualStrings("pwsh.exe", pwsh_result[0]);
+}
+
+test "execCommand windows: cmd with existing /c arg skips preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe /c echo hi", .auto);
+
+    // User's `/c` already consumes "the rest of the command line";
+    // appending `/K chcp ...` after it would either be ignored by cmd
+    // or parsed as part of the user's echo, so we skip.
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("cmd.exe", result[0]);
+    try testing.expectEqualStrings("/c", result[1]);
+    try testing.expectEqualStrings("echo", result[2]);
+    try testing.expectEqualStrings("hi", result[3]);
+}
+
+test "execCommand windows: pwsh with existing -Command skips preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(
+        arena.allocator(),
+        "pwsh.exe -NoProfile -Command Write-Host",
+        .never,
+    );
+
+    // Duplicating -Command confuses pwsh's arg parser; let the user's
+    // explicit script run as configured.
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+    try testing.expectEqualStrings("-NoProfile", result[1]);
+    try testing.expectEqualStrings("-Command", result[2]);
+    try testing.expectEqualStrings("Write-Host", result[3]);
+}
+
+test "execCommand windows: pwsh with benign args gets appended preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe -NoProfile", .never);
+
+    // -NoProfile doesn't conflict with -Command, so we append the
+    // preamble after the user's flags.
+    try testing.expectEqual(@as(usize, 5), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+    try testing.expectEqualStrings("-NoProfile", result[1]);
+    try testing.expectEqualStrings("-NoExit", result[2]);
+    try testing.expectEqualStrings("-Command", result[3]);
+}
+
+test "execCommand windows: cmd-wrap path (pipes) gets chcp prepended to /C script" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const result = try testExecWindowsShell(arena.allocator(), "dir | findstr foo", .auto);
+
+    // Metachars force a cmd.exe /C wrap (existing behavior). The
+    // preamble goes *inside* the /C string so the whole pipeline runs
+    // in the same UTF-8 codepage.
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expect(std.mem.endsWith(u8, result[0], "cmd.exe"));
+    try testing.expectEqualStrings("/C", result[1]);
+    try testing.expectEqualStrings("chcp 65001 >nul && dir | findstr foo", result[2]);
+}
+
+test "execCommand windows: direct command for cmd.exe gets cmd preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .direct = &.{"cmd.exe"} },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .auto,
+    );
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("cmd.exe", result[0]);
+    try testing.expectEqualStrings("/K", result[1]);
+    try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
+}
+
+test "execCommand windows: direct command for pwsh under never gets pwsh preamble" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .direct = &.{ "pwsh.exe", "-NoLogo" } },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .never,
+    );
+
+    try testing.expectEqual(@as(usize, 5), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+    try testing.expectEqualStrings("-NoLogo", result[1]);
+    try testing.expectEqualStrings("-NoExit", result[2]);
+    try testing.expectEqualStrings("-Command", result[3]);
 }
