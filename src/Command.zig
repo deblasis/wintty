@@ -419,6 +419,13 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
     flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
 
+    // Suppress console window for raw-pipe sessions. ConPTY attaches the
+    // pseudo-console which automatically suppresses the window; raw pipes need
+    // the flag explicitly.
+    if (self.pseudo_console == null) {
+        flags |= windows.exp.CREATE_NO_WINDOW;
+    }
+
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
         null,
