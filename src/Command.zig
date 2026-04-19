@@ -321,12 +321,80 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         const stdin = if (self.stdin) |f| f.handle else null_fd.?;
         const stdout = if (self.stdout) |f| f.handle else null_fd.?;
         const stderr = if (self.stderr) |f| f.handle else null_fd.?;
-        break :b .{ null, stdin, stdout, stderr };
+
+        // All three handles must be HANDLE_FLAG_INHERIT for
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST. The PTY path flips _pty
+        // ends inheritable in pty.zig; null_fd and caller-provided
+        // files may or may not be. Flip them unconditionally here -
+        // it's idempotent, and handles our code owns are closed after
+        // spawn anyway.
+        try windows.SetHandleInformation(stdin, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT);
+        try windows.SetHandleInformation(stdout, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT);
+        try windows.SetHandleInformation(stderr, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT);
+
+        // Bypass path: restrict inheritance to just these three handles
+        // via PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Without this,
+        // bInheritHandles = TRUE leaks every inheritable parent handle
+        // to the child - a real security bug.
+        var attribute_list_size: usize = undefined;
+        _ = windows.exp.kernel32.InitializeProcThreadAttributeList(
+            null,
+            1,
+            0,
+            &attribute_list_size,
+        );
+
+        const attribute_list_buf = try arena.alloc(u8, attribute_list_size);
+        if (windows.exp.kernel32.InitializeProcThreadAttributeList(
+            attribute_list_buf.ptr,
+            1,
+            0,
+            &attribute_list_size,
+        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+
+        // Allocate the handle list from the arena so its lifetime
+        // outlives the attribute list until after CreateProcessW.
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST rejects duplicate handles,
+        // which is easy to hit: tests use null_fd for both stdin and
+        // stderr, and PTY bypass uses out_pipe_pty for both stdout and
+        // stderr. Build a list of unique handles only.
+        var unique: [3]windows.HANDLE = .{ stdin, stdout, stderr };
+        var unique_len: usize = 1;
+        for (unique[1..]) |h| {
+            var seen = false;
+            for (unique[0..unique_len]) |u| {
+                if (u == h) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                unique[unique_len] = h;
+                unique_len += 1;
+            }
+        }
+        const handles = try arena.alloc(windows.HANDLE, unique_len);
+        @memcpy(handles, unique[0..unique_len]);
+
+        // lpValue for PROC_THREAD_ATTRIBUTE_HANDLE_LIST is the handles
+        // array pointer passed BY VALUE (not by ref), matching how
+        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE above passes `pseudo_console`.
+        if (windows.exp.kernel32.UpdateProcThreadAttribute(
+            attribute_list_buf.ptr,
+            0,
+            windows.exp.PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            @ptrCast(handles.ptr),
+            @sizeOf(windows.HANDLE) * handles.len,
+            null,
+            null,
+        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+
+        break :b .{ attribute_list_buf.ptr, stdin, stdout, stderr };
     };
 
     var startup_info_ex = windows.exp.STARTUPINFOEX{
         .StartupInfo = .{
-            .cb = if (attribute_list != null) @sizeOf(windows.exp.STARTUPINFOEX) else @sizeOf(windows.STARTUPINFOW),
+            .cb = @sizeOf(windows.exp.STARTUPINFOEX),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
@@ -349,7 +417,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     };
 
     var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
-    if (attribute_list != null) flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
+    flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
@@ -900,7 +968,7 @@ test "Command: posix fork handles execveZ failure" {
 // If cmd.start fails with error.ExecFailedInChild it's the _child_ process that is running. If it does not
 // terminate in response to that error both the parent and child will continue as if they _are_ the test suite
 // process.
-fn testingStart(self: *Command) !void {
+pub fn testingStart(self: *Command) !void {
     self.start(testing.allocator) catch |err| {
         if (err == error.ExecFailedInChild) {
             // I am a child process, I must not get confused and continue running the rest of the test suite.

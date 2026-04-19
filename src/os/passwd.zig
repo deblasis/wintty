@@ -66,7 +66,7 @@ pub fn get(alloc: Allocator) !Entry {
         // some operating systems (NixOS tested) don't set the PATH for various
         // utilities properly until we get a login shell.
         const Pty = @import("../pty.zig").Pty;
-        var pty = try Pty.open(.{});
+        var pty = try Pty.open(.{ .size = .{} });
         defer pty.deinit();
         var cmd: internal_os.FlatpakHostCommand = .{
             .argv = &[_][]const u8{
