@@ -31,6 +31,7 @@ pub const STARTF_USESTDHANDLES = windows.STARTF_USESTDHANDLES;
 pub const SYNCHRONIZE = windows.SYNCHRONIZE;
 pub const WAIT_FAILED = windows.WAIT_FAILED;
 pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
+pub const DUPLICATE_SAME_ACCESS = windows.DUPLICATE_SAME_ACCESS;
 pub const FALSE = windows.FALSE;
 pub const TRUE = windows.TRUE;
 
@@ -48,6 +49,7 @@ pub const exp = struct {
     pub const HPCON = windows.LPVOID;
 
     pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    pub const CREATE_NO_WINDOW = 0x08000000;
     pub const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     pub const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
     pub const FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
