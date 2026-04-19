@@ -21,7 +21,7 @@ public class HttpLoopbackListenerTests
         _ = Task.Run(async () =>
         {
             await Task.Delay(50);
-            await http.GetAsync($"http://127.0.0.1:{listener.Port}/cb?token=abc&nonce=xyz");
+            await http.GetAsync($"http://127.0.0.1:{listener.Port}/?token=abc&nonce=xyz");
         });
 
         var result = await listener.AwaitCallbackAsync(CancellationToken.None);
@@ -41,7 +41,7 @@ public class HttpLoopbackListenerTests
         _ = Task.Run(async () =>
         {
             await Task.Delay(50);
-            await http.GetAsync($"http://127.0.0.1:{listener.Port}/cb?error=access_denied");
+            await http.GetAsync($"http://127.0.0.1:{listener.Port}/?error=access_denied");
         });
 
         var result = await listener.AwaitCallbackAsync(CancellationToken.None);
@@ -64,7 +64,7 @@ public class HttpLoopbackListenerTests
             Assert.Equal(System.Net.HttpStatusCode.NotFound, wrong.StatusCode);
 
             await Task.Delay(50);
-            await http.GetAsync($"http://127.0.0.1:{listener.Port}/cb?token=t&nonce=n");
+            await http.GetAsync($"http://127.0.0.1:{listener.Port}/?token=t&nonce=n");
         });
 
         var result = await listener.AwaitCallbackAsync(CancellationToken.None);
@@ -90,5 +90,16 @@ public class HttpLoopbackListenerTests
         using var listener = new HttpLoopbackListener();
 
         Assert.Throws<InvalidOperationException>(() => _ = listener.Port);
+    }
+
+    [Fact]
+    public void Start_ThrowsWhenPortOutsideEphemeralRange()
+    {
+        // Force a range that no real ephemeral port can satisfy so the
+        // assertion inside Start() has to fire.
+        using var listener = new HttpLoopbackListener(minPort: 1, maxPort: 1);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => listener.Start());
+        Assert.Contains("outside allowed range", ex.Message);
     }
 }
