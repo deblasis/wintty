@@ -14,6 +14,7 @@ const terminfo = @import("../terminfo/main.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
+const log_validate = std.log.scoped(.validate_transport);
 
 /// This is used as the handler for the terminal.Stream type. This is
 /// stateful and is expected to live for the entire lifetime of the terminal.
@@ -1338,6 +1339,12 @@ pub const StreamHandler = struct {
                 ),
 
                 .query => |kind| report: {
+                    // Fire validation log before the early-return so we capture
+                    // OSC 11 arrival regardless of osc-color-report-format.
+                    if (kind == .dynamic and kind.dynamic == .background) {
+                        log_validate.info("osc11 from pty: kind=query", .{});
+                    }
+
                     if (self.osc_color_report_format == .none) break :report;
 
                     const color = switch (kind) {
