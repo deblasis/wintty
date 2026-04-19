@@ -10,16 +10,32 @@ namespace Ghostty.Core.Sponsor.Auth;
 /// <summary>
 /// One-shot loopback HTTP server for OAuth callback capture. Binds an
 /// ephemeral port on <c>127.0.0.1</c> and responds to the first
-/// <c>/cb</c> request with a confirmation page, then exits. Non-<c>/cb</c>
-/// paths return 404 and listening continues until <c>/cb</c> arrives or
-/// cancellation fires.
+/// <c>/</c> request with a confirmation page, then exits. Non-root
+/// paths return 404 and listening continues until the root request
+/// arrives or cancellation fires.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class HttpLoopbackListener : ILoopbackListener
 {
     private HttpListener? _listener;
+    private readonly int _minPort;
+    private readonly int _maxPort;
     private int _port;
     private bool _started;
+
+    // Windows ephemeral range is 49152-65535 since Vista (IPPORT_DYNAMIC).
+    // TcpListener(IPAddress.Loopback, 0) always lands in this range on an
+    // unmodified host. The assertion in Start() catches unexpected
+    // deviations (e.g., registry tweaks to MaxUserPort) so the user sees
+    // a clear local error instead of an opaque remote 400 later in the
+    // OAuth round-trip.
+    public HttpLoopbackListener() : this(49152, 65535) { }
+
+    internal HttpLoopbackListener(int minPort, int maxPort)
+    {
+        _minPort = minPort;
+        _maxPort = maxPort;
+    }
 
     private static readonly byte[] ConfirmPage = Encoding.UTF8.GetBytes(
         "<!doctype html><html><body style='font-family:sans-serif;padding:2em'>"
@@ -42,6 +58,12 @@ internal sealed class HttpLoopbackListener : ILoopbackListener
         tcp.Start();
         _port = ((IPEndPoint)tcp.LocalEndpoint).Port;
         tcp.Stop();
+
+        if (_port < _minPort || _port > _maxPort)
+        {
+            throw new InvalidOperationException(
+                $"loopback port {_port} outside allowed range {_minPort}-{_maxPort}");
+        }
 
         _listener = new HttpListener();
         _listener.Prefixes.Add($"http://127.0.0.1:{_port}/");
@@ -85,7 +107,7 @@ internal sealed class HttpLoopbackListener : ILoopbackListener
             }
 
             var req = ctx.Request;
-            if (req.Url?.AbsolutePath != "/cb")
+            if (req.Url?.AbsolutePath != "/")
             {
                 ctx.Response.StatusCode = 404;
                 ctx.Response.Close();
@@ -94,7 +116,7 @@ internal sealed class HttpLoopbackListener : ILoopbackListener
                 {
                     // Bounds a local process flooding the port with junk
                     // requests. The legitimate OAuth flow makes exactly one
-                    // call to /cb; anything else is either a broken client
+                    // request to /; anything else is either a broken client
                     // or an attack and we shouldn't keep the listener open.
                     return new LoopbackResult(null, null, "too many invalid callbacks");
                 }
