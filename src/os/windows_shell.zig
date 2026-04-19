@@ -19,19 +19,99 @@ pub const Awareness = enum {
     console_api,
 };
 
-const known = std.StaticStringMap(Awareness).initComptime(.{
-    .{ "pwsh", .vt_aware },
-    .{ "wsl", .vt_aware },
-    .{ "ssh", .vt_aware },
-    .{ "bash", .vt_aware },
-    .{ "nu", .vt_aware },
-    .{ "zsh", .vt_aware },
-    .{ "fish", .vt_aware },
-    .{ "elvish", .vt_aware },
-    .{ "xonsh", .vt_aware },
-    .{ "cmd", .console_api },
-    .{ "powershell", .console_api },
+/// UTF-8 preamble kind needed to make a shell's *initial* output land
+/// as UTF-8 when it runs under ConPTY. Separate from `Awareness`
+/// because we need to distinguish cmd from powershell (same awareness,
+/// different preamble) and pwsh from the other vt_aware shells
+/// (same awareness, but only powershell-family benefits from the
+/// setup under forced conpty-mode=never - see # 302).
+///
+/// The setup runs once at shell startup inside ConPTY's conhost.exe,
+/// which does not inherit the caller's console codepage.
+pub const Preamble = enum {
+    /// No preamble: either the shell is unknown, or it already handles
+    /// its own encoding (e.g. wsl / bash / nu all decode their own
+    /// output regardless of the Windows console CP).
+    none,
+    /// cmd.exe: run `chcp 65001 >nul` at startup and stay interactive.
+    cmd,
+    /// PowerShell (pwsh.exe or Windows PowerShell 5.1): assign
+    /// `[Console]::OutputEncoding` and `InputEncoding` before the
+    /// prompt appears.
+    pwsh,
+
+    /// Argv elements to append after the user's existing argv so that
+    /// the configured shell runs the UTF-8 setup at startup. String
+    /// literals live in `.rodata`, so callers using an arena for argv
+    /// can append the returned slices directly without duping.
+    pub fn suffix(self: Preamble) []const [:0]const u8 {
+        return switch (self) {
+            .none => &.{},
+            .cmd => &cmd_suffix,
+            .pwsh => &pwsh_suffix,
+        };
+    }
+
+    const cmd_suffix = [_][:0]const u8{ "/K", "chcp 65001 >nul" };
+    const pwsh_suffix = [_][:0]const u8{
+        "-NoExit",
+        "-Command",
+        // Set both output *and* input encodings: the output side fixes
+        // what the pane renders; the input side fixes what redirection
+        // (`>`, `|`) produces when the user pipes pwsh into another
+        // tool.
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding",
+    };
+};
+
+/// Fine-grained shell identity used to select a UTF-8 preamble under
+/// ConPTY. Kept internal; exposed only through `utf8Preamble`.
+const Kind = enum {
+    unknown,
+    cmd,
+    powershell,
+    pwsh,
+    wsl,
+    ssh,
+    bash,
+    nu,
+    zsh,
+    fish,
+    elvish,
+    xonsh,
+};
+
+const kinds = std.StaticStringMap(Kind).initComptime(.{
+    .{ "pwsh", .pwsh },
+    .{ "wsl", .wsl },
+    .{ "ssh", .ssh },
+    .{ "bash", .bash },
+    .{ "nu", .nu },
+    .{ "zsh", .zsh },
+    .{ "fish", .fish },
+    .{ "elvish", .elvish },
+    .{ "xonsh", .xonsh },
+    .{ "cmd", .cmd },
+    .{ "powershell", .powershell },
 });
+
+fn awarenessOf(kind: Kind) Awareness {
+    return switch (kind) {
+        .unknown => .unknown,
+        .cmd, .powershell => .console_api,
+        .pwsh, .wsl, .ssh, .bash, .nu, .zsh, .fish, .elvish, .xonsh => .vt_aware,
+    };
+}
+
+fn preambleOf(kind: Kind) Preamble {
+    return switch (kind) {
+        .cmd => .cmd,
+        .powershell, .pwsh => .pwsh,
+        // All other kinds decode their own output; a Windows CP chcp
+        // would be ignored at best and misleading at worst.
+        .unknown, .wsl, .ssh, .bash, .nu, .zsh, .fish, .elvish, .xonsh => .none,
+    };
+}
 
 /// Classify an executable path or single-token command string. Strips
 /// surrounding quotes, directory prefix, and a trailing `.exe`
@@ -41,6 +121,18 @@ const known = std.StaticStringMap(Awareness).initComptime(.{
 /// This function does not parse argv flags. Callers with a full
 /// command line should split off the first token before calling.
 pub fn classify(exe_path: []const u8) Awareness {
+    return awarenessOf(identify(exe_path));
+}
+
+/// Return the UTF-8 preamble needed to make this shell emit UTF-8 on
+/// startup under ConPTY. Callers should invoke this only when the
+/// transport actually resolves to ConPTY; the raw-pipe bypass path
+/// already inherits our UTF-8 parent console (see PR # 301).
+pub fn utf8Preamble(exe_path: []const u8) Preamble {
+    return preambleOf(identify(exe_path));
+}
+
+fn identify(exe_path: []const u8) Kind {
     const trimmed = std.mem.trim(u8, exe_path, "\"' \t\r\n");
     if (trimmed.len == 0) return .unknown;
 
@@ -69,7 +161,7 @@ pub fn classify(exe_path: []const u8) Awareness {
     }
     const lower = std.ascii.lowerString(buf[0..base.len], base);
 
-    return known.get(lower) orelse .unknown;
+    return kinds.get(lower) orelse .unknown;
 }
 
 test "classify: pwsh variants" {
@@ -137,4 +229,63 @@ test "classify: handles very long path safely" {
     var long_path: [128]u8 = undefined;
     @memset(&long_path, 'a');
     try testing.expectEqual(Awareness.unknown, classify(&long_path));
+}
+
+test "utf8Preamble: cmd.exe returns .cmd" {
+    try testing.expectEqual(Preamble.cmd, utf8Preamble("cmd"));
+    try testing.expectEqual(Preamble.cmd, utf8Preamble("cmd.exe"));
+    try testing.expectEqual(Preamble.cmd, utf8Preamble("CMD.EXE"));
+    try testing.expectEqual(Preamble.cmd, utf8Preamble("C:\\Windows\\System32\\cmd.exe"));
+}
+
+test "utf8Preamble: pwsh.exe returns .pwsh" {
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("pwsh"));
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("pwsh.exe"));
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("PWSH.EXE"));
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+}
+
+test "utf8Preamble: powershell 5.1 returns .pwsh" {
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("powershell"));
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("powershell.exe"));
+    try testing.expectEqual(Preamble.pwsh, utf8Preamble("PowerShell.exe"));
+}
+
+test "utf8Preamble: vt-aware non-powershell shells return .none" {
+    // bash/wsl/ssh/nu don't observe the Windows console CP the same way
+    // powershell does, and auto-mode routes them through the bypass
+    // path anyway. Only powershell-family shells need the preamble
+    // under forced conpty-mode=never.
+    try testing.expectEqual(Preamble.none, utf8Preamble("bash.exe"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("wsl.exe"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("ssh.exe"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("nu"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("zsh"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("fish"));
+}
+
+test "utf8Preamble: unknown returns .none" {
+    try testing.expectEqual(Preamble.none, utf8Preamble("my-custom-repl.exe"));
+    try testing.expectEqual(Preamble.none, utf8Preamble("python.exe"));
+    try testing.expectEqual(Preamble.none, utf8Preamble(""));
+}
+
+test "utf8Preamble: suffix argv matches ConPTY setup contract" {
+    // cmd: /K lets the shell stay interactive after chcp.
+    const cmd_suffix = Preamble.cmd.suffix();
+    try testing.expectEqual(@as(usize, 2), cmd_suffix.len);
+    try testing.expectEqualStrings("/K", cmd_suffix[0]);
+    try testing.expectEqualStrings("chcp 65001 >nul", cmd_suffix[1]);
+
+    // pwsh: -NoExit mirrors the cmd /K behavior; -Command runs the
+    // setup before dropping the user into the prompt.
+    const pwsh_suffix = Preamble.pwsh.suffix();
+    try testing.expectEqual(@as(usize, 3), pwsh_suffix.len);
+    try testing.expectEqualStrings("-NoExit", pwsh_suffix[0]);
+    try testing.expectEqualStrings("-Command", pwsh_suffix[1]);
+    try testing.expect(std.mem.indexOf(u8, pwsh_suffix[2], "[Console]::OutputEncoding") != null);
+    try testing.expect(std.mem.indexOf(u8, pwsh_suffix[2], "[Console]::InputEncoding") != null);
+
+    // none: empty.
+    try testing.expectEqual(@as(usize, 0), Preamble.none.suffix().len);
 }
