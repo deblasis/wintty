@@ -1274,6 +1274,23 @@ GHOSTTY_API void ghostty_set_window_background_blur(ghostty_app_t, void*);
 // Benchmark API, if available.
 GHOSTTY_API bool ghostty_benchmark_cli(const char*, const char*);
 
+// Log bridge. Lets an embedder receive every std.log message libghostty
+// emits. scope_ptr/message_ptr are NOT null-terminated; use the
+// companion length. user_data is echoed verbatim from the registration
+// call. Invoked from whichever thread produces the log, so callbacks
+// must be thread-safe. Level ordinals are pinned:
+//   0 = debug, 1 = info, 2 = warn, 3 = err.
+// Pass NULL cb to clear any previously-installed callback.
+typedef void (*ghostty_log_callback)(
+    uint32_t level,
+    const char *scope_ptr,
+    uintptr_t scope_len,
+    const char *message_ptr,
+    uintptr_t message_len,
+    void *user_data);
+GHOSTTY_API void ghostty_log_set_callback(ghostty_log_callback cb,
+                                          void *user_data);
+
 #ifdef __cplusplus
 }
 #endif
