@@ -254,15 +254,20 @@ internal sealed partial class VelopackUpdateDriver : IUpdateDriver, IDisposable
     {
         _logger.LogWarning("[sponsor/update] TokenInvalidated event fired");
 
-        // Cancel any in-flight download before overwriting state with the
-        // auth-expired Error snapshot.
-        _downloadCts?.Cancel();
-
+        // Write the Error snapshot before cancelling any in-flight download.
+        // DownloadAsync's OperationCanceledException catch reads _current and
+        // only emits FromCancel when the state isn't already Error; publishing
+        // Error first ensures that check wins whether the catch inlines inside
+        // Cancel() or resumes on the threadpool. Cancel() is a release barrier,
+        // so the write is visible to the observer thread. Reversing this order
+        // lets FromCancel race past Error under concurrent load.
         var snap = UpdateStateMapping.FromError(
             new UpdateCheckException(UpdateErrorKind.AuthExpired, "token invalidated"),
             targetVersion: _lastInfo?.Version);
         _current = snap;
         StateChanged?.Invoke(this, snap);
+
+        _downloadCts?.Cancel();
     }
 
     private void Emit(UpdateStateSnapshot snap)
