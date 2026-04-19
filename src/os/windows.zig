@@ -20,6 +20,7 @@ pub const COORD = windows.COORD;
 pub const DWORD = windows.DWORD;
 pub const DWORD_PTR = windows.DWORD_PTR;
 pub const HANDLE = windows.HANDLE;
+pub const HWND = windows.HWND;
 pub const HINSTANCE = windows.HINSTANCE;
 pub const HPCON = windows.LPVOID;
 pub const HRESULT = c_long;
@@ -114,6 +115,8 @@ pub const S_OK = 0;
 pub const SYNCHRONIZE = 0x00100000;
 pub const VOLUME_NAME_DOS = 0x0;
 pub const WAIT_FAILED = 0xFFFFFFFF;
+pub const SW_HIDE: c_int = 0;
+pub const CP_UTF8: UINT = 65001;
 
 /// IOCTL that fills the output buffer with bytes from the kernel CSPRNG
 /// behind `\Device\CNG` (what ProcessPrng and BCryptGenRandom draw from).
@@ -160,6 +163,23 @@ pub const exp = struct {
             hWritePipe: *HANDLE,
             lpPipeAttributes: ?*const SECURITY_ATTRIBUTES,
             nSize: DWORD,
+        ) callconv(.winapi) BOOL;
+        // Console code page: needed to force spawned shells to inherit
+        // UTF-8 instead of the system OEM CP (see ensureUtf8Console in
+        // Command.zig). std.os.windows does not wrap these.
+        pub extern "kernel32" fn AllocConsole() callconv(.winapi) BOOL;
+        pub extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?HWND;
+        pub extern "kernel32" fn SetConsoleCP(
+            wCodePageID: UINT,
+        ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn SetConsoleOutputCP(
+            wCodePageID: UINT,
+        ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn GetConsoleCP() callconv(.winapi) UINT;
+        pub extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) UINT;
+        pub extern "kernel32" fn SetConsoleCtrlHandler(
+            HandlerRoutine: ?*const fn (DWORD) callconv(.winapi) BOOL,
+            Add: BOOL,
         ) callconv(.winapi) BOOL;
         // std.os.windows.kernel32 only exposes CreateEventExW; add the
         // classic CreateEventW for overlapped I/O wait events.
@@ -305,6 +325,16 @@ pub const exp = struct {
             dwFlags: DWORD,
         ) callconv(.winapi) DWORD;
     };
+    pub const user32 = struct {
+        // Used by `ensureUtf8Console` in Command.zig to hide the console
+        // window we allocate purely to carry the UTF-8 code page into
+        // spawned children.
+        pub extern "user32" fn ShowWindow(
+            hWnd: HWND,
+            nCmdShow: c_int,
+        ) callconv(.winapi) BOOL;
+    };
+
     pub const ntdll = struct {
         pub extern "ntdll" fn NtCreateFile(
             FileHandle: *HANDLE,
