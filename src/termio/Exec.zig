@@ -352,7 +352,7 @@ fn termiosTimer(
 
     // This is kind of hacky but we rebuild a Pty struct to get the
     // termios data.
-    const mode: ptypkg.Mode = (Pty{
+    const mode: ptypkg.TerminalMode = (Pty{
         .master = exec.read_thread_fd,
         .slave = undefined,
     }).getMode() catch |err| err: {
@@ -541,7 +541,7 @@ pub const ThreadData = struct {
 
     /// The last known termios mode. Used for change detection
     /// to prevent unnecessary locking of expensive mutexes.
-    termios_mode: ptypkg.Mode = .{},
+    termios_mode: ptypkg.TerminalMode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         posix.close(self.read_thread_pipe);
@@ -574,6 +574,13 @@ pub const Config = struct {
     resources_dir: ?[]const u8,
     term: []const u8,
 
+    /// Windows ConPTY transport mode. Resolved at spawn time against the
+    /// shell classifier (see `resolveConptyMode`). Ignored on POSIX.
+    conpty_mode: if (builtin.os.tag == .windows)
+        configpkg.Config.ConptyMode
+    else
+        void = if (builtin.os.tag == .windows) .auto else {},
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
 };
@@ -593,6 +600,13 @@ const Subprocess = struct {
     screen_size: renderer.ScreenSize,
     pty: ?Pty = null,
     process: ?Process = null,
+
+    /// Captured from Config.conpty_mode at init time; resolved against
+    /// the shell classifier at spawn time. Ignored on POSIX.
+    conpty_mode: if (builtin.os.tag == .windows)
+        configpkg.Config.ConptyMode
+    else
+        void = if (builtin.os.tag == .windows) .auto else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
@@ -868,6 +882,8 @@ const Subprocess = struct {
             .cwd = cwd,
             .args = args,
 
+            .conpty_mode = cfg.conpty_mode,
+
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
 
@@ -900,12 +916,22 @@ const Subprocess = struct {
         // process).
         var in_child: bool = false;
 
+        // Resolve the transport mode from config + shell classification.
+        // Windows-only; POSIX ignores opts.mode.
+        const mode: ptypkg.Mode = if (comptime builtin.os.tag == .windows)
+            resolveConptyMode(self.conpty_mode, self.args[0])
+        else
+            .conpty;
+
         // Create our pty
         var pty = try Pty.open(.{
-            .ws_row = @intCast(self.grid_size.rows),
-            .ws_col = @intCast(self.grid_size.columns),
-            .ws_xpixel = @intCast(self.screen_size.width),
-            .ws_ypixel = @intCast(self.screen_size.height),
+            .size = .{
+                .ws_row = @intCast(self.grid_size.rows),
+                .ws_col = @intCast(self.grid_size.columns),
+                .ws_xpixel = @intCast(self.screen_size.width),
+                .ws_ypixel = @intCast(self.screen_size.height),
+            },
+            .mode = mode,
         });
         self.pty = pty;
         errdefer if (!in_child) {
@@ -925,6 +951,24 @@ const Subprocess = struct {
                 // side. This prevents the slave fd from being leaked to
                 // future children.
                 _ = posix.close(pty.slave);
+            } else {
+                // In bypass mode the child holds its own inherited dup of
+                // `in_pipe_pty` / `out_pipe_pty`. Close our parent copies
+                // so EOF propagates on `out_pipe` when the child exits.
+                // In ConPTY mode the pseudoconsole owns those handles
+                // internally and we keep them alive until `Pty.deinit`.
+                if (mode == .bypass) {
+                    _ = windows.CloseHandle(pty.in_pipe_pty);
+                    _ = windows.CloseHandle(pty.out_pipe_pty);
+                    pty.in_pipe_pty = windows.INVALID_HANDLE_VALUE;
+                    pty.out_pipe_pty = windows.INVALID_HANDLE_VALUE;
+                    // Keep `self.pty` in sync; `Pty.deinit` tolerates
+                    // `INVALID_HANDLE_VALUE` via `CloseHandle` returning 0.
+                    if (self.pty) |*sp| {
+                        sp.in_pipe_pty = windows.INVALID_HANDLE_VALUE;
+                        sp.out_pipe_pty = windows.INVALID_HANDLE_VALUE;
+                    }
+                }
             }
 
             // Successful start we can clear out some memory.
@@ -1008,16 +1052,42 @@ const Subprocess = struct {
             };
         }
 
-        // Build our subcommand
+        // Build our subcommand. On Windows, stdio and `pseudo_console` are
+        // wired differently per transport mode: ConPTY owns stdio via the
+        // pseudoconsole handle; bypass mode feeds the child our raw pipe
+        // ends and leaves `pseudo_console` null.
         var cmd: Command = .{
             .path = self.args[0],
             .args = self.args,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
-            .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
-            .stdout = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
-            .stderr = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
-            .pseudo_console = if (builtin.os.tag == .windows) pty.pseudo_console else {},
+            .stdin = if (comptime builtin.os.tag == .windows)
+                switch (mode) {
+                    .bypass => std.fs.File{ .handle = pty.in_pipe_pty },
+                    .conpty => null,
+                }
+            else
+                .{ .handle = pty.slave },
+            .stdout = if (comptime builtin.os.tag == .windows)
+                switch (mode) {
+                    .bypass => std.fs.File{ .handle = pty.out_pipe_pty },
+                    .conpty => null,
+                }
+            else
+                .{ .handle = pty.slave },
+            .stderr = if (comptime builtin.os.tag == .windows)
+                switch (mode) {
+                    .bypass => std.fs.File{ .handle = pty.out_pipe_pty },
+                    .conpty => null,
+                }
+            else
+                .{ .handle = pty.slave },
+            .pseudo_console = if (comptime builtin.os.tag == .windows)
+                switch (mode) {
+                    .conpty => pty.pseudo_console,
+                    .bypass => null,
+                }
+            else {},
             .os_pre_exec = switch (comptime builtin.os.tag) {
                 .windows => null,
                 else => f: {
@@ -1672,6 +1742,29 @@ pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type
     return self.subprocess.getProcessInfo(info);
 }
 
+/// Resolve the requested transport mode at spawn time. Windows-only
+/// in effect; POSIX callers should pass `.conpty` and the value is
+/// ignored by PosixPty.
+///
+/// - `.never` always picks ConPTY (classic behavior).
+/// - `.always` always picks the raw-pipe bypass.
+/// - `.auto` defers to the shell classifier: VT-aware shells use the
+///   bypass, console-API shells and anything unrecognized fall back
+///   to ConPTY so unknown programs keep the safe default.
+fn resolveConptyMode(
+    cfg: configpkg.Config.ConptyMode,
+    exe_path: []const u8,
+) ptypkg.Mode {
+    return switch (cfg) {
+        .never => .conpty,
+        .always => .bypass,
+        .auto => switch (internal_os.windows_shell.classify(exe_path)) {
+            .vt_aware => .bypass,
+            .console_api, .unknown => .conpty,
+        },
+    };
+}
+
 test "execCommand darwin: shell command" {
     if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
 
@@ -2023,4 +2116,32 @@ test "windowsShellNeedsCmdWrapping" {
     try testing.expect(windowsShellNeedsCmdWrapping("echo %USERNAME%"));
     try testing.expect(windowsShellNeedsCmdWrapping("echo !var!"));
     try testing.expect(windowsShellNeedsCmdWrapping("a^b"));
+}
+
+test "resolveConptyMode: never forces conpty" {
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "cmd.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "unknown.exe"));
+}
+
+test "resolveConptyMode: always forces bypass" {
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "cmd.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "unknown.exe"));
+}
+
+test "resolveConptyMode: auto picks bypass for vt_aware" {
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "wsl.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash"));
+}
+
+test "resolveConptyMode: auto picks conpty for console_api" {
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "cmd.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "powershell.exe"));
+}
+
+test "resolveConptyMode: auto picks conpty for unknown (safe default)" {
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "my-custom.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, ""));
 }
