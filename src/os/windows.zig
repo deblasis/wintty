@@ -70,6 +70,8 @@ pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
 pub const MAX_PATH = windows.MAX_PATH;
 pub const FALSE: windows.BOOL = .fromBool(false);
 pub const TRUE: windows.BOOL = .fromBool(true);
+pub const SYNCHRONIZE = windows.SYNCHRONIZE;
+pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
 
 // Bit-field and enum constant values
 pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
@@ -108,6 +110,18 @@ pub const IO_STATUS_BLOCK = windows.IO_STATUS_BLOCK;
 pub const NTSTATUS = windows.NTSTATUS;
 pub const OBJECT_ATTRIBUTES = windows.OBJECT.ATTRIBUTES;
 
+pub const SetHandleInformation = windows.SetHandleInformation;
+
+/// GetHandleInformation is not wrapped in Zig std yet (std only wraps
+/// SetHandleInformation). Expose a small wrapper here so callers can
+/// verify handle inheritance flags without reaching into kernel32
+/// directly.
+pub fn GetHandleInformation(handle: HANDLE, flags: *DWORD) !void {
+    if (exp.kernel32.GetHandleInformation(handle, flags) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+}
+
 // Exported functions by library
 pub const exp = struct {
     pub const kernel32 = struct {
@@ -116,6 +130,18 @@ pub const exp = struct {
             hWritePipe: *HANDLE,
             lpPipeAttributes: ?*const SECURITY_ATTRIBUTES,
             nSize: DWORD,
+        ) callconv(.winapi) BOOL;
+        // std.os.windows.kernel32 only exposes CreateEventExW; add the
+        // classic CreateEventW for overlapped I/O wait events.
+        pub extern "kernel32" fn CreateEventW(
+            lpEventAttributes: ?*SECURITY_ATTRIBUTES,
+            bManualReset: BOOL,
+            bInitialState: BOOL,
+            lpName: ?LPCWSTR,
+        ) callconv(.winapi) ?HANDLE;
+        pub extern "kernel32" fn GetHandleInformation(
+            hObject: HANDLE,
+            lpdwFlags: *DWORD,
         ) callconv(.winapi) BOOL;
         pub extern "kernel32" fn CreatePseudoConsole(
             size: COORD,
@@ -255,6 +281,7 @@ pub const exp = struct {
 };
 
 pub const ProcThreadAttributeNumber = enum(DWORD) {
+    ProcThreadAttributeHandleList = 2,
     ProcThreadAttributePseudoConsole = 22,
     _,
 };
