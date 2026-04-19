@@ -246,6 +246,27 @@ public partial class OAuthTokenProviderTests
     }
 
     [Fact]
+    public async Task SignInAsync_StartUrlUsesLoopbackAndNonceQueryShape()
+    {
+        var (provider, _, browser, listener, _, time) = Build();
+        var jwt = MakeJwt(time, secondsFromNow: 3600);
+        listener.Behavior = _ =>
+        {
+            var opened = browser.Opened[^1];
+            var nonce = GetQueryParam(opened, "nonce")!;
+            return Task.FromResult(new LoopbackResult(jwt, nonce, null));
+        };
+
+        await provider.SignInAsync(CancellationToken.None);
+
+        var opened = browser.Opened[0];
+        // Contract with the Worker: ?loopback=<port>&nonce=<hex>.
+        Assert.Equal("54321", GetQueryParam(opened, "loopback"));
+        Assert.Matches(@"^[0-9A-Fa-f]{32}$", GetQueryParam(opened, "nonce"));
+        Assert.Null(GetQueryParam(opened, "redirect"));
+    }
+
+    [Fact]
     public async Task SignInAsync_NonceMismatch_ReturnsFalse()
     {
         var (provider, _, _, listener, _, time) = Build();
