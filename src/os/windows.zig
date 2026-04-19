@@ -72,9 +72,13 @@ pub const FALSE: windows.BOOL = .fromBool(false);
 pub const TRUE: windows.BOOL = .fromBool(true);
 pub const SYNCHRONIZE = windows.SYNCHRONIZE;
 pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
+pub const DUPLICATE_SAME_ACCESS = windows.DUPLICATE_SAME_ACCESS;
 
 // Bit-field and enum constant values
 pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+pub const CREATE_NO_WINDOW = 0x08000000;
+pub const STATUS_PENDING = 0x00000103;
+pub const STILL_ACTIVE = STATUS_PENDING;
 pub const DELETE = 0x00010000;
 pub const ERROR_SUCCESS = 0;
 pub const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
