@@ -48,6 +48,11 @@ comptime {
     // Force-reference our memset override so its export is emitted.
     // See quirks_memset.zig for details on why this exists.
     _ = @import("quirks_memset.zig");
+
+    // Embedder log callback bridge. Referenced here so the
+    // ghostty_log_set_callback export lands in libghostty even when
+    // main_ghostty.zig imports log_bridge only via logFn.
+    _ = @import("log_bridge.zig");
 }
 
 /// ghostty_info_s

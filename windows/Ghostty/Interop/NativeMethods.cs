@@ -567,4 +567,17 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_cli_set_theme_callback")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void CliSetThemeCallback(IntPtr callback);
+
+    // ---- log bridge ----------------------------------------------------
+
+    // Register (or clear, with IntPtr.Zero) an embedder callback that
+    // receives every libghostty std.log message. The delegate type is
+    // LibghosttyLogBridge.LogCallbackDelegate in Ghostty.Core.Logging;
+    // we take IntPtr here so this P/Invoke surface does not pull a
+    // Ghostty.Core type into the marshaling signature. Level maps as:
+    // 0=debug, 1=info, 2=warn, 3=err. Scope and message bytes are NOT
+    // null-terminated; companion lengths are passed to the callback.
+    [LibraryImport(Dll, EntryPoint = "ghostty_log_set_callback")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void LogSetCallback(IntPtr callback, IntPtr userData);
 }
