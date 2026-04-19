@@ -30,6 +30,7 @@ const windows = internal_os.windows;
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_exec);
+const log_validate = std.log.scoped(.validate_transport);
 
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
@@ -918,6 +919,9 @@ const Subprocess = struct {
 
         // Resolve the transport mode from config + shell classification.
         // Windows-only; POSIX ignores opts.mode.
+        // args[0] is the shell executable path (bare basename or full path),
+        // never a joined command line. resolveConptyMode relies on this -
+        // windows_shell.classify does not split tokens on spaces.
         const mode: ptypkg.Mode = if (comptime builtin.os.tag == .windows)
             resolveConptyMode(self.conpty_mode, self.args[0])
         else
@@ -1751,11 +1755,14 @@ pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type
 /// - `.auto` defers to the shell classifier: VT-aware shells use the
 ///   bypass, console-API shells and anything unrecognized fall back
 ///   to ConPTY so unknown programs keep the safe default.
+///
+/// `exe_path` must be a single executable path (basename or full path),
+/// not a joined argv string. Callers holding argv should pass argv[0].
 fn resolveConptyMode(
     cfg: configpkg.Config.ConptyMode,
     exe_path: []const u8,
 ) ptypkg.Mode {
-    return switch (cfg) {
+    const resolved: ptypkg.Mode = switch (cfg) {
         .never => .conpty,
         .always => .bypass,
         .auto => switch (internal_os.windows_shell.classify(exe_path)) {
@@ -1763,6 +1770,11 @@ fn resolveConptyMode(
             .console_api, .unknown => .conpty,
         },
     };
+    log_validate.info(
+        "transport resolved: shell=\"{s}\" config_mode={s} resolved={s}",
+        .{ exe_path, @tagName(cfg), @tagName(resolved) },
+    );
+    return resolved;
 }
 
 test "execCommand darwin: shell command" {
@@ -2144,4 +2156,15 @@ test "resolveConptyMode: auto picks conpty for console_api" {
 test "resolveConptyMode: auto picks conpty for unknown (safe default)" {
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "my-custom.exe"));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, ""));
+}
+
+test "resolveConptyMode: auto handles path-prefixed shell" {
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Windows\\System32\\cmd.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:/Program Files/PowerShell/7/pwsh.exe"));
+}
+
+test "resolveConptyMode: auto handles quoted shell" {
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "\"pwsh.exe\""));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "'cmd.exe'"));
 }
