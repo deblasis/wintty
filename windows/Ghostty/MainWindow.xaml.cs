@@ -155,12 +155,6 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
-#if SPONSOR_BUILD && DEBUG
-    private Ghostty.Sponsor.Update.SponsorUpdateCommandSource? _sponsorSource;
-#endif
-#if SPONSOR_BUILD
-    private Ghostty.Sponsor.Auth.SponsorAuthCommandSource? _sponsorAuthSource;
-#endif
 
     /// <summary>
     /// Palette close state: prevents re-entrant close handling between
@@ -854,11 +848,6 @@ public sealed partial class MainWindow : Window
         _taskbar.Dispose();
         _themeManager.Dispose();
 
-#if SPONSOR_BUILD
-        _sponsorAuthSource?.Dispose();
-        _sponsorAuthSource = null;
-#endif
-
         // Surface lifetime is decoupled from Loaded/Unloaded
         // (see TerminalControl.DisposeSurface), so we have to
         // free every leaf in every tab explicitly before tearing
@@ -1535,31 +1524,6 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config };
 
-#if SPONSOR_BUILD && DEBUG
-        // SharedSimulator is lazily materialized on first access (App.xaml.cs),
-        // so it's live here even though the full SponsorOverlay gets wired
-        // later in App.OnLaunched. Same instance flows into the bootstrapper.
-        if ((Microsoft.UI.Xaml.Application.Current as App)?.SharedSimulator is { } sim)
-        {
-            _sponsorSource = new Ghostty.Sponsor.Update.SponsorUpdateCommandSource(sim);
-            sources.Add(_sponsorSource);
-        }
-#endif
-
-#if SPONSOR_BUILD
-        // Auth palette entries (sign-in / sign-out). Ships in release
-        // sponsor builds. Separate from the DEBUG-only simulator source
-        // above because users need these entries to activate / revoke
-        // their sponsor session; simulator entries are QA-only.
-        if ((Microsoft.UI.Xaml.Application.Current as App)?.SharedTokens is { } tokens)
-        {
-            var authLogger = App.LoggerFactory?.CreateLogger<Ghostty.Sponsor.Auth.SponsorAuthCommandSource>()
-                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Ghostty.Sponsor.Auth.SponsorAuthCommandSource>.Instance;
-            _sponsorAuthSource = new Ghostty.Sponsor.Auth.SponsorAuthCommandSource(tokens, authLogger);
-            sources.Add(_sponsorAuthSource);
-        }
-#endif
-
         // Build the action autocompleter with a minimal set of action schemas.
         var schemas = new Dictionary<string, ActionSchema>
         {
@@ -1588,21 +1552,6 @@ public sealed partial class MainWindow : Window
             autoCompleter,
             groupByCategory: _configService.CommandPaletteGroupCommands);
     }
-
-#if SPONSOR_BUILD && DEBUG
-    /// <summary>
-    /// Path A re-registration: called from App.OnLaunched after Wire() so
-    /// the palette gains the real-service entry without a rebuild cycle.
-    /// GetCommands() is read on each palette open, so no separate
-    /// notification to CommandPaletteViewModel is needed.
-    /// </summary>
-    internal void RegisterSponsorService(Ghostty.Sponsor.Update.UpdateService service)
-    {
-        if (_sponsorSource is null) return;
-        _sponsorSource.SetService(service);
-        _sponsorSource.Refresh();
-    }
-#endif
 
     private void ExecuteBindingAction(string actionKey)
     {
