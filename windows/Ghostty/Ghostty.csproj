@@ -15,7 +15,7 @@
     <Platforms>x86;x64;ARM64</Platforms>
     <Platform Condition="'$(Platform)' == 'AnyCPU' or '$(Platform)' == ''">x64</Platform>
     <RootNamespace>Ghostty</RootNamespace>
-    <AssemblyName>Ghostty</AssemblyName>
+    <AssemblyName>Wintty</AssemblyName>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <Nullable>enable</Nullable>

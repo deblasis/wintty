@@ -73,7 +73,7 @@ function Assert-Equal($expected, $actual, $label) {
 }
 
 # Single output path - the existing Justfile convention.
-$dllPath = "windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Ghostty.dll"
+$dllPath = "windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.dll"
 
 Write-Host "=== Default build (SponsorBuild unset) ===" -ForegroundColor Cyan
 dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Debug
