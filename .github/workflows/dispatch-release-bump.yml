@@ -1,0 +1,31 @@
+# Fires a repository_dispatch at deblasis/wintty-release on windows-branch pushes.
+
+name: dispatch-release-bump
+
+on:
+  push:
+    branches: [windows]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  dispatch:
+    if: vars.ENABLE_WINTTY_RELEASE_DISPATCH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch wintty-windows-head to deblasis/wintty-release
+        env:
+          GH_TOKEN: ${{ secrets.WINTTY_RELEASE_DISPATCH_PAT }}
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          gh api /repos/deblasis/wintty-release/dispatches \
+            -f event_type=wintty-windows-head \
+            -f "client_payload[sha]=${{ github.sha }}" \
+            -f "client_payload[source_repo]=deblasis/wintty" \
+            -f "client_payload[ref]=${{ github.ref }}" \
+            -f "client_payload[subject]=$COMMIT_SUBJECT"
