@@ -52,6 +52,42 @@ pub const Preamble = enum {
         };
     }
 
+    /// Text to prepend to a user-supplied script when the user already
+    /// consumed the shell's "rest of command line" slot (e.g. `cmd /C
+    /// <script>`, `pwsh -Command <script>`). The returned slice is an
+    /// empty string for `.none`; otherwise it ends in whatever statement
+    /// terminator the shell needs so the caller can just concatenate it
+    /// in front of the user's script. See `suffix` for the
+    /// non-conflicting argv-append form.
+    ///
+    /// SECURITY: the returned strings are compile-time constants. Do
+    /// not interpolate user input into a new prefix string - that
+    /// would turn this into a shell-injection sink.
+    ///
+    /// The pwsh prefix uses `[System.Text.UTF8Encoding]::new()` whose
+    /// parameterless ctor defaults to `encoderShouldEmitUTF8Identifier
+    /// = false` (no BOM) and `throwOnInvalidBytes = false` (lenient
+    /// decode - U+FFFD substitution on malformed bytes). Both are the
+    /// right choice for a terminal; do not switch to
+    /// `[Encoding]::UTF8` or a stricter ctor without understanding the
+    /// BOM side effects on piped output.
+    pub fn prefix(self: Preamble) []const u8 {
+        return switch (self) {
+            .none => "",
+            // cmd's `&&` only runs the user's script when chcp
+            // succeeded. chcp 65001 has no failure modes on supported
+            // Windows SKUs; the `&&` variant matches the shell-wrap
+            // path in Exec.zig so both entrypoints behave identically
+            // if a future SKU ever breaks chcp. `>nul` silences the
+            // "Active code page: 65001" banner.
+            .cmd => "chcp 65001 >nul && ",
+            // `;` chains statements in PowerShell. Output encoding
+            // first, then input so piped stdout and redirected stdin
+            // match. See `suffix` for why we set both.
+            .pwsh => "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding; ",
+        };
+    }
+
     const cmd_suffix = [_][:0]const u8{ "/K", "chcp 65001 >nul" };
     const pwsh_suffix = [_][:0]const u8{
         "-NoExit",
@@ -288,4 +324,23 @@ test "utf8Preamble: suffix argv matches ConPTY setup contract" {
 
     // none: empty.
     try testing.expectEqual(@as(usize, 0), Preamble.none.suffix().len);
+}
+
+test "utf8Preamble: prefix ends with shell-appropriate separator" {
+    // cmd: `&&` chains on success, preserving the user's script when
+    // chcp somehow fails; trailing space so concatenation doesn't
+    // mash into the user's script.
+    const cmd_prefix = Preamble.cmd.prefix();
+    try testing.expect(std.mem.startsWith(u8, cmd_prefix, "chcp 65001"));
+    try testing.expect(std.mem.endsWith(u8, cmd_prefix, " && "));
+
+    // pwsh: `;` is a statement separator; trailing space keeps the
+    // wrapped script readable in logs.
+    const pwsh_prefix = Preamble.pwsh.prefix();
+    try testing.expect(std.mem.indexOf(u8, pwsh_prefix, "[Console]::OutputEncoding") != null);
+    try testing.expect(std.mem.indexOf(u8, pwsh_prefix, "[Console]::InputEncoding") != null);
+    try testing.expect(std.mem.endsWith(u8, pwsh_prefix, "; "));
+
+    // none: empty.
+    try testing.expectEqualStrings("", Preamble.none.prefix());
 }
