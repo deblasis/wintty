@@ -5,7 +5,7 @@
 .DESCRIPTION
     Copies dev-configs/validate-transport/<Row>.conf into an isolated
     XDG_CONFIG_HOME directory (as ghostty/config.ghostty), launches
-    the built Ghostty.exe with XDG_CONFIG_HOME pointing at it, waits
+    the built Wintty.exe with XDG_CONFIG_HOME pointing at it, waits
     for exit, then invokes scripts/validate-transport-assert.ps1 -Row
     <Row> and exits with its exit code.
 
@@ -28,12 +28,12 @@
     Safety timeout. Defaults to 10000 (10 seconds).
 
 .PARAMETER ExePath
-    Path to the built Ghostty.exe. Defaults to the Debug x64 output.
+    Path to the built Wintty.exe. Defaults to the Debug x64 output.
 #>
 param(
     [Parameter(Mandatory)][string]$Row,
     [int]$TimeoutMs = 10000,
-    [string]$ExePath = './windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Ghostty.exe'
+    [string]$ExePath = './windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe'
 )
 $ErrorActionPreference = 'Stop'
 
