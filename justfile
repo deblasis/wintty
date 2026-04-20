@@ -110,7 +110,7 @@ build-win:
 # Build the DLL and the shell, then launch it.
 [windows]
 run-win: build-dll build-win
-    ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Ghostty.exe
+    ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
 
 # === ConPTY-mode validation ===
 

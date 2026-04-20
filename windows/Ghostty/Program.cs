@@ -15,7 +15,7 @@ namespace Ghostty;
 public static partial class Program
 {
     /// <summary>
-    /// Exit codes for Ghostty.exe. Distinct values let callers
+    /// Exit codes for Wintty.exe. Distinct values let callers
     /// (launchers, tests, CI, <c>just run-win</c>) tell apart "refused
     /// to start" from "crashed mid-run". CLI actions
     /// (<c>ghostty +list-themes</c> etc.) bypass this scheme and
@@ -239,11 +239,13 @@ public static partial class Program
 
     private static string? FindThemePreviewPipe()
     {
-        // Look for a running Ghostty process and try its pipe name.
+        // Look for a running Wintty process and try its pipe name.
         // The pipe is named ghostty-theme-preview-{PID}.
+        // Match the assembly name from windows/Ghostty/Ghostty.csproj
+        // so this stays in sync if the binary is ever renamed again.
         try
         {
-            var procs = System.Diagnostics.Process.GetProcessesByName("Ghostty");
+            var procs = System.Diagnostics.Process.GetProcessesByName("Wintty");
             foreach (var proc in procs)
             {
                 using (proc)
