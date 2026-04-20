@@ -271,7 +271,7 @@ var utf8_console_owned: bool = false;
 
 var utf8_console = std.once(ensureUtf8ConsoleImpl);
 
-/// Ghostty.exe ships as a console-subsystem EXE but `Program.cs`'s
+/// Wintty.exe ships as a console-subsystem EXE but `Program.cs`'s
 /// `FreeConsole` gate detaches from the inherited console when we are
 /// its sole owner (Explorer / Start Menu / Default Terminal handoff
 /// launches). In that solo case we then have no console at spawn time,
@@ -745,13 +745,13 @@ test "ensureUtf8Console: idempotent, sets UTF-8 CP when it owns the console" {
     // the main property we can assert portably across test hosts:
     // both `zig build test` (which launches the test binary in a
     // detached state where AllocConsole semantics vary) and
-    // production (GUI-subsystem Ghostty.exe launched by Explorer)
+    // production (GUI-subsystem Wintty.exe launched by Explorer)
     // must tolerate repeat invocation.
     ensureUtf8Console();
     ensureUtf8Console();
 
     // If `ensureUtf8Console` actually allocated the console (the
-    // production case where Ghostty.exe has no parent console) we
+    // production case where Wintty.exe has no parent console) we
     // assert the code page was flipped to UTF-8 and that ownership
     // latches on a third call. We only assert in this branch
     // because under `zig build test` the test runner may be in a
