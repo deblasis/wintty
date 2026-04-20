@@ -64,57 +64,6 @@ public partial class App : Application
     // are one-shot startup info and the workaround would be to capture
     // into a pre-factory buffer that is then replayed.
     private Ghostty.Core.Logging.LibghosttyLogBridge? _zigLogBridge;
-#if SPONSOR_BUILD
-    private Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? _sponsorOverlay;
-    internal Ghostty.Sponsor.Update.SponsorOverlayBootstrapper? SponsorOverlay => _sponsorOverlay;
-    // Eagerly-initialized so MainWindow.CreateCommandPaletteViewModel
-    // (which runs inside the MainWindow ctor, before _sponsorOverlay is
-    // wired below) can still see a live simulator and register its
-    // palette commands. The bootstrapper reuses this same instance.
-    private Ghostty.Core.Sponsor.Update.UpdateSimulator? _sharedSimulator;
-    internal Ghostty.Core.Sponsor.Update.UpdateSimulator SharedSimulator =>
-        _sharedSimulator ??= new Ghostty.Core.Sponsor.Update.UpdateSimulator();
-    private Ghostty.Core.Sponsor.Auth.OAuthTokenProvider? _sharedTokens;
-    internal Ghostty.Core.Sponsor.Auth.OAuthTokenProvider SharedTokens =>
-        _sharedTokens ??= BuildTokenProvider();
-
-    private System.Net.Http.HttpClient? _sponsorAuthHttp;
-
-    private Ghostty.Core.Sponsor.Auth.OAuthTokenProvider BuildTokenProvider()
-    {
-        // AllowAutoRedirect=false so the bearer JWT is not forwarded to a
-        // redirected host if api.wintty.io ever returns a 302. WinttyAuthClient
-        // expects direct 2xx from /auth/refresh and /auth/revoke; any 3xx is
-        // surfaced as AuthErrorKind.ServerError.
-        _sponsorAuthHttp = new System.Net.Http.HttpClient(
-            new System.Net.Http.SocketsHttpHandler
-            {
-                AllowAutoRedirect = false,
-            })
-        {
-            Timeout = System.TimeSpan.FromSeconds(30),
-        };
-
-        var localAppData = System.Environment.GetFolderPath(
-            System.Environment.SpecialFolder.LocalApplicationData);
-        var authDir = System.IO.Path.Combine(localAppData, "Ghostty");
-
-        var store    = new Ghostty.Core.Sponsor.Auth.DpapiJwtStore(
-            authDir, Ghostty.Core.Sponsor.Auth.DpapiJwtStore.DefaultEntropy);
-        var browserLogger = _loggerFactory?.CreateLogger<Ghostty.Core.Sponsor.Auth.DesktopBrowserLauncher>()
-            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Ghostty.Core.Sponsor.Auth.DesktopBrowserLauncher>.Instance;
-        var browser  = new Ghostty.Core.Sponsor.Auth.DesktopBrowserLauncher(browserLogger);
-        var listener = new Ghostty.Core.Sponsor.Auth.HttpLoopbackListener();
-
-        var apiBase = new System.Uri("https://api.wintty.io");
-        var auth    = new Ghostty.Core.Sponsor.Auth.WinttyAuthClient(_sponsorAuthHttp, apiBase);
-        var logger  = _loggerFactory?.CreateLogger<Ghostty.Core.Sponsor.Auth.OAuthTokenProvider>()
-            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Ghostty.Core.Sponsor.Auth.OAuthTokenProvider>.Instance;
-
-        return new Ghostty.Core.Sponsor.Auth.OAuthTokenProvider(
-            auth, store, browser, listener, apiBase, logger, System.TimeProvider.System);
-    }
-#endif
 
     // Top-level window registry keyed by XamlRoot. Replaces the old
     // singular RootWindow and the earlier List<Window> draft: XamlRoot
@@ -508,42 +457,6 @@ public partial class App : Application
 
         var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
         window.Closed += OnAnyWindowClosedInternal;
-#if SPONSOR_BUILD
-        // OAuth boot: load cached JWT + refresh if stale. Task.Run pushes the
-        // work off the UI dispatcher so HttpClient continuations never try to
-        // resume on a captured UI SynchronizationContext. Bounded (single DPAPI
-        // read + at most one HTTP call on expired tokens) and must complete
-        // before Wire constructs the update pipeline, which reads GetTokenAsync
-        // immediately in its first poll.
-        System.Threading.Tasks.Task.Run(
-            () => SharedTokens.InitializeAsync(System.Threading.CancellationToken.None))
-            .GetAwaiter().GetResult();
-
-        // SharedSimulator was already materialized during MainWindow's
-        // ctor (CreateCommandPaletteViewModel reads it to register the
-        // palette commands). Pass that same instance to Wire so there's
-        // one simulator driving both the palette and the update pipeline.
-        _sponsorOverlay = Ghostty.Sponsor.Update.SponsorOverlayBootstrapper.Wire(
-            window, _configService, DispatcherQueue.GetForCurrentThread(), SharedSimulator,
-            SharedTokens, loggerFactory: _loggerFactory);
-
-        // Schedule proactive refresh timer AFTER Wire() so the overlay
-        // subscribes to TokenInvalidated first. The timer never fires
-        // until exp-24h so order-of-ops is not load-bearing for Task 12
-        // behavior, but keeping it post-Wire matches the disposal order
-        // below (overlay Dispose runs before provider Dispose).
-        SharedTokens.StartRefreshTimer();
-#if DEBUG
-        // Path A: push the real UpdateService into the palette source now
-        // that Wire() has run. GetCommands() is called on each palette open,
-        // so no additional ViewModel notification is needed.
-        window.RegisterSponsorService(_sponsorOverlay.Service);
-#endif
-        if (activationUri is not null)
-        {
-            _sponsorOverlay?.Router.HandleUri(activationUri);
-        }
-#endif
         window.Activate();
     }
 
@@ -589,21 +502,6 @@ public partial class App : Application
                 // _hostBySurface (asserts empty), notifies the
                 // supervisor (which throws if anything is still live),
                 // and calls AppFree.
-#if SPONSOR_BUILD
-                // Overlay first: stops driver + unsubscribes from TokenInvalidated.
-                _sponsorOverlay?.Dispose();
-                _sponsorOverlay = null;
-
-                // Then provider: cancels refresh timer + releases semaphore.
-                _sharedTokens?.Dispose();
-                _sharedTokens = null;
-
-                // HttpClient last: provider may have had in-flight refresh
-                // when its Dispose ran; drop the transport after the provider
-                // is quiesced.
-                _sponsorAuthHttp?.Dispose();
-                _sponsorAuthHttp = null;
-#endif
                 _bootstrapHost?.Dispose();
 
                 // Dispose ConfigService last: it outlives every host
