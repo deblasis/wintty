@@ -79,7 +79,7 @@ jobs:
 
   required:
     name: "Required Checks: Test"
-    if: always()
+    if: always() && github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-xsm
     needs:
       - skip
