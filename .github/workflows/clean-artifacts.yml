@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 jobs:
   remove-old-artifacts:
+    if: github.repository == 'ghostty-org/ghostty'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

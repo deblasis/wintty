@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   setup:
+    if: github.repository == 'ghostty-org/ghostty'
     runs-on: namespace-profile-ghostty-sm
     outputs:
       version: ${{ steps.extract_version.outputs.version }}
