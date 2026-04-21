@@ -14,6 +14,7 @@ name: Snap
 
 jobs:
   build:
+    if: github.repository == 'ghostty-org/ghostty'
     strategy:
       fail-fast: false
       matrix:
