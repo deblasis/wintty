@@ -9,6 +9,7 @@ pub const init = initpkg.init;
 pub const finalize = initpkg.finalize;
 pub const Program = program.Program;
 pub const Shader = shader.Shader;
+pub const wrapper = @import("wrapper.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
