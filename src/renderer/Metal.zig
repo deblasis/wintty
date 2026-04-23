@@ -159,6 +159,12 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
     };
 }
 
+/// Block until the GPU finishes all submitted work.
+/// Metal retains resources until the GPU is done, so this is a no-op.
+pub fn waitGpu(self: *Metal) void {
+    _ = self;
+}
+
 pub fn deinit(self: *Metal) void {
     self.queue.release();
     self.device.release();
@@ -312,6 +318,12 @@ pub inline fn textureOptions(self: Metal) Texture.Options {
             .render_target = true,
         },
     };
+}
+
+pub inline fn renderTargetTextureOptions(self: Metal, rtv_slot: anytype, srv_slot: anytype) Texture.Options {
+    _ = rtv_slot;
+    _ = srv_slot;
+    return self.textureOptions();
 }
 
 pub inline fn samplerOptions(self: Metal) Sampler.Options {

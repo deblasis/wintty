@@ -52,6 +52,11 @@ pub const custom_shader_target: shadertoy.Target = .hlsl;
 /// DX12 uses top-left origin, same as Metal.
 pub const custom_shader_y_is_down = true;
 
+/// DX12 uses a fixed B8G8R8A8_UNORM pixel format regardless of blending
+/// mode, so blending changes don't require shader/pipeline recompilation.
+/// Metal needs reinit because it switches between bgra8unorm/srgb.
+pub const blending_requires_shader_reinit = false;
+
 /// Triple buffering for DX12, matching Metal's swap chain depth.
 pub const swap_chain_count = 3;
 
@@ -93,14 +98,26 @@ dev: ?device.Device = null,
 /// Obtained by QueryInterface from the SwapChain1 in dev.
 swap_chain3: ?*dxgi.IDXGISwapChain3 = null,
 
+/// Allocator used to create descriptor heap objects. Stored for deinit.
+allocator: Allocator = undefined,
+
 /// RTV descriptor heap for swap chain back buffers.
-rtv_heap: ?DescriptorHeap = null,
+/// Heap-allocated so copies of DirectX12 share the same mutable state
+/// (allocated counter, descriptor handles). The generic renderer passes
+/// GraphicsAPI by value, and value-copied DescriptorHeap structs would
+/// diverge in their allocated counters, causing descriptor aliasing.
+rtv_heap: ?*DescriptorHeap = null,
+/// Snapshot of rtv_heap.allocated after swap chain back buffer slots
+/// are claimed in init().  Custom-shader ping-pong textures get
+/// descriptors above this base.  drawFrameStart resets allocated back
+/// to this value so resize can reuse the same slots.
+rtv_base: u32 = 0,
 
 /// Shader-visible CBV/SRV/UAV descriptor heap for textures and buffers.
-srv_heap: ?DescriptorHeap = null,
+srv_heap: ?*DescriptorHeap = null,
 
 /// Shader-visible sampler descriptor heap.
-sampler_heap: ?DescriptorHeap = null,
+sampler_heap: ?*DescriptorHeap = null,
 
 /// Per-frame command recording contexts (triple buffered).
 gpu_frames: [device.Device.frame_count]?Frame = .{ null, null, null },
@@ -136,6 +153,17 @@ init_command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// to record the fence value against the correct frame slot.
 /// Must be saved here because GetCurrentBackBufferIndex advances after Present.
 pending_frame_index: u32 = 0,
+
+/// Deferred frame completion state. DX12 must signal the GPU fence before
+/// releasing the frame semaphore (which happens in frameCompleted), because
+/// frame.resize() reuses descriptor slots that the GPU may still be reading.
+/// Metal's completion handler naturally runs after GPU finish; DX12's
+/// complete() runs before command list execution, so we defer frameCompleted
+/// to drawFrameEnd() which runs after ExecuteCommandLists + Signal.
+pending_complete: ?struct {
+    renderer: *Renderer,
+    health: rendererpkg.Health,
+} = null,
 
 /// Desired surface dimensions, updated by setTargetSize.
 ///
@@ -174,9 +202,7 @@ inline fn unpackSize(packed_size: u64) struct { width: u32, height: u32 } {
 // --- GraphicsAPI contract: functions ---
 
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
-    _ = alloc; // DX12 uses COM-based allocation; Zig allocator unused for now.
-
-    var result = DirectX12{};
+    var result = DirectX12{ .allocator = alloc };
 
     if (comptime builtin.os.tag != .windows) {
         return result;
@@ -236,49 +262,77 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         _ = sc3.Release();
     };
 
-    // Create RTV descriptor heap for back buffers.
-    result.rtv_heap = DescriptorHeap.init(
-        dev_ptr.device,
-        .RTV,
-        device.Device.frame_count,
-        false,
-    ) catch |err| {
-        log.err("RTV descriptor heap creation failed: {}", .{err});
-        return error.DescriptorHeapCreationFailed;
-    };
+    // Create RTV descriptor heap for back buffers plus custom shader
+    // textures.  Each FrameState may have 2 render-target textures
+    // (front/back for custom shader ping-pong), so we need:
+    //   frame_count (swap chain) + frame_count * 2 (custom shader)
+    const rtv_heap_capacity = device.Device.frame_count + device.Device.frame_count * 2;
+    {
+        const ptr = try alloc.create(DescriptorHeap);
+        errdefer alloc.destroy(ptr);
+        ptr.* = DescriptorHeap.init(
+            dev_ptr.device,
+            .RTV,
+            rtv_heap_capacity,
+            false,
+        ) catch |err| {
+            log.err("RTV descriptor heap creation failed: {}", .{err});
+            return error.DescriptorHeapCreationFailed;
+        };
+        result.rtv_heap = ptr;
+    }
     errdefer {
-        result.rtv_heap.?.deinit();
-        result.rtv_heap = null;
+        if (result.rtv_heap) |h| {
+            h.deinit();
+            alloc.destroy(h);
+            result.rtv_heap = null;
+        }
     }
 
     // Shader-visible CBV/SRV/UAV heap for texture SRVs.
-    result.srv_heap = DescriptorHeap.init(
-        dev_ptr.device,
-        .CBV_SRV_UAV,
-        srv_heap_capacity,
-        true,
-    ) catch |err| {
-        log.err("SRV descriptor heap creation failed: {}", .{err});
-        return error.DescriptorHeapCreationFailed;
-    };
+    {
+        const ptr = try alloc.create(DescriptorHeap);
+        errdefer alloc.destroy(ptr);
+        ptr.* = DescriptorHeap.init(
+            dev_ptr.device,
+            .CBV_SRV_UAV,
+            srv_heap_capacity,
+            true,
+        ) catch |err| {
+            log.err("SRV descriptor heap creation failed: {}", .{err});
+            return error.DescriptorHeapCreationFailed;
+        };
+        result.srv_heap = ptr;
+    }
     errdefer {
-        result.srv_heap.?.deinit();
-        result.srv_heap = null;
+        if (result.srv_heap) |h| {
+            h.deinit();
+            alloc.destroy(h);
+            result.srv_heap = null;
+        }
     }
 
     // Shader-visible sampler heap for texture sampling.
-    result.sampler_heap = DescriptorHeap.init(
-        dev_ptr.device,
-        .SAMPLER,
-        sampler_heap_capacity,
-        true,
-    ) catch |err| {
-        log.err("Sampler descriptor heap creation failed: {}", .{err});
-        return error.DescriptorHeapCreationFailed;
-    };
+    {
+        const ptr = try alloc.create(DescriptorHeap);
+        errdefer alloc.destroy(ptr);
+        ptr.* = DescriptorHeap.init(
+            dev_ptr.device,
+            .SAMPLER,
+            sampler_heap_capacity,
+            true,
+        ) catch |err| {
+            log.err("Sampler descriptor heap creation failed: {}", .{err});
+            return error.DescriptorHeapCreationFailed;
+        };
+        result.sampler_heap = ptr;
+    }
     errdefer {
-        result.sampler_heap.?.deinit();
-        result.sampler_heap = null;
+        if (result.sampler_heap) |h| {
+            h.deinit();
+            alloc.destroy(h);
+            result.sampler_heap = null;
+        }
     }
 
     // Get back buffer resources and create RTVs.
@@ -300,6 +354,10 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
             dev_ptr.device.CreateRenderTargetView(resource, null, rtv_handle);
             result.rtv_handles[i] = rtv_handle;
         }
+        // Advance the linear allocator past the swap chain slots so
+        // custom shader textures get their own RTV descriptors.
+        result.rtv_heap.?.allocated = device.Device.frame_count;
+        result.rtv_base = result.rtv_heap.?.allocated;
     } else if (dev_ptr.shared_texture != null) {
         // Shared-texture mode: one RTV pointing at the shared resource.
         // Use RTV heap slot 0 -- we only ever need one slot because
@@ -309,6 +367,8 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
         const rtv_handle = result.rtv_heap.?.cpuHandle(0);
         dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
         result.shared_rtv = rtv_handle;
+        result.rtv_heap.?.allocated = 1;
+        result.rtv_base = 1;
     }
     errdefer {
         for (&result.back_buffers) |*bb| {
@@ -412,18 +472,21 @@ pub fn deinit(self: *DirectX12) void {
         }
     }
 
-    if (self.sampler_heap) |*h| {
+    if (self.sampler_heap) |h| {
         h.deinit();
+        self.allocator.destroy(h);
         self.sampler_heap = null;
     }
 
-    if (self.srv_heap) |*h| {
+    if (self.srv_heap) |h| {
         h.deinit();
+        self.allocator.destroy(h);
         self.srv_heap = null;
     }
 
-    if (self.rtv_heap) |*h| {
+    if (self.rtv_heap) |h| {
         h.deinit();
+        self.allocator.destroy(h);
         self.rtv_heap = null;
     }
 
@@ -480,11 +543,37 @@ pub fn flushInitCommands(self: *DirectX12) void {
     self.pending_command_list = null;
 }
 
+/// Block until the GPU finishes all submitted work.
+/// Must be called before freeing any GPU resources (textures,
+/// buffers, pipelines) to prevent use-after-free on the GPU.
+pub fn waitGpu(self: *DirectX12) void {
+    if (self.dev) |*dev_ptr| {
+        dev_ptr.waitForGpu() catch {};
+    }
+}
+
 pub fn drawFrameStart(self: *DirectX12) void {
     _ = self;
+    // RTV heap slots are per-frame and stable. No reset needed -- each
+    // frame's CustomShaderState reuses its own dedicated RTV descriptors
+    // during resize (via the rtv_slot option in Texture.Options).
 }
 
 pub fn drawFrameEnd(self: *DirectX12) void {
+    // Release the frame semaphore after all GPU work is submitted.
+    // frameCompleted (called by the defer below) posts the swap-chain
+    // semaphore, which allows the next frame to proceed.  In Metal the
+    // completion handler fires after the GPU finishes; DX12's complete()
+    // fires before ExecuteCommandLists, so we must defer the semaphore
+    // release until after the fence signal to prevent frame.resize()
+    // from overwriting descriptor slots the GPU hasn't finished reading.
+    defer {
+        if (self.pending_complete) |pc| {
+            self.pending_complete = null;
+            pc.renderer.frameCompleted(pc.health);
+        }
+    }
+
     const dev_ptr = &(self.dev orelse return);
     const cl = self.pending_command_list orelse return;
     self.pending_command_list = null;
@@ -553,10 +642,8 @@ pub fn initShaders(
     alloc: Allocator,
     custom_shaders: []const [:0]const u8,
 ) !shaders.Shaders {
-    _ = alloc;
-    _ = custom_shaders;
     const dev_device = if (self.dev) |*d| d.device else null;
-    return shaders.Shaders.init(dev_device);
+    return shaders.Shaders.init(dev_device, alloc, custom_shaders);
 }
 
 /// Called by the apprt (via generic.zig) when the surface is resized.
@@ -634,7 +721,7 @@ fn resizeSwapChain(self: *DirectX12, width: u32, height: u32) !void {
     // Re-acquire back buffers and recreate RTVs at the same descriptor
     // slots. Mirrors the loop in init() so the rtv_handles array stays
     // valid for beginFrame.
-    const rtv_heap = &(self.rtv_heap orelse return error.NoRtvHeap);
+    const rtv_heap = self.rtv_heap orelse return error.NoRtvHeap;
     for (0..device.Device.frame_count) |i| {
         var resource: ?*d3d12.ID3D12Resource = null;
         const get_hr = sc3.GetBuffer(
@@ -712,6 +799,18 @@ pub inline fn beginFrame(
     if (api.device_lost) return error.DeviceLost;
     const dev_ptr = &(api.dev orelse return error.NoDevice);
 
+    // Pre-flight device health check.  GetDeviceRemovedReason is cheap
+    // (no GPU stall) and catches TDR/crashes from the PREVIOUS frame
+    // before we record new commands against a dead device.
+    {
+        const drr = dev_ptr.device.GetDeviceRemovedReason();
+        if (com.FAILED(drr)) {
+            log.err("device removed, reason=0x{x}", .{@as(u32, @bitCast(drr))});
+            api.handleDeviceRemoved();
+            return error.DeviceLost;
+        }
+    }
+
     // If the apprt asked for a new surface size since the last frame,
     // resize now -- on the renderer thread, before any command list work.
     // setTargetSize only records the desired size; it cannot touch GPU
@@ -743,7 +842,7 @@ pub inline fn beginFrame(
             // Slot 0 is the fixed shared-texture slot allocated in init();
             // overwriting the descriptor is safe because waitForGpu inside
             // recreateSharedTexture already drained all in-flight GPU work.
-            if (api.rtv_heap) |*heap| {
+            if (api.rtv_heap) |heap| {
                 const st = &dev_ptr.shared_texture.?;
                 const rtv_handle = heap.cpuHandle(0);
                 dev_ptr.device.CreateRenderTargetView(st.resource, null, rtv_handle);
@@ -861,16 +960,35 @@ pub inline fn textureOptions(self: DirectX12) Texture.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
-        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
-        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+        .srv_heap = self.srv_heap,
+    };
+}
+
+/// Options for creating textures that serve as both render targets and
+/// shader resources. Used by CustomShaderState for ping-pong textures.
+/// When descriptor slots are provided, the texture reuses them instead of
+/// allocating new ones (for resize without heap exhaustion).
+pub inline fn renderTargetTextureOptions(
+    self: DirectX12,
+    rtv_slot: ?DescriptorHeap.Descriptor,
+    srv_slot: ?DescriptorHeap.Descriptor,
+) Texture.Options {
+    return .{
+        .device = if (self.dev) |*d| d.device else null,
+        .command_list = self.pending_command_list,
+        .srv_heap = self.srv_heap,
+        .rtv_heap = self.rtv_heap,
+        .pixel_format = .B8G8R8A8_UNORM,
+        .render_target = true,
+        .rtv_slot = rtv_slot,
+        .srv_slot = srv_slot,
     };
 }
 
 pub inline fn samplerOptions(self: DirectX12) Sampler.Options {
     return .{
         .device = if (self.dev) |*d| d.device else null,
-        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
-        .sampler_heap = if (self.sampler_heap) |*h| @constCast(h) else null,
+        .sampler_heap = self.sampler_heap,
     };
 }
 
@@ -883,8 +1001,7 @@ pub inline fn imageTextureOptions(
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
-        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
-        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+        .srv_heap = self.srv_heap,
         .pixel_format = switch (format) {
             .gray => .R8_UNORM,
             .rgba => .R8G8B8A8_UNORM,
@@ -908,8 +1025,7 @@ pub fn initAtlasTexture(
     return Texture.init(.{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
-        // @constCast is safe: DescriptorHeap wraps a COM object on the heap.
-        .srv_heap = if (self.srv_heap) |*h| @constCast(h) else null,
+        .srv_heap = self.srv_heap,
         .pixel_format = pixel_format,
     }, size, size, null);
 }
