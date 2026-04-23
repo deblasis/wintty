@@ -523,7 +523,7 @@ test "Pipeline: all PSOs created from DXIL bytecode via Shaders.init" {
     var dev = createTestDevice() catch return;
     defer dev.deinit();
 
-    var s = Shaders.init(dev.device) catch return;
+    var s = Shaders.init(dev.device, std.testing.allocator, &.{}) catch return;
     defer s.deinit(std.testing.allocator);
 
     try std.testing.expect(s.pipelines.bg_color.pso != null);

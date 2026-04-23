@@ -185,6 +185,109 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
     return root_sig.?;
 }
 
+/// Root signature for custom post-process shaders.
+/// The shader_wrapper remaps binding=1 to binding=0 in the GLSL input
+/// before glslang, so SPIRV-Cross naturally outputs register(b0).
+/// Layout:
+///   [0] CBV at b0 (uniforms constant buffer)
+///   [1] Descriptor table: 1 SRV at t0
+///   [2] Descriptor table: 1 sampler at s0
+pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignature {
+    const srv_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
+        .RangeType = .SRV,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = 0,
+        .RegisterSpace = 0,
+        .Flags = .DATA_STATIC,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
+
+    const sampler_range = d3d12.D3D12_DESCRIPTOR_RANGE1{
+        .RangeType = .SAMPLER,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = 0,
+        .RegisterSpace = 0,
+        .Flags = .NONE,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
+
+    const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
+        // [0] Inline CBV at b0 (remapped from b1 in shader_wrapper).
+        .{
+            .ParameterType = .CBV,
+            .u = .{ .Descriptor = .{
+                .ShaderRegister = 0,
+                .RegisterSpace = 0,
+                .Flags = .DATA_VOLATILE,
+            } },
+            .ShaderVisibility = .ALL,
+        },
+        // [1] Descriptor table: 1 SRV at t0 (source texture).
+        .{
+            .ParameterType = .DESCRIPTOR_TABLE,
+            .u = .{ .DescriptorTable = .{
+                .NumDescriptorRanges = 1,
+                .pDescriptorRanges = @ptrCast(&srv_range),
+            } },
+            .ShaderVisibility = .ALL,
+        },
+        // [2] Descriptor table: 1 sampler at s0.
+        .{
+            .ParameterType = .DESCRIPTOR_TABLE,
+            .u = .{ .DescriptorTable = .{
+                .NumDescriptorRanges = 1,
+                .pDescriptorRanges = @ptrCast(&sampler_range),
+            } },
+            .ShaderVisibility = .ALL,
+        },
+    };
+
+    const desc = d3d12.D3D12_VERSIONED_ROOT_SIGNATURE_DESC{
+        .Version = .VERSION_1_1,
+        .u = .{ .Desc_1_1 = .{
+            .NumParameters = root_params.len,
+            .pParameters = &root_params,
+            .NumStaticSamplers = 0,
+            .pStaticSamplers = null,
+            .Flags = .ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+        } },
+    };
+
+    var blob: ?*d3d12.ID3DBlob = null;
+    var error_blob: ?*d3d12.ID3DBlob = null;
+    var hr = d3d12.D3D12SerializeVersionedRootSignature(
+        &desc,
+        &blob,
+        &error_blob,
+    );
+    if (error_blob) |eb| {
+        defer _ = eb.Release();
+        const msg_ptr: [*]const u8 = @ptrCast(eb.GetBufferPointer());
+        const msg_len = eb.GetBufferSize();
+        log.err("Post root signature serialization error: {s}", .{msg_ptr[0..msg_len]});
+    }
+    if (FAILED(hr)) {
+        if (blob) |b| _ = b.Release();
+        return error.RootSignatureSerializeFailed;
+    }
+    defer _ = blob.?.Release();
+
+    var root_sig: ?*d3d12.ID3D12RootSignature = null;
+    hr = device.CreateRootSignature(
+        0,
+        blob.?.GetBufferPointer(),
+        blob.?.GetBufferSize(),
+        &d3d12.ID3D12RootSignature.IID,
+        @ptrCast(&root_sig),
+    );
+    if (FAILED(hr)) {
+        log.err("Post CreateRootSignature failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+        return error.RootSignatureCreationFailed;
+    }
+
+    return root_sig.?;
+}
+
 /// Create a pipeline with specific shaders and input layout.
 pub fn init(opts: Options) !Pipeline {
     const no_blend = d3d12.D3D12_RENDER_TARGET_BLEND_DESC{

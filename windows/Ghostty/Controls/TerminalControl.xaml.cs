@@ -313,7 +313,16 @@ public sealed partial class TerminalControl : UserControl
         _selfHandle = GCHandle.Alloc(this, GCHandleType.Normal);
         surfaceConfig.Userdata = GCHandle.ToIntPtr(_selfHandle);
 
-        _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
+        try
+        {
+            _surface = NativeMethods.SurfaceNew(app, surfaceConfig);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[Ghostty] SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
+            throw;
+        }
         // Drop our ref: libghostty does not retain the panel pointer.
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);

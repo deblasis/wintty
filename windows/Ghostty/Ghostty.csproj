@@ -66,6 +66,12 @@
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!--
+      glslang + SPIRV-Cross + DX12 renderer init creates deep stack frames
+      that exceed .NET's 1 MB default. 4 MB matches macOS main-thread
+      convention and gives comfortable headroom for custom shader compilation.
+    -->
+    <StackReserveSize>4194304</StackReserveSize>
+    <!--
       Channel selects the app icon variant at build time. Debug builds
       default to Nightly so local dev is always visually distinguishable
       from a stable build; Release defaults to Stable. Override with
