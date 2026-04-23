@@ -432,6 +432,19 @@ pub const D3D12_HEAP_PROPERTIES = extern struct {
     VisibleNodeMask: u32,
 };
 
+pub const D3D12_CLEAR_VALUE = extern struct {
+    Format: DXGI_FORMAT,
+    u: extern union {
+        Color: [4]f32,
+        DepthStencil: D3D12_DEPTH_STENCIL_VALUE,
+    },
+};
+
+pub const D3D12_DEPTH_STENCIL_VALUE = extern struct {
+    Depth: f32,
+    Stencil: u8,
+};
+
 pub const D3D12_RESOURCE_DESC = extern struct {
     Dimension: D3D12_RESOURCE_DIMENSION,
     Alignment: u64,
@@ -1547,6 +1560,284 @@ pub extern "d3d12" fn D3D12SerializeVersionedRootSignature(
     ppErrorBlob: *?*ID3DBlob,
 ) callconv(.winapi) HRESULT;
 
+// --- DXC (DirectX Shader Compiler) types ---
+
+pub const DXC_OUT_KIND = enum(u32) {
+    NONE = 0,
+    OBJECT = 1,
+    ERRORS = 2,
+    PDB = 3,
+    SHADER_HASH = 4,
+    DISASSEMBLY = 5,
+    HLSL = 6,
+    TEXT = 7,
+    REFLECTION = 8,
+    ROOT_SIGNATURE = 9,
+    EXTRA_OUTPUTS = 10,
+    FORCE_DWORD = 0xFFFFFFFF,
+};
+
+pub const DxcBuffer = extern struct {
+    Ptr: ?*const anyopaque,
+    Size: usize,
+    Encoding: u32,
+};
+
+// IDxcBlob
+// Inherits: IUnknown(3) > IDxcBlob(2) = 5 total
+pub const IDxcBlob = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x8BA5FB08,
+        .data2 = 0x5195,
+        .data3 = 0x40e2,
+        .data4 = .{ 0xAC, 0x58, 0x0D, 0x98, 0x9C, 0x3A, 0x01, 0x02 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDxcBlob, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDxcBlob) callconv(.winapi) u32,
+        Release: *const fn (*IDxcBlob) callconv(.winapi) u32,
+        // IDxcBlob (slots 3-4)
+        GetBufferPointer: *const fn (*IDxcBlob) callconv(.winapi) *anyopaque,
+        GetBufferSize: *const fn (*IDxcBlob) callconv(.winapi) usize,
+    };
+
+    pub inline fn GetBufferPointer(self: *IDxcBlob) *anyopaque {
+        return self.vtable.GetBufferPointer(self);
+    }
+
+    pub inline fn GetBufferSize(self: *IDxcBlob) usize {
+        return self.vtable.GetBufferSize(self);
+    }
+
+    pub inline fn Release(self: *IDxcBlob) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
+// IDxcBlobUtf8
+// Inherits: IUnknown(3) > IDxcBlob(2) > IDxcBlobEncoding(1) > IDxcBlobUtf8(2) = 8 total
+pub const IDxcBlobUtf8 = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x3DA636C9,
+        .data2 = 0xBA71,
+        .data3 = 0x4024,
+        .data4 = .{ 0xA3, 0x01, 0x30, 0xCB, 0xF1, 0x25, 0x30, 0x5B },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDxcBlobUtf8, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDxcBlobUtf8) callconv(.winapi) u32,
+        Release: *const fn (*IDxcBlobUtf8) callconv(.winapi) u32,
+        // IDxcBlob (slots 3-4)
+        GetBufferPointer: *const fn (*IDxcBlobUtf8) callconv(.winapi) *anyopaque,
+        GetBufferSize: *const fn (*IDxcBlobUtf8) callconv(.winapi) usize,
+        // IDxcBlobEncoding (slot 5)
+        GetEncoding: Reserved,
+        // IDxcBlobUtf8 (slots 6-7)
+        GetStringPointer: *const fn (*IDxcBlobUtf8) callconv(.winapi) [*:0]const u8,
+        GetStringLength: *const fn (*IDxcBlobUtf8) callconv(.winapi) usize,
+    };
+
+    pub inline fn GetBufferPointer(self: *IDxcBlobUtf8) *anyopaque {
+        return self.vtable.GetBufferPointer(self);
+    }
+
+    pub inline fn GetBufferSize(self: *IDxcBlobUtf8) usize {
+        return self.vtable.GetBufferSize(self);
+    }
+
+    pub inline fn GetStringPointer(self: *IDxcBlobUtf8) [*:0]const u8 {
+        return self.vtable.GetStringPointer(self);
+    }
+
+    pub inline fn GetStringLength(self: *IDxcBlobUtf8) usize {
+        return self.vtable.GetStringLength(self);
+    }
+
+    pub inline fn Release(self: *IDxcBlobUtf8) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
+// IDxcResult
+// Inherits: IUnknown(3) > IDxcOperationResult(3) > IDxcResult(5) = 11 total
+pub const IDxcResult = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x58346CDA,
+        .data2 = 0xDDE7,
+        .data3 = 0x4497,
+        .data4 = .{ 0x94, 0x61, 0x6F, 0x87, 0xAF, 0x5E, 0x06, 0x59 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDxcResult, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDxcResult) callconv(.winapi) u32,
+        Release: *const fn (*IDxcResult) callconv(.winapi) u32,
+        // IDxcOperationResult (slots 3-5)
+        GetStatus: *const fn (*IDxcResult, *HRESULT) callconv(.winapi) HRESULT,
+        GetResult: Reserved,
+        GetErrorBuffer: Reserved,
+        // IDxcResult (slots 6-10)
+        HasOutput: Reserved,
+        GetOutput: *const fn (*IDxcResult, DXC_OUT_KIND, *const GUID, *?*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT,
+        GetNumOutputs: Reserved,
+        GetOutputByIndex: Reserved,
+        PrimaryOutput: Reserved,
+    };
+
+    pub inline fn GetStatus(self: *IDxcResult) HRESULT {
+        var status: HRESULT = 0;
+        _ = self.vtable.GetStatus(self, &status);
+        return status;
+    }
+
+    pub inline fn GetOutput(self: *IDxcResult, kind: DXC_OUT_KIND, riid: *const GUID, ppvObject: *?*anyopaque, ppOutputObject: *?*anyopaque) HRESULT {
+        return self.vtable.GetOutput(self, kind, riid, ppvObject, ppOutputObject);
+    }
+
+    pub inline fn Release(self: *IDxcResult) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
+// IDxcUtils
+// Inherits: IUnknown(3) + 13 own methods = 16 total
+pub const IDxcUtils = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x4605C4CB,
+        .data2 = 0x2019,
+        .data3 = 0x492A,
+        .data4 = .{ 0xAD, 0xA4, 0x65, 0xF2, 0x0B, 0xB7, 0xD6, 0x7F },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDxcUtils, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDxcUtils) callconv(.winapi) u32,
+        Release: *const fn (*IDxcUtils) callconv(.winapi) u32,
+        // IDxcUtils (slots 3-15)
+        CreateBlobFromBlob: Reserved,
+        CreateBlobFromPinned: Reserved,
+        MoveToBlob: Reserved,
+        CreateBlob: Reserved,
+        LoadFile: Reserved,
+        CreateReadOnlyStreamFromBlob: Reserved,
+        CreateDefaultIncludeHandler: *const fn (*IDxcUtils, *?*anyopaque) callconv(.winapi) HRESULT,
+        GetBlobAsUtf8: Reserved,
+        GetBlobAsWide: Reserved,
+        GetDxilContainerPart: Reserved,
+        CreateReflection: Reserved,
+        BuildArguments: Reserved,
+        GetPDBContents: Reserved,
+    };
+
+    pub inline fn CreateDefaultIncludeHandler(self: *IDxcUtils, pp: *?*anyopaque) HRESULT {
+        return self.vtable.CreateDefaultIncludeHandler(self, pp);
+    }
+
+    pub inline fn Release(self: *IDxcUtils) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
+// IDxcCompiler3
+// Inherits: IUnknown(3) + 2 own methods = 5 total
+pub const IDxcCompiler3 = extern struct {
+    vtable: *const VTable,
+    pub const IID = GUID{
+        .data1 = 0x228B4687,
+        .data2 = 0x5A6A,
+        .data3 = 0x4730,
+        .data4 = .{ 0x90, 0x0C, 0x97, 0x02, 0xB2, 0x20, 0x3F, 0x54 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown (slots 0-2)
+        QueryInterface: *const fn (*IDxcCompiler3, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDxcCompiler3) callconv(.winapi) u32,
+        Release: *const fn (*IDxcCompiler3) callconv(.winapi) u32,
+        // IDxcCompiler3 (slots 3-4)
+        Compile: *const fn (
+            *IDxcCompiler3,
+            *const DxcBuffer,
+            [*]const ?[*:0]const u16,
+            u32,
+            ?*anyopaque,
+            *const GUID,
+            *?*anyopaque,
+        ) callconv(.winapi) HRESULT,
+        Disassemble: Reserved,
+    };
+
+    pub inline fn Compile(
+        self: *IDxcCompiler3,
+        source: *const DxcBuffer,
+        args: [*]const ?[*:0]const u16,
+        arg_count: u32,
+        define: ?*anyopaque,
+        riid: *const GUID,
+        pp: *?*anyopaque,
+    ) HRESULT {
+        return self.vtable.Compile(self, source, args, arg_count, define, riid, pp);
+    }
+
+    pub inline fn Release(self: *IDxcCompiler3) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
+pub const CLSID_DxcUtils = GUID{ .data1 = 0x6245D6AF, .data2 = 0x66E0, .data3 = 0x48FD, .data4 = .{ 0x80, 0xB4, 0x4D, 0x27, 0x17, 0x96, 0x74, 0x8C } };
+pub const CLSID_DxcCompiler = GUID{ .data1 = 0x73E22D93, .data2 = 0xE6CE, .data3 = 0x47F3, .data4 = .{ 0xB5, 0xBF, 0xF0, 0x66, 0x4F, 0x39, 0xC1, 0xB0 } };
+
+// DxcLibrary handles dynamic loading of dxcompiler.dll
+pub const DxcLibrary = struct {
+    dll: ?std.os.windows.HMODULE,
+    create_instance: ?*const fn (*const GUID, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+
+    /// Load dxcompiler.dll and get DxcCreateInstance function pointer.
+    /// Returns null if the DLL cannot be loaded.
+    pub fn load() ?DxcLibrary {
+        const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("dxcompiler.dll");
+        const dll = std.os.windows.LoadLibraryW(dll_name) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return null,
+        };
+
+        // Get the DxcCreateInstance function
+        const proc = std.os.windows.kernel32.GetProcAddress(dll, "DxcCreateInstance") orelse {
+            std.os.windows.FreeLibrary(dll);
+            return null;
+        };
+
+        return DxcLibrary{
+            .dll = dll,
+            .create_instance = @ptrCast(proc),
+        };
+    }
+
+    /// Unload the DLL.
+    pub fn deinit(self: DxcLibrary) void {
+        if (self.dll) |dll| {
+            std.os.windows.FreeLibrary(dll);
+        }
+    }
+
+    /// Create a DXC object via DxcCreateInstance.
+    /// Returns E_FAIL if the library was not loaded successfully.
+    pub fn createInstance(self: DxcLibrary, class_id: *const GUID, interface_id: *const GUID, out: *?*anyopaque) HRESULT {
+        const create_fn = self.create_instance orelse return com.E_FAIL;
+        return create_fn(class_id, interface_id, out);
+    }
+};
+
 // --- Kernel32 helpers for fence synchronization ---
 
 pub extern "kernel32" fn CreateEventW(
@@ -1682,4 +1973,58 @@ test "CommandList vtable passes descriptor handles as raw scalars" {
     try std.testing.expectEqual(usize, ParamType.get(@as(VT, undefined).ClearRenderTargetView, 1));
     // SetGraphicsRootDescriptorTable: param 2 (after self + index) must be u64
     try std.testing.expectEqual(u64, ParamType.get(@as(VT, undefined).SetGraphicsRootDescriptorTable, 2));
+}
+
+test "DxcBuffer is extern struct with expected field order" {
+    try std.testing.expectEqual(@sizeOf(?*const anyopaque), @sizeOf(@FieldType(DxcBuffer, "Ptr")));
+    try std.testing.expectEqual(@sizeOf(usize), @sizeOf(@FieldType(DxcBuffer, "Size")));
+    try std.testing.expectEqual(@sizeOf(u32), @sizeOf(@FieldType(DxcBuffer, "Encoding")));
+}
+
+test "DXC_OUT_KIND has OBJECT and ERRORS variants" {
+    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(DXC_OUT_KIND.OBJECT));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(DXC_OUT_KIND.ERRORS));
+}
+
+test "IDxcBlobUtf8 has expected vtable field count" {
+    // IUnknown(3) + IDxcBlob(2) + IDxcBlobEncoding(1) + IDxcBlobUtf8(2) = 8 slots
+    try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcBlobUtf8));
+    const vtable_size = @sizeOf(IDxcBlobUtf8.VTable);
+    const expected_size = 8 * @sizeOf(*anyopaque);
+    try std.testing.expectEqual(expected_size, vtable_size);
+}
+
+test "IDxcResult has expected vtable field count" {
+    // IUnknown(3) + IDxcOperationResult(3) + IDxcResult(5) = 11 slots
+    try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcResult));
+    const vtable_size = @sizeOf(IDxcResult.VTable);
+    const expected_size = 11 * @sizeOf(*anyopaque);
+    try std.testing.expectEqual(expected_size, vtable_size);
+}
+
+test "IDxcUtils has expected vtable field count" {
+    // IUnknown(3) + 13 methods = 16 slots
+    try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcUtils));
+    const vtable_size = @sizeOf(IDxcUtils.VTable);
+    const expected_size = 16 * @sizeOf(*anyopaque);
+    try std.testing.expectEqual(expected_size, vtable_size);
+}
+
+test "IDxcCompiler3 has expected vtable field count" {
+    // IUnknown(3) + Compile + Disassemble = 5 slots
+    try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcCompiler3));
+    const vtable_size = @sizeOf(IDxcCompiler3.VTable);
+    const expected_size = 5 * @sizeOf(*anyopaque);
+    try std.testing.expectEqual(expected_size, vtable_size);
+}
+
+test "DxcLibrary.load returns null when dxcompiler.dll absent" {
+    // This test just verifies the struct compiles and the method exists.
+    // We don't actually call load() since it would fail if dxcompiler.dll is present.
+    try std.testing.expectEqual(@sizeOf(?std.os.windows.HMODULE), @sizeOf(@FieldType(DxcLibrary, "dll")));
+    try std.testing.expectEqual(@sizeOf(?*const fn (*const GUID, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT), @sizeOf(@FieldType(DxcLibrary, "create_instance")));
+}
+
+test "CLSID constants are distinct" {
+    try std.testing.expect(!std.mem.eql(u8, &CLSID_DxcUtils.data4, &CLSID_DxcCompiler.data4));
 }

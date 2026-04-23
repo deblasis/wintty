@@ -48,7 +48,9 @@ pub fn init(opts: Options) Error!Sampler {
         .ComparisonFunc = .NEVER,
         .BorderColor = .{ 0.0, 0.0, 0.0, 0.0 },
         .MinLOD = 0.0,
-        .MaxLOD = 0.0,
+        // D3D12 default: allow all mip levels. Current textures use MipLevels=1
+        // so this is a no-op, but correct for custom shader post-process sampling.
+        .MaxLOD = 3.402823466e+38,
     };
     device.CreateSampler(&sampler_desc, desc.cpu);
 

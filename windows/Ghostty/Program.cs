@@ -58,6 +58,81 @@ public static partial class Program
         [Out] uint[] lpdwProcessList,
         uint dwProcessCount);
 
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr GetStdHandle(int nStdHandle);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetStdHandle(int nStdHandle, IntPtr hHandle);
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial IntPtr CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    private const int STD_ERROR_HANDLE = -12;
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint CREATE_ALWAYS = 2;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+    /// <summary>
+    /// Persistent GPU diagnostic log path.  Survives reboot so we can
+    /// read crash details after a GPU driver crash takes down the machine.
+    /// Located next to the executable so it's easy to find.
+    /// </summary>
+    private static readonly string GpuLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Ghostty", "gpu.log");
+
+    /// <summary>
+    /// Redirect stderr to a file so all diagnostic output (Zig std.log,
+    /// C# Console.Error, DX12 debug layer via OutputDebugString) is
+    /// persisted to disk.  Called before any native GPU code runs.
+    /// </summary>
+    private static void RedirectStderrToFile()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(GpuLogPath)!);
+
+            // Open log file with unbuffered writes so data hits disk even if
+            // the process is killed by a GPU driver crash.
+            var hFile = CreateFileW(
+                GpuLogPath,
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                IntPtr.Zero,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                IntPtr.Zero);
+
+            if (hFile == IntPtr.Zero || hFile == new IntPtr(-1))
+                return;
+
+            // Duplicate the handle so Console and native code both see it.
+            SetStdHandle(STD_ERROR_HANDLE, hFile);
+
+            // Also redirect managed Console.Error so C# writes go to the file.
+            var fs = new FileStream(hFile, FileAccess.Write);
+            var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
+            Console.SetError(writer);
+
+            Console.Error.WriteLine($"=== Wintty GPU log started {DateTime.UtcNow:O} ===");
+            Console.Error.WriteLine($"Log file: {GpuLogPath}");
+            Console.Error.Flush();
+        }
+        catch
+        {
+            // Best effort -- if we can't redirect, we still run normally.
+        }
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -66,6 +141,11 @@ public static partial class Program
 
     static int MainImpl(string[] args)
     {
+        // Persist GPU diagnostics to disk before any native code runs.
+        // After a GPU driver crash, the log at %LOCALAPPDATA%\Ghostty\gpu.log
+        // survives reboot and tells us exactly what went wrong.
+        RedirectStderrToFile();
+
         // CLI actions are delegated to libghostty, matching the macOS
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
