@@ -55,6 +55,12 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
     };
 }
 
+/// Block until the GPU finishes all submitted work.
+/// OpenGL drivers manage resource lifetime, so this is a no-op.
+pub fn waitGpu(self: *OpenGL) void {
+    _ = self;
+}
+
 pub fn deinit(self: *OpenGL) void {
     self.* = undefined;
 }
@@ -363,6 +369,12 @@ pub inline fn textureOptions(self: OpenGL) Texture.Options {
         .wrap_s = .clamp_to_edge,
         .wrap_t = .clamp_to_edge,
     };
+}
+
+pub inline fn renderTargetTextureOptions(self: OpenGL, rtv_slot: anytype, srv_slot: anytype) Texture.Options {
+    _ = rtv_slot;
+    _ = srv_slot;
+    return self.textureOptions();
 }
 
 /// Returns the options to use when constructing samplers.
