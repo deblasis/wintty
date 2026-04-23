@@ -51,118 +51,164 @@ fn buildGlslang(
         .linkage = .static,
     });
     lib.linkLibC();
-    // On MSVC, we must not use linkLibCpp because Zig unconditionally
-    // passes -nostdinc++ and then adds its bundled libc++/libc++abi
-    // include paths, which conflict with MSVC's own C++ runtime headers.
-    // The MSVC SDK include directories (added via linkLibC) contain
-    // both C and C++ headers, so linkLibCpp is not needed.
-    if (target.result.abi != .msvc) {
+
+    // On Windows MSVC, use a pre-built static library compiled with MSVC cl.exe
+    // to avoid C++ ABI issues between Zig's bundled Clang and MSVC's C++ runtime
+    // when the resulting DLL is loaded by .NET.
+    if (target.result.abi == .msvc) {
+        // Merge the MSVC-compiled objects directly into this library.
+        // We use a dummy C file so the library has at least one compilation unit.
+        lib.addCSourceFiles(.{
+            .root = b.path("msvc_build"),
+            .flags = &.{},
+            .files = &.{"dummy.c"},
+        });
+        // Add each MSVC object file individually
+        const msvc_build = b.path("msvc_build");
+        lib.addObjectFile(msvc_build.path(b, "CodeGen.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Link.obj"));
+        lib.addObjectFile(msvc_build.path(b, "glslang_tab.obj"));
+        lib.addObjectFile(msvc_build.path(b, "attribute.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Constant.obj"));
+        lib.addObjectFile(msvc_build.path(b, "iomapper.obj"));
+        lib.addObjectFile(msvc_build.path(b, "InfoSink.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Initialize.obj"));
+        lib.addObjectFile(msvc_build.path(b, "IntermTraverse.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Intermediate.obj"));
+        lib.addObjectFile(msvc_build.path(b, "ParseContextBase.obj"));
+        lib.addObjectFile(msvc_build.path(b, "ParseHelper.obj"));
+        lib.addObjectFile(msvc_build.path(b, "PoolAlloc.obj"));
+        lib.addObjectFile(msvc_build.path(b, "RemoveTree.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Scan.obj"));
+        lib.addObjectFile(msvc_build.path(b, "ShaderLang.obj"));
+        lib.addObjectFile(msvc_build.path(b, "SpirvIntrinsics.obj"));
+        lib.addObjectFile(msvc_build.path(b, "SymbolTable.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Versions.obj"));
+        lib.addObjectFile(msvc_build.path(b, "intermOut.obj"));
+        lib.addObjectFile(msvc_build.path(b, "limits.obj"));
+        lib.addObjectFile(msvc_build.path(b, "linkValidate.obj"));
+        lib.addObjectFile(msvc_build.path(b, "parseConst.obj"));
+        lib.addObjectFile(msvc_build.path(b, "reflection.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Pp.obj"));
+        lib.addObjectFile(msvc_build.path(b, "PpAtom.obj"));
+        lib.addObjectFile(msvc_build.path(b, "PpContext.obj"));
+        lib.addObjectFile(msvc_build.path(b, "PpScanner.obj"));
+        lib.addObjectFile(msvc_build.path(b, "PpTokens.obj"));
+        lib.addObjectFile(msvc_build.path(b, "propagateNoContraction.obj"));
+        lib.addObjectFile(msvc_build.path(b, "glslang_c_interface.obj"));
+        lib.addObjectFile(msvc_build.path(b, "ResourceLimits.obj"));
+        lib.addObjectFile(msvc_build.path(b, "resource_limits_c.obj"));
+        lib.addObjectFile(msvc_build.path(b, "ossource.obj"));
+        lib.addObjectFile(msvc_build.path(b, "GlslangToSpv.obj"));
+        lib.addObjectFile(msvc_build.path(b, "InReadableOrder.obj"));
+        lib.addObjectFile(msvc_build.path(b, "Logger.obj"));
+        lib.addObjectFile(msvc_build.path(b, "SpvBuilder.obj"));
+        lib.addObjectFile(msvc_build.path(b, "SpvPostProcess.obj"));
+        lib.addObjectFile(msvc_build.path(b, "doc.obj"));
+        lib.addObjectFile(msvc_build.path(b, "disassemble.obj"));
+        lib.addObjectFile(msvc_build.path(b, "spirv_c_interface.obj"));
+        // Static C++ stdlib for MSVC-compiled objects (/MT)
+        lib.linkSystemLibrary("libcpmt");
+    } else {
         lib.linkLibCpp();
     }
+
     if (upstream_) |upstream| lib.addIncludePath(upstream.path(""));
     lib.addIncludePath(b.path("override"));
+
     if (target.result.os.tag.isDarwin()) {
         const apple_sdk = @import("apple_sdk");
         try apple_sdk.addPaths(b, lib);
     }
 
-    var flags: std.ArrayList([]const u8) = .empty;
-    defer flags.deinit(b.allocator);
-    try flags.appendSlice(b.allocator, &.{
-        "-fno-sanitize=undefined",
-        "-fno-sanitize-trap=undefined",
-    });
-    // MSVC requires explicit std specification otherwise C++17 features
-    // like std::variant, std::filesystem, and inline variables are
-    // guarded behind _HAS_CXX17.
-    try flags.append(b.allocator, "-std=c++17");
-
-    if (target.result.os.tag == .freebsd or target.result.abi == .musl) {
-        try flags.append(b.allocator, "-fPIC");
-    }
-
-    if (upstream_) |upstream| {
-        lib.addCSourceFiles(.{
-            .root = upstream.path(""),
-            .flags = flags.items,
-            .files = &.{
-                // GenericCodeGen
-                "glslang/GenericCodeGen/CodeGen.cpp",
-                "glslang/GenericCodeGen/Link.cpp",
-
-                // MachineIndependent
-                //"MachineIndependent/glslang.y",
-                "glslang/MachineIndependent/glslang_tab.cpp",
-                "glslang/MachineIndependent/attribute.cpp",
-                "glslang/MachineIndependent/Constant.cpp",
-                "glslang/MachineIndependent/iomapper.cpp",
-                "glslang/MachineIndependent/InfoSink.cpp",
-                "glslang/MachineIndependent/Initialize.cpp",
-                "glslang/MachineIndependent/IntermTraverse.cpp",
-                "glslang/MachineIndependent/Intermediate.cpp",
-                "glslang/MachineIndependent/ParseContextBase.cpp",
-                "glslang/MachineIndependent/ParseHelper.cpp",
-                "glslang/MachineIndependent/PoolAlloc.cpp",
-                "glslang/MachineIndependent/RemoveTree.cpp",
-                "glslang/MachineIndependent/Scan.cpp",
-                "glslang/MachineIndependent/ShaderLang.cpp",
-                "glslang/MachineIndependent/SpirvIntrinsics.cpp",
-                "glslang/MachineIndependent/SymbolTable.cpp",
-                "glslang/MachineIndependent/Versions.cpp",
-                "glslang/MachineIndependent/intermOut.cpp",
-                "glslang/MachineIndependent/limits.cpp",
-                "glslang/MachineIndependent/linkValidate.cpp",
-                "glslang/MachineIndependent/parseConst.cpp",
-                "glslang/MachineIndependent/reflection.cpp",
-                "glslang/MachineIndependent/preprocessor/Pp.cpp",
-                "glslang/MachineIndependent/preprocessor/PpAtom.cpp",
-                "glslang/MachineIndependent/preprocessor/PpContext.cpp",
-                "glslang/MachineIndependent/preprocessor/PpScanner.cpp",
-                "glslang/MachineIndependent/preprocessor/PpTokens.cpp",
-                "glslang/MachineIndependent/propagateNoContraction.cpp",
-
-                // C Interface
-                "glslang/CInterface/glslang_c_interface.cpp",
-
-                // ResourceLimits
-                "glslang/ResourceLimits/ResourceLimits.cpp",
-                "glslang/ResourceLimits/resource_limits_c.cpp",
-
-                // SPIRV
-                "SPIRV/GlslangToSpv.cpp",
-                "SPIRV/InReadableOrder.cpp",
-                "SPIRV/Logger.cpp",
-                "SPIRV/SpvBuilder.cpp",
-                "SPIRV/SpvPostProcess.cpp",
-                "SPIRV/doc.cpp",
-                "SPIRV/disassemble.cpp",
-                "SPIRV/CInterface/spirv_c_interface.cpp",
-            },
+    // Non-MSVC: compile C++ sources with Zig's Clang
+    if (target.result.abi != .msvc) {
+        var flags: std.ArrayList([]const u8) = .empty;
+        defer flags.deinit(b.allocator);
+        try flags.appendSlice(b.allocator, &.{
+            "-fno-sanitize=undefined",
+            "-fno-sanitize-trap=undefined",
         });
+        try flags.append(b.allocator, "-std=c++17");
+        try flags.append(b.allocator, "-DNDEBUG");
 
-        if (target.result.os.tag != .windows) {
-            lib.addCSourceFiles(.{
-                .root = upstream.path(""),
-                .flags = flags.items,
-                .files = &.{
-                    "glslang/OSDependent/Unix/ossource.cpp",
-                },
-            });
-        } else {
-            lib.addCSourceFiles(.{
-                .root = upstream.path(""),
-                .flags = flags.items,
-                .files = &.{
-                    "glslang/OSDependent/Windows/ossource.cpp",
-                },
-            });
+        if (target.result.os.tag == .freebsd or target.result.abi == .musl) {
+            try flags.append(b.allocator, "-fPIC");
         }
 
-        lib.installHeadersDirectory(
-            upstream.path(""),
-            "",
-            .{ .include_extensions = &.{".h"} },
-        );
+        if (upstream_) |upstream| {
+            lib.addCSourceFiles(.{
+                .root = upstream.path(""),
+                .flags = flags.items,
+                .files = &.{
+                    "glslang/GenericCodeGen/CodeGen.cpp",
+                    "glslang/GenericCodeGen/Link.cpp",
+                    "glslang/MachineIndependent/glslang_tab.cpp",
+                    "glslang/MachineIndependent/attribute.cpp",
+                    "glslang/MachineIndependent/Constant.cpp",
+                    "glslang/MachineIndependent/iomapper.cpp",
+                    "glslang/MachineIndependent/InfoSink.cpp",
+                    "glslang/MachineIndependent/Initialize.cpp",
+                    "glslang/MachineIndependent/IntermTraverse.cpp",
+                    "glslang/MachineIndependent/Intermediate.cpp",
+                    "glslang/MachineIndependent/ParseContextBase.cpp",
+                    "glslang/MachineIndependent/ParseHelper.cpp",
+                    "glslang/MachineIndependent/PoolAlloc.cpp",
+                    "glslang/MachineIndependent/RemoveTree.cpp",
+                    "glslang/MachineIndependent/Scan.cpp",
+                    "glslang/MachineIndependent/ShaderLang.cpp",
+                    "glslang/MachineIndependent/SpirvIntrinsics.cpp",
+                    "glslang/MachineIndependent/SymbolTable.cpp",
+                    "glslang/MachineIndependent/Versions.cpp",
+                    "glslang/MachineIndependent/intermOut.cpp",
+                    "glslang/MachineIndependent/limits.cpp",
+                    "glslang/MachineIndependent/linkValidate.cpp",
+                    "glslang/MachineIndependent/parseConst.cpp",
+                    "glslang/MachineIndependent/reflection.cpp",
+                    "glslang/MachineIndependent/preprocessor/Pp.cpp",
+                    "glslang/MachineIndependent/preprocessor/PpAtom.cpp",
+                    "glslang/MachineIndependent/preprocessor/PpContext.cpp",
+                    "glslang/MachineIndependent/preprocessor/PpScanner.cpp",
+                    "glslang/MachineIndependent/preprocessor/PpTokens.cpp",
+                    "glslang/MachineIndependent/propagateNoContraction.cpp",
+                    "glslang/CInterface/glslang_c_interface.cpp",
+                    "glslang/ResourceLimits/ResourceLimits.cpp",
+                    "glslang/ResourceLimits/resource_limits_c.cpp",
+                    "SPIRV/GlslangToSpv.cpp",
+                    "SPIRV/InReadableOrder.cpp",
+                    "SPIRV/Logger.cpp",
+                    "SPIRV/SpvBuilder.cpp",
+                    "SPIRV/SpvPostProcess.cpp",
+                    "SPIRV/doc.cpp",
+                    "SPIRV/disassemble.cpp",
+                    "SPIRV/CInterface/spirv_c_interface.cpp",
+                },
+            });
+
+            if (target.result.os.tag != .windows) {
+                lib.addCSourceFiles(.{
+                    .root = upstream.path(""),
+                    .flags = flags.items,
+                    .files = &.{
+                        "glslang/OSDependent/Unix/ossource.cpp",
+                    },
+                });
+            } else {
+                lib.addCSourceFiles(.{
+                    .root = upstream.path(""),
+                    .flags = flags.items,
+                    .files = &.{
+                        "glslang/OSDependent/Windows/ossource.cpp",
+                    },
+                });
+            }
+
+            lib.installHeadersDirectory(
+                upstream.path(""),
+                "",
+                .{ .include_extensions = &.{".h"} },
+            );
+        }
     }
 
     return lib;
