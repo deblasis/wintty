@@ -469,14 +469,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Initialize the front and back textures at 1x1 px, this
                 // is slightly wasteful but it's only done once so whatever.
                 const front_texture = try Texture.init(
-                    api.textureOptions(),
+                    api.renderTargetTextureOptions(null, null),
                     1,
                     1,
                     null,
                 );
                 errdefer front_texture.deinit();
                 const back_texture = try Texture.init(
-                    api.textureOptions(),
+                    api.renderTargetTextureOptions(null, null),
                     1,
                     1,
                     null,
@@ -507,15 +507,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 width: usize,
                 height: usize,
             ) !void {
+                // Reuse existing descriptor slots so each frame keeps its
+                // dedicated RTV and SRV descriptors. This prevents both
+                // RTV overwrites across in-flight frames and SRV heap
+                // exhaustion from leaked descriptors.
+                const Descriptor = @TypeOf(self.front_texture.rtv);
+                const front_rtv_slot: ?Descriptor =
+                    if (self.front_texture.rtv.cpu.ptr != 0) self.front_texture.rtv else null;
+                const back_rtv_slot: ?Descriptor =
+                    if (self.back_texture.rtv.cpu.ptr != 0) self.back_texture.rtv else null;
+                const front_srv_slot: ?Descriptor =
+                    if (self.front_texture.srv.gpu.ptr != 0) self.front_texture.srv else null;
+                const back_srv_slot: ?Descriptor =
+                    if (self.back_texture.srv.gpu.ptr != 0) self.back_texture.srv else null;
+
                 const front_texture = try Texture.init(
-                    api.textureOptions(),
+                    api.renderTargetTextureOptions(front_rtv_slot, front_srv_slot),
                     @intCast(width),
                     @intCast(height),
                     null,
                 );
                 errdefer front_texture.deinit();
                 const back_texture = try Texture.init(
-                    api.textureOptions(),
+                    api.renderTargetTextureOptions(back_rtv_slot, back_srv_slot),
                     @intCast(width),
                     @intCast(height),
                     null,
@@ -805,6 +819,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            // Ensure the GPU is idle before freeing any GPU resources.
+            // DX12 requires explicit synchronization; Metal and OpenGL
+            // drivers handle this automatically (no-op).
+            self.api.waitGpu();
+
             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
@@ -851,7 +870,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.config.custom_shaders,
                 GraphicsAPI.custom_shader_target,
             ) catch |err| err: {
-                log.warn("error loading custom shaders err={}", .{err});
+                log.warn("custom shader load failed, continuing without: {}", .{err});
                 break :err &.{};
             };
 
@@ -1511,8 +1530,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
             // If we need to reinitialize our shaders, do so.
+            // GPU must be idle before destroying PSOs and root signatures
+            // that in-flight command lists may still reference.
             if (self.reinitialize_shaders) {
                 self.reinitialize_shaders = false;
+                self.api.waitGpu();
                 self.shaders.deinit(self.alloc);
                 try self.initShaders();
             }
@@ -1610,10 +1632,35 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
             }
 
+            // Determine if we can use the custom shader path.  All post-process
+            // resources must be valid -- if any are null (e.g. a texture failed
+            // to create during resize), fall back to direct-to-target rendering
+            // so the terminal stays visible instead of crashing the GPU driver.
+            const use_custom_shader = use_custom_shader: {
+                const state = frame.custom_shader_state orelse break :use_custom_shader false;
+                if (state.front_texture.resource == null or
+                    state.back_texture.resource == null or
+                    state.front_texture.rtv.cpu.ptr == 0 or
+                    state.back_texture.rtv.cpu.ptr == 0 or
+                    state.front_texture.srv.gpu.ptr == 0 or
+                    state.back_texture.srv.gpu.ptr == 0)
+                {
+                    break :use_custom_shader false;
+                }
+                // Verify post-process pipelines have valid PSOs.
+                for (self.shaders.post_pipelines, 0..) |pipeline, i| {
+                    if (pipeline.pso == null or pipeline.root_signature == null) {
+                        log.warn("post-process pipeline {} has null PSO/root_sig, falling back", .{i});
+                        break :use_custom_shader false;
+                    }
+                }
+                break :use_custom_shader true;
+            };
+
             {
                 var pass = frame_ctx.renderPass(&.{.{
-                    .target = if (frame.custom_shader_state) |state|
-                        .{ .texture = state.back_texture }
+                    .target = if (use_custom_shader)
+                        .{ .texture = frame.custom_shader_state.?.back_texture }
                     else
                         .{ .target = frame.target },
                     .clear_color = .{ 0.0, 0.0, 0.0, 0.0 },
@@ -1710,8 +1757,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
-            // If we have custom shaders, then we render them.
-            if (frame.custom_shader_state) |*state| {
+            // If we have custom shaders and all resources are valid, run them.
+            if (use_custom_shader) {
+                const state = &frame.custom_shader_state.?;
+
                 // Sync our uniforms.
                 try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
@@ -1905,7 +1954,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     config.bg_image != null;
 
             const old_blending = self.config.blending;
-            const custom_shaders_changed = !self.config.custom_shaders.equal(config.custom_shaders);
+            const custom_shaders_changed = custom_shaders_changed: {
+                const old = self.config.custom_shaders.value.items;
+                const new = config.custom_shaders.value.items;
+                if (old.len != new.len) break :custom_shaders_changed true;
+                for (old, new) |a, b| {
+                    const a_str = switch (a) { .optional => |s| s, .required => |s| s };
+                    const b_str = switch (b) { .optional => |s| s, .required => |s| s };
+                    if (!std.mem.eql(u8, a_str, b_str)) break :custom_shaders_changed true;
+                }
+                break :custom_shaders_changed false;
+            };
 
             self.config.deinit();
             self.config = config.*;
@@ -1924,11 +1983,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (blending_changed) {
                 // We update our API's blending mode.
                 self.api.blending = config.blending;
-                // And indicate that we need to reinitialize our shaders.
-                self.reinitialize_shaders = true;
-                // And indicate that our swap chain targets need to
-                // be re-created to account for the new blending mode.
-                self.target_config_modified +%= 1;
+                // Metal requires reinit because its pixel format changes
+                // between bgra8unorm and bgra8unorm_srgb. DX12 uses a
+                // fixed B8G8R8A8_UNORM so neither shader reinit nor
+                // target recreation is needed.
+                const blending_needs_reinit = !(@hasDecl(GraphicsAPI, "blending_requires_shader_reinit") and
+                    !GraphicsAPI.blending_requires_shader_reinit);
+                if (blending_needs_reinit) {
+                    self.reinitialize_shaders = true;
+                    // And indicate that our swap chain targets need to
+                    // be re-created to account for the new blending mode.
+                    self.target_config_modified +%= 1;
+                }
             }
 
             if (custom_shaders_changed) {

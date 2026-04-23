@@ -21,7 +21,22 @@ pub const Options = struct {
     device: ?*d3d12.ID3D12Device = null,
     command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
     srv_heap: ?*DescriptorHeap = null,
+    /// Required when render_target is true. RTV descriptors are allocated from
+    /// a separate RTV descriptor heap (D3D12_DESCRIPTOR_HEAP_TYPE_RTV).
+    rtv_heap: ?*DescriptorHeap = null,
     pixel_format: dxgi.DXGI_FORMAT = .R8_UNORM,
+    /// When true, the texture can be used as both a render target (via RTV)
+    /// and a shader resource (via SRV). The resource is created with
+    /// ALLOW_RENDER_TARGET flag. No initial data upload is performed.
+    render_target: bool = false,
+    /// When non-null, reuse this RTV descriptor slot instead of allocating
+    /// a new one from the heap. Used during resize to avoid overwriting
+    /// other frames' in-flight RTV descriptors.
+    rtv_slot: ?DescriptorHeap.Descriptor = null,
+    /// When non-null, reuse this SRV descriptor slot instead of allocating
+    /// a new one from the heap. Used during resize to prevent SRV heap
+    /// exhaustion from leaked descriptors.
+    srv_slot: ?DescriptorHeap.Descriptor = null,
 };
 
 pub const Error = error{
@@ -38,6 +53,12 @@ bpp: u32 = 1,
 resource: ?*d3d12.ID3D12Resource = null,
 /// SRV descriptor for shader binding.
 srv: DescriptorHeap.Descriptor = .{
+    .cpu = .{ .ptr = 0 },
+    .gpu = .{ .ptr = 0 },
+    .index = 0,
+},
+/// RTV descriptor for render-target binding. Only set when render_target is true.
+rtv: DescriptorHeap.Descriptor = .{
     .cpu = .{ .ptr = 0 },
     .gpu = .{ .ptr = 0 },
     .index = 0,
@@ -68,14 +89,15 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     const bpp: u32 = bppForFormat(opts.pixel_format);
     const aligned_row_pitch = alignPitch(@intCast(width * bpp));
 
-    // Create the GPU-only texture resource.
-    const resource = createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
+    // Create the GPU texture resource. Render targets use ALLOW_RENDER_TARGET.
+    const resource = if (opts.render_target)
+        createRenderTargetResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed
+    else
+        createTextureResource(device, @intCast(width), @intCast(height), opts.pixel_format) orelse return error.TextureCreateFailed;
     errdefer _ = resource.Release();
 
-    // Allocate SRV descriptor.
-    // Note: the linear allocator has no individual free, so a failed init()
-    // after this point permanently consumes one descriptor slot.
-    const srv = srv_heap.allocate() catch return error.TextureCreateFailed;
+    // Allocate or reuse SRV descriptor.
+    const srv = if (opts.srv_slot) |slot| slot else srv_heap.allocate() catch return error.TextureCreateFailed;
 
     // Create the SRV.
     const srv_desc = d3d12.D3D12_SHADER_RESOURCE_VIEW_DESC{
@@ -93,28 +115,49 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     };
     device.CreateShaderResourceView(resource, &srv_desc, srv.cpu);
 
+    // Create RTV if this is a render-target texture.
+    var rtv: DescriptorHeap.Descriptor = .{
+        .cpu = .{ .ptr = 0 },
+        .gpu = .{ .ptr = 0 },
+        .index = 0,
+    };
+    if (opts.render_target) {
+        const rtv_heap = opts.rtv_heap orelse return error.TextureCreateFailed;
+        if (opts.rtv_slot) |slot| {
+            // Reuse a pre-allocated RTV descriptor slot (e.g. during resize).
+            rtv = slot;
+        } else {
+            rtv = rtv_heap.allocate() catch return error.TextureCreateFailed;
+        }
+        device.CreateRenderTargetView(resource, null, rtv.cpu);
+    }
+
     var tex = Texture{
         .width = width,
         .height = height,
         .bpp = bpp,
         .resource = resource,
         .srv = srv,
+        .rtv = rtv,
         .aligned_row_pitch = aligned_row_pitch,
         .format = opts.pixel_format,
         .device = device,
         .command_list = opts.command_list,
-        // Texture starts in COPY_DEST so the initial upload (if any) can proceed
-        // without a barrier. After the upload we transition to PIXEL_SHADER_RESOURCE.
-        .state = d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
+        .state = if (opts.render_target)
+            d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE
+        else
+            d3d12.D3D12_RESOURCE_STATES.COPY_DEST,
     };
 
-    // Upload initial data if provided.
-    if (data) |pixels| {
-        tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
+    if (!opts.render_target) {
+        // Upload initial data if provided.
+        if (data) |pixels| {
+            tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
+        }
+        // Transition to shader-readable. The texture was created in COPY_DEST
+        // so the initial upload (if any) could proceed without a barrier.
+        tex.transition(d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE);
     }
-    // Transition to shader-readable. The texture was created in COPY_DEST
-    // so the initial upload (if any) could proceed without a barrier.
-    tex.transition(d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE);
 
     return tex;
 }
@@ -278,6 +321,32 @@ fn transition(self: *Texture, new_state: d3d12.D3D12_RESOURCE_STATES) void {
     self.state = new_state;
 }
 
+/// Issue a resource barrier transition on the given command list.
+/// Does NOT update self.state -- the caller is responsible for tracking
+/// the resource state externally. Matches Target.transitionBarrier's pattern.
+pub fn transitionBarrier(
+    self: *const Texture,
+    cl: *d3d12.ID3D12GraphicsCommandList,
+    before: d3d12.D3D12_RESOURCE_STATES,
+    after: d3d12.D3D12_RESOURCE_STATES,
+) void {
+    const resource = self.resource orelse return;
+    if (before == after) return;
+    const barrier = d3d12.D3D12_RESOURCE_BARRIER{
+        .Type = .TRANSITION,
+        .Flags = .NONE,
+        .u = .{
+            .Transition = .{
+                .pResource = resource,
+                .Subresource = 0xFFFFFFFF,
+                .StateBefore = before,
+                .StateAfter = after,
+            },
+        },
+    };
+    cl.ResourceBarrier(1, @ptrCast(&barrier));
+}
+
 fn createTextureResource(device: *d3d12.ID3D12Device, width: u32, height: u32, format: dxgi.DXGI_FORMAT) ?*d3d12.ID3D12Resource {
     const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
         .Type = .DEFAULT,
@@ -313,6 +382,53 @@ fn createTextureResource(device: *d3d12.ID3D12Device, width: u32, height: u32, f
     );
     if (com.FAILED(hr)) {
         log.err("CreateCommittedResource for texture failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+        return null;
+    }
+    return resource;
+}
+
+/// Create a GPU texture resource that can be used as both a render target
+/// and a shader resource. Uses ALLOW_RENDER_TARGET flag and starts in
+/// RENDER_TARGET state.
+fn createRenderTargetResource(device: *d3d12.ID3D12Device, width: u32, height: u32, format: dxgi.DXGI_FORMAT) ?*d3d12.ID3D12Resource {
+    const heap_props = d3d12.D3D12_HEAP_PROPERTIES{
+        .Type = .DEFAULT,
+        .CPUPageProperty = 0,
+        .MemoryPoolPreference = 0,
+        .CreationNodeMask = 0,
+        .VisibleNodeMask = 0,
+    };
+
+    const clear_value = d3d12.D3D12_CLEAR_VALUE{
+        .Format = format,
+        .u = .{ .Color = .{ 0.0, 0.0, 0.0, 0.0 } },
+    };
+
+    const desc = d3d12.D3D12_RESOURCE_DESC{
+        .Dimension = .TEXTURE2D,
+        .Alignment = 0,
+        .Width = width,
+        .Height = height,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .Format = format,
+        .SampleDesc = .{ .Count = 1, .Quality = 0 },
+        .Layout = .UNKNOWN,
+        .Flags = .ALLOW_RENDER_TARGET,
+    };
+
+    var resource: ?*d3d12.ID3D12Resource = null;
+    const hr = device.CreateCommittedResource(
+        &heap_props,
+        0,
+        &desc,
+        d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
+        &clear_value,
+        &d3d12.ID3D12Resource.IID,
+        @ptrCast(&resource),
+    );
+    if (com.FAILED(hr)) {
+        log.err("CreateCommittedResource for render target failed: 0x{x}", .{@as(u32, @bitCast(hr))});
         return null;
     }
     return resource;
@@ -419,4 +535,18 @@ test "setCommandList updates cached command list" {
     try std.testing.expect(tex.command_list == sentinel);
     tex.setCommandList(null);
     try std.testing.expect(tex.command_list == null);
+}
+
+test "Texture.Options has render_target field" {
+    const opts = Options{ .render_target = true };
+    try std.testing.expect(opts.render_target);
+}
+
+test "Texture has rtv field" {
+    try std.testing.expect(@hasField(Texture, "rtv"));
+}
+
+test "Texture default rtv is zero" {
+    const tex = Texture{};
+    try std.testing.expect(tex.rtv.cpu.ptr == 0);
 }
