@@ -2,86 +2,115 @@
 <Window
     x:Class="Ghostty.Settings.SettingsWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Ghostty Settings">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <NavigationView
-        x:Name="NavView"
-        IsBackButtonVisible="Collapsed"
-        IsSettingsVisible="False"
-        PaneDisplayMode="Left"
-        SelectionChanged="NavView_SelectionChanged">
+    <!--
+      Title + AppTitleBar.Title are set in code-behind from
+      AppIdentity.ProductName so a future rebrand touches one constant
+      instead of XAML strings. Window.Title is still set so the taskbar,
+      alt-tab switcher, and Win+Tab overlay show the branded name.
 
-        <NavigationView.AutoSuggestBox>
-            <!--
-              Standard WinUI 3 pattern: NavigationView renders an
-              AutoSuggestBox at the top of the pane. Used here as a
-              plain search field (QueryIcon, no suggestions). Ctrl+F
-              focuses it; Esc clears it and restores the previous page.
-            -->
-            <AutoSuggestBox
-                x:Name="SearchBox"
-                PlaceholderText="Search settings"
-                QueryIcon="Find"
-                TextChanged="SearchBox_TextChanged"
-                KeyDown="SearchBox_KeyDown" />
-        </NavigationView.AutoSuggestBox>
+      The WinAppSDK 1.8 Microsoft.UI.Xaml.Controls.TitleBar primitive
+      replaces the earlier hand-rolled drag-region Grid: it inherits
+      RequestedTheme from its parent, owns the IconSource / Title /
+      Subtitle slots, and participates in the standard drag-region +
+      caption-button layout that SetTitleBar plumbs in code-behind.
+    -->
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-        <NavigationView.MenuItems>
-            <NavigationViewItem x:Name="NavGeneral" Content="General" Tag="general">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Setting" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-            <NavigationViewItem x:Name="NavAppearance" Content="Appearance" Tag="appearance">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Font" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-            <NavigationViewItem x:Name="NavColors" Content="Colors" Tag="colors">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Highlight" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-            <NavigationViewItem x:Name="NavTerminal" Content="Terminal" Tag="terminal">
-                <NavigationViewItem.Icon>
-                    <FontIcon Glyph="&#xE756;" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-            <NavigationViewItem x:Name="NavKeybindings" Content="Keybindings" Tag="keybindings">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Keyboard" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-            <NavigationViewItem x:Name="NavAdvanced" Content="Advanced" Tag="advanced">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Repair" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
+        <TitleBar
+            x:Name="AppTitleBar"
+            Grid.Row="0">
+            <TitleBar.IconSource>
+                <!-- E713 = Settings gear, distinguishing this window from
+                     MainWindow in the taskbar / alt-tab overlay. -->
+                <FontIconSource Glyph="&#xE713;" />
+            </TitleBar.IconSource>
+        </TitleBar>
 
-            <NavigationViewItemSeparator />
+        <NavigationView
+            x:Name="NavView"
+            Grid.Row="1"
+            IsBackButtonVisible="Collapsed"
+            IsSettingsVisible="False"
+            PaneDisplayMode="Left"
+            SelectionChanged="NavView_SelectionChanged">
 
-            <NavigationViewItem x:Name="NavRaw" Content="Raw Editor" Tag="raw">
-                <NavigationViewItem.Icon>
-                    <SymbolIcon Symbol="Edit" />
-                </NavigationViewItem.Icon>
-            </NavigationViewItem>
-        </NavigationView.MenuItems>
+            <NavigationView.AutoSuggestBox>
+                <!--
+                  Standard WinUI 3 pattern: NavigationView renders an
+                  AutoSuggestBox at the top of the pane. Used here as a
+                  plain search field (QueryIcon, no suggestions). Ctrl+F
+                  focuses it; Esc clears it and restores the previous page.
+                -->
+                <AutoSuggestBox
+                    x:Name="SearchBox"
+                    PlaceholderText="Search settings"
+                    QueryIcon="Find"
+                    TextChanged="SearchBox_TextChanged"
+                    KeyDown="SearchBox_KeyDown" />
+            </NavigationView.AutoSuggestBox>
 
-        <NavigationView.PaneFooter>
-            <!--
-              Only visible while searching. Spec: "Total result count at
-              the bottom of the sidebar." Hidden when no query; pane
-              footer layout collapses cleanly with zero-opacity text.
-            -->
-            <TextBlock
-                x:Name="ResultCountText"
-                Margin="12,4,12,12"
-                Style="{StaticResource CaptionTextBlockStyle}"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Visibility="Collapsed" />
-        </NavigationView.PaneFooter>
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="NavGeneral" Content="General" Tag="general">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Setting" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavAppearance" Content="Appearance" Tag="appearance">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Font" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavColors" Content="Colors" Tag="colors">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Highlight" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavTerminal" Content="Terminal" Tag="terminal">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE756;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavKeybindings" Content="Keybindings" Tag="keybindings">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Keyboard" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="NavAdvanced" Content="Advanced" Tag="advanced">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Repair" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
 
-        <Frame x:Name="ContentFrame" />
-    </NavigationView>
+                <NavigationViewItemSeparator />
+
+                <NavigationViewItem x:Name="NavRaw" Content="Raw Editor" Tag="raw">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Edit" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <NavigationView.PaneFooter>
+                <!--
+                  Only visible while searching. Spec: "Total result count at
+                  the bottom of the sidebar." Hidden when no query; pane
+                  footer layout collapses cleanly with zero-opacity text.
+                -->
+                <TextBlock
+                    x:Name="ResultCountText"
+                    Margin="12,4,12,12"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Visibility="Collapsed" />
+            </NavigationView.PaneFooter>
+
+            <Frame x:Name="ContentFrame" />
+        </NavigationView>
+    </Grid>
 </Window>
