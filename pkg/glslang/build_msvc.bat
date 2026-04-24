@@ -128,7 +128,11 @@ for %%f in (
 )
 
 echo Compiling with MSVC...
-%CL% %CFLAGS% %FILES%
+REM Quote %CL%: the expanded path contains "Program Files" (with a space) on
+REM stock Windows, so an unquoted invocation has cmd parse 'C:\Program' as the
+REM command and the rest as args. Breaks on windows-latest runners and any
+REM default VS install.
+"%CL%" %CFLAGS% %FILES%
 
 if errorlevel 1 (
     echo ERROR: Compilation failed
