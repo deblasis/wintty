@@ -448,6 +448,7 @@ public sealed partial class MainWindow : Window
         InstallPaneAccelerators();
 
         _commandPaletteVm = CreateCommandPaletteViewModel();
+        CommandPaletteUI.Configure(_configService);
         CommandPaletteUI.Bind(_commandPaletteVm);
         CommandPaletteUI.ApplySettings(_configService.CommandPaletteBackground);
 
