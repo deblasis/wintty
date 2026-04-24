@@ -385,6 +385,7 @@ public sealed partial class MainWindow : Window
         // paint RootGrid.Background from the resolved state.
         ApplyShellTheme();
         ApplyRootGridBackground();
+        RefreshPowerSaverIcon();
 
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
@@ -578,6 +579,15 @@ public sealed partial class MainWindow : Window
             ApplyShellTheme();
             ApplyRootGridBackground();
         };
+
+        // Re-evaluate the gradient and other power-gated effects whenever
+        // low-power mode toggles. MainWindow runs on the UI thread so we
+        // marshal back explicitly; the monitor fires on the thread-pool
+        // after its 150ms debounce.
+        if (Ghostty.App.PowerStateMonitor is { } powerMonitor)
+        {
+            powerMonitor.LowPowerChanged += OnLowPowerChanged;
+        }
 
         _tabManager.LastTabClosed += (_, _) => Close();
 
@@ -795,6 +805,10 @@ public sealed partial class MainWindow : Window
         Ghostty.Settings.Pages.GeneralPage.VerticalTabsToggled
             -= OnVerticalTabsToggledFromSettings;
         _configService.ConfigChanged -= OnConfigReloaded;
+        if (Ghostty.App.PowerStateMonitor is { } powerMonitor)
+        {
+            powerMonitor.LowPowerChanged -= OnLowPowerChanged;
+        }
 
         // Persist window placement for next launch. Skip when
         // fullscreen -- restore to the normal size instead.
@@ -1147,15 +1161,22 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyBackdropStyle()
     {
-        var opacity = _configService.BackgroundOpacity;
+        var lowPowerActive = Ghostty.App.PowerStateMonitor?.IsLowPowerActive ?? false;
+
+        var configOpacity = _configService.BackgroundOpacity;
+        var opacity = lowPowerActive ? 1.0 : configOpacity;
         var configStyle = _configService.BackgroundStyle;
 
         // If the user's configured style is acrylic-based, keep the
         // acrylic backdrop alive even at opacity=1.0 so Ctrl+Shift+Scroll
         // doesn't flash between Mica and acrylic at the boundary.
-        var style = (opacity >= 1.0 && configStyle != BackdropStyles.Frosted)
+        // Low-power mode overrides this: flatten unconditionally to Solid
+        // (Mica) to drop the composition cost of acrylic/crystal.
+        var style = lowPowerActive
             ? BackdropStyles.Solid
-            : configStyle;
+            : ((opacity >= 1.0 && configStyle != BackdropStyles.Frosted)
+                ? BackdropStyles.Solid
+                : configStyle);
 
         // Skip if the effective style hasn't changed.
         if (style == _currentBackdropStyle && SystemBackdrop is not null)
@@ -1217,6 +1238,11 @@ public sealed partial class MainWindow : Window
     private (Windows.UI.Color tintColor, float tintOpacity, float luminosityOpacity)
         ResolveAcrylicTuning()
     {
+        // Low-power flattens opacity to 1.0 so the tuning resolver picks
+        // the opaque fallback consistent with ApplyBackdropStyle.
+        var lowPowerActive = Ghostty.App.PowerStateMonitor?.IsLowPowerActive ?? false;
+        var effectiveOpacity = lowPowerActive ? 1.0 : _configService.BackgroundOpacity;
+
         uint? overrideArgb = _configService.BackgroundTintColor is { } c
             ? ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B
             : null;
@@ -1227,7 +1253,7 @@ public sealed partial class MainWindow : Window
             tintOpacityOverride: _configService.BackgroundTintOpacity,
             luminosityOpacityOverride: _configService.BackgroundLuminosityOpacity,
             blurFollowsOpacity: _configService.BackgroundBlurFollowsOpacity,
-            backgroundOpacity: _configService.BackgroundOpacity);
+            backgroundOpacity: effectiveOpacity);
 
         var tint = Windows.UI.Color.FromArgb(
             (byte)(t.TintArgb >> 24),
@@ -1236,6 +1262,43 @@ public sealed partial class MainWindow : Window
             (byte)t.TintArgb);
 
         return (tint, t.TintOpacity, t.LuminosityOpacity);
+    }
+
+    private void OnLowPowerChanged(object? sender, EventArgs args)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                ApplyBackdropStyle();
+                UpdateAcrylicTuning();
+                ApplyGradientTint();
+                ApplyRootGridBackground();
+                RefreshPowerSaverIcon();
+            }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
+                                    or InvalidOperationException
+                                    or NullReferenceException)
+            {
+                // Window tore down between monitor thread-pool event and UI dispatch.
+                // OnClosedAsync unsubscribes, but there's a narrow window before the
+                // queued lambda runs where XAML objects may already be disposed.
+            }
+        });
+    }
+
+    private void RefreshPowerSaverIcon()
+    {
+        var monitor = Ghostty.App.PowerStateMonitor;
+        var active = monitor?.IsLowPowerActive ?? false;
+        PowerSaverIcon.Visibility = active
+            ? Microsoft.UI.Xaml.Visibility.Visible
+            : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+        var triggers = monitor?.ActiveTriggers ?? Ghostty.Core.Power.PowerSaverTrigger.None;
+        Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(
+            PowerSaverIcon,
+            Ghostty.Core.Power.PowerSaverTooltipFormatter.Format(triggers));
     }
 
     /// <summary>
@@ -1253,7 +1316,12 @@ public sealed partial class MainWindow : Window
     {
         var points = _configService.GradientPoints;
 
-        if (points.Count == 0)
+        // Low-power mode flattens the backdrop: no animated gradient,
+        // no composition work beyond the system backdrop. Treat as if
+        // no points were configured so the existing teardown runs.
+        var lowPowerActive = Ghostty.App.PowerStateMonitor?.IsLowPowerActive ?? false;
+
+        if (points.Count == 0 || lowPowerActive)
         {
             _gradientVisual?.Dispose();
             _gradientVisual = null;

@@ -217,6 +217,20 @@
                                                ctrl:SettingsCard.ConfigKey="background-gradient-point" />
                 </StackPanel>
             </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup Header="Power Saving"
+                                Description="Reduce GPU and compositor work when Windows is in a power-saving state.">
+                <ctrl:SettingsCard Header="Power saving mode"
+                                   Description="Auto reacts to Battery Saver, running on battery, Transparency effects off, or Remote Desktop. Always forces the mode on. Never ignores all OS signals."
+                                   ctrl:SettingsCard.ConfigKey="power-saver-mode">
+                    <ComboBox x:Name="PowerSaverModeCombo" MinWidth="180"
+                              SelectionChanged="PowerSaverMode_SelectionChanged">
+                        <ComboBoxItem Content="Auto" Tag="auto" />
+                        <ComboBoxItem Content="Always" Tag="always" />
+                        <ComboBoxItem Content="Never" Tag="never" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
 </Page>
