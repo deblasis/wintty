@@ -120,6 +120,15 @@ public static class SettingsIndex
             new[] { "gradient", "point", "color", "position" },
             SettingType.Custom),
 
+        // ----- Appearance / Power Saving -----
+        new("power-saver-mode", "Power saving",
+            "Dial back expensive effects when Windows is in a power-saving state. " +
+            "Auto: react to Battery Saver, running on battery, Transparency effects off, or Remote Desktop. " +
+            "Always: permanently on. Never: ignore OS signals.",
+            "Appearance", "Power Saving",
+            new[] { "power", "battery", "saver", "energy", "performance", "low", "rdp" },
+            SettingType.Combo),
+
         // ----- Colors / Theme -----
         new("theme", "Color theme",
             "Named theme file loaded from the themes directory. Supports light:X,dark:Y pairs.",
