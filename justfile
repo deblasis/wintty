@@ -286,6 +286,52 @@ deploy-shader-wrapper: build-dll build-shader-wrapper build-win
     cp pkg/glslang/glslang_dll/shader_wrapper.dll "${DOTNET_OUT}/"
     echo "Deployed ghostty.dll + shader_wrapper.dll"
 
+# === Worktree Setup ===
+
+# Seed pkg/glslang/msvc_build/ with the .obj files the zig build expects.
+# Prefers copying from a sibling worktree (seconds) over running build_msvc.bat
+# from scratch (minute-plus). Meant to be run once after `git worktree add`.
+# Temporary helper until the MSVC pre-build is folded into the zig build step.
+#
+# Bash shebang (requires git-bash on PATH, same as other complex recipes in
+# this file) so control flow and arrays work reliably; pwsh's -File mode
+# rejects just's extension-less temp scripts.
+[windows]
+prepare-worktree:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="{{justfile_directory()}}"
+    TARGET="$ROOT/pkg/glslang/msvc_build"
+    mkdir -p "$TARGET"
+
+    existing=$(find "$TARGET" -maxdepth 1 -name '*.obj' 2>/dev/null | wc -l)
+    if [ "$existing" -ge 40 ]; then
+        echo "pkg/glslang/msvc_build already seeded ($existing .obj files)."
+        exit 0
+    fi
+
+    # Fast path: copy from another worktree. If this tree were the source,
+    # we would have exited above, so no self-check needed.
+    while IFS= read -r line; do
+        [[ "$line" == worktree\ * ]] || continue
+        wt="${line#worktree }"
+        src="$wt/pkg/glslang/msvc_build"
+        src_count=$(find "$src" -maxdepth 1 -name '*.obj' 2>/dev/null | wc -l)
+        if [ "$src_count" -ge 40 ]; then
+            echo "Copying msvc_build artifacts from $wt ..."
+            cp "$src"/*.obj "$TARGET/"
+            [ -f "$src/dummy.c" ] && cp "$src/dummy.c" "$TARGET/"
+            echo "Seeded $TARGET with $src_count .obj files."
+            exit 0
+        fi
+    done < <(git worktree list --porcelain)
+
+    # Fallback: build from source. Needs MSVC discoverable via vswhere
+    # (bundled with VS 2017+) or on PATH.
+    echo "No sibling worktree has msvc_build artifacts; running build_msvc.bat ..."
+    cd "$ROOT/pkg/glslang"
+    ./build_msvc.bat
+
 # === Upstream Sync ===
 
 # Pinned to bash via shebang so the POSIX `[` branch test below works
