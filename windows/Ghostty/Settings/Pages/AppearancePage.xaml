@@ -115,8 +115,17 @@
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Acrylic tint color"
                                    ctrl:SettingsCard.ConfigKey="background-tint-color">
-                    <ctrl:ColorPickerControl x:Name="TintColorPicker"
-                                             ColorChanged="TintColor_ColorChanged" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="TintColorPicker"
+                                                 ColorChanged="TintColor_ColorChanged" />
+                        <Button x:Name="TintColorResetButton"
+                                Click="TintColor_Reset"
+                                ToolTipService.ToolTip="Use the default tint color"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Acrylic tint opacity"
                                    ctrl:SettingsCard.ConfigKey="background-tint-opacity">
