@@ -27,8 +27,11 @@ internal static class LogEvents
     // 1200-1299: Profiles / discovery
     internal static class Profiles
     {
-        public const int ProbeFailed      = 1200;
-        public const int CacheReadFailed  = 1201;
-        public const int CacheWriteFailed = 1202;
+        public const int ProbeFailed             = 1200;
+        public const int CacheReadFailed         = 1201;
+        public const int CacheWriteFailed        = 1202;
+        public const int RegistryRecomposed      = 1203;
+        public const int DiscoveryRefreshFailed  = 1204;
+        public const int ProfileParseWarning     = 1205;
     }
 }
