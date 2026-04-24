@@ -14,4 +14,11 @@ internal static class AppIdentity
     /// caches the process-to-AUMID association on first use.
     /// </summary>
     public const string AumId = "com.deblasis.ghostty";
+
+    /// <summary>
+    /// Brand name shown in user-facing surfaces (window titles, dialog
+    /// captions). Gated behind a single constant so rebrands (Ghostty →
+    /// Wintty → ...) only touch one file instead of scattering literals.
+    /// </summary>
+    public const string ProductName = "Wintty";
 }
