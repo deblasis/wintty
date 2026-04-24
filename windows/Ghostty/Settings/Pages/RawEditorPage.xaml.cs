@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.System;
 using Windows.UI;
 
@@ -38,6 +39,14 @@ internal sealed partial class RawEditorPage : Page
     // Reusable colors invalidated on theme change.
     private Color _matchColor;
     private Color _currentColor;
+    // "Clear" color for wiping a highlight off a range. In WinUI 3's
+    // RichEditBox, ITextCharacterFormat.BackgroundColor appears to ignore
+    // the alpha channel, so Color.FromArgb(0,0,0,0) — which reads as
+    // "transparent" to a human — actually renders as opaque black and
+    // paints a black rectangle over the character. Pick a color that
+    // matches the editor's theme background so cleared ranges visually
+    // disappear regardless of whether alpha is respected.
+    private Color _clearBgColor;
     private bool _colorsReady;
 
     public RawEditorPage(IConfigService configService, IConfigFileEditor editor)
@@ -45,6 +54,12 @@ internal sealed partial class RawEditorPage : Page
         _configService = configService;
         _editor = editor;
         InitializeComponent();
+
+        // Theme flips while the page is live must force a recompute of
+        // the highlight / clear-bg colors cached in EnsureColors, and
+        // repaint the document bg so stale dark-mode clears don't remain
+        // visible as dark boxes on a light background (issue #325).
+        ActualThemeChanged += OnActualThemeChanged;
 
         DiagList.ItemsSource = _diagnostics;
         DiagList.ContainerContentChanging += OnContainerContentChanging;
@@ -68,6 +83,33 @@ internal sealed partial class RawEditorPage : Page
     private void SetEditorText(string text)
     {
         Editor.Document.SetText(TextSetOptions.None, text);
+        ClearAllBackgrounds();
+    }
+
+    // Wipe any lingering CharacterFormat.BackgroundColor across the whole
+    // document. SetText keeps the document's default character format, so
+    // any highlight BG left over from a prior Ctrl+F cycle carries into
+    // the freshly-loaded text and paints every character (issue #325:
+    // save-and-reload turns the whole editor black). Also resets
+    // Selection.CharacterFormat so subsequent typing doesn't inherit a
+    // stale highlight format.
+    private void ClearAllBackgrounds()
+    {
+        EnsureColors();
+        // int.MaxValue is the documented "to end of document" sentinel for
+        // RichEditTextDocument.GetRange; RichEditBox uses CRLF internally,
+        // so the C# input string length would under-count.
+        var range = Editor.Document.GetRange(0, int.MaxValue);
+        range.CharacterFormat.BackgroundColor = _clearBgColor;
+        Editor.Document.Selection.CharacterFormat.BackgroundColor = _clearBgColor;
+        _prevRanges.Clear();
+        _prevCurrentRange = default;
+    }
+
+    private void OnActualThemeChanged(FrameworkElement sender, object args)
+    {
+        _colorsReady = false;
+        ClearAllBackgrounds();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -232,27 +274,71 @@ internal sealed partial class RawEditorPage : Page
     private void EnsureColors()
     {
         if (_colorsReady) return;
-        var isDark = Editor.ActualTheme == ElementTheme.Dark;
+        // Read the Page's ActualTheme rather than the Editor's: during the
+        // first Loaded tick the inner RichEditBox may still report
+        // ElementTheme.Default before the theme cascades, which previously
+        // made us cache dark-mode brush values inside a light-mode window
+        // (issue #325).
+        var isDark = ActualTheme == ElementTheme.Dark;
         _matchColor = isDark
             ? Color.FromArgb(70, 200, 170, 50)
             : Color.FromArgb(90, 255, 230, 100);
         _currentColor = isDark
             ? Color.FromArgb(180, 255, 200, 60)
             : Color.FromArgb(220, 255, 190, 50);
+        // Opaque editor-background color so a "cleared" highlight renders
+        // indistinguishable from un-highlighted text. Read it from the
+        // active theme dictionary via TextControlBackground (the brush
+        // RichEditBox fills its surface with) so the clear colour tracks
+        // the editor regardless of future Fluent/brand tweaks. Fall back
+        // to ApplicationPageBackgroundThemeBrush, then to the pre-fix
+        // hand-picked values as a last resort.
+        _clearBgColor = TryReadSolidThemeColor("TextControlBackground", isDark, out var c)
+            || TryReadSolidThemeColor("ApplicationPageBackgroundThemeBrush", isDark, out c)
+            ? c
+            : (isDark ? Color.FromArgb(255, 32, 32, 32) : Color.FromArgb(255, 255, 255, 255));
         _colorsReady = true;
+    }
+
+    // Look up a resource by key from Application.Current.Resources'
+    // theme dictionaries, picking the Light/Default variant from this
+    // Page's theme rather than Application.RequestedTheme. Handles
+    // either a SolidColorBrush or a raw Color value under that key —
+    // TextControlBackground is a Color on WinAppSDK, not a Brush, so
+    // callers can't assume either shape.
+    private static bool TryReadSolidThemeColor(string key, bool isDark, out Color color)
+    {
+        var themeKey = isDark ? "Default" : "Light";
+        if (Application.Current.Resources.ThemeDictionaries.TryGetValue(themeKey, out var dictObj)
+            && dictObj is Microsoft.UI.Xaml.ResourceDictionary themeDict
+            && themeDict.TryGetValue(key, out var v))
+        {
+            switch (v)
+            {
+                case SolidColorBrush b:
+                    color = b.Color;
+                    return true;
+                case Color raw:
+                    color = raw;
+                    return true;
+            }
+        }
+        color = default;
+        return false;
     }
 
     private void ClearPreviousHighlights()
     {
+        EnsureColors();
         foreach (var (s, e) in _prevRanges)
         {
             var r = Editor.Document.GetRange(s, e);
-            r.CharacterFormat.BackgroundColor = Color.FromArgb(0, 0, 0, 0);
+            r.CharacterFormat.BackgroundColor = _clearBgColor;
         }
         if (_prevCurrentRange != default)
         {
             var cr = Editor.Document.GetRange(_prevCurrentRange.start, _prevCurrentRange.end);
-            cr.CharacterFormat.BackgroundColor = Color.FromArgb(0, 0, 0, 0);
+            cr.CharacterFormat.BackgroundColor = _clearBgColor;
         }
         _prevRanges.Clear();
         _prevCurrentRange = default;

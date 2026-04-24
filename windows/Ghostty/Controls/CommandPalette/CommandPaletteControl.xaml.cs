@@ -1,14 +1,17 @@
 using System;
 using System.ComponentModel;
 using Ghostty.Commands;
+using Ghostty.Services;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.System;
 using Windows.UI;
+using Windows.UI.ViewManagement;
 
 namespace Ghostty.Controls.CommandPalette;
 
@@ -28,11 +31,82 @@ namespace Ghostty.Controls.CommandPalette;
 internal sealed partial class CommandPaletteControl : UserControl
 {
     private CommandPaletteViewModel? _vm;
+    // Cached background mode so ActualThemeChanged can re-resolve the
+    // right theme variant — a code-behind lookup against
+    // Application.Current.Resources bakes in Application.RequestedTheme
+    // at call time, so the brush wouldn't auto-update when the main
+    // window's theme flipped otherwise.
+    private string _backgroundSetting = string.Empty;
 
-    // Suppress "Event never fired" — fired by WinUI runtime via ContainerContentChanging.
+    // The palette tracks the OS theme instead of the MainWindow's
+    // palette-derived ElementTheme, matching the Settings window's
+    // "feel OS-native regardless of the terminal's colors" rule. A dark
+    // terminal palette on a light system would otherwise give a dark
+    // command palette over a light taskbar / desktop chrome, which
+    // reads as out of place compared to every other system UI surface.
+    private UISettings? _uiSettings;
+    // Fully-qualified: both Microsoft.UI.Dispatching and Windows.System
+    // export a DispatcherQueue; the WinUI 3 one is what we need.
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher =
+        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+
     public CommandPaletteControl()
     {
         InitializeComponent();
+        // ApplySystemTheme here sets only the UserControl's RequestedTheme;
+        // the Popup parent is fixed up on Loaded once Parent is non-null.
+        RequestedTheme = OsTheme.IsDark() ? ElementTheme.Dark : ElementTheme.Light;
+        ActualThemeChanged += (_, _) =>
+        {
+            if (!string.IsNullOrEmpty(_backgroundSetting))
+                ApplySettings(_backgroundSetting);
+        };
+
+        // UISettings.ColorValuesChanged fires on a background thread, so
+        // the handler marshals back to the UI. Subscribe on Loaded /
+        // unsubscribe on Unloaded so the palette doesn't keep UISettings
+        // alive past its visual-tree lifetime (one palette per main
+        // window, instances can come and go with detach/reattach).
+        Loaded += OnPaletteLoaded;
+        Unloaded += OnPaletteUnloaded;
+    }
+
+    private void OnPaletteLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_uiSettings is not null) return;
+        _uiSettings = new UISettings();
+        _uiSettings.ColorValuesChanged += OnSystemColorsChanged;
+        // Re-read once on (re)load in case the system theme changed
+        // while the palette was detached from the visual tree.
+        ApplySystemTheme();
+    }
+
+    private void OnPaletteUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_uiSettings is null) return;
+        _uiSettings.ColorValuesChanged -= OnSystemColorsChanged;
+        _uiSettings = null;
+    }
+
+    private void OnSystemColorsChanged(UISettings sender, object args)
+    {
+        _dispatcher?.TryEnqueue(ApplySystemTheme);
+    }
+
+    private void ApplySystemTheme()
+    {
+        var theme = OsTheme.IsDark() ? ElementTheme.Dark : ElementTheme.Light;
+        RequestedTheme = theme;
+        // Popup is a theme-inheritance boundary: its own RequestedTheme
+        // stays at Default (= Application.RequestedTheme, which we pin
+        // at launch based on the initial system theme) regardless of
+        // what we set on the child UserControl. That leaves XAML
+        // {ThemeResource} bindings in templated ListView rows resolved
+        // against the stale Application theme, which is why flipping
+        // Windows light/dark left the palette text stuck on the wrong
+        // brushes even after our own RequestedTheme flipped. Sync the
+        // Popup's theme too.
+        if (Parent is Popup popup) popup.RequestedTheme = theme;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -91,12 +165,32 @@ internal sealed partial class CommandPaletteControl : UserControl
     /// </summary>
     public void ApplySettings(string backgroundSetting)
     {
-        OuterBorder.Background = backgroundSetting switch
+        _backgroundSetting = backgroundSetting ?? string.Empty;
+        var key = backgroundSetting switch
         {
-            "mica" => (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"],
-            "opaque" => (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"],
-            _ => (Brush)Application.Current.Resources["AcrylicInAppFillColorDefaultBrush"],
+            "mica" => "SolidBackgroundFillColorBaseBrush",
+            "opaque" => "SolidBackgroundFillColorBaseBrush",
+            _ => "AcrylicInAppFillColorDefaultBrush",
         };
+        OuterBorder.Background = ResolveAppBrushForElementTheme(key);
+    }
+
+    // Resolve a system brush by walking
+    // Application.Resources.ThemeDictionaries with THIS control's
+    // ActualTheme rather than the Application's RequestedTheme.
+    // Application.Current.Resources[key] returns whichever theme entry
+    // the Application is pinned to, which is wrong whenever the control
+    // lives under a window whose ElementTheme differs from the app's —
+    // e.g. a dark-palette main window while the OS (and Application) are
+    // in Light mode. That mismatch was visible as invisible text on a
+    // wrong-tone acrylic in the command palette.
+    private Brush ResolveAppBrushForElementTheme(string key)
+    {
+        if (ThemedResources.TryFindBrush(Application.Current.Resources, key, ActualTheme, out var brush))
+            return brush;
+        // Fallback preserves pre-fix behavior if the theme dictionary
+        // can't be walked (custom app resources, HighContrast, etc.).
+        return (Brush)Application.Current.Resources[key];
     }
 
     // ── ViewModel → UI ────────────────────────────────────────────────────────

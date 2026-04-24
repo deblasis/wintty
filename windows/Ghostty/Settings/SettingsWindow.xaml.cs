@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
 using Ghostty.Services;
@@ -55,6 +56,16 @@ internal sealed partial class SettingsWindow : Window
         _keybindings = keybindings;
         _theme = theme;
         InitializeComponent();
+
+        // Branded window title and custom title bar. Title is used by the
+        // taskbar / alt-tab; AppTitleBar.Title renders the same text inside
+        // the window next to the gear FontIcon. Both read from
+        // AppIdentity.ProductName so a rebrand touches one constant.
+        var titleText = $"{AppIdentity.ProductName} Settings";
+        Title = titleText;
+        AppTitleBar.Title = titleText;
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
 
         // Mica backdrop so the window isn't a black flash while XAML
         // measures its first layout pass.
@@ -129,8 +140,50 @@ internal sealed partial class SettingsWindow : Window
 
     private void ApplyTheme()
     {
-        NavView.RequestedTheme = _themeManager.ElementTheme;
+        // RequestedTheme on the root Grid cascades to the custom title
+        // bar AND the NavView subtree, so the gear FontIcon + title text
+        // track the window theme. Without this the Grid falls back to
+        // Application.RequestedTheme (Dark), leaving white title-bar
+        // text on a light Mica backdrop.
+        RootGrid.RequestedTheme = _themeManager.ElementTheme;
         _themeManager.ApplyToWindow(this);
+        ApplyCaptionButtonColors();
+    }
+
+    // With ExtendsContentIntoTitleBar=true, the system-rendered caption
+    // buttons (min/max/close) default to white glyphs — invisible on a
+    // light Mica backdrop when the window is focused. AppWindow.TitleBar
+    // exposes per-state color slots; pick ones that follow the window
+    // theme rather than the Application's (pinned-Dark) theme.
+    //
+    // Inactive foreground is theme-neutral mid-grey (#999) — reads on
+    // both Mica tints. Hover/pressed use the foreground tone layered
+    // at CaptionButtonHoverAlpha / CaptionButtonPressedAlpha so the
+    // feedback tint comes from the current theme rather than a hard
+    // colour.
+    private const byte CaptionButtonHoverAlpha = 0x33;
+    private const byte CaptionButtonPressedAlpha = 0x66;
+    private static readonly Windows.UI.Color CaptionButtonInactiveFg =
+        Windows.UI.Color.FromArgb(0xFF, 0x99, 0x99, 0x99);
+
+    private void ApplyCaptionButtonColors()
+    {
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var windowId = Win32Interop.GetWindowIdFromWindow(hwnd);
+        var titleBar = AppWindow.GetFromWindowId(windowId).TitleBar;
+        var dark = _themeManager.ElementTheme == ElementTheme.Dark;
+        var fg = dark ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Black;
+
+        titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+        titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        titleBar.ButtonForegroundColor = fg;
+        titleBar.ButtonInactiveForegroundColor = CaptionButtonInactiveFg;
+        titleBar.ButtonHoverBackgroundColor =
+            Windows.UI.Color.FromArgb(CaptionButtonHoverAlpha, fg.R, fg.G, fg.B);
+        titleBar.ButtonHoverForegroundColor = fg;
+        titleBar.ButtonPressedBackgroundColor =
+            Windows.UI.Color.FromArgb(CaptionButtonPressedAlpha, fg.R, fg.G, fg.B);
+        titleBar.ButtonPressedForegroundColor = fg;
     }
 
     private void NavView_SelectionChanged(
