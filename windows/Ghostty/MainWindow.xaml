@@ -121,5 +121,25 @@
             <cmdpalette:CommandPaletteControl x:Name="CommandPaletteUI"/>
         </Popup>
 
+        <!--
+            Power-saving-mode indicator. Shown in the top-right when
+            IPowerStateMonitor.IsLowPowerActive is true. Positioned
+            outside the tab strips so it stays visible in both
+            horizontal and vertical tab modes. Right margin matches
+            the caption-button inset (146px) so it never collides
+            with the min/max/close buttons.
+        -->
+        <FontIcon x:Name="PowerSaverIcon"
+                  Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Top"
+                  Margin="0,8,154,0"
+                  Glyph="&#xEC0A;"
+                  FontFamily="{StaticResource SymbolThemeFontFamily}"
+                  FontSize="14"
+                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                  Visibility="Collapsed"
+                  ToolTipService.ToolTip="Power saving mode active."/>
+
     </Grid>
 </Window>

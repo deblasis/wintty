@@ -8,7 +8,9 @@ using System.Runtime.InteropServices;
 using Ghostty.Controls;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
+using Ghostty.Core.Power;
 using Ghostty.Hosting;
+using Ghostty.Power;
 using Ghostty.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
@@ -50,6 +52,7 @@ public partial class App : Application
     private ConfigService? _configService;
     private ConfigFileEditor? _configEditor;
     private ConfigWriteScheduler? _configWriteScheduler;
+    private WindowsPowerStateMonitor? _powerStateMonitor;
     private GhosttyHost? _bootstrapHost;
     private HostLifetimeSupervisor? _lifetimeSupervisor;
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
@@ -83,6 +86,12 @@ public partial class App : Application
 
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
+
+    /// <summary>
+    /// Process-wide power-saving-mode monitor. Null before OnLaunched
+    /// runs; null after OnAnyWindowClosedInternal tears services down.
+    /// </summary>
+    internal static IPowerStateMonitor? PowerStateMonitor { get; private set; }
 
     /// <summary>
     /// Process-wide logger factory built at startup from Ghostty config.
@@ -391,6 +400,33 @@ public partial class App : Application
         // sites inside static scopes.
         Ghostty.Logging.StaticLoggers.Initialize(factory);
 
+        // Power-saving monitor. Reads power-saver-mode from config every
+        // time it resolves (Func thunk decouples it from ConfigService
+        // lifetime). Must be constructed on the UI thread so its
+        // UISettings field gets a live DispatcherQueue for change events.
+        _powerStateMonitor = new WindowsPowerStateMonitor(
+            readMode: () =>
+            {
+                var raw = _configService?.GetRawFileValue("power-saver-mode") ?? "auto";
+                return raw.Trim().ToLowerInvariant() switch
+                {
+                    "always" => PowerSaverMode.Always,
+                    "never"  => PowerSaverMode.Never,
+                    _        => PowerSaverMode.Auto,
+                };
+            },
+            logger: factory.CreateLogger<WindowsPowerStateMonitor>());
+        PowerStateMonitor = _powerStateMonitor;
+
+        // Re-resolve whenever the user edits power-saver-mode (or any
+        // other key -- cheap, and keeps this out of the reload path's
+        // critical section). Named handler so we can detach symmetrically
+        // at shutdown (the rest of this codebase detaches every event
+        // subscription explicitly; anonymous lambda breaks that pattern).
+        _configService.ConfigChanged += OnConfigChanged_NotifyPowerMonitor;
+
+        _powerStateMonitor.Start();
+
         // One editor + one scheduler per process. Keeping them here
         // (instead of per-settings-window) means rapid edits coalesce
         // across window lifetimes and the file watcher sees a single
@@ -498,6 +534,11 @@ public partial class App : Application
             _logFilters, cfg.LogLevel, cfg.LogFilter);
     }
 
+    private void OnConfigChanged_NotifyPowerMonitor(Ghostty.Core.Config.IConfigService cfg)
+    {
+        _powerStateMonitor?.OnConfigReloaded();
+    }
+
     /// <summary>
     /// Called when ANY top-level <see cref="MainWindow"/> closes. The
     /// per-window <see cref="GhosttyHost"/> is already disposed by
@@ -534,6 +575,14 @@ public partial class App : Application
                 // supervisor (which throws if anything is still live),
                 // and calls AppFree.
                 _bootstrapHost?.Dispose();
+
+                // Dispose between host and config service: the monitor subscribes
+                // to ConfigService.ConfigChanged, so tear it down before ConfigService.
+                if (_configService is not null)
+                {
+                    _configService.ConfigChanged -= OnConfigChanged_NotifyPowerMonitor;
+                }
+                _powerStateMonitor?.Dispose();
 
                 // Dispose ConfigService last: it outlives every host
                 // (by design, so reload round-trips work across
@@ -583,6 +632,8 @@ public partial class App : Application
                 LifetimeSupervisor = null;
                 _configService = null;
                 ConfigService = null;
+                _powerStateMonitor = null;
+                PowerStateMonitor = null;
 
                 _zigLogBridge = null;
                 _fileLogSink = null;

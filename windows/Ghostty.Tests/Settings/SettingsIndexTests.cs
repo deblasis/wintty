@@ -38,6 +38,7 @@ public class SettingsIndexTests
         "background-gradient-speed",
         "background-gradient-animation",
         "background-gradient-point",
+        "power-saver-mode",
         // Colors
         "theme",
         "foreground",

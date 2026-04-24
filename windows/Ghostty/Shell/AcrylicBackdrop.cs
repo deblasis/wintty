@@ -55,7 +55,11 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
             TintColor = _tintColor,
             TintOpacity = _tintOpacity,
             LuminosityOpacity = _luminosityOpacity,
-            FallbackColor = Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            // Shown when Windows disables acrylic internally (low-end GPU,
+            // system-level Battery Saver, transparency effects off). A
+            // transparent fallback produces a see-through hole; using the
+            // configured tint keeps the terminal visually coherent.
+            FallbackColor = Windows.UI.Color.FromArgb(0xFF, _tintColor.R, _tintColor.G, _tintColor.B),
         };
 
         // Keep the backdrop active even when the window loses focus.

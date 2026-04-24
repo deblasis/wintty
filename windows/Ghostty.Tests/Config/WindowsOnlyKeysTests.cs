@@ -19,6 +19,7 @@ public class WindowsOnlyKeysTests
     [InlineData("vertical-tabs")]
     [InlineData("command-palette-group-commands")]
     [InlineData("command-palette-background")]
+    [InlineData("power-saver-mode")]
     public void Contains_KnownKey(string key)
     {
         Assert.True(WindowsOnlyKeys.Contains(key));
