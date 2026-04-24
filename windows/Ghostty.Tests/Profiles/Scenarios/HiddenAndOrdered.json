@@ -1,6 +1,28 @@
 {
-  "knownFolders": {},
-  "files": [],
+  "knownFolders": {
+    "System": "C:\\Windows\\System32",
+    "ProgramFiles": "C:\\Program Files",
+    "LocalAppData": "C:\\Users\\test\\AppData\\Local"
+  },
+  "files": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+  ],
   "registry": { "keys": [], "values": [] },
-  "processes": []
+  "processes": [
+    {
+      "fileName": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": ["-v"],
+      "exitCode": 0,
+      "stdout": "PowerShell 7.4.1\n",
+      "stderr": ""
+    },
+    {
+      "fileName": "wsl.exe",
+      "args": ["--list", "--quiet"],
+      "exitCode": 0,
+      "stdout": "Ubuntu\nDebian\n",
+      "stderr": ""
+    }
+  ]
 }
