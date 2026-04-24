@@ -12,3 +12,16 @@ IDWriteFontCollection
 IDWriteFontFamily
 IDWriteFontList
 IDWriteLocalizedStrings
+
+// shell32 for profiles discovery
+SHGetKnownFolderPath
+KNOWN_FOLDER_FLAG
+
+// shell32 for icon extraction (WindowsIconResolver.AutoForExe)
+SHGetFileInfo
+SHFILEINFOW
+SHGFI_FLAGS
+
+// user32 for icon lifetime
+DestroyIcon
+HICON

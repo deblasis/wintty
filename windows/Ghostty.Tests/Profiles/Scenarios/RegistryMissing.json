@@ -1,0 +1,12 @@
+{
+  "knownFolders": {
+    "System": "C:\\Windows\\System32",
+    "ProgramFiles": "C:\\Program Files"
+  },
+  "files": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Program Files\\Git\\bin\\bash.exe"
+  ],
+  "registry": { "keys": [], "values": [] },
+  "processes": []
+}

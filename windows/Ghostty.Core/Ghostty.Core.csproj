@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <!--
-      Plain net9.0. No Windows App SDK targets, no PRI/MRT, no WinUI.
+      Plain net10.0. No Windows App SDK targets, no PRI/MRT, no WinUI.
       This assembly holds pure-logic types that both the WinUI shell
       (Ghostty.csproj) and the test project (Ghostty.Tests.csproj)
       reference normally via ProjectReference.
@@ -11,6 +11,17 @@
       Compile Include trick is replaced by this assembly.
     -->
     <TargetFramework>net10.0</TargetFramework>
+    <!--
+      CsWin32 resolves its Windows SDK metadata per-architecture: the
+      SHGetFileInfoW / SHFILEINFOW entry points are available in the
+      x86/x64/arm64 metadata packs only and error with "not declared for
+      this platform" under AnyCPU. Declare Platforms and default unset
+      to x64 so the sln / dotnet build picks an architecture-specific
+      evaluation. This mirrors what Ghostty.csproj does for the same
+      reason (CsWin32 + DWrite surfaces).
+    -->
+    <Platforms>x86;x64;ARM64</Platforms>
+    <Platform Condition="'$(Platform)' == 'AnyCPU' or '$(Platform)' == ''">x64</Platform>
     <RootNamespace>Ghostty.Core</RootNamespace>
     <AssemblyName>Ghostty.Core</AssemblyName>
     <Nullable>enable</Nullable>
@@ -47,6 +58,33 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.EventSource" Version="9.0.0" />
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
+    <!--
+      System.Drawing.Common is the shortest path from HICON to a PNG-encoded
+      byte[] (Icon.FromHandle -> Bitmap.Save). The BCL forwards the types
+      here but ships no runtime implementation, so without this package
+      Win32IconExtractor fails CS1069 at compile time. Phase 2 should
+      migrate to a direct GetIconInfo + WIC encoder path and drop this.
+    -->
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Bundled 16x16 PNG icons for profile discovery. LogicalName forces
+      a flat "Ghostty.Core.Profiles.IconAssets.<file>.png" manifest name
+      so WindowsIconResolver can GetManifestResourceStream by key without
+      caring about how MSBuild would otherwise mangle folder paths.
+    -->
+    <!--
+      Remove from the default <None> glob first. The Microsoft.NET.Sdk
+      None glob picks up arbitrary files, so without this each PNG would
+      sit in both @(None) and @(EmbeddedResource) simultaneously - harmless
+      at build time but noisy in the evaluated item graph.
+    -->
+    <None Remove="Profiles\IconAssets\*.png" />
+    <EmbeddedResource Include="Profiles\IconAssets\*.png">
+      <LogicalName>Ghostty.Core.Profiles.IconAssets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

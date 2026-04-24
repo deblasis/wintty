@@ -159,9 +159,12 @@ public class FileLoggerProviderTests : IDisposable
 
     private sealed class FakeClock : IClock
     {
-        private DateTime _now;
-        public FakeClock(DateTime utcNow) => _now = utcNow;
-        public void Set(DateTime utcNow) => _now = utcNow;
-        public DateTime UtcNow => _now;
+        private DateTimeOffset _now;
+        // Existing call sites seed with DateTime(..., DateTimeKind.Utc);
+        // wrap in DateTimeOffset(TimeSpan.Zero) to preserve the UTC
+        // semantics the test setup relies on.
+        public FakeClock(DateTime utcNow) => _now = new DateTimeOffset(utcNow, TimeSpan.Zero);
+        public void Set(DateTime utcNow) => _now = new DateTimeOffset(utcNow, TimeSpan.Zero);
+        public DateTimeOffset UtcNow => _now;
     }
 }
