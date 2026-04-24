@@ -1,9 +1,14 @@
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using Ghostty.Core.Config;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
+using Windows.UI;
 
 namespace Ghostty.Settings.Pages;
 
@@ -14,14 +19,26 @@ internal sealed partial class RawEditorPage : Page
     private readonly ObservableCollection<string> _diagnostics = new();
     private int _lastDiagnosticCount = -1;
 
-    // Last content we read from disk. Used to detect whether the
-    // editor buffer is pristine (matches disk) or dirty (user has
-    // edits). Pristine buffers get refreshed when the file changes
-    // under us; dirty buffers are left alone so we never silently
-    // clobber in-flight edits. Without this, saving from Raw Editor
-    // would overwrite changes that the Appearance/Gradient/etc pages
-    // wrote while this page was cached but off-screen.
     private string _lastLoadedText = string.Empty;
+
+    // Find state
+    private readonly List<int> _findMatches = new();
+    private int _findCurrentIndex = -1;
+    private DispatcherTimer? _findDebounce;
+    private string _findTextSnapshot = string.Empty;
+
+    // Track highlighted ranges so we only clear those (never the full document).
+    private readonly List<(int start, int end)> _prevRanges = new();
+    private (int start, int end) _prevCurrentRange;
+
+    // CharacterFormat.BackgroundColor on many ranges is expensive; cap to keep
+    // per-keystroke latency acceptable (~50 ms for 50 ranges on a 94 KB file).
+    private const int MaxHighlightedMatches = 50;
+
+    // Reusable colors invalidated on theme change.
+    private Color _matchColor;
+    private Color _currentColor;
+    private bool _colorsReady;
 
     public RawEditorPage(IConfigService configService, IConfigFileEditor editor)
     {
@@ -30,15 +47,9 @@ internal sealed partial class RawEditorPage : Page
         InitializeComponent();
 
         DiagList.ItemsSource = _diagnostics;
-        // AOT-safe: populate TextBlock from code-behind instead of
-        // {Binding} which relies on reflection that NativeAOT trims.
         DiagList.ContainerContentChanging += OnContainerContentChanging;
-        // ConfigChanged is subscribed in Loaded (not the ctor) so the
-        // subscription lifetime tracks visibility across arbitrary
-        // navigate-away/navigate-back cycles. SettingsWindow caches
-        // page instances, and Unloaded fires every time we swap pages;
-        // if we subscribed in the ctor we'd only receive live updates
-        // on the first visit.
+        Editor.ActualThemeChanged += (_, _) => _colorsReady = false;
+        Editor.TextChanged += Editor_TextChanged;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
 
@@ -46,14 +57,22 @@ internal sealed partial class RawEditorPage : Page
         RefreshDiagnostics(isInitialLoad: true);
     }
 
+    private string GetEditorText()
+    {
+        // RichEditBox appends a trailing \r that wasn't in the original text;
+        // trim it so comparisons and disk writes stay consistent.
+        Editor.Document.GetText(TextGetOptions.None, out var text);
+        return text.TrimEnd('\r');
+    }
+
+    private void SetEditorText(string text)
+    {
+        Editor.Document.SetText(TextSetOptions.None, text);
+    }
+
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _configService.ConfigChanged += OnConfigChanged;
-
-        // Re-entering the page (SettingsWindow caches pages). Pull
-        // fresh content from disk if the user's buffer is pristine,
-        // so they see whatever other settings pages wrote while this
-        // page was off-screen. If the buffer is dirty, leave it alone.
         RefreshFromDiskIfPristine();
         RefreshDiagnostics(isInitialLoad: false);
     }
@@ -82,30 +101,17 @@ internal sealed partial class RawEditorPage : Page
 
     private void RefreshFromDiskIfPristine()
     {
-        // Only refresh when the user has no pending edits. Equality
-        // against _lastLoadedText (what we last saw from disk) is a
-        // reliable proxy: set to current text every time we read OR
-        // write, so divergence means the user typed.
-        if (Editor.Text == _lastLoadedText)
+        if (GetEditorText() == _lastLoadedText)
             LoadContent();
     }
 
     private void LoadContent()
     {
-        Editor.Text = _editor.ReadAll();
-        // Re-read after assignment: WinUI 3's TextBox canonicalizes line
-        // endings internally (to bare \r), so storing what we read from
-        // disk would drift from Editor.Text and make the pristine-check
-        // in RefreshFromDiskIfPristine always miss.
-        _lastLoadedText = Editor.Text;
+        SetEditorText(_editor.ReadAll());
+        _lastLoadedText = GetEditorText();
         StatusText.Text = $"Loaded from {_configService.ConfigFilePath}";
     }
 
-    // Auto-collapse when clean, auto-expand on transition from clean to
-    // errors so a freshly introduced problem can't hide behind a
-    // collapsed panel. User's choice is preserved during a steady
-    // state (e.g. if they collapse with errors still present,
-    // subsequent refreshes with the same non-zero count leave it alone).
     private void RefreshDiagnostics(bool isInitialLoad)
     {
         var count = _configService.DiagnosticsCount;
@@ -117,7 +123,6 @@ internal sealed partial class RawEditorPage : Page
         foreach (var item in items)
             _diagnostics.Add(item);
 
-        // Status glyph + label. Badge only shows when there are errors.
         var hasErrors = count > 0;
         StatusOkIcon.Visibility = hasErrors ? Visibility.Collapsed : Visibility.Visible;
         StatusErrorIcon.Visibility = hasErrors ? Visibility.Visible : Visibility.Collapsed;
@@ -127,8 +132,6 @@ internal sealed partial class RawEditorPage : Page
         CountBadge.Value = count;
         CountBadge.Visibility = hasErrors ? Visibility.Visible : Visibility.Collapsed;
 
-        // Show the list when there are errors; show the empty-state
-        // placeholder when the user expands the panel on a clean config.
         DiagList.Visibility = hasErrors ? Visibility.Visible : Visibility.Collapsed;
         DiagEmptyState.Visibility = hasErrors ? Visibility.Collapsed : Visibility.Visible;
 
@@ -142,9 +145,6 @@ internal sealed partial class RawEditorPage : Page
         RefreshWindowsOnlyInfo();
     }
 
-    // Windows-only section: hidden when empty, stays collapsed by
-    // default when present. Unlike the Diagnostics expander these keys
-    // aren't errors, so we don't auto-expand on transition.
     private void RefreshWindowsOnlyInfo()
     {
         var keys = _configService.WindowsOnlyKeysUsed;
@@ -186,11 +186,6 @@ internal sealed partial class RawEditorPage : Page
         return rtb;
     }
 
-    // Inline "code pill" that mirrors GitHub's backtick rendering: subtle
-    // rounded background, 1px stroke, monospace text. The Styles live in
-    // XAML (see Page.Resources) so the brushes re-resolve when the OS
-    // theme flips. Hover tooltip carries the registry's description so
-    // the user learns what the key does without leaving Settings.
     private InlineUIContainer BuildCodePill(string key)
     {
         var border = new Border
@@ -210,12 +205,8 @@ internal sealed partial class RawEditorPage : Page
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         _configService.SuppressWatcher(true);
-        _editor.WriteRaw(Editor.Text);
-        // What we just wrote is now the on-disk truth. Without this,
-        // the ConfigChanged callback (fired async by Reload) would
-        // see Editor.Text != _lastLoadedText and skip the refresh,
-        // leaving _lastLoadedText stale for the next pristine check.
-        _lastLoadedText = Editor.Text;
+        _editor.WriteRaw(GetEditorText());
+        _lastLoadedText = GetEditorText();
         _configService.SuppressWatcher(false);
 
         var success = _configService.Reload();
@@ -232,10 +223,262 @@ internal sealed partial class RawEditorPage : Page
 
     private void ReloadButton_Click(object sender, RoutedEventArgs e)
     {
-        // Pick up external edits to the config file without touching
-        // the editor text. Useful when a diagnostic points at a line
-        // the user fixed in another editor.
         _configService.Reload();
         LoadContent();
+    }
+
+    // --- Find bar ---
+
+    private void EnsureColors()
+    {
+        if (_colorsReady) return;
+        var isDark = Editor.ActualTheme == ElementTheme.Dark;
+        _matchColor = isDark
+            ? Color.FromArgb(70, 200, 170, 50)
+            : Color.FromArgb(90, 255, 230, 100);
+        _currentColor = isDark
+            ? Color.FromArgb(180, 255, 200, 60)
+            : Color.FromArgb(220, 255, 190, 50);
+        _colorsReady = true;
+    }
+
+    private void ClearPreviousHighlights()
+    {
+        foreach (var (s, e) in _prevRanges)
+        {
+            var r = Editor.Document.GetRange(s, e);
+            r.CharacterFormat.BackgroundColor = Color.FromArgb(0, 0, 0, 0);
+        }
+        if (_prevCurrentRange != default)
+        {
+            var cr = Editor.Document.GetRange(_prevCurrentRange.start, _prevCurrentRange.end);
+            cr.CharacterFormat.BackgroundColor = Color.FromArgb(0, 0, 0, 0);
+        }
+        _prevRanges.Clear();
+        _prevCurrentRange = default;
+    }
+
+    private void CtrlF_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (FindBar.Visibility == Visibility.Visible)
+        {
+            FindInput.SelectAll();
+            FindInput.Focus(FocusState.Keyboard);
+        }
+        else
+        {
+            ShowFindBar();
+        }
+        args.Handled = true;
+    }
+
+    private void F3_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (FindBar.Visibility != Visibility.Visible)
+            ShowFindBar();
+        if (_findMatches.Count > 0)
+            FindNextMatch();
+        args.Handled = true;
+    }
+
+    private void ShiftF3_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (FindBar.Visibility != Visibility.Visible)
+            ShowFindBar();
+        if (_findMatches.Count > 0)
+            FindPrevMatch();
+        args.Handled = true;
+    }
+
+    private void ShowFindBar()
+    {
+        FindBar.Visibility = Visibility.Visible;
+        var sel = Editor.Document.Selection;
+        if (!string.IsNullOrEmpty(sel.Text))
+            FindInput.Text = sel.Text;
+        else
+            FindInput.Text = string.Empty;
+        FindInput.SelectAll();
+        FindInput.Focus(FocusState.Keyboard);
+        UpdateFindMatches();
+    }
+
+    private void HideFindBar()
+    {
+        FindBar.Visibility = Visibility.Collapsed;
+        ClearPreviousHighlights();
+        _findMatches.Clear();
+        _findCurrentIndex = -1;
+        FindMatchCount.Text = string.Empty;
+        Editor.Focus(FocusState.Programmatic);
+    }
+
+    private void FindInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        UpdateFindMatches();
+    }
+
+    private void FindInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape)
+        {
+            HideFindBar();
+            e.Handled = true;
+        }
+        else if (e.Key == VirtualKey.Enter)
+        {
+            var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
+                VirtualKey.Shift);
+            if (shift.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
+                FindPrevMatch();
+            else
+                FindNextMatch();
+            e.Handled = true;
+        }
+    }
+
+    private void FindNext_Click(object sender, RoutedEventArgs e) => FindNextMatch();
+    private void FindPrev_Click(object sender, RoutedEventArgs e) => FindPrevMatch();
+    private void FindClose_Click(object sender, RoutedEventArgs e) => HideFindBar();
+
+    private void FindCaseSensitive_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateFindMatches();
+    }
+
+    private void Editor_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape
+            && FindBar.Visibility == Visibility.Visible)
+        {
+            HideFindBar();
+            e.Handled = true;
+        }
+    }
+
+    private void Editor_TextChanged(object sender, RoutedEventArgs e)
+    {
+        if (FindBar.Visibility != Visibility.Visible) return;
+        // CharacterFormat changes fire TextChanged too; skip if the actual
+        // text content hasn't changed since the last find update.
+        var current = GetEditorText();
+        if (current == _findTextSnapshot) return;
+        // Debounce: restart the timer on each change, fire after 300ms of silence.
+        _findDebounce ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _findDebounce.Stop();
+        _findDebounce.Tick -= OnFindDebounce;
+        _findDebounce.Tick += OnFindDebounce;
+        _findDebounce.Start();
+    }
+
+    private void OnFindDebounce(object? sender, object e)
+    {
+        _findDebounce!.Stop();
+        _findDebounce.Tick -= OnFindDebounce;
+        UpdateFindMatches();
+    }
+
+    // --- Find logic ---
+
+    private void UpdateFindMatches()
+    {
+        var query = FindInput.Text;
+        _findMatches.Clear();
+        _findCurrentIndex = -1;
+        _findTextSnapshot = GetEditorText();
+
+        if (string.IsNullOrEmpty(query))
+        {
+            FindMatchCount.Text = string.Empty;
+            ClearPreviousHighlights();
+            return;
+        }
+
+        var text = GetEditorText();
+        var comparison = FindCaseSensitive.IsChecked == true
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        int pos = 0;
+        while (pos <= text.Length - query.Length)
+        {
+            var idx = text.IndexOf(query, pos, comparison);
+            if (idx < 0) break;
+            _findMatches.Add(idx);
+            pos = idx + query.Length;
+        }
+
+        if (_findMatches.Count == 0)
+        {
+            FindMatchCount.Text = "No results";
+            ClearPreviousHighlights();
+            return;
+        }
+
+        _findCurrentIndex = 0;
+        ApplyHighlights();
+        // Only scroll to the match when the find input has focus (user is
+        // searching). Skip when focus is in the editor (user is editing)
+        // to avoid jarring auto-scroll.
+        if (FindInput.FocusState != FocusState.Unfocused)
+            NavigateToMatch(_findCurrentIndex);
+        UpdateMatchCountDisplay();
+    }
+
+    private void FindNextMatch()
+    {
+        if (_findMatches.Count == 0) return;
+        _findCurrentIndex = (_findCurrentIndex + 1) % _findMatches.Count;
+        ApplyHighlights();
+        NavigateToMatch(_findCurrentIndex);
+        UpdateMatchCountDisplay();
+    }
+
+    private void FindPrevMatch()
+    {
+        if (_findMatches.Count == 0) return;
+        _findCurrentIndex = (_findCurrentIndex - 1 + _findMatches.Count) % _findMatches.Count;
+        ApplyHighlights();
+        NavigateToMatch(_findCurrentIndex);
+        UpdateMatchCountDisplay();
+    }
+
+    private void NavigateToMatch(int index)
+    {
+        var start = _findMatches[index];
+        var end = start + FindInput.Text.Length;
+        var range = Editor.Document.GetRange(start, end);
+        range.ScrollIntoView(PointOptions.Start);
+        Editor.Document.Selection.SetRange(start, end);
+    }
+
+    private void ApplyHighlights()
+    {
+        EnsureColors();
+        ClearPreviousHighlights();
+
+        var query = FindInput.Text;
+        var queryLen = query.Length;
+        var limit = Math.Min(_findMatches.Count, MaxHighlightedMatches);
+        var currentStart = _findMatches[_findCurrentIndex];
+
+        for (int i = 0; i < limit; i++)
+        {
+            var s = _findMatches[i];
+            if (s == currentStart) continue;
+            var range = Editor.Document.GetRange(s, s + queryLen);
+            range.CharacterFormat.BackgroundColor = _matchColor;
+            _prevRanges.Add((s, s + queryLen));
+        }
+
+        // Current match gets brighter highlight.
+        var curRange = Editor.Document.GetRange(currentStart, currentStart + queryLen);
+        curRange.CharacterFormat.BackgroundColor = _currentColor;
+        _prevCurrentRange = (currentStart, currentStart + queryLen);
+    }
+
+    private void UpdateMatchCountDisplay()
+    {
+        FindMatchCount.Text = $"{_findCurrentIndex + 1} of {_findMatches.Count}";
     }
 }
