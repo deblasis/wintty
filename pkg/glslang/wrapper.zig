@@ -66,8 +66,8 @@ pub fn compileToHlsl(alloc: std.mem.Allocator, source: [:0]const u8) ![:0]const 
     // too little headroom.
     var buf = std.ArrayList(u8).initCapacity(alloc, 256 * 1024) catch
         return error.OutOfMemory;
-    defer buf.deinit();
-    try buf.appendNTimes(0, buf.capacity);
+    defer buf.deinit(alloc);
+    try buf.appendNTimes(alloc, 0, buf.capacity);
 
     var out_len: c_int = 0;
 
