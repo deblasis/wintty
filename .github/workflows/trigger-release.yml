@@ -1,0 +1,43 @@
+# Thin release-trigger for the Windows release distribution.
+#
+# On tag push (v*), fires a repository_dispatch event at deblasis/wintty-release
+# so the private release repo can build, pack, and upload without needing any
+# R2 or signing credentials to live in this public repo.
+#
+# DORMANT UNTIL ENABLED: the job is a no-op while vars.ENABLE_WINTTY_RELEASE_DISPATCH
+# is unset or not 'true'. This prevents noisy failures before the private repo
+# + WINTTY_RELEASE_DISPATCH_PAT secret are provisioned.
+
+name: trigger-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: vars.ENABLE_WINTTY_RELEASE_DISPATCH == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Derive channel from ref
+        id: chan
+        shell: bash
+        run: |
+          case "${{ github.ref }}" in
+            refs/tags/v*) echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
+            *)            echo "channel=tip"    >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Dispatch release event to deblasis/wintty-release
+        env:
+          GH_TOKEN: ${{ secrets.WINTTY_RELEASE_DISPATCH_PAT }}
+        run: |
+          gh api /repos/deblasis/wintty-release/dispatches \
+            -f event_type=release \
+            -f "client_payload[channel]=${{ steps.chan.outputs.channel }}" \
+            -f "client_payload[ref]=${{ github.ref }}"
