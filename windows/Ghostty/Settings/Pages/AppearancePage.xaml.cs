@@ -49,6 +49,12 @@ internal sealed partial class AppearancePage : Page
         if (configService is ConfigService cs)
         {
             SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle);
+
+            // Seed power saver mode from config, defaulting to "auto".
+            var powerMode = cs.GetRawFileValue("power-saver-mode");
+            if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
+            SelectComboByTag(PowerSaverModeCombo, powerMode.Trim().ToLowerInvariant());
+
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
             if (cs.IsConfiguredInFile("background-tint-color"))
             {
@@ -229,6 +235,12 @@ internal sealed partial class AppearancePage : Page
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
             OnValueChanged("background-style", item.Tag?.ToString() ?? "frosted");
+    }
+
+    private void PowerSaverMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
+            OnValueChanged("power-saver-mode", item.Tag?.ToString() ?? "auto");
     }
 
     private void BlurFollowsOpacity_Toggled(object sender, RoutedEventArgs e)
