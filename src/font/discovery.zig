@@ -292,8 +292,13 @@ pub const DirectWrite = struct {
     }
 
     pub fn discover(self: *const DirectWrite, alloc: Allocator, desc: Descriptor) !DiscoverIterator {
-        const family = desc.family orelse return DiscoverIterator.empty(alloc, desc.variations);
+        return if (desc.family) |family|
+            self.discoverFamily(alloc, desc, family)
+        else
+            self.discoverAll(alloc, desc);
+    }
 
+    fn discoverFamily(self: *const DirectWrite, alloc: Allocator, desc: Descriptor, family: [:0]const u8) !DiscoverIterator {
         // Convert family name to UTF-16 for DirectWrite APIs
         var wfamily_buf: [128]u16 = undefined;
         const wfamily = utf8ToUtf16Le(&wfamily_buf, family) orelse
@@ -341,6 +346,45 @@ pub const DirectWrite = struct {
 
         return DiscoverIterator{
             .fonts = result,
+            .alloc = alloc,
+            .variations = desc.variations,
+            .i = 0,
+        };
+    }
+
+    /// Enumerate all fonts across every family in the system collection.
+    /// Used by `+list-fonts` when no --family filter is specified.
+    fn discoverAll(self: *const DirectWrite, alloc: Allocator, desc: Descriptor) !DiscoverIterator {
+        const family_count = self.collection.GetFontFamilyCount();
+        var fonts = try std.ArrayList(*dwrite.IDWriteFont).initCapacity(alloc, 256);
+        errdefer {
+            for (fonts.items) |f| _ = f.Release();
+            fonts.deinit(alloc);
+        }
+
+        for (0..family_count) |fi| {
+            var dw_family: ?*dwrite.IDWriteFontFamily = null;
+            var hr = self.collection.GetFontFamily(@intCast(fi), &dw_family);
+            if (dwrite.FAILED(hr)) continue;
+            defer _ = dw_family.?.Release();
+
+            const font_count = dw_family.?.GetFontCount();
+            for (0..font_count) |i| {
+                var dw_font: ?*dwrite.IDWriteFont = null;
+                hr = dw_family.?.GetFont(@intCast(i), &dw_font);
+                if (dwrite.FAILED(hr)) continue;
+
+                if (dw_font.?.GetSimulations() != .NONE) {
+                    _ = dw_font.?.Release();
+                    continue;
+                }
+
+                try fonts.append(alloc, dw_font.?);
+            }
+        }
+
+        return DiscoverIterator{
+            .fonts = try fonts.toOwnedSlice(alloc),
             .alloc = alloc,
             .variations = desc.variations,
             .i = 0,
@@ -1765,4 +1809,27 @@ test "directwrite variations" {
     defer face.deinit();
     try testing.expectEqual(1, face.dw.?.variations.len);
     try testing.expectEqual(Variation.Id.init("wght"), face.dw.?.variations[0].id);
+}
+
+test "directwrite discover all" {
+    if (options.backend != .directwrite_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var dw = DirectWrite.init();
+    defer dw.deinit();
+
+    // No family filter -- exercises discoverAll(), which enumerates
+    // every font in the system collection.
+    var it = try dw.discover(alloc, .{});
+    defer it.deinit();
+
+    var count: usize = 0;
+    while (try it.next()) |_| {
+        count += 1;
+    }
+
+    // A typical Windows install has hundreds of fonts.
+    try testing.expect(count > 0);
 }
