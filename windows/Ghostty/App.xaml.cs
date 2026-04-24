@@ -53,6 +53,8 @@ public partial class App : Application
     private ConfigFileEditor? _configEditor;
     private ConfigWriteScheduler? _configWriteScheduler;
     private WindowsPowerStateMonitor? _powerStateMonitor;
+    private Ghostty.Core.Profiles.DiscoveryService? _discoveryService;
+    private Ghostty.Core.Profiles.ProfileRegistry? _profileRegistry;
     private GhosttyHost? _bootstrapHost;
     private HostLifetimeSupervisor? _lifetimeSupervisor;
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
@@ -86,6 +88,7 @@ public partial class App : Application
 
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
+    internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
 
     /// <summary>
     /// Process-wide power-saving-mode monitor. Null before OnLaunched
@@ -467,6 +470,40 @@ public partial class App : Application
             logger: factory.CreateLogger<ConfigWriteScheduler>());
         ConfigWriteScheduler = _configWriteScheduler;
 
+        // Profiles discovery + composition. No UI consumer lands yet,
+        // but the registry bootstraps here so future settings-UI and
+        // command-palette consumers can plug in without touching this
+        // file again.
+        var discoveryCachePath = System.IO.Path.Combine(
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            "Wintty", "DiscoveryCache", "v1.json");
+        var winttyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "dev";
+
+        var processRunner = new Ghostty.Core.Profiles.WindowsProcessRunner();
+        var registryReader = new Ghostty.Core.Profiles.WindowsRegistryReader();
+        var fileSystem = new Ghostty.Core.Profiles.WindowsFileSystem();
+
+        var probes = new Ghostty.Core.Profiles.IInstalledShellProbe[]
+        {
+            new Ghostty.Core.Profiles.Probes.CmdProbe(fileSystem),
+            new Ghostty.Core.Profiles.Probes.PowerShellProbe(fileSystem, processRunner),
+            new Ghostty.Core.Profiles.Probes.WslProbe(processRunner),
+            new Ghostty.Core.Profiles.Probes.GitBashProbe(registryReader, fileSystem),
+            new Ghostty.Core.Profiles.Probes.AzureCloudShellProbe(processRunner),
+        };
+
+        _discoveryService = new Ghostty.Core.Profiles.DiscoveryService(
+            probes, fileSystem, Ghostty.Core.Logging.SystemClock.Instance,
+            winttyVersion, discoveryCachePath,
+            factory.CreateLogger<Ghostty.Core.Profiles.DiscoveryService>());
+
+        _profileRegistry = new Ghostty.Core.Profiles.ProfileRegistry(
+            source: _configService,
+            discover: (bypass, ct) => _discoveryService.DiscoverAsync(bypass, ct),
+            dispatcher: action => uiDispatcher.TryEnqueue(() => action()),
+            log: factory.CreateLogger<Ghostty.Core.Profiles.ProfileRegistry>());
+        ProfileRegistry = _profileRegistry;
+
         // One-shot migration of the legacy ui-settings.json into the
         // real config + a placement-only window-state.json. Runs
         // before the first window opens so MainWindow's initial reads
@@ -564,6 +601,13 @@ public partial class App : Application
         {
             try
             {
+                // Dispose the registry first: its Dispose cancels any
+                // pending discovery and unsubscribes from
+                // _configService's ProfileConfigChanged event. The
+                // DiscoveryService holds no unmanaged resources, so
+                // we just drop the ref and let GC claim it.
+                _profileRegistry?.Dispose();
+
                 // Flush any pending debounced writes before the editor
                 // is gone. Dispose waits for an in-flight timer
                 // callback so disk writes happen-before the host tears
@@ -622,6 +666,9 @@ public partial class App : Application
             }
             finally
             {
+                _profileRegistry = null;
+                ProfileRegistry = null;
+                _discoveryService = null;
                 _configWriteScheduler = null;
                 ConfigWriteScheduler = null;
                 _configEditor = null;
