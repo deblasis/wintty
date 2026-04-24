@@ -199,6 +199,37 @@ public partial class App : Application
 
     public App()
     {
+        // Match the OS theme before any XAML parses so the first paint
+        // of every window is already in the right mode. Without this,
+        // App.xaml's static RequestedTheme (previously "Dark") drew the
+        // first frame of Settings / Raw Editor in dark mode even when
+        // the user is on a light system, producing a visible flash when
+        // WindowThemeManager later switched to Light. Application.
+        // RequestedTheme is only settable before the first window is
+        // created; setting it here is the one safe window.
+        try
+        {
+            RequestedTheme = Ghostty.Services.OsTheme.IsDark()
+                ? ApplicationTheme.Dark
+                : ApplicationTheme.Light;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            // UISettings can throw in certain packaged / sandboxed
+            // startup edges. Fall back to the pre-existing default so
+            // the app still launches; users on a system whose theme
+            // doesn't match will see the old one-frame flash.
+            //
+            // Unhandled-exception handlers aren't wired up yet (done
+            // below), so Debug.WriteLine is the most signal we can
+            // surface to a devenv-attached run without taking the app
+            // down. A packaged Release launch will lose this — that's
+            // acceptable for a one-frame cosmetic flash.
+            System.Diagnostics.Debug.WriteLine(
+                $"[Ghostty] OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
+            RequestedTheme = ApplicationTheme.Dark;
+        }
+
         InitializeComponent();
 
         // Surface unhandled exceptions to stderr AND to a file under

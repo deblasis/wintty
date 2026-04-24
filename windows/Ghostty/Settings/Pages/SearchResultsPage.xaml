@@ -11,6 +11,52 @@
       a XAML DataTemplateSelector would be heavier than the one-off
       layout needs.
     -->
+    <Page.Resources>
+        <!--
+          Theme-aware brushes for imperatively constructed rows. Looking
+          up TextFillColor*Brush via Application.Current.Resources resolves
+          against Application.RequestedTheme (Dark), not the Page's
+          ActualTheme — which made description/breadcrumb/section-header
+          text nearly invisible in light mode. Defining the brushes here
+          means `this.Resources[key]` honors the Page's ActualTheme chain.
+        -->
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <!--
+                  Color values mirror WinUI 3 system ThemeResources
+                  (TextFillColorSecondary/Tertiary, AccentTextFillColorPrimary,
+                  CardBackgroundFillColorDefault, CardStrokeColorDefault)
+                  as of WindowsAppSDK 1.8. Duplicating the constants lets
+                  the lookup run in code-behind without walking up to
+                  Application.Current.Resources, which is pinned to
+                  RequestedTheme="Dark".
+                -->
+                <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="SearchHighlightBrush" Color="#60CDFF" />
+                    <SolidColorBrush x:Key="SearchDescBrush" Color="#C5FFFFFF" />
+                    <SolidColorBrush x:Key="SearchSectionBrush" Color="#C5FFFFFF" />
+                    <SolidColorBrush x:Key="SearchBreadcrumbBrush" Color="#87FFFFFF" />
+                    <SolidColorBrush x:Key="SearchCardBgBrush" Color="#0DFFFFFF" />
+                    <SolidColorBrush x:Key="SearchCardStrokeBrush" Color="#17FFFFFF" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="SearchHighlightBrush" Color="#005FB8" />
+                    <SolidColorBrush x:Key="SearchDescBrush" Color="#9E000000" />
+                    <SolidColorBrush x:Key="SearchSectionBrush" Color="#9E000000" />
+                    <SolidColorBrush x:Key="SearchBreadcrumbBrush" Color="#72000000" />
+                    <SolidColorBrush x:Key="SearchCardBgBrush" Color="#B3FFFFFF" />
+                    <SolidColorBrush x:Key="SearchCardStrokeBrush" Color="#0F000000" />
+                </ResourceDictionary>
+                <!--
+                  HighContrast deliberately omitted: ActualTheme only
+                  exposes Light/Dark/Default, so GetThemedBrush would
+                  never route here without an AccessibilitySettings
+                  bridge. If HC parity matters later, add that plumbing
+                  then reintroduce the dict.
+                -->
+            </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+    </Page.Resources>
     <ScrollViewer Padding="24">
         <StackPanel MaxWidth="800">
             <TextBlock

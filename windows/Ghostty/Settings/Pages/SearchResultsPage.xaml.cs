@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Settings;
+using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
@@ -13,12 +14,20 @@ namespace Ghostty.Settings.Pages;
 internal sealed partial class SearchResultsPage : Page
 {
     private string _query = string.Empty;
+    private IReadOnlyList<SearchHit>? _pendingHits;
     private Action<string>? _onChosen;
     private Action? _onClear;
 
     public SearchResultsPage()
     {
         InitializeComponent();
+        // Theme-aware brushes live in Page.Resources. Before the page is
+        // attached to the visual tree, ActualTheme isn't resolved, so
+        // `this.Resources[key]` would pick the Default dictionary. Defer
+        // the first render to Loaded; subsequent Show() calls run
+        // synchronously because the page is cached and stays loaded.
+        Loaded += OnPageLoaded;
+        ActualThemeChanged += OnActualThemeChanged;
     }
 
     public void Show(
@@ -28,24 +37,58 @@ internal sealed partial class SearchResultsPage : Page
         Action onClear)
     {
         _query = query;
+        _pendingHits = hits;
         _onChosen = onChosen;
         _onClear = onClear;
 
+        if (IsLoaded) Render();
+    }
+
+    private void OnPageLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_pendingHits != null) Render();
+    }
+
+    // Rebuild if the user toggles the window theme while results are
+    // visible — cached SolidColorBrush instances don't auto-update when
+    // the ThemeDictionaries active entry flips.
+    private void OnActualThemeChanged(FrameworkElement sender, object args)
+    {
+        if (IsLoaded && _pendingHits != null) Render();
+    }
+
+    private void Render()
+    {
+        var hits = _pendingHits ?? Array.Empty<SearchHit>();
+
         TitleText.Text = hits.Count == 0
             ? "Search"
-            : $"{hits.Count} result{(hits.Count == 1 ? "" : "s")} for \"{query}\"";
+            : $"{hits.Count} result{(hits.Count == 1 ? "" : "s")} for \"{_query}\"";
 
         ResultsPanel.Children.Clear();
 
         if (hits.Count == 0)
         {
-            EmptyText.Text = $"No settings match \"{query}\".";
+            EmptyText.Text = $"No settings match \"{_query}\".";
             EmptyPanel.Visibility = Visibility.Visible;
             return;
         }
 
         EmptyPanel.Visibility = Visibility.Collapsed;
         BuildGroupedResults(hits);
+    }
+
+    // Resolve a brush from Page.Resources.ThemeDictionaries by the Page's
+    // ActualTheme. Direct `this.Resources[key]` calls bottom out in
+    // Application.Current.Resources when the key is inside a theme
+    // dictionary, which re-introduces the original bug (app theme wins).
+    // Delegates to ThemedResources so the walk stays consistent with the
+    // command-palette lookup path.
+    private Brush GetThemedBrush(string key)
+    {
+        if (ThemedResources.TryFindBrush(Resources, key, ActualTheme, out var brush))
+            return brush;
+        return (Brush)Resources[key];
     }
 
     private void BuildGroupedResults(IReadOnlyList<SearchHit> hits)
@@ -72,6 +115,12 @@ internal sealed partial class SearchResultsPage : Page
             sectionBucket.Hits.Add(hit);
         }
 
+        var descBrush = GetThemedBrush("SearchDescBrush");
+        var sectionBrush = GetThemedBrush("SearchSectionBrush");
+        var breadcrumbBrush = GetThemedBrush("SearchBreadcrumbBrush");
+        var cardBgBrush = GetThemedBrush("SearchCardBgBrush");
+        var cardStrokeBrush = GetThemedBrush("SearchCardStrokeBrush");
+
         foreach (var (page, sections) in byPage)
         {
             ResultsPanel.Children.Add(new TextBlock
@@ -87,18 +136,18 @@ internal sealed partial class SearchResultsPage : Page
                 {
                     Text = section,
                     Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                    Foreground = sectionBrush,
                     Margin = new Thickness(0, 4, 0, 4),
                 });
                 foreach (var hit in sectionHits)
                 {
-                    ResultsPanel.Children.Add(BuildRow(hit));
+                    ResultsPanel.Children.Add(BuildRow(hit, descBrush, breadcrumbBrush, cardBgBrush, cardStrokeBrush));
                 }
             }
         }
     }
 
-    private UIElement BuildRow(SearchHit hit)
+    private UIElement BuildRow(SearchHit hit, Brush descBrush, Brush breadcrumbBrush, Brush cardBgBrush, Brush cardStrokeBrush)
     {
         // Rows are buttons so keyboard focus + Enter work out of the
         // box. The row itself is a Border inside the Button content;
@@ -112,7 +161,7 @@ internal sealed partial class SearchResultsPage : Page
         var description = new TextBlock
         {
             Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            Foreground = descBrush,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 2, 0, 0),
         };
@@ -122,7 +171,7 @@ internal sealed partial class SearchResultsPage : Page
         {
             Text = $"{hit.Entry.Page} > {hit.Entry.Section}",
             Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            Foreground = breadcrumbBrush,
             Margin = new Thickness(0, 4, 0, 0),
         };
 
@@ -136,8 +185,8 @@ internal sealed partial class SearchResultsPage : Page
             Padding = new Thickness(16, 10, 16, 10),
             MinHeight = 68,
             CornerRadius = new CornerRadius(4),
-            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+            Background = cardBgBrush,
+            BorderBrush = cardStrokeBrush,
             BorderThickness = new Thickness(1),
             Margin = new Thickness(0, 0, 0, 6),
             Child = panel,
@@ -160,7 +209,7 @@ internal sealed partial class SearchResultsPage : Page
     // Split `text` around each case-insensitive occurrence of `query`
     // and render matches bolded with accent foreground. Inline spans
     // avoid re-measuring a child TextBlock for every match.
-    private static void AppendHighlighted(InlineCollection inlines, string text, string query)
+    private void AppendHighlighted(InlineCollection inlines, string text, string query)
     {
         inlines.Clear();
         if (string.IsNullOrEmpty(query) || string.IsNullOrEmpty(text))
@@ -169,7 +218,7 @@ internal sealed partial class SearchResultsPage : Page
             return;
         }
 
-        var accent = (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"];
+        var accent = GetThemedBrush("SearchHighlightBrush");
         int cursor = 0;
         while (cursor < text.Length)
         {
