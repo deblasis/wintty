@@ -85,6 +85,44 @@ public static partial class ProfileSourceParser
         return new ProfileParseResult(profiles, warnings);
     }
 
+    /// <summary>
+    /// Extracts ids for which <c>profile.&lt;id&gt;.hidden = true</c>
+    /// appears. Matches the same id format as <see cref="Parse"/>
+    /// (lowercase ASCII). Ignores <c>hidden = false</c> and any other
+    /// subkey. Used by <c>ProfileRegistry</c> to suppress discovered
+    /// profiles without requiring a full user override.
+    /// </summary>
+    public static IReadOnlySet<string> ExtractHiddenIds(string configText)
+    {
+        ArgumentNullException.ThrowIfNull(configText);
+
+        if (configText.Length > 0 && configText[0] == '\uFEFF')
+            configText = configText.Substring(1);
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var rawLine in configText.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r').Trim();
+            if (line.Length == 0 || line[0] == '#') continue;
+
+            var match = LineRegex().Match(line);
+            if (!match.Success) continue;
+
+            var subKey = match.Groups[2].Value;
+            if (!string.Equals(subKey, "hidden", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var value = match.Groups[3].Value;
+            if (!bool.TryParse(value, out var flag) || !flag) continue;
+
+            var id = match.Groups[1].Value.ToLowerInvariant();
+            ids.Add(id);
+        }
+
+        return ids;
+    }
+
     private static (EffectiveVisualOverrides Value, bool HasAny) BuildVisuals(
         Dictionary<string, string> bag)
     {
