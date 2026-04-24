@@ -28,6 +28,10 @@ WINDOW_STYLE
 WINDOWPLACEMENT
 WM_SYSCOMMAND
 
+// user32 (power monitor)
+GetSystemMetrics
+SYSTEM_METRICS_INDEX
+
 // gdi32 - CreateSolidBrush and SetClassLongPtr are not in CsWin32
 // 0.3.269 metadata for this platform target; hand-written in MainWindow.
 
