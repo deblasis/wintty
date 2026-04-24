@@ -35,7 +35,7 @@ public sealed class ScenarioLoaderTests
 
         var result = await s.ProcessRunner.RunAsync(
             "wsl.exe",
-            new[] { "--list", "--verbose", "--quiet" },
+            new[] { "--list", "--quiet" },
             System.TimeSpan.FromSeconds(1),
             System.Threading.CancellationToken.None);
 
