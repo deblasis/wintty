@@ -68,4 +68,10 @@
                       LogicalName="Ghostty.Tests.Interop.NativeMethods.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Profiles\Scenarios\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
