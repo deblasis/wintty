@@ -1,0 +1,14 @@
+{
+  "knownFolders": {
+    "System": "C:\\Windows\\System32",
+    "LocalAppData": "C:\\Users\\test\\AppData\\Local"
+  },
+  "files": [
+    "C:\\Windows\\System32\\cmd.exe"
+  ],
+  "registry": {
+    "keys": [],
+    "values": []
+  },
+  "processes": []
+}

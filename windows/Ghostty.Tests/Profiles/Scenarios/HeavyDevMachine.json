@@ -1,0 +1,47 @@
+{
+  "knownFolders": {
+    "System": "C:\\Windows\\System32",
+    "ProgramFiles": "C:\\Program Files",
+    "LocalAppData": "C:\\Users\\test\\AppData\\Local"
+  },
+  "files": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "C:\\Program Files\\Git\\bin\\bash.exe"
+  ],
+  "registry": {
+    "keys": ["LocalMachine::SOFTWARE\\GitForWindows"],
+    "values": [
+      {
+        "hive": "LocalMachine",
+        "keyPath": "SOFTWARE\\GitForWindows",
+        "valueName": "InstallPath",
+        "value": "C:\\Program Files\\Git"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "fileName": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": ["-v"],
+      "exitCode": 0,
+      "stdout": "PowerShell 7.4.1\n",
+      "stderr": ""
+    },
+    {
+      "fileName": "wsl.exe",
+      "args": ["--list", "--verbose", "--quiet"],
+      "exitCode": 0,
+      "stdout": "Ubuntu-22.04\nDebian\nkali-linux\n",
+      "stderr": ""
+    },
+    {
+      "fileName": "az",
+      "args": ["--version"],
+      "exitCode": 0,
+      "stdout": "azure-cli 2.55.0\n",
+      "stderr": ""
+    }
+  ]
+}
