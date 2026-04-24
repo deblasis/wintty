@@ -50,10 +50,19 @@ internal sealed partial class AppearancePage : Page
         {
             SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle);
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
-            if (cs.BackgroundTintColor.HasValue)
+            if (cs.IsConfiguredInFile("background-tint-color"))
             {
-                var c = cs.BackgroundTintColor.Value;
-                TintColorPicker.Color = new Rgb(c.R, c.G, c.B).ToHex();
+                if (cs.BackgroundTintColor.HasValue)
+                {
+                    var c = cs.BackgroundTintColor.Value;
+                    TintColorPicker.Color = new Rgb(c.R, c.G, c.B).ToHex();
+                }
+                TintColorResetButton.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                TintColorPicker.Color = "";
+                TintColorResetButton.Visibility = Visibility.Collapsed;
             }
             TintOpacitySlider.Value = cs.BackgroundTintOpacity ?? 0.3;
             LuminosityOpacitySlider.Value = cs.BackgroundLuminosityOpacity ?? 0.3;
@@ -229,7 +238,24 @@ internal sealed partial class AppearancePage : Page
     }
 
     private void TintColor_ColorChanged(object? sender, string hex)
-        => OnValueChanged("background-tint-color", hex);
+    {
+        OnValueChanged("background-tint-color", hex);
+        TintColorResetButton.Visibility = Visibility.Visible;
+    }
+
+    private void TintColor_Reset(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        _configService.SuppressWatcher(true);
+        try { _editor.RemoveValue("background-tint-color"); }
+        finally { _configService.SuppressWatcher(false); }
+        _configService.Reload();
+
+        _loading = true;
+        try { TintColorPicker.Color = ""; }
+        finally { _loading = false; }
+        TintColorResetButton.Visibility = Visibility.Collapsed;
+    }
 
     private void TintOpacity_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
