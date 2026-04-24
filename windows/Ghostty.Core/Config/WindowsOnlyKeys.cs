@@ -58,6 +58,10 @@ public static class WindowsOnlyKeys
             "Backdrop material for the command palette (acrylic / mica / opaque)."),
         new("power-saver-mode",
             "How the app reacts to Windows power-saving signals (auto, always, never)."),
+        new("default-profile",
+            "Id of the profile opened for a new tab or window when none is specified."),
+        new("profile-order",
+            "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
     ];
 
     public static readonly FrozenSet<string> Set =
@@ -106,5 +110,31 @@ public static class WindowsOnlyKeys
         var lastColon = prefix.LastIndexOf(':');
         key = lastColon >= 0 ? prefix[(lastColon + 1)..] : prefix;
         return key.Length > 0;
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="key"/> is a dotted
+    /// per-profile key of the shape <c>profile.&lt;id&gt;.&lt;subkey&gt;</c>.
+    /// Used by <c>ConfigService</c>'s diagnostic filter to absorb
+    /// libghostty's "unknown field" output for user-defined profile
+    /// blocks without polluting <c>WindowsOnlyKeysUsed</c> with one
+    /// entry per subkey per profile.
+    /// </summary>
+    public static bool IsProfileSubkey(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+
+        const string Prefix = "profile.";
+        if (!key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Must have at least one character of <id>, then '.', then at
+        // least one character of <subkey>. IndexOf('.', Prefix.Length)
+        // skips the initial "profile." dot and looks for the id-subkey
+        // separator; the result must be strictly greater than
+        // Prefix.Length (non-empty id) and strictly less than the
+        // string end (non-empty subkey).
+        var sep = key.IndexOf('.', Prefix.Length);
+        return sep > Prefix.Length && sep < key.Length - 1;
     }
 }
