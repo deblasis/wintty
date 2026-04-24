@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -26,4 +27,11 @@ public interface IFileSystem
     string? GetKnownFolder(KnownFolderId id);
     Task<byte[]> ReadAllBytesAsync(string path, CancellationToken ct);
     Task WriteAllBytesAsync(string path, byte[] bytes, CancellationToken ct);
+
+    /// <summary>
+    /// Last-write time in UTC, or null if the path is missing or unreadable.
+    /// Used by WindowsIconResolver to key its cache so exe/ico upgrades
+    /// invalidate stale PNG bytes without a schema bump.
+    /// </summary>
+    DateTime? GetLastWriteTimeUtc(string path);
 }

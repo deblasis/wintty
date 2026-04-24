@@ -31,14 +31,14 @@
     },
     {
       "fileName": "wsl.exe",
-      "args": ["--list", "--verbose", "--quiet"],
+      "args": ["--list", "--quiet"],
       "exitCode": 0,
       "stdout": "Ubuntu-22.04\nDebian\nkali-linux\n",
       "stderr": ""
     },
     {
-      "fileName": "az",
-      "args": ["--version"],
+      "fileName": "cmd.exe",
+      "args": ["/c", "az", "--version"],
       "exitCode": 0,
       "stdout": "azure-cli 2.55.0\n",
       "stderr": ""
