@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Config;
+using Ghostty.Core.Windows;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Windows.Win32;
@@ -10,25 +11,15 @@ using WinRT.Interop;
 namespace Ghostty.Services;
 
 /// <summary>
-/// How the manager resolves <c>window-theme</c> values that aren't
-/// explicitly <c>light</c> or <c>dark</c> (i.e. <c>auto</c>,
-/// <c>ghostty</c>). MainWindow uses Palette so terminal chrome tracks
-/// the active palette. SettingsWindow uses System so the config UI
-/// feels OS-native regardless of the terminal's color scheme.
-/// </summary>
-internal enum ThemeFallbackStyle
-{
-    Palette,
-    System,
-}
-
-/// <summary>
 /// Maps the libghostty <c>window-theme</c> config value to WinUI 3
 /// ElementTheme and the DWM immersive dark mode attribute. Handles
 /// "light", "dark", "system" (follows OS), and "auto" (derives from
 /// background color luminance, matching the macOS port).
 ///
 /// Subscribe to <see cref="ThemeChanged"/> for live-reload updates.
+/// Resolution logic lives in
+/// <see cref="Ghostty.Core.Windows.ThemeResolution"/> so it can be
+/// unit-tested without a WinUI runtime.
 /// </summary>
 internal sealed class WindowThemeManager : IDisposable
 {
@@ -91,7 +82,26 @@ internal sealed class WindowThemeManager : IDisposable
             (uint)sizeof(BOOL));
     }
 
-    private void OnConfigChanged(IConfigService _)
+    // ConfigService.ConfigChanged can be raised synchronously from a
+    // non-UI thread (ThemePreviewService.ApplyThemeColors invokes it
+    // inline; the reload path already marshals, but we can't rely on
+    // every callsite doing so). Route through the dispatcher so
+    // ThemeChanged subscribers — which touch XAML properties — always
+    // run on the UI thread.
+    private void OnConfigChanged(IConfigService _) =>
+        _dispatcher.TryEnqueue(ResolveAndNotifyIfChanged);
+
+    private void OnSystemThemeChanged(
+        Windows.UI.ViewManagement.UISettings sender, object args)
+    {
+        // ColorValuesChanged fires on a background thread. System theme
+        // flips only matter when the resolved mode consults the OS;
+        // skip the dispatch otherwise.
+        if (!ThemeResolution.TracksSystem(_configService.WindowTheme, _fallback)) return;
+        _dispatcher.TryEnqueue(ResolveAndNotifyIfChanged);
+    }
+
+    private void ResolveAndNotifyIfChanged()
     {
         var previous = IsDarkMode;
         Resolve();
@@ -99,74 +109,12 @@ internal sealed class WindowThemeManager : IDisposable
             ThemeChanged?.Invoke(IsDarkMode);
     }
 
-    private void OnSystemThemeChanged(
-        Windows.UI.ViewManagement.UISettings sender, object args)
-    {
-        // ColorValuesChanged fires on a background thread.
-        _dispatcher.TryEnqueue(() =>
-        {
-            // System theme flips only matter when the resolved mode
-            // consults the OS. Explicit light/dark never do; "system"
-            // always does; auto/ghostty do only when fallback=System.
-            if (!TracksSystem(_configService.WindowTheme)) return;
-
-            var previous = IsDarkMode;
-            Resolve();
-            if (IsDarkMode != previous)
-                ThemeChanged?.Invoke(IsDarkMode);
-        });
-    }
-
-    private bool TracksSystem(string windowTheme) => windowTheme switch
-    {
-        "light" or "dark" => false,
-        "system" => true,
-        _ => _fallback == ThemeFallbackStyle.System,
-    };
-
     private void Resolve()
     {
-        IsDarkMode = _configService.WindowTheme switch
-        {
-            "light" => false,
-            "dark" => true,
-            "system" => IsSystemDark(),
-            // auto/ghostty (and any unknown value): consult the fallback.
-            // Palette matches the terminal's chrome to the active palette;
-            // System makes the window feel OS-native regardless.
-            _ => _fallback == ThemeFallbackStyle.System
-                ? IsSystemDark()
-                : IsBackgroundDark(),
-        };
+        IsDarkMode = ThemeResolution.ResolveIsDark(
+            _configService.WindowTheme,
+            _configService.BackgroundColor,
+            _fallback,
+            OsTheme.IsDark());
     }
-
-    /// <summary>
-    /// Check whether the OS is currently in dark mode. Uses the
-    /// shared <see cref="OsTheme"/> helper; we keep the
-    /// <see cref="_uiSettings"/> instance for the ColorValuesChanged
-    /// subscription but route the actual dark-mode read through the
-    /// shared heuristic so it can't diverge from ConfigService.
-    /// </summary>
-    private static bool IsSystemDark() => OsTheme.IsDark();
-
-    /// <summary>
-    /// Derive theme from the terminal background color luminance,
-    /// matching the macOS port's "auto" behavior. A background with
-    /// relative luminance below 0.5 is considered dark.
-    /// </summary>
-    private bool IsBackgroundDark()
-    {
-        // BackgroundColor is packed 0x00RRGGBB.
-        var color = _configService.BackgroundColor;
-        var r = (color >> 16) & 0xFF;
-        var g = (color >> 8) & 0xFF;
-        var b = color & 0xFF;
-
-        // Same luminance test the macOS port uses via NSColor.isLightColor:
-        // relative luminance (BT.709 coefficients). A color is "light" if
-        // luminance >= 0.5, matching the NSColor extension upstream.
-        var luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
-        return luminance < 0.5;
-    }
-
 }
