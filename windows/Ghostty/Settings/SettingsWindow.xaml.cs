@@ -4,6 +4,7 @@ using System.Linq;
 using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
+using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
