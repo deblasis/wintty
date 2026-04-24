@@ -1,6 +1,8 @@
 using System;
 using System.ComponentModel;
 using Ghostty.Commands;
+using Ghostty.Core.Config;
+using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -11,7 +13,6 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.System;
 using Windows.UI;
-using Windows.UI.ViewManagement;
 
 namespace Ghostty.Controls.CommandPalette;
 
@@ -31,71 +32,77 @@ namespace Ghostty.Controls.CommandPalette;
 internal sealed partial class CommandPaletteControl : UserControl
 {
     private CommandPaletteViewModel? _vm;
-    // Cached background mode so ActualThemeChanged can re-resolve the
-    // right theme variant — a code-behind lookup against
+    // Cached background mode so ApplyTheme can re-resolve the right
+    // theme variant on a theme flip — a code-behind lookup against
     // Application.Current.Resources bakes in Application.RequestedTheme
-    // at call time, so the brush wouldn't auto-update when the main
-    // window's theme flipped otherwise.
+    // at call time, so the brush wouldn't auto-update when the window's
+    // theme flipped otherwise.
     private string _backgroundSetting = string.Empty;
 
-    // The palette tracks the OS theme instead of the MainWindow's
-    // palette-derived ElementTheme, matching the Settings window's
-    // "feel OS-native regardless of the terminal's colors" rule. A dark
-    // terminal palette on a light system would otherwise give a dark
-    // command palette over a light taskbar / desktop chrome, which
-    // reads as out of place compared to every other system UI surface.
-    private UISettings? _uiSettings;
-    // Fully-qualified: both Microsoft.UI.Dispatching and Windows.System
-    // export a DispatcherQueue; the WinUI 3 one is what we need.
-    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher =
-        Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+    // Config+OS-driven theme resolver. The palette uses System fallback
+    // (same as SettingsWindow) so it feels OS-native regardless of the
+    // terminal's palette: a dark palette on a light OS leaves the
+    // palette light, matching every other system UI surface. Created
+    // in Configure() and disposed on Unloaded. Null until Configure
+    // runs, which happens once during MainWindow init.
+    private WindowThemeManager? _themeManager;
 
     public CommandPaletteControl()
     {
         InitializeComponent();
-        // ApplySystemTheme here sets only the UserControl's RequestedTheme;
-        // the Popup parent is fixed up on Loaded once Parent is non-null.
-        RequestedTheme = OsTheme.IsDark() ? ElementTheme.Dark : ElementTheme.Light;
-        ActualThemeChanged += (_, _) =>
-        {
-            if (!string.IsNullOrEmpty(_backgroundSetting))
-                ApplySettings(_backgroundSetting);
-        };
-
-        // UISettings.ColorValuesChanged fires on a background thread, so
-        // the handler marshals back to the UI. Subscribe on Loaded /
-        // unsubscribe on Unloaded so the palette doesn't keep UISettings
-        // alive past its visual-tree lifetime (one palette per main
-        // window, instances can come and go with detach/reattach).
+        // Configure() runs during MainWindow init, before this control
+        // is in the visual tree. Parent-walk to the Popup may not
+        // resolve yet, so re-apply on Loaded to guarantee the Popup's
+        // RequestedTheme ends up in sync.
         Loaded += OnPaletteLoaded;
         Unloaded += OnPaletteUnloaded;
     }
 
-    private void OnPaletteLoaded(object sender, RoutedEventArgs e)
+    private void OnPaletteLoaded(object sender, RoutedEventArgs e) => ApplyTheme();
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Wires theme resolution to the live config + OS theme. Matches
+    /// the SettingsWindow pattern: explicit <c>window-theme</c> wins,
+    /// "system" follows the OS, and any other value (auto/ghostty)
+    /// falls back to the OS too — the palette is a system-native
+    /// surface, not a palette-coloured one.
+    ///
+    /// Idempotent re-wiring is supported: a subsequent call tears
+    /// down the previous subscription before creating a new one. In
+    /// practice MainWindow calls Configure exactly once during init.
+    /// </summary>
+    public void Configure(IConfigService configService)
     {
-        if (_uiSettings is not null) return;
-        _uiSettings = new UISettings();
-        _uiSettings.ColorValuesChanged += OnSystemColorsChanged;
-        // Re-read once on (re)load in case the system theme changed
-        // while the palette was detached from the visual tree.
-        ApplySystemTheme();
+        ArgumentNullException.ThrowIfNull(configService);
+
+        if (_themeManager is not null)
+        {
+            _themeManager.ThemeChanged -= OnThemeChanged;
+            _themeManager.Dispose();
+        }
+
+        _themeManager = new WindowThemeManager(
+            configService, DispatcherQueue, ThemeFallbackStyle.System);
+        _themeManager.ThemeChanged += OnThemeChanged;
+        ApplyTheme();
     }
 
     private void OnPaletteUnloaded(object sender, RoutedEventArgs e)
     {
-        if (_uiSettings is null) return;
-        _uiSettings.ColorValuesChanged -= OnSystemColorsChanged;
-        _uiSettings = null;
+        if (_themeManager is null) return;
+        _themeManager.ThemeChanged -= OnThemeChanged;
+        _themeManager.Dispose();
+        _themeManager = null;
     }
 
-    private void OnSystemColorsChanged(UISettings sender, object args)
-    {
-        _dispatcher?.TryEnqueue(ApplySystemTheme);
-    }
+    private void OnThemeChanged(bool _) => ApplyTheme();
 
-    private void ApplySystemTheme()
+    private void ApplyTheme()
     {
-        var theme = OsTheme.IsDark() ? ElementTheme.Dark : ElementTheme.Light;
+        if (_themeManager is null) return;
+        var theme = _themeManager.ElementTheme;
         RequestedTheme = theme;
         // Popup is a theme-inheritance boundary: its own RequestedTheme
         // stays at Default (= Application.RequestedTheme, which we pin
@@ -107,9 +114,13 @@ internal sealed partial class CommandPaletteControl : UserControl
         // brushes even after our own RequestedTheme flipped. Sync the
         // Popup's theme too.
         if (Parent is Popup popup) popup.RequestedTheme = theme;
+        // Re-resolve the background brush — acrylic + solid-fill brushes
+        // are pulled from Application.Resources.ThemeDictionaries in
+        // code-behind, so they don't auto-update when RequestedTheme
+        // flips the way XAML {ThemeResource} bindings do.
+        if (!string.IsNullOrEmpty(_backgroundSetting))
+            ApplySettings(_backgroundSetting);
     }
-
-    // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Connects the control to a <see cref="CommandPaletteViewModel"/>.
