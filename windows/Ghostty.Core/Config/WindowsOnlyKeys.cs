@@ -56,6 +56,8 @@ public static class WindowsOnlyKeys
             "Group entries in the command palette by category instead of listing them flat."),
         new("command-palette-background",
             "Backdrop material for the command palette (acrylic / mica / opaque)."),
+        new("power-saver-mode",
+            "How the app reacts to Windows power-saving signals (auto, always, never)."),
     ];
 
     public static readonly FrozenSet<string> Set =
