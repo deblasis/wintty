@@ -30,6 +30,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private readonly PaneActionRouter _router;
     private readonly DialogTracker _dialogs;
     private readonly Dictionary<TabModel, TabViewItem> _itemByModel = new();
+    // Header title TextBlock per tab. Kept so ApplyShellTheme can update
+    // the Foreground directly without replacing the StackPanel header
+    // (which would drop the 2px progress bar and the tab-color tint).
+    private readonly Dictionary<TabModel, TextBlock> _headerTextByModel = new();
     private bool _suppressSelectionEvent;
 
     public FrameworkElement HostElement => this;
@@ -73,6 +77,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // INPC notifications — TabModel raises EffectiveTitle on title
         // changes and Progress on OSC 9;4 state changes.
         var headerText = new TextBlock { Text = tab.EffectiveTitle };
+        // If the shell theme is already active, paint the new tab's
+        // title in the cached active-text brush so tabs opened after
+        // ApplyShellTheme match the ones that were present at the time.
+        if (_shellActiveTextBrush is not null)
+            headerText.Foreground = _shellActiveTextBrush;
         var headerBar = new ProgressBar
         {
             Height = 2,
@@ -132,6 +141,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             }
         };
         _itemByModel[tab] = item;
+        _headerTextByModel[tab] = headerText;
         TabViewControl.TabItems.Add(item);
     }
 
@@ -140,6 +150,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
         TabViewControl.TabItems.Remove(item);
         _itemByModel.Remove(tab);
+        _headerTextByModel.Remove(tab);
         // PaneHost detach from the shared container is MainWindow's job.
     }
 
@@ -367,33 +378,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
         TabViewControl.RequestedTheme = ElementTheme.Light;
         TabViewControl.RequestedTheme = _cachedTheme;
 
-        // For foreground: use a HeaderTemplate with a TextBlock whose
-        // Foreground is bound to our brush. This survives Header
-        // re-assignments (title changes) because the template is
-        // persistent -- only the Header string changes, not the
-        // template that renders it.
+        // Paint the Foreground of each tab's existing title TextBlock.
+        // The previous implementation set TabViewItem.HeaderTemplate to
+        // a programmatic DataTemplate — in WinUI 3 that replaces the
+        // custom StackPanel Header entirely, dropping both the 2px
+        // progress bar and the tab-color tint, and its `{Binding}`
+        // resolved to the TabViewItem DataContext (the TabModel), so
+        // every tab rendered its type name "Ghostty.Core.Tabs.TabModel"
+        // instead of the title.
         _shellActiveTextBrush = activeTextBrush;
-        var template = CreateColoredHeaderTemplate(activeTextBrush);
-        foreach (var item in TabViewControl.TabItems)
-        {
-            if (item is TabViewItem tvi)
-                tvi.HeaderTemplate = template;
-        }
+        foreach (var tb in _headerTextByModel.Values)
+            tb.Foreground = activeTextBrush;
     }
 
     private SolidColorBrush? _shellActiveTextBrush;
-
-    private static DataTemplate CreateColoredHeaderTemplate(SolidColorBrush brush)
-    {
-        // Build a DataTemplate programmatically: a TextBlock that
-        // displays the Header string with our foreground color.
-        var c = brush.Color;
-        var xaml = $@"<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
-            <TextBlock Text='{{Binding}}' Foreground='#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}'
-                       TextTrimming='CharacterEllipsis'/>
-        </DataTemplate>";
-        return (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(xaml);
-    }
 
     private ElementTheme _cachedTheme = ElementTheme.Default;
 
@@ -408,13 +406,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
         TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
         _shellActiveTextBrush = null;
 
-        // Remove custom header templates so tabs revert to default rendering.
-        foreach (var item in TabViewControl.TabItems)
-        {
-            if (item is TabViewItem tvi)
-                tvi.ClearValue(TabViewItem.HeaderTemplateProperty);
-        }
+        // Revert each tab title's Foreground to its inherited theme
+        // brush so the default WinUI text color returns.
+        foreach (var tb in _headerTextByModel.Values)
+            tb.ClearValue(TextBlock.ForegroundProperty);
 
+        // Toggle theme to force WinUI to re-read the default
+        // background resources now that the overrides are gone.
+        // Foregrounds don't need this — ClearValue above is immediate.
         TabViewControl.RequestedTheme = ElementTheme.Light;
         TabViewControl.RequestedTheme = _cachedTheme;
     }
