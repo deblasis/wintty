@@ -60,11 +60,18 @@ internal sealed partial class DiscoveryService
         _cacheFilePath = cacheFilePath;
     }
 
-    public async Task<IReadOnlyList<DiscoveredProfile>> DiscoverAsync(CancellationToken ct)
+    public Task<IReadOnlyList<DiscoveredProfile>> DiscoverAsync(CancellationToken ct)
+        => DiscoverAsync(bypassCache: false, ct);
+
+    public async Task<IReadOnlyList<DiscoveredProfile>> DiscoverAsync(
+        bool bypassCache, CancellationToken ct)
     {
-        var cached = await TryLoadFreshCacheAsync(ct).ConfigureAwait(false);
-        if (cached is not null)
-            return cached;
+        if (!bypassCache)
+        {
+            var cached = await TryLoadFreshCacheAsync(ct).ConfigureAwait(false);
+            if (cached is not null)
+                return cached;
+        }
 
         var merged = await RunProbesAsync(ct).ConfigureAwait(false);
         await TryWriteCacheAsync(merged, ct).ConfigureAwait(false);

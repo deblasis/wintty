@@ -24,7 +24,7 @@ internal readonly record struct GradientPoint(
 /// Fires <see cref="ConfigChanged"/> on the UI thread after every
 /// successful reload so consumers can re-read values they depend on.
 /// </summary>
-internal sealed class ConfigService : IConfigService
+internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
 {
     private GhosttyConfig _config;
     private GhosttyApp _app;
@@ -100,6 +100,19 @@ internal sealed class ConfigService : IConfigService
 
     public IReadOnlyList<string> WindowsOnlyKeysUsed => _windowsOnlyKeysUsed;
 
+    // Profile view is published atomically via a single volatile
+    // ProfileView reference so non-UI consumers see a consistent
+    // five-field set without tearing. IProfileConfigSource is public,
+    // so while today's only consumer (ProfileRegistry) reads via the
+    // UI-dispatched event, future worker-thread consumers are safe.
+    public IReadOnlyDictionary<string, Ghostty.Core.Profiles.ProfileDef> ParsedProfiles => _profileView.ParsedProfiles;
+    public IReadOnlyList<string> ProfileOrder => _profileView.ProfileOrder;
+    public string? DefaultProfileId => _profileView.DefaultProfileId;
+    public IReadOnlySet<string> HiddenProfileIds => _profileView.HiddenProfileIds;
+    public IReadOnlyList<string> ProfileWarnings => _profileView.ProfileWarnings;
+
+    public event Action? ProfileConfigChanged;
+
     /// <summary>
     /// Filtered diagnostic messages from the last load/reload.
     /// "Unknown field" errors for <see cref="WindowsOnlyKeys"/> are
@@ -123,6 +136,15 @@ internal sealed class ConfigService : IConfigService
     /// </summary>
     private readonly HashSet<string> _windowsOnlyKeysSeen =
         new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Ghostty.Core.Config.ProfileView EmptyProfileView = new(
+        ParsedProfiles: new Dictionary<string, Ghostty.Core.Profiles.ProfileDef>(),
+        ProfileOrder: Array.Empty<string>(),
+        DefaultProfileId: null,
+        HiddenProfileIds: System.Collections.Frozen.FrozenSet<string>.Empty,
+        ProfileWarnings: Array.Empty<string>());
+
+    private volatile Ghostty.Core.Config.ProfileView _profileView = EmptyProfileView;
 
     /// <summary>
     /// Snapshot of the config file's key/value lines, populated at the
@@ -220,7 +242,11 @@ internal sealed class ConfigService : IConfigService
 
         _suppressWatcher = wasSuppressed;
 
-        _dispatcher.TryEnqueue(() => ConfigChanged?.Invoke(this));
+        _dispatcher.TryEnqueue(() =>
+        {
+            ConfigChanged?.Invoke(this);
+            ProfileConfigChanged?.Invoke();
+        });
         return true;
     }
 
@@ -253,12 +279,23 @@ internal sealed class ConfigService : IConfigService
 
             // Filter "unknown field" diagnostics for keys we know are
             // Windows-only; surface them via WindowsOnlyKeysUsed instead.
-            if (WindowsOnlyKeys.TryExtractUnknownFieldKey(message, out var key)
-                && WindowsOnlyKeys.Contains(key))
+            if (WindowsOnlyKeys.TryExtractUnknownFieldKey(message, out var key))
             {
-                if (_windowsOnlyKeysSeen.Add(key))
-                    _windowsOnlyKeysUsed.Add(key);
-                continue;
+                if (WindowsOnlyKeys.IsProfileSubkey(key))
+                {
+                    // profile.<id>.<subkey> keys are handled by
+                    // ProfileRegistry; suppress the diagnostic entirely
+                    // without surfacing a per-subkey entry in
+                    // WindowsOnlyKeysUsed (would flood the settings UI
+                    // notice list for a many-profile config).
+                    continue;
+                }
+                if (WindowsOnlyKeys.Contains(key))
+                {
+                    if (_windowsOnlyKeysSeen.Add(key))
+                        _windowsOnlyKeysUsed.Add(key);
+                    continue;
+                }
             }
 
             _diagnosticMessages.Add(message);
@@ -433,6 +470,31 @@ internal sealed class ConfigService : IConfigService
         }
 
         AnsiPalette = GetAllPaletteColors();
+
+        // Profile-view second pass. The scalar keys (default-profile
+        // and profile-order) are read through GetFileValue which hits
+        // the parsed line cache populated at the top of ReadFlags.
+        // The profile.<id>.* regex and hidden-id extraction need the
+        // raw file text though, and _configFileCache stores parsed
+        // pairs rather than the original bytes, so this second read is
+        // deliberate -- the reload is already cold-path and the config
+        // is small. Readers of the five profile-view properties see a
+        // consistent snapshot via the single volatile _profileView
+        // assignment below.
+        var rawConfigText = File.Exists(ConfigFilePath)
+            ? File.ReadAllText(ConfigFilePath)
+            : string.Empty;
+        var view = Ghostty.Core.Config.ConfigServiceProfileParser.ParseAll(
+            rawConfigText,
+            key =>
+            {
+                var v = GetFileValue(key, string.Empty);
+                return v.Length == 0 ? null : v;
+            });
+        _profileView = view;
+
+        foreach (var warning in view.ProfileWarnings)
+            StaticLoggers.ConfigService.LogProfileParseWarning(warning);
     }
 
     /// <summary>
@@ -871,4 +933,16 @@ internal static partial class ConfigServiceLogExtensions
                    Message = "[ConfigService] Reload failed to create new config")]
     internal static partial void LogReloadFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Surfaces each warning string returned by
+    // ConfigServiceProfileParser.ParseAll so admin-visible parse
+    // issues (malformed profile blocks, unknown ids, etc.) land in
+    // the log stream rather than only in the _profileWarnings
+    // field. Warning level because the reload still succeeds --
+    // the offending block is just skipped.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Profiles.ProfileParseWarning,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] profile parse: {Warning}")]
+    internal static partial void LogProfileParseWarning(
+        this ILogger<ConfigService> logger, string warning);
 }
