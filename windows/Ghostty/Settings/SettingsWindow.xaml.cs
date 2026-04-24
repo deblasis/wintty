@@ -120,6 +120,13 @@ internal sealed partial class SettingsWindow : Window
         ctrlF.Invoked += (_, args) => { args.Handled = true; SearchBox.Focus(FocusState.Keyboard); };
         NavView.KeyboardAccelerators.Add(ctrlF);
 
+        // NavView hosts this accelerator, so WinUI auto-shows its shortcut
+        // tooltip wherever hover lands inside NavView's template -- which
+        // is every nav item. The shortcut is already advertised by the
+        // SearchBox placeholder, so hide the auto-tooltip. Matches the
+        // policy on MainWindow's RootGrid accelerators.
+        NavView.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+
         Closed += OnClosed;
         NavView.SelectedItem = NavView.MenuItems[0];
     }
