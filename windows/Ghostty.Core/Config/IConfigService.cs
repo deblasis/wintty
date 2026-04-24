@@ -110,4 +110,33 @@ public interface IConfigService : IDisposable
     /// as an informational notice (not an error).
     /// </summary>
     IReadOnlyList<string> WindowsOnlyKeysUsed { get; }
+
+    /// <summary>
+    /// Parsed user-defined profiles from <c>profile.&lt;id&gt;.*</c>
+    /// lines. Keys are lowercase-ASCII ids. Replaced on every reload.
+    /// See <c>Ghostty.Core.Profiles.IProfileConfigSource</c> for the
+    /// narrow interface that <c>ProfileRegistry</c> depends on.
+    /// </summary>
+    IReadOnlyDictionary<string, Ghostty.Core.Profiles.ProfileDef> ParsedProfiles { get; }
+
+    /// <summary>
+    /// Ids from <c>profile-order</c>, empty when unset.
+    /// </summary>
+    IReadOnlyList<string> ProfileOrder { get; }
+
+    /// <summary>
+    /// Value of <c>default-profile</c>, or null when unset.
+    /// </summary>
+    string? DefaultProfileId { get; }
+
+    /// <summary>
+    /// Ids for which <c>profile.&lt;id&gt;.hidden = true</c> appears.
+    /// </summary>
+    IReadOnlySet<string> HiddenProfileIds { get; }
+
+    /// <summary>
+    /// Non-fatal warnings emitted by the profile parser during the
+    /// last reload.
+    /// </summary>
+    IReadOnlyList<string> ProfileWarnings { get; }
 }

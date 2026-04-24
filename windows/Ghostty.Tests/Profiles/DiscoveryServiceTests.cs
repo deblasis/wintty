@@ -140,6 +140,36 @@ public sealed class DiscoveryServiceTests
         Assert.Equal("1.2.4", rewritten!.WinttyVersion);
     }
 
+    [Fact]
+    public async Task DiscoverAsync_BypassCache_AlwaysRunsProbes()
+    {
+        var fs = new Ghostty.Tests.Profiles.Fakes.FakeFileSystem();
+        var clock = new FakeClock { UtcNow = DateTimeOffset.Parse("2026-01-01T00:00:00Z") };
+        var cachePath = @"C:\wintty\cache\v1.json";
+
+        // Warm cache with a single entry so the regular code path
+        // would short-circuit.
+        var probe = new Ghostty.Tests.Profiles.Fakes.FakeInstalledShellProbe(
+            "probe-a",
+            new[] { new DiscoveredProfile(
+                Id: "a", Name: "A", Command: "a.exe", ProbeId: "probe-a",
+                WorkingDirectory: null, Icon: null, TabTitle: null) });
+        var warmSvc = new DiscoveryService(new[] { probe }, fs, clock, "1.0.0", cachePath);
+        var cacheWarm = await warmSvc.DiscoverAsync(CancellationToken.None);
+        Assert.Single(cacheWarm);
+        Assert.Equal(1, probe.CallCount);
+
+        // Second call with bypassCache: true must run probes again.
+        var _ = await warmSvc.DiscoverAsync(bypassCache: true, CancellationToken.None);
+        Assert.Equal(2, probe.CallCount);
+
+        // Also assert cache was refreshed: file now has freshly-dated cache.
+        var rewritten = DiscoveryCache.Deserialize(await fs.ReadAllBytesAsync(cachePath, CancellationToken.None));
+        Assert.Equal(clock.UtcNow, rewritten!.CreatedAt);
+        Assert.Single(rewritten.Profiles);
+        Assert.Equal("a", rewritten.Profiles[0].Id);
+    }
+
     internal sealed class FakeClock : IClock
     {
         public DateTimeOffset UtcNow { get; set; }
