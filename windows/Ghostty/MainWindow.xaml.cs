@@ -1209,36 +1209,32 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Resolve effective acrylic tuning values from config, applying
-    /// blur-follows-opacity scaling when enabled.
+    /// Resolve effective acrylic tuning values from config. Thin
+    /// adapter: packs <see cref="Windows.UI.Color"/> into ARGB, delegates
+    /// the policy to <see cref="AcrylicTintResolver"/>, unpacks back.
     /// </summary>
     private (Windows.UI.Color tintColor, float tintOpacity, float luminosityOpacity)
         ResolveAcrylicTuning()
     {
-        var tintColor = _configService.BackgroundTintColor
-            ?? Windows.UI.Color.FromArgb(0, 0, 0, 0);
-        var tintOpacity = _configService.BackgroundTintOpacity ?? 0.3f;
-        var luminosityOpacity = _configService.BackgroundLuminosityOpacity ?? 0.3f;
+        uint? overrideArgb = _configService.BackgroundTintColor is { } c
+            ? ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B
+            : null;
 
-        // When enabled, tint and luminosity track opacity directly:
-        // 1.0 = fully opaque (solid-looking), 0.0 = fully see-through.
-        // Uses the terminal background color as tint so at full opacity
-        // the acrylic blends into the terminal background.
-        if (_configService.BackgroundBlurFollowsOpacity)
-        {
-            var opacity = (float)_configService.BackgroundOpacity;
-            tintOpacity = opacity;
-            luminosityOpacity = opacity;
+        var t = AcrylicTintResolver.Resolve(
+            tintOverrideArgb: overrideArgb,
+            themeBackgroundRgb: _configService.BackgroundColor,
+            tintOpacityOverride: _configService.BackgroundTintOpacity,
+            luminosityOpacityOverride: _configService.BackgroundLuminosityOpacity,
+            blurFollowsOpacity: _configService.BackgroundBlurFollowsOpacity,
+            backgroundOpacity: _configService.BackgroundOpacity);
 
-            if (_configService.BackgroundTintColor is null)
-            {
-                var bg = _configService.BackgroundColor;
-                tintColor = Windows.UI.Color.FromArgb(0xFF,
-                    (byte)(bg >> 16), (byte)(bg >> 8), (byte)bg);
-            }
-        }
+        var tint = Windows.UI.Color.FromArgb(
+            (byte)(t.TintArgb >> 24),
+            (byte)(t.TintArgb >> 16),
+            (byte)(t.TintArgb >> 8),
+            (byte)t.TintArgb);
 
-        return (tintColor, tintOpacity, luminosityOpacity);
+        return (tint, t.TintOpacity, t.LuminosityOpacity);
     }
 
     /// <summary>
