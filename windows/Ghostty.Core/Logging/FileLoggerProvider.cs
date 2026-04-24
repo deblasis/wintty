@@ -256,7 +256,9 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     private LogRecord SyntheticDroppedRecord(long count)
         => new(
-            Timestamp: _clock.UtcNow,
+            // LogRecord.Timestamp is DateTime; IClock.UtcNow is
+            // DateTimeOffset post-widening, so unwrap via UtcDateTime.
+            Timestamp: _clock.UtcNow.UtcDateTime,
             Level: LogLevel.Warning,
             EventId: new EventId(0, "LogRecordsDropped"),
             Category: "Ghostty.Core.Logging",
@@ -363,7 +365,9 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
             Exception? exception, Func<TState, Exception?, string> formatter)
         {
             _parent.TryWrite(new LogRecord(
-                Timestamp: _parent._clock.UtcNow,
+                // LogRecord.Timestamp is DateTime; IClock.UtcNow is
+                // DateTimeOffset post-widening, so unwrap via UtcDateTime.
+                Timestamp: _parent._clock.UtcNow.UtcDateTime,
                 Level: logLevel,
                 EventId: eventId,
                 Category: _category,

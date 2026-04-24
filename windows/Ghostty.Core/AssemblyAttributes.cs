@@ -13,3 +13,4 @@
 // renamed from Ghostty to Wintty; this grant follows that rename.
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Wintty")]
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Ghostty.Tests")]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Ghostty.Tests.Windows")]
