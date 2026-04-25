@@ -56,6 +56,33 @@ fn buildGlslang(
     // to avoid C++ ABI issues between Zig's bundled Clang and MSVC's C++ runtime
     // when the resulting DLL is loaded by .NET.
     if (target.result.abi == .msvc) {
+        // Pre-build glslang to .obj files via MSVC cl.exe. Run as a build step
+        // so `zig build` is one-shot for new contributors and CI; previously
+        // required a manual `cmd /c pkg/glslang/build_msvc.bat` from a VS
+        // Developer Shell before `zig build`, which only failed at the
+        // .obj-consumption step with a confusing "FileNotFound" error and no
+        // hint about the missing pre-step. The bat must run from a VS
+        // Developer Shell (cl.exe + Windows SDK on PATH); this is already a
+        // hard requirement of the .msvc target. The host platform check
+        // narrows this to Windows because cl.exe doesn't exist on
+        // linux/macos hosts cross-compiling to .msvc (rare, but defensive).
+        //
+        // Caching is best-effort: addSystemCommand has no native way to
+        // express "this step produces these specific .obj files," so the
+        // step is treated as side-effecting and re-runs every time it
+        // appears in the graph. The bat itself uses cl.exe /c which does
+        // not skip up-to-date sources, so cold-build cost is ~10-30s.
+        // Acceptable for v1; can optimize later with a stamp-file scheme.
+        if (target.result.os.tag == .windows) {
+            const bat_step = b.addSystemCommand(&.{
+                "cmd.exe",
+                "/c",
+                b.pathFromRoot("build_msvc.bat"),
+            });
+            bat_step.setName("build_msvc.bat (glslang)");
+            lib.step.dependOn(&bat_step.step);
+        }
+
         // Merge the MSVC-compiled objects directly into this library.
         // We use a dummy C file so the library has at least one compilation unit.
         lib.addCSourceFiles(.{
