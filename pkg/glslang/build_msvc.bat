@@ -9,7 +9,10 @@ if not defined MSVC_DIR (
         for /f "usebackq delims=" %%d in (`"!VSWHERE!" -latest -property installationPath`) do set "VS_PATH=%%d"
     )
     if defined VS_PATH (
-        for /f "usebackq delims=" %%t in (`dir /b /ad "!VS_PATH!\VC\Tools\MSVC" 2^>nul ^| sort /r`) do (
+        REM Use absolute path to sort.exe: GNU coreutils sort from git-bash/MSYS2/WSL
+        REM on PATH ahead of System32 silently shadows Windows sort and treats /r as
+        REM a filename, which empties this loop and breaks SDK auto-detection.
+        for /f "usebackq delims=" %%t in (`dir /b /ad "!VS_PATH!\VC\Tools\MSVC" 2^>nul ^| %SystemRoot%\System32\sort.exe /r`) do (
             set "MSVC_DIR=!VS_PATH!\VC\Tools\MSVC\%%t"
             goto :found_msvc
         )
@@ -36,7 +39,8 @@ REM Discover Windows SDK version (use latest)
 set WINSDK_VER=
 set WINSDK_ROOT=%ProgramFiles(x86)%\Windows Kits\10
 if exist "%WINSDK_ROOT%\Include" (
-    for /f "delims=" %%v in ('dir /b /ad "%WINSDK_ROOT%\Include" 2^>nul ^| sort /r') do (
+    REM Absolute path to sort.exe; see comment above on shadowed PATH lookups.
+    for /f "delims=" %%v in ('dir /b /ad "%WINSDK_ROOT%\Include" 2^>nul ^| %SystemRoot%\System32\sort.exe /r') do (
         if exist "%WINSDK_ROOT%\Include\%%v\um" (
             set WINSDK_VER=%%v
             goto :found_sdk
