@@ -38,9 +38,13 @@ public static class ConfigServiceProfileParser
         var profileOrder = ParseCsv(profileOrderRaw);
 
         // Suppress warnings for ids that appear only as a hidden-override
-        // (e.g. "profile.foo.hidden = true" with no name/command). These
-        // are intentional suppression markers, not malformed definitions.
-        var warnings = FilterHiddenOnlyWarnings(parsed.Warnings, parsed.Profiles, hidden);
+        // (e.g. "profile.foo.hidden = true" or "= false" with no
+        // name/command). Both directions are intentional suppression
+        // markers, not malformed definitions; the un-hide path of the
+        // settings-page toggle writes hidden = false, so filtering only
+        // on the true-set would leak false-positive warnings.
+        var hiddenMentions = ProfileSourceParser.ExtractHiddenMentionIds(configText);
+        var warnings = FilterHiddenOnlyWarnings(parsed.Warnings, parsed.Profiles, hiddenMentions);
 
         return new ProfileView(
             ParsedProfiles: parsed.Profiles,
@@ -58,21 +62,21 @@ public static class ConfigServiceProfileParser
     private static IReadOnlyList<string> FilterHiddenOnlyWarnings(
         IReadOnlyList<string> warnings,
         IReadOnlyDictionary<string, ProfileDef> profiles,
-        IReadOnlySet<string> hidden)
+        IReadOnlySet<string> hiddenMentions)
     {
         if (warnings.Count == 0) return warnings;
 
-        // Precompute the "profile '<id>':" prefixes once per hidden id
+        // Precompute the "profile '<id>':" prefixes once per mentioned id
         // rather than per (warning x id) pair; the old string interpolation
         // inside the inner loop allocated a new format string on every
         // iteration. Skip ids that also have a full parsed definition --
         // those warnings are for genuinely broken blocks, not hide-only
         // overrides.
         List<string>? prefixes = null;
-        foreach (var id in hidden)
+        foreach (var id in hiddenMentions)
         {
             if (profiles.ContainsKey(id)) continue;
-            (prefixes ??= new List<string>(hidden.Count)).Add($"profile '{id}':");
+            (prefixes ??= new List<string>(hiddenMentions.Count)).Add($"profile '{id}':");
         }
         if (prefixes is null) return warnings;
 
