@@ -9,8 +9,10 @@ namespace Ghostty.Tests.Profiles;
 internal sealed class FakeProfileRegistry : IProfileRegistry
 {
     private List<ResolvedProfile> _profiles = new();
+    private List<ResolvedProfile> _hidden = new();
 
     public IReadOnlyList<ResolvedProfile> Profiles => _profiles;
+    public IReadOnlyList<ResolvedProfile> HiddenProfiles => _hidden;
     public string? DefaultProfileId { get; set; }
     public long Version { get; private set; }
 
@@ -33,14 +35,19 @@ internal sealed class FakeProfileRegistry : IProfileRegistry
     public void Dispose() { }
 
     /// <summary>
-    /// Test-only helper: replace the profile list, bump
-    /// <see cref="Version"/>, and fire <see cref="ProfilesChanged"/>
-    /// synchronously (mimicking the production UI-dispatch shape from
-    /// the perspective of a single-threaded test).
+    /// Test-only helper: replace the profile list (and optionally the
+    /// hidden list), bump <see cref="Version"/>, and fire
+    /// <see cref="ProfilesChanged"/> synchronously (mimicking the
+    /// production UI-dispatch shape from the perspective of a
+    /// single-threaded test).
     /// </summary>
-    public void SetProfiles(IReadOnlyList<ResolvedProfile> profiles, string? defaultProfileId = null)
+    public void SetProfiles(
+        IReadOnlyList<ResolvedProfile> profiles,
+        IReadOnlyList<ResolvedProfile>? hidden = null,
+        string? defaultProfileId = null)
     {
         _profiles = new List<ResolvedProfile>(profiles);
+        _hidden = hidden is null ? new List<ResolvedProfile>() : new List<ResolvedProfile>(hidden);
         DefaultProfileId = defaultProfileId;
         Version++;
         ProfilesChanged?.Invoke(this);
