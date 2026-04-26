@@ -10,20 +10,23 @@ namespace Ghostty.Core.Profiles;
 /// then unlisted user profiles in the order they were defined, then
 /// unlisted discovered profiles in alphabetical-by-ID order. Hidden
 /// profiles (either via ProfileDef.Hidden or the hidden set parameter)
-/// are omitted entirely.
+/// are returned in <see cref="ResolvedProfileSet.Hidden"/> rather than
+/// the visible list, so the settings-UI inspector can offer an unhide
+/// affordance without re-running the resolver against a different
+/// hidden set.
 /// </summary>
 public static class ProfileOrderResolver
 {
-    public static IReadOnlyList<ResolvedProfile> Resolve(
+    public static ResolvedProfileSet Resolve(
         IReadOnlyList<ProfileDef> user,
         IReadOnlyList<DiscoveredProfile> discovered,
         IReadOnlyList<string>? profileOrder,
         string? defaultProfileId,
-        IReadOnlySet<string> hidden)
+        IReadOnlySet<string> hiddenIds)
     {
         ArgumentNullException.ThrowIfNull(user);
         ArgumentNullException.ThrowIfNull(discovered);
-        ArgumentNullException.ThrowIfNull(hidden);
+        ArgumentNullException.ThrowIfNull(hiddenIds);
 
         var combined = new Dictionary<string, ProfileDef>();
         var userOrder = new List<string>();
@@ -69,45 +72,56 @@ public static class ProfileOrderResolver
         foreach (var id in discoveredById.Keys.OrderBy(k => k, StringComparer.Ordinal))
             if (seen.Add(id)) ordered.Add(id);
 
-        var result = new List<ResolvedProfile>();
-        var index = 0;
-        var defaultResolved = ResolveDefault(defaultProfileId, ordered, combined, hidden);
+        var visible = new List<ResolvedProfile>();
+        var hidden = new List<ResolvedProfile>();
+        var visibleIndex = 0;
+        var hiddenIndex = 0;
+        var defaultResolved = ResolveDefault(defaultProfileId, ordered, combined, hiddenIds);
         foreach (var id in ordered)
         {
             var def = combined[id];
-            if (def.Hidden || hidden.Contains(id)) continue;
-            result.Add(new ResolvedProfile(
-                Id: def.Id,
-                Name: def.Name,
-                Command: def.Command,
-                WorkingDirectory: def.WorkingDirectory,
-                Icon: def.Icon ?? new IconSpec.BundledKey("default"),
-                TabTitle: def.TabTitle ?? def.Name,
-                Visuals: def.Visuals,
-                ProbeId: def.ProbeId,
-                OrderIndex: index++,
-                IsDefault: def.Id == defaultResolved));
+            var isHidden = def.Hidden || hiddenIds.Contains(id);
+            if (isHidden)
+                hidden.Add(MakeProfile(def, hiddenIndex++, isDefault: false));
+            else
+                visible.Add(MakeProfile(def, visibleIndex++, isDefault: def.Id == defaultResolved));
         }
-        return result;
+        return new ResolvedProfileSet(visible, hidden);
     }
+
+    // Single source of truth for the ProfileDef -> ResolvedProfile
+    // projection so the visible / hidden branches above stay in sync as
+    // the record gains fields.
+    private static ResolvedProfile MakeProfile(ProfileDef def, int orderIndex, bool isDefault)
+        => new(
+            Id: def.Id,
+            Name: def.Name,
+            Command: def.Command,
+            WorkingDirectory: def.WorkingDirectory,
+            Icon: def.Icon ?? new IconSpec.BundledKey("default"),
+            TabTitle: def.TabTitle ?? def.Name,
+            Visuals: def.Visuals,
+            ProbeId: def.ProbeId,
+            OrderIndex: orderIndex,
+            IsDefault: isDefault);
 
     private static string? ResolveDefault(
         string? requested,
         List<string> ordered,
         Dictionary<string, ProfileDef> combined,
-        IReadOnlySet<string> hidden)
+        IReadOnlySet<string> hiddenIds)
     {
         if (requested is not null
             && combined.TryGetValue(requested, out var def)
             && !def.Hidden
-            && !hidden.Contains(requested))
+            && !hiddenIds.Contains(requested))
         {
             return requested;
         }
         foreach (var id in ordered)
         {
             var d = combined[id];
-            if (!d.Hidden && !hidden.Contains(id)) return id;
+            if (!d.Hidden && !hiddenIds.Contains(id)) return id;
         }
         return null;
     }

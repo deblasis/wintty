@@ -66,6 +66,15 @@
                         <SymbolIcon Symbol="Font" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem x:Name="NavProfiles" Content="Profiles" Tag="profiles">
+                    <NavigationViewItem.Icon>
+                        <!-- E748 Segoe Fluent "PreviewLink": ProfileCommandSource
+                             ships LeadingIcon="" today, so there's no existing
+                             glyph to reuse for visual continuity. PreviewLink
+                             reads as a list-of-launchables which fits the page. -->
+                        <FontIcon Glyph="&#xE748;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem x:Name="NavColors" Content="Colors" Tag="colors">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Highlight" />

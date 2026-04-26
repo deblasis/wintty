@@ -1,0 +1,28 @@
+<Page
+    x:Class="Ghostty.Settings.Pages.ProfilesPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
+
+    <ScrollViewer Padding="24">
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="Profiles" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
+
+            <InfoBar x:Name="WarningsBar"
+                     IsOpen="False"
+                     IsClosable="False"
+                     Severity="Warning"
+                     Title="Profile config warnings"
+                     Margin="0,0,0,12" />
+
+            <ctrl:SettingsGroup Header="Default profile"
+                                Description="Used when no profile is specified at launch.">
+                <ctrl:SettingsCard x:Name="DefaultProfileCard" Header="Default profile id" />
+            </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup x:Name="ProfilesGroup"
+                                Header="Profiles"
+                                Description="Hidden profiles stay listed here but don't appear in the new-tab menu, command palette, or Ctrl+Shift+1..9 chords." />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -92,4 +92,46 @@ public sealed class ProfileSourceParserHiddenIdsTests
         var result = ProfileSourceParser.ExtractHiddenIds(text);
         Assert.Empty(result);
     }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_HiddenFalse_Included()
+    {
+        const string text = "profile.azure.hidden = false";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(text);
+        Assert.Single(result);
+        Assert.Contains("azure", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_BothTrueAndFalse_BothIncluded()
+    {
+        const string text = """
+            profile.foo.hidden = true
+            profile.bar.hidden = false
+            """;
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(text);
+        Assert.Equal(2, result.Count);
+        Assert.Contains("foo", result);
+        Assert.Contains("bar", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_NonBoolValue_StillIncluded()
+    {
+        // Even nonsense values count as mentions -- the warnings filter
+        // wants to know "did the user mention this id via a hidden line",
+        // not "did the value parse cleanly". Resolver-side filtering
+        // (ExtractHiddenIds) keeps the strict semantics.
+        const string text = "profile.weird.hidden = oops";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(text);
+        Assert.Contains("weird", result);
+    }
+
+    [Fact]
+    public void ExtractHiddenMentionIds_NonHiddenSubkey_Ignored()
+    {
+        const string text = "profile.azure.name = Azure";
+        var result = ProfileSourceParser.ExtractHiddenMentionIds(text);
+        Assert.Empty(result);
+    }
 }

@@ -24,7 +24,7 @@ public sealed class ProfileOrderResolverTests
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal(new[] { "alpha", "zulu", "bravo", "delta" }, resolved.Select(r => r.Id));
     }
@@ -40,7 +40,7 @@ public sealed class ProfileOrderResolverTests
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Single(resolved);
         Assert.Equal("MyPwsh", resolved[0].Name);
@@ -57,7 +57,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal(new[] { "a", "c" }, resolved.Select(r => r.Id));
     }
@@ -72,7 +72,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string> { "a" }).ToList();
+            hiddenIds: new HashSet<string> { "a" }).Visible.ToList();
 
         Assert.Equal(new[] { "b" }, resolved.Select(r => r.Id));
     }
@@ -89,7 +89,7 @@ public sealed class ProfileOrderResolverTests
             discovered: discovered,
             profileOrder: order,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal(new[] { "delta", "alpha", "zulu", "bravo" }, resolved.Select(r => r.Id));
     }
@@ -105,7 +105,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: order,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal(new[] { "a" }, resolved.Select(r => r.Id));
     }
@@ -120,7 +120,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: "zulu",
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.False(resolved.Single(r => r.Id == "alpha").IsDefault);
         Assert.True(resolved.Single(r => r.Id == "zulu").IsDefault);
@@ -136,7 +136,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: "ghost",
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.True(resolved[0].IsDefault);
         Assert.Equal("alpha", resolved[0].Id);
@@ -152,7 +152,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.True(resolved[0].IsDefault);
     }
@@ -167,7 +167,7 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal(0, resolved[0].OrderIndex);
         Assert.Equal(1, resolved[1].OrderIndex);
@@ -182,7 +182,7 @@ public sealed class ProfileOrderResolverTests
             discovered: new[] { Disc("wsl-ubuntu", probe: "wsl") },
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).Single();
+            hiddenIds: new HashSet<string>()).Visible.Single();
 
         Assert.Equal("wsl", resolved.ProbeId);
     }
@@ -195,9 +195,9 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>());
+            hiddenIds: new HashSet<string>());
 
-        Assert.Empty(resolved);
+        Assert.Empty(resolved.Visible);
     }
 
     [Fact]
@@ -210,14 +210,14 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: null,
             defaultProfileId: "pwsh-7",
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         var after = ProfileOrderResolver.Resolve(
             user: users,
             discovered: new[] { Disc("wsl-ubuntu"), Disc("wsl-debian") },
             profileOrder: null,
             defaultProfileId: "pwsh-7",
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         Assert.Equal("pwsh-7", before[0].Id);
         Assert.Equal("pwsh-7", after[0].Id);
@@ -240,14 +240,14 @@ public sealed class ProfileOrderResolverTests
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string>()).ToList();
+            hiddenIds: new HashSet<string>()).Visible.ToList();
 
         var hideKali = ProfileOrderResolver.Resolve(
             user: [],
             discovered: discovered,
             profileOrder: null,
             defaultProfileId: null,
-            hidden: new HashSet<string> { "wsl-kali" }).ToList();
+            hiddenIds: new HashSet<string> { "wsl-kali" }).Visible.ToList();
 
         Assert.Equal(new[] { "wsl-debian", "wsl-kali", "wsl-ubuntu" },
                      noHide.Select(r => r.Id));
@@ -268,8 +268,57 @@ public sealed class ProfileOrderResolverTests
             discovered: [],
             profileOrder: new[] { "c", "a" },
             defaultProfileId: null,
-            hidden: new HashSet<string> { "b" }).ToList();
+            hiddenIds: new HashSet<string> { "b" }).Visible.ToList();
 
         Assert.Equal(new[] { "c", "a", "d" }, pinned.Select(r => r.Id));
+    }
+
+    [Fact]
+    public void Resolve_HiddenSet_RetainedInHiddenListInOriginalOrder()
+    {
+        var users = new[] { User("alpha"), User("zulu", hidden: true) };
+        var discovered = new[] { Disc("bravo") };
+
+        var set = ProfileOrderResolver.Resolve(
+            user: users,
+            discovered: discovered,
+            profileOrder: null,
+            defaultProfileId: null,
+            hiddenIds: new HashSet<string> { "bravo" });
+
+        Assert.Equal(new[] { "alpha" }, set.Visible.Select(r => r.Id));
+        Assert.Equal(new[] { "zulu", "bravo" }, set.Hidden.Select(r => r.Id));
+    }
+
+    [Fact]
+    public void Resolve_HiddenEntries_OrderIndexRestartsAtZero()
+    {
+        var users = new[] { User("a"), User("b", hidden: true), User("c", hidden: true) };
+
+        var set = ProfileOrderResolver.Resolve(
+            user: users,
+            discovered: [],
+            profileOrder: null,
+            defaultProfileId: null,
+            hiddenIds: new HashSet<string>());
+
+        Assert.Equal(new[] { 0 }, set.Visible.Select(r => r.OrderIndex));
+        Assert.Equal(new[] { 0, 1 }, set.Hidden.Select(r => r.OrderIndex));
+    }
+
+    [Fact]
+    public void Resolve_HiddenEntry_NeverMarkedDefault()
+    {
+        var users = new[] { User("a", hidden: true), User("b") };
+
+        var set = ProfileOrderResolver.Resolve(
+            user: users,
+            discovered: [],
+            profileOrder: null,
+            defaultProfileId: "a",
+            hiddenIds: new HashSet<string>());
+
+        Assert.False(set.Hidden.Single(r => r.Id == "a").IsDefault);
+        Assert.True(set.Visible.Single(r => r.Id == "b").IsDefault);
     }
 }
