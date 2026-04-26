@@ -8,6 +8,7 @@ using Ghostty.Commands;
 using Ghostty.Controls;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
+using Ghostty.Core.Input;
 using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
@@ -80,6 +81,11 @@ public sealed partial class MainWindow : Window
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
+
+    // Static cache so the router's getProfiles lambda does not allocate a
+    // fresh empty array on every Ctrl+Shift+N chord when ProfileRegistry is
+    // not yet wired (cold-start path) or returns an unset snapshot.
+    private static readonly IReadOnlyList<Ghostty.Core.Profiles.ResolvedProfile> EmptyProfiles = [];
     private readonly DialogTracker _dialogs = new();
     private readonly WindowState _windowState;
     // Kept as a field so the ColorValuesChanged subscription is not GC'd.
@@ -352,7 +358,10 @@ public sealed partial class MainWindow : Window
         _tabManager = new TabManager(
             snapshot => _factory.Create(snapshot),
             seed: seedTab);
-        _router = new PaneActionRouter(_tabManager);
+        _router = new PaneActionRouter(
+            _tabManager,
+            getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
+            openProfile: OpenProfile);
         _windowState = WindowState.Load();
         RestoreWindowPlacement();
 
@@ -1680,6 +1689,18 @@ public sealed partial class MainWindow : Window
         var config = new ConfigCommandSource();
 
         var sources = new List<ICommandSource> { builtIn, jump, config };
+
+        // PR 5: profile rows. Null-check App services as a defensive belt
+        // (cold-start where App.ProfileRegistry isn't wired yet would skip
+        // the source entirely; ProfileCommandSource itself returns an empty
+        // list when its registry has no profiles).
+        if (App.ProfileRegistry is not null && App.ModifierKeyState is not null)
+        {
+            sources.Add(new ProfileCommandSource(
+                App.ProfileRegistry,
+                App.ModifierKeyState,
+                OpenProfile));
+        }
 
         // Build the action autocompleter with a minimal set of action schemas.
         var schemas = new Dictionary<string, ActionSchema>
