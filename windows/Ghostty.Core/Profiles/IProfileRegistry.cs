@@ -22,6 +22,17 @@ public interface IProfileRegistry : IDisposable
     IReadOnlyList<ResolvedProfile> Profiles { get; }
 
     /// <summary>
+    /// Profiles whose hidden flag is set (either
+    /// <see cref="ProfileDef.Hidden"/> or
+    /// <see cref="IProfileConfigSource.HiddenProfileIds"/>). Same record
+    /// shape as <see cref="Profiles"/>. <see cref="ResolvedProfile.OrderIndex"/>
+    /// restarts at 0 within this list. <see cref="ResolvedProfile.IsDefault"/>
+    /// is always false on entries here -- the resolver never picks a
+    /// hidden profile as default.
+    /// </summary>
+    IReadOnlyList<ResolvedProfile> HiddenProfiles { get; }
+
+    /// <summary>
     /// Id of the entry with <c>IsDefault = true</c> in
     /// <see cref="Profiles"/>, or null when the list is empty.
     /// </summary>
