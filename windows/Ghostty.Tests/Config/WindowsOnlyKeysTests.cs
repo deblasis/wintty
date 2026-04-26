@@ -128,4 +128,19 @@ public class WindowsOnlyKeysTests
     {
         Assert.Equal(expected, Ghostty.Core.Config.WindowsOnlyKeys.IsProfileSubkey(key));
     }
+
+    [Theory]
+    [InlineData("internal.update-simulator", true)]
+    [InlineData("internal.foo", true)]
+    [InlineData("internal.a", true)]                    // minimal valid (single char name)
+    [InlineData("INTERNAL.UPDATE-SIMULATOR", true)]     // case-insensitive prefix
+    [InlineData("internal.", false)]                    // bare prefix, no name
+    [InlineData("internal", false)]                     // exact scalar
+    [InlineData("internalish", false)]                  // prefix-without-dot, different key
+    [InlineData("profile.x.internal", false)]           // different namespace
+    [InlineData("background-style", false)]             // unrelated public key
+    public void IsInternalKey_Expected(string key, bool expected)
+    {
+        Assert.Equal(expected, Ghostty.Core.Config.WindowsOnlyKeys.IsInternalKey(key));
+    }
 }
