@@ -1,5 +1,6 @@
 using Ghostty.Controls;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Profiles;
 using Ghostty.Hosting;
 using Ghostty.Panes;
 
@@ -21,6 +22,9 @@ internal sealed class PaneHostFactory
 
     public PaneHostFactory(GhosttyHost host) { _host = host; }
 
-    public IPaneHost Create() =>
-        new PaneHost(_host, terminalFactory: () => new TerminalControl());
+    public IPaneHost Create(ProfileSnapshot? snapshot = null) =>
+        new PaneHost(
+            _host,
+            terminalFactory: snap => new TerminalControl { Snapshot = snap },
+            initialSnapshot: snapshot);
 }
