@@ -114,7 +114,10 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
         // via a shared container (see #171). Same for the title-bar
         // TextBlock that used to live in this UserControl.
 
-        _strip.NewTabRequested += (_, _) => _manager.NewTab();
+        // The new-tab button is the composite NewTabSplitButton;
+        // it routes Click / Alt+Click / Shift+Click through
+        // MainWindow.OpenProfile after MainWindow calls AttachOwner.
+        // The chevron is still strip-local (toggles pinned state).
         _strip.ChevronToggled += (_, _) => TogglePinned();
     }
 
@@ -125,6 +128,15 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     internal void TogglePinnedFromKeyboard() => TogglePinned();
 
+    /// <summary>
+    /// Forward the owning window into the strip's
+    /// <see cref="NewTabSplitButton"/> so its click handlers can call
+    /// <see cref="MainWindow.OpenProfile"/>. Mirrors
+    /// <see cref="TabHost.AttachOwner"/>; <see cref="MainWindow"/>
+    /// invokes both immediately after constructing the hosts.
+    /// </summary>
+    internal void AttachOwner(MainWindow owner) => _strip.AttachOwner(owner);
+
     private void OnSwitchLayoutClick(object sender, RoutedEventArgs e)
         => _router.RequestToggleTabLayout();
 
@@ -132,7 +144,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     {
         _pinnedExpanded = !_pinnedExpanded;
         _strip.IsExpanded = _pinnedExpanded;
-        var target = _pinnedExpanded ? ExpandedWidth : 40;
+        var target = _pinnedExpanded
+            ? ExpandedWidth
+            : Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth;
         // MainWindow listens on this event and tweens both its
         // RootGrid outer strip column AND our internal column in
         // lockstep so the sidebar actually grows on-screen.
