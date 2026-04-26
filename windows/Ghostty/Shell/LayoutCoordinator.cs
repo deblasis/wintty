@@ -25,11 +25,12 @@ namespace Ghostty.Shell;
 /// </summary>
 internal sealed class LayoutCoordinator
 {
-    // Wider than the 40px icon cell so the new-tab split button at
-    // the bottom of the vertical strip can render its dropdown
-    // chevron. Must stay in sync with the StripColumn Width in
-    // VerticalTabHost.xaml.
-    public const double VerticalStripCollapsedWidth = 56;
+    // Width of the icon cell (chevron, tab rows, new-tab control).
+    // The new-tab split button stacks its dropdown chevron
+    // vertically in this mode (Orientation=Vertical on
+    // NewTabSplitButton), so the column can stay narrow. Must stay
+    // in sync with the StripColumn Width in VerticalTabHost.xaml.
+    public const double VerticalStripCollapsedWidth = 40;
     public const int SwitchDurationMs = 220;
 
     private readonly ColumnDefinition _stripColumn;
