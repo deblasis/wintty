@@ -30,7 +30,7 @@ internal sealed class PowerShellProbe(IFileSystem fs, IProcessRunner runner) : I
             list.Add(new DiscoveredProfile(
                 Id: "pwsh-7",
                 Name: name,
-                Command: pwsh,
+                Command: ProbeUtil.QuoteIfNeeded(pwsh),
                 ProbeId: ProbeId,
                 Icon: new IconSpec.BundledKey("pwsh")));
         }
@@ -41,7 +41,7 @@ internal sealed class PowerShellProbe(IFileSystem fs, IProcessRunner runner) : I
             list.Add(new DiscoveredProfile(
                 Id: "pwsh-windows",
                 Name: "Windows PowerShell",
-                Command: winps,
+                Command: ProbeUtil.QuoteIfNeeded(winps),
                 ProbeId: ProbeId,
                 Icon: new IconSpec.BundledKey("powershell")));
         }

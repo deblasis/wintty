@@ -10,7 +10,7 @@ public sealed class TabManagerDetachTests
     private static TabManager NewManager(out FakePaneHost first)
     {
         FakePaneHost? captured = null;
-        var mgr = new TabManager(() =>
+        var mgr = new TabManager((_) =>
         {
             var h = new FakePaneHost();
             captured ??= h;
@@ -129,7 +129,7 @@ public sealed class TabManagerDetachTests
         var seed = new TabModel(seedHost);
 
         var dst = new TabManager(
-            () => { factoryCalls++; return new FakePaneHost(); },
+            (_) => { factoryCalls++; return new FakePaneHost(); },
             seed);
 
         Assert.Equal(0, factoryCalls);

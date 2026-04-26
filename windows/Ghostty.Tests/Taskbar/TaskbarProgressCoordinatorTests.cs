@@ -12,7 +12,7 @@ public class TaskbarProgressCoordinatorTests
     private static (TabManager mgr, List<FakePaneHost> hosts) NewManager()
     {
         var hostList = new List<FakePaneHost>();
-        var mgr = new TabManager(() =>
+        var mgr = new TabManager((_) =>
         {
             var h = new FakePaneHost();
             hostList.Add(h);
