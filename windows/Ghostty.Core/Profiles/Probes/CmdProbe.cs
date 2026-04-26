@@ -27,7 +27,7 @@ internal sealed class CmdProbe(IFileSystem fs) : IInstalledShellProbe
         var profile = new DiscoveredProfile(
             Id: "cmd",
             Name: "Command Prompt",
-            Command: cmd,
+            Command: ProbeUtil.QuoteIfNeeded(cmd),
             ProbeId: "cmd",
             Icon: new IconSpec.BundledKey("cmd"));
 

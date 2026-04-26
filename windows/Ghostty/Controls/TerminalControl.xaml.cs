@@ -100,6 +100,17 @@ public sealed partial class TerminalControl : UserControl
     internal GhosttyHost? Host { get; set; }
 
     /// <summary>
+    /// Profile snapshot the terminal was opened with, or null for the
+    /// legacy no-profile path (cold-start fallback, keyboard
+    /// Alt+Shift+D split). Set by <see cref="Ghostty.Tabs.PaneHostFactory"/>
+    /// before the control loads. Read once in OnLoaded to populate
+    /// surfaceConfig.Command and surfaceConfig.WorkingDirectory; ignored
+    /// thereafter. PR 6 will introduce a hot-apply path for live config
+    /// edits.
+    /// </summary>
+    internal Ghostty.Core.Profiles.ProfileSnapshot? Snapshot { get; set; }
+
+    /// <summary>
     /// The raw libghostty surface handle for this control. Used by
     /// <see cref="Ghostty.Hosting.GhosttyHost"/> to resolve a per-surface
     /// userdata pointer back to the handle for clipboard callback completion.
@@ -287,8 +298,12 @@ public sealed partial class TerminalControl : UserControl
         //    strings rather than aliasing one buffer - aliasing was a
         //    footgun if Zig ever wrote through any of them. These live
         //    until the surface is freed.
-        _workingDirectoryUtf8 = AllocEmptyUtf8();
-        _commandUtf8 = AllocEmptyUtf8();
+        _workingDirectoryUtf8 = Snapshot is { WorkingDirectory: { Length: > 0 } wd }
+            ? AllocUtf8(wd)
+            : AllocEmptyUtf8();
+        _commandUtf8 = Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
+            ? AllocUtf8(cmd)
+            : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
 
         var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
@@ -418,6 +433,19 @@ public sealed partial class TerminalControl : UserControl
     {
         var p = Marshal.AllocHGlobal(1);
         Marshal.WriteByte(p, 0);
+        return p;
+    }
+
+    private static IntPtr AllocUtf8(string s)
+    {
+        // +1 for the null terminator that Zig dereferences unconditionally.
+        var byteCount = System.Text.Encoding.UTF8.GetByteCount(s) + 1;
+        var p = Marshal.AllocHGlobal(byteCount);
+        // Write the UTF-8 bytes then null-terminate. Marshal.AllocHGlobal
+        // does not zero-initialize, so the terminator must be explicit.
+        var bytes = System.Text.Encoding.UTF8.GetBytes(s);
+        Marshal.Copy(bytes, 0, p, bytes.Length);
+        Marshal.WriteByte(p, bytes.Length, 0);
         return p;
     }
 
