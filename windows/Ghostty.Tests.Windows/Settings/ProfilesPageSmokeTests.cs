@@ -4,18 +4,28 @@ namespace Ghostty.Tests.Windows.Settings;
 
 public class ProfilesPageSmokeTests
 {
-    // Wire-up plan when WinUITestHost lands:
-    //   1. Build a SettingsWindow on the WinUITestHost dispatcher.
-    //   2. Inject a FakeProfileRegistry with 2 visible + 1 hidden
-    //      profile and a no-op IConfigFileEditor.
-    //   3. Navigate to the "profiles" tab.
-    //   4. Assert ProfilesGroup.Cards.Count == 3 with toggle states
-    //      off/off/on in registry-order.
-    //   5. Toggle the first row on; assert the editor saw a
-    //      SetValue("profile.<id>.hidden", "true") call.
-    //   6. Toggle the third row off; assert the editor saw a
-    //      RemoveValue("profile.<id>.hidden") call.
-    [Fact(Skip = "TODO: wire WinUITestHost (also blocks PR 4 tasks 17/18 + PR 5 chord smoke)")]
+    // Manual smoke spec for the Profiles settings page.
+    //
+    // Visible/hidden ordering and per-row hide-marker parsing are
+    // already covered by ProfileOrderResolverTests,
+    // ProfileRegistryTests, ProfileHiddenKeyTests, and
+    // ProfileSourceParserHiddenIdsTests in Ghostty.Tests. What this
+    // test would add is the SettingsCard rendering and the
+    // ToggleSwitch into IConfigFileEditor write path inside a real
+    // SettingsWindow on a dispatcher, and hosting WinUI 3 here is
+    // the same architectural blocker that keeps the other smoke
+    // tests un-automated.
+    //
+    // To validate by hand:
+    //   1. Open Settings -> Profiles with 2 visible + 1 hidden
+    //      profile.
+    //   2. Confirm 3 rows render in registry order with toggle
+    //      states off/off/on.
+    //   3. Toggle the first row on; confirm the config file gains
+    //      'profile.<id>.hidden = true'.
+    //   4. Toggle the third row off; confirm the line is removed
+    //      via RemoveValue (not rewritten as 'hidden = false').
+    [Fact(Skip = "Manual smoke; XAML+dispatcher hosting not in scope for this test project.")]
     public void ProfilesPage_RendersVisibleAndHiddenProfilesInOneFlatList()
     {
     }
