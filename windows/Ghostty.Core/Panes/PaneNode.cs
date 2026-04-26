@@ -20,6 +20,16 @@ internal sealed class LeafPane : PaneNode
     /// and never dereferences Tag.
     /// </summary>
     public object? Tag { get; set; }
+
+    /// <summary>
+    /// Profile snapshot the leaf was created from. Null for leaves
+    /// created via the legacy no-profile keyboard-Split path
+    /// (<c>Alt+Shift+D</c>) and for the very first leaf in a
+    /// no-profiles-configured cold start. Read by PR 6 for hot-apply
+    /// of visual updates when <c>IProfileRegistry.ProfilesChanged</c>
+    /// fires.
+    /// </summary>
+    internal Ghostty.Core.Profiles.ProfileSnapshot? Snapshot { get; set; }
 }
 
 internal sealed class SplitPane : PaneNode

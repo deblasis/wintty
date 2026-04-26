@@ -255,7 +255,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
             main.DetachTabToZone(tab, zone);
     }
 
-    private void OnAddTabButtonClick(TabView sender, object args) => _manager.NewTab();
+    /// <summary>
+    /// Wire the owning window into <see cref="NewTabButton"/> so its
+    /// click handlers can call <see cref="MainWindow.OpenProfile"/>.
+    /// Called by <see cref="MainWindow"/> immediately after constructing
+    /// this instance. Option (b): TabHost has no MainWindow field, so
+    /// the window pushes itself in rather than TabHost pulling via
+    /// App.WindowsByRoot (which is not yet populated at ctor time).
+    /// </summary>
+    internal void AttachOwner(MainWindow owner)
+    {
+        NewTabButton.Owner = owner;
+    }
 
     private async void OnTabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
     {

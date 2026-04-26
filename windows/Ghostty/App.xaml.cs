@@ -55,6 +55,8 @@ public partial class App : Application
     private WindowsPowerStateMonitor? _powerStateMonitor;
     private Ghostty.Core.Profiles.DiscoveryService? _discoveryService;
     private Ghostty.Core.Profiles.ProfileRegistry? _profileRegistry;
+    private Ghostty.Input.Win32ModifierKeyState? _modifierKeyState;
+    private Ghostty.Core.Profiles.WindowsIconResolver? _iconResolver;
     private GhosttyHost? _bootstrapHost;
     private HostLifetimeSupervisor? _lifetimeSupervisor;
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
@@ -89,6 +91,8 @@ public partial class App : Application
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
+    internal static Ghostty.Core.Input.IModifierKeyState? ModifierKeyState { get; private set; }
+    internal static Ghostty.Core.Profiles.IIconResolver? IconResolver { get; private set; }
 
     /// <summary>
     /// Process-wide power-saving-mode monitor. Null before OnLaunched
@@ -476,7 +480,7 @@ public partial class App : Application
         // file again.
         var discoveryCachePath = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "Wintty", "DiscoveryCache", "v1.json");
+            "Wintty", "DiscoveryCache", "v2.json");
         var winttyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "dev";
 
         var processRunner = new Ghostty.Core.Profiles.WindowsProcessRunner();
@@ -496,6 +500,12 @@ public partial class App : Application
             probes, fileSystem, Ghostty.Core.Logging.SystemClock.Instance,
             winttyVersion, discoveryCachePath,
             factory.CreateLogger<Ghostty.Core.Profiles.DiscoveryService>());
+
+        _modifierKeyState = new Ghostty.Input.Win32ModifierKeyState();
+        ModifierKeyState = _modifierKeyState;
+
+        _iconResolver = new Ghostty.Core.Profiles.WindowsIconResolver(fileSystem);
+        IconResolver = _iconResolver;
 
         _profileRegistry = new Ghostty.Core.Profiles.ProfileRegistry(
             source: _configService,
@@ -668,6 +678,10 @@ public partial class App : Application
             {
                 _profileRegistry = null;
                 ProfileRegistry = null;
+                ModifierKeyState = null;
+                _modifierKeyState = null;
+                IconResolver = null;
+                _iconResolver = null;
                 _discoveryService = null;
                 _configWriteScheduler = null;
                 ConfigWriteScheduler = null;

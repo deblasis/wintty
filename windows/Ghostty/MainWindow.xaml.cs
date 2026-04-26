@@ -8,6 +8,7 @@ using Ghostty.Commands;
 using Ghostty.Controls;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
+using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Hosting;
@@ -349,13 +350,14 @@ public sealed partial class MainWindow : Window
 
         _factory = new PaneHostFactory(_host);
         _tabManager = new TabManager(
-            () => _factory.Create(),
+            snapshot => _factory.Create(snapshot),
             seed: seedTab);
         _router = new PaneActionRouter(_tabManager);
         _windowState = WindowState.Load();
         RestoreWindowPlacement();
 
         _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
+        _horizontalTabHost.AttachOwner(this);
         _verticalTabHost = new VerticalTabHost(_tabManager, _router, _dialogs, _host);
 
         // Place both tab hosts in their RootGrid slots. The
@@ -661,6 +663,31 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Build a <see cref="MainWindow"/> that opens with a single fresh
+    /// tab seeded from <paramref name="initialSnapshot"/>. Used by
+    /// <see cref="OpenProfile"/> when target is
+    /// <see cref="ProfileLaunchTarget.NewWindow"/>. Mirrors the
+    /// <see cref="CreateForAdoption"/> shape (same dependencies, no
+    /// pre-activation flicker) but takes a <see cref="ProfileSnapshot"/>
+    /// instead of an existing <see cref="TabModel"/> -- the new window
+    /// owns its own tab from creation.
+    /// </summary>
+    internal static MainWindow CreateForNewTab(
+        ConfigService configService,
+        GhosttyHost bootstrapHost,
+        HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory,
+        ProfileSnapshot? initialSnapshot)
+    {
+        var window = new MainWindow(configService, bootstrapHost, supervisor, loggerFactory);
+        if (initialSnapshot is not null)
+        {
+            window._tabManager.ActiveTab.AttachProfileSnapshot(initialSnapshot);
+        }
+        return window;
+    }
+
+    /// <summary>
     /// Pre-activation hook for Snap Layouts placement. PR 199's
     /// detach flow constructs a MainWindow but MUST NOT call
     /// Activate until any snap target has been applied, otherwise
@@ -668,6 +695,71 @@ public sealed partial class MainWindow : Window
     /// placement is done.
     /// </summary>
     internal void ActivateAfterPlacement() => Activate();
+
+    /// <summary>
+    /// Single funnel for the new-tab split button (PR 4) and the
+    /// command-palette profile rows (PR 5). Resolves
+    /// <paramref name="profileId"/> against the registry, falling back
+    /// to the registry's <c>DefaultProfileId</c> when the requested id
+    /// is missing. Logs and returns when both lookups fail (cold-start
+    /// empty-registry case -- the no-arg <c>TabManager.NewTab()</c>
+    /// fallback path remains usable from other call sites).
+    /// </summary>
+    internal void OpenProfile(string profileId, ProfileLaunchTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(profileId);
+
+        var registry = App.ProfileRegistry;
+        if (registry is null)
+        {
+            _logger.LogWarning("OpenProfile invoked before ProfileRegistry was wired.");
+            return;
+        }
+
+        var resolved = registry.Resolve(profileId)
+            ?? (registry.DefaultProfileId is { } d ? registry.Resolve(d) : null);
+        if (resolved is null)
+        {
+            _logger.LogWarning(
+                "OpenProfile: id '{ProfileId}' not found and no default available.",
+                profileId);
+            return;
+        }
+
+        var snapshot = ProfileSnapshotStore.From(resolved, registry.Version);
+
+        switch (target)
+        {
+            case ProfileLaunchTarget.NewTab:
+                _tabManager.NewTab(snapshot);
+                break;
+            case ProfileLaunchTarget.NewPane:
+                _tabManager.ActiveTab.PaneHost.Split(
+                    PaneOrientation.Horizontal, snapshot);
+                break;
+            case ProfileLaunchTarget.NewWindow:
+                OpenInNewWindow(snapshot);
+                break;
+        }
+    }
+
+    private void OpenInNewWindow(ProfileSnapshot snapshot)
+    {
+        var bootstrap = App.BootstrapHost
+            ?? throw new InvalidOperationException(
+                "OpenInNewWindow: no bootstrap host; App.OnLaunched did not run.");
+        var supervisor = App.LifetimeSupervisor
+            ?? throw new InvalidOperationException(
+                "OpenInNewWindow: no lifetime supervisor; App.OnLaunched did not run.");
+        var loggerFactory = App.LoggerFactory
+            ?? throw new InvalidOperationException(
+                "OpenInNewWindow: no logger factory; App.OnLaunched did not run.");
+
+        var newWindow = CreateForNewTab(
+            _configService, bootstrap, supervisor, loggerFactory, snapshot);
+        newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+        newWindow.Activate();
+    }
 
     /// <summary>
     /// Move <paramref name="tab"/> out of this window into a brand
