@@ -11,7 +11,6 @@ namespace Ghostty.Tabs;
 internal sealed partial class NewTabSplitButton : UserControl
 {
     private NewTabSplitButtonViewModel? _vm;
-    private MainWindow? _owner;
 
     public NewTabSplitButton()
     {
@@ -26,11 +25,7 @@ internal sealed partial class NewTabSplitButton : UserControl
     /// the control so click handlers can call
     /// <see cref="MainWindow.OpenProfile"/>.
     /// </summary>
-    internal MainWindow? Owner
-    {
-        get => _owner;
-        set => _owner = value;
-    }
+    internal MainWindow? Owner { get; set; }
 
     /// <summary>
     /// Placement for the profile dropdown flyout. Default
@@ -59,6 +54,33 @@ internal sealed partial class NewTabSplitButton : UserControl
         // paths, so guard the field access defensively.
         if (d is NewTabSplitButton ctl && ctl.ProfileMenu is not null)
             ctl.ProfileMenu.Placement = (FlyoutPlacementMode)e.NewValue;
+    }
+
+    /// <summary>
+    /// Stack direction for the primary "+" button and its chevron
+    /// dropdown. Horizontal (default) places the chevron to the right
+    /// of the primary action, matching the WinUI SplitButton it
+    /// replaces. Vertical stacks the chevron below the primary so the
+    /// control fits in a narrow vertical-strip footer without forcing
+    /// the strip column to widen.
+    /// </summary>
+    public Orientation Orientation
+    {
+        get => (Orientation)GetValue(OrientationProperty);
+        set => SetValue(OrientationProperty, value);
+    }
+
+    public static readonly DependencyProperty OrientationProperty =
+        DependencyProperty.Register(
+            nameof(Orientation),
+            typeof(Orientation),
+            typeof(NewTabSplitButton),
+            new PropertyMetadata(Orientation.Horizontal, OnOrientationChanged));
+
+    private static void OnOrientationChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is NewTabSplitButton ctl && ctl.LayoutRoot is not null)
+            ctl.LayoutRoot.Orientation = (Orientation)e.NewValue;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -119,27 +141,27 @@ internal sealed partial class NewTabSplitButton : UserControl
         }
     }
 
-    private void OnPrimaryClick(SplitButton sender, SplitButtonClickEventArgs args)
+    private void OnPrimaryClick(object sender, RoutedEventArgs e)
     {
         var registry = App.ProfileRegistry;
         var defaultId = registry?.DefaultProfileId;
-        if (defaultId is null || _owner is null) return;
+        if (defaultId is null || Owner is null) return;
 
         var modifiers = App.ModifierKeyState;
         if (modifiers is null) return;
 
-        _owner.OpenProfile(defaultId, ClickModifierClassifier.Classify(modifiers));
+        Owner.OpenProfile(defaultId, ClickModifierClassifier.Classify(modifiers));
     }
 
     private void OnRowClick(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItem item) return;
         if (item.Tag is not string profileId) return;
-        if (_owner is null) return;
+        if (Owner is null) return;
 
         var modifiers = App.ModifierKeyState;
         if (modifiers is null) return;
 
-        _owner.OpenProfile(profileId, ClickModifierClassifier.Classify(modifiers));
+        Owner.OpenProfile(profileId, ClickModifierClassifier.Classify(modifiers));
     }
 }
