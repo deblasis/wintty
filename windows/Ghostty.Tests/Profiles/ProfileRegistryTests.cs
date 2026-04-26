@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Frozen;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Profiles;
@@ -262,6 +264,57 @@ public class ProfileRegistryTests
         Assert.Equal(versionBefore, registry.Version);        // unchanged
         Assert.Single(registry.Profiles);                      // user still there
         Assert.Equal(0, eventsFiredAfterSubscribe);            // no event after failure
+    }
+
+    [Fact]
+    public void HiddenProfiles_ExposesEntriesFilteredFromVisibleList()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            ParsedProfiles = new Dictionary<string, ProfileDef>
+            {
+                ["a"] = UserDef("a", "A"),
+                ["b"] = new ProfileDef(
+                    Id: "b",
+                    Name: "B",
+                    Command: "b.exe",
+                    WorkingDirectory: null,
+                    Icon: null,
+                    TabTitle: null,
+                    Hidden: true,
+                    ProbeId: null,
+                    VisualsOrNull: null),
+            },
+        };
+
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+
+        Assert.Equal(new[] { "a" }, registry.Profiles.Select(p => p.Id));
+        Assert.Equal(new[] { "b" }, registry.HiddenProfiles.Select(p => p.Id));
+    }
+
+    [Fact]
+    public void HiddenProfiles_RecomposedAfterConfigChange()
+    {
+        var src = new FakeProfileConfigSource
+        {
+            ParsedProfiles = new Dictionary<string, ProfileDef>
+            {
+                ["a"] = UserDef("a", "A"),
+            },
+        };
+
+        using var registry = new ProfileRegistry(
+            src, EmptyDiscovery(), SynchronousDispatcher, NullLogger<ProfileRegistry>.Instance);
+
+        Assert.Empty(registry.HiddenProfiles);
+
+        src.HiddenProfileIds = new HashSet<string> { "a" }.ToFrozenSet();
+        src.Raise();
+
+        Assert.Empty(registry.Profiles);
+        Assert.Equal(new[] { "a" }, registry.HiddenProfiles.Select(p => p.Id));
     }
 
     [Fact]
