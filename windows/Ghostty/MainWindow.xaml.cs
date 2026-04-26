@@ -368,6 +368,7 @@ public sealed partial class MainWindow : Window
         _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
         _horizontalTabHost.AttachOwner(this);
         _verticalTabHost = new VerticalTabHost(_tabManager, _router, _dialogs, _host);
+        _verticalTabHost.AttachOwner(this);
 
         // Place both tab hosts in their RootGrid slots. The
         // horizontal host spans both columns in row 0 so its TabView
