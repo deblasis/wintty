@@ -93,6 +93,23 @@ public static partial class ProfileSourceParser
     /// profiles without requiring a full user override.
     /// </summary>
     public static IReadOnlySet<string> ExtractHiddenIds(string configText)
+        => ExtractHiddenIdsCore(configText, requireTrue: true);
+
+    /// <summary>
+    /// Extracts ids for which any <c>profile.&lt;id&gt;.hidden = ...</c>
+    /// line appears, regardless of whether the value parses as true or
+    /// false. Used by the warnings filter so an id whose only
+    /// <c>profile.&lt;id&gt;.*</c> line is a hide-override (true OR
+    /// false) doesn't get a spurious "missing required key 'name'"
+    /// warning. The true-only set isn't sufficient because the settings
+    /// page's un-hide path can leave <c>hidden = false</c> markers in
+    /// the config, and an explicit <c>hidden = false</c> mention is
+    /// still a hide-override marker, not a malformed profile block.
+    /// </summary>
+    public static IReadOnlySet<string> ExtractHiddenMentionIds(string configText)
+        => ExtractHiddenIdsCore(configText, requireTrue: false);
+
+    private static IReadOnlySet<string> ExtractHiddenIdsCore(string configText, bool requireTrue)
     {
         ArgumentNullException.ThrowIfNull(configText);
 
@@ -113,8 +130,11 @@ public static partial class ProfileSourceParser
             if (!string.Equals(subKey, "hidden", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var value = match.Groups[3].Value;
-            if (!bool.TryParse(value, out var flag) || !flag) continue;
+            if (requireTrue)
+            {
+                var value = match.Groups[3].Value;
+                if (!bool.TryParse(value, out var flag) || !flag) continue;
+            }
 
             var id = match.Groups[1].Value.ToLowerInvariant();
             ids.Add(id);
