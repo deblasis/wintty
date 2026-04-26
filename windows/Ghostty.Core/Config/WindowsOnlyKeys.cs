@@ -137,4 +137,24 @@ public static class WindowsOnlyKeys
         var sep = key.IndexOf('.', Prefix.Length);
         return sep > Prefix.Length && sep < key.Length - 1;
     }
+
+    /// <summary>
+    /// Returns true when <paramref name="key"/> is an internal-namespace
+    /// key of the shape <c>internal.&lt;name&gt;</c>. These are reserved
+    /// for app-private knobs (e.g. update simulator toggles) that are
+    /// read directly from the raw config file and are not meant to be
+    /// surfaced as Windows-only public config; suppressing them here
+    /// keeps libghostty's "unknown field" diagnostic from leaking into
+    /// the settings UI notice list.
+    /// </summary>
+    public static bool IsInternalKey(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+
+        const string Prefix = "internal.";
+        // Need the full prefix plus at least one character of <name>;
+        // bare "internal." or "internal" alone shouldn't match.
+        return key.Length > Prefix.Length
+            && key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
+    }
 }

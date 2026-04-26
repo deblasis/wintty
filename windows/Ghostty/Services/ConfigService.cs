@@ -290,6 +290,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
                     // notice list for a many-profile config).
                     continue;
                 }
+                if (WindowsOnlyKeys.IsInternalKey(key))
+                {
+                    // internal.<name> keys are app-private knobs read
+                    // directly from the raw config file; they aren't
+                    // public Windows-only config, so we don't surface
+                    // them via WindowsOnlyKeysUsed either.
+                    continue;
+                }
                 if (WindowsOnlyKeys.Contains(key))
                 {
                     if (_windowsOnlyKeysSeen.Add(key))
