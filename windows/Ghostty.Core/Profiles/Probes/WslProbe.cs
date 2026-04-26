@@ -33,7 +33,7 @@ internal sealed class WslProbe(IProcessRunner runner) : IInstalledShellProbe
             profiles.Add(new DiscoveredProfile(
                 Id: id,
                 Name: $"WSL: {name}",
-                Command: $"wsl.exe -d {name}",
+                Command: $"wsl.exe -d {ProbeUtil.QuoteIfNeeded(name)}",
                 ProbeId: ProbeId,
                 Icon: new IconSpec.AutoForWslDistro(name)));
         }
