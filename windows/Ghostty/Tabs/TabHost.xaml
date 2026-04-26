@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
     xmlns:branding="using:Ghostty.Branding"
+    xmlns:tabs="using:Ghostty.Tabs"
     RequestedTheme="Dark"
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch"
@@ -48,8 +49,7 @@
             CanReorderTabs="True"
             CanDragTabs="True"
             TabWidthMode="Equal"
-            IsAddTabButtonVisible="True"
-            AddTabButtonClick="OnAddTabButtonClick"
+            IsAddTabButtonVisible="False"
             TabCloseRequested="OnTabCloseRequested"
             ContextRequested="OnTabViewContextRequested"
             SelectionChanged="OnSelectionChanged"
@@ -58,23 +58,35 @@
                 <branding:AppIconBadge />
             </controls:TabView.TabStripHeader>
             <!--
-                TabStripFooter is a right-side spacer that reserves
-                room for the OS caption buttons (min / max / close)
-                when the window extends content into the title bar.
-                MainWindow calls SetTitleBar(CustomDragRegion) so
-                clicks on the empty strip area drag the window.
-
-                Width is hardcoded to 146 DIPs here which matches the
-                standard Windows 11 caption button width at 100%
-                scale. TODO(titlebar): bind to
-                AppWindow.TitleBar.RightInset / RasterizationScale at
-                runtime so the footer tracks DPI and high-contrast
-                variants that resize the caption buttons.
+                TabStripFooter is a two-cell row. Cell 0 holds the
+                NewTabSplitButton (not inside the drag region so clicks
+                land on the button). Cell 1 is the drag-only spacer
+                named CustomDragRegion; MainWindow calls
+                SetTitleBar(CustomDragRegion) so the empty strip area
+                still drags the window.
             -->
             <controls:TabView.TabStripFooter>
-                <Grid x:Name="CustomDragRegion"
-                      MinWidth="146"
-                      Background="Transparent"/>
+                <Grid x:Name="FooterRoot">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <!-- Cell 0: composite new-tab control. NOT inside the
+                         drag region; clicks reach the SplitButton. -->
+                    <tabs:NewTabSplitButton x:Name="NewTabButton"
+                                            Grid.Column="0"
+                                            Margin="4,0,4,0"/>
+                    <!-- Cell 1: drag-only spacer. Owns the title-bar
+                         passthrough so the empty strip area still drags
+                         the window. MinWidth reserves room for the OS
+                         caption buttons (min/max/close) at 100% scale.
+                         TODO(titlebar): bind MinWidth to
+                         AppWindow.TitleBar.RightInset / RasterizationScale. -->
+                    <Grid x:Name="CustomDragRegion"
+                          Grid.Column="1"
+                          MinWidth="146"
+                          Background="Transparent"/>
+                </Grid>
             </controls:TabView.TabStripFooter>
         </controls:TabView>
     </Grid>

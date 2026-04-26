@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 
 namespace Ghostty.Core.Panes;
@@ -33,6 +34,14 @@ internal interface IPaneHost
     /// <c>TerminalControl.CurrentProgress</c> but do not drive the
     /// tab-level indicator.</summary>
     event EventHandler<TabProgressState>? ProgressChanged;
+
+    /// <summary>
+    /// Split the active leaf with the given orientation. The new leaf
+    /// becomes the active leaf. <paramref name="snapshot"/> is recorded
+    /// on the freshly-created leaf for future hot-apply (PR 6); when
+    /// null, this is the legacy keyboard-Split path with no profile.
+    /// </summary>
+    void Split(PaneOrientation orientation, ProfileSnapshot? snapshot);
 
     /// <summary>Close the currently active pane.</summary>
     void CloseActive();

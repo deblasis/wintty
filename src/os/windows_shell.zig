@@ -81,10 +81,19 @@ pub const Preamble = enum {
             // if a future SKU ever breaks chcp. `>nul` silences the
             // "Active code page: 65001" banner.
             .cmd => "chcp 65001 >nul && ",
-            // `;` chains statements in PowerShell. Output encoding
-            // first, then input so piped stdout and redirected stdin
-            // match. See `suffix` for why we set both.
-            .pwsh => "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding; ",
+            // `chcp 65001 > $null` sets the conhost output codepage
+            // to UTF-8 so the bytes [Console]::OutputEncoding writes
+            // are also rendered as UTF-8 by the host. Without it,
+            // Nerd Font glyphs from prompt themes (Oh-My-Posh,
+            // Starship) come out as `?` even though pwsh's .NET
+            // encoding is UTF-8 - the conhost interpreter is still
+            // on the system codepage. The `cmd -> pwsh` path doesn't
+            // hit this because cmd's own preamble already chcp'd the
+            // host before pwsh inherited it. `;` chains statements
+            // in PowerShell. Output encoding first, then input so
+            // piped stdout and redirected stdin match. See `suffix`
+            // for why we set both.
+            .pwsh => "chcp 65001 > $null; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding; ",
         };
     }
 
@@ -92,11 +101,16 @@ pub const Preamble = enum {
     const pwsh_suffix = [_][:0]const u8{
         "-NoExit",
         "-Command",
-        // Set both output *and* input encodings: the output side fixes
-        // what the pane renders; the input side fixes what redirection
-        // (`>`, `|`) produces when the user pipes pwsh into another
-        // tool.
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding",
+        // `chcp 65001 > $null` sets the conhost output codepage so
+        // the bytes [Console]::OutputEncoding writes get rendered as
+        // UTF-8 by the host (otherwise Nerd Font glyphs from Oh-My-
+        // Posh/Starship come out as `?` even when pwsh's .NET
+        // encoding is UTF-8 - the conhost interpreter is still on
+        // the system codepage). Then set both output *and* input
+        // encodings: the output side fixes what the pane renders;
+        // the input side fixes what redirection (`>`, `|`) produces
+        // when the user pipes pwsh into another tool.
+        "chcp 65001 > $null; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::InputEncoding = [Console]::OutputEncoding",
     };
 };
 
@@ -321,6 +335,10 @@ test "utf8Preamble: suffix argv matches ConPTY setup contract" {
     try testing.expectEqualStrings("-Command", pwsh_suffix[1]);
     try testing.expect(std.mem.indexOf(u8, pwsh_suffix[2], "[Console]::OutputEncoding") != null);
     try testing.expect(std.mem.indexOf(u8, pwsh_suffix[2], "[Console]::InputEncoding") != null);
+    // Setting [Console]::OutputEncoding alone leaves conhost on the
+    // system codepage so Nerd Font glyphs render as `?`. The script
+    // must run `chcp 65001 > $null` first.
+    try testing.expect(std.mem.indexOf(u8, pwsh_suffix[2], "chcp 65001") != null);
 
     // none: empty.
     try testing.expectEqual(@as(usize, 0), Preamble.none.suffix().len);
@@ -335,8 +353,11 @@ test "utf8Preamble: prefix ends with shell-appropriate separator" {
     try testing.expect(std.mem.endsWith(u8, cmd_prefix, " && "));
 
     // pwsh: `;` is a statement separator; trailing space keeps the
-    // wrapped script readable in logs.
+    // wrapped script readable in logs. Same chcp prefix as the
+    // suffix path so wrap-with-existing-Command users get UTF-8
+    // conhost too.
     const pwsh_prefix = Preamble.pwsh.prefix();
+    try testing.expect(std.mem.indexOf(u8, pwsh_prefix, "chcp 65001") != null);
     try testing.expect(std.mem.indexOf(u8, pwsh_prefix, "[Console]::OutputEncoding") != null);
     try testing.expect(std.mem.indexOf(u8, pwsh_prefix, "[Console]::InputEncoding") != null);
     try testing.expect(std.mem.endsWith(u8, pwsh_prefix, "; "));
