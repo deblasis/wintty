@@ -45,4 +45,30 @@ internal sealed class FakeProfileRegistry : IProfileRegistry
         Version++;
         ProfilesChanged?.Invoke(this);
     }
+
+    /// <summary>
+    /// Convenience: build N profiles named "p1".."pN" with default
+    /// everything else. p1 is marked default and OrderIndex follows
+    /// declaration order. Used by command-palette / keybinding tests
+    /// that only care about the count + ids.
+    /// </summary>
+    public static List<ResolvedProfile> BuildN(int count)
+    {
+        var list = new List<ResolvedProfile>(count);
+        for (int i = 0; i < count; i++)
+        {
+            list.Add(new ResolvedProfile(
+                Id: $"p{i + 1}",
+                Name: $"Profile {i + 1}",
+                Command: "cmd.exe",
+                WorkingDirectory: null,
+                Icon: new IconSpec.BundledKey("default"),
+                TabTitle: $"Profile {i + 1}",
+                Visuals: EffectiveVisualOverrides.Empty,
+                ProbeId: null,
+                OrderIndex: i,
+                IsDefault: i == 0));
+        }
+        return list;
+    }
 }

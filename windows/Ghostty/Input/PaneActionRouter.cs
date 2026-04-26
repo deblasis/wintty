@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using Ghostty.Core.Input;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 using Ghostty.Panes;
 
@@ -26,10 +29,22 @@ namespace Ghostty.Input;
 internal sealed class PaneActionRouter
 {
     private readonly TabManager _tabs;
+    private readonly Func<IReadOnlyList<ResolvedProfile>>? _getProfiles = null;
+    private readonly Action<string, ProfileLaunchTarget>? _openProfile = null;
 
     public PaneActionRouter(TabManager tabs)
     {
         _tabs = tabs;
+    }
+
+    public PaneActionRouter(
+        TabManager tabs,
+        Func<IReadOnlyList<ResolvedProfile>>? getProfiles,
+        Action<string, ProfileLaunchTarget>? openProfile)
+        : this(tabs)
+    {
+        _getProfiles = getProfiles;
+        _openProfile = openProfile;
     }
 
     public TabManager Tabs => _tabs;
@@ -86,6 +101,18 @@ internal sealed class PaneActionRouter
             case PaneAction.ToggleFullscreen:
                 ToggleFullscreenRequested?.Invoke(this, EventArgs.Empty);
                 return;
+
+            // PR 5: profile slot chords. Resolve via the live registry; out-of-range
+            // and missing-delegate are silent no-ops.
+            case PaneAction.OpenProfile1: OpenProfileSlot(1); return;
+            case PaneAction.OpenProfile2: OpenProfileSlot(2); return;
+            case PaneAction.OpenProfile3: OpenProfileSlot(3); return;
+            case PaneAction.OpenProfile4: OpenProfileSlot(4); return;
+            case PaneAction.OpenProfile5: OpenProfileSlot(5); return;
+            case PaneAction.OpenProfile6: OpenProfileSlot(6); return;
+            case PaneAction.OpenProfile7: OpenProfileSlot(7); return;
+            case PaneAction.OpenProfile8: OpenProfileSlot(8); return;
+            case PaneAction.OpenProfile9: OpenProfileSlot(9); return;
         }
 
         var pane = _tabs.ActiveTab.PaneHost;
@@ -163,5 +190,21 @@ internal sealed class PaneActionRouter
             return;
         }
         TabCloseRequestedFromKeyboard?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Open the profile at 1-based <paramref name="slot"/> in the live
+    /// registry snapshot. Silent no-op (no exception) when the slot is out
+    /// of range, the registry isn't wired, or no open-profile delegate was
+    /// injected. Real slot logic lives in
+    /// <see cref="Ghostty.Core.Input.ProfileSlotResolver"/> so it stays
+    /// testable from Ghostty.Tests.
+    /// </summary>
+    private void OpenProfileSlot(int slot)
+    {
+        if (_getProfiles is null || _openProfile is null) return;
+        var id = ProfileSlotResolver.Resolve(_getProfiles(), slot);
+        if (id is null) return;
+        _openProfile(id, ProfileLaunchTarget.NewTab);
     }
 }
