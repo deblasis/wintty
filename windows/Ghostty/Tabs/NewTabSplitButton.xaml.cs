@@ -21,14 +21,44 @@ internal sealed partial class NewTabSplitButton : UserControl
     }
 
     /// <summary>
-    /// Owning window. Set by <see cref="TabHost"/> immediately after
-    /// constructing the control so click handlers can call
+    /// Owning window. Set by <see cref="TabHost"/> or
+    /// <see cref="VerticalTabStrip"/> immediately after constructing
+    /// the control so click handlers can call
     /// <see cref="MainWindow.OpenProfile"/>.
     /// </summary>
     internal MainWindow? Owner
     {
         get => _owner;
         set => _owner = value;
+    }
+
+    /// <summary>
+    /// Placement for the profile dropdown flyout. Default
+    /// <see cref="FlyoutPlacementMode.Bottom"/> matches the horizontal
+    /// tab-strip footer; the vertical-strip footer sets it to
+    /// <see cref="FlyoutPlacementMode.Right"/> so the menu opens away
+    /// from the sidebar instead of off the bottom edge of the window.
+    /// </summary>
+    public FlyoutPlacementMode FlyoutPlacement
+    {
+        get => (FlyoutPlacementMode)GetValue(FlyoutPlacementProperty);
+        set => SetValue(FlyoutPlacementProperty, value);
+    }
+
+    public static readonly DependencyProperty FlyoutPlacementProperty =
+        DependencyProperty.Register(
+            nameof(FlyoutPlacement),
+            typeof(FlyoutPlacementMode),
+            typeof(NewTabSplitButton),
+            new PropertyMetadata(FlyoutPlacementMode.Bottom, OnFlyoutPlacementChanged));
+
+    private static void OnFlyoutPlacementChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        // ProfileMenu is created during InitializeComponent; the DP
+        // can be set before parent-XAML attachment in some hosting
+        // paths, so guard the field access defensively.
+        if (d is NewTabSplitButton ctl && ctl.ProfileMenu is not null)
+            ctl.ProfileMenu.Placement = (FlyoutPlacementMode)e.NewValue;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)

@@ -25,9 +25,6 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// <summary>Raised when the user clicks the chevron toggle.</summary>
     public event EventHandler? ChevronToggled;
 
-    /// <summary>Raised when the user clicks the new-tab "+" button.</summary>
-    public event EventHandler? NewTabRequested;
-
     /// <summary>Raised when a row's close button is clicked. The
     /// consuming <see cref="VerticalTabHost"/> routes this through its
     /// shared <c>RequestCloseTabAsync</c>.</summary>
@@ -150,6 +147,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void OnChevronClick(object sender, RoutedEventArgs e) =>
         ChevronToggled?.Invoke(this, EventArgs.Empty);
 
-    private void OnNewTabClick(object sender, RoutedEventArgs e) =>
-        NewTabRequested?.Invoke(this, EventArgs.Empty);
+    /// <summary>
+    /// Wire the owning window into <see cref="NewTabButton"/> so the
+    /// composite control's click handlers can call
+    /// <see cref="MainWindow.OpenProfile"/>. Mirrors
+    /// <see cref="TabHost.AttachOwner"/>; <see cref="VerticalTabHost"/>
+    /// forwards the call after constructing the strip.
+    /// </summary>
+    internal void AttachOwner(MainWindow owner)
+    {
+        NewTabButton.Owner = owner;
+    }
 }
