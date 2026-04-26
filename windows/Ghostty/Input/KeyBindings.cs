@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Text;
+using Ghostty.Core.Input;
 using Windows.System;
 
 namespace Ghostty.Input;
@@ -86,6 +87,24 @@ internal sealed class KeyBindings
     }
 
     /// <summary>
+    /// Return the first <see cref="KeyBinding"/> bound to
+    /// <paramref name="action"/>, or null if no chord points to it.
+    /// Linear scan; same complexity as <see cref="Match"/> and
+    /// <see cref="Label"/>. Single source for the
+    /// "what chord opens this action?" lookup so command-palette sources
+    /// (BuiltInCommandSource, ProfileCommandSource, ...) do not each
+    /// reimplement the loop.
+    /// </summary>
+    public KeyBinding? Find(PaneAction action)
+    {
+        foreach (var b in _bindings)
+        {
+            if (b.Action == action) return b;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Hardcoded default bindings for PR 2. Mirrors Windows Terminal
     /// muscle memory: Ctrl+Shift+D / E for splits, Ctrl+Shift+W to
     /// close, Alt+Arrows for directional focus.
@@ -132,6 +151,18 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)188, PaneAction.ToggleTabLayout),
         // Command palette
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.P, PaneAction.ToggleCommandPalette),
+
+        // Profiles (PR 5). Slot N = Profiles[N-1] (post hidden filter, ordered by
+        // profile-order). Out-of-range slots silently no-op in the router.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number1, PaneAction.OpenProfile1),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number2, PaneAction.OpenProfile2),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number3, PaneAction.OpenProfile3),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number4, PaneAction.OpenProfile4),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number5, PaneAction.OpenProfile5),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number6, PaneAction.OpenProfile6),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number7, PaneAction.OpenProfile7),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number8, PaneAction.OpenProfile8),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number9, PaneAction.OpenProfile9),
     });
 
     /// <summary>
@@ -141,6 +172,19 @@ internal sealed class KeyBindings
     /// </summary>
     private static string KeyDisplayName(VirtualKey key) => (int)key switch
     {
+        // Top-row digits Number0..Number9 (VirtualKey values 0x30..0x39).
+        // Default ToString() prints "Number1"; we want "1" for chord labels.
+        48 => "0",
+        49 => "1",
+        50 => "2",
+        51 => "3",
+        52 => "4",
+        53 => "5",
+        54 => "6",
+        55 => "7",
+        56 => "8",
+        57 => "9",
+        // OEM punctuation that lacks a named VirtualKey member.
         188 => ",",
         190 => ".",
         186 => ";",
