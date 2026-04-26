@@ -13,7 +13,12 @@
          this UserControl is constrained to the strip column. -->
     <Grid Background="Transparent" ContextRequested="OnStripContextRequested">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition x:Name="StripColumn" Width="40"/>
+            <!-- Collapsed width is wider than the icon cell (40px) so
+                 the new-tab split button at the bottom of the strip
+                 can render its dropdown chevron. Must match
+                 LayoutCoordinator.VerticalStripCollapsedWidth. The
+                 icon rows above stay 40px wide and left-aligned. -->
+            <ColumnDefinition x:Name="StripColumn" Width="56"/>
         </Grid.ColumnDefinitions>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
