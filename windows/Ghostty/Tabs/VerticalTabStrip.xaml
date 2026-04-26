@@ -3,6 +3,7 @@
     x:Class="Ghostty.Tabs.VerticalTabStrip"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tabs="using:Ghostty.Tabs"
     Background="Transparent">
 
     <UserControl.Resources>
@@ -201,15 +202,15 @@
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Hidden"/>
 
-        <Button x:Name="NewTabButton"
-                Grid.Row="2"
-                Width="32" Height="32"
-                Margin="4"
-                Padding="0"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="OnNewTabClick">
-            <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE710;"/>
-        </Button>
+        <!-- Composite new-tab control: same UserControl as the
+             horizontal TabHost footer. Routes Click / Alt+Click /
+             Shift+Click through MainWindow.OpenProfile and exposes
+             a profile-selection dropdown. FlyoutPlacement="Right"
+             opens the menu into the pane area instead of off the
+             window's bottom edge. -->
+        <tabs:NewTabSplitButton x:Name="NewTabButton"
+                                Grid.Row="2"
+                                Margin="4"
+                                FlyoutPlacement="Right"/>
     </Grid>
 </UserControl>
