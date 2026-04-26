@@ -5,12 +5,24 @@ namespace Ghostty.Core.Profiles;
 
 /// <summary>
 /// Builds and refreshes <see cref="ProfileSnapshot"/> instances for
-/// open tabs. Pure logic: the per-tab storage of the snapshot itself
-/// belongs to TabModel (PR 3). This type only knows how to derive
-/// snapshots from the current resolved profile list.
+/// open tabs. Pure logic: per-tab storage of the snapshot belongs to
+/// <see cref="Ghostty.Core.Tabs.TabModel"/>. This type only knows how
+/// to derive snapshots from resolved profiles.
 /// </summary>
 public static class ProfileSnapshotStore
 {
+    /// <summary>
+    /// Direct construction over a <see cref="ResolvedProfile"/> the
+    /// caller already has in hand. Used by <c>MainWindow.OpenProfile</c>
+    /// to avoid a second list-scan after the funnel's own
+    /// <see cref="IProfileRegistry.Resolve"/> lookup.
+    /// </summary>
+    public static ProfileSnapshot From(ResolvedProfile profile, long version)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return BuildSnapshot(profile, version);
+    }
+
     /// <summary>
     /// First-time resolution for a freshly-opened tab. Returns null
     /// if the requested profile is not in the resolved list (caller
@@ -26,7 +38,7 @@ public static class ProfileSnapshotStore
 
         var profile = FindById(resolvedProfiles, profileId);
         if (profile is null) return null;
-        return BuildSnapshot(profile, version);
+        return From(profile, version);
     }
 
     /// <summary>
@@ -45,7 +57,7 @@ public static class ProfileSnapshotStore
 
         var profile = FindById(resolvedProfiles, existing.ProfileId);
         if (profile is null) return existing;
-        return BuildSnapshot(profile, newVersion);
+        return From(profile, newVersion);
     }
 
     private static ResolvedProfile? FindById(

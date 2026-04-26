@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Profiles;
 using Ghostty.Controls;
 using Ghostty.Hosting;
 using Microsoft.UI.Xaml;
@@ -43,7 +44,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // detach. UI-thread-only -- all reads and writes happen on the
     // dispatcher queue, so no synchronization is needed.
     private GhosttyHost _host;
-    private readonly Func<TerminalControl> _terminalFactory;
+    private readonly Func<ProfileSnapshot?, TerminalControl> _terminalFactory;
 
     // Pane highlight system, rendered as an overlay Canvas above the
     // split tree. Two layers of chrome:
@@ -168,8 +169,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <see cref="TerminalControl"/> with no <see cref="TerminalControl.Host"/>
     /// set. PaneHost assigns Host before adding the control to the
     /// visual tree, ensuring the OnLoaded guard fires only once Host
-    /// is in place.</param>
-    public PaneHost(GhosttyHost host, Func<TerminalControl> terminalFactory)
+    /// is in place. Receives the profile snapshot (or null for the
+    /// legacy no-profile path) so it can pre-set
+    /// <see cref="TerminalControl.Snapshot"/> before the control loads.</param>
+    /// <param name="initialSnapshot">Profile snapshot for the first leaf,
+    /// or null for cold-start / legacy paths.</param>
+    public PaneHost(GhosttyHost host, Func<ProfileSnapshot?, TerminalControl> terminalFactory,
+        ProfileSnapshot? initialSnapshot = null)
     {
         _host = host;
         _terminalFactory = terminalFactory;
@@ -190,9 +196,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // the chrome never gets composited under the terminal.
         Canvas.SetZIndex(_highlightOverlay, 999);
 
-        // Initial single leaf.
-        var firstTerminal = CreateTerminal();
-        _activeLeaf = new LeafPane { Tag = firstTerminal };
+        // Initial single leaf. Pass the initialSnapshot so the terminal
+        // spawns with the right command/working-directory from OnLoaded.
+        var firstTerminal = CreateTerminal(initialSnapshot);
+        _activeLeaf = new LeafPane { Tag = firstTerminal, Snapshot = initialSnapshot };
         _root = _activeLeaf;
 
         // Two-layer host Grid: the actual split tree below, the
@@ -230,9 +237,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
-    /// becomes the active leaf.
+    /// becomes the active leaf. Legacy keyboard-Split path; no profile
+    /// snapshot is attached to the new leaf.
     /// </summary>
     public void Split(PaneOrientation orientation)
+        => Split(orientation, snapshot: null);
+
+    /// <summary>
+    /// Split the active leaf with the given orientation. The new leaf
+    /// becomes the active leaf. <paramref name="snapshot"/> (when
+    /// non-null) is stored on the new <see cref="LeafPane"/> for
+    /// future hot-apply by PR 6.
+    /// </summary>
+    public void Split(PaneOrientation orientation, ProfileSnapshot? snapshot)
     {
         // Unzoom before splitting so the new sub-Grid is inserted into
         // the full tree, not into the zoomed single-leaf visual.
@@ -244,8 +261,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         var oldActive = _activeLeaf;
         var wasRoot = ReferenceEquals(_root, oldActive);
-        var newTerminal = CreateTerminal();
+        var newTerminal = CreateTerminal(snapshot);
         var newLeaf = new LeafPane { Tag = newTerminal };
+        newLeaf.Snapshot = snapshot;
         _root = PaneTree.Split(_root, oldActive, newLeaf, orientation);
         _activeLeaf = newLeaf;
 
@@ -622,9 +640,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     // Internals ---------------------------------------------------------
 
-    private TerminalControl CreateTerminal()
+    private TerminalControl CreateTerminal(ProfileSnapshot? snapshot)
     {
-        var t = _terminalFactory();
+        var t = _terminalFactory(snapshot);
         // Host MUST be set before the control is loaded; TerminalControl
         // throws otherwise.
         t.Host = _host;

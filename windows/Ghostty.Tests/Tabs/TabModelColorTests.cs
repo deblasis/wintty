@@ -10,14 +10,14 @@ public class TabModelColorTests
     [Fact]
     public void Default_color_is_None()
     {
-        var mgr = new TabManager(() => new FakePaneHost());
+        var mgr = new TabManager((_) => new FakePaneHost());
         Assert.Equal(TabColor.None, mgr.ActiveTab.Color);
     }
 
     [Fact]
     public void Setting_color_raises_PropertyChanged_once()
     {
-        var mgr = new TabManager(() => new FakePaneHost());
+        var mgr = new TabManager((_) => new FakePaneHost());
         var tab = mgr.ActiveTab;
 
         var raised = new List<string?>();
@@ -32,7 +32,7 @@ public class TabModelColorTests
     [Fact]
     public void Setting_color_to_same_value_does_not_raise()
     {
-        var mgr = new TabManager(() => new FakePaneHost());
+        var mgr = new TabManager((_) => new FakePaneHost());
         var tab = mgr.ActiveTab;
         tab.Color = TabColor.Red;
 
