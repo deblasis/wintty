@@ -63,6 +63,23 @@ public class ConfigServiceProfileParserTests
     }
 
     [Fact]
+    public void ParseAll_HiddenFalseOnlyOverride_DoesNotProduceWarning()
+    {
+        // The settings-page un-hide path writes hidden = false. An id
+        // with only that line is still a hide-override marker (the user
+        // is explicitly opting back in), not a malformed profile, so
+        // no missing-name warning should surface.
+        const string text = "profile.pwsh-7.hidden = false";
+        var values = new Dictionary<string, string?>();
+
+        var result = ConfigServiceProfileParser.ParseAll(text, key => FileValue(values, key));
+
+        Assert.DoesNotContain("pwsh-7", result.HiddenProfileIds);
+        Assert.Empty(result.ParsedProfiles);
+        Assert.Empty(result.ProfileWarnings);
+    }
+
+    [Fact]
     public void ParseAll_MalformedProfile_ProducesWarning()
     {
         const string text = "profile.broken.name = NoCommand";  // missing command

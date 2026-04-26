@@ -105,6 +105,9 @@ internal sealed partial class SettingsWindow : Window
         {
             new PageMapping("general", "General", NavGeneral),
             new PageMapping("appearance", "Appearance", NavAppearance),
+            // Profiles page renders the registry directly and doesn't host
+            // SettingsIndex entries yet; null IndexName keeps it out of search.
+            new PageMapping("profiles", null, NavProfiles),
             new PageMapping("colors", "Colors", NavColors),
             new PageMapping("terminal", "Terminal", NavTerminal),
             new PageMapping("keybindings", "Keybindings", NavKeybindings),
@@ -221,6 +224,11 @@ internal sealed partial class SettingsWindow : Window
             {
                 "general" => new Pages.GeneralPage(_configService, _editor),
                 "appearance" => new Pages.AppearancePage(_configService, _editor),
+                "profiles" => new Pages.ProfilesPage(
+                    App.ProfileRegistry
+                        ?? throw new InvalidOperationException("ProfileRegistry not initialized"),
+                    _configService,
+                    _editor),
                 "colors" => new Pages.ColorsPage(_configService, _editor, _theme),
                 "terminal" => new Pages.TerminalPage(_configService, _editor),
                 "keybindings" => new Pages.KeybindingsPage(_keybindings),
