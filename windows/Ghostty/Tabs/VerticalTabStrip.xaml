@@ -205,12 +205,15 @@
         <!-- Composite new-tab control: same UserControl as the
              horizontal TabHost footer. Routes Click / Alt+Click /
              Shift+Click through MainWindow.OpenProfile and exposes
-             a profile-selection dropdown. FlyoutPlacement="Right"
-             opens the menu into the pane area instead of off the
-             window's bottom edge. -->
+             a profile-selection dropdown. Orientation="Vertical"
+             stacks the chevron below the primary button so the
+             control fits in the 40px strip column without forcing
+             it to widen. FlyoutPlacement="Right" opens the menu
+             into the pane area instead of off the bottom edge. -->
         <tabs:NewTabSplitButton x:Name="NewTabButton"
                                 Grid.Row="2"
                                 Margin="4"
+                                Orientation="Vertical"
                                 FlyoutPlacement="Right"/>
     </Grid>
 </UserControl>

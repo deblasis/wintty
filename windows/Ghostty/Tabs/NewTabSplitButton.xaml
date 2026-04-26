@@ -6,15 +6,34 @@
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
     HorizontalAlignment="Left"
     VerticalAlignment="Center">
-    <controls:SplitButton x:Name="ButtonRoot"
-                          Click="OnPrimaryClick"
-                          ToolTipService.ToolTip="New tab (Alt: pane, Shift: window)"
-                          AutomationProperties.Name="New tab">
-        <controls:FontIcon Glyph="&#xE710;"
-                           FontFamily="Segoe Fluent Icons"
-                           FontSize="14"/>
-        <controls:SplitButton.Flyout>
-            <controls:MenuFlyout x:Name="ProfileMenu" Placement="Bottom"/>
-        </controls:SplitButton.Flyout>
-    </controls:SplitButton>
+    <!--
+        Two stacked Buttons sharing a MenuFlyout: a primary "+" button
+        that routes through MainWindow.OpenProfile (with Click / Alt /
+        Shift modifiers via ClickModifierClassifier) and a smaller
+        chevron button that opens the profile dropdown. The
+        Orientation property switches between horizontal (TabHost
+        footer) and vertical (VerticalTabStrip footer) layouts; the
+        chevron stays a separate hit target either way so the
+        keyboard / accessibility surface is the same in both modes.
+    -->
+    <StackPanel x:Name="LayoutRoot" Orientation="Horizontal">
+        <Button x:Name="PrimaryButton"
+                Click="OnPrimaryClick"
+                ToolTipService.ToolTip="New tab (Alt: pane, Shift: window)"
+                AutomationProperties.Name="New tab">
+            <controls:FontIcon Glyph="&#xE710;"
+                               FontFamily="Segoe Fluent Icons"
+                               FontSize="14"/>
+        </Button>
+        <Button x:Name="ChevronButton"
+                ToolTipService.ToolTip="New tab from profile..."
+                AutomationProperties.Name="Open profile menu">
+            <controls:FontIcon Glyph="&#xE70D;"
+                               FontFamily="Segoe Fluent Icons"
+                               FontSize="10"/>
+            <Button.Flyout>
+                <controls:MenuFlyout x:Name="ProfileMenu" Placement="Bottom"/>
+            </Button.Flyout>
+        </Button>
+    </StackPanel>
 </UserControl>
