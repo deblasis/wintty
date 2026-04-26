@@ -79,8 +79,40 @@ internal sealed partial class NewTabSplitButton : UserControl
 
     private static void OnOrientationChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is NewTabSplitButton ctl && ctl.LayoutRoot is not null)
-            ctl.LayoutRoot.Orientation = (Orientation)e.NewValue;
+        if (d is not NewTabSplitButton ctl) return;
+        var orient = (Orientation)e.NewValue;
+
+        if (ctl.LayoutRoot is not null)
+            ctl.LayoutRoot.Orientation = orient;
+
+        // Separator is a 1px line perpendicular to the StackPanel
+        // direction: vertical line in a horizontal stack, horizontal
+        // line in a vertical stack. Setting one dimension to NaN lets
+        // the StackPanel stretch the other to fill its cross-axis.
+        if (ctl.SeparatorBorder is not null)
+        {
+            if (orient == Orientation.Horizontal)
+            {
+                ctl.SeparatorBorder.Width = 1;
+                ctl.SeparatorBorder.Height = double.NaN;
+            }
+            else
+            {
+                ctl.SeparatorBorder.Width = double.NaN;
+                ctl.SeparatorBorder.Height = 1;
+            }
+        }
+
+        // Chevron glyph points toward where the menu opens: down
+        // (E70D ChevronDown) in horizontal mode where the flyout
+        // opens below, right (E76C ChevronRight) in vertical mode
+        // where it opens beside the strip.
+        if (ctl.ChevronGlyph is not null)
+        {
+            ctl.ChevronGlyph.Glyph = orient == Orientation.Vertical
+                ? "\uE76C"
+                : "\uE70D";
+        }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)

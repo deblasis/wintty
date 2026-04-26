@@ -4,36 +4,66 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
-    HorizontalAlignment="Left"
+    HorizontalAlignment="Stretch"
     VerticalAlignment="Center">
     <!--
-        Two stacked Buttons sharing a MenuFlyout: a primary "+" button
-        that routes through MainWindow.OpenProfile (with Click / Alt /
-        Shift modifiers via ClickModifierClassifier) and a smaller
-        chevron button that opens the profile dropdown. The
-        Orientation property switches between horizontal (TabHost
-        footer) and vertical (VerticalTabStrip footer) layouts; the
-        chevron stays a separate hit target either way so the
-        keyboard / accessibility surface is the same in both modes.
+        Unified chrome that wraps a primary "+" Button + a smaller
+        chevron Button + a 1px separator into a single visual unit.
+        Theme key overrides at UserControl scope (NOT per-button:
+        per-button Resources crashed the WinUI runtime in
+        ApplyBackdropStyle during MainWindow ctor) make the inner
+        Buttons transparent by default while preserving the standard
+        PointerOver / Pressed background brushes so each half still
+        highlights individually on hover.
     -->
-    <StackPanel x:Name="LayoutRoot" Orientation="Horizontal">
-        <Button x:Name="PrimaryButton"
-                Click="OnPrimaryClick"
-                ToolTipService.ToolTip="New tab (Alt: pane, Shift: window)"
-                AutomationProperties.Name="New tab">
-            <controls:FontIcon Glyph="&#xE710;"
-                               FontFamily="Segoe Fluent Icons"
-                               FontSize="14"/>
-        </Button>
-        <Button x:Name="ChevronButton"
-                ToolTipService.ToolTip="New tab from profile..."
-                AutomationProperties.Name="Open profile menu">
-            <controls:FontIcon Glyph="&#xE70D;"
-                               FontFamily="Segoe Fluent Icons"
-                               FontSize="10"/>
-            <Button.Flyout>
-                <controls:MenuFlyout x:Name="ProfileMenu" Placement="Bottom"/>
-            </Button.Flyout>
-        </Button>
-    </StackPanel>
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="ButtonBackground" Color="Transparent"/>
+        <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent"/>
+        <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent"/>
+        <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent"/>
+        <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent"/>
+    </UserControl.Resources>
+    <Border x:Name="OuterChrome"
+            CornerRadius="4"
+            Background="{ThemeResource SubtleFillColorTransparentBrush}"
+            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+            BorderThickness="1">
+        <StackPanel x:Name="LayoutRoot" Orientation="Horizontal">
+            <Button x:Name="PrimaryButton"
+                    Click="OnPrimaryClick"
+                    Padding="8,4"
+                    MinWidth="0"
+                    MinHeight="0"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    ToolTipService.ToolTip="New tab (Alt: pane, Shift: window)"
+                    AutomationProperties.Name="New tab">
+                <controls:FontIcon Glyph="&#xE710;"
+                                   FontFamily="Segoe Fluent Icons"
+                                   FontSize="14"/>
+            </Button>
+            <!-- Separator. Width=1 in horizontal mode (vertical line);
+                 OnOrientationChanged flips this to Width=NaN + Height=1
+                 (horizontal line) when the layout is stacked. -->
+            <Border x:Name="SeparatorBorder"
+                    Width="1"
+                    Background="{ThemeResource ControlStrokeColorDefaultBrush}"/>
+            <Button x:Name="ChevronButton"
+                    Padding="6,2"
+                    MinWidth="0"
+                    MinHeight="0"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    ToolTipService.ToolTip="New tab from profile..."
+                    AutomationProperties.Name="Open profile menu">
+                <controls:FontIcon x:Name="ChevronGlyph"
+                                   Glyph="&#xE70D;"
+                                   FontFamily="Segoe Fluent Icons"
+                                   FontSize="10"/>
+                <Button.Flyout>
+                    <controls:MenuFlyout x:Name="ProfileMenu" Placement="Bottom"/>
+                </Button.Flyout>
+            </Button>
+        </StackPanel>
+    </Border>
 </UserControl>
