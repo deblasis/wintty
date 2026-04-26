@@ -9,7 +9,7 @@ public class TabManagerTests
     private static TabManager NewManager(out List<FakePaneHost> hosts)
     {
         var hostList = new List<FakePaneHost>();
-        var mgr = new TabManager(() =>
+        var mgr = new TabManager((_) =>
         {
             var h = new FakePaneHost();
             hostList.Add(h);

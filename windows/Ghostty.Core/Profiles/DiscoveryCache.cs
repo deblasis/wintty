@@ -32,7 +32,12 @@ public sealed record DiscoveryCacheEntry(
 /// </summary>
 public static class DiscoveryCache
 {
-    public const int CurrentSchemaVersion = 1;
+    // v2: probe Command outputs now quote paths that contain spaces
+    // (Git Bash bin path, PowerShell 7 install path, etc.). Pre-fix
+    // caches stored unquoted commands that fail libghostty's argv
+    // tokenizer. Bumping forces a re-discovery on first launch with
+    // the fix.
+    public const int CurrentSchemaVersion = 2;
 
     public static byte[] Serialize(DiscoveryCacheFile file)
         => JsonSerializer.SerializeToUtf8Bytes(file, DiscoveryCacheContext.Default.DiscoveryCacheFile);
