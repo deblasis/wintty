@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Profiles;
 using Ghostty.Core.Tabs;
 
 namespace Ghostty.Tests.Tabs;
@@ -20,6 +21,18 @@ internal sealed class FakePaneHost : IPaneHost
     public int PaneCount { get; private set; } = 1;
     public int CloseActiveCalls { get; private set; }
     public int DisposeAllCalls { get; private set; }
+
+    public PaneOrientation? LastSplitOrientation { get; private set; }
+    public ProfileSnapshot? LastSplitSnapshot { get; private set; }
+    public int SplitCalls { get; private set; }
+
+    public void Split(PaneOrientation orientation, ProfileSnapshot? snapshot)
+    {
+        SplitCalls++;
+        LastSplitOrientation = orientation;
+        LastSplitSnapshot = snapshot;
+        PaneCount++;
+    }
 
     public event EventHandler<LeafPane>? LeafFocused;
     public event EventHandler? LastLeafClosed;
