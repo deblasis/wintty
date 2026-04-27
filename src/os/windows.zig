@@ -52,8 +52,6 @@ pub const exp = struct {
     pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     pub const CREATE_NO_WINDOW = 0x08000000;
     pub const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
-    pub const SW_HIDE: c_int = 0;
-    pub const CP_UTF8: windows.UINT = 65001;
     pub const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
     pub const FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
 
@@ -72,23 +70,11 @@ pub const exp = struct {
             lpPipeAttributes: ?*const windows.SECURITY_ATTRIBUTES,
             nSize: windows.DWORD,
         ) callconv(.winapi) windows.BOOL;
-        // Console code page: needed to force spawned shells to inherit
-        // UTF-8 instead of the system OEM CP (see ensureUtf8Console in
-        // Command.zig). std.os.windows does not wrap these.
-        pub extern "kernel32" fn AllocConsole() callconv(.winapi) windows.BOOL;
-        pub extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?windows.HWND;
-        pub extern "kernel32" fn SetConsoleCP(
-            wCodePageID: windows.UINT,
-        ) callconv(.winapi) windows.BOOL;
-        pub extern "kernel32" fn SetConsoleOutputCP(
-            wCodePageID: windows.UINT,
-        ) callconv(.winapi) windows.BOOL;
-        pub extern "kernel32" fn GetConsoleCP() callconv(.winapi) windows.UINT;
-        pub extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) windows.UINT;
-        pub extern "kernel32" fn SetConsoleCtrlHandler(
-            HandlerRoutine: ?*const fn (windows.DWORD) callconv(.winapi) windows.BOOL,
-            Add: windows.BOOL,
-        ) callconv(.winapi) windows.BOOL;
+        // System ANSI code page (per-process default ACP, set by the
+        // user's locale). Used to detect legacy double-byte CJK locales
+        // where forcing UTF-8 on a spawned shell would mojibake legacy
+        // .bat scripts. std.os.windows does not wrap this.
+        pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
         // std.os.windows.kernel32 only exposes CreateEventExW; add the
         // classic CreateEventW for overlapped I/O wait events.
         pub extern "kernel32" fn CreateEventW(
@@ -156,16 +142,6 @@ pub const exp = struct {
             nBufferLength: windows.DWORD,
             lpBuffer: windows.LPWSTR,
         ) callconv(.winapi) windows.DWORD;
-    };
-
-    pub const user32 = struct {
-        // Used by `ensureUtf8Console` in Command.zig to hide the console
-        // window we allocate purely to carry the UTF-8 code page into
-        // spawned children.
-        pub extern "user32" fn ShowWindow(
-            hWnd: windows.HWND,
-            nCmdShow: c_int,
-        ) callconv(.winapi) windows.BOOL;
     };
 
     pub const PROC_THREAD_ATTRIBUTE_NUMBER = 0x0000FFFF;
