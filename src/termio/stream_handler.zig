@@ -131,6 +131,19 @@ pub const StreamHandler = struct {
         self.termio_messaged = true;
     }
 
+    /// Mutate a `Message` produced by `Message.writeReq` so its write
+    /// variant is tagged as a parser-driven response. This lets the
+    /// termio thread suppress the write under shells that can't consume
+    /// CSI bytes on stdin (see `WriteKind`).
+    inline fn tagResponse(msg: *termio.Message) void {
+        switch (msg.*) {
+            .write_small => |*v| v.kind = .response,
+            .write_stable => |*v| v.kind = .response,
+            .write_alloc => |*v| v.kind = .response,
+            else => unreachable, // Message.writeReq only returns write variants
+        }
+    }
+
     /// Send a renderer message and unlock the renderer state mutex
     /// if necessary to ensure we don't deadlock.
     ///
@@ -443,10 +456,12 @@ pub const StreamHandler = struct {
                         .command => |command| {
                             assert(command.len > 0);
                             assert(command[command.len - 1] == '\n');
-                            self.messageWriter(try termio.Message.writeReq(
+                            var msg = try termio.Message.writeReq(
                                 self.alloc,
                                 command,
-                            ));
+                            );
+                            tagResponse(&msg);
+                            self.messageWriter(msg);
                         },
 
                         .windows => {
@@ -460,17 +475,21 @@ pub const StreamHandler = struct {
                 const map = comptime terminfo.ghostty.xtgettcapMap();
                 while (gettcap.next()) |key| {
                     const response = map.get(key) orelse continue;
-                    self.messageWriter(.{ .write_stable = response });
+                    self.messageWriter(.{ .write_stable = .{
+                        .data = response,
+                        .kind = .response,
+                    } });
                 }
             },
 
             .decrqss => |decrqss| {
                 var response: [terminal.dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
                 const encoded = try decrqss.encode(self.terminal, &response);
-                const msg = try termio.Message.writeReq(
+                var msg = try termio.Message.writeReq(
                     self.alloc,
                     encoded,
                 );
+                tagResponse(&msg);
                 self.messageWriter(msg);
             },
         }
@@ -491,7 +510,9 @@ pub const StreamHandler = struct {
                     const final = writer.buffered();
                     if (final.len > 2) {
                         log.debug("kitty graphics response: {x}", .{final});
-                        self.messageWriter(try termio.Message.writeReq(self.alloc, final));
+                        var msg = try termio.Message.writeReq(self.alloc, final);
+                        tagResponse(&msg);
+                        self.messageWriter(msg);
                     }
                 }
             },
@@ -580,6 +601,7 @@ pub const StreamHandler = struct {
         self.messageWriter(.{ .write_small = .{
             .data = data,
             .len = @intCast(writer.buffered().len),
+            .kind = .response,
         } });
     }
 
@@ -782,14 +804,20 @@ pub const StreamHandler = struct {
                 // 62 = Level 2 conformance
                 // 22 = Color text
                 // 52 = Clipboard access
-                .write_stable = if (self.clipboard_write != .deny)
-                    "\x1B[?62;22;52c"
-                else
-                    "\x1B[?62;22c",
+                .write_stable = .{
+                    .data = if (self.clipboard_write != .deny)
+                        "\x1B[?62;22;52c"
+                    else
+                        "\x1B[?62;22c",
+                    .kind = .response,
+                },
             }),
 
             .secondary => self.messageWriter(.{
-                .write_stable = "\x1B[>1;10;0c",
+                .write_stable = .{
+                    .data = "\x1B[>1;10;0c",
+                    .kind = .response,
+                },
             }),
 
             else => log.warn("unimplemented device attributes req: {}", .{req}),
@@ -801,7 +829,10 @@ pub const StreamHandler = struct {
         req: terminal.device_status.Request,
     ) !void {
         switch (req) {
-            .operating_status => self.messageWriter(.{ .write_stable = "\x1B[0n" }),
+            .operating_status => self.messageWriter(.{ .write_stable = .{
+                .data = "\x1B[0n",
+                .kind = .response,
+            } }),
 
             .cursor_position => {
                 const pos: struct {
@@ -818,7 +849,7 @@ pub const StreamHandler = struct {
                 // Response always is at least 4 chars, so this leaves the
                 // remainder for the row/column as base-10 numbers. This
                 // will support a very large terminal.
-                var msg: termio.Message = .{ .write_small = .{} };
+                var msg: termio.Message = .{ .write_small = .{ .kind = .response } };
                 const resp = try std.fmt.bufPrint(&msg.write_small.data, "\x1B[{};{}R", .{
                     pos.y + 1,
                     pos.x + 1,
@@ -851,7 +882,9 @@ pub const StreamHandler = struct {
 
     pub fn enquiry(self: *StreamHandler) !void {
         log.debug("sending enquiry response={s}", .{self.enquiry_response});
-        self.messageWriter(try termio.Message.writeReq(self.alloc, self.enquiry_response));
+        var msg = try termio.Message.writeReq(self.alloc, self.enquiry_response);
+        tagResponse(&msg);
+        self.messageWriter(msg);
     }
 
     fn configureCharset(
@@ -886,6 +919,7 @@ pub const StreamHandler = struct {
             .write_small = .{
                 .data = data,
                 .len = @intCast(resp.len),
+                .kind = .response,
             },
         });
     }
@@ -903,7 +937,8 @@ pub const StreamHandler = struct {
                 build_config.version_string,
             },
         );
-        const msg = try termio.Message.writeReq(self.alloc, resp);
+        var msg = try termio.Message.writeReq(self.alloc, resp);
+        tagResponse(&msg);
         self.messageWriter(msg);
     }
 
@@ -1343,7 +1378,8 @@ pub const StreamHandler = struct {
         if (response.writer.end > 0) {
             // If any of the operations were reports, finalize the report
             // string and send it to the terminal.
-            const msg = try termio.Message.writeReq(self.alloc, response.writer.buffered());
+            var msg = try termio.Message.writeReq(self.alloc, response.writer.buffered());
+            tagResponse(&msg);
             self.messageWriter(msg);
         }
     }
@@ -1459,6 +1495,7 @@ pub const StreamHandler = struct {
                 .write_alloc = .{
                     .alloc = self.alloc,
                     .data = try stream.toOwnedSlice(),
+                    .kind = .response,
                 },
             });
         }

@@ -155,6 +155,11 @@ pub const exp = struct {
             HandlerRoutine: ?*const fn (DWORD) callconv(.winapi) BOOL,
             Add: BOOL,
         ) callconv(.winapi) BOOL;
+        // System ANSI code page (per-process default ACP, set by the
+        // user's locale). Used to detect legacy double-byte CJK locales
+        // where forcing UTF-8 on a spawned shell would mojibake legacy
+        // .bat scripts. std.os.windows does not wrap this.
+        pub extern "kernel32" fn GetACP() callconv(.winapi) UINT;
         // std.os.windows.kernel32 only exposes CreateEventExW; add the
         // classic CreateEventW for overlapped I/O wait events.
         pub extern "kernel32" fn CreateEventW(
