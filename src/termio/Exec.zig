@@ -190,6 +190,12 @@ pub fn threadEnter(
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
+        .pty_mode = if (comptime builtin.os.tag == .windows)
+            self.subprocess.resolved_mode orelse .conpty
+        else {},
+        .shell_kind = if (comptime builtin.os.tag == .windows)
+            self.subprocess.resolved_shell_kind
+        else {},
     } };
 
     // On Windows, spawn a dedicated thread that blocks on WaitForSingleObject
@@ -477,12 +483,38 @@ pub fn queueWrite(
     td: *termio.Termio.ThreadData,
     data: []const u8,
     linefeed: bool,
+    kind: termio.Message.WriteKind,
 ) !void {
     _ = self;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
+
+    // Windows-only: under raw-pipe (bypass) transport, pwsh disables
+    // PSReadLine because there is no console handle for VT input. It
+    // falls back to Console.ReadLine, which treats CSI bytes on stdin
+    // as literal command text. Suppress writes tagged as parser-driven
+    // responses (cursor position, device attributes, color queries,
+    // etc.) so we don't pollute the prompt buffer.
+    //
+    // Note: under default `conpty-mode = auto`, pwsh now routes to
+    // .conpty (see resolveConptyMode), so this gate is reached only
+    // when the user explicitly sets `conpty-mode = always`. It remains
+    // in place as defense-in-depth and to keep output clean for that
+    // (unusual) configuration.
+    if (comptime builtin.os.tag == .windows) {
+        if (kind == .response and exec.pty_mode == .bypass) {
+            const sk = exec.shell_kind orelse .unknown;
+            if (sk == .pwsh) {
+                log.debug(
+                    "suppressing CSI response under bypass+pwsh ({d} bytes)",
+                    .{data.len},
+                );
+                return;
+            }
+        }
+    }
 
     // We go through and chunk the data if necessary to fit into
     // our cached buffers that we can queue to the stream.
@@ -623,6 +655,23 @@ pub const ThreadData = struct {
     /// to prevent unnecessary locking of expensive mutexes.
     termios_mode: ptypkg.TerminalMode = .{},
 
+    /// Resolved Windows pty transport for the running child. Captured
+    /// from `Subprocess.start` so the write path can gate per-shell
+    /// quirks without re-running shell classification. POSIX has no
+    /// transport selection, so this is always `.conpty` there (the
+    /// enum still has a `.conpty` variant on POSIX for source-shape
+    /// compatibility).
+    pty_mode: if (builtin.os.tag == .windows) ptypkg.Mode else void =
+        if (builtin.os.tag == .windows) .conpty else {},
+
+    /// Resolved Windows shell identity for the running child. Captured
+    /// from `Subprocess.start` so the write path can gate per-shell
+    /// quirks (currently: pwsh + bypass suppresses CSI responses).
+    /// `null` on Windows when classification did not match a known
+    /// shell. Not meaningful on POSIX.
+    shell_kind: if (builtin.os.tag == .windows) ?internal_os.windows_shell.Kind else void =
+        if (builtin.os.tag == .windows) null else {},
+
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         _ = posix.system.close(self.read_thread_pipe);
 
@@ -660,6 +709,14 @@ pub const Config = struct {
     else
         void = if (builtin.os.tag == .windows) .auto else {},
 
+    /// Windows UTF-8 console preamble policy. Resolved at spawn time
+    /// against the system ANSI codepage (see `resolveUtf8Console`).
+    /// Ignored on POSIX.
+    utf8_console: if (builtin.os.tag == .windows)
+        configpkg.Config.Utf8Console
+    else
+        void = if (builtin.os.tag == .windows) .auto else {},
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
 };
@@ -686,6 +743,28 @@ const Subprocess = struct {
         configpkg.Config.ConptyMode
     else
         void = if (builtin.os.tag == .windows) .auto else {},
+
+    /// Captured from Config.utf8_console at init time; resolved against
+    /// the system ACP per-spawn inside maybeInjectUtf8Preamble.
+    utf8_console: if (builtin.os.tag == .windows)
+        configpkg.Config.Utf8Console
+    else
+        void = if (builtin.os.tag == .windows) .auto else {},
+
+    /// Resolved transport mode set by `start` once the shell has been
+    /// classified. `null` until `start` runs. Read by `Exec.threadEnter`
+    /// to populate `Exec.ThreadData.pty_mode`. Windows-only.
+    resolved_mode: if (builtin.os.tag == .windows) ?ptypkg.Mode else void =
+        if (builtin.os.tag == .windows) null else {},
+
+    /// Resolved shell identity set by `start`. `null` until `start`
+    /// runs OR if classification did not match a known shell. Read by
+    /// `Exec.threadEnter` to populate `Exec.ThreadData.shell_kind`.
+    /// Windows-only.
+    resolved_shell_kind: if (builtin.os.tag == .windows)
+        ?internal_os.windows_shell.Kind
+    else
+        void = if (builtin.os.tag == .windows) null else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
@@ -921,7 +1000,7 @@ const Subprocess = struct {
             alloc,
             shell_command,
             internal_os.passwd,
-            cfg.conpty_mode,
+            cfg.utf8_console,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -966,6 +1045,7 @@ const Subprocess = struct {
             .args = args,
 
             .conpty_mode = cfg.conpty_mode,
+            .utf8_console = cfg.utf8_console,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
@@ -1008,6 +1088,17 @@ const Subprocess = struct {
             resolveConptyMode(self.conpty_mode, self.args[0])
         else
             .conpty;
+
+        // Cache the resolved mode and shell identity so the termio
+        // thread can read them from Exec.ThreadData without re-running
+        // classification (and without holding the renderer lock). The
+        // write path needs both to gate per-shell quirks - currently:
+        // pwsh under bypass cannot consume CSI response bytes on stdin
+        // because PSReadLine is disabled.
+        if (comptime builtin.os.tag == .windows) {
+            self.resolved_mode = mode;
+            self.resolved_shell_kind = internal_os.windows_shell.identify(self.args[0]);
+        }
 
         // Create our pty
         var pty = try Pty.open(.{
@@ -2053,10 +2144,10 @@ fn execCommand(
     alloc: Allocator,
     command: configpkg.Command,
     comptime passwdpkg: type,
-    /// Configured transport mode; used only on Windows to decide whether
-    /// to inject the ConPTY UTF-8 preamble (# 302). Ignored on other
-    /// platforms.
-    conpty_mode: configpkg.Config.ConptyMode,
+    /// Configured UTF-8 console preamble policy; used only on Windows
+    /// to gate UTF-8 preamble injection across both ConPTY and bypass
+    /// transports (# 302, # 341). Ignored on other platforms.
+    utf8_console: configpkg.Config.Utf8Console,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
@@ -2187,7 +2278,7 @@ fn execCommand(
                 break :direct try maybeInjectUtf8Preamble(
                     alloc,
                     cloned,
-                    conpty_mode,
+                    utf8_console,
                 );
             }
             break :direct cloned;
@@ -2252,7 +2343,7 @@ fn execCommand(
                     break :shell try maybeInjectUtf8Preamble(
                         alloc,
                         direct_args,
-                        conpty_mode,
+                        utf8_console,
                     );
                 }
 
@@ -2276,13 +2367,15 @@ fn execCommand(
                     "cmd.exe",
                 });
 
-                // cmd.exe is always `console_api` so `auto` + `never`
-                // both pick ConPTY here, and `always` picks the raw-pipe
-                // bypass (which already gets UTF-8 from PR # 301).
-                // Prepend `chcp 65001 >nul && ` to the /C script in the
-                // ConPTY cases so the whole pipeline runs UTF-8.
-                const mode = resolveConptyMode(conpty_mode, cmd);
-                const script: [:0]const u8 = if (mode == .conpty)
+                // Gate on the encoding policy directly. The chcp
+                // prepend works under both ConPTY (the dominant case
+                // for cmd) and bypass (under conpty-mode = always);
+                // decoupling from transport means utf8-console = never
+                // is a real kill switch regardless of how the user has
+                // configured conpty-mode, and `auto` (resolved to
+                // `.always` on non-CJK Windows) still forces UTF-8
+                // across the whole pipeline.
+                const script: [:0]const u8 = if (resolveUtf8Console(utf8_console) == .always)
                     try std.fmt.allocPrintSentinel(
                         alloc,
                         "chcp 65001 >nul && {s}",
@@ -2357,29 +2450,40 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
     return false;
 }
 
-/// Windows-only. If the configured transport will resolve to ConPTY
-/// for this argv and the shell is known to benefit from a UTF-8
-/// preamble (# 302), return a new argv with the preamble suffix
-/// appended. Returns `args` unchanged otherwise.
+/// Inject a shell-specific UTF-8 codepage setup into argv when the
+/// resolved utf8-console policy is `always`. Skips when the user
+/// configured `never` or when `auto` resolved to `never` (CJK ACP).
 ///
-/// Why the injection happens here and not later: we need to emit the
-/// preamble *argv-level*, before the shell has read any input. The
-/// raw-pipe bypass already gets UTF-8 from PR # 301 (parent console
-/// inheritance), but CreatePseudoConsole spawns its own conhost that
-/// starts at the system OEM CP regardless of what the parent has set.
+/// Why this fires on BOTH .conpty and .bypass transports for pwsh:
+/// - .conpty: CreatePseudoConsole spawns conhost at the system OEM
+///   CP regardless of parent state, so the child needs an explicit
+///   `[Console]::OutputEncoding = ...` to talk UTF-8.
+/// - .bypass: raw-pipe pwsh (the dominant case under conpty-mode=auto)
+///   inherits stdio pipes, not a console handle. .NET's
+///   ConsoleEncodingHelper falls back to GetACP() on a non-console
+///   handle, which is the system ANSI CP (e.g. 1252 on Italian
+///   Windows) - still not UTF-8. Same fix works.
+///
+/// `Preamble.cmd` only ever fires under .conpty by construction
+/// (cmd is .console_api -> resolveConptyMode picks .conpty). Other
+/// VT-aware shells (bash, wsl, ssh, nu, fish, zsh, elvish, xonsh)
+/// short-circuit on the Preamble.none guard.
 ///
 /// Callers own both the input `args` and the returned slice; when no
 /// injection is needed the returned slice aliases `args` (no copy).
 fn maybeInjectUtf8Preamble(
     alloc: Allocator,
     args: []const [:0]const u8,
-    conpty_mode: configpkg.Config.ConptyMode,
+    utf8_console: configpkg.Config.Utf8Console,
 ) Allocator.Error![]const [:0]const u8 {
     if (comptime builtin.os.tag != .windows) return args;
     if (args.len == 0) return args;
 
-    const mode = resolveConptyMode(conpty_mode, args[0]);
-    if (mode != .conpty) return args;
+    // Honor the user kill switch first. `.auto` resolves against the
+    // system ACP and collapses to `.always` on Western Windows (the
+    // common case) or `.never` on default-locale CJK Windows where
+    // forcing UTF-8 would mojibake legacy double-byte .bat scripts.
+    if (resolveUtf8Console(utf8_console) == .never) return args;
 
     const preamble = internal_os.windows_shell.utf8Preamble(args[0]);
     if (preamble == .none) return args;
@@ -2680,14 +2784,44 @@ fn resolveConptyMode(
     const resolved: ptypkg.Mode = switch (cfg) {
         .never => .conpty,
         .always => .bypass,
-        .auto => switch (internal_os.windows_shell.classify(exe_path)) {
-            .vt_aware => .bypass,
-            .console_api, .unknown => .conpty,
+        .auto => blk: {
+            const kind = internal_os.windows_shell.identify(exe_path);
+            // Force ConPTY for shells whose interactive input layer
+            // (e.g. PSReadLine for pwsh) requires a real console handle.
+            if (internal_os.windows_shell.requiresConsoleInput(kind)) {
+                break :blk .conpty;
+            }
+            break :blk switch (internal_os.windows_shell.awarenessOf(kind)) {
+                .vt_aware => .bypass,
+                .console_api, .unknown => .conpty,
+            };
         },
     };
     log_validate.info(
         "transport resolved: shell=\"{s}\" config_mode={s} resolved={s}",
         .{ exe_path, @tagName(cfg), @tagName(resolved) },
+    );
+    return resolved;
+}
+
+/// Binary resolution of `Config.Utf8Console`. `auto` collapses to
+/// `.never` on default-locale CJK Windows (Shift-JIS, GB2312, EUC-KR,
+/// Big5, Johab) and to `.always` everywhere else. The runtime never
+/// sees `.auto`; only its resolved form.
+const ResolvedUtf8Console = enum { always, never };
+
+fn resolveUtf8Console(cfg: configpkg.Config.Utf8Console) ResolvedUtf8Console {
+    const resolved: ResolvedUtf8Console = switch (cfg) {
+        .always => .always,
+        .never => .never,
+        .auto => if (internal_os.windows_shell.isCjkAnsiCodePage())
+            .never
+        else
+            .always,
+    };
+    log_validate.info(
+        "utf8-console resolved: config={s} resolved={s}",
+        .{ @tagName(cfg), @tagName(resolved) },
     );
     return resolved;
 }
@@ -2888,8 +3022,9 @@ test "execCommand windows: shell command, single token spawns directly" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // always mode forces the bypass path so we get the bare argv without
-    // UTF-8 preamble injection - the original behavior the test covers.
+    // utf8-console=never disables the bypass-path preamble injection
+    // (# 341) so this test stays focused on what it's actually checking:
+    // shell-string parsing.
     const result = try execCommand(
         alloc,
         .{ .shell = "pwsh.exe" },
@@ -2898,7 +3033,7 @@ test "execCommand windows: shell command, single token spawns directly" {
                 return .{};
             }
         },
-        .always,
+        .never,
     );
 
     // No cmd.exe /C wrapper: args[0] is the configured shell itself.
@@ -2922,7 +3057,7 @@ test "execCommand windows: shell command, args split without cmd wrap" {
                 return .{};
             }
         },
-        .always,
+        .never,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2947,7 +3082,7 @@ test "execCommand windows: shell command, quoted path kept as one arg" {
                 return .{};
             }
         },
-        .always,
+        .never,
     );
 
     try testing.expectEqual(2, result.len);
@@ -2966,8 +3101,9 @@ test "execCommand windows: shell command with pipe falls back to cmd.exe" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // always mode forces bypass so the cmd-wrap path does not pick up
-    // the ConPTY UTF-8 preamble injection covered in its own test.
+    // utf8-console=never disables the chcp prepend so this test stays
+    // focused on cmd-wrap routing, not preamble injection (covered by
+    // its own test).
     const result = try execCommand(
         alloc,
         .{ .shell = "dir | findstr foo" },
@@ -2976,7 +3112,7 @@ test "execCommand windows: shell command with pipe falls back to cmd.exe" {
                 return .{};
             }
         },
-        .always,
+        .never,
     );
 
     // Metachar present: wrap with cmd.exe /C so cmd handles the pipe.
@@ -3002,7 +3138,7 @@ test "execCommand windows: shell command with redirect falls back to cmd.exe" {
                 return .{};
             }
         },
-        .always,
+        .never,
     );
 
     try testing.expectEqual(3, result.len);
@@ -3069,9 +3205,16 @@ test "resolveConptyMode: always forces bypass" {
 }
 
 test "resolveConptyMode: auto picks bypass for vt_aware" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash.exe"));
     try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "wsl.exe"));
     try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash"));
+}
+
+test "resolveConptyMode: auto picks conpty for pwsh (requires console for PSReadLine)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
 }
 
 test "resolveConptyMode: auto picks conpty for console_api" {
@@ -3085,14 +3228,42 @@ test "resolveConptyMode: auto picks conpty for unknown (safe default)" {
 }
 
 test "resolveConptyMode: auto handles path-prefixed shell" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:\\Program Files\\Git\\bin\\bash.exe"));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Windows\\System32\\cmd.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:/Program Files/PowerShell/7/pwsh.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:/Program Files/Git/bin/bash.exe"));
 }
 
 test "resolveConptyMode: auto handles quoted shell" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "\"pwsh.exe\""));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "\"bash.exe\""));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "'cmd.exe'"));
+}
+
+test "resolveUtf8Console: always returns always" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectEqual(
+        @as(ResolvedUtf8Console, .always),
+        resolveUtf8Console(.always),
+    );
+}
+
+test "resolveUtf8Console: never returns never" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectEqual(
+        @as(ResolvedUtf8Console, .never),
+        resolveUtf8Console(.never),
+    );
+}
+
+test "resolveUtf8Console: auto agrees with isCjkAnsiCodePage" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    // Cross-check the resolved value against the linked CJK helper for
+    // whatever ACP the test host actually has. Catches a regression
+    // where the auto branch silently stops calling isCjkAnsiCodePage.
+    const expected: ResolvedUtf8Console = if (internal_os.windows_shell.isCjkAnsiCodePage())
+        .never
+    else
+        .always;
+    try std.testing.expectEqual(expected, resolveUtf8Console(.auto));
 }
 
 // --- # 302 UTF-8 preamble injection tests -----------------------------------
@@ -3106,7 +3277,6 @@ test "resolveConptyMode: auto handles quoted shell" {
 fn testExecWindowsShell(
     alloc: Allocator,
     shell: [:0]const u8,
-    conpty_mode: configpkg.Config.ConptyMode,
 ) ![]const [:0]const u8 {
     return try execCommand(
         alloc,
@@ -3116,7 +3286,7 @@ fn testExecWindowsShell(
                 return .{};
             }
         },
-        conpty_mode,
+        .auto,
     );
 }
 
@@ -3126,7 +3296,7 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe", .auto);
+    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe");
 
     // auto + cmd (console_api) → ConPTY → cmd preamble appended.
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3135,27 +3305,13 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
     try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
 }
 
-test "execCommand windows: pwsh under auto mode (bypass) has no preamble" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const testing = std.testing;
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .auto);
-
-    // auto + pwsh (vt_aware) → bypass → PR # 301's parent console CP
-    // does the work. No preamble.
-    try testing.expectEqual(@as(usize, 1), result.len);
-    try testing.expectEqualStrings("pwsh.exe", result[0]);
-}
-
 test "execCommand windows: pwsh under forced never mode gets pwsh preamble" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .never);
+    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe");
 
     // never → ConPTY even for vt_aware shells. pwsh is identified as
     // the powershell family, so we inject the Console encoding setup.
@@ -3172,7 +3328,7 @@ test "execCommand windows: powershell 5.1 under auto mode gets pwsh preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "powershell.exe", .auto);
+    const result = try testExecWindowsShell(arena.allocator(), "powershell.exe");
 
     // Windows PowerShell 5.1 is console_api → auto picks ConPTY → pwsh
     // preamble (same [Console]::*Encoding API as pwsh 7).
@@ -3188,7 +3344,7 @@ test "execCommand windows: unknown shell under ConPTY has no preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "my-custom.exe", .never);
+    const result = try testExecWindowsShell(arena.allocator(), "my-custom.exe");
 
     // Unknown → no preamble even under forced ConPTY; we don't know
     // what syntax to inject.
@@ -3202,7 +3358,7 @@ test "execCommand windows: vt-aware non-powershell (bash) under ConPTY has no pr
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "bash.exe", .never);
+    const result = try testExecWindowsShell(arena.allocator(), "bash.exe");
 
     // bash et al. don't care about the Windows console CP; they decode
     // their own output.
@@ -3210,18 +3366,40 @@ test "execCommand windows: vt-aware non-powershell (bash) under ConPTY has no pr
     try testing.expectEqualStrings("bash.exe", result[0]);
 }
 
-test "execCommand windows: always mode (bypass) never injects preamble" {
+test "execCommand windows: utf8-console=never is a kill switch across transports" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    const alloc = arena.allocator();
 
-    const cmd_result = try testExecWindowsShell(arena.allocator(), "cmd.exe", .always);
+    // After the # 341 fix the preamble decision is owned by the
+    // utf8-console policy, not the transport. `never` must mean
+    // "no preamble anywhere", regardless of how transport resolves.
+    const cmd_result = try execCommand(
+        alloc,
+        .{ .shell = "cmd.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .never,
+    );
     try testing.expectEqual(@as(usize, 1), cmd_result.len);
     try testing.expectEqualStrings("cmd.exe", cmd_result[0]);
 
-    const pwsh_result = try testExecWindowsShell(arena.allocator(), "pwsh.exe", .always);
+    const pwsh_result = try execCommand(
+        alloc,
+        .{ .shell = "pwsh.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .never,
+    );
     try testing.expectEqual(@as(usize, 1), pwsh_result.len);
     try testing.expectEqualStrings("pwsh.exe", pwsh_result[0]);
 }
@@ -3232,7 +3410,7 @@ test "execCommand windows: cmd with existing /c arg wraps user script" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe /c echo hi", .auto);
+    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe /c echo hi");
 
     // User's `/c` consumes "the rest of the command line", so we wrap
     // instead of appending: collapse the tail tokens back into one
@@ -3252,7 +3430,6 @@ test "execCommand windows: cmd with existing /K arg wraps user script" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "cmd.exe /K title UTF8",
-        .never,
     );
 
     // /K keeps the shell interactive after running the script; the
@@ -3273,17 +3450,17 @@ test "execCommand windows: pwsh with existing -Command wraps user script" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -NoProfile -Command Write-Host",
-        .never,
     );
 
     // -Command consumes "the rest of the command line". We collapse
     // the user's tail tokens back into one script and prepend the
-    // [Console]::*Encoding setup so their script runs UTF-8.
+    // chcp + [Console]::*Encoding setup so their script runs UTF-8.
     try testing.expectEqual(@as(usize, 4), result.len);
     try testing.expectEqualStrings("pwsh.exe", result[0]);
     try testing.expectEqualStrings("-NoProfile", result[1]);
     try testing.expectEqualStrings("-Command", result[2]);
-    try testing.expect(std.mem.startsWith(u8, result[3], "[Console]::OutputEncoding"));
+    try testing.expect(std.mem.startsWith(u8, result[3], "chcp 65001"));
+    try testing.expect(std.mem.indexOf(u8, result[3], "[Console]::OutputEncoding") != null);
     try testing.expect(std.mem.indexOf(u8, result[3], "[Console]::InputEncoding") != null);
     try testing.expect(std.mem.endsWith(u8, result[3], "; Write-Host"));
 }
@@ -3297,7 +3474,6 @@ test "execCommand windows: pwsh with multi-token -Command script is joined" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -Command Write-Host hello world",
-        .never,
     );
 
     // pwsh joins remaining positional args after `-Command` into the
@@ -3323,7 +3499,6 @@ test "execCommand windows: cmd /c with quoted path preserves quoting on wrap" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "cmd.exe /c dir \"C:\\Program Files\"",
-        .auto,
     );
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3344,7 +3519,6 @@ test "execCommand windows: pwsh with -c short form wraps user script" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -c Write-Host",
-        .never,
     );
 
     // `-c` is the unambiguous 2-letter short form of -Command; treat
@@ -3364,7 +3538,6 @@ test "execCommand windows: pwsh with -File leaves args untouched" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -File C:\\scripts\\my.ps1",
-        .never,
     );
 
     // We can't safely rewrite a user-supplied script file. Leave argv
@@ -3386,7 +3559,6 @@ test "execCommand windows: pwsh with -EncodedCommand leaves args untouched" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgAGgAaQA=",
-        .never,
     );
 
     // -EncodedCommand takes base64-encoded UTF-16LE. Rewriting would
@@ -3406,7 +3578,6 @@ test "execCommand windows: pwsh with trailing -Command (no script) leaves args u
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -Command",
-        .never,
     );
 
     // No tail after `-Command`: fabricating one would change whatever
@@ -3455,7 +3626,7 @@ test "execCommand windows: cmd with trailing /c (no script) leaves args untouche
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe /c", .never);
+    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe /c");
 
     try testing.expectEqual(@as(usize, 2), result.len);
     try testing.expectEqualStrings("cmd.exe", result[0]);
@@ -3489,7 +3660,7 @@ test "execCommand windows: pwsh -Command with param() is left untouched" {
                 return .{};
             }
         },
-        .never,
+        .auto,
     );
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3510,7 +3681,6 @@ test "execCommand windows: pwsh -Command with #requires is left untouched" {
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -Command \"#requires -Version 7\"",
-        .never,
     );
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3531,7 +3701,6 @@ test "execCommand windows: pwsh -Command with leading scriptblock is left untouc
     const result = try testExecWindowsShell(
         arena.allocator(),
         "pwsh.exe -Command \"{ Get-Date }\"",
-        .never,
     );
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3561,7 +3730,7 @@ test "execCommand windows: pwsh -Command with leading whitespace + param is left
                 return .{};
             }
         },
-        .never,
+        .auto,
     );
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -3576,7 +3745,7 @@ test "execCommand windows: pwsh with benign args gets appended preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe -NoProfile", .never);
+    const result = try testExecWindowsShell(arena.allocator(), "pwsh.exe -NoProfile");
 
     // -NoProfile doesn't conflict with -Command, so we append the
     // preamble after the user's flags.
@@ -3593,7 +3762,7 @@ test "execCommand windows: cmd-wrap path (pipes) gets chcp prepended to /C scrip
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "dir | findstr foo", .auto);
+    const result = try testExecWindowsShell(arena.allocator(), "dir | findstr foo");
 
     // Metachars force a cmd.exe /C wrap (existing behavior). The
     // preamble goes *inside* the /C string so the whole pipeline runs
@@ -3643,7 +3812,7 @@ test "execCommand windows: direct command for pwsh under never gets pwsh preambl
                 return .{};
             }
         },
-        .never,
+        .auto,
     );
 
     try testing.expectEqual(@as(usize, 5), result.len);
@@ -3651,4 +3820,87 @@ test "execCommand windows: direct command for pwsh under never gets pwsh preambl
     try testing.expectEqualStrings("-NoLogo", result[1]);
     try testing.expectEqualStrings("-NoExit", result[2]);
     try testing.expectEqualStrings("-Command", result[3]);
+}
+
+test "execCommand windows: pwsh.exe under auto/auto gets pwsh preamble (regression for #341)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // After the # 341 fix the preamble fires regardless of transport
+    // (see maybeInjectUtf8Preamble), so the user sees `chcp 65001` +
+    // `[Console]::OutputEncoding = UTF8` applied at startup. Before
+    // the fix the preamble was gated on `mode == .conpty`, which
+    // masked this code path because pwsh used to route to .bypass.
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "pwsh.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .auto, // utf8_console - non-CJK ACP resolves to .always
+    );
+
+    // Expect: ["pwsh.exe", "-NoExit", "-Command", "<UTF-8 setup script>"]
+    // The exact suffix string is owned by windows_shell.suffix(.pwsh);
+    // assert structural shape, not the literal script text (which may
+    // evolve).
+    try testing.expect(result.len >= 4);
+    try testing.expectEqualStrings(result[0], "pwsh.exe");
+    try testing.expectEqualStrings(result[1], "-NoExit");
+    try testing.expectEqualStrings(result[2], "-Command");
+    // Script text contains both chcp and OutputEncoding setup.
+    try testing.expect(std.mem.indexOf(u8, result[3], "chcp") != null);
+    try testing.expect(std.mem.indexOf(u8, result[3], "OutputEncoding") != null);
+}
+
+test "execCommand windows: pwsh.exe under utf8-console=never returns args unchanged" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "pwsh.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .never, // utf8_console - kill switch
+    );
+
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings(result[0], "pwsh.exe");
+}
+
+test "execCommand windows: bash.exe never gets a preamble (Preamble.none guard)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "bash.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .always, // even with always, bash should be untouched
+    );
+
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings(result[0], "bash.exe");
 }
