@@ -669,7 +669,7 @@ test "directwrite" {
     defer lib.deinit();
 
     var def = def: {
-        var dw = discovery_mod.DirectWrite.init();
+        var dw = discovery_mod.DirectWrite.init(undefined);
         defer dw.deinit();
         var it = try dw.discover(alloc, .{ .family = "Consolas", .size = 12 });
         defer it.deinit();
