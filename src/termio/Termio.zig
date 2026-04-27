@@ -358,7 +358,7 @@ pub fn threadEnter(
 
     // If we have inputs, then queue them all up.
     for (inputs orelse &.{}) |input| switch (input) {
-        .string => |v| self.queueWrite(data, v, false) catch |err| {
+        .string => |v| self.queueWrite(data, v, false, .input) catch |err| {
             log.warn("failed to queue input string err={}", .{err});
             return error.InputFailed;
         },
@@ -372,6 +372,7 @@ pub fn threadEnter(
                 return error.InputFailed;
             },
             false,
+            .input,
         ) catch |err| {
             log.warn("failed to queue input file err={}", .{err});
             return error.InputFailed;
@@ -408,13 +409,20 @@ pub fn queueMessage(
 /// mailbox messages instead.
 ///
 /// If you're not using termio.Thread, this is not threadsafe.
+///
+/// `kind` classifies the write so the backend can suppress it under
+/// shells that can't consume CSI bytes on stdin (see
+/// `termio.Message.WriteKind`). Pass `.input` for user-driven writes
+/// (keystrokes, paste, focus events, scripted inputs) and `.response`
+/// for parser-driven replies to child queries.
 pub inline fn queueWrite(
     self: *Termio,
     td: *ThreadData,
     data: []const u8,
     linefeed: bool,
+    kind: termio.Message.WriteKind,
 ) !void {
-    try self.backend.queueWrite(self.alloc, td, data, linefeed);
+    try self.backend.queueWrite(self.alloc, td, data, linefeed, kind);
 }
 
 /// Update the configuration.
@@ -528,7 +536,7 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
         report_size,
     );
 
-    try self.queueWrite(td, writer.buffered(), false);
+    try self.queueWrite(td, writer.buffered(), false, .response);
 }
 
 /// Reset the synchronized output mode. This is usually called by timer
@@ -592,7 +600,8 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
     }
 
     // If we reached here it means we're at a prompt, so we send a form-feed.
-    try self.queueWrite(td, &[_]u8{0x0C}, false);
+    // This is user-driven (the user invoked clear-screen) so it's `.input`.
+    try self.queueWrite(td, &[_]u8{0x0C}, false, .input);
 }
 
 /// Scroll the viewport
@@ -630,7 +639,9 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
             log.err("error encoding focus event err={}", .{err});
             return;
         };
-        try self.queueWrite(td, writer.buffered(), false);
+        // Focus events are triggered by user/window-manager focus changes,
+        // not by a child VT query, so they're classified as `.input`.
+        try self.queueWrite(td, writer.buffered(), false, .input);
     }
 
     // We always notify our backend of focus changes.
@@ -716,7 +727,7 @@ pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !voi
         .light => "\x1B[?997;2n",
         .dark => "\x1B[?997;1n",
     };
-    try self.queueWrite(td, output, false);
+    try self.queueWrite(td, output, false, .response);
 }
 
 /// ThreadData is the data created and stored in the termio thread
