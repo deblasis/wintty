@@ -253,7 +253,11 @@ pub const DirectWrite = struct {
     fallback: *dwrite.IDWriteFontFallback,
     number_sub: *dwrite.IDWriteNumberSubstitution,
 
-    pub fn init() DirectWrite {
+    pub fn init(lib: Library) DirectWrite {
+        // DirectWrite manages its own font enumeration via the OS;
+        // FreeType `lib` is unused. Accepting it keeps Discover.init
+        // uniform across backends (per upstream #12386 review).
+        _ = lib;
         const createFactory = dwrite.loadDWriteCreateFactory() catch
             @panic("DirectWrite: failed to load DWriteCreateFactory");
 
@@ -1780,7 +1784,7 @@ test "directwrite" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
     var it = try dw.discover(alloc, .{ .family = "Consolas", .size = 12 });
     defer it.deinit();
@@ -1797,7 +1801,7 @@ test "directwrite codepoint" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
     var it = try dw.discover(alloc, .{ .family = "Consolas", .codepoint = 'A', .size = 12 });
     defer it.deinit();
@@ -1814,7 +1818,7 @@ test "directwrite bold" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
     var it = try dw.discover(alloc, .{ .family = "Consolas", .bold = true, .size = 12 });
     defer it.deinit();
@@ -1833,7 +1837,7 @@ test "directwrite fallback" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
 
     // U+1F600 = grinning face emoji -- should find a fallback font.
@@ -1861,7 +1865,7 @@ test "directwrite variations" {
         .{ .id = Variation.Id.init("wght"), .value = 300 },
     };
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
     var it = try dw.discover(alloc, .{
         .family = "Cascadia Code",
@@ -1884,7 +1888,7 @@ test "directwrite discover all" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var dw = DirectWrite.init();
+    var dw = DirectWrite.init(undefined);
     defer dw.deinit();
 
     // No family filter -- exercises discoverAll(), which enumerates
