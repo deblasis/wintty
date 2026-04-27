@@ -28,6 +28,33 @@
             Background="{ThemeResource SubtleFillColorTransparentBrush}"
             BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
             BorderThickness="1">
+        <!--
+            Orientation states. The Orientation DP's PropertyChangedCallback
+            calls VisualStateManager.GoToState; the initial XAML-declared
+            values on LayoutRoot/SeparatorBorder/ChevronGlyph match
+            HorizontalState so an uninitialized control still renders
+            correctly before the callback fires.
+        -->
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="OrientationStates">
+                <VisualState x:Name="HorizontalState">
+                    <VisualState.Setters>
+                        <Setter Target="LayoutRoot.Orientation" Value="Horizontal"/>
+                        <Setter Target="SeparatorBorder.Width" Value="1"/>
+                        <Setter Target="SeparatorBorder.Height" Value="NaN"/>
+                        <Setter Target="ChevronGlyph.Glyph" Value="&#xE70D;"/>
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="VerticalState">
+                    <VisualState.Setters>
+                        <Setter Target="LayoutRoot.Orientation" Value="Vertical"/>
+                        <Setter Target="SeparatorBorder.Width" Value="NaN"/>
+                        <Setter Target="SeparatorBorder.Height" Value="1"/>
+                        <Setter Target="ChevronGlyph.Glyph" Value="&#xE76C;"/>
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
         <StackPanel x:Name="LayoutRoot" Orientation="Horizontal">
             <Button x:Name="PrimaryButton"
                     Click="OnPrimaryClick"
@@ -39,11 +66,11 @@
                     ToolTipService.ToolTip="New tab (Alt: pane, Shift: window)"
                     AutomationProperties.Name="New tab">
                 <controls:FontIcon Glyph="&#xE710;"
-                                   FontFamily="Segoe Fluent Icons"
-                                   FontSize="14"/>
+                                   FontFamily="{StaticResource SymbolThemeFontFamily}"
+                                   FontSize="{StaticResource BodyTextBlockFontSize}"/>
             </Button>
             <!-- Separator. Width=1 in horizontal mode (vertical line);
-                 OnOrientationChanged flips this to Width=NaN + Height=1
+                 VerticalState flips this to Width=NaN + Height=1
                  (horizontal line) when the layout is stacked. -->
             <Border x:Name="SeparatorBorder"
                     Width="1"
@@ -56,9 +83,13 @@
                     HorizontalContentAlignment="Center"
                     ToolTipService.ToolTip="New tab from profile..."
                     AutomationProperties.Name="Open profile menu">
+                <!-- 10px chevron is intentionally smaller than the
+                     14px primary glyph: there is no theme ramp entry
+                     for 10 (Caption=12, Body=14), so the literal stays
+                     to preserve the visual hierarchy. -->
                 <controls:FontIcon x:Name="ChevronGlyph"
                                    Glyph="&#xE70D;"
-                                   FontFamily="Segoe Fluent Icons"
+                                   FontFamily="{StaticResource SymbolThemeFontFamily}"
                                    FontSize="10"/>
                 <Button.Flyout>
                     <controls:MenuFlyout x:Name="ProfileMenu" Placement="Bottom"/>
