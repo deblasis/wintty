@@ -2873,6 +2873,13 @@ keybind: Keybinds = .{},
 @"conpty-mode": if (builtin.os.tag == .windows) ConptyMode else void =
     if (builtin.os.tag == .windows) .auto else {},
 
+/// Controls whether Ghostty injects a UTF-8 codepage setup into
+/// spawned cmd / PowerShell shells on Windows. See the `Utf8Console`
+/// enum for the full description of `auto`, `always`, and `never`.
+/// Has no effect on non-Windows platforms.
+@"utf8-console": if (builtin.os.tag == .windows) Utf8Console else void =
+    if (builtin.os.tag == .windows) .auto else {},
+
 /// Custom entries into the command palette.
 ///
 /// Each entry requires the title, the corresponding action, and an optional
@@ -8671,6 +8678,33 @@ pub const ShellIntegrationFeatures = packed struct {
 };
 
 pub const ConptyMode = enum { auto, always, never };
+
+/// Controls whether Ghostty injects a UTF-8 codepage setup into spawned
+/// cmd / PowerShell shells on Windows.
+///
+/// * `always`: always inject (`chcp 65001` for cmd; `[Console]::
+///   OutputEncoding = [System.Text.UTF8Encoding]::new()` for pwsh).
+///   This is what most Western Windows users want: it makes Nerd Font
+///   prompts render correctly and stops CSI responses leaking into the
+///   prompt buffer on installs whose OEM codepage is not 65001.
+///
+/// * `never`: never inject. Useful if you run legacy `.bat` scripts
+///   containing literal multi-byte characters in your system OEM
+///   codepage (e.g. Shift-JIS on Japanese Windows) and don't want the
+///   process flipped to UTF-8 underneath them.
+///
+/// * `auto` (default): inject unless the system ANSI codepage is one
+///   of the legacy double-byte CJK codepages (932, 936, 949, 950, 1361).
+///   Equivalent to `always` on Western Windows and `never` on default-
+///   locale Japanese / Simplified Chinese / Korean / Traditional
+///   Chinese installs.
+///
+/// This option has no effect on macOS or Linux.
+pub const Utf8Console = enum {
+    auto,
+    always,
+    never,
+};
 
 pub const SplitPreserveZoom = packed struct {
     navigation: bool = false,
