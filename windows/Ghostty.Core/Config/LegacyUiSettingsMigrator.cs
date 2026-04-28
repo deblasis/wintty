@@ -4,10 +4,7 @@ using System.Collections.Generic;
 namespace Ghostty.Core.Config;
 
 /// <summary>
-/// Pre-migration shape of ui-settings.json for the three fields
-/// being moved into the real config layer. Window placement is
-/// intentionally excluded -- that stays in the shim file (renamed
-/// to window-state.json by the next task).
+/// Shape of legacy ui-settings.json (no window placement).
 /// </summary>
 public sealed record LegacyUiSettingsPayload(
     bool VerticalTabs,

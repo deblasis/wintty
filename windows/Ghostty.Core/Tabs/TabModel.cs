@@ -23,8 +23,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     public IPaneHost PaneHost { get; }
 
     /// <summary>Profile id, set when this tab was created from a
-    /// jump-list profile or context-menu duplicate. Null today
-    /// because the config layer does not exist; reserved for plan 3.</summary>
+    /// jump-list profile or context-menu duplicate.</summary>
     public string? ProfileId { get; set; }
 
     /// <summary>
@@ -34,10 +33,6 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// creation by <see cref="TabManager.NewTab(ProfileSnapshot?)"/>
     /// <b>before</b> <see cref="TabManager.TabAdded"/> fires; downstream
     /// listeners can read it synchronously.
-    ///
-    /// PR 6 will replace the once-only setter with a hot-apply path
-    /// that calls <see cref="ProfileSnapshotStore.Refresh"/> when
-    /// <c>IProfileRegistry.ProfilesChanged</c> fires.
     /// </summary>
     public ProfileSnapshot? ProfileSnapshot { get; private set; }
 

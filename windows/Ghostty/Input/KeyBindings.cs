@@ -105,16 +105,16 @@ internal sealed class KeyBindings
     }
 
     /// <summary>
-    /// Hardcoded default bindings for PR 2. Mirrors Windows Terminal
-    /// muscle memory: Ctrl+Shift+D / E for splits, Ctrl+Shift+W to
-    /// close, Alt+Arrows for directional focus.
+    /// Hardcoded default bindings; mirrors Windows Terminal muscle
+    /// memory: Ctrl+Shift+D / E for splits, Ctrl+Shift+W to close,
+    /// Alt+Arrows for directional focus.
     /// </summary>
     // OEM virtual-key codes that lack a named VirtualKey member.
     private const VirtualKey VkEquals = (VirtualKey)187;
 
     public static KeyBindings Default { get; } = new(new[]
     {
-        // Panes (#163)
+        // Panes
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.D, PaneAction.SplitVertical),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.E, PaneAction.SplitHorizontal),
         new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Left, PaneAction.FocusLeft),
@@ -152,7 +152,7 @@ internal sealed class KeyBindings
         // Command palette
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.P, PaneAction.ToggleCommandPalette),
 
-        // Profiles (PR 5). Slot N = Profiles[N-1] (post hidden filter, ordered by
+        // Profiles. Slot N = Profiles[N-1] (post hidden filter, ordered by
         // profile-order). Out-of-range slots silently no-op in the router.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number1, PaneAction.OpenProfile1),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number2, PaneAction.OpenProfile2),

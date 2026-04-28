@@ -7,7 +7,7 @@ namespace Ghostty.Core.Logging;
 /// can control time. Production impl is <see cref="SystemClock"/>.
 /// Returns <see cref="DateTimeOffset"/> so callers that persist cache
 /// metadata (e.g. Profiles.DiscoveryCacheFile.CreatedAt) round-trip
-/// losslessly; legacy DateTime-consumers use <c>.UtcDateTime</c>.
+/// losslessly.
 /// </summary>
 internal interface IClock
 {
