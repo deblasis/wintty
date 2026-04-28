@@ -51,10 +51,9 @@ pub const Backend = enum {
         }
 
         if (target.os.tag == .windows) {
-            // wintty fork default: prefer DirectWrite for OS-authoritative
-            // font enumeration, locale-aware fallback (CJK / emoji), and
-            // weight/italic scoring. Upstream's freetype_windows directory
-            // scanner remains available as a build option.
+            // DirectWrite gives OS-authoritative font enumeration,
+            // locale-aware fallback (CJK / emoji), and weight/italic
+            // scoring. freetype_windows is still available as an opt-in.
             return .directwrite_freetype;
         }
 

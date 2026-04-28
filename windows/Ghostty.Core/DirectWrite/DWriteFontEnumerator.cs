@@ -1,16 +1,6 @@
-// Pure-logic DWrite font family enumeration shared between the
-// migrated AppearancePage code path (Ghostty WinUI 3 assembly)
-// and the equivalence test (Ghostty.Tests).
-//
-// EnumerateReference is the raw-vtable path, copied verbatim from
-// the pre-migration AppearancePage.EnumerateSystemFonts and kept
-// ONLY as the equivalence baseline. EnumerateMigrated (added in
-// Task 7 Step 3) is the CsWin32-generated path that production
-// AppearancePage will call.
-//
-// Do NOT delete EnumerateReference when the migration lands - it
-// guards against locale-selection or vtable-slot drift in future
-// revisions and is the anchor of DWriteFontFamilyEquivalenceTest.
+// DWrite font family enumeration. EnumerateReference (raw vtable) and
+// EnumerateMigrated (CsWin32) coexist as the equivalence test baseline
+// guarding against locale-selection or vtable-slot drift.
 
 using System;
 using System.Collections.Generic;
@@ -34,10 +24,9 @@ namespace Ghostty.Core.DirectWrite;
 public static class DWriteFontEnumerator
 {
     /// <summary>
-    /// Raw-vtable reference implementation. Kept verbatim from the
-    /// pre-migration AppearancePage code path as the equivalence
-    /// baseline for DWriteFontFamilyEquivalenceTest. Do not refactor
-    /// to use generated CsWin32 types.
+    /// Raw-vtable reference implementation. Equivalence baseline for
+    /// DWriteFontFamilyEquivalenceTest; do not refactor to use
+    /// generated CsWin32 types.
     /// </summary>
     public static unsafe List<string> EnumerateReference()
     {
@@ -94,7 +83,6 @@ public static class DWriteFontEnumerator
 
     private static unsafe string? GetFamilyNameReference(IntPtr familyPtr)
     {
-        // Locale index 0 matches the pre-migration behavior.
         var fvt = (IntPtr*)*(IntPtr*)familyPtr;
         IntPtr namesPtr;
         var getNames = (delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)fvt[6];

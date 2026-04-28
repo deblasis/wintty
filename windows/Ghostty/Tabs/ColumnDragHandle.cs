@@ -14,10 +14,10 @@ namespace Ghostty.Tabs;
 /// width on each pointer move. Used by <see cref="VerticalTabHost"/>
 /// to let the user resize the pinned-expanded strip width live.
 ///
-/// Why not reuse <see cref="Ghostty.Panes.Splitter"/> from #163: that
-/// one is wired to <c>SplitPane.Ratio</c> and assumes a sibling-pair
-/// model. The vertical tab strip has no such pair — it just owns
-/// one column width.
+/// Why not reuse <see cref="Ghostty.Panes.Splitter"/>: that one is
+/// wired to <c>SplitPane.Ratio</c> and assumes a sibling-pair model.
+/// The vertical tab strip has no such pair, it just owns one column
+/// width.
 /// </summary>
 internal sealed partial class ColumnDragHandle : Grid
 {

@@ -9,8 +9,7 @@ namespace Ghostty.Dialogs;
 /// <c>MainWindow.Closed</c> can wait for them to dismiss before
 /// tearing down the libghostty host. Shutting down while a dialog is
 /// still on-screen races the XAML data-binding teardown and throws
-/// <c>COMException</c> out of the runtime — see
-/// files-community/Files #17363 for the well-known reproducer.
+/// <c>COMException</c> out of the runtime.
 ///
 /// Usage:
 ///   using (tracker.Track(dialog))

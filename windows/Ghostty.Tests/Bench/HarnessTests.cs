@@ -201,9 +201,7 @@ public class HarnessTests
         });
         byte[] scratch = new byte[64 * 1024];
 
-        // Harness converts the internal OCE from the cancelled ReadAsync
-        // into TimeoutException. Asserting the strict type catches a
-        // regression if the conversion ever silently leaks.
+        // Strict-type assert pins the OCE -> TimeoutException conversion.
         Assert.Throws<TimeoutException>(() =>
             Runner.RunThroughputIteration(
                 t, payload, terminator, TimeSpan.FromMilliseconds(250), scratch));

@@ -10,8 +10,7 @@ namespace Ghostty.Core.Tabs;
 /// <summary>
 /// Owns the list of <see cref="TabModel"/>s for one window. All
 /// operations on tabs (create, close, activate, move, navigate) go
-/// through here. Pure C#, no WinUI references — lives in
-/// Ghostty.Core so the test project consumes it directly.
+/// through here.
 ///
 /// PaneHost construction is injected via a factory delegate so the
 /// test project can supply <c>FakePaneHost</c>. The real call site
@@ -66,9 +65,8 @@ internal sealed class TabManager
         : this(paneHostFactory, seed: null) { }
 
     /// <summary>
-    /// Seeded constructor. If <paramref name="seed"/> is non-null the
-    /// manager adopts it as its initial tab and skips the factory call.
-    /// If <paramref name="seed"/> is null the legacy path runs.
+    /// Non-null <paramref name="seed"/> is adopted as the initial tab
+    /// (factory call is skipped); null falls through to the factory.
     ///
     /// Seeded construction does NOT raise <see cref="TabAdded"/> for
     /// the seed: it is the initial tab, and TabAdded is for growth.

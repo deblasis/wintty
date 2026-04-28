@@ -1,7 +1,7 @@
 namespace Ghostty.Core.Profiles;
 
 /// <summary>
-/// The five per-profile visual override keys (the "beta" set from the V1 design).
+/// The five per-profile visual override keys.
 /// All fields are optional; null means "inherit from base config".
 /// </summary>
 public sealed record EffectiveVisualOverrides(

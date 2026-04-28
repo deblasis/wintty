@@ -79,12 +79,6 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
     public ILogger CreateLogger(string categoryName)
         => new FileLogger(categoryName, this);
 
-    /// <summary>
-    /// Public writer entry so follow-up work (crash-log path convergence)
-    /// can drive records straight onto the channel without going through
-    /// <see cref="ILogger"/>. Not part of this PR's consumer surface;
-    /// kept public to avoid a breaking change when the follow-up lands.
-    /// </summary>
     public bool TryWrite(LogRecord record)
     {
         if (_writer.TryWrite(record))

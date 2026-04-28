@@ -74,8 +74,8 @@ pub fn discoverThemes(arena: Allocator) ![]ThemeEntry {
     return themes.items;
 }
 
-/// An in-process theme picker that renders via VT escape sequences.
-/// Does not use Vaxis -- writes raw ANSI sequences through the write callback.
+/// In-process theme picker that writes raw ANSI sequences through
+/// the write callback (no Vaxis).
 pub const InlineThemePicker = struct {
     allocator: Allocator,
     /// Arena for per-frame allocations, reset each draw call.
@@ -287,8 +287,8 @@ pub const InlineThemePicker = struct {
                 } else if (key == .key_d) {
                     self.hex = false;
                 } else if (key == .key_f) {
-                    // Could cycle filter, but for inline picker we skip
-                    // color scheme filtering (no config loading overhead).
+                    // Color-scheme filter skipped: would require loading
+                    // every theme config up front.
                 }
                 self.notifyThemeChange();
                 self.draw();
@@ -960,7 +960,7 @@ pub const InlineThemePicker = struct {
 
             self.moveTo(row, x_off + col);
 
-            // Apply special styles for certain words (matching list_themes.zig)
+            // Apply special styles for certain words.
             if (std.mem.eql(u8, "ipsum", word)) {
                 const pc = paletteColor(config, 2);
                 self.setFg(pc[0], pc[1], pc[2]);

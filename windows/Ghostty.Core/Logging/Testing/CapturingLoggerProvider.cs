@@ -10,11 +10,6 @@ namespace Ghostty.Core.Logging.Testing;
 /// In-memory <see cref="ILoggerProvider"/> that captures every emitted
 /// entry. Used by contract tests to assert that a specific component
 /// emits a specific <see cref="EventId"/> on a given code path.
-///
-/// This is NOT a test stub - it is a real <see cref="ILoggerProvider"/>
-/// implementation. It lives in <c>Ghostty.Core</c> so both
-/// <c>Ghostty.Tests</c> and any future Core-referencing test project can
-/// use it without duplication.
 /// </summary>
 internal sealed class CapturingLoggerProvider : ILoggerProvider
 {

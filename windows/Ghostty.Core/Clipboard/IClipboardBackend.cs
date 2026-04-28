@@ -4,9 +4,8 @@ using System.Threading.Tasks;
 namespace Ghostty.Core.Clipboard;
 
 /// <summary>
-/// Abstracts the Windows clipboard so the service layer is unit-testable
-/// without WinUI. The production implementation lives in the WinUI
-/// project as WinUiClipboardBackend.
+/// Abstracts the Windows clipboard. The production implementation lives
+/// in the WinUI project as WinUiClipboardBackend.
 /// </summary>
 public interface IClipboardBackend
 {

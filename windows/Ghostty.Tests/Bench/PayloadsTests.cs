@@ -35,10 +35,8 @@ public class PayloadsTests
     [Fact]
     public void Sgr_ContainsAtLeastFiftyThousandRedSgrSequences()
     {
-        // The SGR chunk is "\x1b[31mhello\x1b[0m " = 15 bytes. 1 MB / 15
-        // = ~69 905 introducers; 50 000 is a comfortable floor that still
-        // detects accidental factory changes (e.g., a payload switch that
-        // dropped the SGR pattern entirely).
+        // SGR chunk is 15 bytes -> 1 MB / 15 ~= 69 905 introducers.
+        // 50 000 floor catches accidental factory changes.
         var p = Payloads.Sgr1Mb().Span;
         int count = 0;
         ReadOnlySpan<byte> needle = [0x1b, (byte)'[', (byte)'3', (byte)'1', (byte)'m'];
@@ -90,11 +88,6 @@ public class PayloadsTests
         Assert.Equal(a.Span.Slice(0, 1024).ToArray(), b.Span.Slice(0, 1024).ToArray());
     }
 
-    // The throughput probe appends a "\r\n~ENDOFBURST_<nonce>~" terminator
-    // after the payload and scans conhost's emitted VT stream for it. If a
-    // payload factory ever emitted the literal "~ENDOFBURST_" substring,
-    // the probe could false-match mid-payload and stop the measurement
-    // early. This test pins the invariant so new payloads must preserve it.
     [Fact]
     public void Payloads_DoNotContainTerminatorPrefix()
     {
