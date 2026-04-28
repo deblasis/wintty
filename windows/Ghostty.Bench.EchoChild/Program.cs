@@ -1,17 +1,4 @@
-// Copies every byte arriving on stdin to stdout.
-// When stdin is a ConPTY terminal, switches to raw mode first so bytes
-// arrive immediately without conhost's line-buffering, then writes the
-// "RDY" ready sentinel so the parent (Ghostty.Bench) knows conhost's
-// VT preamble has been routed and raw mode is active before starting
-// to measure. When stdin is a direct pipe (DirectPipeTransport),
-// GetConsoleMode fails cleanly so we skip both steps and behave as a
-// plain byte-for-byte echo.
-//
-// Throughput probes require no active participation here: the terminator
-// travels through this raw-mode CopyTo byte-for-byte, and under ConPTY
-// conhost renders the trailing "~ENDOFBURST_<nonce>~" onto its screen
-// buffer and re-emits it on hOutput as part of the next refresh cycle.
-// No barrier-response logic lives in EchoChild.
+// Bench helper: copies stdin to stdout with explicit per-write flush.
 using System.Runtime.InteropServices;
 
 const uint STD_INPUT_HANDLE = unchecked((uint)-10);
@@ -59,15 +46,9 @@ try
     using var stdin = Console.OpenStandardInput();
     using var stdout = Console.OpenStandardOutput();
 
-    // Manual copy loop with an explicit Flush after each Write, rather than
-    // Stream.CopyTo. Under ConPTY, Console.OpenStandardOutput's stream can
-    // hold the final partial chunk of a large burst (e.g., the ~31-byte
-    // terminator after a 1 MB throughput payload) in an internal buffer
-    // until the next full block or process exit. That delays the parent's
-    // terminator observation past the probe's wall-clock budget. DirectPipe
-    // does not exhibit this because its anonymous pipe backing is unbuffered.
-    // 81920 is Stream.CopyTo's default buffer size; keep parity for round-
-    // trip throughput characteristics.
+    // Explicit Flush per write: ConPTY's stdout buffers partial chunks
+    // (e.g., the trailing terminator after a 1 MB payload) which would
+    // bench-falsely-positive as latency.
     byte[] buf = new byte[81920];
     int n;
     while ((n = stdin.Read(buf, 0, buf.Length)) > 0)

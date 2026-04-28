@@ -1726,7 +1726,7 @@ fn execCommand(
     comptime passwdpkg: type,
     /// Configured UTF-8 console preamble policy; used only on Windows
     /// to gate UTF-8 preamble injection across both ConPTY and bypass
-    /// transports (# 302, # 341). Ignored on other platforms.
+    /// transports. Ignored on other platforms.
     utf8_console: configpkg.Config.Utf8Console,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
@@ -2815,13 +2815,10 @@ test "resolveUtf8Console: auto agrees with isCjkAnsiCodePage" {
     try std.testing.expectEqual(expected, resolveUtf8Console(.auto));
 }
 
-// --- # 302 UTF-8 preamble injection tests -----------------------------------
-//
-// These check the argv that execCommand hands back when the resolved
-// transport is ConPTY. The preamble's *content* is covered by
-// `utf8Preamble` tests in os/windows_shell.zig; here we only assert
-// the injection decision (when do we inject? on what shells?) and the
-// argv shape (length + flag markers).
+// UTF-8 preamble injection tests: assert the injection decision (when
+// do we inject? on what shells?) and the argv shape (length + flag
+// markers). The preamble's *content* is covered by `utf8Preamble` tests
+// in os/windows_shell.zig.
 
 fn testExecWindowsShell(
     alloc: Allocator,
@@ -2923,9 +2920,9 @@ test "execCommand windows: utf8-console=never is a kill switch across transports
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // After the # 341 fix the preamble decision is owned by the
-    // utf8-console policy, not the transport. `never` must mean
-    // "no preamble anywhere", regardless of how transport resolves.
+    // The preamble decision is owned by the utf8-console policy, not
+    // the transport. `never` must mean "no preamble anywhere",
+    // regardless of how transport resolves.
     const cmd_result = try execCommand(
         alloc,
         .{ .shell = "cmd.exe" },
@@ -3379,11 +3376,10 @@ test "execCommand windows: pwsh.exe under auto/auto gets pwsh preamble (regressi
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // After the # 341 fix the preamble fires regardless of transport
-    // (see maybeInjectUtf8Preamble), so the user sees `chcp 65001` +
-    // `[Console]::OutputEncoding = UTF8` applied at startup. Before
-    // the fix the preamble was gated on `mode == .conpty`, which
-    // masked this code path because pwsh used to route to .bypass.
+    // The preamble fires regardless of transport (see
+    // maybeInjectUtf8Preamble), so the user sees `chcp 65001` +
+    // `[Console]::OutputEncoding = UTF8` applied at startup even when
+    // pwsh routes to .bypass.
     const result = try execCommand(
         alloc,
         .{ .shell = "pwsh.exe" },

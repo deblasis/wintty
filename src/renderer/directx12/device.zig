@@ -364,12 +364,8 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             );
         },
     }
-    // If anything between here and the final `return` ever gains a
-    // fallible step, this errdefer tears down the shared texture state
-    // instead of leaking the resource and both NT handles. Today it is
-    // defensive -- nothing after this point can fail -- but the cost
-    // is nil and the alternative is a latent leak waiting for the next
-    // edit.
+    // Defensive: if a future fallible step lands between here and the
+    // return, this prevents leaking the resource and both NT handles.
     errdefer if (result_shared_texture) |st| {
         _ = d3d12.CloseHandle(st.fence_handle);
         _ = d3d12.CloseHandle(st.resource_handle);
