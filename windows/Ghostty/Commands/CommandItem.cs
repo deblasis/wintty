@@ -11,6 +11,7 @@ internal enum CommandCategory
     Terminal,
     Config,
     Custom,
+    About,
 }
 
 internal record CommandItem

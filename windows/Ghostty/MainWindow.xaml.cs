@@ -1686,7 +1686,9 @@ public sealed partial class MainWindow : Window
 
         var config = new ConfigCommandSource();
 
-        var sources = new List<ICommandSource> { builtIn, jump, config };
+        var version = new VersionCommandSource(() => this.Content?.XamlRoot, _dialogs);
+
+        var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
         // Null-check App services as a defensive belt (cold-start where App.ProfileRegistry
         // isn't wired yet would skip the source entirely; ProfileCommandSource itself

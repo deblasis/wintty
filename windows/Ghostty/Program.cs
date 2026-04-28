@@ -146,6 +146,16 @@ public static partial class Program
         // survives reboot and tells us exactly what went wrong.
         RedirectStderrToFile();
 
+        // +version is intercepted here, before the libghostty CLI
+        // dispatcher. The renderer lives in C# so it can also drive the
+        // Version palette dialog with the same output.
+        if (args.Length > 0 &&
+            (args[0] == "+version" || args[0] == "--version" || args[0] == "-v"))
+        {
+            RegisterNativeResolver();
+            Environment.Exit(Cli.CliActions.PrintVersion());
+        }
+
         // CLI actions are delegated to libghostty, matching the macOS
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
@@ -336,18 +346,21 @@ public static partial class Program
     /// Register the native DLL resolver so LibraryImport("ghostty") finds
     /// native/ghostty.dll. Mirrors the resolver in App.xaml.cs but runs
     /// before WinUI is initialized, enabling CLI-path P/Invoke calls.
+    /// Registered for both the host assembly (Interop.NativeMethods) and
+    /// Ghostty.Core, since LibGhosttyBuildInfoBridge lives in the latter.
     /// </summary>
     private static void RegisterNativeResolver()
     {
-        NativeLibrary.SetDllImportResolver(
-            typeof(Interop.NativeMethods).Assembly,
-            (name, assembly, path) =>
-            {
-                if (!string.Equals(name, "ghostty", StringComparison.OrdinalIgnoreCase))
-                    return IntPtr.Zero;
-                var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
-                return NativeLibrary.Load(candidate);
-            });
+        static IntPtr Resolve(string name, System.Reflection.Assembly assembly, DllImportSearchPath? path)
+        {
+            if (!string.Equals(name, "ghostty", StringComparison.OrdinalIgnoreCase))
+                return IntPtr.Zero;
+            var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
+            return NativeLibrary.Load(candidate);
+        }
+
+        NativeLibrary.SetDllImportResolver(typeof(Interop.NativeMethods).Assembly, Resolve);
+        NativeLibrary.SetDllImportResolver(typeof(Ghostty.Core.Version.LibGhosttyBuildInfoBridge).Assembly, Resolve);
     }
 
     private static int StartGui()
