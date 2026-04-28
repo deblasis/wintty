@@ -188,8 +188,21 @@
           WorkingDirectory="$(MSBuildThisFileDirectory)" />
   </Target>
 
+  <!--
+    Explicit scale list, not a wildcard. Wildcards in <Content Include>
+    expand at MSBuild evaluation time; GenerateBrandingAssets above runs
+    in BeforeBuild (after evaluation), so on a clean build the wildcard
+    matches zero files, no Content items are added, and bin\Assets\ stays
+    empty. ms-appx:///Assets/AppIcon.png then 404s and the WinUI 3
+    AppIconBadge renders the broken-image placeholder instead of the
+    Ghostty ghost. Explicit names get added to @(Content) at evaluation
+    regardless of whether the files exist yet; the Copy task at build
+    time succeeds because GenerateBrandingAssets has produced them by
+    then. Keep this list in sync with PngWriter.ScaleTargets in
+    dist/windows/IconGen/PngWriter.cs.
+  -->
   <ItemGroup>
-    <Content Include="$(GeneratedBrandingDir)AppIcon.scale-*.png">
+    <Content Include="$(GeneratedBrandingDir)AppIcon.scale-100.png;$(GeneratedBrandingDir)AppIcon.scale-150.png;$(GeneratedBrandingDir)AppIcon.scale-200.png;$(GeneratedBrandingDir)AppIcon.scale-400.png">
       <Link>Assets\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
