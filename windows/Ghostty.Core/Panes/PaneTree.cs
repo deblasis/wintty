@@ -154,9 +154,8 @@ internal static class PaneTree
 
     /// <summary>
     /// Reset every <see cref="SplitPane.Ratio"/> in the tree to 0.5,
-    /// giving all leaves equal space. Mirrors upstream's
-    /// <c>equalize_splits</c> keybind (both Zig and Swift). No-op on
-    /// a single leaf.
+    /// giving all leaves equal space. No-op for parity with Zig/Swift
+    /// on a single leaf.
     /// </summary>
     public static void Equalize(PaneNode root)
     {

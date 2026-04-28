@@ -11,7 +11,7 @@ namespace Ghostty.Commands;
 /// IProfileRegistry.Profiles order. The Execute lambda reads
 /// IModifierKeyState at click/Enter time and routes through the
 /// injected openProfile delegate via ClickModifierClassifier, so
-/// Alt/Shift behave the same as the new-tab split button (PR 4).
+/// Alt/Shift behave the same as the new-tab split button.
 ///
 /// Refreshed every time the palette opens (CommandPaletteViewModel.Open
 /// calls Refresh on each source). No event subscription, so no dispose
@@ -65,7 +65,6 @@ internal sealed class ProfileCommandSource : ICommandSource
                 Description = $"Open {profile.Name} as a new tab (Alt: new pane, Shift: new window)",
                 ActionKey = $"open_profile:{profile.Id}",
                 Category = CommandCategory.Tab,
-                // TODO: PR 6 - per-profile icon (use IIconResolver + Profile.Icon).
                 LeadingIcon = "",
                 Shortcut = LookupShortcut(SlotAction(i)),
                 Execute = _ =>

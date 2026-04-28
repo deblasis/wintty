@@ -2,12 +2,10 @@ namespace Ghostty.Core.Input;
 
 /// <summary>
 /// The vocabulary of shell-related actions a key binding can invoke.
-/// Covers panes (PR #163), tabs (PR 4), and profiles (PR 5).
-/// Routed through PaneActionRouter.Invoke in the WinUI assembly. Lives
-/// in Ghostty.Core so cross-platform unit tests in Ghostty.Tests can
-/// reference its values directly (KeyBindings and PaneActionRouter both
-/// stay in the Ghostty assembly because they depend on
-/// Windows.System.VirtualKey and on TabManager respectively).
+/// Routed through PaneActionRouter.Invoke in the WinUI assembly
+/// (KeyBindings and PaneActionRouter stay in the Ghostty assembly
+/// because they depend on Windows.System.VirtualKey and on TabManager
+/// respectively).
 ///
 /// Adding a new bindable action is two changes: add a value here,
 /// add a case in PaneActionRouter.Invoke. Bindings in KeyBindings can
@@ -18,7 +16,7 @@ public enum PaneAction
     // Pane operations (#163)
     SplitVertical = 0,
     SplitHorizontal = 1,
-    ClosePane = 2, // legacy: pane-only close, no chord points to it after tabs landed
+    ClosePane = 2,
     FocusLeft = 3,
     FocusRight = 4,
     FocusUp = 5,
