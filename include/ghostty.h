@@ -79,6 +79,15 @@ typedef struct {
   const char *data;
 } ghostty_clipboard_content_s;
 
+typedef struct {
+  const char *version;
+  const char *version_string;
+  const char *commit;
+  const char *channel;
+  const char *zig_version;
+  const char *build_mode;
+} ghostty_build_info_s;
+
 typedef enum {
   GHOSTTY_CLIPBOARD_REQUEST_PASTE,
   GHOSTTY_CLIPBOARD_REQUEST_OSC_52_READ,
@@ -1085,6 +1094,7 @@ typedef enum {
 
 GHOSTTY_API int ghostty_init(uintptr_t, char**);
 GHOSTTY_API void ghostty_cli_try_action(void);
+GHOSTTY_API void ghostty_build_info(ghostty_build_info_s *out);
 GHOSTTY_API ghostty_info_s ghostty_info(void);
 GHOSTTY_API const char* ghostty_translate(const char*);
 GHOSTTY_API void ghostty_string_free(ghostty_string_s);

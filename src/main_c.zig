@@ -145,6 +145,41 @@ pub export fn ghostty_cli_run_action() c_int {
     });
 }
 
+/// ghostty_build_info_s
+pub const BuildInfo = extern struct {
+    version: [*:0]const u8,
+    version_string: [*:0]const u8,
+    commit: [*:0]const u8,
+    channel: [*:0]const u8,
+    zig_version: [*:0]const u8,
+    build_mode: [*:0]const u8,
+};
+
+/// Fill `out` with build information about the loaded libghostty. Returned
+/// strings are NUL-terminated UTF-8 with static lifetime; the caller must
+/// not free them. `commit` is empty when no build commit is present. Safe
+/// to call before `ghostty_init`.
+pub export fn ghostty_build_info(out: *BuildInfo) void {
+    out.* = .{
+        .version = build_config_version_cstr,
+        .version_string = build_config.version_string,
+        .commit = build_config_commit_cstr,
+        .channel = @tagName(build_config.release_channel),
+        .zig_version = builtin.zig_version_string,
+        .build_mode = @tagName(builtin.mode),
+    };
+}
+
+const build_config_version_cstr: [*:0]const u8 = std.fmt.comptimePrint(
+    "{d}.{d}.{d}",
+    .{ build_config.version.major, build_config.version.minor, build_config.version.patch },
+);
+
+const build_config_commit_cstr: [*:0]const u8 = blk: {
+    const b = build_config.version.build orelse break :blk "";
+    break :blk std.fmt.comptimePrint("{s}", .{b});
+};
+
 /// Set an optional callback that the +list-themes TUI invokes when the
 /// selected theme changes (preview) or is accepted (confirmed). This
 /// lets embedders update their app chrome (title bar, tabs, etc.) to
