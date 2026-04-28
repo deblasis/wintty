@@ -12,17 +12,6 @@ namespace Ghostty.Core.Config;
 /// reading the raw config file; this registry lets us suppress the
 /// false-positive diagnostics and surface the keys as informational
 /// instead.
-///
-/// This is also the single place to look when we eventually propose
-/// these keys upstream: each entry carries a short description and
-/// a pointer to where the runtime behavior lives.
-///
-/// When adding a new Windows-only key:
-/// 1. Add an entry here.
-/// 2. Make sure ConfigService reads it via GetFileValue (not through
-///    libghostty, which doesn't know about it).
-/// 3. If it's user-editable from the settings UI, also add it to
-///    SettingsIndex with an appropriate page/section.
 /// </summary>
 public static class WindowsOnlyKeys
 {
