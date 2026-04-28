@@ -7,12 +7,10 @@ namespace Ghostty.Core.Logging;
 /// <summary>
 /// Static accessor for <see cref="ILogger{T}"/> instances used by
 /// Core types whose call sites are static methods or otherwise
-/// cannot receive a logger through a constructor argument.
-///
-/// Populated once from <c>App.OnLaunched</c> via
-/// <see cref="Initialize(ILoggerFactory)"/>. Before that call, all
-/// accessors return <see cref="NullLogger{T}"/>, so early / test
-/// call sites are safe no-ops.
+/// cannot receive a logger through a constructor argument. Before
+/// <see cref="Initialize(ILoggerFactory)"/> is called, all accessors
+/// return <see cref="NullLogger{T}"/>, so early / test call sites are
+/// safe no-ops.
 ///
 /// Tests should use <see cref="Install"/> instead of Initialize so
 /// the static state is restored to the pre-test NullLogger baseline

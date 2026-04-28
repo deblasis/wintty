@@ -48,9 +48,7 @@ internal static class Win32IconExtractor
     // System.Drawing.Common package. Trimming/AOT analyzers flag the
     // Icon.FromHandle -> Bitmap -> PNG-encode chain because GDI+
     // registration uses reflection; the suppressions below keep the
-    // warnings local to this path. Phase 2 should swap this for a
-    // direct GetIconInfo + WIC encoder path and drop the dependency.
-    // TODO: Phase 2 - migrate to direct WIC encoder to drop System.Drawing.Common.
+    // warnings local to this path.
 #pragma warning disable IL2026, IL3050, CA1416
     // Must be unsafe: HICON.Value is a void* (CsWin32-generated), so the
     // cast to IntPtr for Icon.FromHandle is a pointer-to-nint conversion.

@@ -7,14 +7,7 @@ namespace Ghostty.Tests.Settings;
 
 public class SettingsSearchTests
 {
-    // Match tiers, best → worst, per Phase 3 spec
-    // (docs/superpowers/specs/2026-04-14-settings-reorganization-design.md#matching):
-    //   1. ExactLabel        2. LabelPrefix      3. LabelContains
-    //   4. DescriptionContains  5. TagExact      6. TagContains
-    //   7. FuzzyKey
-    //
-    // Tests use tiny per-test corpora so each assertion isolates one
-    // tier boundary without accidental cross-field hits.
+    // Tests cover each match tier in isolation.
 
     private static SettingsEntry Make(
         string key,
