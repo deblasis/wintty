@@ -34,13 +34,6 @@ internal sealed class FakeProfileRegistry : IProfileRegistry
 
     public void Dispose() { }
 
-    /// <summary>
-    /// Test-only helper: replace the profile list (and optionally the
-    /// hidden list), bump <see cref="Version"/>, and fire
-    /// <see cref="ProfilesChanged"/> synchronously (mimicking the
-    /// production UI-dispatch shape from the perspective of a
-    /// single-threaded test).
-    /// </summary>
     public void SetProfiles(
         IReadOnlyList<ResolvedProfile> profiles,
         IReadOnlyList<ResolvedProfile>? hidden = null,
@@ -53,12 +46,7 @@ internal sealed class FakeProfileRegistry : IProfileRegistry
         ProfilesChanged?.Invoke(this);
     }
 
-    /// <summary>
-    /// Convenience: build N profiles named "p1".."pN" with default
-    /// everything else. p1 is marked default and OrderIndex follows
-    /// declaration order. Used by command-palette / keybinding tests
-    /// that only care about the count + ids.
-    /// </summary>
+    /// <summary>Build N profiles "p1".."pN", p1 default, OrderIndex by declaration.</summary>
     public static List<ResolvedProfile> BuildN(int count)
     {
         var list = new List<ResolvedProfile>(count);

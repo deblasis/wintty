@@ -42,8 +42,7 @@ internal static class Program
 
     private static MasterRasters StripeMasters(MasterRasters original)
     {
-        // Clone each source raster, apply the hazard stripe, hand back
-        // a new MasterRasters instance. Caller disposes.
+        // Caller disposes the returned instance.
         var dict = new Dictionary<int, System.Drawing.Bitmap>();
         foreach (var px in original.Sizes)
         {

@@ -65,8 +65,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void AddItem(TabModel tab)
     {
         // PaneHost parenting and visibility are owned by MainWindow
-        // via a shared container (see #171), so both tab hosts can
-        // coexist without double-parenting the same PaneHost.
+        // via a shared container, so both tab hosts can coexist without
+        // double-parenting the same PaneHost.
         //
         // The TabView item is a header-only placeholder. Content is
         // null on purpose; the actual terminal lives in
@@ -166,8 +166,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void SelectActive()
     {
         // Active-tab PaneHost visibility is owned by MainWindow's
-        // shared container (see #171). This method only syncs the
-        // TabView strip selection.
+        // shared container. This method only syncs the TabView strip
+        // selection.
         if (!_itemByModel.TryGetValue(_manager.ActiveTab, out var item)) return;
 
         // Re-apply tab color tints so the selected tab gets the

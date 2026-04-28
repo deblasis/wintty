@@ -3,8 +3,8 @@ namespace Ghostty.Core.Shell;
 /// <summary>
 /// Pure resolver for acrylic tint + opacity tuning. When the tint
 /// color override is unset the resolver falls back to the terminal
-/// theme background, so the window inherits the active theme look
-/// instead of washing out to transparent black (issue # 324).
+/// theme background so the window inherits the active theme look
+/// instead of washing out to transparent black.
 ///
 /// Opacity values track <c>background-blur-follows-opacity</c>: when
 /// enabled both tint and luminosity opacity are slaved to the window

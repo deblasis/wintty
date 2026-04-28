@@ -14,10 +14,6 @@ namespace Ghostty.Core.Profiles;
 /// %LOCALAPPDATA%\Wintty\IconCache\&lt;sha&gt;.png; subsequent resolves
 /// read from disk rather than recomputing. Unknown bundled keys fall
 /// back to the "default" bundled asset.
-///
-/// Task 15 implements Path and BundledKey. AutoForExe (Task 16),
-/// Mdl2Token (Task 16), and AutoForWslDistro (Task 17) are added
-/// incrementally.
 /// </summary>
 internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
 {
@@ -55,23 +51,14 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
     {
         IconSpec.Path p => await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false),
         IconSpec.BundledKey b => ReadBundledOrDefault(b.Key),
-        // Phase 2: DirectWrite rasterization of the Segoe Fluent Icons /
-        // Segoe MDL2 Assets glyph. For V1 scope we return the default
-        // bundled asset so the UI still gets a usable 16x16 PNG.
         IconSpec.Mdl2Token => ReadBundledOrDefault(DefaultBundledKey),
         IconSpec.AutoForExe a => ExtractExeIconAsPng(a.ExePath),
-        // V1: per-distro icon extraction from appx/WSLg is out of scope. Always
-        // fall back to bundled "wsl" - keeps the UI consistent and the cache
-        // bounded. Phase 2 can introduce a WSLg lookup that keys on DistroName.
         IconSpec.AutoForWslDistro => ReadBundledOrDefault("wsl"),
         _ => ReadBundledOrDefault(DefaultBundledKey),
     };
 
-    // Win32 icon extraction lives behind OperatingSystem.IsWindows() so
-    // the non-Windows build graph still compiles WindowsIconResolver.
-    // Any SHGetFileInfoW / GDI failure silently falls back to the default
-    // bundled icon rather than surfacing the exception - icon resolution
-    // is best-effort and must never fail a profile resolve.
+    // Best-effort: any SHGetFileInfoW / GDI failure falls back to the
+    // default bundled icon rather than failing a profile resolve.
     private static byte[] ExtractExeIconAsPng(string exePath)
     {
         // IsWindowsVersionAtLeast (not bare IsWindows) satisfies CA1416's
@@ -114,8 +101,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         // like "exe:C:\\Foo.exe" and "exe:c:\\foo.exe" currently hash
         // to different SHAs and produce duplicate cache entries for
         // the same underlying file. Acceptable for Path (user-supplied,
-        // round-trips verbatim); Task 16's AutoForExe should normalize
-        // before hitting this token when it lands.
+        // round-trips verbatim).
         var baseToken = spec switch
         {
             IconSpec.Path p => "path:" + p.FilePath,
@@ -152,9 +138,6 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         catch { /* best-effort */ }
     }
 
-    // The ".png" suffix here is nominal - it's a cache identifier, not a
-    // content-type claim. For IconSpec.Path entries pointing at .ico/.jpg
-    // sources, the cached bytes mirror the source file verbatim.
     private string? CachePathFor(string sha)
     {
         var local = fs.GetKnownFolder(KnownFolderId.LocalAppData);

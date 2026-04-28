@@ -102,7 +102,7 @@ internal sealed class PaneActionRouter
                 ToggleFullscreenRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
-            // PR 5: profile slot chords. Resolve via the live registry; out-of-range
+            // Profile slot chords resolve via the live registry; out-of-range
             // and missing-delegate are silent no-ops.
             case PaneAction.OpenProfile1: OpenProfileSlot(1); return;
             case PaneAction.OpenProfile2: OpenProfileSlot(2); return;

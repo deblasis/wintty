@@ -122,7 +122,7 @@ public sealed partial class MainWindow : Window
     // DeleteObject'd when replaced). False when it is a stock object
     // (e.g. NULL_BRUSH from GetStockObject) or the default brush the
     // WNDCLASS was registered with -- stock objects are owned by the
-    // system and MUST NOT be deleted. See # 242.
+    // system and MUST NOT be deleted.
     private bool _classBrushOwned;
 
     // Last color written to RootGrid.Background. ApplyRootGridBackground
@@ -182,8 +182,6 @@ public sealed partial class MainWindow : Window
     // legitimate user repeats (KeyDown -> KeyUp -> KeyDown) come
     // through unmodified. This replaces an earlier 150 ms wall-clock
     // window that ate muscle-memory double-splits.
-    //
-    // Tracked in https://github.com/deblasis/ghostty/issues/165
     private PaneAction? _acceleratorFiredThisKeyDown;
 
     // Win32 interop for the window class background brush. WinUI 3 hosts
@@ -658,9 +656,9 @@ public sealed partial class MainWindow : Window
     /// or the like) and then calling <see cref="Window.Activate"/>.
     ///
     /// Used today by <see cref="DetachTabToNewWindow"/> for cursor-
-    /// anchored placement. PR 201 Snap Layouts will call this same
-    /// factory to install a snap rect before first activation so there
-    /// is no visible placement flicker.
+    /// anchored placement. Snap Layouts will call this same factory to
+    /// install a snap rect before first activation so there is no
+    /// visible placement flicker.
     /// </summary>
     internal static MainWindow CreateForAdoption(
         ConfigService configService,
@@ -698,17 +696,16 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Pre-activation hook for Snap Layouts placement. PR 199's
-    /// detach flow constructs a MainWindow but MUST NOT call
-    /// Activate until any snap target has been applied, otherwise
-    /// the window flashes at the wrong origin. Call this once
-    /// placement is done.
+    /// Pre-activation hook for Snap Layouts placement. The detach flow
+    /// constructs a MainWindow but MUST NOT call Activate until any snap
+    /// target has been applied, otherwise the window flashes at the
+    /// wrong origin. Call this once placement is done.
     /// </summary>
     internal void ActivateAfterPlacement() => Activate();
 
     /// <summary>
-    /// Single funnel for the new-tab split button (PR 4) and the
-    /// command-palette profile rows (PR 5). Resolves
+    /// Single funnel for the new-tab split button and the
+    /// command-palette profile rows. Resolves
     /// <paramref name="profileId"/> against the registry, falling back
     /// to the registry's <c>DefaultProfileId</c> when the requested id
     /// is missing. Logs and returns when both lookups fail (cold-start
@@ -1482,7 +1479,7 @@ public sealed partial class MainWindow : Window
     /// CreateSolidBrush result, we must DeleteObject it; when it was
     /// a stock brush (NULL_BRUSH) or the default WNDCLASS brush, we
     /// must not. <see cref="_classBrushOwned"/> tracks that
-    /// distinction. See # 242.
+    /// distinction.
     /// </summary>
     private void ApplyWindowClassBrush(ClassBrushKind kind)
     {
@@ -1691,10 +1688,9 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config };
 
-        // PR 5: profile rows. Null-check App services as a defensive belt
-        // (cold-start where App.ProfileRegistry isn't wired yet would skip
-        // the source entirely; ProfileCommandSource itself returns an empty
-        // list when its registry has no profiles).
+        // Null-check App services as a defensive belt (cold-start where App.ProfileRegistry
+        // isn't wired yet would skip the source entirely; ProfileCommandSource itself
+        // returns an empty list when its registry has no profiles).
         if (App.ProfileRegistry is not null && App.ModifierKeyState is not null)
         {
             sources.Add(new ProfileCommandSource(
