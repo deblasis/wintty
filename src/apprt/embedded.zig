@@ -465,28 +465,22 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
-    /// Windows key event buffering. WM_KEYDOWN and WM_CHAR arrive as
-    /// separate messages on Windows. We buffer the keydown here and
-    /// attach text from the following ghostty_surface_text call before
-    /// dispatching through key encoding. On non-Windows this is void
-    /// and eliminated by comptime.
+    /// Windows buffers WM_KEYDOWN here so a following WM_CHAR can
+    /// attach text before dispatching through key encoding.
     pending_key: if (builtin.os.tag == .windows)
         ?PendingKey
     else
         void = if (builtin.os.tag == .windows) null else {},
 
-    /// Text buffer for Windows key event combining. Lives outside the
-    /// pending_key optional so it doesn't get poisoned when the optional
-    /// is set to null in debug builds. The event.text pointer references
-    /// this buffer during dispatch. Sized to match GTK's im_buf (128)
-    /// so IME compositions aren't silently truncated.
+    /// Text buffer for the pending key. Lives outside the optional so
+    /// it isn't poisoned when the optional is cleared in debug builds.
+    /// Sized to match GTK's im_buf so IME compositions aren't truncated.
     pending_key_text: if (builtin.os.tag == .windows)
         [128]u8
     else
         void = if (builtin.os.tag == .windows) .{0} ** 128 else {},
 
     /// Input redirect for in-process features (e.g., theme picker).
-    /// Windows-only; eliminated by comptime on other platforms.
     input_redirect: if (builtin.os.tag == .windows)
         ?InputRedirect
     else
@@ -506,23 +500,22 @@ pub const Surface = struct {
         event: App.KeyEvent,
     };
 
-    /// Redirect types for in-process features (e.g., inline theme picker).
-    /// Windows-only: intercepted at the apprt boundary before events
-    /// reach core Surface.
+    /// Intercepts events at the apprt boundary before they reach
+    /// core Surface. Used by the inline theme picker.
     const InputRedirect = struct {
         callback: *const fn (ud: ?*anyopaque, event: *const input.KeyEvent) bool,
         userdata: ?*anyopaque,
     };
 
-    /// Scroll redirect for in-process features. yoff is positive for
-    /// scroll-up, negative for scroll-down. Return true if consumed.
+    /// yoff is positive for scroll-up, negative for scroll-down.
+    /// Return true if consumed.
     const ScrollRedirect = struct {
         callback: *const fn (ud: ?*anyopaque, yoff: f64) bool,
         userdata: ?*anyopaque,
     };
 
-    /// Resize redirect for in-process features. Called after the core
-    /// surface recalculates its grid so cols/rows reflect the new size.
+    /// Called after the core surface recalculates its grid, so cols/rows
+    /// reflect the new size.
     const ResizeRedirect = struct {
         callback: *const fn (ud: ?*anyopaque, cols: u16, rows: u16) void,
         userdata: ?*anyopaque,
@@ -1028,8 +1021,6 @@ pub const Surface = struct {
     }
 
     /// Dispatch a key event through the core key handling path.
-    /// Extracted from ghostty_surface_key to share between the
-    /// immediate dispatch and pending key flush paths.
     fn dispatchKey(self: *Surface, event: App.KeyEvent) bool {
         return self.app.keyEvent(
             .{ .surface = self },
@@ -1040,10 +1031,7 @@ pub const Surface = struct {
         };
     }
 
-    /// Flush any pending key event that was buffered by
-    /// ghostty_surface_key on Windows. Called before buffering a
-    /// new key or when a key release arrives. On non-Windows this
-    /// is a no-op eliminated by comptime.
+    /// Flush a buffered Windows key event. No-op on non-Windows.
     fn flushPendingKey(self: *Surface) void {
         if (comptime builtin.os.tag != .windows) return;
         if (self.pending_key) |pending| {
@@ -1428,11 +1416,9 @@ pub const CAPI = struct {
             };
         }
 
-        /// Derive the unshifted codepoint from a Win32 scancode so
-        /// embedders don't need to provide it themselves. Uses
-        /// MapVirtualKeyW to go scancode -> VK -> base character,
-        /// matching what the C example does with MAPVK_VK_TO_CHAR.
-        /// On non-Windows this returns 0 (no-op).
+        /// Derive the unshifted codepoint from a Win32 scancode via
+        /// MapVirtualKeyW (scancode -> VK -> base character). Returns
+        /// 0 on non-Windows.
         fn unshiftedCodepointFromKeycode(keycode: u32) u32 {
             if (comptime builtin.os.tag != .windows) return 0;
 
@@ -1887,17 +1873,11 @@ pub const CAPI = struct {
         surface.core_surface.writeVt(data[0..len]);
     }
 
-    /// Run the inline theme picker on a surface. The picker renders
-    /// into the surface's terminal (alt screen) and intercepts input
-    /// via the surface's input redirect. The theme_callback fires on
-    /// preview (browsing) and confirm (Enter).
-    ///
-    /// This is a non-blocking call: it sets up the picker state and
-    /// input redirect. The picker renders on each key event. The
-    /// embedder should call ghostty_surface_list_themes_deinit when
-    /// the picker signals completion (should_quit).
-    ///
-    /// Returns an opaque pointer to the picker, or null on error.
+    /// Run the inline theme picker on a surface. Non-blocking: sets
+    /// up picker state and input redirect, then returns. The
+    /// theme_callback fires on preview (browsing) and confirm (Enter).
+    /// The embedder must call ghostty_surface_list_themes_deinit once
+    /// the picker signals should_quit. Returns null on error.
     export fn ghostty_surface_list_themes(
         surface: *Surface,
         theme_cb: ?*const fn ([*:0]const u8, bool) callconv(.c) void,
@@ -2009,9 +1989,8 @@ pub const CAPI = struct {
         // Exit alt screen and restore terminal.
         picker.exit();
 
-        // Send a newline to the shell's stdin so it redraws its
-        // prompt. The picker ran in-process while the shell was
-        // waiting for input -- it needs this nudge.
+        // Nudge the shell to redraw its prompt; it was blocked on
+        // stdin while the picker ran in-process.
         surface.core_surface.writePtyInput("\r");
 
         picker.deinit();
@@ -2019,9 +1998,8 @@ pub const CAPI = struct {
 
     /// Return the ID3D12Device* used by this surface's renderer. Shared
     /// texture consumers should call OpenSharedResource1 on this same
-    /// device to avoid cross-device synchronization issues.
-    /// Returns null on non-DX12 builds, or if the renderer device has not
-    /// finished initializing yet.
+    /// device to avoid cross-device synchronization issues. Returns
+    /// null on non-DX12 builds or before the device finishes init.
     export fn ghostty_surface_get_d3d12_device(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
         const api = surface.core_surface.renderer.api;
@@ -2032,10 +2010,9 @@ pub const CAPI = struct {
     }
 
     /// Return the IDXGISwapChain1* used by this surface's renderer.
-    /// The embedder can bind this to a Windows.UI.Composition visual
-    /// via ICompositorInterop.CreateCompositionSurfaceForSwapChain.
-    /// Returns null on non-DX12 builds or if the swap chain has not
-    /// been created yet.
+    /// Bind it to a Windows.UI.Composition visual via
+    /// ICompositorInterop.CreateCompositionSurfaceForSwapChain.
+    /// Returns null on non-DX12 or before the swap chain is created.
     export fn ghostty_surface_get_swap_chain(surface: *Surface) ?*anyopaque {
         if (comptime builtin.os.tag != .windows) return null;
         const api = surface.core_surface.renderer.api;
@@ -2092,11 +2069,10 @@ pub const CAPI = struct {
         // the window size via GetClientRect. Forward the desired dimensions
         // so the resize detection loop in beginFrame picks up the change.
         surface.core_surface.renderer.setTargetSize(w, h);
-        // Wake the renderer thread so it picks up the new desired_size
-        // immediately rather than waiting for its next natural draw-timer
-        // tick (~8 ms). Cheap (single futex op) and safe to call from any
-        // thread. The 120 Hz draw timer is the backstop if the wakeup is
-        // ever coalesced; in either path beginFrame applies the size.
+        // Wake the renderer thread so it applies the new size in
+        // beginFrame without waiting for the ~8ms draw-timer tick.
+        // Single futex op, safe from any thread. The 120Hz draw timer
+        // is the backstop if the wakeup is coalesced.
         surface.core_surface.renderer_thread.wakeup.notify() catch {};
     }
 
@@ -2181,11 +2157,9 @@ pub const CAPI = struct {
     /// This will handle the keymap translation and send the appropriate
     /// key and char events.
     ///
-    /// On Windows, if this is a press/repeat with no text, the event
-    /// is buffered. A following ghostty_surface_text call will attach
-    /// text and dispatch through key encoding. This handles the split
-    /// WM_KEYDOWN / WM_CHAR message pattern so embedders don't need
-    /// to combine them manually.
+    /// On Windows, a press/repeat with no text is buffered until the
+    /// following ghostty_surface_text attaches text, handling the split
+    /// WM_KEYDOWN / WM_CHAR pattern so embedders don't combine manually.
     export fn ghostty_surface_key(
         surface: *Surface,
         event: KeyEvent,
@@ -2193,31 +2167,26 @@ pub const CAPI = struct {
         const key_event = event.keyEvent();
 
         if (comptime builtin.os.tag == .windows) {
-            // If input is redirected (e.g., theme picker active), send
-            // there before keybinding resolution or key buffering.
+            // Theme picker etc. intercepts before keybinding resolution.
             if (surface.input_redirect) |redirect| {
                 const core_event = key_event.core() orelse return false;
                 if (redirect.callback(redirect.userdata, &core_event))
                     return true;
             }
 
-            // Flush any previous pending key that never got text
-            // (e.g. arrow keys, function keys, backspace).
+            // Flush any prior pending key that never got text (arrows,
+            // function keys, backspace).
             surface.flushPendingKey();
 
-            // If this is a press/repeat with no text, buffer it --
-            // a ghostty_surface_text call may follow with the character.
+            // No text yet: buffer until ghostty_surface_text arrives.
             if (key_event.text == null and key_event.action != .release) {
                 surface.pending_key = .{ .event = key_event };
                 return false;
             }
 
-            // Has text already (caller did combining) or is a release --
-            // dispatch immediately.
             return surface.dispatchKey(key_event);
         }
 
-        // Non-Windows: straight passthrough, unchanged.
         return surface.dispatchKey(key_event);
     }
 
@@ -2242,11 +2211,10 @@ pub const CAPI = struct {
         return true;
     }
 
-    /// Send raw text to the terminal. On non-Windows (or when there is
-    /// no pending key event), this is treated like a paste. On Windows,
-    /// if there is a pending key event from ghostty_surface_key, the
-    /// text is attached to that key and dispatched through key encoding
-    /// instead -- this handles the WM_CHAR message that follows WM_KEYDOWN.
+    /// Send raw text to the terminal. Treated as paste, unless on
+    /// Windows there is a pending key event from ghostty_surface_key,
+    /// in which case the text attaches to that key and dispatches
+    /// through key encoding (WM_CHAR after WM_KEYDOWN).
     export fn ghostty_surface_text(
         surface: *Surface,
         ptr: [*]const u8,
@@ -2256,10 +2224,9 @@ pub const CAPI = struct {
             if (surface.pending_key) |*pending| {
                 const text = ptr[0..len];
 
-                // Don't attach C0 control characters as text. WM_CHAR
-                // delivers the raw byte (e.g. 0x03 for Ctrl+C) but the
-                // key encoder expects the printable character. Matches
-                // GTK filtering (surface.zig:1390).
+                // Don't attach C0 control characters. WM_CHAR delivers
+                // the raw byte (e.g. 0x03 for Ctrl+C) but the key
+                // encoder wants the printable character. Mirrors GTK.
                 const is_c0 = text.len == 1 and (text[0] < 0x20 or text[0] == 0x7f);
 
                 var event = pending.event;
@@ -2267,12 +2234,11 @@ pub const CAPI = struct {
                 if (!is_c0) {
                     const copy_len: usize = @min(text.len, surface.pending_key_text.len - 1);
 
-                    // Copy text into the Surface-level buffer (not
-                    // inside the optional) so it survives clearing
-                    // pending_key. Zig poisons optional payloads in
-                    // debug mode when set to null.
+                    // Buffer lives outside the optional so the text
+                    // survives setting pending_key to null (Zig poisons
+                    // optional payloads in debug builds).
                     @memcpy(surface.pending_key_text[0..copy_len], text[0..copy_len]);
-                    surface.pending_key_text[copy_len] = 0; // null-terminate
+                    surface.pending_key_text[copy_len] = 0;
 
                     event.text = surface.pending_key_text[0..copy_len :0];
                 }
@@ -2283,7 +2249,6 @@ pub const CAPI = struct {
             }
         }
 
-        // No pending key (or non-Windows): paste path, unchanged.
         surface.textCallback(ptr[0..len]);
     }
 

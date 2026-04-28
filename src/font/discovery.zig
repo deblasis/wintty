@@ -254,8 +254,8 @@ pub const DirectWrite = struct {
 
     pub fn init(lib: Library) DirectWrite {
         // DirectWrite manages its own font enumeration via the OS;
-        // FreeType `lib` is unused. Accepting it keeps Discover.init
-        // uniform across backends (per upstream #12386 review).
+        // FreeType `lib` is unused but kept so Discover.init has a
+        // uniform signature across backends.
         _ = lib;
         const createFactory = dwrite.loadDWriteCreateFactory() catch
             @panic("DirectWrite: failed to load DWriteCreateFactory");
