@@ -71,7 +71,7 @@ internal static class TabContextMenuBuilder
         flyout.Items.Add(rename);
 
         var dup = new MenuFlyoutItem { Text = "Duplicate Tab" };
-        dup.Click += (_, _) => manager.NewTab(); // TODO(config): respect ProfileId once profiles exist
+        dup.Click += (_, _) => manager.NewTab();
         flyout.Items.Add(dup);
 
         flyout.Items.Add(new MenuFlyoutSeparator());

@@ -16,7 +16,6 @@ internal static class TabCloseConfirmation
 {
     public static async Task RequestAsync(TabManager manager, TabModel tab, XamlRoot? xamlRoot)
     {
-        // TODO(config): confirm-close-multi-pane (bool, default true)
         const bool confirmCloseMultiPane = true;
 
         var paneCount = tab.PaneHost.PaneCount;

@@ -1,9 +1,3 @@
-// Equivalence test: reference raw-vtable path (baseline) vs
-// migrated CsWin32 path (production). Fails if the two lists
-// diverge in ANY family name, which catches locale-index drift,
-// vtable-slot mistakes, and PWSTR truncation bugs that a weak
-// "Count > 20" sanity test would silently miss.
-
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,10 +7,7 @@ using Xunit;
 
 namespace Ghostty.Tests.Interop;
 
-// Ghostty.Tests targets plain net9.0; DWriteFontEnumerator is
-// marked [SupportedOSPlatform("windows10.0.17763")]. This test only
-// runs on Windows hosts in CI/local, so propagate the platform gate
-// here too instead of suppressing CA1416 globally.
+// Propagate the DWriteFontEnumerator platform gate instead of suppressing CA1416.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class DWriteFontFamilyEquivalenceTest
 {

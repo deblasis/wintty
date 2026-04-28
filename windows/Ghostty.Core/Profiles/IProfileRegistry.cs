@@ -39,9 +39,8 @@ public interface IProfileRegistry : IDisposable
     string? DefaultProfileId { get; }
 
     /// <summary>
-    /// Monotonic counter bumped by 1 per successful recompose.
-    /// Exposed for <c>ProfileSnapshotStore</c> consumers that need a
-    /// generation id. Starts at 0 pre-ctor, reaches 1 after the ctor's
+    /// Monotonic counter for generation id. Bumped by 1 per successful
+    /// recompose. Starts at 0 pre-ctor, reaches 1 after the ctor's
     /// initial synchronous compose, reaches 2 after the first
     /// background discovery completes.
     /// </summary>
