@@ -87,4 +87,72 @@
       <LogicalName>Ghostty.Core.Profiles.IconAssets.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
+
+  <Target Name="GenerateBuildInfo"
+          BeforeTargets="CoreCompile">
+    <!--
+      $(IntermediateOutputPath) is set by Microsoft.NET.Sdk.targets, which
+      imports AFTER the csproj XML evaluates. Both the property assignment
+      and the <Compile Include> live inside this target so the path is
+      fully resolved before WriteLinesToFile and CoreCompile read it. The
+      tradeoff: VS / Rider IntelliSense doesn't see BuildInfo.g.cs until
+      after a CLI build, which is acceptable for this internal generator.
+    -->
+    <PropertyGroup>
+      <_GeneratedBuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</_GeneratedBuildInfoFile>
+      <_WinttyCommit></_WinttyCommit>
+      <_WinttyCommitDirty></_WinttyCommitDirty>
+      <_GitRevExit></_GitRevExit>
+      <_WinttyDirtyOutput></_WinttyDirtyOutput>
+    </PropertyGroup>
+
+    <Exec Command="git rev-parse --short HEAD"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          ContinueOnError="true"
+          WorkingDirectory="$(MSBuildThisFileDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_WinttyCommit"/>
+      <Output TaskParameter="ExitCode" PropertyName="_GitRevExit"/>
+    </Exec>
+
+    <Exec Command="git status --porcelain"
+          ConsoleToMSBuild="true"
+          IgnoreExitCode="true"
+          ContinueOnError="true"
+          WorkingDirectory="$(MSBuildThisFileDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_WinttyDirtyOutput"/>
+    </Exec>
+
+    <PropertyGroup>
+      <_WinttyCommit Condition="'$(_GitRevExit)' != '0' or '$(_WinttyCommit)' == ''">unknown</_WinttyCommit>
+      <_WinttyCommitDirty Condition="'$(_WinttyDirtyOutput)' != '' and '$(_WinttyCommit)' != 'unknown'">-dirty</_WinttyCommitDirty>
+      <_WinttyVersion>0.0.0</_WinttyVersion>
+      <_WinttyChannel Condition="'$(Channel)' == 'Stable'">stable</_WinttyChannel>
+      <_WinttyChannel Condition="'$(_WinttyChannel)' == ''">tip</_WinttyChannel>
+      <_WinttyVersionString>$(_WinttyVersion)-$(_WinttyChannel)+$(_WinttyCommit)$(_WinttyCommitDirty)</_WinttyVersionString>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_BuildInfoLines Include="// &lt;auto-generated/&gt;"/>
+      <_BuildInfoLines Include="namespace Ghostty.Core.Version%3B"/>
+      <_BuildInfoLines Include="internal static class BuildInfo"/>
+      <_BuildInfoLines Include="{"/>
+      <_BuildInfoLines Include="    public const string WinttyVersion = &quot;$(_WinttyVersion)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string WinttyVersionString = &quot;$(_WinttyVersionString)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string WinttyCommit = &quot;$(_WinttyCommit)$(_WinttyCommitDirty)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string MsbuildConfig = &quot;$(Configuration)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const Edition Edition = Edition.Oss%3B"/>
+      <_BuildInfoLines Include="}"/>
+    </ItemGroup>
+
+    <MakeDir Directories="$(IntermediateOutputPath)"/>
+    <WriteLinesToFile File="$(_GeneratedBuildInfoFile)"
+                      Lines="@(_BuildInfoLines)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true"/>
+
+    <ItemGroup>
+      <Compile Include="$(_GeneratedBuildInfoFile)" Visible="false"/>
+    </ItemGroup>
+  </Target>
 </Project>
