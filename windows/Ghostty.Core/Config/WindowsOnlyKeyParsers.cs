@@ -14,10 +14,7 @@ public static class WindowsOnlyKeyParsers
 {
     public static bool ParseBool(string? raw, bool defaultValue)
     {
-        // Accept only the canonical true/false spellings that ghostty's
-        // own parser writes and reads; 1/0 are tempting but would mean
-        // our accessors diverge from `ghostty +show-config` output and
-        // from the rest of the config ecosystem.
+        // Only canonical true/false; 1/0 would diverge from Ghostty's parser.
         if (string.IsNullOrWhiteSpace(raw)) return defaultValue;
         var trimmed = raw.Trim();
         if (trimmed.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;

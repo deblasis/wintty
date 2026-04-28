@@ -341,7 +341,6 @@ comptime {
     std.debug.assert(bg_image_input_elements[1].AlignedByteOffset == @offsetOf(BgImage, "info"));
 }
 
-/// Shader management for DX12.
 pub const Shaders = struct {
     /// Shared root signature owned by this struct. Pipelines reference it
     /// for draw-time binding but do not own it -- deinit releases it here.

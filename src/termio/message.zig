@@ -149,10 +149,7 @@ test {
 
 test {
     // Ensure we don't grow our IO message size without explicitly wanting to.
-    // The previous size was 40 bytes; adding the WriteKind tag bumped the
-    // largest write variant by one byte. The bump is intentional - see
-    // WriteKind for the reason. Update this constant only when another
-    // intentional growth happens.
+    // The extra byte over the 40-byte WriteReq is the WriteKind tag.
     const testing = std.testing;
     try testing.expectEqual(@as(usize, 41), @sizeOf(Message));
 }

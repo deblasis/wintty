@@ -1,14 +1,9 @@
 //! GPU data structs shared between CPU and shader code.
 //!
-//! These structs (Uniforms, CellText, CellBg, Image, BgImage) must match
-//! Metal's layout since GenericRenderer writes to them directly. The HLSL
-//! shaders interpret them differently but the CPU-side layout is shared
-//! across backends.
-//!
-//! The comptime assertions below guard against layout changes in this file
-//! but do not cross-reference the Metal backend's actual struct definitions.
-//! If layout drift between backends is suspected, compare against the Metal
-//! structs manually.
+//! Layout must match Metal's because GenericRenderer writes the same bytes
+//! for both backends. The comptime assertions guard against drift in this
+//! file but do not cross-reference the Metal definitions; verify manually
+//! if drift is suspected.
 const std = @import("std");
 const math = @import("../../math.zig");
 

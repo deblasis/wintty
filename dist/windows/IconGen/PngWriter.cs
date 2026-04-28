@@ -30,8 +30,7 @@ internal static class PngWriter
     {
         // Pick the smallest master >= target for cleanest downsample.
         // If none are large enough, fall back to the largest available
-        // and let DrawImage upscale. Written as two statements rather
-        // than a single LINQ chain so the fallback is obvious at a glance.
+        // and let DrawImage upscale.
         var largeEnough = masters.Sizes.Where(s => s >= targetPx).ToList();
         int sourcePx = largeEnough.Count > 0 ? largeEnough.Min() : masters.Sizes.Max();
         using var source = masters.Get(sourcePx);

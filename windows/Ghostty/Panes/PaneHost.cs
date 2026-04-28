@@ -216,10 +216,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // single TransformToVisual + four set-property calls. Covers
         // window resize, splitter drag, and the post-Split layout
         // pass that finally exposes new-leaf bounds.
-        //
-        // TODO: LayoutUpdated fires aggressively (per arrange pass of
-        // any descendant). At <20 leaves this is imperceptible, but
-        // if ETW traces ever flag it, debounce via a DispatcherQueueTimer.
         LayoutUpdated += (_, _) => UpdateHighlightPosition();
 
         // Defer the first LeafFocused so subscribers (MainWindow) can
@@ -246,8 +242,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
     /// becomes the active leaf. <paramref name="snapshot"/> (when
-    /// non-null) is stored on the new <see cref="LeafPane"/> for
-    /// future hot-apply by PR 6.
+    /// non-null) is stored on the new <see cref="LeafPane"/>.
     /// </summary>
     public void Split(PaneOrientation orientation, ProfileSnapshot? snapshot)
     {
@@ -409,7 +404,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // compositor rendering a ghost DXGI swap chain surface. Without
         // this, the disposed TerminalControl stays in the old Grid's
         // Children and can remain visually rendered even after the Grid
-        // itself is removed from the host. (#185)
+        // itself is removed from the host.
         DetachFromParent(leaf.Terminal());
 
         var newRoot = PaneTree.Close(_root, leaf);
@@ -441,13 +436,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // INCREMENTAL rebuild: splice the surviving sibling visual into
         // the collapsed parent Grid's former slot instead of tearing
         // down and rebuilding the whole visual tree. A full Rebuild
-        // works for 2-pane trees (#185 fix) but regresses to ghost
-        // visuals once the tree is 3+ levels deep - the same WinUI 3
-        // "child already has a parent" / stale-DCOMP-visual behavior
-        // that Split mitigates via its non-root incremental path.
-        // Falls back to a full Rebuild for the root-replacement case
-        // where there is no nested visual structure to confuse the
-        // framework. (#282)
+        // works for 2-pane trees but regresses to ghost visuals once
+        // the tree is 3+ levels deep - the same WinUI 3 "child already
+        // has a parent" / stale-DCOMP-visual behavior that Split
+        // mitigates via its non-root incremental path. Falls back to a
+        // full Rebuild for the root-replacement case where there is no
+        // nested visual structure to confuse the framework.
         if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
         UpdateHighlightPosition();
         DispatcherQueue.TryEnqueue(() => nextActive.Terminal().Focus(FocusState.Programmatic));
@@ -492,7 +486,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         //      grandparent.
         // In both cases we ClearVisualTree the collapsed leafParentGrid
         // so the compositor drops every reference to the now-dead
-        // split Grid and its splitter (same reason as the #185 fix).
+        // split Grid and its splitter, otherwise WinUI 3 leaves ghost
+        // DCOMP visuals on screen.
         if (ReferenceEquals(leafParentGrid, _treeRoot))
         {
             if (Content is not Grid hostGrid) return false;
@@ -774,7 +769,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Clear old tree children recursively before removal so the
         // compositor drops all references to stale swap chain panels.
         // Without this, removed Grids that still contain child elements
-        // can leave ghost visuals on screen. (#185)
+        // can leave ghost visuals on screen.
         ClearVisualTree(_treeRoot);
 
         hostGrid.Children.Remove(_treeRoot);

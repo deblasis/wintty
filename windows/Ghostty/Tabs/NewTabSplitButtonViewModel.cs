@@ -9,9 +9,8 @@ namespace Ghostty.Tabs;
 /// XAML-side wrapper around <see cref="NewTabFlyoutController"/>.
 /// Owns the per-window controller lifetime and exposes its row list to
 /// <see cref="NewTabSplitButton"/>. Per-row icon resolution is deferred
-/// to PR 6, which will reintroduce IIconResolver wiring inside an
-/// async-safe SetSourceAsync flow (the prior implementation disposed
-/// the source MemoryStream synchronously, racing the async load).
+/// pending an async-safe SetSourceAsync flow (the prior implementation
+/// disposed the source MemoryStream synchronously, racing the async load).
 /// </summary>
 internal sealed class NewTabSplitButtonViewModel : IDisposable
 {
