@@ -130,9 +130,27 @@
     </None>
   </ItemGroup>
 
-  <Target Name="WarnIfNoLibghostty" BeforeTargets="Build"
+  <!--
+    Fail the build (do not just warn) when ghostty.dll is missing. The
+    Condition="Exists(...)" on the <None Include> above is evaluated at
+    MSBuild project-load time, not target-execution time, so a missing
+    dll silently drops the copy item and the produced binary throws
+    DllNotFoundException at startup (the process stays alive but no
+    window paints).
+
+    Not gated on $(PublishAot) because that property is set unconditionally
+    in this csproj's main PropertyGroup: it only enables AOT analyzers,
+    not AOT compilation. AOT compile fires during `dotnet publish`, while
+    `dotnet build` always produces a managed assembly that loads
+    ghostty.dll via runtime DllImport. A clean `zig build -Dapp-runtime=none`
+    produces both ghostty.dll and ghostty-static.lib together, so requiring
+    the dll covers every consumer (Debug/Release builds AND AOT publish,
+    which still resolves ghostty.dll when launched from bin\ rather than
+    publish\).
+  -->
+  <Target Name="ErrorIfNoLibghostty" BeforeTargets="Build"
           Condition="!Exists('..\..\zig-out\lib\ghostty.dll')">
-    <Warning Text="ghostty.dll not found at ..\..\zig-out\lib\. Run 'zig build -Dapp-runtime=none' from the repo root first, or the app will fail to start." />
+    <Error Text="ghostty.dll missing at $([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\zig-out\lib\ghostty.dll')). Run 'zig build -Dapp-runtime=none' in the directory containing build.zig before 'dotnet build'." />
   </Target>
 
   <!--
