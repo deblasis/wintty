@@ -81,4 +81,52 @@ public sealed class VersionRendererTests
         var output = VersionRenderer.RenderAnsi(info);
         Assert.DoesNotContain("\x1b]8", output);
     }
+
+    [Fact]
+    public void RenderPlainBody_OssFixture_StartsAtVersionBlock()
+    {
+        var expected =
+            "Version\n" +
+            "  version:        1.2.0\n" +
+            "  channel:        tip\n" +
+            "  edition:        oss\n" +
+            "\n" +
+            "Build Config\n" +
+            "  Zig version:    0.14.0\n" +
+            "  .NET runtime:   10.0.0\n" +
+            "  app runtime:    WinUI 3\n" +
+            "  renderer:       DX12\n" +
+            "  font engine:    DirectWrite\n" +
+            "  libghostty:     1.2.0+abc1234\n" +
+            "  windows:        11.0.26200\n" +
+            "  arch:           x64\n" +
+            "  build mode:     Release\n";
+
+        var output = VersionRenderer.RenderPlainBody(Sample());
+        Assert.Equal(expected, output);
+        Assert.DoesNotContain("Wintty ", output);
+        Assert.DoesNotContain("github.com", output);
+    }
+
+    [Fact]
+    public void CommitUrl_KnownCommit_ReturnsRepoUrl()
+    {
+        Assert.Equal(
+            "https://github.com/deblasis/wintty/commit/abc1234",
+            VersionRenderer.CommitUrl(Sample()));
+    }
+
+    [Fact]
+    public void CommitUrl_UnknownCommit_ReturnsNull()
+    {
+        var info = Sample() with { WinttyCommit = "unknown" };
+        Assert.Null(VersionRenderer.CommitUrl(info));
+    }
+
+    [Fact]
+    public void CommitUrl_EmptyCommit_ReturnsNull()
+    {
+        var info = Sample() with { WinttyCommit = "" };
+        Assert.Null(VersionRenderer.CommitUrl(info));
+    }
 }
