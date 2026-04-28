@@ -26,7 +26,7 @@ pub const Awareness = enum {
 /// because we need to distinguish cmd from powershell (same awareness,
 /// different preamble) and pwsh from the other vt_aware shells
 /// (same awareness, but only powershell-family benefits from the
-/// setup under forced conpty-mode=never - see # 302).
+/// setup under forced conpty-mode=never).
 ///
 /// The setup runs once at shell startup inside ConPTY's conhost.exe,
 /// which does not inherit the caller's console codepage.
@@ -169,9 +169,6 @@ pub fn awarenessOf(kind: Kind) Awareness {
 ///
 /// powershell.exe (5.1) is .console_api in `awarenessOf` so it
 /// already routes to ConPTY without needing this gate.
-///
-/// See deblasis/pwsh-bypass-research for empirical investigation
-/// of whether this can be worked around without ConPTY.
 pub fn requiresConsoleInput(kind: Kind) bool {
     return switch (kind) {
         .pwsh => true,
@@ -206,7 +203,7 @@ pub fn classify(exe_path: []const u8) Awareness {
 /// startup. Callers invoke this regardless of transport; the actual
 /// emission gate lives in `Exec.maybeInjectUtf8Preamble` and is
 /// driven by the resolved `utf8-console` policy, not by ConPTY vs
-/// bypass routing. See deblasis/wintty # 341 for the rationale.
+/// bypass routing.
 pub fn utf8Preamble(exe_path: []const u8) Preamble {
     return preambleOf(identify(exe_path));
 }

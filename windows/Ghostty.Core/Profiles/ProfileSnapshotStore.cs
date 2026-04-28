@@ -5,9 +5,8 @@ namespace Ghostty.Core.Profiles;
 
 /// <summary>
 /// Builds and refreshes <see cref="ProfileSnapshot"/> instances for
-/// open tabs. Pure logic: per-tab storage of the snapshot belongs to
-/// <see cref="Ghostty.Core.Tabs.TabModel"/>. This type only knows how
-/// to derive snapshots from resolved profiles.
+/// open tabs. Derives snapshots from resolved profiles; per-tab
+/// storage lives on <see cref="Ghostty.Core.Tabs.TabModel"/>.
 /// </summary>
 public static class ProfileSnapshotStore
 {

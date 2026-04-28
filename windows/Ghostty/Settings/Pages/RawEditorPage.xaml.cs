@@ -58,7 +58,7 @@ internal sealed partial class RawEditorPage : Page
         // Theme flips while the page is live must force a recompute of
         // the highlight / clear-bg colors cached in EnsureColors, and
         // repaint the document bg so stale dark-mode clears don't remain
-        // visible as dark boxes on a light background (issue #325).
+        // visible as dark boxes on a light background.
         ActualThemeChanged += OnActualThemeChanged;
 
         DiagList.ItemsSource = _diagnostics;
@@ -89,8 +89,8 @@ internal sealed partial class RawEditorPage : Page
     // Wipe any lingering CharacterFormat.BackgroundColor across the whole
     // document. SetText keeps the document's default character format, so
     // any highlight BG left over from a prior Ctrl+F cycle carries into
-    // the freshly-loaded text and paints every character (issue #325:
-    // save-and-reload turns the whole editor black). Also resets
+    // the freshly-loaded text and paints every character (save-and-reload
+    // turns the whole editor black). Also resets
     // Selection.CharacterFormat so subsequent typing doesn't inherit a
     // stale highlight format.
     private void ClearAllBackgrounds()
@@ -277,8 +277,7 @@ internal sealed partial class RawEditorPage : Page
         // Read the Page's ActualTheme rather than the Editor's: during the
         // first Loaded tick the inner RichEditBox may still report
         // ElementTheme.Default before the theme cascades, which previously
-        // made us cache dark-mode brush values inside a light-mode window
-        // (issue #325).
+        // made us cache dark-mode brush values inside a light-mode window.
         var isDark = ActualTheme == ElementTheme.Dark;
         _matchColor = isDark
             ? Color.FromArgb(70, 200, 170, 50)

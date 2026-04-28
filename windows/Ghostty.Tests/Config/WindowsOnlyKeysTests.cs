@@ -65,13 +65,6 @@ public class WindowsOnlyKeysTests
         Assert.Equal(expected, key);
     }
 
-    // Zig's Diagnostic.format emits "cli:IDX: unknown field" (no key
-    // segment, just a space before the message) when the diagnostic
-    // has a location but no key. TryExtract still matches because the
-    // suffix is present; it returns whatever sits before the suffix,
-    // which for this shape is the line number. That's fine: the line
-    // number isn't in WindowsOnlyKeys.Set, so the caller falls through
-    // to the regular diagnostics list. This test pins that behavior.
     [Fact]
     public void TryExtractUnknownFieldKey_EmptyKeyFormat_YieldsNonMatchingToken()
     {
