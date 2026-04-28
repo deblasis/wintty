@@ -762,18 +762,11 @@ pub const D3D12_BOX = extern struct {
 
 // --- COM Interfaces ---
 //
-// Inheritance chains (slot counts):
-//   IUnknown: QueryInterface, AddRef, Release (3 slots)
-//   ID3D12Object adds: GetPrivateData, SetPrivateData, SetPrivateDataInterface, SetName (4 slots)
-//   ID3D12DeviceChild adds: GetDevice (1 slot)
-//   ID3D12Pageable adds nothing (0 slots)
-//   ID3D12CommandList adds: GetType (1 slot)
-//
-// Common inherited totals:
-//   Through ID3D12Object:     3 + 4 = 7 slots
-//   Through ID3D12DeviceChild: 7 + 1 = 8 slots
-//   Through ID3D12Pageable:    8 + 0 = 8 slots
-//   Through ID3D12CommandList:  8 + 1 = 9 slots
+// IUnknown: QueryInterface, AddRef, Release
+// ID3D12Object adds: GetPrivateData, SetPrivateData, SetPrivateDataInterface, SetName
+// ID3D12DeviceChild adds: GetDevice
+// ID3D12Pageable adds nothing
+// ID3D12CommandList adds: GetType
 
 // ID3D12Debug
 pub const ID3D12Debug = extern struct {
@@ -786,11 +779,11 @@ pub const ID3D12Debug = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12Debug, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12Debug) callconv(.winapi) u32,
         Release: *const fn (*ID3D12Debug) callconv(.winapi) u32,
-        // ID3D12Debug (slot 3)
+        // ID3D12Debug
         EnableDebugLayer: *const fn (*ID3D12Debug) callconv(.winapi) void,
     };
 
@@ -808,11 +801,11 @@ pub const ID3DBlob = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3DBlob, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3DBlob) callconv(.winapi) u32,
         Release: *const fn (*ID3DBlob) callconv(.winapi) u32,
-        // ID3DBlob (slots 3-4)
+        // ID3DBlob
         GetBufferPointer: *const fn (*ID3DBlob) callconv(.winapi) *anyopaque,
         GetBufferSize: *const fn (*ID3DBlob) callconv(.winapi) usize,
     };
@@ -831,7 +824,7 @@ pub const ID3DBlob = extern struct {
 };
 
 // ID3D12CommandQueue
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12CommandQueue = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -842,19 +835,19 @@ pub const ID3D12CommandQueue = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12CommandQueue, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12CommandQueue) callconv(.winapi) u32,
         Release: *const fn (*ID3D12CommandQueue) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12CommandQueue own methods (slots 8+)
+        // ID3D12CommandQueue own methods
         UpdateTileMappings: Reserved,
         CopyTileMappings: Reserved,
         ExecuteCommandLists: *const fn (*ID3D12CommandQueue, NumCommandLists: u32, ppCommandLists: [*]const *ID3D12GraphicsCommandList) callconv(.winapi) void,
@@ -882,7 +875,7 @@ pub const ID3D12CommandQueue = extern struct {
 };
 
 // ID3D12CommandAllocator
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12CommandAllocator = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -893,19 +886,19 @@ pub const ID3D12CommandAllocator = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12CommandAllocator, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12CommandAllocator) callconv(.winapi) u32,
         Release: *const fn (*ID3D12CommandAllocator) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12CommandAllocator (slot 8)
+        // ID3D12CommandAllocator
         Reset: *const fn (*ID3D12CommandAllocator) callconv(.winapi) HRESULT,
     };
 
@@ -919,7 +912,7 @@ pub const ID3D12CommandAllocator = extern struct {
 };
 
 // ID3D12Fence
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12Fence = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -930,19 +923,19 @@ pub const ID3D12Fence = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12Fence, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12Fence) callconv(.winapi) u32,
         Release: *const fn (*ID3D12Fence) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12Fence (slots 8-10)
+        // ID3D12Fence
         GetCompletedValue: *const fn (*ID3D12Fence) callconv(.winapi) u64,
         SetEventOnCompletion: *const fn (*ID3D12Fence, Value: u64, hEvent: HANDLE) callconv(.winapi) HRESULT,
         Signal: Reserved,
@@ -962,7 +955,7 @@ pub const ID3D12Fence = extern struct {
 };
 
 // ID3D12DescriptorHeap
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12DescriptorHeap = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -973,19 +966,19 @@ pub const ID3D12DescriptorHeap = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12DescriptorHeap, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12DescriptorHeap) callconv(.winapi) u32,
         Release: *const fn (*ID3D12DescriptorHeap) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12DescriptorHeap (slots 8-10)
+        // ID3D12DescriptorHeap
         GetDesc: Reserved,
         // These COM methods return structs via a hidden output pointer
         // (the C ABI convention used in the actual vtable). The C++ wrapper
@@ -1012,7 +1005,7 @@ pub const ID3D12DescriptorHeap = extern struct {
 };
 
 // ID3D12Resource
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12Resource = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1023,19 +1016,19 @@ pub const ID3D12Resource = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12Resource, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12Resource) callconv(.winapi) u32,
         Release: *const fn (*ID3D12Resource) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12Resource (slots 8-14)
+        // ID3D12Resource
         Map: *const fn (*ID3D12Resource, Subresource: u32, pReadRange: ?*const D3D12_RANGE, ppData: *?*anyopaque) callconv(.winapi) HRESULT,
         Unmap: *const fn (*ID3D12Resource, Subresource: u32, pWrittenRange: ?*const D3D12_RANGE) callconv(.winapi) void,
         GetDesc: Reserved,
@@ -1063,7 +1056,7 @@ pub const ID3D12Resource = extern struct {
 };
 
 // ID3D12PipelineState
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12PipelineState = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1074,19 +1067,19 @@ pub const ID3D12PipelineState = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12PipelineState, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12PipelineState) callconv(.winapi) u32,
         Release: *const fn (*ID3D12PipelineState) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12PipelineState (slot 8)
+        // ID3D12PipelineState
         GetCachedBlob: Reserved,
     };
 
@@ -1096,7 +1089,7 @@ pub const ID3D12PipelineState = extern struct {
 };
 
 // ID3D12RootSignature
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild
 // No own methods beyond inherited.
 pub const ID3D12RootSignature = extern struct {
     vtable: *const VTable,
@@ -1108,16 +1101,16 @@ pub const ID3D12RootSignature = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12RootSignature, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12RootSignature) callconv(.winapi) u32,
         Release: *const fn (*ID3D12RootSignature) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
     };
 
@@ -1127,24 +1120,24 @@ pub const ID3D12RootSignature = extern struct {
 };
 
 // ID3D12Heap
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12Pageable (0) = 8 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12Pageable
 pub const ID3D12Heap = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12Heap, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12Heap) callconv(.winapi) u32,
         Release: *const fn (*ID3D12Heap) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
         // ID3D12Pageable adds nothing
-        // ID3D12Heap (slot 8)
+        // ID3D12Heap
         GetDesc: Reserved,
     };
 
@@ -1154,7 +1147,7 @@ pub const ID3D12Heap = extern struct {
 };
 
 // ID3D12GraphicsCommandList
-// Inherits: IUnknown (3) -> ID3D12Object (4) -> ID3D12DeviceChild (1) -> ID3D12CommandList (1) = 9 inherited
+// Inherits: IUnknown -> ID3D12Object -> ID3D12DeviceChild -> ID3D12CommandList
 pub const ID3D12GraphicsCommandList = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1165,126 +1158,75 @@ pub const ID3D12GraphicsCommandList = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12GraphicsCommandList, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12GraphicsCommandList) callconv(.winapi) u32,
         Release: *const fn (*ID3D12GraphicsCommandList) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12DeviceChild (slot 7)
+        // ID3D12DeviceChild
         GetDevice: Reserved,
-        // ID3D12CommandList (slot 8)
+        // ID3D12CommandList
         GetType: Reserved,
-        // ID3D12GraphicsCommandList own methods (slots 9+)
-        // slot 9
+        // ID3D12GraphicsCommandList own methods
         Close: *const fn (*ID3D12GraphicsCommandList) callconv(.winapi) HRESULT,
-        // slot 10
         Reset: *const fn (*ID3D12GraphicsCommandList, pAllocator: *ID3D12CommandAllocator, pInitialState: ?*ID3D12PipelineState) callconv(.winapi) HRESULT,
-        // slot 11
         ClearState: Reserved,
-        // slot 12
         DrawInstanced: *const fn (*ID3D12GraphicsCommandList, VertexCountPerInstance: u32, InstanceCount: u32, StartVertexLocation: u32, StartInstanceLocation: u32) callconv(.winapi) void,
-        // slot 13
         DrawIndexedInstanced: Reserved,
-        // slot 14
         Dispatch: Reserved,
-        // slot 15
         CopyBufferRegion: *const fn (*ID3D12GraphicsCommandList, pDstBuffer: *ID3D12Resource, DstOffset: u64, pSrcBuffer: *ID3D12Resource, SrcOffset: u64, NumBytes: u64) callconv(.winapi) void,
-        // slot 16
         CopyTextureRegion: *const fn (*ID3D12GraphicsCommandList, pDst: *const D3D12_TEXTURE_COPY_LOCATION, DstX: u32, DstY: u32, DstZ: u32, pSrc: *const D3D12_TEXTURE_COPY_LOCATION, pSrcBox: ?*const D3D12_BOX) callconv(.winapi) void,
-        // slot 17
         CopyResource: Reserved,
-        // slot 18
         CopyTiles: Reserved,
-        // slot 19
         ResolveSubresource: Reserved,
-        // slot 20
         IASetPrimitiveTopology: *const fn (*ID3D12GraphicsCommandList, PrimitiveTopology: D3D_PRIMITIVE_TOPOLOGY) callconv(.winapi) void,
-        // slot 21
         RSSetViewports: *const fn (*ID3D12GraphicsCommandList, NumViewports: u32, pViewports: [*]const D3D12_VIEWPORT) callconv(.winapi) void,
-        // slot 22
         RSSetScissorRects: *const fn (*ID3D12GraphicsCommandList, NumRects: u32, pRects: [*]const D3D12_RECT) callconv(.winapi) void,
-        // slot 23
         OMSetBlendFactor: Reserved,
-        // slot 24
         OMSetStencilRef: Reserved,
-        // slot 25
         SetPipelineState: *const fn (*ID3D12GraphicsCommandList, pPipelineState: *ID3D12PipelineState) callconv(.winapi) void,
-        // slot 26
         ResourceBarrier: *const fn (*ID3D12GraphicsCommandList, NumBarriers: u32, pBarriers: [*]const D3D12_RESOURCE_BARRIER) callconv(.winapi) void,
-        // slot 27
         ExecuteBundle: Reserved,
-        // slot 28
         SetDescriptorHeaps: *const fn (*ID3D12GraphicsCommandList, NumDescriptorHeaps: u32, ppDescriptorHeaps: [*]const *ID3D12DescriptorHeap) callconv(.winapi) void,
-        // slot 29
         SetComputeRootSignature: Reserved,
-        // slot 30
         SetGraphicsRootSignature: *const fn (*ID3D12GraphicsCommandList, pRootSignature: ?*ID3D12RootSignature) callconv(.winapi) void,
-        // slot 31
         SetComputeRootDescriptorTable: Reserved,
-        // slot 32
         // BaseDescriptor is D3D12_GPU_DESCRIPTOR_HANDLE (8-byte struct).
         // Use u64 in the vtable for the same ABI reason as the device
         // descriptor handle parameters above.
         SetGraphicsRootDescriptorTable: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BaseDescriptor: u64) callconv(.winapi) void,
-        // slot 33
         SetComputeRoot32BitConstant: Reserved,
-        // slot 34
         SetGraphicsRoot32BitConstant: Reserved,
-        // slot 35
         SetComputeRoot32BitConstants: Reserved,
-        // slot 36
         SetGraphicsRoot32BitConstants: Reserved,
-        // slot 37
         SetComputeRootConstantBufferView: Reserved,
-        // slot 38
         SetGraphicsRootConstantBufferView: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BufferLocation: u64) callconv(.winapi) void,
-        // slot 39
         SetComputeRootShaderResourceView: Reserved,
-        // slot 40
         SetGraphicsRootShaderResourceView: *const fn (*ID3D12GraphicsCommandList, RootParameterIndex: u32, BufferLocation: u64) callconv(.winapi) void,
-        // slot 41
         SetComputeRootUnorderedAccessView: Reserved,
-        // slot 42
         SetGraphicsRootUnorderedAccessView: Reserved,
-        // slot 43
         IASetIndexBuffer: Reserved,
-        // slot 44
         IASetVertexBuffers: *const fn (*ID3D12GraphicsCommandList, StartSlot: u32, NumViews: u32, pViews: [*]const D3D12_VERTEX_BUFFER_VIEW) callconv(.winapi) void,
-        // slot 45
         SOSetTargets: Reserved,
-        // slot 46
         OMSetRenderTargets: *const fn (*ID3D12GraphicsCommandList, NumRenderTargetDescriptors: u32, pRenderTargetDescriptors: ?[*]const D3D12_CPU_DESCRIPTOR_HANDLE, RTsSingleHandleToDescriptorRange: BOOL, pDepthStencilDescriptor: ?*const D3D12_CPU_DESCRIPTOR_HANDLE) callconv(.winapi) void,
-        // slot 47
         ClearDepthStencilView: Reserved,
-        // slot 48
         // RenderTargetView is D3D12_CPU_DESCRIPTOR_HANDLE (8-byte struct).
         // Use usize in the vtable for the same ABI reason as above.
         ClearRenderTargetView: *const fn (*ID3D12GraphicsCommandList, RenderTargetView: usize, ColorRGBA: *const [4]f32, NumRects: u32, pRects: ?[*]const D3D12_RECT) callconv(.winapi) void,
-        // slot 49
         ClearUnorderedAccessViewUint: Reserved,
-        // slot 50
         ClearUnorderedAccessViewFloat: Reserved,
-        // slot 51
         DiscardResource: Reserved,
-        // slot 52
         BeginQuery: Reserved,
-        // slot 53
         EndQuery: Reserved,
-        // slot 54
         ResolveQueryData: Reserved,
-        // slot 55
         SetPredication: Reserved,
-        // slot 56
         SetMarker: Reserved,
-        // slot 57
         BeginEvent: Reserved,
-        // slot 58
         EndEvent: Reserved,
-        // slot 59
         ExecuteIndirect: Reserved,
     };
 
@@ -1366,7 +1308,7 @@ pub const ID3D12GraphicsCommandList = extern struct {
 };
 
 // ID3D12Device
-// Inherits: IUnknown (3) -> ID3D12Object (4) = 7 inherited slots
+// Inherits: IUnknown -> ID3D12Object
 pub const ID3D12Device = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1377,93 +1319,55 @@ pub const ID3D12Device = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ID3D12Device, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ID3D12Device) callconv(.winapi) u32,
         Release: *const fn (*ID3D12Device) callconv(.winapi) u32,
-        // ID3D12Object (slots 3-6)
+        // ID3D12Object
         GetPrivateData: Reserved,
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         SetName: Reserved,
-        // ID3D12Device own methods (slots 7+)
-        // slot 7
+        // ID3D12Device own methods
         GetNodeCount: Reserved,
-        // slot 8
         CreateCommandQueue: *const fn (*ID3D12Device, *const D3D12_COMMAND_QUEUE_DESC, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 9
         CreateCommandAllocator: *const fn (*ID3D12Device, D3D12_COMMAND_LIST_TYPE, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 10
         CreateGraphicsPipelineState: *const fn (*ID3D12Device, *const D3D12_GRAPHICS_PIPELINE_STATE_DESC, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 11
         CreateComputePipelineState: Reserved,
-        // slot 12
         CreateCommandList: *const fn (*ID3D12Device, NodeMask: u32, Type: D3D12_COMMAND_LIST_TYPE, pCommandAllocator: *ID3D12CommandAllocator, pInitialState: ?*ID3D12PipelineState, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 13
         CheckFeatureSupport: Reserved,
-        // slot 14
         CreateDescriptorHeap: *const fn (*ID3D12Device, *const D3D12_DESCRIPTOR_HEAP_DESC, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 15
         GetDescriptorHandleIncrementSize: *const fn (*ID3D12Device, D3D12_DESCRIPTOR_HEAP_TYPE) callconv(.winapi) u32,
-        // slot 16
         CreateRootSignature: *const fn (*ID3D12Device, NodeMask: u32, pBlobWithRootSignature: *const anyopaque, blobLengthInBytes: usize, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 17
         CreateConstantBufferView: Reserved,
-        // slot 18
         // DestDescriptor is D3D12_CPU_DESCRIPTOR_HANDLE (8-byte struct) passed
         // by value. Use usize in the vtable to avoid Zig callconv(.winapi)
-        // struct-by-value ABI ambiguity -- same class of issue as the
-        // descriptor heap struct-return fix in PR # 142.
+        // struct-by-value ABI ambiguity.
         CreateShaderResourceView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const D3D12_SHADER_RESOURCE_VIEW_DESC, DestDescriptor: usize) callconv(.winapi) void,
-        // slot 19
         CreateUnorderedAccessView: Reserved,
-        // slot 20
         CreateRenderTargetView: *const fn (*ID3D12Device, pResource: ?*ID3D12Resource, pDesc: ?*const anyopaque, DestDescriptor: usize) callconv(.winapi) void,
-        // slot 21
         CreateDepthStencilView: Reserved,
-        // slot 22
         CreateSampler: *const fn (*ID3D12Device, pDesc: *const D3D12_SAMPLER_DESC, DestDescriptor: usize) callconv(.winapi) void,
-        // slot 23
         CopyDescriptors: Reserved,
-        // slot 24
         CopyDescriptorsSimple: Reserved,
-        // slot 25
         GetResourceAllocationInfo: Reserved,
-        // slot 26
         GetCustomHeapProperties: Reserved,
-        // slot 27
         CreateCommittedResource: *const fn (*ID3D12Device, *const D3D12_HEAP_PROPERTIES, u32, *const D3D12_RESOURCE_DESC, D3D12_RESOURCE_STATES, ?*const anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 28
         CreateHeap: Reserved,
-        // slot 29
         CreatePlacedResource: Reserved,
-        // slot 30
         CreateReservedResource: Reserved,
-        // slot 31
         CreateSharedHandle: *const fn (*ID3D12Device, *IUnknown, ?*const anyopaque, u32, ?[*:0]const u16, *HANDLE) callconv(.winapi) HRESULT,
-        // slot 32
         OpenSharedHandle: Reserved,
-        // slot 33
         OpenSharedHandleByName: Reserved,
-        // slot 34
         MakeResident: Reserved,
-        // slot 35
         Evict: Reserved,
-        // slot 36
         CreateFence: *const fn (*ID3D12Device, InitialValue: u64, Flags: D3D12_FENCE_FLAGS, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // slot 37
         GetDeviceRemovedReason: *const fn (*ID3D12Device) callconv(.winapi) HRESULT,
-        // slot 38
         GetCopyableFootprints: Reserved,
-        // slot 39
         CreateQueryHeap: Reserved,
-        // slot 40
         SetStablePowerState: Reserved,
-        // slot 41
         CreateCommandSignature: Reserved,
-        // slot 42
         GetResourceTiling: Reserved,
-        // slot 43
         GetAdapterLuid: Reserved,
     };
 
@@ -1584,7 +1488,7 @@ pub const DxcBuffer = extern struct {
 };
 
 // IDxcBlob
-// Inherits: IUnknown(3) > IDxcBlob(2) = 5 total
+// Inherits: IUnknown > IDxcBlob
 pub const IDxcBlob = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1595,11 +1499,11 @@ pub const IDxcBlob = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDxcBlob, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDxcBlob) callconv(.winapi) u32,
         Release: *const fn (*IDxcBlob) callconv(.winapi) u32,
-        // IDxcBlob (slots 3-4)
+        // IDxcBlob
         GetBufferPointer: *const fn (*IDxcBlob) callconv(.winapi) *anyopaque,
         GetBufferSize: *const fn (*IDxcBlob) callconv(.winapi) usize,
     };
@@ -1618,7 +1522,7 @@ pub const IDxcBlob = extern struct {
 };
 
 // IDxcBlobUtf8
-// Inherits: IUnknown(3) > IDxcBlob(2) > IDxcBlobEncoding(1) > IDxcBlobUtf8(2) = 8 total
+// Inherits: IUnknown > IDxcBlob > IDxcBlobEncoding > IDxcBlobUtf8(2)
 pub const IDxcBlobUtf8 = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1629,16 +1533,16 @@ pub const IDxcBlobUtf8 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDxcBlobUtf8, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDxcBlobUtf8) callconv(.winapi) u32,
         Release: *const fn (*IDxcBlobUtf8) callconv(.winapi) u32,
-        // IDxcBlob (slots 3-4)
+        // IDxcBlob
         GetBufferPointer: *const fn (*IDxcBlobUtf8) callconv(.winapi) *anyopaque,
         GetBufferSize: *const fn (*IDxcBlobUtf8) callconv(.winapi) usize,
-        // IDxcBlobEncoding (slot 5)
+        // IDxcBlobEncoding
         GetEncoding: Reserved,
-        // IDxcBlobUtf8 (slots 6-7)
+        // IDxcBlobUtf8
         GetStringPointer: *const fn (*IDxcBlobUtf8) callconv(.winapi) [*:0]const u8,
         GetStringLength: *const fn (*IDxcBlobUtf8) callconv(.winapi) usize,
     };
@@ -1665,7 +1569,7 @@ pub const IDxcBlobUtf8 = extern struct {
 };
 
 // IDxcResult
-// Inherits: IUnknown(3) > IDxcOperationResult(3) > IDxcResult(5) = 11 total
+// Inherits: IUnknown > IDxcOperationResult > IDxcResult
 pub const IDxcResult = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1676,15 +1580,15 @@ pub const IDxcResult = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDxcResult, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDxcResult) callconv(.winapi) u32,
         Release: *const fn (*IDxcResult) callconv(.winapi) u32,
-        // IDxcOperationResult (slots 3-5)
+        // IDxcOperationResult
         GetStatus: *const fn (*IDxcResult, *HRESULT) callconv(.winapi) HRESULT,
         GetResult: Reserved,
         GetErrorBuffer: Reserved,
-        // IDxcResult (slots 6-10)
+        // IDxcResult
         HasOutput: Reserved,
         GetOutput: *const fn (*IDxcResult, DXC_OUT_KIND, *const GUID, *?*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT,
         GetNumOutputs: Reserved,
@@ -1708,7 +1612,7 @@ pub const IDxcResult = extern struct {
 };
 
 // IDxcUtils
-// Inherits: IUnknown(3) + 13 own methods = 16 total
+// Inherits: IUnknown
 pub const IDxcUtils = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1719,11 +1623,11 @@ pub const IDxcUtils = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDxcUtils, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDxcUtils) callconv(.winapi) u32,
         Release: *const fn (*IDxcUtils) callconv(.winapi) u32,
-        // IDxcUtils (slots 3-15)
+        // IDxcUtils
         CreateBlobFromBlob: Reserved,
         CreateBlobFromPinned: Reserved,
         MoveToBlob: Reserved,
@@ -1749,7 +1653,7 @@ pub const IDxcUtils = extern struct {
 };
 
 // IDxcCompiler3
-// Inherits: IUnknown(3) + 2 own methods = 5 total
+// Inherits: IUnknown
 pub const IDxcCompiler3 = extern struct {
     vtable: *const VTable,
     pub const IID = GUID{
@@ -1760,11 +1664,11 @@ pub const IDxcCompiler3 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDxcCompiler3, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDxcCompiler3) callconv(.winapi) u32,
         Release: *const fn (*IDxcCompiler3) callconv(.winapi) u32,
-        // IDxcCompiler3 (slots 3-4)
+        // IDxcCompiler3
         Compile: *const fn (
             *IDxcCompiler3,
             *const DxcBuffer,
@@ -1987,7 +1891,7 @@ test "DXC_OUT_KIND has OBJECT and ERRORS variants" {
 }
 
 test "IDxcBlobUtf8 has expected vtable field count" {
-    // IUnknown(3) + IDxcBlob(2) + IDxcBlobEncoding(1) + IDxcBlobUtf8(2) = 8 slots
+    // IUnknown + IDxcBlob + IDxcBlobEncoding + IDxcBlobUtf8(2) = 8 slots
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcBlobUtf8));
     const vtable_size = @sizeOf(IDxcBlobUtf8.VTable);
     const expected_size = 8 * @sizeOf(*anyopaque);
@@ -1995,7 +1899,7 @@ test "IDxcBlobUtf8 has expected vtable field count" {
 }
 
 test "IDxcResult has expected vtable field count" {
-    // IUnknown(3) + IDxcOperationResult(3) + IDxcResult(5) = 11 slots
+    // IUnknown + IDxcOperationResult + IDxcResult = 11 slots
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcResult));
     const vtable_size = @sizeOf(IDxcResult.VTable);
     const expected_size = 11 * @sizeOf(*anyopaque);
@@ -2003,7 +1907,7 @@ test "IDxcResult has expected vtable field count" {
 }
 
 test "IDxcUtils has expected vtable field count" {
-    // IUnknown(3) + 13 methods = 16 slots
+    // IUnknown + 13 methods = 16 slots
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcUtils));
     const vtable_size = @sizeOf(IDxcUtils.VTable);
     const expected_size = 16 * @sizeOf(*anyopaque);
@@ -2011,7 +1915,7 @@ test "IDxcUtils has expected vtable field count" {
 }
 
 test "IDxcCompiler3 has expected vtable field count" {
-    // IUnknown(3) + Compile + Disassemble = 5 slots
+    // IUnknown + Compile + Disassemble = 5 slots
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IDxcCompiler3));
     const vtable_size = @sizeOf(IDxcCompiler3.VTable);
     const expected_size = 5 * @sizeOf(*anyopaque);

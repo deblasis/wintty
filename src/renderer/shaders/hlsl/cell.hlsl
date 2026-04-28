@@ -1,9 +1,6 @@
 // Cell grid shader for the DX12 renderer.
-//
-// Renders a terminal-like grid of cells using instanced drawing.
-// Each cell instance provides bg/fg colors and a glyph index.
-// The vertex shader generates a quad (2 triangles, 6 vertices) per cell
-// from SV_VertexID + SV_InstanceID, positioned using a constant buffer.
+// Generates a quad per cell from SV_VertexID + SV_InstanceID; positions
+// come from the cbuffer at b0 (matches Pipeline root signature).
 
 cbuffer Constants : register(b0) {
     float2 grid_size;     // (cols, rows)
@@ -59,7 +56,5 @@ VS_OUTPUT VSMain(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID,
 }
 
 float4 PSMain(VS_OUTPUT input) : SV_TARGET {
-    // For now, just return the background color.
-    // Glyph atlas sampling will be added in a later task.
     return input.bg_color;
 }

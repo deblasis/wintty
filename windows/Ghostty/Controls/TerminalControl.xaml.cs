@@ -105,8 +105,7 @@ public sealed partial class TerminalControl : UserControl
     /// Alt+Shift+D split). Set by <see cref="Ghostty.Tabs.PaneHostFactory"/>
     /// before the control loads. Read once in OnLoaded to populate
     /// surfaceConfig.Command and surfaceConfig.WorkingDirectory; ignored
-    /// thereafter. PR 6 will introduce a hot-apply path for live config
-    /// edits.
+    /// thereafter.
     /// </summary>
     internal Ghostty.Core.Profiles.ProfileSnapshot? Snapshot { get; set; }
 
@@ -292,12 +291,8 @@ public sealed partial class TerminalControl : UserControl
 
         var app = Host.App;
 
-        // Surface config. The string fields (working_directory, command,
-        //    initial_input) must be non-null: Zig dereferences them
-        //    unconditionally. We allocate three independent UTF-8 empty
-        //    strings rather than aliasing one buffer - aliasing was a
-        //    footgun if Zig ever wrote through any of them. These live
-        //    until the surface is freed.
+        // surface-config strings are non-null UTF-8 and live until the surface is freed;
+        // allocate independent buffers so writes never alias.
         _workingDirectoryUtf8 = Snapshot is { WorkingDirectory: { Length: > 0 } wd }
             ? AllocUtf8(wd)
             : AllocEmptyUtf8();

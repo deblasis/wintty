@@ -105,7 +105,7 @@ pub const IDWriteNumberSubstitution = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDWriteNumberSubstitution, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDWriteNumberSubstitution) callconv(.winapi) u32,
         Release: *const fn (*IDWriteNumberSubstitution) callconv(.winapi) u32,
@@ -117,16 +117,15 @@ pub const IDWriteNumberSubstitution = extern struct {
 };
 
 // IDWriteLocalizedStrings
-// Slots: GetCount(3), FindLocaleName(4), [5-6 Reserved], GetStringLength(7), GetString(8)
 pub const IDWriteLocalizedStrings = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteLocalizedStrings) callconv(.winapi) u32,
-        // IDWriteLocalizedStrings (slots 3-8)
+        // IDWriteLocalizedStrings
         GetCount: *const fn (*IDWriteLocalizedStrings) callconv(.winapi) UINT32,
         FindLocaleName: *const fn (
             *IDWriteLocalizedStrings,
@@ -176,16 +175,15 @@ pub const IDWriteLocalizedStrings = extern struct {
 };
 
 // IDWriteFontFace
-// Slots: [3 Reserved], GetFiles(4), GetIndex(5), [6-17 Reserved]
 pub const IDWriteFontFace = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontFace) callconv(.winapi) u32,
-        // IDWriteFontFace (slots 3-17)
+        // IDWriteFontFace
         GetType: Reserved,
         GetFiles: *const fn (
             *IDWriteFontFace,
@@ -236,11 +234,11 @@ pub const IDWriteFontFileLoader = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDWriteFontFileLoader, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDWriteFontFileLoader) callconv(.winapi) u32,
         Release: *const fn (*IDWriteFontFileLoader) callconv(.winapi) u32,
-        // IDWriteFontFileLoader (slot 3)
+        // IDWriteFontFileLoader
         CreateStreamFromKey: Reserved,
     };
 
@@ -265,13 +263,13 @@ pub const IDWriteLocalFontFileLoader = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteLocalFontFileLoader) callconv(.winapi) u32,
-        // IDWriteFontFileLoader (slot 3)
+        // IDWriteFontFileLoader
         CreateStreamFromKey: Reserved,
-        // IDWriteLocalFontFileLoader (slots 4-6)
+        // IDWriteLocalFontFileLoader
         GetFilePathLengthFromKey: *const fn (
             *IDWriteLocalFontFileLoader,
             fontFileReferenceKey: *const anyopaque,
@@ -313,16 +311,15 @@ pub const IDWriteLocalFontFileLoader = extern struct {
 };
 
 // IDWriteFontFile
-// Slots: GetReferenceKey(3), GetLoader(4), [5 Reserved]
 pub const IDWriteFontFile = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontFile) callconv(.winapi) u32,
-        // IDWriteFontFile (slots 3-5)
+        // IDWriteFontFile
         GetReferenceKey: *const fn (
             *IDWriteFontFile,
             fontFileReferenceKey: *?*const anyopaque,
@@ -358,11 +355,11 @@ pub const IDWriteTextAnalysisSource = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDWriteTextAnalysisSource, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDWriteTextAnalysisSource) callconv(.winapi) u32,
         Release: *const fn (*IDWriteTextAnalysisSource) callconv(.winapi) u32,
-        // IDWriteTextAnalysisSource (slots 3-7)
+        // IDWriteTextAnalysisSource
         GetTextAtPosition: *const fn (
             *IDWriteTextAnalysisSource,
             textPosition: UINT32,
@@ -394,16 +391,15 @@ pub const IDWriteTextAnalysisSource = extern struct {
 };
 
 // IDWriteFontFallback
-// Slot 3: MapCharacters
 pub const IDWriteFontFallback = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontFallback) callconv(.winapi) u32,
-        // IDWriteFontFallback (slot 3)
+        // IDWriteFontFallback
         MapCharacters: *const fn (
             *IDWriteFontFallback,
             analysisSource: *IDWriteTextAnalysisSource,
@@ -456,19 +452,15 @@ pub const IDWriteFontFallback = extern struct {
 };
 
 // IDWriteFont (through IDWriteFont2 for IsColorFont)
-// Slots: GetFontFamily(3), GetWeight(4), GetStretch(5), GetStyle(6), IsSymbolFont(7),
-//        GetFaceNames(8), GetInformationalStrings(9), GetSimulations(10),
-//        GetMetrics(11), HasCharacter(12), CreateFontFace(13),
-//        IDWriteFont1 slots 14-17, IsColorFont(18 IDWriteFont2)
 pub const IDWriteFont = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: *const fn (*IDWriteFont) callconv(.winapi) u32,
         Release: *const fn (*IDWriteFont) callconv(.winapi) u32,
-        // IDWriteFont (slots 3-13)
+        // IDWriteFont
         GetFontFamily: Reserved,
         GetWeight: *const fn (*IDWriteFont) callconv(.winapi) DWRITE_FONT_WEIGHT,
         GetStretch: *const fn (*IDWriteFont) callconv(.winapi) DWRITE_FONT_STRETCH,
@@ -485,12 +477,12 @@ pub const IDWriteFont = extern struct {
         GetMetrics: Reserved,
         HasCharacter: *const fn (*IDWriteFont, unicodeValue: UINT32, exists: *BOOL) callconv(.winapi) HRESULT,
         CreateFontFace: *const fn (*IDWriteFont, fontFace: *?*IDWriteFontFace) callconv(.winapi) HRESULT,
-        // IDWriteFont1 (slots 14-17)
+        // IDWriteFont1 reserved padding before IDWriteFont2.IsColorFont
         _slot14: Reserved,
         _slot15: Reserved,
         _slot16: Reserved,
         _slot17: Reserved,
-        // IDWriteFont2 (slot 18)
+        // IDWriteFont2
         IsColorFont: *const fn (*IDWriteFont) callconv(.winapi) BOOL,
     };
 
@@ -545,21 +537,19 @@ pub const IDWriteFont = extern struct {
 };
 
 // IDWriteFontFamily (extends IDWriteFontList)
-// IDWriteFontList slots 3-5: [3 Reserved], GetFontCount(4), GetFont(5)
-// IDWriteFontFamily slots 6-7: GetFamilyNames(6), [7 Reserved]
 pub const IDWriteFontFamily = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontFamily) callconv(.winapi) u32,
-        // IDWriteFontList (slots 3-5)
+        // IDWriteFontList
         GetFontCollection: Reserved,
         GetFontCount: *const fn (*IDWriteFontFamily) callconv(.winapi) UINT32,
         GetFont: *const fn (*IDWriteFontFamily, index: UINT32, font: *?*IDWriteFont) callconv(.winapi) HRESULT,
-        // IDWriteFontFamily (slots 6-7)
+        // IDWriteFontFamily
         GetFamilyNames: *const fn (*IDWriteFontFamily, names: *?*IDWriteLocalizedStrings) callconv(.winapi) HRESULT,
         MatchClosestFont: Reserved,
     };
@@ -587,11 +577,11 @@ pub const IDWriteFontCollection = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontCollection) callconv(.winapi) u32,
-        // IDWriteFontCollection (slots 3-6)
+        // IDWriteFontCollection
         GetFontFamilyCount: *const fn (*IDWriteFontCollection) callconv(.winapi) UINT32,
         GetFontFamily: *const fn (
             *IDWriteFontCollection,
@@ -630,16 +620,15 @@ pub const IDWriteFontCollection = extern struct {
 };
 
 // IDWriteFontCollection1 (extends IDWriteFontCollection)
-// Adds slots 7-8 (all Reserved for our purposes)
 pub const IDWriteFontCollection1 = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFontCollection1) callconv(.winapi) u32,
-        // IDWriteFontCollection (slots 3-6)
+        // IDWriteFontCollection
         GetFontFamilyCount: *const fn (*IDWriteFontCollection1) callconv(.winapi) UINT32,
         GetFontFamily: *const fn (
             *IDWriteFontCollection1,
@@ -653,7 +642,7 @@ pub const IDWriteFontCollection1 = extern struct {
             exists: *BOOL,
         ) callconv(.winapi) HRESULT,
         GetFontFromFontFace: Reserved,
-        // IDWriteFontCollection1 (slots 7-8)
+        // IDWriteFontCollection1
         _slot7: Reserved,
         _slot8: Reserved,
     };
@@ -681,11 +670,6 @@ pub const IDWriteFontCollection1 = extern struct {
 };
 
 // IDWriteFactory3
-// IUnknown slots 0-2
-// IDWriteFactory slots 3-23: GetSystemFontCollection(3), ..., CreateNumberSubstitution(22), CreateGlyphRunAnalysis(23)
-// IDWriteFactory1 slots 24-25: all Reserved
-// IDWriteFactory2 slots 26-30: GetSystemFontFallback(26), [27-30 Reserved]
-// IDWriteFactory3 slots 31-39: [31-37 Reserved], GetSystemFontCollection1(38), [39 Reserved]
 pub const IDWriteFactory3 = extern struct {
     vtable: *const VTable,
 
@@ -697,11 +681,11 @@ pub const IDWriteFactory3 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: *const fn (*IDWriteFactory3) callconv(.winapi) u32,
-        // IDWriteFactory (slots 3-23)
+        // IDWriteFactory
         GetSystemFontCollection: *const fn (
             *IDWriteFactory3,
             fontCollection: *?*IDWriteFontCollection,
@@ -733,10 +717,10 @@ pub const IDWriteFactory3 = extern struct {
             numberSubstitution: *?*IDWriteNumberSubstitution,
         ) callconv(.winapi) HRESULT,
         CreateGlyphRunAnalysis: Reserved,
-        // IDWriteFactory1 (slots 24-25)
+        // IDWriteFactory1
         _slot24: Reserved,
         _slot25: Reserved,
-        // IDWriteFactory2 (slots 26-30)
+        // IDWriteFactory2
         GetSystemFontFallback: *const fn (
             *IDWriteFactory3,
             fontFallback: *?*IDWriteFontFallback,
@@ -745,7 +729,7 @@ pub const IDWriteFactory3 = extern struct {
         _slot28: Reserved,
         _slot29: Reserved,
         _slot30: Reserved,
-        // IDWriteFactory3 (slots 31-39)
+        // IDWriteFactory3
         _slot31: Reserved,
         _slot32: Reserved,
         _slot33: Reserved,

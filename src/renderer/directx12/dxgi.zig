@@ -85,11 +85,11 @@ pub const IDXGIObject = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGIObject, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGIObject) callconv(.winapi) u32,
         Release: *const fn (*IDXGIObject) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
@@ -102,22 +102,22 @@ pub const IDXGIDeviceSubObject = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: Reserved,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
     };
 };
 
 // IDXGIResource
-// Inherits IDXGIDeviceSubObject. Slot we call: GetSharedHandle (slot 8)
+// Inherits IDXGIDeviceSubObject
 pub const IDXGIResource = extern struct {
     vtable: *const VTable,
 
@@ -129,18 +129,18 @@ pub const IDXGIResource = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGIResource, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGIResource) callconv(.winapi) u32,
         Release: *const fn (*IDXGIResource) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
-        // IDXGIResource (slots 8-11)
+        // IDXGIResource
         GetSharedHandle: *const fn (*IDXGIResource, *?std.os.windows.HANDLE) callconv(.winapi) HRESULT,
         GetUsage: Reserved,
         SetEvictionPriority: Reserved,
@@ -157,23 +157,22 @@ pub const IDXGIResource = extern struct {
 };
 
 // IDXGISwapChain
-// Slots we call: Present (8), GetBuffer (9)
 pub const IDXGISwapChain = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGISwapChain, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGISwapChain) callconv(.winapi) u32,
         Release: *const fn (*IDXGISwapChain) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
-        // IDXGISwapChain (slots 8-17)
+        // IDXGISwapChain
         Present: *const fn (*IDXGISwapChain, SyncInterval: u32, Flags: u32) callconv(.winapi) HRESULT,
         GetBuffer: *const fn (*IDXGISwapChain, Buffer: u32, riid: *const GUID, ppSurface: *?*anyopaque) callconv(.winapi) HRESULT,
         SetFullscreenState: Reserved,
@@ -204,18 +203,18 @@ pub const IDXGISwapChain1 = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGISwapChain1, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGISwapChain1) callconv(.winapi) u32,
         Release: *const fn (*IDXGISwapChain1) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
-        // IDXGISwapChain (slots 8-17)
+        // IDXGISwapChain
         Present: *const fn (*IDXGISwapChain1, u32, u32) callconv(.winapi) HRESULT,
         GetBuffer: *const fn (*IDXGISwapChain1, u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         SetFullscreenState: Reserved,
@@ -226,7 +225,7 @@ pub const IDXGISwapChain1 = extern struct {
         GetContainingOutput: Reserved,
         GetFrameStatistics: Reserved,
         GetLastPresentCount: Reserved,
-        // IDXGISwapChain1 (slots 18-28)
+        // IDXGISwapChain1
         GetDesc1: *const fn (*IDXGISwapChain1, *DXGI_SWAP_CHAIN_DESC1) callconv(.winapi) HRESULT,
         GetFullscreenDesc: Reserved,
         GetHwnd: Reserved,
@@ -262,7 +261,6 @@ pub const IDXGISwapChain1 = extern struct {
 };
 
 // IDXGISwapChain2
-// Slot we call: SetMatrixTransform (34)
 pub const IDXGISwapChain2 = extern struct {
     vtable: *const VTable,
 
@@ -274,18 +272,18 @@ pub const IDXGISwapChain2 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGISwapChain2, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGISwapChain2) callconv(.winapi) u32,
         Release: *const fn (*IDXGISwapChain2) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
-        // IDXGISwapChain (slots 8-17)
+        // IDXGISwapChain
         Present: *const fn (*IDXGISwapChain2, u32, u32) callconv(.winapi) HRESULT,
         GetBuffer: *const fn (*IDXGISwapChain2, u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         SetFullscreenState: Reserved,
@@ -296,7 +294,7 @@ pub const IDXGISwapChain2 = extern struct {
         GetContainingOutput: Reserved,
         GetFrameStatistics: Reserved,
         GetLastPresentCount: Reserved,
-        // IDXGISwapChain1 (slots 18-28)
+        // IDXGISwapChain1
         GetDesc1: Reserved,
         GetFullscreenDesc: Reserved,
         GetHwnd: Reserved,
@@ -308,7 +306,7 @@ pub const IDXGISwapChain2 = extern struct {
         GetBackgroundColor: Reserved,
         SetRotation: Reserved,
         GetRotation: Reserved,
-        // IDXGISwapChain2 (slots 29-35)
+        // IDXGISwapChain2
         SetSourceSize: Reserved,
         GetSourceSize: Reserved,
         SetMaximumFrameLatency: Reserved,
@@ -336,7 +334,6 @@ pub const IDXGISwapChain2 = extern struct {
 };
 
 // IDXGISwapChain3
-// Slot we call: GetCurrentBackBufferIndex (36)
 pub const IDXGISwapChain3 = extern struct {
     vtable: *const VTable,
 
@@ -348,18 +345,18 @@ pub const IDXGISwapChain3 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGISwapChain3, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
         Release: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDeviceSubObject (slot 7)
+        // IDXGIDeviceSubObject
         GetDevice: Reserved,
-        // IDXGISwapChain (slots 8-17)
+        // IDXGISwapChain
         Present: *const fn (*IDXGISwapChain3, u32, u32) callconv(.winapi) HRESULT,
         GetBuffer: *const fn (*IDXGISwapChain3, u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         SetFullscreenState: Reserved,
@@ -370,7 +367,7 @@ pub const IDXGISwapChain3 = extern struct {
         GetContainingOutput: Reserved,
         GetFrameStatistics: Reserved,
         GetLastPresentCount: Reserved,
-        // IDXGISwapChain1 (slots 18-28)
+        // IDXGISwapChain1
         GetDesc1: Reserved,
         GetFullscreenDesc: Reserved,
         GetHwnd: Reserved,
@@ -382,7 +379,7 @@ pub const IDXGISwapChain3 = extern struct {
         GetBackgroundColor: Reserved,
         SetRotation: Reserved,
         GetRotation: Reserved,
-        // IDXGISwapChain2 (slots 29-35)
+        // IDXGISwapChain2
         SetSourceSize: Reserved,
         GetSourceSize: Reserved,
         SetMaximumFrameLatency: Reserved,
@@ -390,7 +387,7 @@ pub const IDXGISwapChain3 = extern struct {
         GetFrameLatencyWaitableObject: Reserved,
         SetMatrixTransform: Reserved,
         GetMatrixTransform: Reserved,
-        // IDXGISwapChain3 (slot 36)
+        // IDXGISwapChain3
         GetCurrentBackBufferIndex: *const fn (*IDXGISwapChain3) callconv(.winapi) u32,
     };
 
@@ -412,7 +409,6 @@ pub const IDXGISwapChain3 = extern struct {
 };
 
 // IDXGIDevice
-// Slot we call: GetAdapter (slot 7)
 pub const IDXGIDevice = extern struct {
     vtable: *const VTable,
 
@@ -424,16 +420,16 @@ pub const IDXGIDevice = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGIDevice, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGIDevice) callconv(.winapi) u32,
         Release: *const fn (*IDXGIDevice) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIDevice (slots 7-10)
+        // IDXGIDevice
         GetAdapter: *const fn (*IDXGIDevice, ppAdapter: *?*IDXGIAdapter) callconv(.winapi) HRESULT,
         CreateSurface: Reserved,
         QueryResourceResidency: Reserved,
@@ -450,21 +446,20 @@ pub const IDXGIDevice = extern struct {
 };
 
 // IDXGIAdapter
-// Slot we call: GetParent (slot 6, inherited from IDXGIObject)
 pub const IDXGIAdapter = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGIAdapter, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGIAdapter) callconv(.winapi) u32,
         Release: *const fn (*IDXGIAdapter) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: *const fn (*IDXGIAdapter, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        // IDXGIAdapter (slots 7-9)
+        // IDXGIAdapter
         EnumOutputs: Reserved,
         GetDesc: Reserved,
         CheckInterfaceSupport: Reserved,
@@ -484,16 +479,16 @@ pub const IDXGIFactory = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: Reserved,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIFactory (slots 7-11)
+        // IDXGIFactory
         EnumAdapters: Reserved,
         MakeWindowAssociation: Reserved,
         GetWindowAssociation: Reserved,
@@ -507,29 +502,28 @@ pub const IDXGIFactory1 = extern struct {
     vtable: *const VTable,
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: Reserved,
         AddRef: Reserved,
         Release: Reserved,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIFactory (slots 7-11)
+        // IDXGIFactory
         EnumAdapters: Reserved,
         MakeWindowAssociation: Reserved,
         GetWindowAssociation: Reserved,
         CreateSwapChain: Reserved,
         CreateSoftwareAdapter: Reserved,
-        // IDXGIFactory1 (slots 12-13)
+        // IDXGIFactory1
         EnumAdapters1: Reserved,
         IsCurrent: Reserved,
     };
 };
 
 // IDXGIFactory2
-// Slot we call: CreateSwapChainForComposition (slot 24)
 pub const IDXGIFactory2 = extern struct {
     vtable: *const VTable,
 
@@ -541,25 +535,25 @@ pub const IDXGIFactory2 = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*IDXGIFactory2, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*IDXGIFactory2) callconv(.winapi) u32,
         Release: *const fn (*IDXGIFactory2) callconv(.winapi) u32,
-        // IDXGIObject (slots 3-6)
+        // IDXGIObject
         SetPrivateData: Reserved,
         SetPrivateDataInterface: Reserved,
         GetPrivateData: Reserved,
         GetParent: Reserved,
-        // IDXGIFactory (slots 7-11)
+        // IDXGIFactory
         EnumAdapters: Reserved,
         MakeWindowAssociation: Reserved,
         GetWindowAssociation: Reserved,
         CreateSwapChain: Reserved,
         CreateSoftwareAdapter: Reserved,
-        // IDXGIFactory1 (slots 12-13)
+        // IDXGIFactory1
         EnumAdapters1: Reserved,
         IsCurrent: Reserved,
-        // IDXGIFactory2 (slots 14-24)
+        // IDXGIFactory2
         IsWindowedStereoEnabled: Reserved,
         CreateSwapChainForHwnd: *const fn (
             self: *IDXGIFactory2,
@@ -615,7 +609,6 @@ pub const IDXGIFactory2 = extern struct {
 };
 
 // ISwapChainPanelNative
-// Slot we call: SetSwapChain (slot 3)
 pub const ISwapChainPanelNative = extern struct {
     vtable: *const VTable,
 
@@ -627,11 +620,11 @@ pub const ISwapChainPanelNative = extern struct {
     };
 
     pub const VTable = extern struct {
-        // IUnknown (slots 0-2)
+        // IUnknown
         QueryInterface: *const fn (*ISwapChainPanelNative, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
         AddRef: *const fn (*ISwapChainPanelNative) callconv(.winapi) u32,
         Release: *const fn (*ISwapChainPanelNative) callconv(.winapi) u32,
-        // ISwapChainPanelNative (slot 3)
+        // ISwapChainPanelNative
         SetSwapChain: *const fn (*ISwapChainPanelNative, ?*IDXGISwapChain) callconv(.winapi) HRESULT,
     };
 

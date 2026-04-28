@@ -70,8 +70,6 @@ public class ConfigWriteSchedulerTests
         scheduler.Schedule("command-palette-background", "mica");
         scheduler.Schedule("vertical-tabs", "false");
 
-        // Every Schedule call must rearm the debounce timer so a
-        // steady trickle of writes still flushes at the tail end.
         Assert.Equal(3, timer.ScheduleCount);
 
         timer.Fire();
@@ -90,8 +88,7 @@ public class ConfigWriteSchedulerTests
             editor, timer, TimeSpan.FromMilliseconds(100), () => { },
             NullLogger<ConfigWriteScheduler>.Instance);
 
-        // Ghostty's config parser is case-insensitive, so the two
-        // spellings must land on the same pending entry with last-wins.
+        // Case-insensitive: two spellings must collapse to last-wins.
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Schedule("Vertical-Tabs", "false");
         timer.Fire();
@@ -113,10 +110,7 @@ public class ConfigWriteSchedulerTests
         scheduler.Schedule("vertical-tabs", "true");
         scheduler.Dispose();
 
-        // Disk write happens so persistence is not lost on shutdown,
-        // but onFlushed MUST NOT fire: the app-shutdown handler would
-        // enqueue a reload that runs after the bootstrap host has
-        // already freed the ghostty app (use-after-free).
+        // No flush after shutdown -- would UAF the freed ghostty app.
         Assert.Single(editor.Writes);
         Assert.Equal(0, onFlush);
     }

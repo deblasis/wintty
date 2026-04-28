@@ -63,11 +63,6 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddBindingCommand(commands, "scroll_to_bottom", "Scroll to Bottom", "Jump to the bottom of scrollback", CommandCategory.Terminal);
         AddBindingCommand(commands, "open_config", "Open Config", "Open the Ghostty configuration file", CommandCategory.Config, "\uE713");
         AddBindingCommand(commands, "reload_config", "Reload Config", "Reload configuration from disk", CommandCategory.Config, "\uE72C");
-        // The following binding actions require apprt-level support that
-        // the Windows port doesn't implement yet. Uncomment as they land:
-        // AddBindingCommand(commands, "toggle_fullscreen", "Toggle Fullscreen", "Enter or exit fullscreen mode", CommandCategory.Terminal, "\uE740");
-        // AddBindingCommand(commands, "equalize_splits", "Equalize Splits", "Make all split panes equal size", CommandCategory.Pane);
-        // AddBindingCommand(commands, "toggle_split_zoom", "Toggle Split Zoom", "Zoom the current split to fill the tab", CommandCategory.Pane);
 
         // Opacity adjustment (Ctrl+Shift+Scroll, or from palette)
         if (_opacityAction is not null)

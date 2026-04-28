@@ -1,13 +1,7 @@
 //! Graphics API wrapper for DirectX 12.
 //!
-//! This module provides the GraphicsAPI contract required by GenericRenderer,
-//! mirroring the structure of Metal.zig and OpenGL.zig.
-//!
-//! Current status: all 5 render pipelines (bg_color, cell_bg, cell_text,
-//! image, bg_image) are wired end-to-end. Shader-visible descriptor heaps
-//! for SRV and sampler binding are created at init. RenderPass.step()
-//! binds PSO, root signature, uniforms, textures, samplers, and instance
-//! buffers, then issues DrawInstanced calls.
+//! Provides the GraphicsAPI contract required by GenericRenderer, mirroring
+//! Metal.zig and OpenGL.zig.
 pub const DirectX12 = @This();
 
 const builtin = @import("builtin");
@@ -70,15 +64,12 @@ pub const ImageTextureFormat = enum {
     bgra,
 };
 
-
 /// Number of CBV/SRV/UAV descriptors in the shader-visible heap.
-/// Covers: font atlas (grayscale + color), grid texture, image textures,
-/// and up to ~50 custom shader textures. Will need tuning if custom
-/// shaders exceed this.
+/// Covers font atlas (grayscale + color), grid texture, image textures,
+/// and ~50 custom shader textures.
 const srv_heap_capacity: u32 = 64;
 
 /// Number of sampler descriptors in the shader-visible heap.
-/// Covers: default point/linear samplers + per-pipeline overrides.
 const sampler_heap_capacity: u32 = 16;
 
 // --- GraphicsAPI contract: mutable state ---
@@ -98,7 +89,6 @@ dev: ?device.Device = null,
 /// Obtained by QueryInterface from the SwapChain1 in dev.
 swap_chain3: ?*dxgi.IDXGISwapChain3 = null,
 
-/// Allocator used to create descriptor heap objects. Stored for deinit.
 allocator: Allocator = undefined,
 
 /// RTV descriptor heap for swap chain back buffers.
@@ -167,28 +157,20 @@ pending_complete: ?struct {
 
 /// Desired surface dimensions, updated by setTargetSize.
 ///
-/// DX12 uses composition swap chains for all surface types (HWND via
-/// DirectComposition, SwapChainPanel via XAML). Composition swap chains
-/// have no HWND to query for size, so the apprt must forward the window
-/// dimensions via setTargetSize.
-///
-/// Width and height are packed into a single u64 (high 32 = width, low 32
-/// = height) so we can store/load both atomically. setTargetSize is invoked
-/// synchronously from ghostty_surface_set_size on the apprt thread (the C#
-/// UI thread for the WinUI 3 shell), while the renderer thread reads it
-/// in beginFrame to drive ResizeBuffers. Two separate atomics would tear
-/// during a drag: a resize that updates only width before the renderer
-/// reads height would briefly show a mismatched back buffer. The renderer
-/// thread tracks what it has actually applied in `applied_width` /
-/// `applied_height` -- if the desired and applied values differ at the
-/// start of beginFrame, it resizes the swap chain there (the only thread
-/// allowed to touch back_buffers/RTVs/fence).
+/// Composition swap chains have no HWND to query for size, so the apprt
+/// must forward window dimensions via setTargetSize. Width and height are
+/// packed into a single u64 (high 32 = width, low 32 = height) so both can
+/// be stored/loaded atomically; two separate atomics would tear during a
+/// drag and briefly show a mismatched back buffer. The renderer thread
+/// tracks what it actually applied in applied_width/applied_height; if
+/// desired and applied differ at the start of beginFrame, it resizes the
+/// swap chain there (the only thread allowed to touch back_buffers, RTVs,
+/// or the fence).
 desired_size: std.atomic.Value(u64) = .init(0),
 applied_width: u32 = 0,
 applied_height: u32 = 0,
 
-/// Pack/unpack helpers for desired_size. Width in the high 32 bits so a
-/// hexdump reads naturally as WWWWWWWW_HHHHHHHH.
+/// Width in the high 32 bits so a hexdump reads as WWWWWWWW_HHHHHHHH.
 inline fn packSize(width: u32, height: u32) u64 {
     return (@as(u64, width) << 32) | @as(u64, height);
 }
@@ -554,9 +536,9 @@ pub fn waitGpu(self: *DirectX12) void {
 
 pub fn drawFrameStart(self: *DirectX12) void {
     _ = self;
-    // RTV heap slots are per-frame and stable. No reset needed -- each
-    // frame's CustomShaderState reuses its own dedicated RTV descriptors
-    // during resize (via the rtv_slot option in Texture.Options).
+    // RTV heap slots are per-frame and stable. No reset needed; each frame's
+    // CustomShaderState reuses its own dedicated RTV descriptors during
+    // resize via the rtv_slot option in Texture.Options.
 }
 
 pub fn drawFrameEnd(self: *DirectX12) void {
@@ -793,7 +775,7 @@ pub inline fn beginFrame(
     target: *Target,
 ) !Frame {
     // self is *const to match the GraphicsAPI contract (Metal and OpenGL
-    // both use *const). Mutable access goes through renderer.api.
+    // both use *const); mutable access goes through renderer.api.
     _ = self;
     const api: *DirectX12 = &renderer.api;
     if (api.device_lost) return error.DeviceLost;
@@ -1108,10 +1090,8 @@ test "device_lost flag is independent of device presence" {
     try std.testing.expect(api.device_lost);
 }
 
-// Pull the directx12 integration test file into the test graph.
-// gpu_test.zig is otherwise orphaned -- it has no consumer outside
-// tests -- so without this @import it would never be compiled or
-// executed by `zig build test`.
+// Pull the directx12 integration test file into the test graph; without
+// this @import gpu_test.zig is orphaned and never compiled by `zig build test`.
 test {
     _ = @import("directx12/gpu_test.zig");
 }

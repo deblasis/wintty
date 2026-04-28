@@ -4,10 +4,6 @@ namespace Ghostty.Core.Tabs;
 /// OSC 9;4 progress state mapped 1:1 onto the discriminated cases
 /// libghostty surfaces report. The percent value is meaningless for
 /// <see cref="Kind.None"/> and <see cref="Kind.Indeterminate"/>.
-///
-/// Pure-logic record (no WinUI types): consumed by the per-tab inline
-/// indicator in <c>TabHost</c> and by the <c>TaskbarProgressCoordinator</c>
-/// introduced in plan 4.
 /// </summary>
 internal readonly record struct TabProgressState(TabProgressState.Kind State, int Percent)
 {

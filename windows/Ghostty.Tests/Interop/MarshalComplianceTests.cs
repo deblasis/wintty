@@ -7,28 +7,8 @@ using Xunit;
 
 namespace Ghostty.Tests.Interop;
 
-// Guardrail for PR 203's DisableRuntimeMarshalling convention. The
-// Ghostty assembly carries [assembly: DisableRuntimeMarshalling], and
-// the two-BOOL-shape convention (byte for libghostty C99 _Bool, int
-// for Win32 BOOL) means no [LibraryImport] or [UnmanagedFunctionPointer]
-// signature in NativeMethods.cs should carry a [MarshalAs(...)] hint.
-//
-// The Ghostty project is a WinAppSDK project; this test project is
-// plain net9.0 and cannot reference it. NativeMethods.cs is embedded
-// as a manifest resource via <EmbeddedResource Link=...> in
-// Ghostty.Tests.csproj so this test can read it without a project
-// reference.
-//
-// Scanner rule: strip trailing `//` line comments before scanning, so
-// that explanatory comments like `// [MarshalAs] was removed here`
-// do NOT false-positive. The scanner does NOT strip `/* ... */` block
-// comments; the project convention in NativeMethods.cs is line
-// comments only, and adding a block-comment stripper would add state
-// to the scanner without a matching benefit.
-//
-// When this test fails: either the convention is being reintroduced
-// (fix the signature), or the convention intentionally moved (update
-// this test).
+// Pins that every P/Invoke surface honors [assembly: DisableRuntimeMarshalling]
+// (no [MarshalAs], two-BOOL-shape: byte for libghostty _Bool, int for Win32 BOOL).
 public class MarshalComplianceTests
 {
     private const string ResourceName = "Ghostty.Tests.Interop.NativeMethods.cs";
@@ -135,23 +115,8 @@ public class MarshalComplianceTests
         Assert.Contains("Flagged", tokenHits[0].Text);
     }
 
-    // Strip trailing `//` line comments from each source line before
-    // searching, so commentary like `// [MarshalAs] was removed here`
-    // does not trigger a false positive. The cheapest correct
-    // implementation: look for the first `//` and take the prefix.
-    // This is NOT a full C# tokenizer: it does not understand string
-    // literals containing `//`, but NativeMethods.cs has no such
-    // lines today and adding one would be obviously wrong anyway.
-    //
-    // PR 202 allowlist: lines that reference a Windows.Win32.* type
-    // are CsWin32-generated boundaries where BOOL is the strongly-
-    // typed Windows.Win32.Foundation.BOOL struct (4 bytes, implicit
-    // bool conversion). The two BOOL conventions coexist by scope:
-    // hand-written [LibraryImport] uses int + != 0 (PR 203), CsWin32
-    // call sites use BOOL via implicit conversion. Today this scanner
-    // only reads NativeMethods.cs (libghostty surface, no CsWin32),
-    // so the rule is a future-proofing measure for if/when the scan
-    // scope ever widens to other interop files.
+    // Allowlist: lines referencing Windows.Win32.* (CsWin32 boundary, marshalling
+    // already enforced upstream).
     private static bool IsCsWin32Boundary(string strippedLine)
         => strippedLine.Contains("Windows.Win32.", StringComparison.Ordinal);
 

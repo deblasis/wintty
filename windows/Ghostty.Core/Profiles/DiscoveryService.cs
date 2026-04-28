@@ -34,7 +34,7 @@ internal sealed partial class DiscoveryService
     private readonly string? _cacheFilePath;
     private readonly ILogger<DiscoveryService> _log;
 
-    /// <summary>No-cache constructor used by Task 10 unit tests.</summary>
+    /// <summary>No-cache constructor.</summary>
     public DiscoveryService(
         IEnumerable<IInstalledShellProbe> probes,
         ILogger<DiscoveryService>? log = null)

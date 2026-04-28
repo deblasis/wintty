@@ -83,8 +83,6 @@ cbuffer Uniforms : register(b0)
 #define NO_MIN_CONTRAST  1u
 #define IS_CURSOR_GLYPH  2u
 
-// TODO: port from Metal -- fit/position/repeat logic (BgImage.Info bit masks)
-
 // ---------------------------------------------------------------------------
 // Uniform helpers
 // ---------------------------------------------------------------------------
@@ -95,9 +93,9 @@ uint2 unpack_grid_size()
     return uint2(grid_size_packed & 0xFFFFu, (grid_size_packed >> 16u) & 0xFFFFu);
 }
 
-// TODO: re-enable padding_extend once blend state reliably composites
-// transparent pixels.  Until then, CellBgPS always clamps to the nearest
-// edge cell instead of returning transparent for non-extended padding.
+// padding_extend is currently unused: CellBgPS clamps to the nearest edge
+// cell because the blend state does not reliably composite transparent
+// pixels on non-extended padding.
 bool padding_extend_left()  { return (padding_extend_packed & EXTEND_LEFT)  != 0u; }
 bool padding_extend_right() { return (padding_extend_packed & EXTEND_RIGHT) != 0u; }
 bool padding_extend_up()    { return (padding_extend_packed & EXTEND_UP)    != 0u; }
@@ -108,7 +106,6 @@ bool padding_extend_down()  { return (padding_extend_packed & EXTEND_DOWN)  != 0
 //
 // Simplified vs. Metal: no Display P3 conversion, no linearize/unlinearize,
 // no minimum-contrast enforcement.
-// TODO: port full color pipeline from src/renderer/shaders/shaders.metal
 // ---------------------------------------------------------------------------
 
 // Unpack a uint containing RGBA as four u8 bytes (R in the low byte) to
@@ -124,11 +121,10 @@ float4 unpack_u32_rgba(uint packed)
 }
 
 // load_color: converts a packed uint8x4 (RGBA) to premultiplied float4.
-// Premultiplication is required because the blend state uses
-// SrcBlend=ONE (not SRC_ALPHA), so RGB must already be scaled by alpha.
-// Without this, transparent cells (alpha=0) would still add their RGB
-// to the render target, covering content drawn by earlier passes.
-// TODO: port full load_color() from shaders.metal (linearize, Display P3)
+// Premultiplication is required because the blend state uses SrcBlend=ONE
+// (not SRC_ALPHA), so RGB must already be scaled by alpha. Without this,
+// transparent cells (alpha=0) would still add their RGB to the render
+// target and cover content drawn by earlier passes.
 float4 load_color(uint packed)
 {
     float4 c = unpack_u32_rgba(packed);
@@ -139,7 +135,6 @@ float4 load_color(uint packed)
 // Variant for colors that arrived via hardware R8G8B8A8_UNORM conversion
 // (e.g. the CellText color instance attribute). Already in [0, 1].
 // Premultiply to match load_color() -- the blend state uses SrcBlend=ONE.
-// TODO: linearize, Display P3, min-contrast -- port from Metal
 float4 load_color_f4(float4 color)
 {
     color.rgb *= color.a;
@@ -338,7 +333,6 @@ CellTextVSOut CellTextVS(uint vid : SV_VertexID, CellTextVSIn inst)
     o.atlas = inst.atlas;
 
     // Foreground color (R8G8B8A8_UNORM hardware-converted to [0,1] float4).
-    // TODO: linearize, Display P3, min-contrast -- port from Metal
     o.color = load_color_f4(inst.color);
 
     // Per-cell background color composited over the global background
@@ -379,13 +373,11 @@ float4 CellTextPS(CellTextVSOut input) : SV_TARGET
     if (input.atlas == ATLAS_COLOR) {
         // Color glyph: sample from the color atlas.
         // Values arrive already premultiplied; do not premultiply again.
-        // TODO: unlinearize if !use_linear_blending -- port from Metal
         float4 color = ct_atlas_color.Load(int3(tc, 0));
         return color;
     }
 
     // Grayscale glyph: the red channel is an alpha mask applied to fg color.
-    // TODO: linear blending correction, unlinearize -- port from Metal
     float4 color = input.color;
     float a = ct_atlas_grayscale.Load(int3(tc, 0)).r;
     color *= a;
@@ -448,8 +440,6 @@ float4 ImagePS(ImageVSOut input) : SV_TARGET
 {
     int2 tc = int2(input.tex_coord);
     float4 rgba = img_texture.Load(int3(tc, 0));
-
-    // TODO: unlinearize if !use_linear_blending -- port from Metal
     rgba.rgb *= rgba.a;
     return rgba;
 }
@@ -496,22 +486,16 @@ BgImageVSOut BgImageVS(uint vid : SV_VertexID, BgImageVSIn inst)
 
     o.opacity  = inst.opacity;
     o.bg_color = load_color(bg_color_packed);
-
-    // TODO: port from Metal -- fit/position/repeat logic
-
     return o;
 }
 
 float4 BgImagePS(BgImageVSOut input) : SV_TARGET
 {
-    // TODO: port from Metal -- fit/position/repeat logic
-
     // Sample the texture at the normalized screen UV.
     float2 uv = input.position.xy / screen_size;
     float4 rgba = bgi_texture.SampleLevel(bgi_sampler, uv, 0.0);
 
     // Premultiply alpha.
-    // TODO: unlinearize if !use_linear_blending -- port from Metal
     rgba.rgb *= rgba.a;
 
     float bg_alpha = input.bg_color.a;

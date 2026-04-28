@@ -558,7 +558,7 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceListThemesDeinit(GhosttySurface surface, IntPtr handle);
 
-    // ---- CLI actions (PR 218) -------------------------------------------
+    // ---- CLI actions ---------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_cli_run_action")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]

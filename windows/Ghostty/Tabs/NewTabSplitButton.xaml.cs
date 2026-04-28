@@ -143,10 +143,9 @@ internal sealed partial class NewTabSplitButton : UserControl
             item.Click += OnRowClick;
 
             // Icon resolution is fire-and-forget; row keeps placeholder
-            // until the resolve completes. PR 4 does not show a per-row
-            // icon yet because MenuFlyoutItem.Icon expects an IconElement,
-            // not a BitmapImage; full icon support lands when we wrap in
-            // an Image inside a custom MenuFlyoutItem template (PR 6).
+            // until the resolve completes. MenuFlyoutItem.Icon expects an
+            // IconElement, not a BitmapImage; full icon support lands when
+            // we wrap in an Image inside a custom MenuFlyoutItem template.
 
             ProfileMenu.Items.Add(item);
         }

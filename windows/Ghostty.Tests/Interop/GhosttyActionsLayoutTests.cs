@@ -4,21 +4,10 @@ using Xunit;
 
 namespace Ghostty.Tests.Interop;
 
-// Pins the ordinal values and struct layouts of the ghostty_action_*
-// subset the Windows apprt dispatches on. If any of these drift away
-// from include/ghostty.h, CI fails here instead of users seeing a
-// silently-misrouted action at runtime.
-//
-// When libghostty rebases and these break, re-verify against
-// include/ghostty.h:
-//   grep -n GHOSTTY_ACTION_ include/ghostty.h | \
-//     grep -nE 'SCROLLBAR|SET_TITLE|CLOSE_WINDOW|RING_BELL|PROGRESS_REPORT'
-// then update the constants in Ghostty.Core/Interop/GhosttyActions.cs.
+// Pins ghostty_action_* ordinals and struct layouts (FFI ABI with include/ghostty.h).
 public class GhosttyActionsLayoutTests
 {
-    // Parameters are typed as `int` (not the enum) so the public test
-    // method doesn't leak the now-internal enum type across its public
-    // signature — xUnit requires test classes to be public.
+    // int (not enum) parameter: xUnit needs public test class, internal enum can't leak.
     [Theory]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]

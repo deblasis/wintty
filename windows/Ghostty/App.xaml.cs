@@ -27,28 +27,7 @@ namespace Ghostty;
 /// </summary>
 public partial class App : Application
 {
-    // -- Option (b) hoist: process-global libghostty ownership. --
-    //
-    // Single ghostty_app_t across all top-level windows. The bootstrap
-    // GhosttyHost owns the runtime callback function pointers libghostty
-    // was given in AppNew, so it must stay alive until the last window
-    // closes. Every MainWindow builds its own per-window GhosttyHost
-    // with its own per-window _surfaces dictionary.
-    //
-    // Dispose order at shutdown (OnAnyWindowClosedInternal handler):
-    //   1. Per-window host for the closing window disposes first, as
-    //      part of MainWindow.OnClosed, and removes itself from
-    //      _hostBySurface via GhosttyHost.Dispose -> UnregisterHostSurfaces.
-    //   2. When WindowsByRoot is empty, bootstrap host disposes: it
-    //      calls AppFree (its HostLifetimeState.OwnsApp is true).
-    //   3. ConfigService disposal is handled by process exit.
-    // Instance fields for the App's own lifecycle (assigned in
-    // OnLaunched, cleared in OnAnyWindowClosedInternal). The matching
-    // static properties below expose the same references to types
-    // (MainWindow, GhosttyHost) that do not hold a reference to the
-    // App instance. WinUI 3's Application is a process singleton so
-    // both always agree; the duplication is the lesser evil compared
-    // to casting Application.Current everywhere.
+    // Process-global libghostty: bootstrap host owns the app handle; per-window hosts own only their surfaces.
     private ConfigService? _configService;
     private ConfigFileEditor? _configEditor;
     private ConfigWriteScheduler? _configWriteScheduler;
@@ -370,11 +349,10 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
-        // #259 logging: build the factory from Ghostty config before any
-        // other service constructs an ILogger<T>. Log directory under the
-        // same %LOCALAPPDATA%\Ghostty root that App.LogUnhandled already
-        // uses for crash.log, so a user reporting a bug only has one
-        // folder to attach.
+        // build the factory from Ghostty config before any other service constructs an
+        // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Ghostty root that
+        // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
+        // one folder to attach.
         var logDir = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
             "Ghostty", "logs");
@@ -395,15 +373,14 @@ public partial class App : Application
             factory, new Ghostty.Logging.LibghosttyLogInstaller());
         _zigLogBridge.Install();
 
-        // #259 logging: populate Core-side static logger accessors
-        // for types whose call sites are static (e.g., FrecencyStore
-        // static methods that can't take a ctor-injected logger).
+        // populate Core-side static logger accessors for types whose call sites are
+        // static (e.g., FrecencyStore static methods that can't take a ctor-injected
+        // logger).
         Ghostty.Core.Logging.CoreStaticLoggers.Initialize(factory);
 
-        // #259 logging: populate Ghostty-project static logger accessors
-        // for types that construct before ctor-injection is possible
-        // (e.g., ConfigService is built above BEFORE the factory exists,
-        // and cannot receive a logger through its ctor) and for call
+        // populate Ghostty-project static logger accessors for types that construct
+        // before ctor-injection is possible (e.g., ConfigService is built above BEFORE
+        // the factory exists, and cannot receive a logger through its ctor) and for call
         // sites inside static scopes.
         Ghostty.Logging.StaticLoggers.Initialize(factory);
 
@@ -656,9 +633,8 @@ public partial class App : Application
                 // inbound Zig log into a disposed ILoggerFactory.
                 _zigLogBridge?.Dispose();
 
-                // #259 logging: dispose the factory after the config
-                // service so any ConfigChanged callbacks fired during
-                // ConfigService.Dispose don't race a disposed factory.
+                // dispose the factory after the config service so any ConfigChanged
+                // callbacks fired during ConfigService.Dispose don't race a disposed factory.
                 // FileLoggerProvider.DisposeAsync flushes its channel
                 // with a 2-second cap; block synchronously so the final
                 // batch of log records lands on disk before process exit.

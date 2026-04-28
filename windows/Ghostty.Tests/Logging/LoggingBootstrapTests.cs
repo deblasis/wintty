@@ -90,11 +90,6 @@ public class LoggingBootstrapTests
         Assert.Equal("Ghostty.Core", opts.Rules[0].CategoryName);
     }
 
-    // Regression: proves the live-reload filter swap actually takes
-    // effect on subsequent log calls. MEL caches per-(provider, category)
-    // thresholds internally; the filter delegate closed over FilterState
-    // must be consulted on every log call (not just once at builder
-    // time), otherwise ApplyFilters is a no-op in practice.
     [Fact]
     public void ApplyFilters_SwappingInPlace_AppliesToSubsequentLogCalls()
     {
@@ -128,7 +123,6 @@ public class LoggingBootstrapTests
         Assert.Equal("warning-after-swap", entries[0].Message);
     }
 
-    // Regression: per-category filter rules must also live-swap.
     [Fact]
     public void ApplyFilters_AddingPerCategoryOverride_AppliesToSubsequentLogCalls()
     {

@@ -5,27 +5,13 @@ namespace Ghostty.Tests.Bench;
 
 public enum FakeTransportMode
 {
-    // Existing behavior: every byte written to Input is copied back on
-    // Output. Used by HarnessTests that exercise Harness.RunRoundTrip
-    // against a trivial loopback so byte-for-byte symmetry holds.
     Echo,
-
-    // Scripted: each input write from the harness causes the scripted
-    // emitter to enqueue a caller-supplied response sequence. Used by
-    // HarnessTests that need to assert sentinel-scan behavior against
-    // VT-like noise patterns.
     Scripted,
 }
 
-// In-process ITransport used by HarnessTests. Defaults to echo mode for
-// backward compat with the existing tests. Scripted mode lets callers
-// simulate conhost's "VT noise plus sentinel" output shape without
-// spawning a real child.
-//
-// Uses two named pipes with unique GUIDs so we get clean in-process
-// semantics without the handle-ownership complications of anonymous
-// pipes (DisposeLocalCopyOfClientHandle is only safe after a real
-// fork; in-process it closes the only reader/writer and breaks IO).
+// Uses two named pipes with unique GUIDs for clean in-process semantics:
+// anonymous pipes' DisposeLocalCopyOfClientHandle is only safe after a
+// real fork, so in-process it would close the only reader/writer.
 public sealed class FakeTransport : ITransport
 {
     private readonly NamedPipeServerStream _inputServer;
@@ -40,17 +26,8 @@ public sealed class FakeTransport : ITransport
 
     public int DisposeCount => Volatile.Read(ref _disposed);
 
-    // Echo-mode constructor. Preserves the original behavior: every write
-    // to Input is copied verbatim to Output. Existing HarnessTests rely
-    // on this; don't change its semantics.
     public FakeTransport() : this(FakeTransportMode.Echo, scriptedResponder: null) { }
 
-    // Scripted-mode constructor. `scriptedResponder` is called once per
-    // input write chunk read from the pipe. If it returns a byte buffer,
-    // that buffer is written to Output. If it returns null, the Output
-    // stream is closed (emulating child death / EOF). This is the hook
-    // HarnessTests uses to feed SentinelRoundTrip hand-crafted VT noise
-    // plus sentinel bytes.
     public FakeTransport(Func<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>?> scriptedResponder)
         : this(FakeTransportMode.Scripted, scriptedResponder) { }
 
@@ -58,9 +35,6 @@ public sealed class FakeTransport : ITransport
     {
         if (mode == FakeTransportMode.Scripted)
         {
-            // Defense-in-depth: the public scripted ctor already requires a
-            // non-null responder at the call site, but validate again here so
-            // the IoLoop can call the responder without a null-forgiving operator.
             ArgumentNullException.ThrowIfNull(scriptedResponder);
         }
         _mode = mode;

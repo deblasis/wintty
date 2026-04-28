@@ -6,10 +6,9 @@ namespace Ghostty.Core.Panes;
 
 /// <summary>
 /// Surface of <see cref="Ghostty.Panes.PaneHost"/> that
-/// <c>Ghostty.Core.Tabs.TabManager</c> consumes. Lives in
-/// <c>Ghostty.Core</c> so the test project can reference it
-/// without dragging in WinAppSDK. The concrete implementation
-/// (<c>Ghostty.Panes.PaneHost</c>) lives in the WinUI project.
+/// <c>Ghostty.Core.Tabs.TabManager</c> consumes. The concrete
+/// implementation (<c>Ghostty.Panes.PaneHost</c>) lives in the WinUI
+/// project.
 ///
 /// Adding members here means adding them to the production
 /// implementation AND any test fakes.
@@ -38,8 +37,7 @@ internal interface IPaneHost
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
     /// becomes the active leaf. <paramref name="snapshot"/> is recorded
-    /// on the freshly-created leaf for future hot-apply (PR 6); when
-    /// null, this is the legacy keyboard-Split path with no profile.
+    /// on the freshly-created leaf.
     /// </summary>
     void Split(PaneOrientation orientation, ProfileSnapshot? snapshot);
 

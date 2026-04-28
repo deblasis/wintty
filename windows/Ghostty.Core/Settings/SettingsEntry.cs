@@ -1,9 +1,7 @@
 namespace Ghostty.Core.Settings;
 
 /// <summary>
-/// Shape of a settings control. Used by the future search overlay
-/// to render result rows inline. Phase 1 only needs the values to
-/// exist in the index; no rendering logic consumes this yet.
+/// Shape of a settings control.
 /// </summary>
 public enum SettingType
 {

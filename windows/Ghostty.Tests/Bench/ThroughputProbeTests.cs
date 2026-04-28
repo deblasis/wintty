@@ -8,9 +8,8 @@ namespace Ghostty.Tests.Bench;
 
 public class ThroughputProbeTests
 {
-    // Each iteration must use a distinct nonce. Guards against leftover-
-    // match false positives under ConPTY where a prior iteration's
-    // terminator can linger in conhost's screen buffer.
+    // Distinct nonce per iteration: leftover bytes in conhost's screen
+    // buffer would otherwise match the next iteration's terminator.
     [Fact]
     public void ThroughputProbe_RegeneratesNoncePerIteration()
     {
@@ -29,12 +28,6 @@ public class ThroughputProbeTests
         var host = new HostInfo("Windows", "26200", "Test CPU", "x64", "10.0.0", "inbox");
         probe.Run(t, host, DateTime.UtcNow);
 
-        // Scan every captured write for terminator occurrences and collect
-        // the nonces. The probe writes payload and terminator as two separate
-        // Input.Write calls; depending on FakeTransport pipe scheduling the
-        // server-side IoLoop may read them as one or two chunks per iteration.
-        // Either way the terminator prefix lands in some captured write, and
-        // three iterations must produce three distinct nonces.
         var nonces = new HashSet<string>();
         byte[] prefix = Encoding.ASCII.GetBytes("\r\n~ENDOFBURST_");
         foreach (byte[] w in capturedWrites)
@@ -47,9 +40,6 @@ public class ThroughputProbeTests
         Assert.Equal(3, nonces.Count);
     }
 
-    // The probe must report both ingest and emit numbers. Under echo mode,
-    // ingest and emit differ only by terminator overhead (~31 bytes out of
-    // 65 536), so they are approximately equal.
     [Fact]
     public void ThroughputProbe_ReportsBothIngestAndEmitMetrics()
     {
@@ -77,9 +67,8 @@ public class ThroughputProbeTests
         Assert.InRange(ratio, 0.95, 1.10);
     }
 
-    // The probe must write payload first, then terminator. Scripted
-    // responder captures all input writes and the assertion validates the
-    // byte order.
+    // Payload-then-terminator order: throughput attribution depends on
+    // the terminator landing strictly after the measured payload bytes.
     [Fact]
     public void ThroughputProbe_WritesPayloadThenTerminator()
     {

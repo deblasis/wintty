@@ -7,14 +7,7 @@ namespace Ghostty.Tests.Settings;
 
 public class SettingsIndexTests
 {
-    // Every config key the settings UI currently edits must have an
-    // index entry. This test is the forcing function: when a new
-    // page handler calls OnValueChanged("some-key", ...), we want
-    // the build to remind the author to register the key here.
-    //
-    // Keys come from hand-inspecting the existing Pages/*.xaml.cs
-    // files as of 2026-04-14. When new config keys are wired up,
-    // add them to this list AND to SettingsIndex.
+    // SettingsIndex must cover every config key the settings UI edits.
     private static readonly string[] ExpectedKeys =
     {
         // General
