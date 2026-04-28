@@ -39,12 +39,24 @@ public static class VersionRenderer
             Architecture:        RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant());
     }
 
-    /// <summary>Plain rendering. No escape sequences. Used by the dialog
-    /// and by redirected stdout.</summary>
+    /// <summary>Plain rendering with header. No escape sequences. Used by
+    /// redirected stdout and by the clipboard "Copy" payload in the dialog.</summary>
     public static string RenderPlain(VersionInfo info)
     {
         var sb = new StringBuilder();
         AppendHeader(sb, info, ansi: false);
+        AppendBody(sb, info);
+        return sb.ToString();
+    }
+
+    /// <summary>Plain rendering of just the Version + Build Config blocks
+    /// (no header, no commit URL line). The dialog uses this because the
+    /// dialog's title bar already shows "Wintty &lt;version&gt;" and the
+    /// commit URL is rendered as a clickable HyperlinkButton above the text,
+    /// making the header redundant.</summary>
+    public static string RenderPlainBody(VersionInfo info)
+    {
+        var sb = new StringBuilder();
         AppendBody(sb, info);
         return sb.ToString();
     }
@@ -57,6 +69,16 @@ public static class VersionRenderer
         AppendHeader(sb, info, ansi: true);
         AppendBody(sb, info);
         return sb.ToString();
+    }
+
+    /// <summary>Returns the github.com commit URL for the wintty repo, or
+    /// null when no commit is known. The dialog uses this to populate the
+    /// HyperlinkButton; ANSI rendering uses it for the OSC 8 wrap.</summary>
+    public static string? CommitUrl(VersionInfo info)
+    {
+        if (string.IsNullOrEmpty(info.WinttyCommit) || info.WinttyCommit == "unknown")
+            return null;
+        return CommitUrlPrefix + info.WinttyCommit;
     }
 
     private static void AppendHeader(StringBuilder sb, VersionInfo info, bool ansi)
