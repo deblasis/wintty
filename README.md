@@ -1,8 +1,9 @@
 <!-- LOGO -->
 <h1>
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Logo" width="128">
-  <br>Ghostty
+  <img src="https://github.com/user-attachments/assets/eed9e6f8-dfc5-4e29-b3bb-53ca39cf6aeb" alt="Logo" width="128" />
+  <br><a href="https://wintty.io?utm_source=gh_readme">Wintty</a>
+</p>
 </h1>
   <p align="center">
     Fast, native, feature-rich terminal emulator pushing modern features.
@@ -22,7 +23,7 @@
 </p>
 
 > [!IMPORTANT]
-> ## Ghostty for Windows (Soft Fork)
+> ## Wintty (Ghostty R&D Soft Fork)
 >
 > <p align="center">🍬🍴</p>
 >
