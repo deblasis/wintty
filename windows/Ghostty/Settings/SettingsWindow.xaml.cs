@@ -392,19 +392,36 @@ internal sealed partial class SettingsWindow : Window
         var counts = hits.GroupBy(h => h.Entry.Page)
                          .ToDictionary(g => g.Key, g => g.Count());
 
+        // AttentionValueInfoBadgeStyle is a WinUI 3 framework theme resource;
+        // a raw cast throws if the key isn't present in the merged dictionaries
+        // for the current theme. Mirror TabColorPalettePicker.GetBrushResource
+        // and fall back to the InfoBadge default style by leaving Style unset.
+        Style? badgeStyle = null;
+        if (Application.Current.Resources.TryGetValue("AttentionValueInfoBadgeStyle", out var styleObj)
+            && styleObj is Style s)
+        {
+            badgeStyle = s;
+        }
+
         foreach (var m in _pageMappings)
         {
             int n = m.IndexName != null && counts.TryGetValue(m.IndexName, out var c) ? c : 0;
             // Dim pages with zero matches rather than collapsing, so the
             // sidebar layout stays stable while the user edits the query.
             m.Item.Opacity = n > 0 ? 1.0 : 0.4;
-            m.Item.InfoBadge = n > 0
-                ? new InfoBadge
+            if (n > 0)
+            {
+                var badge = new InfoBadge { Value = n };
+                if (badgeStyle != null)
                 {
-                    Value = n,
-                    Style = (Style)Application.Current.Resources["AttentionValueInfoBadgeStyle"],
+                    badge.Style = badgeStyle;
                 }
-                : null;
+                m.Item.InfoBadge = badge;
+            }
+            else
+            {
+                m.Item.InfoBadge = null;
+            }
         }
     }
 
