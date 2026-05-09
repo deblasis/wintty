@@ -422,6 +422,15 @@ pub fn add(
         }
     }
 
+    // glslpp — pure-Zig GLSL->SPIR-V->HLSL replacement for glslang+spirv-cross
+    {
+        const glslpp_dep = b.dependency("glslpp", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        step.root_module.addImport("glslpp", glslpp_dep.module("glslpp"));
+    }
+
     // Sentry
     if (self.config.sentry) {
         if (b.lazyDependency("sentry", .{

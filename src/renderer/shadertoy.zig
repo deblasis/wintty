@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const glslang = @import("glslang");
 const spvcross = @import("spirv_cross");
+const glslpp = @import("glslpp");
 const configpkg = @import("../config.zig");
 
 const log = std.log.scoped(.shadertoy);
@@ -74,13 +75,17 @@ pub fn loadFromFiles(
 }
 
 /// Load a single shader from a file and convert it to the target language.
-/// On Windows, runs the compilation on a fresh OS thread to avoid C++
-/// runtime thread-local state issues when called from .NET threads.
+/// For HLSL: uses glslpp (pure Zig) — no C++ runtime, no DLL, no 8MB stack thread.
+/// For MSL/GLSL: still uses glslang+spirv-cross on Windows with a separate thread.
 pub fn loadFromFile(
     alloc_gpa: Allocator,
     path: []const u8,
     target: Target,
 ) ![:0]const u8 {
+    // HLSL: glslpp is pure Zig, no thread isolation needed
+    if (target == .hlsl) return compileShader(alloc_gpa, path, target);
+
+    // MSL/GLSL: glslang+spirv-cross need thread isolation on Windows
     if (builtin.os.tag == .windows) {
         const Ctx = struct {
             alloc_gpa: Allocator,
@@ -142,16 +147,15 @@ fn compileShader(
         try stream.writer.writeByte(0);
         break :glsl stream.written()[0 .. stream.written().len - 1 :0];
     };
-    // On Windows, use the MSVC-compiled shader_wrapper.dll for the full
-    // GLSL -> SPIR-V -> HLSL pipeline to avoid C++ ABI issues.
-    if (builtin.os.tag == .windows and target == .hlsl) {
-        return glslang.wrapper.compileToHlsl(alloc_gpa, glsl) catch |err| {
-            log.warn("wrapper compile failed path={s} err={}", .{ path, err });
+    // HLSL: use glslpp (pure-Zig pipeline, no C++ dependencies)
+    if (target == .hlsl) {
+        return glslpp.compileGlslToHlsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("glslpp compile failed path={s} err={}", .{ path, err });
             return err;
         };
     }
 
-    // Convert to SPIR-V (non-Windows or non-HLSL path)
+    // MSL/GLSL: still use glslang + spirv-cross
     const spirv: []const u8 = spirv: {
         var stream: std.Io.Writer.Allocating = .init(alloc);
         var errlog: SpirvLog = .{ .alloc = alloc };
@@ -171,11 +175,11 @@ fn compileShader(
         break :spirv list.items;
     };
 
-    // Convert to target format
+    // Convert to target format (MSL or GLSL only — HLSL handled above)
     return switch (target) {
         .glsl => try glslFromSpv(alloc_gpa, spirv),
         .msl => try mslFromSpv(alloc_gpa, spirv),
-        .hlsl => try hlslFromSpv(alloc_gpa, spirv),
+        .hlsl => unreachable, // handled above
     };
 }
 
