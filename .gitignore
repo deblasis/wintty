@@ -48,3 +48,5 @@ pkg/glslang/msvc_build_md/
 
 # IconGen preview output from `just branding-preview`
 /dist/windows/preview/
+
+zig-pkg/

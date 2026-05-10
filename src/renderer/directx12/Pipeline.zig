@@ -211,7 +211,7 @@ pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSi
     };
 
     const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
-        // [0] Inline CBV at b0 (remapped from b1 in shader_wrapper).
+        // [0] Inline CBV at b0 (remapped from binding=1 by glslpp binding_shift=-1).
         .{
             .ParameterType = .CBV,
             .u = .{ .Descriptor = .{

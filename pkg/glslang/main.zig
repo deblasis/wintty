@@ -9,7 +9,7 @@ pub const init = initpkg.init;
 pub const finalize = initpkg.finalize;
 pub const Program = program.Program;
 pub const Shader = shader.Shader;
-pub const wrapper = @import("wrapper.zig");
+// shader_wrapper removed — glslpp handles GLSL→HLSL now (pure Zig, no DLL)
 
 test {
     @import("std").testing.refAllDecls(@This());
