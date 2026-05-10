@@ -16,6 +16,23 @@ set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 # Default: run tests and build the DLL
 default: test build-dll
 
+# === CI Pipeline (local equivalent) ===
+
+# Run everything CI would run
+ci: check-zig test build-release
+    @echo ""
+    @echo "═══════════════════════════════════════"
+    @echo "  CI PASSED — all gates green"
+    @echo "═══════════════════════════════════════"
+
+# Verify Zig version matches project requirement
+check-zig:
+    @mise exec -- zig version | grep -q "0.15.2" && echo "Zig 0.15.2 ✓" || (echo "ERROR: expected Zig 0.15.2" && exit 1)
+
+# Build in ReleaseSafe (what CI uses)
+build-release:
+    mise exec -- zig build -Doptimize=ReleaseSafe --summary all
+
 # === Testing ===
 
 # Run all Zig tests
@@ -124,11 +141,14 @@ validate-transport-smoke ROW: build-dll build-win
 validate-transport-smoke-all: build-dll build-win
     pwsh -NoProfile -File scripts/validate-transport-run-all.ps1
 
-# === Shader Wrapper DLL (MSVC-compiled glslang + SPIRV-Cross) ===
+# === Shader Wrapper DLL (REMOVED) ===
+# shader_wrapper.dll has been replaced by glslpp (pure-Zig GLSL→HLSL).
+# The old recipes (build-shader-wrapper, deploy-shader-wrapper) are removed.
+# glslpp compiles GLSL→SPIR-V→HLSL in-process — no C++ DLL, no MSVC, no 8MB thread.
 
 # Build shader_wrapper.dll with MSVC (isolates C++ ABI from ghostty.dll).
 # Must be run from a VS Developer Shell or with MSVC on PATH.
-build-shader-wrapper:
+build-shader-wrapper-legacy:
     #!/usr/bin/env bash
     set -euo pipefail
     ROOT="{{justfile_directory()}}"
@@ -278,13 +298,12 @@ build-shader-wrapper:
 
 # Build everything and deploy to .NET output (full dev cycle)
 [windows]
-deploy-shader-wrapper: build-dll build-shader-wrapper build-win
+deploy: build-dll build-win
     #!/usr/bin/env bash
     set -e
     DOTNET_OUT="windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0"
     cp zig-out/lib/ghostty.dll "${DOTNET_OUT}/native/"
-    cp pkg/glslang/glslang_dll/shader_wrapper.dll "${DOTNET_OUT}/"
-    echo "Deployed ghostty.dll + shader_wrapper.dll"
+    echo "Deployed ghostty.dll (no shader_wrapper.dll needed — glslpp is linked in)"
 
 # === Worktree Setup ===
 
