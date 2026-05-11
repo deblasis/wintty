@@ -2553,7 +2553,7 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, .never);
 
     try testing.expectEqual(1, result.len);
 
@@ -2711,7 +2711,7 @@ test "execCommand windows: direct command is passed through unchanged" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, .never);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);
