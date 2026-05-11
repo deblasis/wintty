@@ -75,45 +75,13 @@ pub fn loadFromFiles(
 }
 
 /// Load a single shader from a file and convert it to the target language.
-/// For HLSL: uses glslpp (pure Zig) — no C++ runtime, no DLL, no 8MB stack thread.
-/// For MSL/GLSL: still uses glslang+spirv-cross on Windows with a separate thread.
+/// All targets use glslpp (pure-Zig GLSL→SPIR-V→HLSL/MSL/GLSL compiler).
+/// No C++ dependencies, no DLL, no 8MB stack thread needed.
 pub fn loadFromFile(
     alloc_gpa: Allocator,
     path: []const u8,
     target: Target,
 ) ![:0]const u8 {
-    // HLSL: glslpp is pure Zig, no thread isolation needed
-    if (target == .hlsl) return compileShader(alloc_gpa, path, target);
-
-    // MSL/GLSL: glslang+spirv-cross need thread isolation on Windows
-    if (builtin.os.tag == .windows) {
-        const Ctx = struct {
-            alloc_gpa: Allocator,
-            path: []const u8,
-            target: Target,
-            result: anyerror![:0]const u8 = error.Unexpected,
-
-            fn run(self: *@This()) void {
-                self.result = compileShader(self.alloc_gpa, self.path, self.target);
-            }
-        };
-
-        var ctx: Ctx = .{
-            .alloc_gpa = alloc_gpa,
-            .path = path,
-            .target = target,
-        };
-
-        const thread = std.Thread.spawn(
-            .{ .stack_size = 8 * 1024 * 1024 },
-            Ctx.run,
-            .{&ctx},
-        ) catch return error.OutOfMemory;
-        thread.join();
-
-        return ctx.result;
-    }
-
     return compileShader(alloc_gpa, path, target);
 }
 
@@ -147,39 +115,20 @@ fn compileShader(
         try stream.writer.writeByte(0);
         break :glsl stream.written()[0 .. stream.written().len - 1 :0];
     };
-    // HLSL: use glslpp (pure-Zig pipeline, no C++ dependencies)
-    if (target == .hlsl) {
-        return glslpp.compileGlslToHlsl(alloc_gpa, glsl, .fragment) catch |err| {
-            log.warn("glslpp compile failed path={s} err={}", .{ path, err });
-            return err;
-        };
-    }
-
-    // MSL/GLSL: still use glslang + spirv-cross
-    const spirv: []const u8 = spirv: {
-        var stream: std.Io.Writer.Allocating = .init(alloc);
-        var errlog: SpirvLog = .{ .alloc = alloc };
-        defer errlog.deinit();
-        spirvFromGlsl(&stream.writer, &errlog, glsl) catch |err| {
-            if (errlog.info.len > 0 or errlog.debug.len > 0) {
-                log.warn("spirv error path={s} info={s} debug={s}", .{
-                    path,
-                    errlog.info,
-                    errlog.debug,
-                });
-            }
-            return err;
-        };
-        var list: std.ArrayListAligned(u8, .of(u32)) = .empty;
-        try list.appendSlice(alloc, stream.written());
-        break :spirv list.items;
-    };
-
-    // Convert to target format (MSL or GLSL only — HLSL handled above)
+    // All targets: use glslpp (pure-Zig pipeline, no C++ dependencies)
     return switch (target) {
-        .glsl => try glslFromSpv(alloc_gpa, spirv),
-        .msl => try mslFromSpv(alloc_gpa, spirv),
-        .hlsl => unreachable, // handled above
+        .hlsl => glslpp.compileGlslToHlsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("glslpp HLSL compile failed path={s} err={}", .{ path, err });
+            return err;
+        },
+        .msl => glslpp.compileGlslToMsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("glslpp MSL compile failed path={s} err={}", .{ path, err });
+            return err;
+        },
+        .glsl => glslpp.compileGlslToGlsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("glslpp GLSL compile failed path={s} err={}", .{ path, err });
+            return err;
+        },
     };
 }
 
