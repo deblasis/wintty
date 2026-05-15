@@ -1596,12 +1596,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 frame.target_config_modified = self.target_config_modified;
             }
 
-            // Upload images to the GPU as necessary.
-            _ = self.images.upload(self.alloc, &self.api);
-
-            // Upload the background image to the GPU as necessary.
-            try self.uploadBackgroundImage();
-
             // Update per-frame custom shader uniforms.
             try self.updateCustomShaderUniformsForFrame();
 
@@ -1618,12 +1612,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             // Get a frame context from the graphics API.
-            // This must happen before atlas sync because DX12 texture uploads
-            // (CopyTextureRegion) require the frame's command list, which is
-            // only available after beginFrame. Metal and OpenGL use immediate
-            // CPU-to-GPU copies so this ordering is transparent to them.
+            // This must happen before any texture upload because DX12
+            // CopyTextureRegion requires the frame's command list, which is
+            // only available between beginFrame and drawFrameEnd. Metal and
+            // OpenGL use immediate CPU-to-GPU copies so this ordering is
+            // transparent to them.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
             defer frame_ctx.complete(sync);
+
+            // Upload kitty graphics images to the GPU as necessary. Placed
+            // after beginFrame so the DX12 command list is available for
+            // staging-buffer CopyTextureRegion.
+            _ = self.images.upload(self.alloc, &self.api);
+
+            // Upload the background image to the GPU as necessary. Same
+            // command-list dependency as the kitty image upload above.
+            try self.uploadBackgroundImage();
 
             // If our font atlas changed, sync the texture data.
             // Placed after beginFrame so the DX12 command list is available.
