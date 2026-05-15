@@ -96,17 +96,24 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
     <!--
-      Bundle the OpenConsole-derived ConPTY DLL (Microsoft-signed) next to
-      the executable. Loaded at runtime by the Zig pty layer in preference
-      to the OS-shipped conhost so we get newer VT pass-through behavior
-      (the in-box conhost strips unknown APC/DCS sequences such as the
-      Kitty graphics protocol).
+      Bundle the OpenConsole-derived ConPTY DLL alongside Wintty.exe.
+      Loaded at runtime by the Zig pty layer in preference to the
+      OS-shipped conhost so we get newer VT pass-through behavior
+      (the in-box conhost strips unknown APC/DCS sequences such as
+      the Kitty graphics protocol). Package contents are Microsoft-
+      signed; signature is verified at install time by the MSIX
+      runtime.
 
-      ExcludeAssets="all" stops the package's auto-applied build targets
-      from leaking into a managed project — they expect a C++ link step.
-      GeneratePathProperty exposes $(PkgMicrosoft_Windows_Console_ConPTY)
-      pointing at the package content root so we can pick out the per-RID
-      runtime files with explicit None items below.
+      Pinned to 1.25.260427001-preview because that's the first
+      release whose conpty.dll forwards Kitty graphics APCs without
+      mangling; bumping requires re-validating the protocol-smoke
+      matrix in wintty-smoke.
+
+      ExcludeAssets="all" stops the package's auto-applied build
+      targets from injecting a C++-style link step into this managed
+      project. GeneratePathProperty exposes
+      $(PkgMicrosoft_Windows_Console_ConPTY) for the per-RID copies
+      below.
     -->
     <PackageReference Include="Microsoft.Windows.Console.ConPTY"
                       Version="1.25.260427001-preview"
@@ -122,9 +129,13 @@
     of CreatePseudoConsole; bundling it ensures the same version pair as
     the DLL.
 
-    Ghostty's <Platforms> list is x86;x64;ARM64. NuGet uses lowercase
-    "win-x64" / "win-arm64" / "win-x86" RIDs and the OpenConsole package
-    uses "x64" / "arm64" / "x86" subdirs in build/native/runtimes.
+    The block below repeats the same shape per RID. We tried collapsing
+    via _ConPtyRuntime item metadata + a single None pattern, but
+    MSBuild rejects metadata refs in Condition on cross-item None
+    (MSB4190 for Identity, MSB4191 for custom metadata): batching
+    only works inside a Target, not inline. The explicit listing
+    is the form MSBuild accepts; the project Platforms list is
+    x86;x64;ARM64, so three pairs is the closed set.
   -->
   <ItemGroup>
     <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll"

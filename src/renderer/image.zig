@@ -102,12 +102,12 @@ pub const State = struct {
     /// Any placements that have non-uploaded images are ignored. Any
     /// graphics API errors during drawing are also ignored.
     ///
-    /// `frame_buffers` is owned by the caller (the frame state) and
-    /// retains each per-placement vertex buffer until the GPU finishes
-    /// reading them. DX12's IASetVertexBuffers does not retain the
-    /// underlying ID3D12Resource, so releasing it early (e.g. via
-    /// `defer buf.deinit()`) before the command list executes results
-    /// in the GPU reading zeros.
+    /// `frame_buffers` is owned by the caller; each appended buffer
+    /// must outlive the GPU's read of it. On DX12, IASetVertexBuffers
+    /// records only the GPU virtual address, so freeing the underlying
+    /// ID3D12Resource before the command list executes makes the GPU
+    /// read zeros. The frame state retains buffers until its semaphore
+    /// confirms the previous frame is done.
     pub fn draw(
         self: *State,
         alloc: Allocator,
@@ -143,6 +143,15 @@ pub const State = struct {
                 },
             };
 
+            // Reserve the slot first so we can build the buffer directly
+            // into the caller-owned retention list; avoids the
+            // append-then-handle-OOM dance that would otherwise need to
+            // call deinit on a buffer the GPU may already be reading.
+            frame_buffers.ensureUnusedCapacity(alloc, 1) catch |err| {
+                log.warn("error reserving image vertex buffer slot err={}", .{err});
+                continue;
+            };
+
             // Create our vertex buffer, which is always exactly one item.
             // future(mitchellh): we can group rendering multiple instances of a single image
             const buf = GraphicsAPI.Buffer(GraphicsAPI.shaders.Image).initFill(
@@ -174,18 +183,12 @@ pub const State = struct {
                 log.warn("error creating image vertex buffer err={}", .{err});
                 continue;
             };
-            frame_buffers.append(alloc, buf) catch |err| {
-                log.warn("error retaining image vertex buffer err={}", .{err});
-                var dropped = buf;
-                dropped.deinit();
-                continue;
-            };
-            const buf_ref = &frame_buffers.items[frame_buffers.items.len - 1];
+            frame_buffers.appendAssumeCapacity(buf);
 
             pass.step(.{
                 .pipeline = pipeline,
                 .uniforms = uniforms,
-                .buffers = &.{buf_ref.buffer},
+                .buffers = &.{frame_buffers.items[frame_buffers.items.len - 1].buffer},
                 .textures = &.{texture},
                 .draw = .{
                     .type = .triangle_strip,

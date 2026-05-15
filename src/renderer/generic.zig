@@ -262,25 +262,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// the renderer is deinited after that.
             defunct: bool = false,
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool) !SwapChain {
+            pub fn init(
+                alloc: Allocator,
+                api: GraphicsAPI,
+                custom_shaders: bool,
+            ) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
 
                 // Initialize all of our frame state.
                 for (&result.frames) |*frame| {
-                    frame.* = try FrameState.init(api, custom_shaders);
+                    frame.* = try FrameState.init(alloc, api, custom_shaders);
                 }
 
                 return result;
             }
 
-            pub fn deinit(self: *SwapChain, alloc: Allocator) void {
+            pub fn deinit(self: *SwapChain) void {
                 if (self.defunct) return;
                 self.defunct = true;
 
                 // Wait for all of our inflight draws to complete
                 // so that we can cleanly deinit our GPU state.
                 for (0..buf_count) |_| self.frame_sema.wait();
-                for (&self.frames) |*frame| frame.deinit(alloc);
+                for (&self.frames) |*frame| frame.deinit();
             }
 
             /// Get the next frame state to draw to. This will wait on the
@@ -311,6 +315,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// This is used to implement double/triple buffering.
         const FrameState = struct {
+            /// Allocator the frame state owns; used to manage the
+            /// growable `image_instance_buffers` list. Stored here so
+            /// deinit / recycle don't need to thread it through callers.
+            alloc: Allocator,
+
             uniforms: UniformBuffer,
             cells: CellTextBuffer,
             cells_bg: CellBgBuffer,
@@ -335,12 +344,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// Custom shader state, this is null if we have no custom shaders.
             custom_shader_state: ?CustomShaderState = null,
 
-            /// Per-placement vertex buffers for kitty/overlay image draws.
-            /// The image renderer creates one buffer per placement per
-            /// frame; we own them here so they outlive the GPU command
-            /// list (DX12 IASetVertexBuffers does not retain the
-            /// underlying resource). Recycled when this frame slot is
-            /// reused, after the frame_sema confirms the GPU is done.
+            /// Per-placement vertex buffers for kitty / overlay image
+            /// draws. Each placement gets a fresh buffer per frame; we
+            /// never reuse a buffer instance from a prior frame, only
+            /// its slot in this list. Buffers outlive the GPU command
+            /// list because DX12 IASetVertexBuffers does not retain the
+            /// underlying resource. Recycled when this frame slot is
+            /// reused, after frame_sema confirms the GPU is done.
             image_instance_buffers: std.ArrayListUnmanaged(ImageBuffer) = .empty,
 
             const UniformBuffer = Buffer(shaderpkg.Uniforms);
@@ -349,7 +359,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
             const ImageBuffer = Buffer(shaderpkg.Image);
 
-            pub fn init(api: GraphicsAPI, custom_shaders: bool) !FrameState {
+            pub fn init(
+                alloc: Allocator,
+                api: GraphicsAPI,
+                custom_shaders: bool,
+            ) !FrameState {
                 // Uniform buffer contains exactly 1 uniform struct. The
                 // uniform data will be undefined so this must be set before
                 // a frame is drawn.
@@ -403,6 +417,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const target = try api.initTarget(1, 1);
 
                 return .{
+                    .alloc = alloc,
                     .uniforms = uniforms,
                     .cells = cells,
                     .cells_bg = cells_bg,
@@ -414,7 +429,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            pub fn deinit(self: *FrameState, alloc: Allocator) void {
+            pub fn deinit(self: *FrameState) void {
                 self.target.deinit();
                 self.uniforms.deinit();
                 self.cells.deinit();
@@ -423,14 +438,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.color.deinit();
                 self.bg_image_buffer.deinit();
                 for (self.image_instance_buffers.items) |*b| b.deinit();
-                self.image_instance_buffers.deinit(alloc);
+                self.image_instance_buffers.deinit(self.alloc);
                 if (self.custom_shader_state) |*state| state.deinit();
             }
 
-            /// Drain all in-flight image instance buffers. Caller must
-            /// guarantee the GPU is done reading from them (typically by
-            /// waiting on the frame_sema, which only releases after the
-            /// frame's command list completes).
+            /// Drain all per-placement image vertex buffers from the
+            /// previous use of this frame slot. Safe to call only after
+            /// frame_sema has released this slot -- that signals the GPU
+            /// has finished reading them.
             pub fn recycleImageBuffers(self: *FrameState) void {
                 for (self.image_instance_buffers.items) |*b| b.deinit();
                 self.image_instance_buffers.clearRetainingCapacity();
@@ -712,10 +727,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Prepare our swap chain
             var swap_chain = try SwapChain.init(
+                alloc,
                 api,
                 has_custom_shaders,
             );
-            errdefer swap_chain.deinit(alloc);
+            errdefer swap_chain.deinit();
 
             // Flush any init-time GPU commands (e.g., DX12 texture barriers).
             // SwapChain.init creates placeholder atlas textures that may need
@@ -860,7 +876,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
             if (self.search_matches) |*m| m.arena.deinit();
-            self.swap_chain.deinit(self.alloc);
+            self.swap_chain.deinit();
 
             if (DisplayLink != void) {
                 if (self.display_link) |display_link| {
@@ -1021,6 +1037,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // We reinitialize our shaders and our swap chain.
             try self.initShaders();
             self.swap_chain = try SwapChain.init(
+                self.alloc,
                 self.api,
                 self.has_custom_shaders,
             );
@@ -1046,7 +1063,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //
             // This will mark them as defunct so that they
             // can't be double-freed or used in draw calls.
-            self.swap_chain.deinit(self.alloc);
+            self.swap_chain.deinit();
             self.shaders.deinit(self.alloc);
         }
 
@@ -1561,9 +1578,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer self.swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
-            // The frame_sema only releases this slot after the GPU has
-            // finished its previous use, so it's now safe to deinit any
-            // per-placement image vertex buffers we created last time.
+            // `nextFrame` has waited on frame_sema, so the GPU is no
+            // longer reading last frame's image vertex buffers. Recycle
+            // them now, before any new draw calls in this frame can
+            // append fresh ones.
             frame.recycleImageBuffers();
 
             // If we need to reinitialize our shaders, do so.
@@ -1645,13 +1663,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
             defer frame_ctx.complete(sync);
 
-            // Upload kitty graphics images to the GPU as necessary. Placed
-            // after beginFrame so the DX12 command list is available for
-            // staging-buffer CopyTextureRegion.
+            // Upload kitty graphics images to the GPU as necessary.
             _ = self.images.upload(self.alloc, &self.api);
 
-            // Upload the background image to the GPU as necessary. Same
-            // command-list dependency as the kitty image upload above.
+            // Upload the background image to the GPU as necessary.
             try self.uploadBackgroundImage();
 
             // If our font atlas changed, sync the texture data.
