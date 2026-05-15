@@ -102,12 +102,22 @@ pub const State = struct {
     ///
     /// Any placements that have non-uploaded images are ignored. Any
     /// graphics API errors during drawing are also ignored.
+    ///
+    /// `frame_buffers` is owned by the caller; each appended buffer
+    /// must outlive the GPU's read of it. On DX12, IASetVertexBuffers
+    /// records only the GPU virtual address, so freeing the underlying
+    /// ID3D12Resource before the command list executes makes the GPU
+    /// read zeros. The frame state retains buffers until its semaphore
+    /// confirms the previous frame is done.
     pub fn draw(
         self: *State,
+        alloc: Allocator,
         api: *GraphicsAPI,
         pipeline: GraphicsAPI.Pipeline,
         pass: *GraphicsAPI.RenderPass,
         placement_type: DrawPlacements,
+        uniforms: anytype,
+        frame_buffers: *std.ArrayListUnmanaged(GraphicsAPI.Buffer(GraphicsAPI.shaders.Image)),
     ) void {
         const placements: []const Placement = switch (placement_type) {
             .kitty_below_bg => self.kitty_placements.items[0..self.kitty_bg_end],
@@ -134,9 +144,18 @@ pub const State = struct {
                 },
             };
 
+            // Reserve the slot first so we can build the buffer directly
+            // into the caller-owned retention list; avoids the
+            // append-then-handle-OOM dance that would otherwise need to
+            // call deinit on a buffer the GPU may already be reading.
+            frame_buffers.ensureUnusedCapacity(alloc, 1) catch |err| {
+                log.warn("error reserving image vertex buffer slot err={}", .{err});
+                continue;
+            };
+
             // Create our vertex buffer, which is always exactly one item.
             // future(mitchellh): we can group rendering multiple instances of a single image
-            var buf = GraphicsAPI.Buffer(GraphicsAPI.shaders.Image).initFill(
+            const buf = GraphicsAPI.Buffer(GraphicsAPI.shaders.Image).initFill(
                 api.imageBufferOptions(),
                 &.{.{
                     .grid_pos = .{
@@ -165,11 +184,12 @@ pub const State = struct {
                 log.warn("error creating image vertex buffer err={}", .{err});
                 continue;
             };
-            defer buf.deinit();
+            frame_buffers.appendAssumeCapacity(buf);
 
             pass.step(.{
                 .pipeline = pipeline,
-                .buffers = &.{buf.buffer},
+                .uniforms = uniforms,
+                .buffers = &.{frame_buffers.items[frame_buffers.items.len - 1].buffer},
                 .textures = &.{texture},
                 .draw = .{
                     .type = .triangle_strip,
