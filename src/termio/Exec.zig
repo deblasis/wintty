@@ -2859,11 +2859,16 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe");
+    const alloc = arena.allocator();
+    const result = try testExecWindowsShell(alloc, "cmd.exe");
 
     // auto + cmd (console_api) → ConPTY → cmd preamble appended.
+    // result[0] is %COMSPEC% if set (the documented path to the current
+    // command processor) or the literal "cmd.exe" fallback.
     try testing.expectEqual(@as(usize, 3), result.len);
-    try testing.expectEqualStrings("cmd.exe", result[0]);
+    const expected_cmd = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
+        try alloc.dupe(u8, "cmd.exe");
+    try testing.expectEqualStrings(expected_cmd, result[0]);
     try testing.expectEqualStrings("/K", result[1]);
     try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
 }
@@ -2951,7 +2956,12 @@ test "execCommand windows: utf8-console=never is a kill switch across transports
         .never,
     );
     try testing.expectEqual(@as(usize, 1), cmd_result.len);
-    try testing.expectEqualStrings("cmd.exe", cmd_result[0]);
+    // %COMSPEC% resolution still happens (it's transport-independent
+    // shell-name handling); the .never flag only suppresses preamble
+    // injection. Accept either the env var or the literal fallback.
+    const expected_cmd = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
+        try alloc.dupe(u8, "cmd.exe");
+    try testing.expectEqualStrings(expected_cmd, cmd_result[0]);
 
     const pwsh_result = try execCommand(
         alloc,
