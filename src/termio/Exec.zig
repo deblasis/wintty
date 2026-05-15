@@ -987,12 +987,18 @@ const Subprocess = struct {
             );
         }
 
-        // Build our args list
+        // Build our args list. cfg.utf8_console is `void` on
+        // non-Windows; pass `.auto` as a no-op concrete value so the
+        // shape of the call site stays cross-platform (execCommand's
+        // body reads utf8_console only inside Windows-gated blocks).
         const args: []const [:0]const u8 = execCommand(
             alloc,
             shell_command,
             internal_os.passwd,
-            cfg.utf8_console,
+            if (comptime builtin.os.tag == .windows)
+                cfg.utf8_console
+            else
+                .auto,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -2011,7 +2017,11 @@ fn execCommand(
     comptime passwdpkg: type,
     /// Configured UTF-8 console preamble policy; used only on Windows
     /// to gate UTF-8 preamble injection across both ConPTY and bypass
-    /// transports. Ignored on other platforms.
+    /// transports. Ignored on other platforms. We keep the parameter
+    /// concrete (rather than `void` off-Windows) so darwin/posix unit
+    /// tests can keep passing `.auto` literally as a "don't care"
+    /// argument; the function never reads it outside Windows-gated
+    /// blocks.
     utf8_console: configpkg.Config.Utf8Console,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
@@ -2834,18 +2844,31 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const result = try execCommand(alloc, .{ .shell = "cmd.exe" }, struct {
-        fn get(_: Allocator) !PasswdEntry {
-            return .{};
-        }
-    });
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "cmd.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        // utf8-console=never to disable the chcp preamble; this test
+        // verifies COMSPEC resolution, not preamble injection.
+        .never,
+    );
 
     try testing.expectEqual(1, result.len);
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), result[0]);
+}
 
-    // Expect COMSPEC if available, otherwise the documented fallback.
-    const expected = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
-        try alloc.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
-    try testing.expectEqualStrings(expected, result[0]);
+/// Helper for the Windows execCommand tests: what we expect `args[0]`
+/// to be when the configured shell is the bare token "cmd.exe". The
+/// production code at execCommand's shell-handling block resolves it
+/// via %COMSPEC% when set, otherwise leaves the input unchanged -- so
+/// the unset case returns "cmd.exe" literally, not a hard-coded path.
+fn expectedCmdExeArg0(alloc: Allocator) Allocator.Error![]const u8 {
+    return std.process.getEnvVarOwned(alloc, "COMSPEC") catch
+        try alloc.dupe(u8, "cmd.exe");
 }
 
 test "execCommand windows: shell command, single token spawns directly" {
@@ -2989,14 +3012,19 @@ test "execCommand windows: direct command is passed through unchanged" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const result = try execCommand(alloc, .{ .direct = &.{
-        "C:\\tools\\foo.exe",
-        "arg with spaces",
-    } }, struct {
-        fn get(_: Allocator) !PasswdEntry {
-            return .{};
-        }
-    });
+    const result = try execCommand(
+        alloc,
+        .{ .direct = &.{
+            "C:\\tools\\foo.exe",
+            "arg with spaces",
+        } },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .auto,
+    );
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);
@@ -3127,11 +3155,12 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(arena.allocator(), "cmd.exe");
+    const alloc = arena.allocator();
+    const result = try testExecWindowsShell(alloc, "cmd.exe");
 
     // auto + cmd (console_api) → ConPTY → cmd preamble appended.
     try testing.expectEqual(@as(usize, 3), result.len);
-    try testing.expectEqualStrings("cmd.exe", result[0]);
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), result[0]);
     try testing.expectEqualStrings("/K", result[1]);
     try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
 }
@@ -3219,7 +3248,9 @@ test "execCommand windows: utf8-console=never is a kill switch across transports
         .never,
     );
     try testing.expectEqual(@as(usize, 1), cmd_result.len);
-    try testing.expectEqualStrings("cmd.exe", cmd_result[0]);
+    // %COMSPEC% resolution still happens here (transport-independent
+    // shell-name handling); .never only suppresses preamble injection.
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), cmd_result[0]);
 
     const pwsh_result = try execCommand(
         alloc,
