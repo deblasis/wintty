@@ -95,6 +95,85 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260317003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
+    <!--
+      Bundle the OpenConsole-derived ConPTY DLL alongside Wintty.exe.
+      Loaded at runtime by the Zig pty layer in preference to the
+      OS-shipped conhost so we get newer VT pass-through behavior
+      (the in-box conhost strips unknown APC/DCS sequences such as
+      the Kitty graphics protocol). Package contents are Microsoft-
+      signed; signature is verified at install time by the MSIX
+      runtime.
+
+      Pinned to 1.25.260427001-preview because that's the first
+      release whose conpty.dll forwards Kitty graphics APCs without
+      mangling; bumping requires re-validating the protocol-smoke
+      matrix in wintty-smoke.
+
+      ExcludeAssets="all" stops the package's auto-applied build
+      targets from injecting a C++-style link step into this managed
+      project. GeneratePathProperty exposes
+      $(PkgMicrosoft_Windows_Console_ConPTY) for the per-RID copies
+      below.
+    -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY"
+                      Version="1.25.260427001-preview"
+                      GeneratePathProperty="true"
+                      ExcludeAssets="all" />
+  </ItemGroup>
+
+  <!--
+    Deploy the runtime conpty.dll matching the build platform alongside
+    Wintty.exe so LoadLibraryW("conpty.dll") from the pty layer resolves
+    against the bundled DLL rather than the older OS copy. OpenConsole.exe
+    is the conhost replacement that the bundled DLL launches as the child
+    of CreatePseudoConsole; bundling it ensures the same version pair as
+    the DLL.
+
+    The block below repeats the same shape per RID. We tried collapsing
+    via _ConPtyRuntime item metadata + a single None pattern, but
+    MSBuild rejects metadata refs in Condition on cross-item None
+    (MSB4190 for Identity, MSB4191 for custom metadata): batching
+    only works inside a Target, not inline. The explicit listing
+    is the form MSBuild accepts; the project Platforms list is
+    x86;x64;ARM64, so three pairs is the closed set.
+  -->
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll"
+          Condition="'$(Platform)' == 'x64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe"
+          Condition="'$(Platform)' == 'x64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-arm64\native\conpty.dll"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-arm64\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\arm64\OpenConsole.exe"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\arm64\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x86\native\conpty.dll"
+          Condition="'$(Platform)' == 'x86' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x86\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe"
+          Condition="'$(Platform)' == 'x86' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
