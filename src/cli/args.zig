@@ -310,6 +310,9 @@ pub fn parseIntoField(
     assert(info == .@"struct");
 
     inline for (info.@"struct".fields) |field| {
+        // Void-typed fields (platform-gated Config keys) have no value to set.
+        if (comptime field.type == void) continue;
+
         if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
             // For optional fields, we just treat it as the child type.
             // This lets optional fields default to null but get set by
