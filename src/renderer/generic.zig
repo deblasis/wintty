@@ -510,16 +510,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Reuse existing descriptor slots so each frame keeps its
                 // dedicated RTV and SRV descriptors. This prevents both
                 // RTV overwrites across in-flight frames and SRV heap
-                // exhaustion from leaked descriptors.
-                const Descriptor = @TypeOf(self.front_texture.rtv);
-                const front_rtv_slot: ?Descriptor =
-                    if (self.front_texture.rtv.cpu.ptr != 0) self.front_texture.rtv else null;
-                const back_rtv_slot: ?Descriptor =
-                    if (self.back_texture.rtv.cpu.ptr != 0) self.back_texture.rtv else null;
-                const front_srv_slot: ?Descriptor =
-                    if (self.front_texture.srv.gpu.ptr != 0) self.front_texture.srv else null;
-                const back_srv_slot: ?Descriptor =
-                    if (self.back_texture.srv.gpu.ptr != 0) self.back_texture.srv else null;
+                // exhaustion from leaked descriptors. The slots only
+                // exist on DX12; Metal and OpenGL ignore the args.
+                const has_descriptor_slots =
+                    comptime @hasField(Texture, "rtv");
+                const front_rtv_slot, const back_rtv_slot,
+                const front_srv_slot, const back_srv_slot =
+                    if (has_descriptor_slots) reuse: {
+                        const Descriptor = @TypeOf(self.front_texture.rtv);
+                        break :reuse .{
+                            @as(?Descriptor, if (self.front_texture.rtv.cpu.ptr != 0) self.front_texture.rtv else null),
+                            @as(?Descriptor, if (self.back_texture.rtv.cpu.ptr != 0) self.back_texture.rtv else null),
+                            @as(?Descriptor, if (self.front_texture.srv.gpu.ptr != 0) self.front_texture.srv else null),
+                            @as(?Descriptor, if (self.back_texture.srv.gpu.ptr != 0) self.back_texture.srv else null),
+                        };
+                    } else .{ null, null, null, null };
 
                 const front_texture = try Texture.init(
                     api.renderTargetTextureOptions(front_rtv_slot, front_srv_slot),
@@ -1636,22 +1641,30 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // resources must be valid -- if any are null (e.g. a texture failed
             // to create during resize), fall back to direct-to-target rendering
             // so the terminal stays visible instead of crashing the GPU driver.
+            // The resource/PSO null checks are DX12-specific (descriptor heaps
+            // can be exhausted, PSOs can be defunct after re-init); Metal and
+            // OpenGL fail at allocation so any state we reach here is valid.
             const use_custom_shader = use_custom_shader: {
                 const state = frame.custom_shader_state orelse break :use_custom_shader false;
-                if (state.front_texture.resource == null or
-                    state.back_texture.resource == null or
-                    state.front_texture.rtv.cpu.ptr == 0 or
-                    state.back_texture.rtv.cpu.ptr == 0 or
-                    state.front_texture.srv.gpu.ptr == 0 or
-                    state.back_texture.srv.gpu.ptr == 0)
-                {
-                    break :use_custom_shader false;
-                }
-                // Verify post-process pipelines have valid PSOs.
-                for (self.shaders.post_pipelines, 0..) |pipeline, i| {
-                    if (pipeline.pso == null or pipeline.root_signature == null) {
-                        log.warn("post-process pipeline {} has null PSO/root_sig, falling back", .{i});
+                if (comptime @hasField(Texture, "resource")) {
+                    if (state.front_texture.resource == null or
+                        state.back_texture.resource == null or
+                        state.front_texture.rtv.cpu.ptr == 0 or
+                        state.back_texture.rtv.cpu.ptr == 0 or
+                        state.front_texture.srv.gpu.ptr == 0 or
+                        state.back_texture.srv.gpu.ptr == 0)
+                    {
                         break :use_custom_shader false;
+                    }
+                }
+                // Verify post-process pipelines have valid PSOs (DX12-only
+                // state -- Metal/OpenGL pipelines have no `pso` field).
+                if (comptime @hasField(GraphicsAPI.Pipeline, "pso")) {
+                    for (self.shaders.post_pipelines, 0..) |pipeline, i| {
+                        if (pipeline.pso == null or pipeline.root_signature == null) {
+                            log.warn("post-process pipeline {} has null PSO/root_sig, falling back", .{i});
+                            break :use_custom_shader false;
+                        }
                     }
                 }
                 break :use_custom_shader true;

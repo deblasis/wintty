@@ -1881,6 +1881,11 @@ pub const CAPI = struct {
         surface: *Surface,
         theme_cb: ?*const fn ([*:0]const u8, bool) callconv(.c) void,
     ) ?*anyopaque {
+        // The picker drives Surface.{input,scroll,resize}_redirect, which
+        // only exist on Windows. Non-Windows targets compile the export so
+        // the libghostty header stays portable, but the body is gated out.
+        if (comptime builtin.os.tag != .windows) return null;
+
         const picker_mod = @import("../cli/inline_theme_picker.zig");
         const alloc = global.alloc;
 
@@ -1977,6 +1982,10 @@ pub const CAPI = struct {
         surface: *Surface,
         picker_ptr: ?*anyopaque,
     ) void {
+        // Mirrors the gate in ghostty_surface_list_themes -- the redirect
+        // fields are void on non-Windows targets.
+        if (comptime builtin.os.tag != .windows) return;
+
         const picker_mod = @import("../cli/inline_theme_picker.zig");
         const picker: *picker_mod.InlineThemePicker = @ptrCast(@alignCast(picker_ptr orelse return));
 

@@ -987,12 +987,17 @@ const Subprocess = struct {
             );
         }
 
-        // Build our args list
+        // Build our args list. utf8_console is void on non-Windows;
+        // execCommand only reads it inside Windows-gated blocks, so we
+        // pass `.auto` as a dummy that the function ignores.
         const args: []const [:0]const u8 = execCommand(
             alloc,
             shell_command,
             internal_os.passwd,
-            cfg.utf8_console,
+            if (comptime builtin.os.tag == .windows)
+                cfg.utf8_console
+            else
+                .auto,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -2549,11 +2554,18 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const result = try execCommand(alloc, .{ .shell = "cmd.exe" }, struct {
-        fn get(_: Allocator) !PasswdEntry {
-            return .{};
-        }
-    });
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "cmd.exe" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        // utf8-console=never to disable the chcp preamble; this test
+        // verifies COMSPEC resolution, not preamble injection.
+        .never,
+    );
 
     try testing.expectEqual(1, result.len);
 
@@ -2704,14 +2716,19 @@ test "execCommand windows: direct command is passed through unchanged" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const result = try execCommand(alloc, .{ .direct = &.{
-        "C:\\tools\\foo.exe",
-        "arg with spaces",
-    } }, struct {
-        fn get(_: Allocator) !PasswdEntry {
-            return .{};
-        }
-    });
+    const result = try execCommand(
+        alloc,
+        .{ .direct = &.{
+            "C:\\tools\\foo.exe",
+            "arg with spaces",
+        } },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .auto,
+    );
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);

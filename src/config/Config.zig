@@ -5037,6 +5037,10 @@ fn cloneValue(
         .@"union",
         => return src,
 
+        // Platform-gated void fields (e.g. @"conpty-mode" on non-Windows)
+        // have no value to clone; src is already `{}`.
+        .void => return src,
+
         .optional => |info| return try cloneValue(
             alloc,
             info.child,
