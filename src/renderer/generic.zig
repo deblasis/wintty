@@ -273,14 +273,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return result;
             }
 
-            pub fn deinit(self: *SwapChain) void {
+            pub fn deinit(self: *SwapChain, alloc: Allocator) void {
                 if (self.defunct) return;
                 self.defunct = true;
 
                 // Wait for all of our inflight draws to complete
                 // so that we can cleanly deinit our GPU state.
                 for (0..buf_count) |_| self.frame_sema.wait();
-                for (&self.frames) |*frame| frame.deinit();
+                for (&self.frames) |*frame| frame.deinit(alloc);
             }
 
             /// Get the next frame state to draw to. This will wait on the
@@ -335,10 +335,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// Custom shader state, this is null if we have no custom shaders.
             custom_shader_state: ?CustomShaderState = null,
 
+            /// Per-placement vertex buffers for kitty/overlay image draws.
+            /// The image renderer creates one buffer per placement per
+            /// frame; we own them here so they outlive the GPU command
+            /// list (DX12 IASetVertexBuffers does not retain the
+            /// underlying resource). Recycled when this frame slot is
+            /// reused, after the frame_sema confirms the GPU is done.
+            image_instance_buffers: std.ArrayListUnmanaged(ImageBuffer) = .empty,
+
             const UniformBuffer = Buffer(shaderpkg.Uniforms);
             const CellBgBuffer = Buffer(shaderpkg.CellBg);
             const CellTextBuffer = Buffer(shaderpkg.CellText);
             const BgImageBuffer = Buffer(shaderpkg.BgImage);
+            const ImageBuffer = Buffer(shaderpkg.Image);
 
             pub fn init(api: GraphicsAPI, custom_shaders: bool) !FrameState {
                 // Uniform buffer contains exactly 1 uniform struct. The
@@ -405,7 +414,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            pub fn deinit(self: *FrameState) void {
+            pub fn deinit(self: *FrameState, alloc: Allocator) void {
                 self.target.deinit();
                 self.uniforms.deinit();
                 self.cells.deinit();
@@ -413,7 +422,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.grayscale.deinit();
                 self.color.deinit();
                 self.bg_image_buffer.deinit();
+                for (self.image_instance_buffers.items) |*b| b.deinit();
+                self.image_instance_buffers.deinit(alloc);
                 if (self.custom_shader_state) |*state| state.deinit();
+            }
+
+            /// Drain all in-flight image instance buffers. Caller must
+            /// guarantee the GPU is done reading from them (typically by
+            /// waiting on the frame_sema, which only releases after the
+            /// frame's command list completes).
+            pub fn recycleImageBuffers(self: *FrameState) void {
+                for (self.image_instance_buffers.items) |*b| b.deinit();
+                self.image_instance_buffers.clearRetainingCapacity();
             }
 
             pub fn resize(
@@ -695,7 +715,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 api,
                 has_custom_shaders,
             );
-            errdefer swap_chain.deinit();
+            errdefer swap_chain.deinit(alloc);
 
             // Flush any init-time GPU commands (e.g., DX12 texture barriers).
             // SwapChain.init creates placeholder atlas textures that may need
@@ -840,7 +860,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
             if (self.search_matches) |*m| m.arena.deinit();
-            self.swap_chain.deinit();
+            self.swap_chain.deinit(self.alloc);
 
             if (DisplayLink != void) {
                 if (self.display_link) |display_link| {
@@ -1026,7 +1046,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //
             // This will mark them as defunct so that they
             // can't be double-freed or used in draw calls.
-            self.swap_chain.deinit();
+            self.swap_chain.deinit(self.alloc);
             self.shaders.deinit(self.alloc);
         }
 
@@ -1541,6 +1561,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer self.swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
+            // The frame_sema only releases this slot after the GPU has
+            // finished its previous use, so it's now safe to deinit any
+            // per-placement image vertex buffers we created last time.
+            frame.recycleImageBuffers();
+
             // If we need to reinitialize our shaders, do so.
             // GPU must be idle before destroying PSOs and root signatures
             // that in-flight command lists may still reference.
@@ -1722,10 +1747,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Then we draw any kitty images that need
                 // to be behind text AND cell backgrounds.
                 self.images.draw(
+                    self.alloc,
                     &self.api,
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_below_bg,
+                    frame.uniforms.buffer,
+                    &frame.image_instance_buffers,
                 );
 
                 // Then we draw any opaque cell backgrounds.
@@ -1738,10 +1766,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Kitty images between cell backgrounds and text.
                 self.images.draw(
+                    self.alloc,
                     &self.api,
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_below_text,
+                    frame.uniforms.buffer,
+                    &frame.image_instance_buffers,
                 );
 
                 // Text.
@@ -1765,19 +1796,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Kitty images in front of text.
                 self.images.draw(
+                    self.alloc,
                     &self.api,
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_above_text,
+                    frame.uniforms.buffer,
+                    &frame.image_instance_buffers,
                 );
 
                 // Debug overlay. We do this before any custom shader state
                 // because our debug overlay is aligned with the grid.
                 if (self.overlay != null) self.images.draw(
+                    self.alloc,
                     &self.api,
                     self.shaders.pipelines.image,
                     &pass,
                     .overlay,
+                    frame.uniforms.buffer,
+                    &frame.image_instance_buffers,
                 );
             }
 
