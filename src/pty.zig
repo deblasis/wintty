@@ -345,6 +345,24 @@ const WindowsPty = struct {
     // Process-wide counter for pipe names
     var pipe_name_counter = std.atomic.Value(u32).init(1);
 
+    // ConPTY entry points resolved either from a conpty.dll bundled next
+    // to the executable (newer OpenConsole, more permissive about
+    // unknown VT pass-through such as kitty graphics APCs) or from the
+    // OS kernel32 if no bundled DLL is present. Resolved lazily on the
+    // first ConPTY open via `std.once` and cached for the rest of the
+    // process. `null` means "not yet resolved"; once `pseudo_console_api`
+    // is set, it always points to a complete, callable trio (bundled or
+    // fallback). The bundled HMODULE is intentionally leaked -- it is a
+    // process-wide singleton and the OS reclaims it at exit.
+    const PseudoConsoleApi = struct {
+        create: *const @TypeOf(windows.exp.kernel32.CreatePseudoConsole),
+        resize: *const @TypeOf(windows.exp.kernel32.ResizePseudoConsole),
+        close: *const @TypeOf(windows.exp.kernel32.ClosePseudoConsole),
+    };
+
+    var pseudo_console_api: ?PseudoConsoleApi = null;
+    var pseudo_console_api_once = std.once(resolvePseudoConsoleApi);
+
     out_pipe: windows.HANDLE,
     in_pipe: windows.HANDLE,
     out_pipe_pty: windows.HANDLE,
@@ -354,6 +372,82 @@ const WindowsPty = struct {
     pseudo_console: ?windows.exp.HPCON,
     size: winsize,
     mode: Mode,
+
+    /// Build a UTF-16 path string for `<exe-dir>\conpty.dll`. Returns
+    /// null if the executable path can't be queried, has no parent
+    /// directory, or the resulting UTF-16 path doesn't fit in
+    /// `buf_out` (which must reserve room for a null terminator).
+    fn adjacentConptyPathW(
+        buf_out: *[std.fs.max_path_bytes]u16,
+    ) ?[:0]const u16 {
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_path = std.fs.selfExePath(&exe_buf) catch return null;
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
+
+        var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dll_path = std.fmt.bufPrint(
+            &dll_path_buf,
+            "{s}\\conpty.dll",
+            .{exe_dir},
+        ) catch return null;
+
+        // Reserve one u16 for the null terminator.
+        const utf16_len = std.unicode.utf8ToUtf16Le(
+            buf_out[0 .. buf_out.len - 1],
+            dll_path,
+        ) catch return null;
+        buf_out[utf16_len] = 0;
+        return buf_out[0..utf16_len :0];
+    }
+
+    /// `std.once`-driven body for resolving the ConPTY trio. Runs at
+    /// most once, regardless of how many threads race to open a PTY.
+    /// On success the bundled DLL is in use; on any failure we leave
+    /// `pseudo_console_api` set to the kernel32 fallback so the
+    /// caller never has to revisit the resolution decision.
+    fn resolvePseudoConsoleApi() void {
+        const fallback: PseudoConsoleApi = .{
+            .create = windows.exp.kernel32.CreatePseudoConsole,
+            .resize = windows.exp.kernel32.ResizePseudoConsole,
+            .close = windows.exp.kernel32.ClosePseudoConsole,
+        };
+
+        var path_buf: [std.fs.max_path_bytes]u16 = undefined;
+        const path_w = adjacentConptyPathW(&path_buf) orelse {
+            log.debug("pty: no bundled conpty.dll alongside executable; using OS conhost", .{});
+            pseudo_console_api = fallback;
+            return;
+        };
+
+        const module = std.os.windows.LoadLibraryW(path_w) catch {
+            log.debug("pty: bundled conpty.dll present but LoadLibraryW failed; using OS conhost", .{});
+            pseudo_console_api = fallback;
+            return;
+        };
+
+        const create_ptr = std.os.windows.kernel32.GetProcAddress(module, "CreatePseudoConsole");
+        const resize_ptr = std.os.windows.kernel32.GetProcAddress(module, "ResizePseudoConsole");
+        const close_ptr = std.os.windows.kernel32.GetProcAddress(module, "ClosePseudoConsole");
+        if (create_ptr == null or resize_ptr == null or close_ptr == null) {
+            log.warn("pty: bundled conpty.dll missing required exports; using OS conhost", .{});
+            pseudo_console_api = fallback;
+            return;
+        }
+
+        pseudo_console_api = .{
+            .create = @ptrCast(create_ptr.?),
+            .resize = @ptrCast(resize_ptr.?),
+            .close = @ptrCast(close_ptr.?),
+        };
+        log.info("pty: using bundled conpty.dll", .{});
+    }
+
+    /// Return the resolved ConPTY API trio. First call drives the
+    /// `std.once` resolver; subsequent calls return the cached value.
+    fn pseudoConsoleApi() PseudoConsoleApi {
+        pseudo_console_api_once.call();
+        return pseudo_console_api.?;
+    }
 
     pub const OpenError = error{Unexpected};
 
@@ -453,7 +547,7 @@ const WindowsPty = struct {
         switch (opts.mode) {
             .conpty => {
                 var hpcon: windows.exp.HPCON = undefined;
-                const result = windows.exp.kernel32.CreatePseudoConsole(
+                const result = pseudoConsoleApi().create(
                     .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
                     pty.in_pipe_pty,
                     pty.out_pipe_pty,
@@ -491,7 +585,7 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.out_pipe_pty);
         _ = windows.CloseHandle(self.out_pipe);
         if (self.pseudo_console) |hpcon| {
-            _ = windows.exp.kernel32.ClosePseudoConsole(hpcon);
+            _ = pseudoConsoleApi().close(hpcon);
         }
         self.* = undefined;
     }
@@ -569,7 +663,7 @@ const WindowsPty = struct {
         switch (self.mode) {
             .conpty => {
                 const hpcon = self.pseudo_console orelse return error.ResizeFailed;
-                const result = windows.exp.kernel32.ResizePseudoConsole(
+                const result = pseudoConsoleApi().resize(
                     hpcon,
                     .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
                 );
@@ -616,6 +710,36 @@ test {
         .macos => try testing.expect(std.mem.startsWith(u8, pty.getProcessInfo(.tty_name).?, "/dev/")),
         else => try testing.expect(pty.getProcessInfo(.tty_name) == null),
     }
+}
+
+test "WindowsPty.adjacentConptyPathW: returns path ending in conpty.dll" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path = WindowsPty.adjacentConptyPathW(&buf) orelse {
+        // selfExePath can fail in exotic execution contexts; treat
+        // that as "skip" rather than "fail" since the resolver itself
+        // handles null by falling back to the OS conhost.
+        return error.SkipZigTest;
+    };
+
+    // Convert back to UTF-8 to assert the suffix.
+    var utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const utf8_len = try std.unicode.utf16LeToUtf8(&utf8_buf, path);
+    try std.testing.expect(std.mem.endsWith(u8, utf8_buf[0..utf8_len], "\\conpty.dll"));
+}
+
+test "WindowsPty.adjacentConptyPathW: null-terminated slice" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [std.fs.max_path_bytes]u16 = undefined;
+    const path = WindowsPty.adjacentConptyPathW(&buf) orelse return error.SkipZigTest;
+
+    // The returned slice is a `[:0]const u16` — the u16 immediately
+    // past the slice end must be zero, because LoadLibraryW reads
+    // until null. Indexing past `path.len` via the parent buffer is
+    // safe since `path` aliases `buf`.
+    try std.testing.expectEqual(@as(u16, 0), buf[path.len]);
 }
 
 test "WindowsPty: conpty mode populates pseudo_console" {
