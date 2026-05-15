@@ -95,6 +95,74 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260317003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
+    <!--
+      Bundle the OpenConsole-derived ConPTY DLL (Microsoft-signed) next to
+      the executable. Loaded at runtime by the Zig pty layer in preference
+      to the OS-shipped conhost so we get newer VT pass-through behavior
+      (the in-box conhost strips unknown APC/DCS sequences such as the
+      Kitty graphics protocol).
+
+      ExcludeAssets="all" stops the package's auto-applied build targets
+      from leaking into a managed project — they expect a C++ link step.
+      GeneratePathProperty exposes $(PkgMicrosoft_Windows_Console_ConPTY)
+      pointing at the package content root so we can pick out the per-RID
+      runtime files with explicit None items below.
+    -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY"
+                      Version="1.25.260427001-preview"
+                      GeneratePathProperty="true"
+                      ExcludeAssets="all" />
+  </ItemGroup>
+
+  <!--
+    Deploy the runtime conpty.dll matching the build platform alongside
+    Wintty.exe so LoadLibraryW("conpty.dll") from the pty layer resolves
+    against the bundled DLL rather than the older OS copy. OpenConsole.exe
+    is the conhost replacement that the bundled DLL launches as the child
+    of CreatePseudoConsole; bundling it ensures the same version pair as
+    the DLL.
+
+    Ghostty's <Platforms> list is x86;x64;ARM64. NuGet uses lowercase
+    "win-x64" / "win-arm64" / "win-x86" RIDs and the OpenConsole package
+    uses "x64" / "arm64" / "x86" subdirs in build/native/runtimes.
+  -->
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll"
+          Condition="'$(Platform)' == 'x64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe"
+          Condition="'$(Platform)' == 'x64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-arm64\native\conpty.dll"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-arm64\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\arm64\OpenConsole.exe"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\arm64\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x86\native\conpty.dll"
+          Condition="'$(Platform)' == 'x86' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x86\native\conpty.dll')">
+      <Link>conpty.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe"
+          Condition="'$(Platform)' == 'x86' and Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe')">
+      <Link>OpenConsole.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

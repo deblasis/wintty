@@ -345,6 +345,20 @@ const WindowsPty = struct {
     // Process-wide counter for pipe names
     var pipe_name_counter = std.atomic.Value(u32).init(1);
 
+    // ConPTY entry points resolved either from a conpty.dll bundled next
+    // to the executable (newer OpenConsole, more permissive about
+    // unknown VT pass-through such as kitty graphics APCs) or from the
+    // OS kernel32 if no bundled DLL is present. Resolved lazily on the
+    // first ConPTY open and cached for the rest of the process.
+    const PseudoConsoleApi = struct {
+        create: *const @TypeOf(windows.exp.kernel32.CreatePseudoConsole),
+        resize: *const @TypeOf(windows.exp.kernel32.ResizePseudoConsole),
+        close: *const @TypeOf(windows.exp.kernel32.ClosePseudoConsole),
+    };
+
+    var pseudo_console_api_cache: ?PseudoConsoleApi = null;
+    var pseudo_console_api_resolved: bool = false;
+
     out_pipe: windows.HANDLE,
     in_pipe: windows.HANDLE,
     out_pipe_pty: windows.HANDLE,
@@ -354,6 +368,66 @@ const WindowsPty = struct {
     pseudo_console: ?windows.exp.HPCON,
     size: winsize,
     mode: Mode,
+
+    /// Build a UTF-16 path string for `<exe-dir>\conpty.dll`. Returns
+    /// null on any encoding/length failure; the caller treats null as
+    /// "no bundled DLL found" and falls back to the OS API.
+    fn adjacentConptyPathW(buf_out: []u16) ?[:0]const u16 {
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_path = std.fs.selfExePath(&exe_buf) catch return null;
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
+
+        var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dll_path = std.fmt.bufPrint(
+            &dll_path_buf,
+            "{s}\\conpty.dll",
+            .{exe_dir},
+        ) catch return null;
+
+        // utf8ToUtf16Le returns the count of u16 units written.
+        const utf16_len = std.unicode.utf8ToUtf16Le(
+            buf_out[0 .. buf_out.len - 1],
+            dll_path,
+        ) catch return null;
+        buf_out[utf16_len] = 0;
+        return buf_out[0..utf16_len :0];
+    }
+
+    /// Resolve the ConPTY API trio. First call attempts to load
+    /// `conpty.dll` from alongside the executable; subsequent calls
+    /// return the cached resolution. Falls back to the OS kernel32
+    /// exports when nothing is bundled or the DLL is missing one of
+    /// the three exports we depend on.
+    fn pseudoConsoleApi() PseudoConsoleApi {
+        if (!pseudo_console_api_resolved) {
+            pseudo_console_api_resolved = true;
+
+            var path_buf: [std.fs.max_path_bytes]u16 = undefined;
+            if (adjacentConptyPathW(&path_buf)) |path_w| {
+                if (std.os.windows.kernel32.LoadLibraryW(path_w.ptr)) |module| {
+                    const create_ptr = std.os.windows.kernel32.GetProcAddress(module, "CreatePseudoConsole");
+                    const resize_ptr = std.os.windows.kernel32.GetProcAddress(module, "ResizePseudoConsole");
+                    const close_ptr = std.os.windows.kernel32.GetProcAddress(module, "ClosePseudoConsole");
+                    if (create_ptr != null and resize_ptr != null and close_ptr != null) {
+                        pseudo_console_api_cache = .{
+                            .create = @ptrCast(create_ptr.?),
+                            .resize = @ptrCast(resize_ptr.?),
+                            .close = @ptrCast(close_ptr.?),
+                        };
+                        log.info("pty: using bundled conpty.dll", .{});
+                    } else {
+                        log.warn("pty: bundled conpty.dll missing required exports; falling back to OS conhost", .{});
+                    }
+                }
+            }
+        }
+
+        return pseudo_console_api_cache orelse .{
+            .create = windows.exp.kernel32.CreatePseudoConsole,
+            .resize = windows.exp.kernel32.ResizePseudoConsole,
+            .close = windows.exp.kernel32.ClosePseudoConsole,
+        };
+    }
 
     pub const OpenError = error{Unexpected};
 
@@ -453,7 +527,7 @@ const WindowsPty = struct {
         switch (opts.mode) {
             .conpty => {
                 var hpcon: windows.exp.HPCON = undefined;
-                const result = windows.exp.kernel32.CreatePseudoConsole(
+                const result = pseudoConsoleApi().create(
                     .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
                     pty.in_pipe_pty,
                     pty.out_pipe_pty,
@@ -491,7 +565,7 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.out_pipe_pty);
         _ = windows.CloseHandle(self.out_pipe);
         if (self.pseudo_console) |hpcon| {
-            _ = windows.exp.kernel32.ClosePseudoConsole(hpcon);
+            _ = pseudoConsoleApi().close(hpcon);
         }
         self.* = undefined;
     }
@@ -569,7 +643,7 @@ const WindowsPty = struct {
         switch (self.mode) {
             .conpty => {
                 const hpcon = self.pseudo_console orelse return error.ResizeFailed;
-                const result = windows.exp.kernel32.ResizePseudoConsole(
+                const result = pseudoConsoleApi().resize(
                     hpcon,
                     .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
                 );
