@@ -507,22 +507,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 width: usize,
                 height: usize,
             ) !void {
-                // Reuse existing descriptor slots so each frame keeps its
-                // dedicated RTV and SRV descriptors. This prevents both
-                // RTV overwrites across in-flight frames and SRV heap
-                // exhaustion from leaked descriptors. The slots only
-                // exist on DX12; Metal and OpenGL ignore the args.
-                const has_descriptor_slots =
-                    comptime @hasField(Texture, "rtv");
+                // DX12 reuses the existing RTV/SRV descriptor slots
+                // across resizes so each frame keeps its dedicated heap
+                // entries: prevents RTV overwrites across in-flight
+                // frames and SRV-heap exhaustion from leaked descriptors.
+                // Metal and OpenGL don't model descriptor heaps; their
+                // renderTargetTextureOptions take the slots as `anytype`
+                // and ignore them, so non-DX12 backends pass null and
+                // skip the field reads entirely (comptime-gated, the
+                // `.rtv`/`.srv` paths below never get type-checked on
+                // those backends).
                 const front_rtv_slot, const back_rtv_slot,
                 const front_srv_slot, const back_srv_slot =
-                    if (has_descriptor_slots) reuse: {
-                        const Descriptor = @TypeOf(self.front_texture.rtv);
-                        break :reuse .{
-                            @as(?Descriptor, if (self.front_texture.rtv.cpu.ptr != 0) self.front_texture.rtv else null),
-                            @as(?Descriptor, if (self.back_texture.rtv.cpu.ptr != 0) self.back_texture.rtv else null),
-                            @as(?Descriptor, if (self.front_texture.srv.gpu.ptr != 0) self.front_texture.srv else null),
-                            @as(?Descriptor, if (self.back_texture.srv.gpu.ptr != 0) self.back_texture.srv else null),
+                    if (comptime @hasField(Texture, "rtv")) slots: {
+                        const D = @TypeOf(self.front_texture.rtv);
+                        const fr = self.front_texture.rtv;
+                        const br = self.back_texture.rtv;
+                        const fs = self.front_texture.srv;
+                        const bs = self.back_texture.srv;
+                        break :slots .{
+                            @as(?D, if (fr.cpu.ptr != 0) fr else null),
+                            @as(?D, if (br.cpu.ptr != 0) br else null),
+                            @as(?D, if (fs.gpu.ptr != 0) fs else null),
+                            @as(?D, if (bs.gpu.ptr != 0) bs else null),
                         };
                     } else .{ null, null, null, null };
 

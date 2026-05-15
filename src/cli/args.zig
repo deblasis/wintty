@@ -310,9 +310,7 @@ pub fn parseIntoField(
     assert(info == .@"struct");
 
     inline for (info.@"struct".fields) |field| {
-        // Skip platform-gated void fields (e.g. Config.@"conpty-mode" on
-        // non-Windows). These exist in the struct only so configuration
-        // schemas stay stable across platforms; there is no value to set.
+        // Void-typed fields (platform-gated Config keys) have no value to set.
         if (comptime field.type == void) continue;
 
         if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {

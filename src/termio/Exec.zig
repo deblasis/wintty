@@ -987,9 +987,10 @@ const Subprocess = struct {
             );
         }
 
-        // Build our args list. utf8_console is void on non-Windows;
-        // execCommand only reads it inside Windows-gated blocks, so we
-        // pass `.auto` as a dummy that the function ignores.
+        // Build our args list. cfg.utf8_console is `void` on
+        // non-Windows; pass `.auto` as a no-op concrete value so the
+        // shape of the call site stays cross-platform (execCommand's
+        // body reads utf8_console only inside Windows-gated blocks).
         const args: []const [:0]const u8 = execCommand(
             alloc,
             shell_command,
@@ -1731,7 +1732,11 @@ fn execCommand(
     comptime passwdpkg: type,
     /// Configured UTF-8 console preamble policy; used only on Windows
     /// to gate UTF-8 preamble injection across both ConPTY and bypass
-    /// transports. Ignored on other platforms.
+    /// transports. Ignored on other platforms. We keep the parameter
+    /// concrete (rather than `void` off-Windows) so darwin/posix unit
+    /// tests can keep passing `.auto` literally as a "don't care"
+    /// argument; the function never reads it outside Windows-gated
+    /// blocks.
     utf8_console: configpkg.Config.Utf8Console,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
@@ -2568,11 +2573,17 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
     );
 
     try testing.expectEqual(1, result.len);
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), result[0]);
+}
 
-    // Expect COMSPEC if available, otherwise the documented fallback.
-    const expected = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
-        try alloc.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
-    try testing.expectEqualStrings(expected, result[0]);
+/// Helper for the Windows execCommand tests: what we expect `args[0]`
+/// to be when the configured shell is the bare token "cmd.exe". The
+/// production code at execCommand's shell-handling block resolves it
+/// via %COMSPEC% when set, otherwise leaves the input unchanged -- so
+/// the unset case returns "cmd.exe" literally, not a hard-coded path.
+fn expectedCmdExeArg0(alloc: Allocator) Allocator.Error![]const u8 {
+    return std.process.getEnvVarOwned(alloc, "COMSPEC") catch
+        try alloc.dupe(u8, "cmd.exe");
 }
 
 test "execCommand windows: shell command, single token spawns directly" {
@@ -2863,12 +2874,8 @@ test "execCommand windows: cmd.exe under auto mode gets cmd preamble" {
     const result = try testExecWindowsShell(alloc, "cmd.exe");
 
     // auto + cmd (console_api) → ConPTY → cmd preamble appended.
-    // result[0] is %COMSPEC% if set (the documented path to the current
-    // command processor) or the literal "cmd.exe" fallback.
     try testing.expectEqual(@as(usize, 3), result.len);
-    const expected_cmd = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
-        try alloc.dupe(u8, "cmd.exe");
-    try testing.expectEqualStrings(expected_cmd, result[0]);
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), result[0]);
     try testing.expectEqualStrings("/K", result[1]);
     try testing.expectEqualStrings("chcp 65001 >nul", result[2]);
 }
@@ -2956,12 +2963,9 @@ test "execCommand windows: utf8-console=never is a kill switch across transports
         .never,
     );
     try testing.expectEqual(@as(usize, 1), cmd_result.len);
-    // %COMSPEC% resolution still happens (it's transport-independent
-    // shell-name handling); the .never flag only suppresses preamble
-    // injection. Accept either the env var or the literal fallback.
-    const expected_cmd = std.process.getEnvVarOwned(alloc, "COMSPEC") catch
-        try alloc.dupe(u8, "cmd.exe");
-    try testing.expectEqualStrings(expected_cmd, cmd_result[0]);
+    // %COMSPEC% resolution still happens here (transport-independent
+    // shell-name handling); .never only suppresses preamble injection.
+    try testing.expectEqualStrings(try expectedCmdExeArg0(alloc), cmd_result[0]);
 
     const pwsh_result = try execCommand(
         alloc,

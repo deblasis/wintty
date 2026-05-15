@@ -5030,16 +5030,16 @@ fn cloneValue(
 
     // Back into types of types
     switch (t) {
+        // Trivially copyable: numeric, boolean, enum, union, and the
+        // void slot used for platform-gated Config fields (e.g.
+        // @"conpty-mode" / @"utf8-console" off Windows).
         inline .bool,
         .int,
         .float,
         .@"enum",
         .@"union",
+        .void,
         => return src,
-
-        // Platform-gated void fields (e.g. @"conpty-mode" on non-Windows)
-        // have no value to clone; src is already `{}`.
-        .void => return src,
 
         .optional => |info| return try cloneValue(
             alloc,
