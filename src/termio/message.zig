@@ -158,7 +158,11 @@ test {
 
 test {
     // Ensure we don't grow our IO message size without explicitly wanting to.
-    // The extra byte over the 40-byte WriteReq is the WriteKind tag.
+    // Layout on 64-bit:
+    //   - payload max = WriteAllocReq = Allocator(16) + []u8(16) + WriteKind(1)
+    //     padded to 40 bytes
+    //   - union tag = 1 byte, padded to 8 for natural alignment
+    //   => total = 48 bytes
     const testing = std.testing;
-    try testing.expectEqual(@as(usize, 41), @sizeOf(Message));
+    try testing.expectEqual(@as(usize, 48), @sizeOf(Message));
 }
