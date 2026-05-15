@@ -990,8 +990,9 @@ const KittySequence = struct {
     text: []const u8 = "",
 
     /// Values for the event code (see "event-type" in above comment).
-    /// Note that Kitty omits the ":1" for the press event but other
-    /// terminals include it. We'll include it.
+    /// Press is the default and is omitted from the encoded sequence;
+    /// repeat (2) and release (3) are emitted as ":N" after the modifier
+    /// field. See encodeFull below.
     const Event = enum(u2) {
         none = 0,
         press = 1,
@@ -1880,6 +1881,33 @@ test "kitty: keypad number" {
     });
     const actual = writer.buffered();
     try testing.expectEqualStrings("[57400;;49u", actual[1..]);
+}
+
+test "kitty: context menu (Apps key)" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{ .key = .context_menu, .mods = .{}, .utf8 = "" }, .{
+        .kitty_flags = .{ .disambiguate = true },
+    });
+    try testing.expectEqualStrings("\x1b[57363u", writer.buffered());
+}
+
+test "kitty: media play pause" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{ .key = .media_play_pause, .mods = .{}, .utf8 = "" }, .{
+        .kitty_flags = .{ .disambiguate = true },
+    });
+    try testing.expectEqualStrings("\x1b[57430u", writer.buffered());
+}
+
+test "kitty: audio volume up" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try kitty(&writer, .{ .key = .audio_volume_up, .mods = .{}, .utf8 = "" }, .{
+        .kitty_flags = .{ .disambiguate = true },
+    });
+    try testing.expectEqualStrings("\x1b[57439u", writer.buffered());
 }
 
 test "kitty: backspace with utf8 (dead key state)" {
