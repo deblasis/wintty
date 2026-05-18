@@ -61,6 +61,7 @@ const raw_entries: []const RawEntry = &.{
     .{ .num_lock, 57360, 'u', true },
     .{ .print_screen, 57361, 'u', false },
     .{ .pause, 57362, 'u', false },
+    .{ .context_menu, 57363, 'u', false },
 
     .{ .f1, 1, 'P', false },
     .{ .f2, 1, 'Q', false },
@@ -117,6 +118,14 @@ const raw_entries: []const RawEntry = &.{
     .{ .numpad_insert, 57425, 'u', false },
     .{ .numpad_delete, 57426, 'u', false },
     .{ .numpad_begin, 57427, 'u', false },
+
+    .{ .media_play_pause, 57430, 'u', false },
+    .{ .media_stop, 57432, 'u', false },
+    .{ .media_track_next, 57435, 'u', false },
+    .{ .media_track_previous, 57436, 'u', false },
+    .{ .audio_volume_down, 57438, 'u', false },
+    .{ .audio_volume_up, 57439, 'u', false },
+    .{ .audio_volume_mute, 57440, 'u', false },
 
     .{ .shift_left, 57441, 'u', true },
     .{ .shift_right, 57447, 'u', true },
