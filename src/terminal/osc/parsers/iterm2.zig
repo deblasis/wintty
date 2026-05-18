@@ -91,21 +91,21 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 
     switch (key) {
         .File => {
-            // iTerm2 inline image transmission. The value has the form
+            // iTerm2 inline image transmission. Value is
             // `key=value;key=value:BASE64`. The options block ends at the
-            // first ':' (base64 alphabet doesn't include ':'). For MVP we
-            // only honor `inline=1`; all other geometry hints (width,
-            // height, preserveAspectRatio, size, name) are accepted but
-            // unused. Without `inline=1` the image is meant to be stored
-            // as a file in the iTerm2 download folder, which has no
-            // wintty analog so we reject those.
+            // first ':'; the base64 alphabet excludes ':'.
+            //
+            // MVP only honors `inline=1`; geometry hints (width, height,
+            // preserveAspectRatio, size, name) are accepted but unused.
+            // Without `inline=1` the image is a download-to-disk request,
+            // which has no wintty analog so we reject those.
             const value = value_ orelse {
                 parser.command = .invalid;
                 return null;
             };
 
             const colon = std.mem.indexOfScalar(u8, value, ':') orelse {
-                // No payload separator => no image data => invalid.
+                log.debug("OSC 1337 File= rejected: no payload separator", .{});
                 parser.command = .invalid;
                 return null;
             };
@@ -113,15 +113,16 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
             const options = value[0..colon];
             const payload = value[colon + 1 .. value.len :0];
 
-            // Empty payload is invalid; nothing to render.
             if (payload.len == 0) {
+                log.debug("OSC 1337 File= rejected: empty payload", .{});
                 parser.command = .invalid;
                 return null;
             }
 
-            // Walk the options for `inline=1`. We don't validate other
-            // option names here; the spec lets implementations ignore
-            // unknown keys.
+            // Walk options looking for `inline=1`. Key match is
+            // case-insensitive; the value is matched literally because
+            // iTerm2's documented values for `inline` are exactly `1`
+            // and `0`.
             var inline_display = false;
             var it = std.mem.splitScalar(u8, options, ';');
             while (it.next()) |kv| {
@@ -132,12 +133,14 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                     std.mem.eql(u8, v, "1"))
                 {
                     inline_display = true;
+                    break;
                 }
             }
 
             if (!inline_display) {
                 // iTerm2 treats non-inline File= as a download to disk;
                 // we have no equivalent in wintty.
+                log.debug("OSC 1337 File= rejected: missing inline=1", .{});
                 parser.command = .invalid;
                 return null;
             }
@@ -489,7 +492,7 @@ test "OSC: 1337: test CurrentDir with non-empty value" {
     try testing.expectEqualStrings("abc123", cmd.report_pwd.value);
 }
 
-test "OSC: 1337: File inline image with inline=1 produces iterm2_image_transmit" {
+test "OSC: 1337: test File inline=1 produces iterm2_image_transmit" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -503,7 +506,7 @@ test "OSC: 1337: File inline image with inline=1 produces iterm2_image_transmit"
     try testing.expectEqualStrings("iVBORw0KGgo=", cmd.iterm2_image_transmit);
 }
 
-test "OSC: 1337: File inline image with extra options before inline=1" {
+test "OSC: 1337: test File with extra options before inline=1" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -517,7 +520,7 @@ test "OSC: 1337: File inline image with extra options before inline=1" {
     try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit);
 }
 
-test "OSC: 1337: File inline image without inline=1 is rejected (download semantic)" {
+test "OSC: 1337: test File without inline=1 is rejected" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -529,7 +532,7 @@ test "OSC: 1337: File inline image without inline=1 is rejected (download semant
     try testing.expect(p.end('\x1b') == null);
 }
 
-test "OSC: 1337: File inline image with inline=0 is rejected (download semantic)" {
+test "OSC: 1337: test File with inline=0 is rejected" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -541,7 +544,7 @@ test "OSC: 1337: File inline image with inline=0 is rejected (download semantic)
     try testing.expect(p.end('\x1b') == null);
 }
 
-test "OSC: 1337: File with no payload separator is invalid" {
+test "OSC: 1337: test File with no payload separator is invalid" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -553,7 +556,7 @@ test "OSC: 1337: File with no payload separator is invalid" {
     try testing.expect(p.end('\x1b') == null);
 }
 
-test "OSC: 1337: File with empty payload is invalid" {
+test "OSC: 1337: test File with empty payload is invalid" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);
@@ -565,7 +568,7 @@ test "OSC: 1337: File with empty payload is invalid" {
     try testing.expect(p.end('\x1b') == null);
 }
 
-test "OSC: 1337: File inline=1 is case-insensitive" {
+test "OSC: 1337: test File with case-insensitive Inline=1" {
     const testing = std.testing;
 
     var p: Parser = .init(testing.allocator);

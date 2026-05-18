@@ -2048,9 +2048,6 @@ pub fn Stream(comptime H: type) type {
                 },
 
                 .iterm2_image_transmit => |payload| {
-                    // Parser accepted an `OSC 1337 File=...:BASE64` with
-                    // inline=1. The renderer wire-up (base64 decode +
-                    // kitty graphics command synthesis) is a follow-up.
                     log.debug(
                         "iterm2 inline image received: {d} base64 bytes",
                         .{payload.len},
