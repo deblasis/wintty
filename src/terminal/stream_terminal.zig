@@ -368,6 +368,10 @@ pub const Handler = struct {
             .progress_report,
             .title_push,
             .title_pop,
+            // libghostty-vt embedders without a kitty graphics renderer
+            // drop iTerm2 inline images. termio's StreamHandler is where
+            // the image gets decoded and dispatched to the renderer.
+            .iterm2_image_transmit,
             => {},
         }
     }
