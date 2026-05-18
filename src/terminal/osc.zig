@@ -14,7 +14,7 @@ const Allocator = mem.Allocator;
 const lib = @import("lib.zig");
 const LibEnum = lib.Enum;
 const kitty_color = @import("kitty/color.zig");
-pub const parsers = @import("osc/parsers.zig");
+const parsers = @import("osc/parsers.zig");
 const encoding = @import("osc/encoding.zig");
 
 pub const color = parsers.color;

@@ -11,6 +11,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const iterm2_parser = @import("../terminal/osc/parsers/iterm2.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -1611,11 +1612,11 @@ pub const StreamHandler = struct {
     /// transmit_and_display command so it goes through the same image
     /// storage and renderer path that the kitty graphics protocol uses.
     fn iterm2ImageTransmit(self: *StreamHandler, payload: [:0]const u8) !void {
-        var cmd = terminal.osc.parsers.iterm2.synthKittyCommand(
+        var cmd = iterm2_parser.synthKittyCommand(
             self.alloc,
             payload,
         ) catch |err| {
-            log.warn("iterm2 inline image: synthesis failed err={}", .{err});
+            log.warn("iterm2 inline image dropped: {t}", .{err});
             return;
         };
         defer cmd.deinit(self.alloc);
