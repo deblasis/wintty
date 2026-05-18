@@ -163,6 +163,12 @@ pub const Command = union(Key) {
     /// https://uapi-group.org/specifications/specs/osc_context/
     context_signal: parsers.context_signal.Command,
 
+    /// iTerm2 OSC 1337 File= inline image transmission.
+    /// https://iterm2.com/documentation-images.html
+    /// Payload is the raw base64-encoded image bytes. The parser does not
+    /// decode or sniff the format; the consumer is responsible for both.
+    iterm2_image_transmit: [:0]const u8,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
@@ -199,6 +205,7 @@ pub const Command = union(Key) {
             "kitty_clipboard_protocol",
             "kitty_dnd_protocol",
             "context_signal",
+            "iterm2_image_transmit",
         },
     );
 
@@ -432,6 +439,7 @@ pub const Parser = struct {
             .kitty_clipboard_protocol,
             .kitty_dnd_protocol,
             .context_signal,
+            .iterm2_image_transmit,
             => {},
         }
 
