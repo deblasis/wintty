@@ -1,10 +1,12 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 const simd = @import("../../../simd/main.zig");
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
+const kitty_graphics = @import("../../kitty/graphics.zig");
 
 const log = std.log.scoped(.osc_iterm2);
 
@@ -253,6 +255,45 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         },
     }
     return &parser.command;
+}
+
+/// Decode a base64 payload from an iTerm2 OSC 1337 File= sequence and
+/// synthesize a kitty graphics command that transmits and displays it as
+/// a PNG at the current cursor position. Returns an error if the base64
+/// is invalid; the caller is responsible for calling deinit on the
+/// returned Command, which owns the decoded byte buffer.
+///
+/// Format is hard-coded to PNG. iTerm2's File= protocol allows JPEG and
+/// GIF as well, but Ghostty's kitty graphics decoder is PNG-only today.
+/// Non-PNG bytes will reach the decoder and surface as a render error.
+pub fn synthKittyCommand(
+    alloc: Allocator,
+    payload: []const u8,
+) !kitty_graphics.Command {
+    const max_len = simd.base64.maxLen(payload);
+    if (max_len == 0) return error.InvalidData;
+
+    const buf = try alloc.alloc(u8, max_len);
+    errdefer alloc.free(buf);
+
+    const decoded = simd.base64.decode(payload, buf) catch {
+        return error.InvalidData;
+    };
+
+    // Shrink the allocation down to the decoded length so the kitty
+    // Command's data slice doesn't carry unused tail bytes.
+    const data = try alloc.realloc(buf, decoded.len);
+
+    return .{
+        .control = .{ .transmit_and_display = .{
+            .transmission = .{
+                .format = .png,
+                .medium = .direct,
+            },
+            .display = .{},
+        } },
+        .data = data,
+    };
 }
 
 test "OSC: 1337: test valid unimplemented key with no value" {
@@ -580,4 +621,53 @@ test "OSC: 1337: test File with case-insensitive Inline=1" {
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .iterm2_image_transmit);
     try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit);
+}
+
+test "synthKittyCommand: valid base64 yields transmit_and_display PNG command" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // "abcd" base64-encoded.
+    const payload = "YWJjZA==";
+
+    var cmd = try synthKittyCommand(alloc, payload);
+    defer cmd.deinit(alloc);
+
+    try testing.expect(cmd.control == .transmit_and_display);
+    const td = cmd.control.transmit_and_display;
+    try testing.expect(td.transmission.format == .png);
+    try testing.expect(td.transmission.medium == .direct);
+    try testing.expectEqualStrings("abcd", cmd.data);
+}
+
+test "synthKittyCommand: invalid base64 returns error" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // ':' is not in the base64 alphabet. The OSC parser strips the
+    // payload at the first ':', but a malformed sequence could still
+    // reach the helper with non-base64 bytes.
+    const payload = "!!!not base64!!!";
+
+    try testing.expectError(error.InvalidData, synthKittyCommand(alloc, payload));
+}
+
+test "synthKittyCommand: minimal 1x1 PNG round-trips through helper" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Canonical 1x1 transparent PNG, 67 bytes, base64-encoded.
+    const payload =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" ++
+        "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    var cmd = try synthKittyCommand(alloc, payload);
+    defer cmd.deinit(alloc);
+
+    try testing.expect(cmd.control == .transmit_and_display);
+    try testing.expect(cmd.data.len > 0);
+    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    const sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    try testing.expect(cmd.data.len >= sig.len);
+    try testing.expectEqualSlices(u8, &sig, cmd.data[0..sig.len]);
 }
