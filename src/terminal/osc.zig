@@ -167,6 +167,12 @@ pub const Command = union(Key) {
     /// Kitty desktop notifications (OSC 99)
     kitty_desktop_notification: KittyDesktopNotification,
 
+    /// iTerm2 OSC 1337 File= inline image transmission.
+    /// https://iterm2.com/documentation-images.html
+    /// Payload is the raw base64-encoded image bytes. The parser does not
+    /// decode or sniff the format; the consumer is responsible for both.
+    iterm2_image_transmit: [:0]const u8,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
@@ -206,6 +212,7 @@ pub const Command = union(Key) {
             "kitty_dnd_protocol",
             "context_signal",
             "kitty_desktop_notification",
+            "iterm2_image_transmit",
         },
     );
 
@@ -454,6 +461,7 @@ pub const Parser = struct {
             .kitty_dnd_protocol,
             .kitty_desktop_notification,
             .context_signal,
+            .iterm2_image_transmit,
             => {},
         }
 
