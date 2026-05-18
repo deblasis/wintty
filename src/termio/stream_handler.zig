@@ -11,6 +11,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const iterm2_parser = @import("../terminal/osc/parsers/iterm2.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -371,6 +372,7 @@ pub const StreamHandler = struct {
             .apc_start => self.apc.start(),
             .apc_end => try self.apcEnd(),
             .apc_put => self.apc.feed(self.alloc, value),
+            .iterm2_image_transmit => try self.iterm2ImageTransmit(value),
 
             // Unimplemented
             .title_push,
@@ -1603,5 +1605,24 @@ pub const StreamHandler = struct {
     /// Display a GUI progress report.
     fn progressReport(self: *StreamHandler, report: terminal.osc.Command.ProgressReport) void {
         self.surfaceMessageWriter(.{ .progress_report = report });
+    }
+
+    /// Handle an iTerm2 OSC 1337 File= inline image. The payload is the
+    /// raw base64 string; we decode it and dispatch as a kitty graphics
+    /// transmit_and_display command so it goes through the same image
+    /// storage and renderer path that the kitty graphics protocol uses.
+    fn iterm2ImageTransmit(self: *StreamHandler, payload: [:0]const u8) !void {
+        var cmd = iterm2_parser.synthKittyCommand(
+            self.alloc,
+            payload,
+        ) catch |err| {
+            log.warn("iterm2 inline image dropped: {t}", .{err});
+            return;
+        };
+        defer cmd.deinit(self.alloc);
+
+        // iTerm2's File= protocol has no response channel, unlike the
+        // kitty graphics APC. We drop the response.
+        _ = self.terminal.kittyGraphics(self.alloc, &cmd);
     }
 };
