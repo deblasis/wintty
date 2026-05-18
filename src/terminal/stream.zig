@@ -2386,6 +2386,13 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.progress_report, v);
                 },
 
+                .iterm2_image_transmit => |payload| {
+                    log.debug(
+                        "iterm2 inline image received: {d} base64 bytes",
+                        .{payload.len},
+                    );
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
