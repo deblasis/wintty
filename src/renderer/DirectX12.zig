@@ -979,7 +979,13 @@ pub inline fn imageTextureOptions(
     format: ImageTextureFormat,
     srgb: bool,
 ) Texture.Options {
-    _ = srgb; // DX12 sRGB handled by the render target format, not texture views.
+    // The DX12 swap chain back buffer is BGRA8_UNORM, so the pipeline
+    // runs end-to-end in gamma space. Switching this view to
+    // _UNORM_SRGB without also moving the swap chain to a sRGB format
+    // would decode on sample but not re-encode on write, darkening
+    // every image. The Metal renderer pairs an sRGB texture view with
+    // an sRGB drawable; on DX12 we'd need both pieces moved together.
+    _ = srgb;
     return .{
         .device = if (self.dev) |*d| d.device else null,
         .command_list = self.pending_command_list,
