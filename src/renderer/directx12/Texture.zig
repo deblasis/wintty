@@ -41,6 +41,11 @@ pub const Options = struct {
 
 pub const Error = error{
     TextureCreateFailed,
+    /// Texture upload failed: staging-buffer allocation or mapping,
+    /// or a missing device/command_list/resource. Without this, the
+    /// texture transitions to PIXEL_SHADER_RESOURCE with no contents
+    /// and renders as a black quad.
+    UploadFailed,
 };
 
 /// Width of this texture in pixels.
@@ -150,9 +155,12 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
     };
 
     if (!opts.render_target) {
-        // Upload initial data if provided.
+        // Upload initial data if provided. Propagate upload failures so
+        // the caller doesn't end up with a texture that transitioned to
+        // PIXEL_SHADER_RESOURCE without contents and renders as a black
+        // quad. The errdefer above releases the GPU resource.
         if (data) |pixels| {
-            tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
+            try tex.uploadRegion(0, 0, @intCast(width), @intCast(height), pixels);
         }
         // Transition to shader-readable. The texture was created in COPY_DEST
         // so the initial upload (if any) could proceed without a barrier.
@@ -190,7 +198,11 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// executing the prior CopyTextureRegion.
 ///
 /// Returns error{}!void for API compatibility with Metal's replaceRegion
-/// which cannot fail. DX12 upload failures are logged but not propagated.
+/// which cannot fail. DX12 upload failures are caught here and logged at
+/// warn level so a font-atlas or render-target update that drops bytes
+/// is visible without breaking the shared signature. Texture.init's
+/// initial-data path propagates the same failure via uploadRegion, so
+/// new-image uploads do not need this swallow.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
     // Release the staging buffer from the previous upload. Safe because
     // beginFrame waited on the fence for this frame slot, so the GPU
@@ -205,7 +217,9 @@ pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: u
         self.transition(d3d12.D3D12_RESOURCE_STATES.COPY_DEST);
     }
 
-    self.uploadRegion(@intCast(x), @intCast(y), @intCast(width), @intCast(height), data);
+    self.uploadRegion(@intCast(x), @intCast(y), @intCast(width), @intCast(height), data) catch |err| {
+        log.warn("replaceRegion upload dropped: {t}", .{err});
+    };
 
     // Transition back to shader-readable.
     self.transition(d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE);
@@ -213,18 +227,18 @@ pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: u
 
 // --- Internal helpers ---
 
-fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: []const u8) void {
+fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: []const u8) Error!void {
     const device = self.device orelse {
         log.err("uploadRegion called with null device", .{});
-        return;
+        return error.UploadFailed;
     };
     const cmd_list = self.command_list orelse {
         log.err("uploadRegion called with null command_list", .{});
-        return;
+        return error.UploadFailed;
     };
     const texture = self.resource orelse {
         log.err("uploadRegion called with null resource", .{});
-        return;
+        return error.UploadFailed;
     };
 
     const region_aligned_pitch = alignPitch(width * self.bpp);
@@ -233,7 +247,7 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     // Create a temporary upload buffer for staging.
     const staging = createStagingBuffer(device, staging_size) orelse {
         log.err("failed to create staging buffer for texture upload (size={d})", .{staging_size});
-        return;
+        return error.UploadFailed;
     };
     // Staging buffer is saved to self.pending_staging after the copy is
     // recorded, and released at the start of the next replaceRegion or
@@ -246,7 +260,7 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     if (com.FAILED(map_hr) or mapped == null) {
         log.err("Map for staging buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
         _ = staging.Release();
-        return;
+        return error.UploadFailed;
     }
 
     const dst: [*]u8 = @ptrCast(mapped.?);
@@ -524,6 +538,61 @@ test "Texture.Options defaults" {
     try std.testing.expect(opts.command_list == null);
     try std.testing.expect(opts.srv_heap == null);
     try std.testing.expectEqual(dxgi.DXGI_FORMAT.R8_UNORM, opts.pixel_format);
+}
+
+test "Error set carries UploadFailed" {
+    // The variant exists so callers can react to a staging-buffer
+    // allocation refusal rather than rendering a black quad.
+    try std.testing.expectError(
+        error.UploadFailed,
+        @as(Error!void, error.UploadFailed),
+    );
+}
+
+test "uploadRegion returns UploadFailed when command_list is null" {
+    // Sentinel pointers stand in for a real device/resource so the
+    // first nullability check we hit is command_list. Constructing
+    // the Texture directly skips init's preconditions and exercises
+    // uploadRegion's own guards.
+    var tex = Texture{
+        .device = @ptrFromInt(0xDEAD0),
+        .command_list = null,
+        .resource = @ptrFromInt(0xDEAD1),
+        .bpp = 4,
+    };
+    const bytes: [4]u8 = .{ 0, 0, 0, 0 };
+    try std.testing.expectError(
+        error.UploadFailed,
+        tex.uploadRegion(0, 0, 1, 1, &bytes),
+    );
+}
+
+test "uploadRegion returns UploadFailed when device is null" {
+    var tex = Texture{
+        .device = null,
+        .command_list = @ptrFromInt(0xDEAD0),
+        .resource = @ptrFromInt(0xDEAD1),
+        .bpp = 4,
+    };
+    const bytes: [4]u8 = .{ 0, 0, 0, 0 };
+    try std.testing.expectError(
+        error.UploadFailed,
+        tex.uploadRegion(0, 0, 1, 1, &bytes),
+    );
+}
+
+test "uploadRegion returns UploadFailed when resource is null" {
+    var tex = Texture{
+        .device = @ptrFromInt(0xDEAD0),
+        .command_list = @ptrFromInt(0xDEAD1),
+        .resource = null,
+        .bpp = 4,
+    };
+    const bytes: [4]u8 = .{ 0, 0, 0, 0 };
+    try std.testing.expectError(
+        error.UploadFailed,
+        tex.uploadRegion(0, 0, 1, 1, &bytes),
+    );
 }
 
 test "setCommandList updates cached command list" {
