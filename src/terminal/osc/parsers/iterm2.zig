@@ -334,11 +334,11 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         .ReportCellSize => {
             // iTerm2's documented form is the bare key
             // `OSC 1337;ReportCellSize ST`. A trailing `=` with no
-            // value is accepted defensively (matches the FileEnd
-            // path's tolerance for emitters built around naive
-            // `key=value` formatters). Any `=non-empty` form would
-            // collide with the response shape
-            // `ReportCellSize=H;W;scale`, so we reject it.
+            // value is accepted defensively because the upstream
+            // `key=value` split happily produces an empty value for
+            // such input. Any `=non-empty` form would collide with
+            // the response shape `ReportCellSize=H;W;scale`, so we
+            // reject it.
             if (value_) |v| {
                 if (v.len > 0) {
                     parser.command = .invalid;
@@ -1238,9 +1238,10 @@ test "OSC: 1337: test ReportCellSize with empty value also emits query" {
     var p: Parser = .init(testing.allocator);
     defer p.deinit();
 
-    // A trailing `=` with no value is accepted defensively, mirroring
-    // the FileEnd path: emitters built around naive `key=value`
-    // formatters can hit this without intending to send a response.
+    // A trailing `=` with no value is accepted defensively: the
+    // upstream key=value split produces an empty value for such
+    // input, and emitters built around naive `key=value` formatters
+    // can hit this without intending to send a response.
     const input = "1337;ReportCellSize=";
     for (input) |ch| p.next(ch);
 

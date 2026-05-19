@@ -146,8 +146,8 @@ test "encode iterm2 report cell size" {
 
     // iTerm2 OSC 1337 ReportCellSize response. Order is H;W;scale and
     // the scale field is reported as 1.0 because Ghostty's cell metrics
-    // are already in logical pixels on retina displays; clients that
-    // parse the legacy two-field form ignore the trailing scale.
+    // are already in backing pixels; clients that parse the legacy
+    // two-field form ignore the trailing scale.
     try std.testing.expectEqualStrings(
         "\x1b]1337;ReportCellSize=18;9;1.0\x1b\\",
         writer.buffered(),
