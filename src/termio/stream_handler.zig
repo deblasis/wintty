@@ -1518,14 +1518,18 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 
-    /// Handle an iTerm2 OSC 1337 File= inline image. The payload is the
-    /// raw base64 string; we decode it and dispatch as a kitty graphics
-    /// transmit_and_display command so it goes through the same image
-    /// storage and renderer path that the kitty graphics protocol uses.
-    fn iterm2ImageTransmit(self: *StreamHandler, payload: [:0]const u8) !void {
+    /// Handle an iTerm2 OSC 1337 File= inline image. The transmit
+    /// carries the raw base64 payload plus parsed geometry hints; we
+    /// decode + synthesize a kitty graphics transmit_and_display
+    /// command so it goes through the same image storage and renderer
+    /// path that the kitty graphics protocol uses.
+    fn iterm2ImageTransmit(
+        self: *StreamHandler,
+        transmit: terminal.osc.Command.Iterm2ImageTransmit,
+    ) !void {
         var cmd = iterm2_parser.synthKittyCommand(
             self.alloc,
-            payload,
+            transmit,
         ) catch |err| {
             log.warn("iterm2 inline image dropped: {t}", .{err});
             return;
