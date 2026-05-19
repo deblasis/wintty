@@ -1535,6 +1535,9 @@ pub const StreamHandler = struct {
             .csi_16_t => self.messageWriter(.{ .size_report = .csi_16_t }),
             .csi_18_t => self.messageWriter(.{ .size_report = .csi_18_t }),
             .csi_21_t => self.surfaceMessageWriter(.{ .report_title = .csi_21_t }),
+            .iterm2_report_cell_size => self.messageWriter(.{
+                .size_report = .iterm2_report_cell_size,
+            }),
         }
     }
 
