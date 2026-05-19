@@ -131,6 +131,11 @@ pub const Action = union(Key) {
     /// base64 payload plus parsed geometry hints; the handler decodes
     /// the payload and dispatches as a kitty graphics command.
     iterm2_image_transmit: osc.Command.Iterm2ImageTransmit,
+    /// One step of an iTerm2 OSC 1337 multipart File= transfer
+    /// (MultipartFile start, FilePart chunk, or FileEnd terminator).
+    /// The handler accumulates chunks across OSCs and dispatches a
+    /// kitty graphics command on the terminator.
+    iterm2_multipart_image: osc.Command.Iterm2MultipartEvent,
 
     pub const Key = lib.Enum(
         lib.target,
@@ -231,6 +236,7 @@ pub const Action = union(Key) {
             "color_operation",
             "semantic_prompt",
             "iterm2_image_transmit",
+            "iterm2_multipart_image",
         },
     );
 
@@ -2393,6 +2399,10 @@ pub fn Stream(comptime H: type) type {
 
                 .iterm2_image_transmit => |transmit| {
                     self.handler.vt(.iterm2_image_transmit, transmit);
+                },
+
+                .iterm2_multipart_image => |event| {
+                    self.handler.vt(.iterm2_multipart_image, event);
                 },
 
                 .conemu_sleep,
