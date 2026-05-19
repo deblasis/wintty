@@ -12,6 +12,8 @@ pub const Style = lib.Enum(lib.target, &.{
     "csi_16_t",
     // XTWINOPS: report text area size in characters
     "csi_18_t",
+    // iTerm2 OSC 1337 ReportCellSize response.
+    "iterm2_report_cell_size",
 });
 
 /// Runtime size values used to encode terminal size reports.
@@ -77,6 +79,22 @@ pub fn encode(
                 size.columns,
             },
         ),
+
+        .iterm2_report_cell_size => try writer.print(
+            // iTerm2's response shape is `ReportCellSize=H;W;scale`
+            // where scale is the device-pixel ratio and H,W are the
+            // cell dimensions at that scale. Ghostty's cell metrics
+            // are already in backing pixels; reporting scale=1.0 so
+            // that H*scale = backing pixels gives clients the cell
+            // pixel size they need without requiring DPR plumbing.
+            // Clients that parse the legacy two-field form ignore
+            // the trailing scale.
+            "\x1b]1337;ReportCellSize={};{};1.0\x1b\\",
+            .{
+                size.cell_height,
+                size.cell_width,
+            },
+        ),
     }
 }
 
@@ -121,6 +139,21 @@ test "encode csi 18 t" {
     try std.testing.expectEqualStrings("\x1b[8;24;80t", writer.buffered());
 }
 
+test "encode iterm2 report cell size" {
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try encode(&writer, .iterm2_report_cell_size, testSize());
+
+    // iTerm2 OSC 1337 ReportCellSize response. Order is H;W;scale and
+    // the scale field is reported as 1.0 because Ghostty's cell metrics
+    // are already in backing pixels; clients that parse the legacy
+    // two-field form ignore the trailing scale.
+    try std.testing.expectEqualStrings(
+        "\x1b]1337;ReportCellSize=18;9;1.0\x1b\\",
+        writer.buffered(),
+    );
+}
+
 test "encode max values for all fields" {
     const max_size: Size = .{
         .rows = std.math.maxInt(@FieldType(Size, "rows")),
@@ -150,6 +183,10 @@ test "encode max values for all fields" {
         .{
             .style = .csi_18_t,
             .expected = "\x1b[8;65535;65535t",
+        },
+        .{
+            .style = .iterm2_report_cell_size,
+            .expected = "\x1b]1337;ReportCellSize=4294967295;4294967295;1.0\x1b\\",
         },
     }) |case| {
         var buf: [128]u8 = undefined;
