@@ -28,9 +28,18 @@ pub var decode_jpeg: ?DecodeJpegFn = jpeg: {
     break :jpeg &decodeJpegWuffs;
 };
 
+/// Decode the first frame of a GIF into RGBA pixels. Multi-frame GIFs are
+/// rendered as a single still image; animation requires a separate design
+/// pass. Used by the iTerm2 OSC 1337 File= synth path alongside PNG and JPEG.
+pub var decode_gif: ?DecodeGifFn = gif: {
+    if (build_options.artifact == .lib) break :gif null;
+    break :gif &decodeGifWuffs;
+};
+
 pub const DecodeError = Allocator.Error || error{InvalidData};
 pub const DecodePngFn = *const fn (Allocator, []const u8) DecodeError!Image;
 pub const DecodeJpegFn = *const fn (Allocator, []const u8) DecodeError!Image;
+pub const DecodeGifFn = *const fn (Allocator, []const u8) DecodeError!Image;
 
 /// The result of decoding an image. The caller owns the returned data
 /// and must free it with the same allocator that was passed to the
@@ -68,6 +77,27 @@ fn decodeJpegWuffs(
 ) DecodeError!Image {
     const wuffs = @import("wuffs");
     const result = wuffs.jpeg.decode(
+        alloc,
+        data,
+    ) catch |err| switch (err) {
+        error.WuffsError => return error.InvalidData,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Overflow => return error.InvalidData,
+    };
+
+    return .{
+        .width = result.width,
+        .height = result.height,
+        .data = result.data,
+    };
+}
+
+fn decodeGifWuffs(
+    alloc: Allocator,
+    data: []const u8,
+) DecodeError!Image {
+    const wuffs = @import("wuffs");
+    const result = wuffs.gif.decode(
         alloc,
         data,
     ) catch |err| switch (err) {
