@@ -295,6 +295,7 @@ pub const Handler = struct {
             // drop iTerm2 inline images. termio's StreamHandler is where
             // the image gets decoded and dispatched to the renderer.
             .iterm2_image_transmit,
+            .iterm2_multipart_image,
             => {},
         }
     }

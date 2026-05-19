@@ -167,13 +167,24 @@ pub const Command = union(Key) {
     /// https://iterm2.com/documentation-images.html
     iterm2_image_transmit: Iterm2ImageTransmit,
 
+    /// iTerm2 OSC 1337 multipart inline image transmission. The wire
+    /// format is a sequence of three OSC kinds (MultipartFile, FilePart
+    /// repeated, FileEnd); the parser emits one event per OSC and the
+    /// consumer (a multipart assembler in the stream handler) stitches
+    /// them. iTerm2 has no session identifier, so transfers are
+    /// strictly serialized.
+    iterm2_multipart_image: Iterm2MultipartEvent,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
     pub const Iterm2ImageTransmit = struct {
         /// Raw base64-encoded image bytes. The consumer is responsible
-        /// for decode + format sniff.
-        payload: [:0]const u8,
+        /// for decode + format sniff. The slice is not null-terminated;
+        /// the multipart assembler produces it from heap concatenation
+        /// and the single-shot parser produces it as an interior slice
+        /// of its capture buffer.
+        payload: []const u8,
 
         /// Geometry hints parsed from the options block. Defaults
         /// preserve the image's native sizing.
@@ -197,6 +208,25 @@ pub const Command = union(Key) {
         /// both columns and rows are non-zero, because Kitty stretches
         /// only when both display dimensions are supplied.
         preserve_aspect_ratio: bool = true,
+    };
+
+    /// One step of an iTerm2 multipart File= transfer.
+    pub const Iterm2MultipartEvent = union(enum) {
+        /// `OSC 1337;MultipartFile=options` started a new transfer.
+        /// The hints are parsed from the options block. inline=1 is
+        /// required at this layer; the parser rejects MultipartFile
+        /// without it as .invalid rather than emitting this event.
+        start: Iterm2ImageHints,
+
+        /// `OSC 1337;FilePart=BASE64_CHUNK` continued the active
+        /// transfer with one more base64 chunk. The slice points into
+        /// the parser's capture buffer; the assembler must copy it
+        /// before the next OSC resets the buffer.
+        chunk: []const u8,
+
+        /// `OSC 1337;FileEnd` terminated the active transfer. The
+        /// assembler decodes + dispatches the accumulated payload.
+        end,
     };
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
@@ -234,6 +264,7 @@ pub const Command = union(Key) {
             "kitty_dnd_protocol",
             "context_signal",
             "iterm2_image_transmit",
+            "iterm2_multipart_image",
         },
     );
 
@@ -466,6 +497,7 @@ pub const Parser = struct {
             .kitty_dnd_protocol,
             .context_signal,
             .iterm2_image_transmit,
+            .iterm2_multipart_image,
             => {},
         }
 
