@@ -20,8 +20,17 @@ pub var decode_png: ?DecodePngFn = png: {
     break :png &decodePngWuffs;
 };
 
+/// Decode JPEG data into RGBA pixels. Same semantics as decode_png. Used by
+/// the iTerm2 OSC 1337 File= synth path which sniffs the magic bytes and
+/// routes JPEG payloads through the Kitty graphics decoder.
+pub var decode_jpeg: ?DecodeJpegFn = jpeg: {
+    if (build_options.artifact == .lib) break :jpeg null;
+    break :jpeg &decodeJpegWuffs;
+};
+
 pub const DecodeError = Allocator.Error || error{InvalidData};
 pub const DecodePngFn = *const fn (Allocator, []const u8) DecodeError!Image;
+pub const DecodeJpegFn = *const fn (Allocator, []const u8) DecodeError!Image;
 
 /// The result of decoding an image. The caller owns the returned data
 /// and must free it with the same allocator that was passed to the
@@ -38,6 +47,27 @@ fn decodePngWuffs(
 ) DecodeError!Image {
     const wuffs = @import("wuffs");
     const result = wuffs.png.decode(
+        alloc,
+        data,
+    ) catch |err| switch (err) {
+        error.WuffsError => return error.InvalidData,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Overflow => return error.InvalidData,
+    };
+
+    return .{
+        .width = result.width,
+        .height = result.height,
+        .data = result.data,
+    };
+}
+
+fn decodeJpegWuffs(
+    alloc: Allocator,
+    data: []const u8,
+) DecodeError!Image {
+    const wuffs = @import("wuffs");
+    const result = wuffs.jpeg.decode(
         alloc,
         data,
     ) catch |err| switch (err) {
