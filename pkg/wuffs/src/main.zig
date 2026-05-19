@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const png = @import("png.zig");
 pub const jpeg = @import("jpeg.zig");
+pub const gif = @import("gif.zig");
 pub const swizzle = @import("swizzle.zig");
 pub const Error = @import("error.zig").Error;
 

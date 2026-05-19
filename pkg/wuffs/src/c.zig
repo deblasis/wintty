@@ -12,7 +12,9 @@ pub const defines: []const []const u8 = &[_][]const u8{
     "WUFFS_CONFIG__MODULE__ADLER32",
     "WUFFS_CONFIG__MODULE__CRC32",
     "WUFFS_CONFIG__MODULE__DEFLATE",
+    "WUFFS_CONFIG__MODULE__GIF",
     "WUFFS_CONFIG__MODULE__JPEG",
+    "WUFFS_CONFIG__MODULE__LZW",
     "WUFFS_CONFIG__MODULE__PNG",
     "WUFFS_CONFIG__MODULE__ZLIB",
 };
