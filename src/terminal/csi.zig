@@ -43,6 +43,12 @@ pub const SizeReportStyle = lib.Enum(
         "csi_16_t",
         "csi_18_t",
         "csi_21_t",
+        // iTerm2 OSC 1337 ReportCellSize. Triggered by OSC, but the
+        // response shape (cell pixel dimensions written to the pty)
+        // shares the size-report dispatch path with the XTWINOPS
+        // forms, so it lives on this enum alongside csi_21_t which
+        // is similarly OSC-driven.
+        "iterm2_report_cell_size",
     },
 );
 
