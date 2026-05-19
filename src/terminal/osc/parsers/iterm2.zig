@@ -6,6 +6,7 @@ const simd = @import("../../../simd/main.zig");
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
+const apc = @import("../../apc.zig");
 const kitty_graphics = @import("../../kitty/graphics.zig");
 
 const log = std.log.scoped(.osc_iterm2);
@@ -109,6 +110,41 @@ fn parseCellDim(key: []const u8, value: []const u8) u32 {
     return n;
 }
 
+/// Parsed view of the options block from a File= or MultipartFile=
+/// sequence: which `inline=1` toggle the emitter requested, plus the
+/// geometry hints we know how to honor. Used by both the single-shot
+/// and multipart entry points so the recognized keys stay in lockstep.
+const FileOptions = struct {
+    inline_display: bool = false,
+    hints: Command.Iterm2ImageHints = .{},
+};
+
+fn parseFileOptions(options: []const u8) FileOptions {
+    var result: FileOptions = .{};
+    var it = std.mem.splitScalar(u8, options, ';');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        const k = kv[0..eq];
+        const v = kv[eq + 1 ..];
+
+        if (std.ascii.eqlIgnoreCase(k, "inline")) {
+            // iTerm2's documented values for `inline` are exactly `1`
+            // and `0`; match literally.
+            if (std.mem.eql(u8, v, "1")) result.inline_display = true;
+        } else if (std.ascii.eqlIgnoreCase(k, "width")) {
+            result.hints.columns = parseCellDim(k, v);
+        } else if (std.ascii.eqlIgnoreCase(k, "height")) {
+            result.hints.rows = parseCellDim(k, v);
+        } else if (std.ascii.eqlIgnoreCase(k, "preserveAspectRatio")) {
+            // iTerm2 default is 1; only flip to false on explicit `0`.
+            if (std.mem.eql(u8, v, "0")) result.hints.preserve_aspect_ratio = false;
+        }
+        // Unknown keys (name, size, type, ...) are silently ignored.
+        // iTerm2 and WezTerm do the same in practice.
+    }
+    return result;
+}
+
 /// Parse OSC 1337
 /// https://iterm2.com/documentation-escape-codes.html
 pub fn parse(parser: *Parser, _: ?u8) ?*Command {
@@ -162,7 +198,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
             };
 
             const options = value[0..colon];
-            const payload = value[colon + 1 .. value.len :0];
+            const payload = value[colon + 1 ..];
 
             if (payload.len == 0) {
                 log.debug("OSC 1337 File= rejected: empty payload", .{});
@@ -170,34 +206,8 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                 return null;
             }
 
-            // Single pass over the options: pick up inline=1 and the
-            // geometry hints in one walk. Key match is case-insensitive;
-            // `inline` value is matched literally because iTerm2's
-            // documented values are exactly `1` and `0`.
-            var inline_display = false;
-            var hints: Command.Iterm2ImageHints = .{};
-            var it = std.mem.splitScalar(u8, options, ';');
-            while (it.next()) |kv| {
-                const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
-                const k = kv[0..eq];
-                const v = kv[eq + 1 ..];
-
-                if (std.ascii.eqlIgnoreCase(k, "inline")) {
-                    if (std.mem.eql(u8, v, "1")) inline_display = true;
-                } else if (std.ascii.eqlIgnoreCase(k, "width")) {
-                    hints.columns = parseCellDim(k, v);
-                } else if (std.ascii.eqlIgnoreCase(k, "height")) {
-                    hints.rows = parseCellDim(k, v);
-                } else if (std.ascii.eqlIgnoreCase(k, "preserveAspectRatio")) {
-                    // iTerm2 default is 1. Only flip to false on an
-                    // explicit `0`.
-                    if (std.mem.eql(u8, v, "0")) hints.preserve_aspect_ratio = false;
-                }
-                // Unknown keys (name, size, type, ...) are silently
-                // ignored. iTerm2 and WezTerm do the same in practice.
-            }
-
-            if (!inline_display) {
+            const parsed = parseFileOptions(options);
+            if (!parsed.inline_display) {
                 // iTerm2 treats non-inline File= as a download to disk;
                 // we have no equivalent in wintty.
                 log.debug("OSC 1337 File= rejected: missing inline=1", .{});
@@ -207,8 +217,53 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 
             parser.command = .{ .iterm2_image_transmit = .{
                 .payload = payload,
-                .hints = hints,
+                .hints = parsed.hints,
             } };
+            return &parser.command;
+        },
+
+        .MultipartFile => {
+            // Start of a multipart inline image transfer. The wire
+            // format is `MultipartFile=key=value;key=value...` with no
+            // payload here; the chunks arrive in subsequent FilePart=
+            // sequences and the transfer ends on FileEnd.
+            //
+            // We require inline=1 to match the single-shot File= path,
+            // so a download-style multipart never enters our state
+            // machine.
+            const options = value_ orelse "";
+            const parsed = parseFileOptions(options);
+            if (!parsed.inline_display) {
+                log.debug("OSC 1337 MultipartFile= rejected: missing inline=1", .{});
+                parser.command = .invalid;
+                return null;
+            }
+            parser.command = .{ .iterm2_multipart_image = .{
+                .start = parsed.hints,
+            } };
+            return &parser.command;
+        },
+
+        .FilePart => {
+            // One more base64 chunk for the in-flight multipart
+            // transfer. The assembler is responsible for orphan-chunk
+            // handling (FilePart with no preceding MultipartFile), so
+            // we forward the raw bytes (including empty) and let the
+            // assembler decide.
+            const chunk = value_ orelse "";
+            parser.command = .{ .iterm2_multipart_image = .{
+                .chunk = chunk,
+            } };
+            return &parser.command;
+        },
+
+        .FileEnd => {
+            // Terminator. iTerm2's documented form is `FileEnd` with
+            // no `=value`; we accept `FileEnd=` defensively since the
+            // upstream `key=value` parse loop happily produces an
+            // empty value for the bare key and we don't gain anything
+            // by rejecting it.
+            parser.command = .{ .iterm2_multipart_image = .end };
             return &parser.command;
         },
 
@@ -287,10 +342,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         .Custom,
         .Disinter,
         .EndCopy,
-        .FileEnd,
-        .FilePart,
         .HighlightCursorLine,
-        .MultipartFile,
         .OpenURL,
         .PopKeyLabels,
         .PushKeyLabels,
@@ -389,6 +441,113 @@ pub fn synthKittyCommand(
         .data = try data.toOwnedSlice(alloc),
     };
 }
+
+/// Cross-OSC state for iTerm2 multipart File= transfers. iTerm2's wire
+/// format has no session identifier, so transfers are strictly
+/// serialized: at most one assembler `state` is active at a time.
+///
+/// Lifetime: lives on the stream handler for the duration of the
+/// terminal session. `deinit` releases any in-flight payload buffer.
+///
+/// Sequence: `start` initializes a fresh buffer carrying the hints.
+/// `chunk` appends a base64 chunk. `end` returns the accumulated
+/// `Iterm2ImageTransmit` and clears the in-progress state; the caller
+/// owns the returned payload string and is responsible for freeing it.
+pub const Iterm2MultipartAssembler = struct {
+    /// Active multipart accumulation, or null when no transfer is in
+    /// flight.
+    state: ?State = null,
+
+    /// Maximum accumulated base64 payload. Sourced from the APC kitty
+    /// graphics path so the two image-transport ceilings stay in
+    /// lockstep without manual drift.
+    pub const max_payload_bytes: usize = apc.Protocol.defaultMaxBytes(.kitty);
+
+    pub const State = struct {
+        hints: Command.Iterm2ImageHints,
+        payload: std.ArrayList(u8),
+    };
+
+    /// Release the in-flight payload, if any. Safe to call repeatedly.
+    pub fn deinit(self: *Iterm2MultipartAssembler, alloc: Allocator) void {
+        if (self.state) |*s| s.payload.deinit(alloc);
+        self.state = null;
+    }
+
+    /// Feed one parser event. Returns a populated transmit on `.end`
+    /// when the transfer assembled cleanly; the caller owns the
+    /// returned `payload` slice (allocated with `alloc`) and must
+    /// free it (passing the transmit to `Command.deinit` is the usual
+    /// disposal path). Returns null on `.start`, `.chunk`, or on any
+    /// rejected event.
+    pub fn handleEvent(
+        self: *Iterm2MultipartAssembler,
+        alloc: Allocator,
+        event: Command.Iterm2MultipartEvent,
+    ) !?Command.Iterm2ImageTransmit {
+        switch (event) {
+            .start => |hints| {
+                if (self.state != null) {
+                    log.warn(
+                        "iTerm2 multipart overrun: new MultipartFile while one was in flight, dropping previous",
+                        .{},
+                    );
+                    self.deinit(alloc);
+                }
+                self.state = .{
+                    .hints = hints,
+                    .payload = .empty,
+                };
+                return null;
+            },
+
+            .chunk => |chunk| {
+                const s = if (self.state) |*ptr| ptr else {
+                    log.warn(
+                        "iTerm2 multipart: FilePart with no active transfer, dropping {d} bytes",
+                        .{chunk.len},
+                    );
+                    return null;
+                };
+
+                if (s.payload.items.len + chunk.len > max_payload_bytes) {
+                    log.warn(
+                        "iTerm2 multipart: payload would exceed {d} bytes, dropping transfer",
+                        .{max_payload_bytes},
+                    );
+                    self.deinit(alloc);
+                    return null;
+                }
+
+                try s.payload.appendSlice(alloc, chunk);
+                return null;
+            },
+
+            .end => {
+                const s = if (self.state) |*ptr| ptr else {
+                    log.warn(
+                        "iTerm2 multipart: FileEnd with no active transfer, ignoring",
+                        .{},
+                    );
+                    return null;
+                };
+
+                // Hand ownership of the payload buffer off to the
+                // caller. The caller must free `payload` after use
+                // (typically right after the synthKittyCommand call,
+                // which copies the bytes via base64 decode).
+                const hints = s.hints;
+                const payload = try s.payload.toOwnedSlice(alloc);
+                self.state = null;
+
+                return .{
+                    .payload = payload,
+                    .hints = hints,
+                };
+            },
+        }
+    }
+};
 
 test "OSC: 1337: test valid unimplemented key with no value" {
     const testing = std.testing;
@@ -929,4 +1088,188 @@ test "synthKittyCommand: preserve_aspect_ratio=false with both dims allows stret
     // Both dims set => Kitty stretches without preserving aspect.
     try testing.expectEqual(@as(u32, 8), td.display.columns);
     try testing.expectEqual(@as(u32, 4), td.display.rows);
+}
+
+test "OSC: 1337: test MultipartFile inline=1 emits start with hints" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;MultipartFile=inline=1;width=10;height=5";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .iterm2_multipart_image);
+    try testing.expect(cmd.iterm2_multipart_image == .start);
+    const hints = cmd.iterm2_multipart_image.start;
+    try testing.expectEqual(@as(u32, 10), hints.columns);
+    try testing.expectEqual(@as(u32, 5), hints.rows);
+}
+
+test "OSC: 1337: test MultipartFile without inline=1 is rejected" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;MultipartFile=name=foo";
+    for (input) |ch| p.next(ch);
+
+    try testing.expect(p.end('\x1b') == null);
+}
+
+test "OSC: 1337: test FilePart emits chunk with raw bytes" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;FilePart=YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .iterm2_multipart_image);
+    try testing.expect(cmd.iterm2_multipart_image == .chunk);
+    try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_multipart_image.chunk);
+}
+
+test "OSC: 1337: test FilePart with no value emits empty chunk" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;FilePart";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd.iterm2_multipart_image == .chunk);
+    try testing.expectEqualStrings("", cmd.iterm2_multipart_image.chunk);
+}
+
+test "OSC: 1337: test FileEnd emits end" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;FileEnd";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd.iterm2_multipart_image == .end);
+}
+
+test "OSC: 1337: test FileEnd with trailing equals also emits end" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;FileEnd=";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd.iterm2_multipart_image == .end);
+}
+
+test "Iterm2MultipartAssembler: happy path assembles chunks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var assembler: Iterm2MultipartAssembler = .{};
+    defer assembler.deinit(alloc);
+
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .{ .start = .{ .columns = 7 } }),
+    );
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .{ .chunk = "YWJj" }),
+    );
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .{ .chunk = "ZA==" }),
+    );
+
+    const out = (try assembler.handleEvent(alloc, .end)).?;
+    defer alloc.free(out.payload);
+
+    try testing.expectEqualStrings("YWJjZA==", out.payload);
+    try testing.expectEqual(@as(u32, 7), out.hints.columns);
+    try testing.expect(assembler.state == null);
+}
+
+test "Iterm2MultipartAssembler: orphan chunk is dropped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var assembler: Iterm2MultipartAssembler = .{};
+    defer assembler.deinit(alloc);
+
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .{ .chunk = "YWJj" }),
+    );
+    try testing.expect(assembler.state == null);
+}
+
+test "Iterm2MultipartAssembler: orphan end is dropped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var assembler: Iterm2MultipartAssembler = .{};
+    defer assembler.deinit(alloc);
+
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .end),
+    );
+    try testing.expect(assembler.state == null);
+}
+
+test "Iterm2MultipartAssembler: overlapping start discards previous" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var assembler: Iterm2MultipartAssembler = .{};
+    defer assembler.deinit(alloc);
+
+    _ = try assembler.handleEvent(alloc, .{ .start = .{ .columns = 1 } });
+    _ = try assembler.handleEvent(alloc, .{ .chunk = "WA==" });
+    _ = try assembler.handleEvent(alloc, .{ .start = .{ .columns = 99 } });
+    _ = try assembler.handleEvent(alloc, .{ .chunk = "YQ==" });
+    const out = (try assembler.handleEvent(alloc, .end)).?;
+    defer alloc.free(out.payload);
+
+    try testing.expectEqualStrings("YQ==", out.payload);
+    try testing.expectEqual(@as(u32, 99), out.hints.columns);
+}
+
+test "Iterm2MultipartAssembler: oversize transfer is dropped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var assembler: Iterm2MultipartAssembler = .{};
+    defer assembler.deinit(alloc);
+
+    _ = try assembler.handleEvent(alloc, .{ .start = .{} });
+
+    // Pre-load the assembler state up to the cap, then push one more
+    // byte and assert the transfer is aborted. The resize does a real
+    // allocation of max_payload_bytes; that's deliberately the full
+    // 65 MiB so the boundary check exercises the same arithmetic
+    // production sees, and the test is cheap enough at this size.
+    if (assembler.state) |*s| {
+        try s.payload.resize(alloc, Iterm2MultipartAssembler.max_payload_bytes);
+    }
+
+    // One more byte must push past the cap and abort the transfer.
+    try testing.expectEqual(
+        @as(?Command.Iterm2ImageTransmit, null),
+        try assembler.handleEvent(alloc, .{ .chunk = "X" }),
+    );
+    try testing.expect(assembler.state == null);
 }
