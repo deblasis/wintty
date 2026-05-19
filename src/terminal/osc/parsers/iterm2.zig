@@ -63,6 +63,52 @@ const map: Map = .initComptime(
     },
 );
 
+/// Parse an iTerm2 OSC 1337 File= dimension value into a cell count.
+/// Returns 0 (meaning "no preference, use native sizing") for any value
+/// that wintty cannot honor.
+///
+/// Cases:
+/// - Bare integer N > 0      -> N cells.
+/// - `auto`, empty           -> 0 silently (matches iTerm2 default).
+/// - `Npx`, `N%`             -> 0 with log.warn; Kitty has no
+///                              pixel-scaling or percentage primitive.
+/// - 0                       -> 0 with log.warn; iTerm2's grammar
+///                              doesn't sanction `width=0`, but some
+///                              emitters send it; we treat it as a
+///                              fallback to native sizing rather than
+///                              silently making it indistinguishable
+///                              from the missing case.
+/// - Non-numeric, overflow   -> 0 silently.
+///
+/// `key` is included in warning text so an emitter can see which dim
+/// was dropped.
+fn parseCellDim(key: []const u8, value: []const u8) u32 {
+    if (value.len == 0) return 0;
+    if (std.ascii.eqlIgnoreCase(value, "auto")) return 0;
+
+    // Trailing `px` or `%` make the value non-cell. Both forms map to
+    // 0 with a warning; the renderer falls back to native sizing.
+    if (std.mem.endsWith(u8, value, "px") or
+        std.mem.endsWith(u8, value, "%"))
+    {
+        log.warn(
+            "OSC 1337 File= {s}={s}: pixel/percent sizing unsupported, ignored",
+            .{ key, value },
+        );
+        return 0;
+    }
+
+    const n = std.fmt.parseInt(u32, value, 10) catch return 0;
+    if (n == 0) {
+        log.warn(
+            "OSC 1337 File= {s}={s}: zero is not a valid cell count, ignored",
+            .{ key, value },
+        );
+        return 0;
+    }
+    return n;
+}
+
 /// Parse OSC 1337
 /// https://iterm2.com/documentation-escape-codes.html
 pub fn parse(parser: *Parser, _: ?u8) ?*Command {
@@ -97,10 +143,13 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
             // `key=value;key=value:BASE64`. The options block ends at the
             // first ':'; the base64 alphabet excludes ':'.
             //
-            // MVP only honors `inline=1`; geometry hints (width, height,
-            // preserveAspectRatio, size, name) are accepted but unused.
-            // Without `inline=1` the image is a download-to-disk request,
-            // which has no wintty analog so we reject those.
+            // We honor `inline=1` (required) plus geometry hints
+            // `width`, `height`, and `preserveAspectRatio` mapped to
+            // the Kitty graphics Display struct. Pixel and percent
+            // sizing have no Kitty equivalent and log.warn. `name` and
+            // `size` are spec-defined but ignored. Without `inline=1`
+            // the image is a download-to-disk request which has no
+            // wintty analog so we reject those.
             const value = value_ orelse {
                 parser.command = .invalid;
                 return null;
@@ -121,22 +170,31 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                 return null;
             }
 
-            // Walk options looking for `inline=1`. Key match is
-            // case-insensitive; the value is matched literally because
-            // iTerm2's documented values for `inline` are exactly `1`
-            // and `0`.
+            // Single pass over the options: pick up inline=1 and the
+            // geometry hints in one walk. Key match is case-insensitive;
+            // `inline` value is matched literally because iTerm2's
+            // documented values are exactly `1` and `0`.
             var inline_display = false;
+            var hints: Command.Iterm2ImageHints = .{};
             var it = std.mem.splitScalar(u8, options, ';');
             while (it.next()) |kv| {
                 const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
                 const k = kv[0..eq];
                 const v = kv[eq + 1 ..];
-                if (std.ascii.eqlIgnoreCase(k, "inline") and
-                    std.mem.eql(u8, v, "1"))
-                {
-                    inline_display = true;
-                    break;
+
+                if (std.ascii.eqlIgnoreCase(k, "inline")) {
+                    if (std.mem.eql(u8, v, "1")) inline_display = true;
+                } else if (std.ascii.eqlIgnoreCase(k, "width")) {
+                    hints.columns = parseCellDim(k, v);
+                } else if (std.ascii.eqlIgnoreCase(k, "height")) {
+                    hints.rows = parseCellDim(k, v);
+                } else if (std.ascii.eqlIgnoreCase(k, "preserveAspectRatio")) {
+                    // iTerm2 default is 1. Only flip to false on an
+                    // explicit `0`.
+                    if (std.mem.eql(u8, v, "0")) hints.preserve_aspect_ratio = false;
                 }
+                // Unknown keys (name, size, type, ...) are silently
+                // ignored. iTerm2 and WezTerm do the same in practice.
             }
 
             if (!inline_display) {
@@ -147,7 +205,10 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                 return null;
             }
 
-            parser.command = .{ .iterm2_image_transmit = payload };
+            parser.command = .{ .iterm2_image_transmit = .{
+                .payload = payload,
+                .hints = hints,
+            } };
             return &parser.command;
         },
 
@@ -259,9 +320,13 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 
 /// Decode a base64 payload from an iTerm2 OSC 1337 File= sequence and
 /// synthesize a kitty graphics command that transmits and displays it as
-/// a PNG at the current cursor position. The caller owns the returned
-/// Command and must call deinit on it; the Command owns the decoded
-/// byte buffer.
+/// a PNG. Geometry hints map into the Display struct: cell width/height
+/// become Kitty columns/rows. preserve_aspect_ratio=false is only
+/// honored when both columns and rows are set, because Kitty stretches
+/// only when both display dimensions are explicitly supplied.
+///
+/// The caller owns the returned Command and must call deinit on it;
+/// the Command owns the decoded byte buffer.
 ///
 /// Returns error.InvalidData if the base64 is malformed, or
 /// error.UnsupportedFormat if the decoded bytes don't carry a PNG
@@ -271,9 +336,9 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 /// GIF will hit this path.
 pub fn synthKittyCommand(
     alloc: Allocator,
-    payload: []const u8,
+    transmit: Command.Iterm2ImageTransmit,
 ) !kitty_graphics.Command {
-    const max_len = simd.base64.maxLen(payload);
+    const max_len = simd.base64.maxLen(transmit.payload);
     if (max_len == 0) return error.InvalidData;
 
     // Mirror the in-place decode pattern used by the kitty graphics
@@ -284,7 +349,7 @@ pub fn synthKittyCommand(
     errdefer data.deinit(alloc);
     try data.resize(alloc, max_len);
 
-    const decoded = simd.base64.decode(payload, data.items) catch {
+    const decoded = simd.base64.decode(transmit.payload, data.items) catch {
         return error.InvalidData;
     };
     data.items.len = decoded.len;
@@ -296,13 +361,30 @@ pub fn synthKittyCommand(
         return error.UnsupportedFormat;
     }
 
+    // preserve_aspect_ratio=false maps to Kitty's stretch mode, which
+    // is implicit when both columns AND rows are set. When only one
+    // dimension is supplied we cannot stretch (Kitty preserves aspect
+    // either way) so the hint is moot. Emit a log.debug so anyone
+    // bisecting a layout issue sees we received but couldn't honor it.
+    if (!transmit.hints.preserve_aspect_ratio and
+        (transmit.hints.columns == 0 or transmit.hints.rows == 0))
+    {
+        log.debug(
+            "iTerm2 preserveAspectRatio=0 ignored: needs both width and height in cells",
+            .{},
+        );
+    }
+
     return .{
         .control = .{ .transmit_and_display = .{
             .transmission = .{
                 .format = .png,
                 .medium = .direct,
             },
-            .display = .{},
+            .display = .{
+                .columns = transmit.hints.columns,
+                .rows = transmit.hints.rows,
+            },
         } },
         .data = try data.toOwnedSlice(alloc),
     };
@@ -556,7 +638,11 @@ test "OSC: 1337: test File inline=1 produces iterm2_image_transmit" {
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .iterm2_image_transmit);
-    try testing.expectEqualStrings("iVBORw0KGgo=", cmd.iterm2_image_transmit);
+    const tx = cmd.iterm2_image_transmit;
+    try testing.expectEqualStrings("iVBORw0KGgo=", tx.payload);
+    try testing.expectEqual(@as(u32, 0), tx.hints.columns);
+    try testing.expectEqual(@as(u32, 0), tx.hints.rows);
+    try testing.expect(tx.hints.preserve_aspect_ratio);
 }
 
 test "OSC: 1337: test File with extra options before inline=1" {
@@ -570,7 +656,7 @@ test "OSC: 1337: test File with extra options before inline=1" {
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .iterm2_image_transmit);
-    try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit);
+    try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit.payload);
 }
 
 test "OSC: 1337: test File without inline=1 is rejected" {
@@ -632,19 +718,118 @@ test "OSC: 1337: test File with case-insensitive Inline=1" {
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .iterm2_image_transmit);
-    try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit);
+    try testing.expectEqualStrings("YWJjZA==", cmd.iterm2_image_transmit.payload);
 }
+
+test "OSC: 1337: test File with width and height in cells populates hints" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;width=10;height=5:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    const tx = cmd.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 10), tx.hints.columns);
+    try testing.expectEqual(@as(u32, 5), tx.hints.rows);
+    try testing.expect(tx.hints.preserve_aspect_ratio);
+}
+
+test "OSC: 1337: test File with width=auto leaves columns at 0" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;width=auto;height=auto:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 0), tx.hints.columns);
+    try testing.expectEqual(@as(u32, 0), tx.hints.rows);
+}
+
+test "OSC: 1337: test File with pixel-suffixed width leaves columns at 0" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    // Pixel sizing has no Kitty equivalent; the parser logs a warning
+    // and falls back to native sizing.
+    const input = "1337;File=inline=1;width=100px;height=50px:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 0), tx.hints.columns);
+    try testing.expectEqual(@as(u32, 0), tx.hints.rows);
+}
+
+test "OSC: 1337: test File with percent-suffixed width leaves columns at 0" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;width=80%:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 0), tx.hints.columns);
+}
+
+test "OSC: 1337: test File with case-insensitive Width and PreserveAspectRatio" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;Width=12;PreserveAspectRatio=0:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 12), tx.hints.columns);
+    try testing.expect(!tx.hints.preserve_aspect_ratio);
+}
+
+test "OSC: 1337: test File with preserveAspectRatio=1 keeps default true" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;preserveAspectRatio=1:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expect(tx.hints.preserve_aspect_ratio);
+}
+
+test "OSC: 1337: test File with non-numeric width is ignored" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;File=inline=1;width=foo:YWJjZA==";
+    for (input) |ch| p.next(ch);
+
+    const tx = p.end('\x1b').?.*.iterm2_image_transmit;
+    try testing.expectEqual(@as(u32, 0), tx.hints.columns);
+}
+
+// Canonical 1x1 transparent PNG, 67 bytes, base64-encoded.
+const test_png_b64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" ++
+    "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 test "synthKittyCommand: minimal 1x1 PNG yields transmit_and_display PNG command" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // Canonical 1x1 transparent PNG, 67 bytes, base64-encoded.
-    const payload =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" ++
-        "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-
-    var cmd = try synthKittyCommand(alloc, payload);
+    var cmd = try synthKittyCommand(alloc, .{ .payload = test_png_b64 });
     defer cmd.deinit(alloc);
 
     try testing.expect(cmd.control == .transmit_and_display);
@@ -656,31 +841,30 @@ test "synthKittyCommand: minimal 1x1 PNG yields transmit_and_display PNG command
     const sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
     try testing.expect(cmd.data.len >= sig.len);
     try testing.expectEqualSlices(u8, &sig, cmd.data[0..sig.len]);
+
+    // Default hints leave Display columns and rows at 0 (native size).
+    try testing.expectEqual(@as(u32, 0), td.display.columns);
+    try testing.expectEqual(@as(u32, 0), td.display.rows);
 }
 
 test "synthKittyCommand: invalid base64 returns InvalidData" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // The OSC parser strips the payload at the first ':', but a
-    // malformed sequence could still reach the helper with non-base64
-    // bytes.
-    const payload = "!!!not base64!!!";
-
-    try testing.expectError(error.InvalidData, synthKittyCommand(alloc, payload));
+    try testing.expectError(
+        error.InvalidData,
+        synthKittyCommand(alloc, .{ .payload = "!!!not base64!!!" }),
+    );
 }
 
 test "synthKittyCommand: non-PNG bytes return UnsupportedFormat" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // "abcd" base64-encoded. Decodes to valid base64 but missing the
-    // PNG signature.
-    const payload = "YWJjZA==";
-
+    // "abcd" base64-encoded. Valid base64, but no PNG signature.
     try testing.expectError(
         error.UnsupportedFormat,
-        synthKittyCommand(alloc, payload),
+        synthKittyCommand(alloc, .{ .payload = "YWJjZA==" }),
     );
 }
 
@@ -690,10 +874,59 @@ test "synthKittyCommand: payload shorter than PNG signature returns UnsupportedF
 
     // "x" base64-encoded => 1 decoded byte, less than the 8-byte
     // PNG signature.
-    const payload = "eA==";
-
     try testing.expectError(
         error.UnsupportedFormat,
-        synthKittyCommand(alloc, payload),
+        synthKittyCommand(alloc, .{ .payload = "eA==" }),
     );
+}
+
+test "synthKittyCommand: hint columns and rows map to Display" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd = try synthKittyCommand(alloc, .{
+        .payload = test_png_b64,
+        .hints = .{ .columns = 10, .rows = 5 },
+    });
+    defer cmd.deinit(alloc);
+
+    const td = cmd.control.transmit_and_display;
+    try testing.expectEqual(@as(u32, 10), td.display.columns);
+    try testing.expectEqual(@as(u32, 5), td.display.rows);
+}
+
+test "synthKittyCommand: only columns set leaves rows at 0 for aspect preservation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd = try synthKittyCommand(alloc, .{
+        .payload = test_png_b64,
+        .hints = .{ .columns = 20 },
+    });
+    defer cmd.deinit(alloc);
+
+    const td = cmd.control.transmit_and_display;
+    try testing.expectEqual(@as(u32, 20), td.display.columns);
+    // rows=0 lets Kitty compute the height from the image's aspect.
+    try testing.expectEqual(@as(u32, 0), td.display.rows);
+}
+
+test "synthKittyCommand: preserve_aspect_ratio=false with both dims allows stretch" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd = try synthKittyCommand(alloc, .{
+        .payload = test_png_b64,
+        .hints = .{
+            .columns = 8,
+            .rows = 4,
+            .preserve_aspect_ratio = false,
+        },
+    });
+    defer cmd.deinit(alloc);
+
+    const td = cmd.control.transmit_and_display;
+    // Both dims set => Kitty stretches without preserving aspect.
+    try testing.expectEqual(@as(u32, 8), td.display.columns);
+    try testing.expectEqual(@as(u32, 4), td.display.rows);
 }
