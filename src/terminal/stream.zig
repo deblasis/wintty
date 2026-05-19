@@ -126,9 +126,10 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
-    /// iTerm2 OSC 1337 File= inline image. Payload is raw base64; the
-    /// handler decodes it and dispatches as a kitty graphics command.
-    iterm2_image_transmit: [:0]const u8,
+    /// iTerm2 OSC 1337 File= inline image. The struct carries the raw
+    /// base64 payload plus parsed geometry hints; the handler decodes
+    /// the payload and dispatches as a kitty graphics command.
+    iterm2_image_transmit: osc.Command.Iterm2ImageTransmit,
 
     pub const Key = lib.Enum(
         lib.target,
@@ -2257,8 +2258,8 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.progress_report, v);
                 },
 
-                .iterm2_image_transmit => |payload| {
-                    self.handler.vt(.iterm2_image_transmit, payload);
+                .iterm2_image_transmit => |transmit| {
+                    self.handler.vt(.iterm2_image_transmit, transmit);
                 },
 
                 .conemu_sleep,
