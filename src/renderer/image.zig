@@ -59,9 +59,14 @@ pub const State = struct {
     /// Upload any images to the GPU that need to be uploaded,
     /// and remove any images that are no longer needed on the GPU.
     ///
-    /// If any uploads fail, they are ignored. The return value
-    /// can be used to detect if upload was a total success (true)
-    /// or not (false).
+    /// A failed upload (e.g. wuffs decode error, DX12 UploadFailed)
+    /// flips the image to its unload state so the next iteration
+    /// sweeps it. Without this, a persistently-failing image
+    /// retries every frame and floods the log; the placement
+    /// can't render anyway, so dropping it is the correct outcome.
+    ///
+    /// Returns true if every pending image uploaded successfully,
+    /// false if any failed.
     pub fn upload(
         self: *State,
         alloc: Allocator,
@@ -82,7 +87,11 @@ pub const State = struct {
                     alloc,
                     api,
                 ) catch |err| {
-                    log.warn("error uploading image to GPU err={}", .{err});
+                    log.warn(
+                        "error uploading image to GPU err={t}, dropping placement",
+                        .{err},
+                    );
+                    img.markForUnload();
                     success = false;
                 };
             }
@@ -986,3 +995,54 @@ pub const Image = union(enum) {
         };
     }
 };
+
+test "Image.markForUnload pending -> unload_pending" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A four-byte RGBA pixel buffer the .pending state takes
+    // ownership of; deinit frees it.
+    const data = try alloc.alloc(u8, 4);
+    var img: Image = .{ .pending = .{
+        .width = 1,
+        .height = 1,
+        .pixel_format = .rgba,
+        .data = data.ptr,
+    } };
+    defer img.deinit(alloc);
+
+    try testing.expect(img.isPending());
+    try testing.expect(!img.isUnloading());
+
+    img.markForUnload();
+
+    try testing.expectEqual(
+        @as(std.meta.Tag(Image), .unload_pending),
+        std.meta.activeTag(img),
+    );
+    // isUnloading() being true is what State.upload checks first;
+    // the unload sweep deinits + removes the image before the
+    // retry-via-isPending branch fires, so the failed image only
+    // logs once instead of every frame.
+    try testing.expect(img.isUnloading());
+}
+
+test "Image.markForUnload is idempotent on already-unloading states" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const data = try alloc.alloc(u8, 4);
+    var img: Image = .{ .unload_pending = .{
+        .width = 1,
+        .height = 1,
+        .pixel_format = .rgba,
+        .data = data.ptr,
+    } };
+    defer img.deinit(alloc);
+
+    img.markForUnload();
+    try testing.expectEqual(
+        @as(std.meta.Tag(Image), .unload_pending),
+        std.meta.activeTag(img),
+    );
+}
