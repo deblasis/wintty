@@ -10,8 +10,9 @@
 /** @defgroup size_report Size Report Encoding
  *
  * Utilities for encoding terminal size reports into escape sequences,
- * supporting in-band size reports (mode 2048) and XTWINOPS responses
- * (CSI 14 t, CSI 16 t, CSI 18 t).
+ * supporting in-band size reports (mode 2048), XTWINOPS responses
+ * (CSI 14 t, CSI 16 t, CSI 18 t), and the iTerm2 OSC 1337
+ * ReportCellSize response.
  *
  * ## Basic Usage
  *
@@ -49,6 +50,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
     GHOSTTY_SIZE_REPORT_CSI_16_T = 2,
     /** XTWINOPS text area size in characters: ESC [ 8 ; rows ; cols t */
     GHOSTTY_SIZE_REPORT_CSI_18_T = 3,
+    /** iTerm2 OSC 1337 ReportCellSize response: OSC 1337 ; ReportCellSize=height;width;1.0 ST */
+    GHOSTTY_SIZE_REPORT_ITERM2_REPORT_CELL_SIZE = 4,
     GHOSTTY_SIZE_REPORT_STYLE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySizeReportStyle;
 
