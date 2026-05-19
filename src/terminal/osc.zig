@@ -165,11 +165,39 @@ pub const Command = union(Key) {
 
     /// iTerm2 OSC 1337 File= inline image transmission.
     /// https://iterm2.com/documentation-images.html
-    /// Payload is the raw base64-encoded image bytes. The parser does not
-    /// decode or sniff the format; the consumer is responsible for both.
-    iterm2_image_transmit: [:0]const u8,
+    iterm2_image_transmit: Iterm2ImageTransmit,
 
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
+
+    /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
+    pub const Iterm2ImageTransmit = struct {
+        /// Raw base64-encoded image bytes. The consumer is responsible
+        /// for decode + format sniff.
+        payload: [:0]const u8,
+
+        /// Geometry hints parsed from the options block. Defaults
+        /// preserve the image's native sizing.
+        hints: Iterm2ImageHints = .{},
+    };
+
+    /// Subset of iTerm2 File= options that can be expressed in the
+    /// Kitty graphics Display struct. Unsupported iTerm2 forms
+    /// (pixel and percent sizing) are dropped by the parser with a
+    /// log.warn.
+    pub const Iterm2ImageHints = struct {
+        /// Display width in terminal cells. 0 = no preference; the
+        /// renderer falls back to the image's native sizing.
+        columns: u32 = 0,
+
+        /// Display height in terminal cells. 0 = no preference.
+        rows: u32 = 0,
+
+        /// Whether to preserve the image's aspect ratio. iTerm2's
+        /// default is true. False is only meaningfully honored when
+        /// both columns and rows are non-zero, because Kitty stretches
+        /// only when both display dimensions are supplied.
+        preserve_aspect_ratio: bool = true,
+    };
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
 
