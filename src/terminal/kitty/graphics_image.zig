@@ -104,11 +104,12 @@ pub const LoadingImage = struct {
         {
             // Special case if we don't support decoding a compressed
             // format: save the memory/effort of buffering the data and
-            // fail up front. JPEG arrives via the iTerm2 OSC 1337
-            // synth path; PNG via the native kitty wire format.
+            // fail up front. JPEG and GIF arrive via the iTerm2 OSC
+            // 1337 synth path; PNG via the native kitty wire format.
             switch (t.format) {
                 .png => if (sys.decode_png == null) return error.UnsupportedMedium,
                 .jpeg => if (sys.decode_jpeg == null) return error.UnsupportedMedium,
+                .gif => if (sys.decode_gif == null) return error.UnsupportedMedium,
                 .rgb, .rgba, .gray, .gray_alpha => {},
             }
 
@@ -201,7 +202,7 @@ pub const LoadingImage = struct {
         const expected_size: usize = switch (self.image.format) {
             // Compressed formats: we read the full data because later
             // decoding gets the proper dimensions and asserts validity.
-            .png, .jpeg => stat_size,
+            .png, .jpeg, .gif => stat_size,
 
             // For these formats we have a size we must have.
             .gray, .gray_alpha, .rgb, .rgba => size: {
@@ -391,6 +392,10 @@ pub const LoadingImage = struct {
         // format code for JPEG.
         if (img.format == .jpeg) try self.decodeJpeg(alloc);
 
+        // Decode the gif if we have to. Same provenance as JPEG; GIF
+        // is first-frame-only.
+        if (img.format == .gif) try self.decodeGif(alloc);
+
         // Validate our dimensions.
         if (img.width == 0 or img.height == 0) return error.DimensionsRequired;
         if (img.width > max_dimension or img.height > max_dimension) return error.DimensionsTooLarge;
@@ -525,6 +530,38 @@ pub const LoadingImage = struct {
 
         if (result.data.len > max_size) {
             log.warn("jpeg image too large size={} max_size={}", .{ result.data.len, max_size });
+            return error.InvalidData;
+        }
+
+        self.data.deinit(alloc);
+        self.data = .{};
+        try self.data.ensureUnusedCapacity(alloc, result.data.len);
+        try self.data.appendSlice(alloc, result.data[0..result.data.len]);
+
+        self.image.width = result.width;
+        self.image.height = result.height;
+        self.image.format = .rgba;
+    }
+
+    /// Decode the first frame of the data as GIF. This also updates
+    /// the image dimensions. Multi-frame GIFs render as the first
+    /// frame only.
+    fn decodeGif(self: *LoadingImage, alloc: Allocator) !void {
+        assert(self.image.format == .gif);
+
+        const decode_gif_fn = sys.decode_gif orelse
+            return error.UnsupportedFormat;
+        const result = decode_gif_fn(
+            alloc,
+            self.data.items,
+        ) catch |err| switch (err) {
+            error.InvalidData => return error.InvalidData,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer alloc.free(result.data);
+
+        if (result.data.len > max_size) {
+            log.warn("gif image too large size={} max_size={}", .{ result.data.len, max_size });
             return error.InvalidData;
         }
 
