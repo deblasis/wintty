@@ -118,13 +118,14 @@ pub const LoadingImage = struct {
 
         // Verify our capabilities and limits allow this.
         {
-            // Special case if we don't support decoding PNGs and the format
-            // is a PNG we can save a lot of memory/effort buffering the
-            // data but failing up front.
-            if (t.format == .png and
-                sys.decode_png == null)
-            {
-                return error.UnsupportedMedium;
+            // Special case if we don't support decoding a compressed
+            // format: save the memory/effort of buffering the data and
+            // fail up front. JPEG arrives via the iTerm2 OSC 1337
+            // synth path; PNG via the native kitty wire format.
+            switch (t.format) {
+                .png => if (sys.decode_png == null) return error.UnsupportedMedium,
+                .jpeg => if (sys.decode_jpeg == null) return error.UnsupportedMedium,
+                .rgb, .rgba, .gray, .gray_alpha => {},
             }
 
             // Verify the medium is allowed
@@ -245,8 +246,8 @@ pub const LoadingImage = struct {
         DimensionsTooLarge,
     }!SharedMemoryRange {
         const expected_size: ?usize = switch (self.image.format) {
-            // PNG dimensions come from the decoded data.
-            .png => null,
+            // Compressed formats: dimensions come from the decoded data.
+            .png, .jpeg => null,
 
             // Validate before multiplying because protocol dimensions are
             // u32 values and may otherwise overflow in safe builds.
@@ -467,6 +468,11 @@ pub const LoadingImage = struct {
         // Decode the png if we have to
         if (img.format == .png) try self.decodePng(alloc);
 
+        // Decode the jpeg if we have to. JPEG arrives via the iTerm2
+        // OSC 1337 synth path; the kitty wire protocol does not have a
+        // format code for JPEG.
+        if (img.format == .jpeg) try self.decodeJpeg(alloc);
+
         // Validate our dimensions.
         if (img.width == 0 or img.height == 0) return error.DimensionsRequired;
         if (img.width > max_dimension or img.height > max_dimension) return error.DimensionsTooLarge;
@@ -579,6 +585,36 @@ pub const LoadingImage = struct {
         try self.data.appendSlice(alloc, result.data[0..result.data.len]);
 
         // Store updated image dimensions
+        self.image.width = result.width;
+        self.image.height = result.height;
+        self.image.format = .rgba;
+    }
+
+    /// Decode the data as JPEG. This also updates the image dimensions.
+    fn decodeJpeg(self: *LoadingImage, alloc: Allocator) !void {
+        assert(self.image.format == .jpeg);
+
+        const decode_jpeg_fn = sys.decode_jpeg orelse
+            return error.UnsupportedFormat;
+        const result = decode_jpeg_fn(
+            alloc,
+            self.data.items,
+        ) catch |err| switch (err) {
+            error.InvalidData => return error.InvalidData,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer alloc.free(result.data);
+
+        if (result.data.len > max_size) {
+            log.warn("jpeg image too large size={} max_size={}", .{ result.data.len, max_size });
+            return error.InvalidData;
+        }
+
+        self.data.deinit(alloc);
+        self.data = .{};
+        try self.data.ensureUnusedCapacity(alloc, result.data.len);
+        try self.data.appendSlice(alloc, result.data[0..result.data.len]);
+
         self.image.width = result.width;
         self.image.height = result.height;
         self.image.format = .rgba;
