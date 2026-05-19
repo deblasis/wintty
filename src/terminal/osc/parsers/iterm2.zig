@@ -65,12 +65,22 @@ const map: Map = .initComptime(
 
 /// Parse an iTerm2 OSC 1337 File= dimension value into a cell count.
 /// Returns 0 (meaning "no preference, use native sizing") for any value
-/// that wintty cannot honor: the iTerm2-spec forms `Npx` (pixels) and
-/// `N%` (percent of terminal) log.warn and fall back to 0 because Kitty
-/// has no pixel-scaling or percentage-sizing primitive. `auto`, empty,
-/// non-numeric, zero, and overflow values fall back to 0 silently.
+/// that wintty cannot honor.
 ///
-/// `key` is included in the warning so an emitter can see which dim
+/// Cases:
+/// - Bare integer N > 0      -> N cells.
+/// - `auto`, empty           -> 0 silently (matches iTerm2 default).
+/// - `Npx`, `N%`             -> 0 with log.warn; Kitty has no
+///                              pixel-scaling or percentage primitive.
+/// - 0                       -> 0 with log.warn; iTerm2's grammar
+///                              doesn't sanction `width=0`, but some
+///                              emitters send it; we treat it as a
+///                              fallback to native sizing rather than
+///                              silently making it indistinguishable
+///                              from the missing case.
+/// - Non-numeric, overflow   -> 0 silently.
+///
+/// `key` is included in warning text so an emitter can see which dim
 /// was dropped.
 fn parseCellDim(key: []const u8, value: []const u8) u32 {
     if (value.len == 0) return 0;
@@ -89,7 +99,14 @@ fn parseCellDim(key: []const u8, value: []const u8) u32 {
     }
 
     const n = std.fmt.parseInt(u32, value, 10) catch return 0;
-    return n; // 0 is already the "no preference" sentinel.
+    if (n == 0) {
+        log.warn(
+            "OSC 1337 File= {s}={s}: zero is not a valid cell count, ignored",
+            .{ key, value },
+        );
+        return 0;
+    }
+    return n;
 }
 
 /// Parse OSC 1337
@@ -176,9 +193,8 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                     // explicit `0`.
                     if (std.mem.eql(u8, v, "0")) hints.preserve_aspect_ratio = false;
                 }
-                // Unknown keys (name, size, type, ...) are ignored per
-                // spec — implementations may ignore options they don't
-                // understand.
+                // Unknown keys (name, size, type, ...) are silently
+                // ignored. iTerm2 and WezTerm do the same in practice.
             }
 
             if (!inline_display) {
@@ -348,9 +364,17 @@ pub fn synthKittyCommand(
     // preserve_aspect_ratio=false maps to Kitty's stretch mode, which
     // is implicit when both columns AND rows are set. When only one
     // dimension is supplied we cannot stretch (Kitty preserves aspect
-    // either way) so the hint is silently moot in that case. We don't
-    // synthesize a missing dimension here because we don't know the
-    // image's native size at parse time.
+    // either way) so the hint is moot. Emit a log.debug so anyone
+    // bisecting a layout issue sees we received but couldn't honor it.
+    if (!transmit.hints.preserve_aspect_ratio and
+        (transmit.hints.columns == 0 or transmit.hints.rows == 0))
+    {
+        log.debug(
+            "iTerm2 preserveAspectRatio=0 ignored: needs both width and height in cells",
+            .{},
+        );
+    }
+
     return .{
         .control = .{ .transmit_and_display = .{
             .transmission = .{
