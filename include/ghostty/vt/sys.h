@@ -125,6 +125,27 @@ typedef bool (*GhosttySysDecodePngFn)(
     GhosttySysImage* out);
 
 /**
+ * Callback type for JPEG decoding.
+ *
+ * Decodes raw JPEG data into RGBA pixels. The output pixel data must be
+ * allocated through the provided allocator. The library takes ownership
+ * of the buffer and will free it with the same allocator.
+ *
+ * @param userdata  The userdata pointer set via GHOSTTY_SYS_OPT_USERDATA
+ * @param allocator The allocator to use for the output pixel buffer
+ * @param data      Pointer to the raw JPEG data
+ * @param data_len  Length of the raw JPEG data in bytes
+ * @param[out] out  On success, filled with the decoded image
+ * @return true on success, false on failure
+ */
+typedef bool (*GhosttySysDecodeJpegFn)(
+    void* userdata,
+    const GhosttyAllocator* allocator,
+    const uint8_t* data,
+    size_t data_len,
+    GhosttySysImage* out);
+
+/**
  * System option identifiers for ghostty_sys_set().
  */
 typedef enum GHOSTTY_ENUM_TYPED {
@@ -165,6 +186,18 @@ typedef enum GHOSTTY_ENUM_TYPED {
      * Input type: GhosttySysLogFn (function pointer, or NULL)
      */
     GHOSTTY_SYS_OPT_LOG = 2,
+
+    /**
+     * Set the JPEG decode function.
+     *
+     * When set, the iTerm2 OSC 1337 File= path can render JPEG
+     * payloads through the Kitty graphics decoder. When cleared
+     * (NULL value), JPEG decoding is unsupported and JPEG image
+     * data will be rejected.
+     *
+     * Input type: GhosttySysDecodeJpegFn (function pointer, or NULL)
+     */
+    GHOSTTY_SYS_OPT_DECODE_JPEG = 3,
     GHOSTTY_SYS_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySysOption;
 

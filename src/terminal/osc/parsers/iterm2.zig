@@ -388,21 +388,24 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 }
 
 /// Decode a base64 payload from an iTerm2 OSC 1337 File= sequence and
-/// synthesize a kitty graphics command that transmits and displays it as
-/// a PNG. Geometry hints map into the Display struct: cell width/height
-/// become Kitty columns/rows. preserve_aspect_ratio=false is only
-/// honored when both columns and rows are set, because Kitty stretches
-/// only when both display dimensions are explicitly supplied.
+/// synthesize a kitty graphics command that transmits and displays it.
+/// Geometry hints map into the Display struct: cell width/height become
+/// Kitty columns/rows. preserve_aspect_ratio=false is only honored when
+/// both columns and rows are set, because Kitty stretches only when
+/// both display dimensions are explicitly supplied.
 ///
 /// The caller owns the returned Command and must call deinit on it;
 /// the Command owns the decoded byte buffer.
 ///
-/// Returns error.InvalidData if the base64 is malformed, or
-/// error.UnsupportedFormat if the decoded bytes don't carry a PNG
-/// signature. Ghostty's kitty graphics decoder is PNG-only today, so
-/// rejecting other formats here surfaces a clearer error than letting
-/// the decoder reject mid-pipeline. iTerm2 emitters that send JPEG or
-/// GIF will hit this path.
+/// The payload format is sniffed from the leading magic bytes:
+/// PNG (89 50 4E 47 0D 0A 1A 0A) and JPEG (FF D8 FF) are recognized
+/// and tagged on the synthesized Transmission so the downstream image
+/// decoder picks the right wuffs path. Any other content (GIF, BMP,
+/// raw pixels, etc.) returns error.UnsupportedFormat so that the
+/// caller surfaces a clear error rather than letting the kitty
+/// decoder reject mid-pipeline.
+///
+/// Returns error.InvalidData if the base64 is malformed.
 pub fn synthKittyCommand(
     alloc: Allocator,
     transmit: Command.Iterm2ImageTransmit,
@@ -423,12 +426,29 @@ pub fn synthKittyCommand(
     };
     data.items.len = decoded.len;
 
-    const png_sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
-    if (data.items.len < png_sig.len or
-        !std.mem.eql(u8, data.items[0..png_sig.len], &png_sig))
-    {
+    // Sniff the format from the leading magic bytes. PNG and JPEG are
+    // both routed through the kitty graphics image decoder by the
+    // respective Format enum tags; anything else is rejected here so
+    // the caller gets a clear error rather than letting the decoder
+    // reject mid-pipeline.
+    const Sniffed = enum { png, jpeg };
+    const sniffed: Sniffed = sniffed: {
+        const png_sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        if (data.items.len >= png_sig.len and
+            std.mem.eql(u8, data.items[0..png_sig.len], &png_sig))
+        {
+            break :sniffed .png;
+        }
+
+        const jpeg_sig = [_]u8{ 0xFF, 0xD8, 0xFF };
+        if (data.items.len >= jpeg_sig.len and
+            std.mem.eql(u8, data.items[0..jpeg_sig.len], &jpeg_sig))
+        {
+            break :sniffed .jpeg;
+        }
+
         return error.UnsupportedFormat;
-    }
+    };
 
     // preserve_aspect_ratio=false maps to Kitty's stretch mode, which
     // is implicit when both columns AND rows are set. When only one
@@ -447,7 +467,10 @@ pub fn synthKittyCommand(
     return .{
         .control = .{ .transmit_and_display = .{
             .transmission = .{
-                .format = .png,
+                .format = switch (sniffed) {
+                    .png => .png,
+                    .jpeg => .jpeg,
+                },
                 .medium = .direct,
             },
             .display = .{
@@ -1033,15 +1056,40 @@ test "synthKittyCommand: invalid base64 returns InvalidData" {
     );
 }
 
-test "synthKittyCommand: non-PNG bytes return UnsupportedFormat" {
+test "synthKittyCommand: non-PNG non-JPEG bytes return UnsupportedFormat" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // "abcd" base64-encoded. Valid base64, but no PNG signature.
+    // "abcd" base64-encoded. Valid base64, but no PNG nor JPEG
+    // signature. GIF magic (47 49 46 38) would also land here once
+    // GIF support is wired.
     try testing.expectError(
         error.UnsupportedFormat,
         synthKittyCommand(alloc, .{ .payload = "YWJjZA==" }),
     );
+}
+
+// JPEG SOI + APP0 (JFIF) marker start. Enough to satisfy the
+// signature sniff in synthKittyCommand; the wuffs decoder validates
+// the full structure later in the pipeline.
+const test_jpeg_b64 = "/9j/4AAQSkY=";
+
+test "synthKittyCommand: JPEG signature yields transmit_and_display JPEG command" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd = try synthKittyCommand(alloc, .{ .payload = test_jpeg_b64 });
+    defer cmd.deinit(alloc);
+
+    try testing.expect(cmd.control == .transmit_and_display);
+    const td = cmd.control.transmit_and_display;
+    try testing.expect(td.transmission.format == .jpeg);
+    try testing.expect(td.transmission.medium == .direct);
+
+    // JPEG SOI: FF D8 FF
+    const sig = [_]u8{ 0xFF, 0xD8, 0xFF };
+    try testing.expect(cmd.data.len >= sig.len);
+    try testing.expectEqualSlices(u8, &sig, cmd.data[0..sig.len]);
 }
 
 test "synthKittyCommand: payload shorter than PNG signature returns UnsupportedFormat" {

@@ -628,7 +628,9 @@ pub const State = struct {
                     .gray_alpha => .gray_alpha,
                     .rgb => .rgb,
                     .rgba => .rgba,
-                    .png => unreachable, // should be decoded by now
+                    // PNG/JPEG arrive at the renderer only after the
+                    // image decoder has rewritten the format to .rgba.
+                    .png, .jpeg => unreachable,
                 },
 
                 // constCasts are always gross but this one is safe is because
