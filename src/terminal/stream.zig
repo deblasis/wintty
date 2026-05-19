@@ -2517,6 +2517,10 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.iterm2_multipart_image, event);
                 },
 
+                .iterm2_report_cell_size => {
+                    self.handler.vt(.size_report, .iterm2_report_cell_size);
+                },
+
                 .conemu_sleep,
                 .conemu_show_message_box,
                 .conemu_change_tab_title,
