@@ -433,11 +433,13 @@ pub const Transmission = struct {
         // support.
         "gray_alpha",
         "gray",
-        // JPEG has no Kitty wire code; it is a Ghostty-internal
-        // format the iTerm2 OSC 1337 synth path produces when it
-        // detects JPEG magic bytes. The image decoder routes it to
-        // the wuffs JPEG path and emits RGBA downstream.
+        // JPEG and GIF have no Kitty wire code; they are
+        // Ghostty-internal formats the iTerm2 OSC 1337 synth path
+        // produces by sniffing magic bytes. The image decoder
+        // routes them through the wuffs jpeg / gif paths and emits
+        // RGBA downstream. GIF support is first-frame-only.
         "jpeg",
+        "gif",
     });
 
     pub const Medium = lib.Enum(lib.target, &.{
@@ -471,9 +473,9 @@ pub const Transmission = struct {
             .gray_alpha => 2,
             .rgb => 3,
             .rgba => 4,
-            // PNG/JPEG must be decoded to RGBA before any
+            // PNG/JPEG/GIF must be decoded to RGBA before any
             // bytes-per-pixel math is asked of them.
-            .png, .jpeg => unreachable,
+            .png, .jpeg, .gif => unreachable,
         };
     }
 
