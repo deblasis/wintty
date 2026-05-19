@@ -331,6 +331,24 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
             return &parser.command;
         },
 
+        .ReportCellSize => {
+            // iTerm2's documented form is the bare key
+            // `OSC 1337;ReportCellSize ST`. A trailing `=` with no
+            // value is accepted defensively because the upstream
+            // `key=value` split happily produces an empty value for
+            // such input. Any `=non-empty` form would collide with
+            // the response shape `ReportCellSize=H;W;scale`, so we
+            // reject it.
+            if (value_) |v| {
+                if (v.len > 0) {
+                    parser.command = .invalid;
+                    return null;
+                }
+            }
+            parser.command = .iterm2_report_cell_size;
+            return &parser.command;
+        },
+
         .AddAnnotation,
         .AddHiddenAnnotation,
         .Block,
@@ -347,7 +365,6 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         .PopKeyLabels,
         .PushKeyLabels,
         .RemoteHost,
-        .ReportCellSize,
         .ReportVariable,
         .RequestAttention,
         .RequestUpload,
@@ -1172,6 +1189,64 @@ test "OSC: 1337: test FileEnd with trailing equals also emits end" {
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd.iterm2_multipart_image == .end);
+}
+
+test "OSC: 1337: test ReportCellSize bare key emits iterm2_report_cell_size" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;ReportCellSize";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .iterm2_report_cell_size);
+}
+
+test "OSC: 1337: test reportcellsize lowercase emits iterm2_report_cell_size" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    const input = "1337;reportcellsize";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .iterm2_report_cell_size);
+}
+
+test "OSC: 1337: test ReportCellSize with stray value is rejected" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    // The iTerm2 spec defines ReportCellSize as a bare-key query.
+    // Any `=value` form would collide with the terminal's response
+    // wire format, so we reject it.
+    const input = "1337;ReportCellSize=foo";
+    for (input) |ch| p.next(ch);
+
+    try testing.expect(p.end('\x1b') == null);
+}
+
+test "OSC: 1337: test ReportCellSize with empty value also emits query" {
+    const testing = std.testing;
+
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    // A trailing `=` with no value is accepted defensively: the
+    // upstream key=value split produces an empty value for such
+    // input, and emitters built around naive `key=value` formatters
+    // can hit this without intending to send a response.
+    const input = "1337;ReportCellSize=";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expect(cmd == .iterm2_report_cell_size);
 }
 
 test "Iterm2MultipartAssembler: happy path assembles chunks" {
