@@ -6,6 +6,7 @@ const simd = @import("../../../simd/main.zig");
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
+const apc = @import("../../apc.zig");
 const kitty_graphics = @import("../../kitty/graphics.zig");
 
 const log = std.log.scoped(.osc_iterm2);
@@ -258,8 +259,10 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 
         .FileEnd => {
             // Terminator. iTerm2's documented form is `FileEnd` with
-            // no `=value`, but tolerate a trailing `=` (some emitters
-            // round-trip the key as `key=`).
+            // no `=value`; we accept `FileEnd=` defensively since the
+            // upstream `key=value` parse loop happily produces an
+            // empty value for the bare key and we don't gain anything
+            // by rejecting it.
             parser.command = .{ .iterm2_multipart_image = .end };
             return &parser.command;
         },
@@ -455,10 +458,10 @@ pub const Iterm2MultipartAssembler = struct {
     /// flight.
     state: ?State = null,
 
-    /// Maximum accumulated base64 payload. 64 MiB matches the default
-    /// max bytes the APC kitty graphics path enforces (see
-    /// src/terminal/apc.zig Protocol.defaultMaxBytes for kitty).
-    pub const max_payload_bytes: usize = 64 * 1024 * 1024;
+    /// Maximum accumulated base64 payload. Sourced from the APC kitty
+    /// graphics path so the two image-transport ceilings stay in
+    /// lockstep without manual drift.
+    pub const max_payload_bytes: usize = apc.Protocol.defaultMaxBytes(.kitty);
 
     pub const State = struct {
         hints: Command.Iterm2ImageHints,
@@ -1254,10 +1257,11 @@ test "Iterm2MultipartAssembler: oversize transfer is dropped" {
 
     _ = try assembler.handleEvent(alloc, .{ .start = .{} });
 
-    // Build a chunk that, when combined with the cap-1 already in the
-    // buffer, would exceed max_payload_bytes by one byte. We can't
-    // afford to actually allocate 64 MiB in the test, so we cheat by
-    // pre-loading the assembler state with a fake size.
+    // Pre-load the assembler state up to the cap, then push one more
+    // byte and assert the transfer is aborted. The resize does a real
+    // allocation of max_payload_bytes; that's deliberately the full
+    // 65 MiB so the boundary check exercises the same arithmetic
+    // production sees, and the test is cheap enough at this size.
     if (assembler.state) |*s| {
         try s.payload.resize(alloc, Iterm2MultipartAssembler.max_payload_bytes);
     }
