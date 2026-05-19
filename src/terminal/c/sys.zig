@@ -22,6 +22,15 @@ pub const DecodePngFn = *const fn (
     *Image,
 ) callconv(lib.calling_conv) bool;
 
+/// C: GhosttySysDecodeJpegFn
+pub const DecodeJpegFn = *const fn (
+    ?*anyopaque,
+    *const CAllocator,
+    [*]const u8,
+    usize,
+    *Image,
+) callconv(lib.calling_conv) bool;
+
 /// C: GhosttySysLogLevel
 pub const LogLevel = enum(c_int) {
     @"error" = 0,
@@ -54,12 +63,14 @@ pub const Option = enum(c_int) {
     userdata = 0,
     decode_png = 1,
     log = 2,
+    decode_jpeg = 3,
 
     pub fn InType(comptime self: Option) type {
         return switch (self) {
             .userdata => ?*const anyopaque,
             .decode_png => ?DecodePngFn,
             .log => ?LogFn,
+            .decode_jpeg => ?DecodeJpegFn,
         };
     }
 };
@@ -69,6 +80,7 @@ pub const Option = enum(c_int) {
 const Global = struct {
     userdata: ?*anyopaque = null,
     decode_png: ?DecodePngFn = null,
+    decode_jpeg: ?DecodeJpegFn = null,
     log: ?LogFn = null,
 };
 
@@ -83,6 +95,25 @@ fn decodePngWrapper(
     data: []const u8,
 ) terminal_sys.DecodeError!terminal_sys.Image {
     const func = global.decode_png orelse return error.InvalidData;
+
+    const c_alloc = CAllocator.fromZig(&alloc);
+    var out: Image = undefined;
+    if (!func(global.userdata, &c_alloc, data.ptr, data.len, &out)) return error.InvalidData;
+
+    const result_data = out.data orelse return error.InvalidData;
+
+    return .{
+        .width = out.width,
+        .height = out.height,
+        .data = result_data[0..out.data_len],
+    };
+}
+
+fn decodeJpegWrapper(
+    alloc: std.mem.Allocator,
+    data: []const u8,
+) terminal_sys.DecodeError!terminal_sys.Image {
+    const func = global.decode_jpeg orelse return error.InvalidData;
 
     const c_alloc = CAllocator.fromZig(&alloc);
     var out: Image = undefined;
@@ -124,6 +155,10 @@ fn setTyped(
         .decode_png => {
             global.decode_png = value;
             terminal_sys.decode_png = if (value != null) &decodePngWrapper else null;
+        },
+        .decode_jpeg => {
+            global.decode_jpeg = value;
+            terminal_sys.decode_jpeg = if (value != null) &decodeJpegWrapper else null;
         },
         .log => global.log = value,
     }
@@ -271,6 +306,32 @@ test "set decode_png installs wrapper" {
     // Clear it again.
     try std.testing.expectEqual(Result.success, set(.decode_png, null));
     try std.testing.expect(terminal_sys.decode_png == null);
+}
+
+test "set decode_jpeg with null clears" {
+    global.decode_jpeg = null;
+    terminal_sys.decode_jpeg = null;
+
+    try std.testing.expectEqual(Result.success, set(.decode_jpeg, null));
+    try std.testing.expect(terminal_sys.decode_jpeg == null);
+}
+
+test "set decode_jpeg installs wrapper" {
+    const S = struct {
+        fn decode(_: ?*anyopaque, _: *const CAllocator, _: [*]const u8, _: usize, out: *Image) callconv(lib.calling_conv) bool {
+            out.* = .{ .width = 1, .height = 1, .data = null, .data_len = 0 };
+            return true;
+        }
+    };
+
+    try std.testing.expectEqual(Result.success, set(
+        .decode_jpeg,
+        @ptrCast(&S.decode),
+    ));
+    try std.testing.expect(terminal_sys.decode_jpeg != null);
+
+    try std.testing.expectEqual(Result.success, set(.decode_jpeg, null));
+    try std.testing.expect(terminal_sys.decode_jpeg == null);
 }
 
 test "set log with null clears" {
