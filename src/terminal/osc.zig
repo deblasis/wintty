@@ -175,6 +175,13 @@ pub const Command = union(Key) {
     /// strictly serialized.
     iterm2_multipart_image: Iterm2MultipartEvent,
 
+    /// iTerm2 OSC 1337 ReportCellSize query. The terminal replies with
+    /// `OSC 1337;ReportCellSize=H;W;scale ST` where H and W are cell
+    /// pixel height and width. iTerm2's bare-key query carries no
+    /// payload; the parser rejects any `=value` form because it would
+    /// collide with the response wire format.
+    iterm2_report_cell_size,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     /// iTerm2 OSC 1337 File= inline image payload + parsed geometry hints.
@@ -265,6 +272,7 @@ pub const Command = union(Key) {
             "context_signal",
             "iterm2_image_transmit",
             "iterm2_multipart_image",
+            "iterm2_report_cell_size",
         },
     );
 
@@ -500,6 +508,7 @@ pub const Parser = struct {
             .context_signal,
             .iterm2_image_transmit,
             .iterm2_multipart_image,
+            .iterm2_report_cell_size,
             => {},
         }
 

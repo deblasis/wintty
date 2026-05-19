@@ -520,13 +520,18 @@ pub const Handler = struct {
                 aw.writer.print("\x1b]l{s}\x1b\\", .{title}) catch return;
             },
 
-            .csi_14_t, .csi_16_t, .csi_18_t => {
+            .csi_14_t,
+            .csi_16_t,
+            .csi_18_t,
+            .iterm2_report_cell_size,
+            => {
                 const get_size = self.effects.size orelse return;
                 const s = get_size(self) orelse return;
                 const report_style: size_report.Style = switch (style) {
                     .csi_14_t => .csi_14_t,
                     .csi_16_t => .csi_16_t,
                     .csi_18_t => .csi_18_t,
+                    .iterm2_report_cell_size => .iterm2_report_cell_size,
                     .csi_21_t => unreachable,
                 };
                 size_report.encode(
