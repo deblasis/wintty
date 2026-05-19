@@ -397,13 +397,14 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
 /// The caller owns the returned Command and must call deinit on it;
 /// the Command owns the decoded byte buffer.
 ///
-/// The payload format is sniffed from the leading magic bytes:
-/// PNG (89 50 4E 47 0D 0A 1A 0A) and JPEG (FF D8 FF) are recognized
-/// and tagged on the synthesized Transmission so the downstream image
-/// decoder picks the right wuffs path. Any other content (GIF, BMP,
-/// raw pixels, etc.) returns error.UnsupportedFormat so that the
-/// caller surfaces a clear error rather than letting the kitty
-/// decoder reject mid-pipeline.
+/// The payload format is sniffed from the leading magic bytes: PNG
+/// (89 50 4E 47 0D 0A 1A 0A), JPEG (FF D8 FF), and GIF (47 49 46 38)
+/// are recognized and tagged on the synthesized Transmission so the
+/// downstream image decoder picks the right wuffs path. GIF is
+/// rendered as the first frame only. Any other content (BMP, raw
+/// pixels, etc.) returns error.UnsupportedFormat so that the caller
+/// surfaces a clear error rather than letting the kitty decoder
+/// reject mid-pipeline.
 ///
 /// Returns error.InvalidData if the base64 is malformed.
 pub fn synthKittyCommand(
@@ -426,12 +427,12 @@ pub fn synthKittyCommand(
     };
     data.items.len = decoded.len;
 
-    // Sniff the format from the leading magic bytes. PNG and JPEG are
-    // both routed through the kitty graphics image decoder by the
+    // Sniff the format from the leading magic bytes. PNG, JPEG, and
+    // GIF are routed through the kitty graphics image decoder by the
     // respective Format enum tags; anything else is rejected here so
     // the caller gets a clear error rather than letting the decoder
     // reject mid-pipeline.
-    const Sniffed = enum { png, jpeg };
+    const Sniffed = enum { png, jpeg, gif };
     const sniffed: Sniffed = sniffed: {
         const png_sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
         if (data.items.len >= png_sig.len and
@@ -445,6 +446,16 @@ pub fn synthKittyCommand(
             std.mem.eql(u8, data.items[0..jpeg_sig.len], &jpeg_sig))
         {
             break :sniffed .jpeg;
+        }
+
+        // GIF magic is "GIF8" (47 49 46 38) shared between GIF87a
+        // and GIF89a; the trailing version byte and 'a' are not
+        // needed for dispatch.
+        const gif_sig = [_]u8{ 0x47, 0x49, 0x46, 0x38 };
+        if (data.items.len >= gif_sig.len and
+            std.mem.eql(u8, data.items[0..gif_sig.len], &gif_sig))
+        {
+            break :sniffed .gif;
         }
 
         return error.UnsupportedFormat;
@@ -470,6 +481,7 @@ pub fn synthKittyCommand(
                 .format = switch (sniffed) {
                     .png => .png,
                     .jpeg => .jpeg,
+                    .gif => .gif,
                 },
                 .medium = .direct,
             },
@@ -1056,13 +1068,12 @@ test "synthKittyCommand: invalid base64 returns InvalidData" {
     );
 }
 
-test "synthKittyCommand: non-PNG non-JPEG bytes return UnsupportedFormat" {
+test "synthKittyCommand: unknown bytes return UnsupportedFormat" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // "abcd" base64-encoded. Valid base64, but no PNG nor JPEG
-    // signature. GIF magic (47 49 46 38) would also land here once
-    // GIF support is wired.
+    // "abcd" base64-encoded. Valid base64, but no PNG, JPEG, or GIF
+    // signature.
     try testing.expectError(
         error.UnsupportedFormat,
         synthKittyCommand(alloc, .{ .payload = "YWJjZA==" }),
@@ -1088,6 +1099,28 @@ test "synthKittyCommand: JPEG signature yields transmit_and_display JPEG command
 
     // JPEG SOI: FF D8 FF
     const sig = [_]u8{ 0xFF, 0xD8, 0xFF };
+    try testing.expect(cmd.data.len >= sig.len);
+    try testing.expectEqualSlices(u8, &sig, cmd.data[0..sig.len]);
+}
+
+// GIF89a header. Enough to satisfy the signature sniff; the wuffs
+// decoder validates the full structure later in the pipeline.
+const test_gif_b64 = "R0lGODlh";
+
+test "synthKittyCommand: GIF signature yields transmit_and_display GIF command" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cmd = try synthKittyCommand(alloc, .{ .payload = test_gif_b64 });
+    defer cmd.deinit(alloc);
+
+    try testing.expect(cmd.control == .transmit_and_display);
+    const td = cmd.control.transmit_and_display;
+    try testing.expect(td.transmission.format == .gif);
+    try testing.expect(td.transmission.medium == .direct);
+
+    // GIF magic: 47 49 46 38 ("GIF8")
+    const sig = [_]u8{ 0x47, 0x49, 0x46, 0x38 };
     try testing.expect(cmd.data.len >= sig.len);
     try testing.expectEqualSlices(u8, &sig, cmd.data[0..sig.len]);
 }

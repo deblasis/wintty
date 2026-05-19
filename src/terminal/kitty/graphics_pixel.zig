@@ -27,7 +27,7 @@ pub fn rgbaFromFormat(
         .gray_alpha => wuffs.swizzle.gaToRgba(alloc, data),
 
         // Compressed formats are decoded to RGBA during image loading.
-        .png, .jpeg => unreachable,
+        .png, .jpeg, .gif => unreachable,
     };
 
     return result catch |err| switch (err) {
