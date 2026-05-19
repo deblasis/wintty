@@ -72,6 +72,12 @@ pub const StreamHandler = struct {
     /// such as XTGETTCAP.
     dcs: terminal.dcs.Handler = .{},
 
+    /// In-flight iTerm2 multipart File= image accumulation. iTerm2 has
+    /// no session identifier so transfers are strictly serialized;
+    /// this carries the active transfer's hints + buffer between OSC
+    /// sequences.
+    multipart_iterm2: iterm2_parser.Iterm2MultipartAssembler = .{},
+
     /// The tmux control mode viewer state.
     tmux_viewer: if (tmux_enabled) ?*terminal.tmux.Viewer else void = if (tmux_enabled) null else {},
 
@@ -92,6 +98,7 @@ pub const StreamHandler = struct {
     pub fn deinit(self: *StreamHandler) void {
         self.apc.deinit();
         self.dcs.deinit();
+        self.multipart_iterm2.deinit(self.alloc);
         if (comptime tmux_enabled) tmux: {
             const viewer = self.tmux_viewer orelse break :tmux;
             viewer.deinit();
@@ -373,6 +380,7 @@ pub const StreamHandler = struct {
             .apc_end => try self.apcEnd(),
             .apc_put => self.apc.feed(self.alloc, value),
             .iterm2_image_transmit => try self.iterm2ImageTransmit(value),
+            .iterm2_multipart_image => try self.iterm2MultipartImage(value),
 
             // Unimplemented
             .title_push,
@@ -1645,5 +1653,28 @@ pub const StreamHandler = struct {
         // iTerm2's File= protocol has no response channel, unlike the
         // kitty graphics APC. We drop the response.
         _ = self.terminal.kittyGraphics(self.alloc, &cmd);
+    }
+
+    /// Handle one event from an iTerm2 OSC 1337 multipart File=
+    /// transfer. The assembler stitches chunks across OSCs; on FileEnd
+    /// it returns an Iterm2ImageTransmit whose payload we own and
+    /// must free. We hand it straight to the same synth + dispatch
+    /// path the single-shot File= handler uses.
+    fn iterm2MultipartImage(
+        self: *StreamHandler,
+        event: terminal.osc.Command.Iterm2MultipartEvent,
+    ) !void {
+        const assembled = self.multipart_iterm2.handleEvent(
+            self.alloc,
+            event,
+        ) catch |err| {
+            log.warn("iterm2 multipart image dropped: {t}", .{err});
+            return;
+        };
+
+        const transmit = assembled orelse return;
+        defer self.alloc.free(transmit.payload);
+
+        try self.iterm2ImageTransmit(transmit);
     }
 };
