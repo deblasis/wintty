@@ -94,7 +94,10 @@ pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
 /// per band; reset in replaceRegion's release loop.
 pending_staging_bytes: u64 = 0,
 
-const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
+/// Row-pitch alignment that DX12's CopyTextureRegion requires for staging
+/// buffers (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). `pub` so image.zig can
+/// `comptime assert` its mirror constant stays in lockstep.
+pub const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
 
 /// Target size in bytes for each per-band staging buffer. Chosen to keep
 /// individual UPLOAD-heap allocations small enough to succeed under

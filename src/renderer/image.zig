@@ -20,21 +20,33 @@ const log = std.log.scoped(.renderer_image);
 /// pressuring Windows shared-memory.
 const TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Pitch alignment used by DX12 texture uploads. Must stay in sync with
-/// Texture.TEXTURE_DATA_PITCH_ALIGNMENT (256) so the budget estimate
-/// matches the actual staging buffer size.
-const TEXTURE_UPLOAD_PITCH_ALIGNMENT: u32 = 256;
+/// Mirror of directx12/Texture.zig TEXTURE_DATA_PITCH_ALIGNMENT. Kept
+/// local so the budget math stays renderer-agnostic; the comptime
+/// block below catches drift on DX12 builds, and on backends without
+/// the constant (Metal/OpenGL) the assert is skipped.
+const TEXTURE_UPLOAD_PITCH_ALIGNMENT: u64 = 256;
 
-/// Compute the UPLOAD-heap bytes that will be consumed when uploading
-/// an RGBA image of the given dimensions. Mirrors the math inside
-/// Texture.uploadRegion (post-swizzle, 256-byte row alignment); kept
-/// here as a pure function so State.upload can size-check images
-/// without touching the DX12 layer.
+comptime {
+    if (@hasDecl(Texture, "TEXTURE_DATA_PITCH_ALIGNMENT")) {
+        std.debug.assert(
+            TEXTURE_UPLOAD_PITCH_ALIGNMENT == Texture.TEXTURE_DATA_PITCH_ALIGNMENT,
+        );
+    }
+}
+
+/// Compute the UPLOAD-heap bytes that will be consumed when uploading an
+/// image of the given dimensions to a DX12 texture. The destination is
+/// always RGBA (Image.convert() swizzles gray/rgb/bgr/etc. to 4 bpp
+/// before upload), and Texture.uploadRegion aligns each row to
+/// TEXTURE_UPLOAD_PITCH_ALIGNMENT (256 bytes). Pure function so
+/// State.upload can size-check without touching the DX12 layer; the
+/// arithmetic is u64 throughout to keep multi-GB hypotheticals from
+/// silently wrapping the u32 intermediate.
 fn imageStagingBytes(width: u32, height: u32) u64 {
-    const row_bytes: u32 = width * 4;
-    const aligned: u32 = (row_bytes + TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1) &
-        ~(TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1);
-    return @as(u64, aligned) * @as(u64, height);
+    const row_bytes: u64 = @as(u64, width) * 4;
+    const align_mask: u64 = TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1;
+    const aligned: u64 = (row_bytes + align_mask) & ~align_mask;
+    return aligned * @as(u64, height);
 }
 
 /// Budget boundary check: does adding `new_est` bytes to the current
@@ -110,55 +122,60 @@ pub const State = struct {
         alloc: Allocator,
         api: *GraphicsAPI,
     ) bool {
-        // Compute the current UPLOAD-heap staging total across all
-        // already-uploaded textures once at the start of the call. We
-        // incrementally bump this as new uploads succeed; that's still
-        // a strict upper bound because a successful upload only adds
-        // bytes (it never frees, until the next replaceRegion/deinit
-        // which happens in a different code path).
+        // Backends whose Texture tracks staging-heap pressure (DX12) run
+        // the budget gate; everything else falls through to a straight
+        // upload loop. The flag is comptime so dead branches drop out.
+        const budgeted = comptime @hasField(Texture, "pending_staging_bytes");
+
+        // Pass 1: sweep unloads + accumulate in-flight from survivors.
+        // Done first so deferral checks in pass 2 see the post-unload
+        // total (an unloaded image's staging is about to be Released).
         var bytes_in_flight: u64 = 0;
         {
             var image_it = self.images.iterator();
             while (image_it.next()) |kv| {
-                bytes_in_flight += kv.value_ptr.image.pendingStagingBytes();
+                const img = &kv.value_ptr.image;
+                if (img.isUnloading()) {
+                    img.deinit(alloc);
+                    self.images.removeByPtr(kv.key_ptr);
+                    continue;
+                }
+                if (budgeted) bytes_in_flight += img.pendingStagingBytes();
             }
         }
 
+        // Pass 2: upload pending images, gating on DX12's budget.
         var success: bool = true;
         var image_it = self.images.iterator();
         while (image_it.next()) |kv| {
             const img = &kv.value_ptr.image;
-            if (img.isUnloading()) {
-                bytes_in_flight -|= img.pendingStagingBytes();
-                img.deinit(alloc);
-                self.images.removeByPtr(kv.key_ptr);
+            if (!img.isPending()) continue;
+
+            const est: u64 = if (budgeted) img.estimatedUploadStagingBytes() else 0;
+            if (budgeted and wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes)) {
+                log.debug(
+                    "deferring image upload est={d} in_flight={d} budget={d}",
+                    .{ est, bytes_in_flight, self.upload_budget_bytes },
+                );
                 continue;
             }
 
-            if (img.isPending()) {
-                const est = img.estimatedUploadStagingBytes();
-                if (est > 0 and wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes)) {
-                    log.debug(
-                        "deferring image upload est={d} in_flight={d} budget={d}",
-                        .{ est, bytes_in_flight, self.upload_budget_bytes },
-                    );
-                    continue;
-                }
-
-                img.upload(
-                    alloc,
-                    api,
-                ) catch |err| {
-                    log.warn(
-                        "error uploading image to GPU err={t}, dropping placement",
-                        .{err},
-                    );
-                    img.markForUnload();
-                    success = false;
-                    continue;
-                };
-                bytes_in_flight += est;
-            }
+            img.upload(
+                alloc,
+                api,
+            ) catch |err| {
+                log.warn(
+                    "error uploading image to GPU err={t}, dropping placement",
+                    .{err},
+                );
+                // markForUnload moves the image to .unload_pending whose
+                // pendingStagingBytes() returns 0, so next frame's in-flight
+                // total drops by `est` naturally. No manual decrement needed.
+                img.markForUnload();
+                success = false;
+                continue;
+            };
+            if (budgeted) bytes_in_flight += est;
         }
 
         return success;
@@ -882,29 +899,40 @@ pub const Image = union(enum) {
     }
 
     /// UPLOAD-heap bytes this image's currently-held texture is holding
-    /// alive in `pending_staging`. Returns 0 for variants that have no
-    /// uploaded texture yet.
+    /// alive in `pending_staging`. Returns 0 on backends whose Texture
+    /// doesn't track staging-heap pressure (Metal, OpenGL); only DX12
+    /// keeps per-call staging buffers around for fence-gated release.
+    /// The field-access switch is wrapped in a comptime `if` so the
+    /// Metal/OpenGL builds never see `t.pending_staging_bytes` -- a
+    /// post-return version would still type-check the unreachable body.
     pub fn pendingStagingBytes(self: Image) u64 {
-        return switch (self) {
-            .pending, .unload_pending => 0,
-            .ready, .unload_ready => |t| t.pending_staging_bytes,
-            .replace, .unload_replace => |r| r.texture.pending_staging_bytes,
-        };
+        if (comptime @hasField(Texture, "pending_staging_bytes")) {
+            return switch (self) {
+                .pending, .unload_pending => 0,
+                .ready, .unload_ready => |t| t.pending_staging_bytes,
+                .replace, .unload_replace => |r| r.texture.pending_staging_bytes,
+            };
+        }
+        return 0;
     }
 
     /// UPLOAD-heap bytes the next `upload()` call will require for this
     /// image. Returns 0 for already-uploaded or unload-marked variants
-    /// because they won't trigger a new staging allocation.
+    /// because they won't trigger a new staging allocation, and 0 on
+    /// backends without staging-heap tracking.
     pub fn estimatedUploadStagingBytes(self: Image) u64 {
-        return switch (self) {
-            .pending => |p| imageStagingBytes(p.width, p.height),
-            .replace => |r| imageStagingBytes(r.pending.width, r.pending.height),
-            .ready,
-            .unload_ready,
-            .unload_pending,
-            .unload_replace,
-            => 0,
-        };
+        if (comptime @hasField(Texture, "pending_staging_bytes")) {
+            return switch (self) {
+                .pending => |p| imageStagingBytes(p.width, p.height),
+                .replace => |r| imageStagingBytes(r.pending.width, r.pending.height),
+                .ready,
+                .unload_ready,
+                .unload_pending,
+                .unload_replace,
+                => 0,
+            };
+        }
+        return 0;
     }
 
     /// Mark this image for unload whatever state it is in.
@@ -1186,27 +1214,45 @@ test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .pending" 
 }
 
 test "Image.estimatedUploadStagingBytes returns 0 for .ready" {
-    const img: Image = .{ .ready = .{} };
-    try std.testing.expectEqual(@as(u64, 0), img.estimatedUploadStagingBytes());
+    // .ready carries a Texture, and OpenGL's Texture has no default-init
+    // fields, so `.ready = .{}` only compiles where Texture is all-defaults.
+    // Gating on the DX12-only marker keeps the test active where it matters.
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        const img: Image = .{ .ready = .{} };
+        try std.testing.expectEqual(@as(u64, 0), img.estimatedUploadStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
 test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .replace" {
-    var data: [16]u8 = .{0} ** 16;
-    const img: Image = .{ .replace = .{
-        .texture = .{},
-        .pending = .{
-            .width = 2,
-            .height = 2,
-            .pixel_format = .rgba,
-            .data = &data,
-        },
-    } };
-    try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        var data: [16]u8 = .{0} ** 16;
+        const img: Image = .{ .replace = .{
+            .texture = .{},
+            .pending = .{
+                .width = 2,
+                .height = 2,
+                .pixel_format = .rgba,
+                .data = &data,
+            },
+        } };
+        try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
 test "Image.pendingStagingBytes returns texture.pending_staging_bytes for .ready" {
-    const img: Image = .{ .ready = .{ .pending_staging_bytes = 12345 } };
-    try std.testing.expectEqual(@as(u64, 12345), img.pendingStagingBytes());
+    // Only the DX12 Texture has the staging-bytes counter. The outer
+    // comptime branch keeps the field access out of Metal/OpenGL
+    // analysis; the inner runtime skip surfaces in the test report.
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        const img: Image = .{ .ready = .{ .pending_staging_bytes = 12345 } };
+        try std.testing.expectEqual(@as(u64, 12345), img.pendingStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
 test "Image.pendingStagingBytes returns 0 for .pending (no texture yet)" {
