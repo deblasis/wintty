@@ -37,6 +37,13 @@ fn imageStagingBytes(width: u32, height: u32) u64 {
     return @as(u64, aligned) * @as(u64, height);
 }
 
+/// Budget boundary check: does adding `new_est` bytes to the current
+/// `in_flight` total push past `budget`? Strict greater-than so the
+/// budget is the exact ceiling (in_flight + est == budget is allowed).
+fn wouldExceedBudget(in_flight: u64, new_est: u64, budget: u64) bool {
+    return in_flight + new_est > budget;
+}
+
 /// Generic image rendering state for the renderer. This stores all
 /// images and their placements and exposes only a limited public API
 /// for adding images and placements and drawing them.
@@ -1087,4 +1094,22 @@ test "imageStagingBytes pads to next 256 for non-aligned widths" {
 test "imageStagingBytes for typical 4096x3072 RGBA upload" {
     // 4096 * 4 = 16384, already aligned. 16384 * 3072 = 50331648 (~48 MiB).
     try std.testing.expectEqual(@as(u64, 50331648), imageStagingBytes(4096, 3072));
+}
+
+test "wouldExceedBudget false when sum fits exactly" {
+    // 100 + 28 == 128, fits at the boundary.
+    try std.testing.expect(!wouldExceedBudget(100, 28, 128));
+}
+
+test "wouldExceedBudget true when sum overshoots by one" {
+    try std.testing.expect(wouldExceedBudget(100, 29, 128));
+}
+
+test "wouldExceedBudget false when in_flight already at budget and est is 0" {
+    try std.testing.expect(!wouldExceedBudget(128, 0, 128));
+}
+
+test "wouldExceedBudget true when in_flight already over budget" {
+    // Already over (somehow) -- any non-zero est should exceed.
+    try std.testing.expect(wouldExceedBudget(200, 1, 128));
 }
