@@ -495,6 +495,16 @@ fn alignPitch(row_bytes: u32) u32 {
     return (row_bytes + TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 }
 
+/// Number of source rows that fit in a single upload staging band.
+/// Guarantees at least 1 row even if a single row exceeds the budget,
+/// so a pathologically wide image still makes forward progress (each
+/// band uploads exactly one row).
+fn rowsPerBand(aligned_row_pitch: u32, band_budget_bytes: u64) u32 {
+    if (aligned_row_pitch == 0) return 1;
+    const rows: u64 = band_budget_bytes / @as(u64, aligned_row_pitch);
+    return @intCast(@max(@as(u64, 1), rows));
+}
+
 fn bppForFormat(format: dxgi.DXGI_FORMAT) u32 {
     return switch (format) {
         .R8_UNORM => 1,
@@ -513,6 +523,25 @@ test "alignPitch rounds up to 256" {
     try std.testing.expectEqual(@as(u32, 256), alignPitch(256));
     try std.testing.expectEqual(@as(u32, 512), alignPitch(257));
     try std.testing.expectEqual(@as(u32, 1024), alignPitch(1000));
+}
+
+test "rowsPerBand divides evenly" {
+    // 8 MiB budget / 256-byte row pitch = 32768 rows per band.
+    try std.testing.expectEqual(@as(u32, 32768), rowsPerBand(256, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand rounds down for non-divisible row pitch" {
+    // 8 MiB budget / 700-byte row pitch = 11983, remainder 508.
+    try std.testing.expectEqual(@as(u32, 11983), rowsPerBand(700, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand floors at 1 when a single row exceeds the budget" {
+    // A row that is itself 16 MiB still gets a 1-row band so progress is made.
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(16 * 1024 * 1024, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand returns 1 for zero pitch (defensive)" {
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(0, 8 * 1024 * 1024));
 }
 
 test "bppForFormat returns correct bytes per pixel" {
