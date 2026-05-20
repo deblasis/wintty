@@ -184,10 +184,10 @@ pub fn deinit(self: Texture) void {
     for (self.pending_staging.items) |staging| {
         _ = staging.Release();
     }
-    // The ArrayListUnmanaged backing slice is heap-allocated; freeing it
-    // requires a pointer-receiver because list.deinit mutates the list
-    // pointer. self is a value parameter, so the mutation is local and
-    // safe (the original self is destroyed when the function returns).
+    // deinit takes self by value to match Metal/OpenGL Texture and the
+    // switch-capture call sites in image.zig. Copying self locally lets
+    // us call ArrayListUnmanaged.deinit (pointer-receiver) without
+    // changing the cross-backend signature.
     var self_mut = self;
     self_mut.pending_staging.deinit(std.heap.c_allocator);
     if (self.resource) |res| {
@@ -207,11 +207,11 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 
 /// Upload pixel data to a sub-region of this texture.
 ///
-/// The staging buffer is kept alive until the next replaceRegion call or
-/// deinit, because D3D12 does not extend resource lifetimes for recorded
-/// commands. The previous staging buffer is safe to release here because
-/// the frame's fence wait in beginFrame guarantees the GPU finished
-/// executing the prior CopyTextureRegion.
+/// The staging buffers are kept alive until the next replaceRegion call
+/// or deinit, because D3D12 does not extend resource lifetimes for
+/// recorded commands. The previous staging buffers are safe to release
+/// here because the frame's fence wait in beginFrame guarantees the GPU
+/// finished executing the prior CopyTextureRegion calls.
 ///
 /// Returns error{}!void for API compatibility with Metal's replaceRegion
 /// which cannot fail. DX12 upload failures are caught here and logged at
@@ -219,6 +219,18 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// is visible without breaking the shared signature. Texture.init's
 /// initial-data path propagates the same failure via uploadRegion, so
 /// new-image uploads do not need this swallow.
+///
+/// Partial-write caveat: uploadRegion records one CopyTextureRegion per
+/// row-band as it walks the data. If a later band fails (staging alloc,
+/// Map, etc.) the earlier bands' copies stay recorded on the command
+/// list and will execute when the frame submits. For Texture.init the
+/// destination is errdefer-Released so the partial copies write to a
+/// soon-released resource (harmless). For replaceRegion the destination
+/// survives, so a multi-band atlas update could leave the texture with
+/// the leading bands of the new content and the trailing rows of the
+/// previous content. Acceptable for atlases (next replaceRegion fixes
+/// it) but worth knowing if anyone calls replaceRegion on a multi-band
+/// region of a user-visible texture.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
     // Release the staging buffers from the previous upload. Safe because
     // beginFrame waited on the fence for this frame slot, so the GPU
@@ -270,6 +282,12 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     // all stay alive in self.pending_staging until the next replaceRegion
     // or deinit. Splitting the upload keeps individual UPLOAD-heap
     // allocations small enough to succeed under heap fragmentation.
+    //
+    // Note the log-level asymmetry below: the null guards above log at
+    // warn (defensive checks; never fire under correct callers), while
+    // createStagingBuffer and Map failures log at err (real GPU/driver
+    // failures with hex context worth investigating). Both still return
+    // error.UploadFailed and let the caller drop the placement.
     var bands = Bands{ .height = height, .rows_per_band = rows_per };
     while (bands.next()) |band| {
         const band_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, band.row_count);
@@ -329,6 +347,12 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
             .back = 1,
         };
 
+        // y + band.start_row is the band-to-destination offset arithmetic;
+        // this is the integration point where the Bands iterator meets the
+        // DX12 copy command, and is not covered by the iterator's pure
+        // unit tests. A bug here would surface as vertically-shifted or
+        // overlapping bands in a multi-band image -- worth eyeballing on
+        // any change to this loop.
         cmd_list.CopyTextureRegion(&dst_loc, x, y + band.start_row, 0, &src_loc, &src_box);
 
         // Keep the band's staging buffer alive until the GPU finishes the
@@ -585,6 +609,12 @@ test "rowsPerBand rounds down for non-divisible row pitch" {
 test "rowsPerBand floors at 1 when a single row exceeds the budget" {
     // A row that is itself 16 MiB still gets a 1-row band so progress is made.
     try std.testing.expectEqual(@as(u32, 1), rowsPerBand(16 * 1024 * 1024, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand returns 1 when row exactly fills the budget" {
+    // Exact-fit boundary -- the floor-1 path and the divide path both
+    // yield 1, so this test pins the boundary behavior.
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(8 * 1024 * 1024, 8 * 1024 * 1024));
 }
 
 test "rowsPerBand returns 1 for zero pitch (defensive)" {
