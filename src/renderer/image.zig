@@ -13,6 +13,50 @@ const Overlay = @import("Overlay.zig");
 
 const log = std.log.scoped(.renderer_image);
 
+/// Default per-frame UPLOAD-heap budget for image uploads. The State
+/// loop defers any pending image whose chunked-upload total would push
+/// the in-flight sum past this number; the deferred image stays in
+/// .pending and retries on the next frame. 128 MiB leaves headroom for
+/// two ~48 MiB images concurrent with smaller atlases/overlays without
+/// pressuring Windows shared-memory.
+const TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Mirror of directx12/Texture.zig TEXTURE_DATA_PITCH_ALIGNMENT. Kept
+/// local so the budget math stays renderer-agnostic; the comptime
+/// block below catches drift on DX12 builds, and on backends without
+/// the constant (Metal/OpenGL) the assert is skipped.
+const TEXTURE_UPLOAD_PITCH_ALIGNMENT: u64 = 256;
+
+comptime {
+    if (@hasDecl(Texture, "TEXTURE_DATA_PITCH_ALIGNMENT")) {
+        std.debug.assert(
+            TEXTURE_UPLOAD_PITCH_ALIGNMENT == Texture.TEXTURE_DATA_PITCH_ALIGNMENT,
+        );
+    }
+}
+
+/// Compute the UPLOAD-heap bytes that will be consumed when uploading an
+/// image of the given dimensions to a DX12 texture. The destination is
+/// always RGBA (Image.convert() swizzles gray/rgb/bgr/etc. to 4 bpp
+/// before upload), and Texture.uploadRegion aligns each row to
+/// TEXTURE_UPLOAD_PITCH_ALIGNMENT (256 bytes). Pure function so
+/// State.upload can size-check without touching the DX12 layer; the
+/// arithmetic is u64 throughout to keep multi-GB hypotheticals from
+/// silently wrapping the u32 intermediate.
+fn imageStagingBytes(width: u32, height: u32) u64 {
+    const row_bytes: u64 = @as(u64, width) * 4;
+    const align_mask: u64 = TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1;
+    const aligned: u64 = (row_bytes + align_mask) & ~align_mask;
+    return aligned * @as(u64, height);
+}
+
+/// Budget boundary check: does adding `new_est` bytes to the current
+/// `in_flight` total push past `budget`? Strict greater-than so the
+/// budget is the exact ceiling (in_flight + est == budget is allowed).
+fn wouldExceedBudget(in_flight: u64, new_est: u64, budget: u64) bool {
+    return in_flight + new_est > budget;
+}
+
 /// Generic image rendering state for the renderer. This stores all
 /// images and their placements and exposes only a limited public API
 /// for adding images and placements and drawing them.
@@ -37,6 +81,12 @@ pub const State = struct {
     /// Overlays
     overlay_placements: std.ArrayListUnmanaged(Placement),
 
+    /// Per-frame UPLOAD-heap budget for image uploads. State.upload
+    /// defers any pending image whose chunked upload would push the
+    /// running in-flight total past this. Tunable per-State instance;
+    /// defaults to TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES (128 MiB).
+    upload_budget_bytes: u64 = TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
+
     pub const empty: State = .{
         .images = .empty,
         .kitty_placements = .empty,
@@ -44,6 +94,7 @@ pub const State = struct {
         .kitty_text_end = 0,
         .kitty_virtual = false,
         .overlay_placements = .empty,
+        .upload_budget_bytes = TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
     };
 
     pub fn deinit(self: *State, alloc: Allocator) void {
@@ -72,29 +123,60 @@ pub const State = struct {
         alloc: Allocator,
         api: *GraphicsAPI,
     ) bool {
+        // Backends whose Texture tracks staging-heap pressure (DX12) run
+        // the budget gate; everything else falls through to a straight
+        // upload loop. The flag is comptime so dead branches drop out.
+        const budgeted = comptime @hasField(Texture, "pending_staging_bytes");
+
+        // Pass 1: sweep unloads + accumulate in-flight from survivors.
+        // Done first so deferral checks in pass 2 see the post-unload
+        // total (an unloaded image's staging is about to be Released).
+        var bytes_in_flight: u64 = 0;
+        {
+            var image_it = self.images.iterator();
+            while (image_it.next()) |kv| {
+                const img = &kv.value_ptr.image;
+                if (img.isUnloading()) {
+                    img.deinit(alloc);
+                    self.images.removeByPtr(kv.key_ptr);
+                    continue;
+                }
+                if (budgeted) bytes_in_flight += img.pendingStagingBytes();
+            }
+        }
+
+        // Pass 2: upload pending images, gating on DX12's budget.
         var success: bool = true;
         var image_it = self.images.iterator();
         while (image_it.next()) |kv| {
             const img = &kv.value_ptr.image;
-            if (img.isUnloading()) {
-                img.deinit(alloc);
-                self.images.removeByPtr(kv.key_ptr);
+            if (!img.isPending()) continue;
+
+            const est: u64 = if (budgeted) img.estimatedUploadStagingBytes() else 0;
+            if (budgeted and wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes)) {
+                log.debug(
+                    "deferring image upload est={d} in_flight={d} budget={d}",
+                    .{ est, bytes_in_flight, self.upload_budget_bytes },
+                );
                 continue;
             }
 
-            if (img.isPending()) {
-                img.upload(
-                    alloc,
-                    api,
-                ) catch |err| {
-                    log.warn(
-                        "error uploading image to GPU err={t}, dropping placement",
-                        .{err},
-                    );
-                    img.markForUnload();
-                    success = false;
-                };
-            }
+            img.upload(
+                alloc,
+                api,
+            ) catch |err| {
+                log.warn(
+                    "error uploading image to GPU err={t}, dropping placement",
+                    .{err},
+                );
+                // markForUnload moves the image to .unload_pending whose
+                // pendingStagingBytes() returns 0, so next frame's in-flight
+                // total drops by `est` naturally. No manual decrement needed.
+                img.markForUnload();
+                success = false;
+                continue;
+            };
+            if (budgeted) bytes_in_flight += est;
         }
 
         return success;
@@ -835,6 +917,43 @@ pub const Image = union(enum) {
         }
     }
 
+    /// UPLOAD-heap bytes this image's currently-held texture is holding
+    /// alive in `pending_staging`. Returns 0 on backends whose Texture
+    /// doesn't track staging-heap pressure (Metal, OpenGL); only DX12
+    /// keeps per-call staging buffers around for fence-gated release.
+    /// The field-access switch is wrapped in a comptime `if` so the
+    /// Metal/OpenGL builds never see `t.pending_staging_bytes` -- a
+    /// post-return version would still type-check the unreachable body.
+    pub fn pendingStagingBytes(self: Image) u64 {
+        if (comptime @hasField(Texture, "pending_staging_bytes")) {
+            return switch (self) {
+                .pending, .unload_pending => 0,
+                .ready, .unload_ready => |t| t.pending_staging_bytes,
+                .replace, .unload_replace => |r| r.texture.pending_staging_bytes,
+            };
+        }
+        return 0;
+    }
+
+    /// UPLOAD-heap bytes the next `upload()` call will require for this
+    /// image. Returns 0 for already-uploaded or unload-marked variants
+    /// because they won't trigger a new staging allocation, and 0 on
+    /// backends without staging-heap tracking.
+    pub fn estimatedUploadStagingBytes(self: Image) u64 {
+        if (comptime @hasField(Texture, "pending_staging_bytes")) {
+            return switch (self) {
+                .pending => |p| imageStagingBytes(p.width, p.height),
+                .replace => |r| imageStagingBytes(r.pending.width, r.pending.height),
+                .ready,
+                .unload_ready,
+                .unload_pending,
+                .unload_replace,
+                => 0,
+            };
+        }
+        return 0;
+    }
+
     /// Mark this image for unload whatever state it is in.
     pub fn markForUnload(self: *Image) void {
         self.* = switch (self.*) {
@@ -1121,5 +1240,116 @@ test "Image.markForUnload is idempotent on already-unloading states" {
     try testing.expectEqual(
         @as(std.meta.Tag(Image), .unload_pending),
         std.meta.activeTag(img),
+    );
+}
+
+test "imageStagingBytes aligns row pitch to 256" {
+    // 1x1 RGBA -> aligned row pitch is 256, height 1 -> 256 bytes.
+    try std.testing.expectEqual(@as(u64, 256), imageStagingBytes(1, 1));
+}
+
+test "imageStagingBytes for 64x64 RGBA" {
+    // 64 * 4 = 256, already aligned. 256 * 64 = 16384.
+    try std.testing.expectEqual(@as(u64, 16384), imageStagingBytes(64, 64));
+}
+
+test "imageStagingBytes pads to next 256 for non-aligned widths" {
+    // 65 * 4 = 260, pads to 512. 512 * 65 = 33280.
+    try std.testing.expectEqual(@as(u64, 33280), imageStagingBytes(65, 65));
+}
+
+test "imageStagingBytes for typical 4096x3072 RGBA upload" {
+    // 4096 * 4 = 16384, already aligned. 16384 * 3072 = 50331648 (~48 MiB).
+    try std.testing.expectEqual(@as(u64, 50331648), imageStagingBytes(4096, 3072));
+}
+
+test "wouldExceedBudget false when sum fits exactly" {
+    // 100 + 28 == 128, fits at the boundary.
+    try std.testing.expect(!wouldExceedBudget(100, 28, 128));
+}
+
+test "wouldExceedBudget true when sum overshoots by one" {
+    try std.testing.expect(wouldExceedBudget(100, 29, 128));
+}
+
+test "wouldExceedBudget false when in_flight already at budget and est is 0" {
+    try std.testing.expect(!wouldExceedBudget(128, 0, 128));
+}
+
+test "wouldExceedBudget true when in_flight already over budget" {
+    // Already over (somehow) -- any non-zero est should exceed.
+    try std.testing.expect(wouldExceedBudget(200, 1, 128));
+}
+
+test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .pending" {
+    var data: [16]u8 = .{0} ** 16;
+    const img: Image = .{ .pending = .{
+        .width = 2,
+        .height = 2,
+        .pixel_format = .rgba,
+        .data = &data,
+    } };
+    // 2x2 RGBA -> aligned pitch 256 * height 2 = 512.
+    try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+}
+
+test "Image.estimatedUploadStagingBytes returns 0 for .ready" {
+    // .ready carries a Texture, and OpenGL's Texture has no default-init
+    // fields, so `.ready = .{}` only compiles where Texture is all-defaults.
+    // Gating on the DX12-only marker keeps the test active where it matters.
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        const img: Image = .{ .ready = .{} };
+        try std.testing.expectEqual(@as(u64, 0), img.estimatedUploadStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .replace" {
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        var data: [16]u8 = .{0} ** 16;
+        const img: Image = .{ .replace = .{
+            .texture = .{},
+            .pending = .{
+                .width = 2,
+                .height = 2,
+                .pixel_format = .rgba,
+                .data = &data,
+            },
+        } };
+        try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "Image.pendingStagingBytes returns texture.pending_staging_bytes for .ready" {
+    // Only the DX12 Texture has the staging-bytes counter. The outer
+    // comptime branch keeps the field access out of Metal/OpenGL
+    // analysis; the inner runtime skip surfaces in the test report.
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        const img: Image = .{ .ready = .{ .pending_staging_bytes = 12345 } };
+        try std.testing.expectEqual(@as(u64, 12345), img.pendingStagingBytes());
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "Image.pendingStagingBytes returns 0 for .pending (no texture yet)" {
+    var data: [4]u8 = .{0} ** 4;
+    const img: Image = .{ .pending = .{
+        .width = 1,
+        .height = 1,
+        .pixel_format = .rgba,
+        .data = &data,
+    } };
+    try std.testing.expectEqual(@as(u64, 0), img.pendingStagingBytes());
+}
+
+test "State.upload_budget_bytes defaults to TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES" {
+    const state = State.empty;
+    try std.testing.expectEqual(
+        TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
+        state.upload_budget_bytes,
     );
 }
