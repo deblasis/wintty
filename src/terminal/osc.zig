@@ -196,13 +196,41 @@ pub const Command = union(Key) {
         /// Geometry hints parsed from the options block. Defaults
         /// preserve the image's native sizing.
         hints: Iterm2ImageHints = .{},
+
+        /// C ABI representation. The Zig slice is split into a nested
+        /// `payload: { ptr, len }` because slices aren't extern-compat.
+        ///
+        /// LIFETIME: `payload.ptr` is borrowed -- it points into the
+        /// parser's capture buffer (single-shot dispatch) or the
+        /// multipart assembler's heap concatenation. Consumers must
+        /// copy before returning from the dispatch callback.
+        // Sync with: ghostty_osc_iterm2_image_transmit_s
+        pub const C = extern struct {
+            payload: extern struct {
+                ptr: [*]const u8,
+                len: usize,
+            },
+            hints: Iterm2ImageHints,
+        };
+
+        pub fn cval(self: Iterm2ImageTransmit) C {
+            return .{
+                .payload = .{ .ptr = self.payload.ptr, .len = self.payload.len },
+                .hints = self.hints,
+            };
+        }
     };
 
     /// Subset of iTerm2 File= options that can be expressed in the
     /// Kitty graphics Display struct. Unsupported iTerm2 forms
     /// (pixel and percent sizing) are dropped by the parser with a
     /// log.warn.
-    pub const Iterm2ImageHints = struct {
+    ///
+    /// Declared `extern struct` so it can be embedded in the C ABI
+    /// CValue union directly: every field (u32, u32, bool) is
+    /// extern-compatible, but a plain Zig struct doesn't carry a
+    /// layout guarantee that the extern union requires.
+    pub const Iterm2ImageHints = extern struct {
         /// Display width in terminal cells. 0 = no preference; the
         /// renderer falls back to the image's native sizing.
         columns: u32 = 0,
@@ -234,6 +262,47 @@ pub const Command = union(Key) {
         /// `OSC 1337;FileEnd` terminated the active transfer. The
         /// assembler decodes + dispatches the accumulated payload.
         end,
+
+        // Sync with: ghostty_osc_iterm2_multipart_event_tag_e
+        pub const Tag = enum(c_int) {
+            start,
+            chunk,
+            end,
+        };
+
+        /// C ABI representation. Mirrors the apprt/action.zig
+        /// `KeyTable` pattern: a `Tag` discriminant alongside an
+        /// `extern union` of the variants' payloads, both wrapped in
+        /// an outer `extern struct { tag, value }`.
+        ///
+        /// LIFETIME: `chunk.ptr` is borrowed from the parser's
+        /// capture buffer. Consumers must copy before the next OSC
+        /// dispatches.
+        // Sync with: ghostty_osc_iterm2_multipart_event_u
+        pub const CValue = extern union {
+            start: Iterm2ImageHints,
+            chunk: extern struct {
+                ptr: [*]const u8,
+                len: usize,
+            },
+        };
+
+        // Sync with: ghostty_osc_iterm2_multipart_event_s
+        pub const C = extern struct {
+            tag: Tag,
+            value: CValue,
+        };
+
+        pub fn cval(self: Iterm2MultipartEvent) C {
+            return switch (self) {
+                .start => |h| .{ .tag = .start, .value = .{ .start = h } },
+                .chunk => |s| .{
+                    .tag = .chunk,
+                    .value = .{ .chunk = .{ .ptr = s.ptr, .len = s.len } },
+                },
+                .end => .{ .tag = .end, .value = undefined },
+            };
+        }
     };
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
