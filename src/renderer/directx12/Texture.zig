@@ -505,6 +505,27 @@ fn rowsPerBand(aligned_row_pitch: u32, band_budget_bytes: u64) u32 {
     return @intCast(@max(@as(u64, 1), rows));
 }
 
+const Band = struct {
+    start_row: u32,
+    row_count: u32,
+};
+
+/// Iterator yielding row-bands for a chunked upload. `rows_per_band` comes
+/// from `rowsPerBand`. The last band is truncated to the remaining rows.
+const Bands = struct {
+    height: u32,
+    rows_per_band: u32,
+    cursor: u32 = 0,
+
+    fn next(self: *Bands) ?Band {
+        if (self.cursor >= self.height) return null;
+        const row_count = @min(self.rows_per_band, self.height - self.cursor);
+        const band = Band{ .start_row = self.cursor, .row_count = row_count };
+        self.cursor += row_count;
+        return band;
+    }
+};
+
 fn bppForFormat(format: dxgi.DXGI_FORMAT) u32 {
     return switch (format) {
         .R8_UNORM => 1,
@@ -542,6 +563,35 @@ test "rowsPerBand floors at 1 when a single row exceeds the budget" {
 
 test "rowsPerBand returns 1 for zero pitch (defensive)" {
     try std.testing.expectEqual(@as(u32, 1), rowsPerBand(0, 8 * 1024 * 1024));
+}
+
+test "Bands iterates exact-multiple height" {
+    var b = Bands{ .height = 64, .rows_per_band = 16 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 16, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 32, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 48, .row_count = 16 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands truncates final band to remaining rows" {
+    var b = Bands{ .height = 50, .rows_per_band = 16 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 16, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 32, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 48, .row_count = 2 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands with single-band fit returns one band" {
+    var b = Bands{ .height = 10, .rows_per_band = 100 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 10 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands with zero height yields nothing" {
+    var b = Bands{ .height = 0, .rows_per_band = 16 };
+    try std.testing.expect(b.next() == null);
 }
 
 test "bppForFormat returns correct bytes per pixel" {
