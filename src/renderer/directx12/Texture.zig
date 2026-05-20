@@ -78,12 +78,15 @@ device: ?*d3d12.ID3D12Device = null,
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Current resource state for barrier tracking.
 state: d3d12.D3D12_RESOURCE_STATES = d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
-/// Staging buffer from the most recent upload, kept alive until the GPU
-/// finishes executing the CopyTextureRegion that reads from it.
-/// D3D12 does NOT extend resource lifetimes for recorded commands, so
-/// the staging buffer must outlive the command list execution.
-/// Released at the start of the next replaceRegion or in deinit.
-pending_staging: ?*d3d12.ID3D12Resource = null,
+/// Staging buffers from the most recent upload, one per row-band, kept
+/// alive until the GPU finishes executing the CopyTextureRegion calls
+/// that read from them. D3D12 does NOT extend resource lifetimes for
+/// recorded commands, so each band's staging buffer must outlive command
+/// list execution. All are released together at the start of the next
+/// replaceRegion or in deinit. Backed by std.heap.c_allocator so deinit
+/// stays signature-compatible with the value-receiver call sites
+/// (Image switch captures, generic.zig front/back texture fields).
+pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
 
 const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
 
@@ -171,9 +174,15 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
 }
 
 pub fn deinit(self: Texture) void {
-    if (self.pending_staging) |staging| {
+    for (self.pending_staging.items) |staging| {
         _ = staging.Release();
     }
+    // The ArrayListUnmanaged backing slice is heap-allocated; freeing it
+    // requires a pointer-receiver because list.deinit mutates the list
+    // pointer. self is a value parameter, so the mutation is local and
+    // safe (the original self is destroyed when the function returns).
+    var self_mut = self;
+    self_mut.pending_staging.deinit(std.heap.c_allocator);
     if (self.resource) |res| {
         _ = res.Release();
     }
@@ -204,13 +213,13 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// initial-data path propagates the same failure via uploadRegion, so
 /// new-image uploads do not need this swallow.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
-    // Release the staging buffer from the previous upload. Safe because
+    // Release the staging buffers from the previous upload. Safe because
     // beginFrame waited on the fence for this frame slot, so the GPU
-    // has finished reading from it.
-    if (self.pending_staging) |prev| {
+    // has finished reading from them.
+    for (self.pending_staging.items) |prev| {
         _ = prev.Release();
-        self.pending_staging = null;
     }
+    self.pending_staging.clearRetainingCapacity();
 
     // Transition to COPY_DEST if needed.
     if (self.state != d3d12.D3D12_RESOURCE_STATES.COPY_DEST) {
@@ -314,7 +323,11 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
 
     // Keep the staging buffer alive until the GPU finishes the copy.
     // Released at the start of the next replaceRegion or in deinit.
-    self.pending_staging = staging;
+    self.pending_staging.append(std.heap.c_allocator, staging) catch {
+        _ = staging.Release();
+        log.warn("failed to track staging buffer for chunked upload", .{});
+        return error.UploadFailed;
+    };
 }
 
 fn transition(self: *Texture, new_state: d3d12.D3D12_RESOURCE_STATES) void {
@@ -610,9 +623,9 @@ test "Texture struct fields" {
     try std.testing.expect(@hasField(Texture, "pending_staging"));
 }
 
-test "Texture pending_staging defaults to null" {
+test "Texture pending_staging defaults to empty" {
     const tex = Texture{};
-    try std.testing.expect(tex.pending_staging == null);
+    try std.testing.expectEqual(@as(usize, 0), tex.pending_staging.items.len);
 }
 
 test "Texture.Options defaults" {
