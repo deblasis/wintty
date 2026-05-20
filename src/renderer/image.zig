@@ -567,7 +567,11 @@ pub const State = struct {
             return;
         }
 
-        // Copy the data so we own it.
+        // Copy the data so we own it. The largest decoded image we expect
+        // here is bounded by the kitty graphics APC payload cap (also used
+        // by iTerm2 multipart File= after the multipart series), currently
+        // 65 MiB. DX12 uploads are chunked into row-bands so the GPU
+        // staging-heap pressure scales with band size, not full-image size.
         const data = if (alloc.dupe(
             u8,
             pending.dataSlice(),
