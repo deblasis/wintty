@@ -12,6 +12,31 @@ const Overlay = @import("Overlay.zig");
 
 const log = std.log.scoped(.renderer_image);
 
+/// Default per-frame UPLOAD-heap budget for image uploads. The State
+/// loop defers any pending image whose chunked-upload total would push
+/// the in-flight sum past this number; the deferred image stays in
+/// .pending and retries on the next frame. 128 MiB leaves headroom for
+/// two ~48 MiB images concurrent with smaller atlases/overlays without
+/// pressuring Windows shared-memory.
+const TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Pitch alignment used by DX12 texture uploads. Must stay in sync with
+/// Texture.TEXTURE_DATA_PITCH_ALIGNMENT (256) so the budget estimate
+/// matches the actual staging buffer size.
+const TEXTURE_UPLOAD_PITCH_ALIGNMENT: u32 = 256;
+
+/// Compute the UPLOAD-heap bytes that will be consumed when uploading
+/// an RGBA image of the given dimensions. Mirrors the math inside
+/// Texture.uploadRegion (post-swizzle, 256-byte row alignment); kept
+/// here as a pure function so State.upload can size-check images
+/// without touching the DX12 layer.
+fn imageStagingBytes(width: u32, height: u32) u64 {
+    const row_bytes: u32 = width * 4;
+    const aligned: u32 = (row_bytes + TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1) &
+        ~(TEXTURE_UPLOAD_PITCH_ALIGNMENT - 1);
+    return @as(u64, aligned) * @as(u64, height);
+}
+
 /// Generic image rendering state for the renderer. This stores all
 /// images and their placements and exposes only a limited public API
 /// for adding images and placements and drawing them.
@@ -1042,4 +1067,24 @@ test "Image.markForUnload is idempotent on already-unloading states" {
         @as(std.meta.Tag(Image), .unload_pending),
         std.meta.activeTag(img),
     );
+}
+
+test "imageStagingBytes aligns row pitch to 256" {
+    // 1x1 RGBA -> aligned row pitch is 256, height 1 -> 256 bytes.
+    try std.testing.expectEqual(@as(u64, 256), imageStagingBytes(1, 1));
+}
+
+test "imageStagingBytes for 64x64 RGBA" {
+    // 64 * 4 = 256, already aligned. 256 * 64 = 16384.
+    try std.testing.expectEqual(@as(u64, 16384), imageStagingBytes(64, 64));
+}
+
+test "imageStagingBytes pads to next 256 for non-aligned widths" {
+    // 65 * 4 = 260, pads to 512. 512 * 65 = 33280.
+    try std.testing.expectEqual(@as(u64, 33280), imageStagingBytes(65, 65));
+}
+
+test "imageStagingBytes for typical 4096x3072 RGBA upload" {
+    // 4096 * 4 = 16384, already aligned. 16384 * 3072 = 50331648 (~48 MiB).
+    try std.testing.expectEqual(@as(u64, 50331648), imageStagingBytes(4096, 3072));
 }
