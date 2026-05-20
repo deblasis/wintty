@@ -78,14 +78,24 @@ device: ?*d3d12.ID3D12Device = null,
 command_list: ?*d3d12.ID3D12GraphicsCommandList = null,
 /// Current resource state for barrier tracking.
 state: d3d12.D3D12_RESOURCE_STATES = d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE,
-/// Staging buffer from the most recent upload, kept alive until the GPU
-/// finishes executing the CopyTextureRegion that reads from it.
-/// D3D12 does NOT extend resource lifetimes for recorded commands, so
-/// the staging buffer must outlive the command list execution.
-/// Released at the start of the next replaceRegion or in deinit.
-pending_staging: ?*d3d12.ID3D12Resource = null,
+/// Staging buffers from the most recent upload, one per row-band, kept
+/// alive until the GPU finishes executing the CopyTextureRegion calls
+/// that read from them. D3D12 does NOT extend resource lifetimes for
+/// recorded commands, so each band's staging buffer must outlive command
+/// list execution. All are released together at the start of the next
+/// replaceRegion or in deinit. Backed by std.heap.c_allocator so deinit
+/// stays signature-compatible with the value-receiver call sites
+/// (Image switch captures, generic.zig front/back texture fields).
+pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
 
 const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
+
+/// Target size in bytes for each per-band staging buffer. Chosen to keep
+/// individual UPLOAD-heap allocations small enough to succeed under
+/// fragmentation while amortizing the per-band CopyTextureRegion cost.
+/// At 8 MiB an RGBA image up to ~8192x256 (= 8 MiB) fits in one band;
+/// larger images are split across multiple CopyTextureRegion calls.
+const TEXTURE_UPLOAD_BAND_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error!Texture {
     const device = opts.device orelse return error.TextureCreateFailed;
@@ -171,9 +181,15 @@ pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error
 }
 
 pub fn deinit(self: Texture) void {
-    if (self.pending_staging) |staging| {
+    for (self.pending_staging.items) |staging| {
         _ = staging.Release();
     }
+    // deinit takes self by value to match Metal/OpenGL Texture and the
+    // switch-capture call sites in image.zig. Copying self locally lets
+    // us call ArrayListUnmanaged.deinit (pointer-receiver) without
+    // changing the cross-backend signature.
+    var self_mut = self;
+    self_mut.pending_staging.deinit(std.heap.c_allocator);
     if (self.resource) |res| {
         _ = res.Release();
     }
@@ -191,11 +207,11 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 
 /// Upload pixel data to a sub-region of this texture.
 ///
-/// The staging buffer is kept alive until the next replaceRegion call or
-/// deinit, because D3D12 does not extend resource lifetimes for recorded
-/// commands. The previous staging buffer is safe to release here because
-/// the frame's fence wait in beginFrame guarantees the GPU finished
-/// executing the prior CopyTextureRegion.
+/// The staging buffers are kept alive until the next replaceRegion call
+/// or deinit, because D3D12 does not extend resource lifetimes for
+/// recorded commands. The previous staging buffers are safe to release
+/// here because the frame's fence wait in beginFrame guarantees the GPU
+/// finished executing the prior CopyTextureRegion calls.
 ///
 /// Returns error{}!void for API compatibility with Metal's replaceRegion
 /// which cannot fail. DX12 upload failures are caught here and logged at
@@ -203,14 +219,26 @@ pub fn setCommandList(self: *Texture, cl: ?*d3d12.ID3D12GraphicsCommandList) voi
 /// is visible without breaking the shared signature. Texture.init's
 /// initial-data path propagates the same failure via uploadRegion, so
 /// new-image uploads do not need this swallow.
+///
+/// Partial-write caveat: uploadRegion records one CopyTextureRegion per
+/// row-band as it walks the data. If a later band fails (staging alloc,
+/// Map, etc.) the earlier bands' copies stay recorded on the command
+/// list and will execute when the frame submits. For Texture.init the
+/// destination is errdefer-Released so the partial copies write to a
+/// soon-released resource (harmless). For replaceRegion the destination
+/// survives, so a multi-band atlas update could leave the texture with
+/// the leading bands of the new content and the trailing rows of the
+/// previous content. Acceptable for atlases (next replaceRegion fixes
+/// it) but worth knowing if anyone calls replaceRegion on a multi-band
+/// region of a user-visible texture.
 pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: usize, data: []const u8) error{}!void {
-    // Release the staging buffer from the previous upload. Safe because
+    // Release the staging buffers from the previous upload. Safe because
     // beginFrame waited on the fence for this frame slot, so the GPU
-    // has finished reading from it.
-    if (self.pending_staging) |prev| {
+    // has finished reading from them.
+    for (self.pending_staging.items) |prev| {
         _ = prev.Release();
-        self.pending_staging = null;
     }
+    self.pending_staging.clearRetainingCapacity();
 
     // Transition to COPY_DEST if needed.
     if (self.state != d3d12.D3D12_RESOURCE_STATES.COPY_DEST) {
@@ -246,75 +274,97 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     };
 
     const region_aligned_pitch = alignPitch(width * self.bpp);
-    const staging_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, height);
+    const src_row_bytes: usize = width * self.bpp;
+    const rows_per = rowsPerBand(region_aligned_pitch, TEXTURE_UPLOAD_BAND_BYTES);
 
-    // Create a temporary upload buffer for staging.
-    const staging = createStagingBuffer(device, staging_size) orelse {
-        log.err("failed to create staging buffer for texture upload (size={d})", .{staging_size});
-        return error.UploadFailed;
-    };
-    // Staging buffer is saved to self.pending_staging after the copy is
-    // recorded, and released at the start of the next replaceRegion or
-    // in deinit (after the GPU has finished reading from it).
+    // Walk the upload region in ~TEXTURE_UPLOAD_BAND_BYTES row-bands.
+    // Each band gets its own staging buffer + CopyTextureRegion call;
+    // all stay alive in self.pending_staging until the next replaceRegion
+    // or deinit. Splitting the upload keeps individual UPLOAD-heap
+    // allocations small enough to succeed under heap fragmentation.
+    //
+    // Note the log-level asymmetry below: the null guards above log at
+    // warn (defensive checks; never fire under correct callers), while
+    // createStagingBuffer and Map failures log at err (real GPU/driver
+    // failures with hex context worth investigating). Both still return
+    // error.UploadFailed and let the caller drop the placement.
+    var bands = Bands{ .height = height, .rows_per_band = rows_per };
+    while (bands.next()) |band| {
+        const band_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, band.row_count);
 
-    // Map and copy row-by-row with pitch alignment.
-    var mapped: ?*anyopaque = null;
-    const read_range = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
-    const map_hr = staging.Map(0, &read_range, &mapped);
-    if (com.FAILED(map_hr) or mapped == null) {
-        log.err("Map for staging buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
-        _ = staging.Release();
-        return error.UploadFailed;
-    }
+        const staging = createStagingBuffer(device, band_size) orelse {
+            log.err("failed to create staging buffer for texture upload (size={d})", .{band_size});
+            return error.UploadFailed;
+        };
 
-    const dst: [*]u8 = @ptrCast(mapped.?);
-    const src_row_bytes = width * self.bpp;
-    for (0..height) |row| {
-        const dst_offset = row * @as(usize, region_aligned_pitch);
-        const src_offset = row * @as(usize, src_row_bytes);
-        @memcpy(dst[dst_offset..][0..src_row_bytes], data[src_offset..][0..src_row_bytes]);
-    }
+        var mapped: ?*anyopaque = null;
+        const read_range = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
+        const map_hr = staging.Map(0, &read_range, &mapped);
+        if (com.FAILED(map_hr) or mapped == null) {
+            log.err("Map for staging buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
+            _ = staging.Release();
+            return error.UploadFailed;
+        }
 
-    staging.Unmap(0, null);
+        const dst: [*]u8 = @ptrCast(mapped.?);
+        for (0..band.row_count) |row_in_band| {
+            const src_row = @as(usize, band.start_row) + row_in_band;
+            const dst_offset = row_in_band * @as(usize, region_aligned_pitch);
+            const src_offset = src_row * src_row_bytes;
+            @memcpy(dst[dst_offset..][0..src_row_bytes], data[src_offset..][0..src_row_bytes]);
+        }
+        staging.Unmap(0, null);
 
-    // Record the copy command.
-    const src_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
-        .pResource = staging,
-        .Type = .PLACED_FOOTPRINT,
-        .u = .{
-            .PlacedFootprint = .{
-                .Offset = 0,
-                .Footprint = .{
-                    .Format = self.format,
-                    .Width = width,
-                    .Height = height,
-                    .Depth = 1,
-                    .RowPitch = region_aligned_pitch,
+        const src_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = staging,
+            .Type = .PLACED_FOOTPRINT,
+            .u = .{
+                .PlacedFootprint = .{
+                    .Offset = 0,
+                    .Footprint = .{
+                        .Format = self.format,
+                        .Width = width,
+                        .Height = band.row_count,
+                        .Depth = 1,
+                        .RowPitch = region_aligned_pitch,
+                    },
                 },
             },
-        },
-    };
+        };
 
-    const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
-        .pResource = texture,
-        .Type = .SUBRESOURCE_INDEX,
-        .u = .{ .SubresourceIndex = 0 },
-    };
+        const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = texture,
+            .Type = .SUBRESOURCE_INDEX,
+            .u = .{ .SubresourceIndex = 0 },
+        };
 
-    const src_box = d3d12.D3D12_BOX{
-        .left = 0,
-        .top = 0,
-        .front = 0,
-        .right = width,
-        .bottom = height,
-        .back = 1,
-    };
+        const src_box = d3d12.D3D12_BOX{
+            .left = 0,
+            .top = 0,
+            .front = 0,
+            .right = width,
+            .bottom = band.row_count,
+            .back = 1,
+        };
 
-    cmd_list.CopyTextureRegion(&dst_loc, x, y, 0, &src_loc, &src_box);
+        // y + band.start_row is the band-to-destination offset arithmetic;
+        // this is the integration point where the Bands iterator meets the
+        // DX12 copy command, and is not covered by the iterator's pure
+        // unit tests. A bug here would surface as vertically-shifted or
+        // overlapping bands in a multi-band image -- worth eyeballing on
+        // any change to this loop.
+        cmd_list.CopyTextureRegion(&dst_loc, x, y + band.start_row, 0, &src_loc, &src_box);
 
-    // Keep the staging buffer alive until the GPU finishes the copy.
-    // Released at the start of the next replaceRegion or in deinit.
-    self.pending_staging = staging;
+        // Keep the band's staging buffer alive until the GPU finishes the
+        // copy. Released together with the other bands at the start of
+        // the next replaceRegion or in deinit. On append failure we must
+        // release the just-created buffer to avoid leaking it.
+        self.pending_staging.append(std.heap.c_allocator, staging) catch {
+            _ = staging.Release();
+            log.warn("failed to track staging buffer for chunked upload", .{});
+            return error.UploadFailed;
+        };
+    }
 }
 
 fn transition(self: *Texture, new_state: d3d12.D3D12_RESOURCE_STATES) void {
@@ -495,6 +545,37 @@ fn alignPitch(row_bytes: u32) u32 {
     return (row_bytes + TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(TEXTURE_DATA_PITCH_ALIGNMENT - 1);
 }
 
+/// Number of source rows that fit in a single upload staging band.
+/// Guarantees at least 1 row even if a single row exceeds the budget,
+/// so a pathologically wide image still makes forward progress (each
+/// band uploads exactly one row).
+fn rowsPerBand(aligned_row_pitch: u32, band_budget_bytes: u64) u32 {
+    if (aligned_row_pitch == 0) return 1;
+    const rows: u64 = band_budget_bytes / @as(u64, aligned_row_pitch);
+    return @intCast(@max(@as(u64, 1), rows));
+}
+
+const Band = struct {
+    start_row: u32,
+    row_count: u32,
+};
+
+/// Iterator yielding row-bands for a chunked upload. `rows_per_band` comes
+/// from `rowsPerBand`. The last band is truncated to the remaining rows.
+const Bands = struct {
+    height: u32,
+    rows_per_band: u32,
+    cursor: u32 = 0,
+
+    fn next(self: *Bands) ?Band {
+        if (self.cursor >= self.height) return null;
+        const row_count = @min(self.rows_per_band, self.height - self.cursor);
+        const band = Band{ .start_row = self.cursor, .row_count = row_count };
+        self.cursor += row_count;
+        return band;
+    }
+};
+
 fn bppForFormat(format: dxgi.DXGI_FORMAT) u32 {
     return switch (format) {
         .R8_UNORM => 1,
@@ -515,6 +596,60 @@ test "alignPitch rounds up to 256" {
     try std.testing.expectEqual(@as(u32, 1024), alignPitch(1000));
 }
 
+test "rowsPerBand divides evenly" {
+    // 8 MiB budget / 256-byte row pitch = 32768 rows per band.
+    try std.testing.expectEqual(@as(u32, 32768), rowsPerBand(256, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand rounds down for non-divisible row pitch" {
+    // 8 MiB budget / 700-byte row pitch = 11983, remainder 508.
+    try std.testing.expectEqual(@as(u32, 11983), rowsPerBand(700, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand floors at 1 when a single row exceeds the budget" {
+    // A row that is itself 16 MiB still gets a 1-row band so progress is made.
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(16 * 1024 * 1024, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand returns 1 when row exactly fills the budget" {
+    // Exact-fit boundary -- the floor-1 path and the divide path both
+    // yield 1, so this test pins the boundary behavior.
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(8 * 1024 * 1024, 8 * 1024 * 1024));
+}
+
+test "rowsPerBand returns 1 for zero pitch (defensive)" {
+    try std.testing.expectEqual(@as(u32, 1), rowsPerBand(0, 8 * 1024 * 1024));
+}
+
+test "Bands iterates exact-multiple height" {
+    var b = Bands{ .height = 64, .rows_per_band = 16 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 16, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 32, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 48, .row_count = 16 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands truncates final band to remaining rows" {
+    var b = Bands{ .height = 50, .rows_per_band = 16 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 16, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 32, .row_count = 16 }), b.next());
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 48, .row_count = 2 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands with single-band fit returns one band" {
+    var b = Bands{ .height = 10, .rows_per_band = 100 };
+    try std.testing.expectEqualDeep(@as(?Band, .{ .start_row = 0, .row_count = 10 }), b.next());
+    try std.testing.expect(b.next() == null);
+}
+
+test "Bands with zero height yields nothing" {
+    var b = Bands{ .height = 0, .rows_per_band = 16 };
+    try std.testing.expect(b.next() == null);
+}
+
 test "bppForFormat returns correct bytes per pixel" {
     try std.testing.expectEqual(@as(u32, 1), bppForFormat(.R8_UNORM));
     try std.testing.expectEqual(@as(u32, 4), bppForFormat(.R8G8B8A8_UNORM));
@@ -531,9 +666,9 @@ test "Texture struct fields" {
     try std.testing.expect(@hasField(Texture, "pending_staging"));
 }
 
-test "Texture pending_staging defaults to null" {
+test "Texture pending_staging defaults to empty" {
     const tex = Texture{};
-    try std.testing.expect(tex.pending_staging == null);
+    try std.testing.expectEqual(@as(usize, 0), tex.pending_staging.items.len);
 }
 
 test "Texture.Options defaults" {
