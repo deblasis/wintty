@@ -228,16 +228,20 @@ pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: u
 // --- Internal helpers ---
 
 fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: []const u8) Error!void {
+    // Null guards are defensive: replaceRegion / Texture.init / State.upload
+    // all handle error.UploadFailed by dropping the placement and marking
+    // the image for unload (see image.zig State.upload), so this is a
+    // recoverable diagnostic rather than a hard failure.
     const device = self.device orelse {
-        log.err("uploadRegion called with null device", .{});
+        log.warn("uploadRegion called with null device", .{});
         return error.UploadFailed;
     };
     const cmd_list = self.command_list orelse {
-        log.err("uploadRegion called with null command_list", .{});
+        log.warn("uploadRegion called with null command_list", .{});
         return error.UploadFailed;
     };
     const texture = self.resource orelse {
-        log.err("uploadRegion called with null resource", .{});
+        log.warn("uploadRegion called with null resource", .{});
         return error.UploadFailed;
     };
 
@@ -549,15 +553,18 @@ test "Error set carries UploadFailed" {
     );
 }
 
+// Sentinel pointers stand in for real device/cmd_list/resource when the
+// null-guard tests construct a Texture directly (skipping init). Both
+// values are 8-byte aligned so Zig's @ptrFromInt pointer-alignment check
+// accepts them; they differ only to stay grep-distinct in panic dumps.
+const SENTINEL_A: usize = 0xDEAD0;
+const SENTINEL_B: usize = 0xDEAD8;
+
 test "uploadRegion returns UploadFailed when command_list is null" {
-    // Sentinel pointers stand in for a real device/resource so the
-    // first nullability check we hit is command_list. Constructing
-    // the Texture directly skips init's preconditions and exercises
-    // uploadRegion's own guards.
     var tex = Texture{
-        .device = @ptrFromInt(0xDEAD0),
+        .device = @ptrFromInt(SENTINEL_A),
         .command_list = null,
-        .resource = @ptrFromInt(0xDEAD1),
+        .resource = @ptrFromInt(SENTINEL_B),
         .bpp = 4,
     };
     const bytes: [4]u8 = .{ 0, 0, 0, 0 };
@@ -570,8 +577,8 @@ test "uploadRegion returns UploadFailed when command_list is null" {
 test "uploadRegion returns UploadFailed when device is null" {
     var tex = Texture{
         .device = null,
-        .command_list = @ptrFromInt(0xDEAD0),
-        .resource = @ptrFromInt(0xDEAD1),
+        .command_list = @ptrFromInt(SENTINEL_A),
+        .resource = @ptrFromInt(SENTINEL_B),
         .bpp = 4,
     };
     const bytes: [4]u8 = .{ 0, 0, 0, 0 };
@@ -583,8 +590,8 @@ test "uploadRegion returns UploadFailed when device is null" {
 
 test "uploadRegion returns UploadFailed when resource is null" {
     var tex = Texture{
-        .device = @ptrFromInt(0xDEAD0),
-        .command_list = @ptrFromInt(0xDEAD1),
+        .device = @ptrFromInt(SENTINEL_A),
+        .command_list = @ptrFromInt(SENTINEL_B),
         .resource = null,
         .bpp = 4,
     };
