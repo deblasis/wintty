@@ -87,8 +87,17 @@ state: d3d12.D3D12_RESOURCE_STATES = d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RE
 /// stays signature-compatible with the value-receiver call sites
 /// (Image switch captures, generic.zig front/back texture fields).
 pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
+/// Running sum of band-staging bytes currently held by `pending_staging`.
+/// Mirrors the list contents so callers (image.zig State.upload) can
+/// query the UPLOAD-heap pressure of an individual texture without
+/// COM-querying each ID3D12Resource's size. Incremented in uploadRegion
+/// per band; reset in replaceRegion's release loop.
+pending_staging_bytes: u64 = 0,
 
-const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
+/// Row-pitch alignment that DX12's CopyTextureRegion requires for staging
+/// buffers (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT). `pub` so image.zig can
+/// `comptime assert` its mirror constant stays in lockstep.
+pub const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
 
 /// Target size in bytes for each per-band staging buffer. Chosen to keep
 /// individual UPLOAD-heap allocations small enough to succeed under
@@ -239,6 +248,7 @@ pub fn replaceRegion(self: *Texture, x: usize, y: usize, width: usize, height: u
         _ = prev.Release();
     }
     self.pending_staging.clearRetainingCapacity();
+    self.pending_staging_bytes = 0;
 
     // Transition to COPY_DEST if needed.
     if (self.state != d3d12.D3D12_RESOURCE_STATES.COPY_DEST) {
@@ -364,6 +374,7 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
             log.warn("failed to track staging buffer for chunked upload", .{});
             return error.UploadFailed;
         };
+        self.pending_staging_bytes += band_size;
     }
 }
 
@@ -669,6 +680,11 @@ test "Texture struct fields" {
 test "Texture pending_staging defaults to empty" {
     const tex = Texture{};
     try std.testing.expectEqual(@as(usize, 0), tex.pending_staging.items.len);
+}
+
+test "Texture pending_staging_bytes defaults to 0" {
+    const tex = Texture{};
+    try std.testing.expectEqual(@as(u64, 0), tex.pending_staging_bytes);
 }
 
 test "Texture.Options defaults" {
