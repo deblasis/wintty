@@ -68,6 +68,12 @@ pub const State = struct {
     /// Overlays
     overlay_placements: std.ArrayListUnmanaged(Placement),
 
+    /// Per-frame UPLOAD-heap budget for image uploads. State.upload
+    /// defers any pending image whose chunked upload would push the
+    /// running in-flight total past this. Tunable per-State instance;
+    /// defaults to TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES (128 MiB).
+    upload_budget_bytes: u64 = TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
+
     pub const empty: State = .{
         .images = .empty,
         .kitty_placements = .empty,
@@ -75,6 +81,7 @@ pub const State = struct {
         .kitty_text_end = 0,
         .kitty_virtual = false,
         .overlay_placements = .empty,
+        .upload_budget_bytes = TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
     };
 
     pub fn deinit(self: *State, alloc: Allocator) void {
@@ -103,17 +110,41 @@ pub const State = struct {
         alloc: Allocator,
         api: *GraphicsAPI,
     ) bool {
+        // Compute the current UPLOAD-heap staging total across all
+        // already-uploaded textures once at the start of the call. We
+        // incrementally bump this as new uploads succeed; that's still
+        // a strict upper bound because a successful upload only adds
+        // bytes (it never frees, until the next replaceRegion/deinit
+        // which happens in a different code path).
+        var bytes_in_flight: u64 = 0;
+        {
+            var image_it = self.images.iterator();
+            while (image_it.next()) |kv| {
+                bytes_in_flight += kv.value_ptr.image.pendingStagingBytes();
+            }
+        }
+
         var success: bool = true;
         var image_it = self.images.iterator();
         while (image_it.next()) |kv| {
             const img = &kv.value_ptr.image;
             if (img.isUnloading()) {
+                bytes_in_flight -|= img.pendingStagingBytes();
                 img.deinit(alloc);
                 self.images.removeByPtr(kv.key_ptr);
                 continue;
             }
 
             if (img.isPending()) {
+                const est = img.estimatedUploadStagingBytes();
+                if (est > 0 and wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes)) {
+                    log.debug(
+                        "deferring image upload est={d} in_flight={d} budget={d}",
+                        .{ est, bytes_in_flight, self.upload_budget_bytes },
+                    );
+                    continue;
+                }
+
                 img.upload(
                     alloc,
                     api,
@@ -124,7 +155,9 @@ pub const State = struct {
                     );
                     img.markForUnload();
                     success = false;
+                    continue;
                 };
+                bytes_in_flight += est;
             }
         }
 
@@ -1185,4 +1218,12 @@ test "Image.pendingStagingBytes returns 0 for .pending (no texture yet)" {
         .data = &data,
     } };
     try std.testing.expectEqual(@as(u64, 0), img.pendingStagingBytes());
+}
+
+test "State.upload_budget_bytes defaults to TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES" {
+    const state = State.empty;
+    try std.testing.expectEqual(
+        TEXTURE_UPLOAD_BUDGET_DEFAULT_BYTES,
+        state.upload_budget_bytes,
+    );
 }
