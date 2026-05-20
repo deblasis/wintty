@@ -848,6 +848,32 @@ pub const Image = union(enum) {
         }
     }
 
+    /// UPLOAD-heap bytes this image's currently-held texture is holding
+    /// alive in `pending_staging`. Returns 0 for variants that have no
+    /// uploaded texture yet.
+    pub fn pendingStagingBytes(self: Image) u64 {
+        return switch (self) {
+            .pending, .unload_pending => 0,
+            .ready, .unload_ready => |t| t.pending_staging_bytes,
+            .replace, .unload_replace => |r| r.texture.pending_staging_bytes,
+        };
+    }
+
+    /// UPLOAD-heap bytes the next `upload()` call will require for this
+    /// image. Returns 0 for already-uploaded or unload-marked variants
+    /// because they won't trigger a new staging allocation.
+    pub fn estimatedUploadStagingBytes(self: Image) u64 {
+        return switch (self) {
+            .pending => |p| imageStagingBytes(p.width, p.height),
+            .replace => |r| imageStagingBytes(r.pending.width, r.pending.height),
+            .ready,
+            .unload_ready,
+            .unload_pending,
+            .unload_replace,
+            => 0,
+        };
+    }
+
     /// Mark this image for unload whatever state it is in.
     pub fn markForUnload(self: *Image) void {
         self.* = switch (self.*) {
@@ -1112,4 +1138,51 @@ test "wouldExceedBudget false when in_flight already at budget and est is 0" {
 test "wouldExceedBudget true when in_flight already over budget" {
     // Already over (somehow) -- any non-zero est should exceed.
     try std.testing.expect(wouldExceedBudget(200, 1, 128));
+}
+
+test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .pending" {
+    var data: [16]u8 = .{0} ** 16;
+    const img: Image = .{ .pending = .{
+        .width = 2,
+        .height = 2,
+        .pixel_format = .rgba,
+        .data = &data,
+    } };
+    // 2x2 RGBA -> aligned pitch 256 * height 2 = 512.
+    try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+}
+
+test "Image.estimatedUploadStagingBytes returns 0 for .ready" {
+    const img: Image = .{ .ready = .{} };
+    try std.testing.expectEqual(@as(u64, 0), img.estimatedUploadStagingBytes());
+}
+
+test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .replace" {
+    var data: [16]u8 = .{0} ** 16;
+    const img: Image = .{ .replace = .{
+        .texture = .{},
+        .pending = .{
+            .width = 2,
+            .height = 2,
+            .pixel_format = .rgba,
+            .data = &data,
+        },
+    } };
+    try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+}
+
+test "Image.pendingStagingBytes returns texture.pending_staging_bytes for .ready" {
+    const img: Image = .{ .ready = .{ .pending_staging_bytes = 12345 } };
+    try std.testing.expectEqual(@as(u64, 12345), img.pendingStagingBytes());
+}
+
+test "Image.pendingStagingBytes returns 0 for .pending (no texture yet)" {
+    var data: [4]u8 = .{0} ** 4;
+    const img: Image = .{ .pending = .{
+        .width = 1,
+        .height = 1,
+        .pixel_format = .rgba,
+        .data = &data,
+    } };
+    try std.testing.expectEqual(@as(u64, 0), img.pendingStagingBytes());
 }
