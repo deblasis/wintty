@@ -90,6 +90,13 @@ pending_staging: std.ArrayListUnmanaged(*d3d12.ID3D12Resource) = .empty,
 
 const TEXTURE_DATA_PITCH_ALIGNMENT: u32 = 256;
 
+/// Target size in bytes for each per-band staging buffer. Chosen to keep
+/// individual UPLOAD-heap allocations small enough to succeed under
+/// fragmentation while amortizing the per-band CopyTextureRegion cost.
+/// At 8 MiB an RGBA image up to ~8192x256 (= 8 MiB) fits in one band;
+/// larger images are split across multiple CopyTextureRegion calls.
+const TEXTURE_UPLOAD_BAND_BYTES: u64 = 8 * 1024 * 1024;
+
 pub fn init(opts: Options, width: usize, height: usize, data: ?[]const u8) Error!Texture {
     const device = opts.device orelse return error.TextureCreateFailed;
     const srv_heap = opts.srv_heap orelse return error.TextureCreateFailed;
@@ -255,79 +262,85 @@ fn uploadRegion(self: *Texture, x: u32, y: u32, width: u32, height: u32, data: [
     };
 
     const region_aligned_pitch = alignPitch(width * self.bpp);
-    const staging_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, height);
+    const src_row_bytes: usize = width * self.bpp;
+    const rows_per = rowsPerBand(region_aligned_pitch, TEXTURE_UPLOAD_BAND_BYTES);
 
-    // Create a temporary upload buffer for staging.
-    const staging = createStagingBuffer(device, staging_size) orelse {
-        log.err("failed to create staging buffer for texture upload (size={d})", .{staging_size});
-        return error.UploadFailed;
-    };
-    // Staging buffer is saved to self.pending_staging after the copy is
-    // recorded, and released at the start of the next replaceRegion or
-    // in deinit (after the GPU has finished reading from it).
+    // Walk the upload region in ~TEXTURE_UPLOAD_BAND_BYTES row-bands.
+    // Each band gets its own staging buffer + CopyTextureRegion call;
+    // all stay alive in self.pending_staging until the next replaceRegion
+    // or deinit. Splitting the upload keeps individual UPLOAD-heap
+    // allocations small enough to succeed under heap fragmentation.
+    var bands = Bands{ .height = height, .rows_per_band = rows_per };
+    while (bands.next()) |band| {
+        const band_size: u64 = @as(u64, region_aligned_pitch) * @as(u64, band.row_count);
 
-    // Map and copy row-by-row with pitch alignment.
-    var mapped: ?*anyopaque = null;
-    const read_range = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
-    const map_hr = staging.Map(0, &read_range, &mapped);
-    if (com.FAILED(map_hr) or mapped == null) {
-        log.err("Map for staging buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
-        _ = staging.Release();
-        return error.UploadFailed;
-    }
+        const staging = createStagingBuffer(device, band_size) orelse {
+            log.err("failed to create staging buffer for texture upload (size={d})", .{band_size});
+            return error.UploadFailed;
+        };
 
-    const dst: [*]u8 = @ptrCast(mapped.?);
-    const src_row_bytes = width * self.bpp;
-    for (0..height) |row| {
-        const dst_offset = row * @as(usize, region_aligned_pitch);
-        const src_offset = row * @as(usize, src_row_bytes);
-        @memcpy(dst[dst_offset..][0..src_row_bytes], data[src_offset..][0..src_row_bytes]);
-    }
+        var mapped: ?*anyopaque = null;
+        const read_range = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
+        const map_hr = staging.Map(0, &read_range, &mapped);
+        if (com.FAILED(map_hr) or mapped == null) {
+            log.err("Map for staging buffer failed: 0x{x}", .{@as(u32, @bitCast(map_hr))});
+            _ = staging.Release();
+            return error.UploadFailed;
+        }
 
-    staging.Unmap(0, null);
+        const dst: [*]u8 = @ptrCast(mapped.?);
+        for (0..band.row_count) |row_in_band| {
+            const src_row = @as(usize, band.start_row) + row_in_band;
+            const dst_offset = row_in_band * @as(usize, region_aligned_pitch);
+            const src_offset = src_row * src_row_bytes;
+            @memcpy(dst[dst_offset..][0..src_row_bytes], data[src_offset..][0..src_row_bytes]);
+        }
+        staging.Unmap(0, null);
 
-    // Record the copy command.
-    const src_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
-        .pResource = staging,
-        .Type = .PLACED_FOOTPRINT,
-        .u = .{
-            .PlacedFootprint = .{
-                .Offset = 0,
-                .Footprint = .{
-                    .Format = self.format,
-                    .Width = width,
-                    .Height = height,
-                    .Depth = 1,
-                    .RowPitch = region_aligned_pitch,
+        const src_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = staging,
+            .Type = .PLACED_FOOTPRINT,
+            .u = .{
+                .PlacedFootprint = .{
+                    .Offset = 0,
+                    .Footprint = .{
+                        .Format = self.format,
+                        .Width = width,
+                        .Height = band.row_count,
+                        .Depth = 1,
+                        .RowPitch = region_aligned_pitch,
+                    },
                 },
             },
-        },
-    };
+        };
 
-    const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
-        .pResource = texture,
-        .Type = .SUBRESOURCE_INDEX,
-        .u = .{ .SubresourceIndex = 0 },
-    };
+        const dst_loc = d3d12.D3D12_TEXTURE_COPY_LOCATION{
+            .pResource = texture,
+            .Type = .SUBRESOURCE_INDEX,
+            .u = .{ .SubresourceIndex = 0 },
+        };
 
-    const src_box = d3d12.D3D12_BOX{
-        .left = 0,
-        .top = 0,
-        .front = 0,
-        .right = width,
-        .bottom = height,
-        .back = 1,
-    };
+        const src_box = d3d12.D3D12_BOX{
+            .left = 0,
+            .top = 0,
+            .front = 0,
+            .right = width,
+            .bottom = band.row_count,
+            .back = 1,
+        };
 
-    cmd_list.CopyTextureRegion(&dst_loc, x, y, 0, &src_loc, &src_box);
+        cmd_list.CopyTextureRegion(&dst_loc, x, y + band.start_row, 0, &src_loc, &src_box);
 
-    // Keep the staging buffer alive until the GPU finishes the copy.
-    // Released at the start of the next replaceRegion or in deinit.
-    self.pending_staging.append(std.heap.c_allocator, staging) catch {
-        _ = staging.Release();
-        log.warn("failed to track staging buffer for chunked upload", .{});
-        return error.UploadFailed;
-    };
+        // Keep the band's staging buffer alive until the GPU finishes the
+        // copy. Released together with the other bands at the start of
+        // the next replaceRegion or in deinit. On append failure we must
+        // release the just-created buffer to avoid leaking it.
+        self.pending_staging.append(std.heap.c_allocator, staging) catch {
+            _ = staging.Release();
+            log.warn("failed to track staging buffer for chunked upload", .{});
+            return error.UploadFailed;
+        };
+    }
 }
 
 fn transition(self: *Texture, new_state: d3d12.D3D12_RESOURCE_STATES) void {
