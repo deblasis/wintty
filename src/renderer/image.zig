@@ -739,7 +739,11 @@ pub const State = struct {
             return;
         }
 
-        // Store it in the map
+        // Store it in the map. The largest decoded image we expect here is
+        // bounded by the kitty graphics APC payload cap (also used by iTerm2
+        // multipart File= after the multipart series), currently 65 MiB. DX12
+        // uploads are chunked into row-bands so the GPU staging-heap pressure
+        // scales with band size, not full-image size.
         const new_image: Image = if (pending.convertCopy(alloc)) |v| v else |_| {
             if (!gop.found_existing) {
                 // If this is a new entry we can just remove it since it
