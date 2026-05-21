@@ -152,7 +152,14 @@ pub const State = struct {
             if (!img.isPending()) continue;
 
             const est: u64 = if (budgeted) img.estimatedUploadStagingBytes() else 0;
-            if (budgeted and wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes)) {
+            // upload_budget_bytes == 0 means "unbounded" per Config.zig
+            // documentation; the user-facing knob would otherwise stall every
+            // upload if literally zero, which is a foot-gun rather than a
+            // useful semantic (compare image-storage-limit = 0 disabling
+            // image protocols entirely).
+            if (budgeted and self.upload_budget_bytes != 0 and
+                wouldExceedBudget(bytes_in_flight, est, self.upload_budget_bytes))
+            {
                 log.debug(
                     "deferring image upload est={d} in_flight={d} budget={d}",
                     .{ est, bytes_in_flight, self.upload_budget_bytes },
