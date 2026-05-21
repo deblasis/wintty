@@ -644,6 +644,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
             custom_shader_animation: configpkg.CustomShaderAnimation,
+            image_upload_budget_bytes: u32,
 
             pub fn init(
                 alloc_gpa: Allocator,
@@ -719,6 +720,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
                     .custom_shader_animation = config.@"custom-shader-animation",
+                    .image_upload_budget_bytes = config.@"image-upload-budget",
                     .arena = arena,
                 };
             }
@@ -866,6 +868,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             result.updateFontGridUniforms();
             result.updateScreenSizeUniforms();
             result.updateBgImageBuffer();
+
+            // Wire the renderer-level image upload budget. The DX12 backend
+            // reads this from images.upload_budget_bytes; other backends
+            // ignore it via comptime gating in image.zig State.upload.
+            result.images.upload_budget_bytes = options.config.image_upload_budget_bytes;
+
             try result.prepBackgroundImage();
 
             return result;
@@ -2214,6 +2222,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Set our new minimum contrast
             self.uniforms.min_contrast = config.min_contrast;
 
+            // Apply the new image upload budget. Live reload picks up the
+            // new ceiling on the next frame; in-flight bytes are unchanged
+            // (a deferred image just retries against the new budget).
+            self.images.upload_budget_bytes = config.image_upload_budget_bytes;
+
             // Set our new color space and blending
             self.uniforms.bools.use_display_p3 = config.colorspace == .@"display-p3";
             self.uniforms.bools.use_linear_blending = config.blending.isLinear();
@@ -2240,8 +2253,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const new = config.custom_shaders.value.items;
                 if (old.len != new.len) break :custom_shaders_changed true;
                 for (old, new) |a, b| {
-                    const a_str = switch (a) { .optional => |s| s, .required => |s| s };
-                    const b_str = switch (b) { .optional => |s| s, .required => |s| s };
+                    const a_str = switch (a) {
+                        .optional => |s| s,
+                        .required => |s| s,
+                    };
+                    const b_str = switch (b) {
+                        .optional => |s| s,
+                        .required => |s| s,
+                    };
                     if (!std.mem.eql(u8, a_str, b_str)) break :custom_shaders_changed true;
                 }
                 break :custom_shaders_changed false;
