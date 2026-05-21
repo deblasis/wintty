@@ -631,6 +631,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             blending: configpkg.Config.AlphaBlending,
             background_blur: configpkg.Config.BackgroundBlur,
             scroll_to_bottom_on_output: bool,
+            image_upload_budget_bytes: u32,
 
             pub fn init(
                 alloc_gpa: Allocator,
@@ -705,6 +706,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .blending = config.@"alpha-blending",
                     .background_blur = config.@"background-blur",
                     .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
+                    .image_upload_budget_bytes = config.@"image-upload-budget",
                     .arena = arena,
                 };
             }
@@ -861,6 +863,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             result.updateFontGridUniforms();
             result.updateScreenSizeUniforms();
             result.updateBgImageBuffer();
+
+            // Wire the renderer-level image upload budget. The DX12 backend
+            // reads this from images.upload_budget_bytes; other backends
+            // ignore it via comptime gating in image.zig State.upload.
+            result.images.upload_budget_bytes = options.config.image_upload_budget_bytes;
+
             try result.prepBackgroundImage();
 
             return result;
@@ -2022,6 +2030,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Set our new minimum contrast
             self.uniforms.min_contrast = config.min_contrast;
+
+            // Apply the new image upload budget. Live reload picks up the
+            // new ceiling on the next frame; in-flight bytes are unchanged
+            // (a deferred image just retries against the new budget).
+            self.images.upload_budget_bytes = config.image_upload_budget_bytes;
 
             // Set our new color space and blending
             self.uniforms.bools.use_display_p3 = config.colorspace == .@"display-p3";
