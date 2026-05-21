@@ -2492,6 +2492,18 @@ keybind: Keybinds = .{},
 /// limit per surface is double.
 @"image-storage-limit": u32 = 320 * 1000 * 1000,
 
+/// The peak GPU upload-heap pressure the renderer will tolerate for image
+/// uploads in a single frame. When pending images would push the in-flight
+/// total past this value, the renderer defers the overflowing image to a
+/// later frame -- the image stays pending and retries once budget clears.
+/// The default is 128MB. Setting this to zero disables the budget entirely
+/// (every pending image uploads immediately, no matter how many bytes are
+/// already in flight).
+///
+/// Currently only effective on the DirectX 12 renderer (Windows). Other
+/// renderers ignore this value.
+@"image-upload-budget": u32 = 128 * 1024 * 1024,
+
 /// Whether to automatically copy selected text to the clipboard. `true`
 /// will prefer to copy to the selection clipboard, otherwise it will copy to
 /// the system clipboard.
