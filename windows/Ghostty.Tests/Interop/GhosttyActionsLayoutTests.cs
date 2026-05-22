@@ -11,6 +11,7 @@ public class GhosttyActionsLayoutTests
     [Theory]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
+    [InlineData((int)GhosttyActionTag.MouseShape, 36)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 56)]
@@ -65,5 +66,37 @@ public class GhosttyActionsLayoutTests
         // sbyte right after the int32 (no packing tricks on x64).
         Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionProgressReport>(nameof(GhosttyActionProgressReport.State)));
         Assert.Equal(4, (int)Marshal.OffsetOf<GhosttyActionProgressReport>(nameof(GhosttyActionProgressReport.Progress)));
+    }
+
+    // Probe struct modelling the C ABI of `ghostty_action_s`:
+    //   { ghostty_action_tag_e tag; ghostty_action_u action; }
+    //
+    // The union contains members with pointers (e.g. `const char* title`,
+    // `const char* url`), so on x64 its natural alignment is 8 bytes.
+    // The tag is `c_int` (4 bytes), and sequential layout inserts 4
+    // bytes of padding to align the union to +8. The `long` field below
+    // has the same 8-byte alignment as the real union, so its computed
+    // offset matches what `OnAction` sees at runtime.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GhosttyActionEnvelopeProbe
+    {
+        public int Tag;
+        public long Payload;
+    }
+
+    [Fact]
+    public void ActionStruct_Payload_Starts_At_Offset_8()
+    {
+        // Every dispatched case in GhosttyHost.OnAction (SetTitle,
+        // Scrollbar, ProgressReport, MouseShape, …) reads payload bytes
+        // via Marshal.ReadXxx(actionPtr, 8). This pin catches a future
+        // ABI change that shifts the union — e.g. upstream widening tag
+        // to int64 (would still be +8 by coincidence) or growing the
+        // union's alignment beyond 8 (would push payloads to +16 and
+        // silently corrupt every read).
+        Assert.Equal(
+            8,
+            (int)Marshal.OffsetOf<GhosttyActionEnvelopeProbe>(
+                nameof(GhosttyActionEnvelopeProbe.Payload)));
     }
 }
