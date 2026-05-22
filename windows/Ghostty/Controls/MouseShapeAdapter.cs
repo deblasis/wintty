@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Ghostty.Core.Input;
 using Microsoft.UI.Input;
 
@@ -12,6 +13,17 @@ namespace Ghostty.Controls;
 /// </summary>
 internal static class MouseShapeAdapter
 {
+    /// <summary>
+    /// Switch over the 13 named <see cref="MouseShapeFamily"/> values
+    /// with a throwing wildcard. Silent degradation to <c>Arrow</c>
+    /// would mask either an upstream-enum drift (caller passing
+    /// <c>(MouseShapeFamily)999</c>) or a forgotten case after a new
+    /// family is added. C# can't express "exhaustive over named enum
+    /// members only" — enums logically contain every underlying int,
+    /// so CS8524 fires without a wildcard. Throwing on the wildcard
+    /// gives the next-best contract: runtime explosion on unknowns,
+    /// every named member explicitly handled in the diff.
+    /// </summary>
     internal static InputSystemCursorShape ToWinUI(MouseShapeFamily family) =>
         family switch
         {
@@ -28,9 +40,6 @@ internal static class MouseShapeAdapter
             MouseShapeFamily.SizeNorthSouth         => InputSystemCursorShape.SizeNorthSouth,
             MouseShapeFamily.SizeNortheastSouthwest => InputSystemCursorShape.SizeNortheastSouthwest,
             MouseShapeFamily.SizeNorthwestSoutheast => InputSystemCursorShape.SizeNorthwestSoutheast,
-            // Safe fallback — Core's enum is closed and the switch is
-            // exhaustive today, but a future MouseShapeFamily addition
-            // mustn't crash the input pipeline.
-            _                                       => InputSystemCursorShape.Arrow,
+            _                                       => throw new SwitchExpressionException(family),
         };
 }

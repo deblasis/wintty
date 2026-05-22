@@ -615,6 +615,13 @@ public sealed partial class TerminalControl : UserControl
         NativeMethods.SurfaceMouseButton(_surface, state, btn, CurrentMods());
     }
 
+    // Tracks the family currently applied to ProtectedCursor so
+    // SetMouseShape can short-circuit when libghostty re-emits the
+    // same shape (common in cursor-heavy TUIs like vim/less, where
+    // OSC 22 fires on every redraw). Initialised to Arrow to match
+    // the WinUI default when ProtectedCursor has not been assigned.
+    private MouseShapeFamily _currentMouseShapeFamily = MouseShapeFamily.Arrow;
+
     /// <summary>
     /// Set the panel cursor in response to libghostty's
     /// <c>apprt.action.MouseShape</c> (typically driven by OSC 22 from
@@ -627,6 +634,8 @@ public sealed partial class TerminalControl : UserControl
     internal void SetMouseShape(MouseShape shape)
     {
         var family = MouseShapeMap.ToFamily(shape);
+        if (family == _currentMouseShapeFamily) return;
+        _currentMouseShapeFamily = family;
         ProtectedCursor =
             InputSystemCursor.Create(MouseShapeAdapter.ToWinUI(family));
     }

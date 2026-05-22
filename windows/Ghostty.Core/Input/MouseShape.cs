@@ -57,6 +57,12 @@ public enum MouseShape
 /// Lives in Ghostty.Core so the mapping is unit-testable without
 /// dragging WinAppSDK into Ghostty.Tests.
 /// </summary>
+// NOTE: The explicit ordinals below are defensive pinning only —
+// MouseShapeFamily is an internal abstraction with no FFI binding, so
+// only the enum member NAMES are load-bearing. Reordering members
+// without updating the explicit values would be a harmless rename
+// from the perspective of every consumer (MouseShapeMap.ToFamily and
+// MouseShapeAdapter.ToWinUI both match by name).
 public enum MouseShapeFamily
 {
     Arrow = 0,
