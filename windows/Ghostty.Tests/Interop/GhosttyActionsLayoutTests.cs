@@ -11,6 +11,7 @@ public class GhosttyActionsLayoutTests
     [Theory]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
+    [InlineData((int)GhosttyActionTag.MouseShape, 36)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 56)]
