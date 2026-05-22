@@ -449,6 +449,28 @@ internal sealed class GhosttyHost : IDisposable
                 return 1;
             }
 
+            case GhosttyActionTag.MouseOverLink:
+            {
+                GhosttyActionMouseOverLink payload;
+                unsafe
+                {
+                    payload = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMouseOverLink>(
+                        (void*)(actionPtr + 8));
+                }
+                // libghostty sends url=null+len=0 when the pointer leaves a link;
+                // surface that as a null hovered-URL so the C# side can clear its
+                // own hover state cleanly.
+                string? url = payload.Url == IntPtr.Zero
+                    ? null
+                    : Marshal.PtrToStringUTF8(payload.Url, (int)payload.Len);
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.SetHoveredLink(url);
+                });
+                return 1;
+            }
+
             case GhosttyActionTag.RingBell:
             {
                 PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
