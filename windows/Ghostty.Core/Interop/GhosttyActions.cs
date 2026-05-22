@@ -23,6 +23,7 @@ internal enum GhosttyActionTag
     Scrollbar = 26,
     SetTitle = 32,
     MouseShape = 36,
+    MouseOverLink = 38,
     OpenConfig = 40,
     ReloadConfig = 47,
     CloseWindow = 49,
@@ -41,6 +42,17 @@ internal struct GhosttyActionScrollbar
     public ulong Total;
     public ulong Offset;
     public ulong Len;
+}
+
+// ghostty_action_mouse_over_link_s:
+//   { const char* url; size_t len; }
+// On x64: 16 bytes total (8 + 8). Read at actionPtr + 8 inside OnAction;
+// url=null+len=0 means "pointer left the link" (clear hover state).
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionMouseOverLink
+{
+    public nint Url;
+    public nuint Len;
 }
 
 // ghostty_action_progress_report_state_e.
