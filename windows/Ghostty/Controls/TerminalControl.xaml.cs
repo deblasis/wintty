@@ -425,6 +425,7 @@ public sealed partial class TerminalControl : UserControl
         TitleChanged = null;
         CloseRequested = null;
         HoveredLinkChanged = null;
+        ProgressChanged = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
