@@ -59,19 +59,19 @@ public enum MouseShape
 /// </summary>
 public enum MouseShapeFamily
 {
-    Arrow,
-    Hand,
-    IBeam,
-    Wait,
-    AppStarting,
-    Cross,
-    Help,
-    SizeAll,
-    UniversalNo,
-    SizeWestEast,
-    SizeNorthSouth,
-    SizeNortheastSouthwest,
-    SizeNorthwestSoutheast,
+    Arrow = 0,
+    Hand = 1,
+    IBeam = 2,
+    Wait = 3,
+    AppStarting = 4,
+    Cross = 5,
+    Help = 6,
+    SizeAll = 7,
+    UniversalNo = 8,
+    SizeWestEast = 9,
+    SizeNorthSouth = 10,
+    SizeNortheastSouthwest = 11,
+    SizeNorthwestSoutheast = 12,
 }
 
 /// <summary>
