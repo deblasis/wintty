@@ -12,7 +12,7 @@ namespace Ghostty.Controls;
 /// </summary>
 internal static class MouseShapeAdapter
 {
-    public static InputSystemCursorShape ToWinUI(MouseShapeFamily family) =>
+    internal static InputSystemCursorShape ToWinUI(MouseShapeFamily family) =>
         family switch
         {
             MouseShapeFamily.Arrow                  => InputSystemCursorShape.Arrow,
