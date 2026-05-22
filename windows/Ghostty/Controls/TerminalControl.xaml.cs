@@ -609,6 +609,13 @@ public sealed partial class TerminalControl : UserControl
             PointerUpdateKind.RightButtonReleased => GhosttyMouseButton.Right,
             PointerUpdateKind.MiddleButtonPressed or
             PointerUpdateKind.MiddleButtonReleased => GhosttyMouseButton.Middle,
+            // Mouse thumb buttons (back/forward). xterm SGR mouse convention
+            // encodes these as button 8 and 9; libghostty's input/mouse.zig
+            // enum has Eight=8 (back) and Nine=9 (forward) reserved for this.
+            PointerUpdateKind.XButton1Pressed or
+            PointerUpdateKind.XButton1Released => GhosttyMouseButton.Eight,
+            PointerUpdateKind.XButton2Pressed or
+            PointerUpdateKind.XButton2Released => GhosttyMouseButton.Nine,
             _ => GhosttyMouseButton.Unknown,
         };
         if (btn == GhosttyMouseButton.Unknown) return;
