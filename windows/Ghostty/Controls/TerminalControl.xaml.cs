@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using Ghostty.Core.Input;
 using Ghostty.Hosting;
 using Ghostty.Input;
@@ -423,6 +424,7 @@ public sealed partial class TerminalControl : UserControl
         // after the control tears down.
         TitleChanged = null;
         CloseRequested = null;
+        HoveredLinkChanged = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
@@ -516,13 +518,61 @@ public sealed partial class TerminalControl : UserControl
 
     // Mouse --------------------------------------------------------------
 
+    // Hovered OSC 8 hyperlink URL (or null when the pointer is not over
+    // a link). Set by GhosttyHost in response to libghostty's
+    // apprt.action.MouseOverLink. The HoveredLinkChanged event fires
+    // only on transitions so consumers (status bar, tab strip) can
+    // avoid redundant updates.
+    internal string? HoveredLink { get; private set; }
+    internal event EventHandler<string?>? HoveredLinkChanged;
+
+    internal void SetHoveredLink(string? url)
+    {
+        if (string.Equals(HoveredLink, url, StringComparison.Ordinal)) return;
+        HoveredLink = url;
+        HoveredLinkChanged?.Invoke(this, url);
+    }
+
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
         // Take focus on the UserControl, not the panel. Guard with the
         // current focus state to avoid generating a Lost+Got pair when
         // we already have focus.
         if (!_focused) this.Focus(FocusState.Pointer);
+
+        // Ctrl+LeftClick on an OSC 8 hyperlink: open the URL in the
+        // default browser and consume the event so libghostty doesn't
+        // also see a stray button-press (which would confuse apps
+        // running mouse=a like vim/htop).
+        var props = e.GetCurrentPoint(Panel).Properties;
+        if (props.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed
+            && (CurrentMods() & GhosttyMods.Ctrl) != 0
+            && HoveredLink is { } url)
+        {
+            _ = TryLaunchHoveredLinkAsync(url);
+            e.Handled = true;
+            return;
+        }
+
         SendMouseButton(e, GhosttyMouseState.Press);
+    }
+
+    private static async Task TryLaunchHoveredLinkAsync(string url)
+    {
+        // Best-effort launch. Malformed URLs (e.g. corrupted OSC 8) or
+        // schemes the user has no handler for shouldn't crash the
+        // terminal; swallow but log to Debug so a regression where valid
+        // URLs stop launching doesn't disappear silently.
+        try
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                await Launcher.LaunchUriAsync(uri);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[TerminalControl] TryLaunchHoveredLinkAsync failed for '{url}': {ex}");
+        }
     }
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e) =>
