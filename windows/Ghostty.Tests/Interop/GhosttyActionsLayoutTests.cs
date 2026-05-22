@@ -12,6 +12,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
+    [InlineData((int)GhosttyActionTag.MouseOverLink, 38)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 56)]
@@ -98,5 +99,20 @@ public class GhosttyActionsLayoutTests
             8,
             (int)Marshal.OffsetOf<GhosttyActionEnvelopeProbe>(
                 nameof(GhosttyActionEnvelopeProbe.Payload)));
+    }
+
+    [Fact]
+    public void MouseOverLinkStruct_Size_Is_16_Bytes()
+    {
+        // { const char* url; size_t len; } on x64 = 8 + 8 = 16
+        Assert.Equal(16, Marshal.SizeOf<GhosttyActionMouseOverLink>());
+    }
+
+    [Fact]
+    public void MouseOverLinkStruct_Field_Offsets_Match_C_Layout()
+    {
+        // Read at (actionPtr + 8); Url at struct offset 0, Len at 8.
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionMouseOverLink>(nameof(GhosttyActionMouseOverLink.Url)));
+        Assert.Equal(8, (int)Marshal.OffsetOf<GhosttyActionMouseOverLink>(nameof(GhosttyActionMouseOverLink.Len)));
     }
 }
