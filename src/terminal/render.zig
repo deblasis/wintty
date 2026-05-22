@@ -986,6 +986,41 @@ pub const RenderState = struct {
 
         return result;
     }
+
+    /// Returns the set of all OSC 8 hyperlink cells in the current
+    /// viewport, regardless of mouse position or any specific link ID.
+    /// Used by renderers in always-underline mode (config
+    /// `link-url-style = always`).
+    ///
+    /// IMPORTANT: The terminal must not have updated since the last call to
+    /// `update`. If there is any chance the terminal has updated, the caller
+    /// must first call `update` again to refresh the render state.
+    pub fn allHyperlinkCells(
+        self: *const RenderState,
+        alloc: Allocator,
+    ) Allocator.Error!CellSet {
+        var result: CellSet = .empty;
+        errdefer result.deinit(alloc);
+
+        const row_slice = self.row_data.slice();
+        const row_raw = row_slice.items(.raw);
+        const row_cells = row_slice.items(.cells);
+
+        for (row_raw, row_cells, 0..) |row, cells, y| {
+            // Row-level shortcut: skip whole rows with no hyperlink cells.
+            if (!row.hyperlink) continue;
+
+            for (0.., cells.items(.raw)) |x, cell| {
+                if (!cell.hyperlink) continue;
+                try result.put(alloc, .{
+                    .y = @intCast(y),
+                    .x = @intCast(x),
+                }, {});
+            }
+        }
+
+        return result;
+    }
 };
 
 /// The number of rows/cells we scan as a single group when looking for
@@ -1966,6 +2001,67 @@ test "linkCells" {
     var cells2 = try state.linkCells(alloc, .{ .x = 4, .y = 0 });
     defer cells2.deinit(alloc);
     try testing.expectEqual(0, cells2.count());
+}
+
+test "allHyperlinkCells empty viewport" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 5,
+        .rows = 2,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("hello");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var cells = try state.allHyperlinkCells(alloc);
+    defer cells.deinit(alloc);
+
+    try testing.expectEqual(0, cells.count());
+}
+
+test "allHyperlinkCells multiple hyperlinks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 20,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Three OSC 8 hyperlinks: two on row 0, one on row 1.
+    s.nextSlice("\x1b]8;;http://a\x1b\\AAAA\x1b]8;;\x1b\\ \x1b]8;;http://b\x1b\\BB\x1b]8;;\x1b\\\r\n");
+    s.nextSlice("\x1b]8;;http://c\x1b\\CCC\x1b]8;;\x1b\\");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var cells = try state.allHyperlinkCells(alloc);
+    defer cells.deinit(alloc);
+
+    // 4 (AAAA) + 2 (BB) + 3 (CCC) = 9 hyperlink cells, regardless of URL.
+    try testing.expectEqual(9, cells.count());
+    try testing.expect(cells.contains(.{ .x = 0, .y = 0 }));
+    try testing.expect(cells.contains(.{ .x = 3, .y = 0 }));
+    try testing.expect(cells.contains(.{ .x = 5, .y = 0 }));
+    try testing.expect(cells.contains(.{ .x = 6, .y = 0 }));
+    try testing.expect(cells.contains(.{ .x = 0, .y = 1 }));
+    try testing.expect(cells.contains(.{ .x = 2, .y = 1 }));
+
+    // The space between the two links on row 0 has no hyperlink.
+    try testing.expect(!cells.contains(.{ .x = 4, .y = 0 }));
 }
 
 test "string" {
