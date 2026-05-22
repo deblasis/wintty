@@ -532,6 +532,24 @@ public sealed partial class TerminalControl : UserControl
         if (string.Equals(HoveredLink, url, StringComparison.Ordinal)) return;
         HoveredLink = url;
         HoveredLinkChanged?.Invoke(this, url);
+        UpdateUrlHoverBanner(url);
+    }
+
+    // Show / hide the bottom-left URL hover banner that mirrors macOS's
+    // URLHoverBanner and the GTK url_left widget. libghostty already
+    // gates this on Ctrl/Cmd-hover (Surface.zig:linkAtPos requires
+    // ctrlOrSuper for OSC 8 hyperlink detection), so the banner only
+    // appears at the "I'm about to interact with this link" moment.
+    private void UpdateUrlHoverBanner(string? url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            UrlHoverBanner.Visibility = Visibility.Collapsed;
+            UrlHoverBannerText.Text = string.Empty;
+            return;
+        }
+        UrlHoverBannerText.Text = HoverLinkText.Format(url);
+        UrlHoverBanner.Visibility = Visibility.Visible;
     }
 
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
