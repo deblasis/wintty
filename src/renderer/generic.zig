@@ -626,6 +626,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             bg_image_fit: configpkg.BackgroundImageFit,
             bg_image_repeat: bool,
             links: link.Set,
+            link_url_style: configpkg.Config.LinkUrlStyle,
             vsync: bool,
             colorspace: configpkg.Config.WindowColorspace,
             blending: configpkg.Config.AlphaBlending,
@@ -701,6 +702,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .bg_image_fit = config.@"background-image-fit",
                     .bg_image_repeat = config.@"background-image-repeat",
                     .links = links,
+                    .link_url_style = config.@"link-url-style",
                     .vsync = config.@"window-vsync",
                     .colorspace = config.@"window-colorspace",
                     .blending = config.@"alpha-blending",
@@ -1335,23 +1337,39 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 }
 
-                // Get our OSC8 links we're hovering if we have a mouse.
-                // This requires terminal state because of URLs.
+                // Determine which OSC 8 hyperlink cells should be
+                // underlined this frame. With link-url-style = .always,
+                // every hyperlink cell in the viewport is underlined
+                // regardless of hover/mods state — matches the default
+                // behavior of most other terminal emulators.
+                // With link-url-style = .@"hover-mods" (default), only
+                // the hyperlink under the mouse is highlighted, and
+                // only while Ctrl/Cmd is held.
                 const links: terminal.RenderState.CellSet = osc8: {
-                    // If our mouse isn't hovering, we have no links.
-                    const vp = state.mouse.point orelse break :osc8 .empty;
+                    switch (self.config.link_url_style) {
+                        .always => break :osc8 self.terminal_state.allHyperlinkCells(
+                            arena_alloc,
+                        ) catch |err| {
+                            log.warn("error collecting OSC8 hyperlinks err={}", .{err});
+                            break :osc8 .empty;
+                        },
+                        .@"hover-mods" => {
+                            // If our mouse isn't hovering, we have no links.
+                            const vp = state.mouse.point orelse break :osc8 .empty;
 
-                    // If the right mods aren't pressed, then we can't match.
-                    if (!state.mouse.mods.equal(inputpkg.ctrlOrSuper(.{})))
-                        break :osc8 .empty;
+                            // If the right mods aren't pressed, then we can't match.
+                            if (!state.mouse.mods.equal(inputpkg.ctrlOrSuper(.{})))
+                                break :osc8 .empty;
 
-                    break :osc8 self.terminal_state.linkCells(
-                        arena_alloc,
-                        vp,
-                    ) catch |err| {
-                        log.warn("error searching for OSC8 links err={}", .{err});
-                        break :osc8 .empty;
-                    };
+                            break :osc8 self.terminal_state.linkCells(
+                                arena_alloc,
+                                vp,
+                            ) catch |err| {
+                                log.warn("error searching for OSC8 links err={}", .{err});
+                                break :osc8 .empty;
+                            };
+                        },
+                    }
                 };
 
                 const overlay_features: []const Overlay.Feature = overlay: {
