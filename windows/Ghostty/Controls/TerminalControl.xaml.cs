@@ -424,6 +424,7 @@ public sealed partial class TerminalControl : UserControl
         // after the control tears down.
         TitleChanged = null;
         CloseRequested = null;
+        HoveredLinkChanged = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
@@ -560,15 +561,17 @@ public sealed partial class TerminalControl : UserControl
     {
         // Best-effort launch. Malformed URLs (e.g. corrupted OSC 8) or
         // schemes the user has no handler for shouldn't crash the
-        // terminal; silently swallow the exception.
+        // terminal; swallow but log to Debug so a regression where valid
+        // URLs stop launching doesn't disappear silently.
         try
         {
             if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
                 await Launcher.LaunchUriAsync(uri);
         }
-        catch
+        catch (Exception ex)
         {
-            // Intentionally swallowed — no UX surface for launch failures yet.
+            System.Diagnostics.Debug.WriteLine(
+                $"[TerminalControl] TryLaunchHoveredLinkAsync failed for '{url}': {ex}");
         }
     }
 
