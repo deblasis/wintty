@@ -65,6 +65,10 @@ internal sealed class WindowThemeManager : IDisposable
     {
         _configService.ConfigChanged -= OnConfigChanged;
         _uiSettings.ColorValuesChanged -= OnSystemThemeChanged;
+
+        // Drop subscribers so the owning window/control isn't rooted
+        // via this event after teardown.
+        ThemeChanged = null;
     }
 
     /// <summary>
