@@ -83,5 +83,38 @@
             Visibility="Collapsed"
             Scroll="OnScrollBarScroll"
             PointerWheelChanged="OnScrollBarPointerWheelChanged" />
+
+        <!--
+            URL hover banner. Bottom-left overlay shown while libghostty's
+            apprt.action.MouseOverLink action is active (i.e. the user is
+            holding Ctrl and hovering an OSC 8 hyperlink or URL-matched
+            text). Matches macOS URLHoverBanner and the GTK url_left
+            widget; on Windows we also prepend "Ctrl+Click to open:" as
+            a discoverability hint because Windows users come from
+            Windows Terminal (which has no equivalent URL preview at all).
+
+            IsHitTestVisible=False so the banner never steals pointer
+            events from the SwapChainPanel underneath - terminal apps
+            running mouse=a keep seeing every mouse move through the
+            banner's footprint.
+        -->
+        <Border
+            x:Name="UrlHoverBanner"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Bottom"
+            Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+            BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+            BorderThickness="1,1,1,0"
+            CornerRadius="0,8,0,0"
+            Padding="8,4,8,4"
+            MaxWidth="640"
+            Visibility="Collapsed"
+            IsHitTestVisible="False">
+            <TextBlock
+                x:Name="UrlHoverBannerText"
+                Style="{ThemeResource CaptionTextBlockStyle}"
+                TextTrimming="CharacterEllipsis"
+                MaxLines="1" />
+        </Border>
     </Grid>
 </UserControl>
