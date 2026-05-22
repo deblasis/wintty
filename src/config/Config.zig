@@ -1424,6 +1424,25 @@ link: RepeatableLink = .{},
 /// `link`). If you want to customize URL matching, use `link` and disable this.
 @"link-url": bool = true,
 
+/// Controls how OSC 8 hyperlinks and the default URL matcher are visually
+/// highlighted on screen. This only affects the underline rendering; clicking
+/// a link still requires Ctrl (Linux/Windows) or Cmd (macOS) regardless of
+/// this setting, so mouse-aware TUI programs (vim with `mouse=a`, htop, etc.)
+/// keep their normal mouse-button semantics.
+///
+/// Available values:
+///
+///   * `hover-mods` (default): Links are only underlined while the mouse
+///     hovers over them with the modifier held. Matches Ghostty's
+///     minimal-chrome default.
+///
+///   * `always`: Links are always underlined whenever they appear on screen.
+///     Matches the default behavior of most other terminal emulators
+///     (Windows Terminal, iTerm2, WezTerm, Kitty, VS Code).
+///
+/// Available since: 1.3.0
+@"link-url-style": LinkUrlStyle = .@"hover-mods",
+
 /// Show link previews for a matched URL.
 ///
 /// When true, link previews are shown for all matched URLs. When false, link
@@ -4682,6 +4701,18 @@ pub fn finalize(self: *Config) !void {
     if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
     if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
 
+    // When link-url-style = always, switch the default URL matcher's
+    // highlight to .always so the URL matcher behaves like the OSC 8
+    // path in always-underline mode. The default link is always at
+    // index 0 (set up in default()). We do this before the link-url
+    // cut below so that disabling link-url still removes the entry
+    // cleanly.
+    if (self.@"link-url" and self.@"link-url-style" == .always and
+        self.link.links.items.len > 0)
+    {
+        self.link.links.items[0].highlight = .{ .always = {} };
+    }
+
     // If URLs are disabled, cut off the first link. The first link is
     // always the URL matcher.
     if (!self.@"link-url") self.link.links.items = self.link.links.items[1..];
@@ -5282,6 +5313,12 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
+};
+
+/// See link-url-style
+pub const LinkUrlStyle = enum {
+    @"hover-mods",
+    always,
 };
 
 /// See working-directory
