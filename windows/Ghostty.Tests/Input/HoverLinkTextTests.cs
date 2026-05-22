@@ -21,6 +21,22 @@ public class HoverLinkTextTests
     }
 
     [Fact]
+    public void Format_AtDefaultMaxBoundary_NoTruncation()
+    {
+        // Pins the s.Length <= maxChars off-by-one boundary in TruncateMid.
+        // The URL is exactly DefaultMaxUrlChars (80) chars, so it should
+        // pass through Format unchanged after the "Ctrl+Click to open: "
+        // prefix - no ellipsis.
+        var eightyCharUrl = "https://" + new string('a', 72);
+        Assert.Equal(80, eightyCharUrl.Length);
+
+        var actual = HoverLinkText.Format(eightyCharUrl);
+
+        Assert.Equal("Ctrl+Click to open: " + eightyCharUrl, actual);
+        Assert.DoesNotContain("…", actual);
+    }
+
+    [Fact]
     public void Format_LongUrl_TruncatesWithEllipsis()
     {
         var longUrl = "https://github.com/deblasis/wintty/pull/394/files#diff-1234567890abcdef1234567890abcdef";
