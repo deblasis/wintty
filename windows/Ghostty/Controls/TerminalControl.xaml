@@ -97,6 +97,16 @@
             events from the SwapChainPanel underneath - terminal apps
             running mouse=a keep seeing every mouse move through the
             banner's footprint.
+
+            BorderThickness "1,1,1,0" drops the bottom edge: the banner is
+            anchored to VerticalAlignment=Bottom and sits flush with the
+            control's bottom boundary, so a bottom-edge stroke would draw
+            a doubled border with the surrounding chrome.
+
+            CornerRadius "0,8,0,0" (TopLeft, TopRight, BottomRight,
+            BottomLeft) rounds only the top-right corner: bottom-left
+            anchor + top-right "lift" mirrors how the macOS URLHoverBanner
+            tucks itself into the corner.
         -->
         <Border
             x:Name="UrlHoverBanner"
@@ -110,10 +120,15 @@
             MaxWidth="640"
             Visibility="Collapsed"
             IsHitTestVisible="False">
+            <!--
+                No TextTrimming: HoverLinkText.Format already mid-ellipsis-
+                truncates at 80 chars in C# (which is more informative for
+                URLs than a right-side render-layer ellipsis). MaxLines=1
+                stays as a defensive cap against multi-line text.
+            -->
             <TextBlock
                 x:Name="UrlHoverBannerText"
                 Style="{ThemeResource CaptionTextBlockStyle}"
-                TextTrimming="CharacterEllipsis"
                 MaxLines="1" />
         </Border>
     </Grid>
