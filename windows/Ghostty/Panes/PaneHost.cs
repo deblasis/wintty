@@ -369,11 +369,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // walking it here would double-dispose (DisposeSurface is
         // idempotent, but the walk is wasted work and a trap for the
         // next reader).
-        if (_allLeavesClosed) return;
-        foreach (var leaf in PaneTree.Leaves(_root))
+        if (!_allLeavesClosed)
         {
-            leaf.Terminal().DisposeSurface();
+            foreach (var leaf in PaneTree.Leaves(_root))
+            {
+                leaf.Terminal().DisposeSurface();
+            }
         }
+
+        // Drop subscribers so MainWindow / TabModel / VerticalTabHost
+        // are not rooted via these events after the tab tears down.
+        // Matches the pattern in TerminalControl.DisposeSurface.
+        LeafFocused = null;
+        ProgressChanged = null;
+        LastLeafClosed = null;
     }
 
     /// <summary>
