@@ -515,6 +515,13 @@ public sealed partial class TerminalControl : UserControl
         NativeMethods.SurfaceSetFocus(_surface, focused);
         var app = Host?.App ?? default;
         if (app.Handle != IntPtr.Zero) NativeMethods.AppSetFocus(app, focused);
+
+        // Banner can only hide via libghostty re-emitting MouseOverLink with
+        // a null URL — which requires the pointer to actually move out of
+        // the link cell. Focus loss (Alt+Tab, click another pane) doesn't
+        // move the pointer, so without this the banner would stay frozen
+        // on screen until the user returned and moved the mouse.
+        if (!focused) UpdateUrlHoverBanner(null);
     }
 
     // Mouse --------------------------------------------------------------
@@ -540,15 +547,23 @@ public sealed partial class TerminalControl : UserControl
     // gates this on Ctrl/Cmd-hover (Surface.zig:linkAtPos requires
     // ctrlOrSuper for OSC 8 hyperlink detection), so the banner only
     // appears at the "I'm about to interact with this link" moment.
+    //
+    // Also sets AutomationProperties.Name on the Border so screen readers
+    // announce the full "Ctrl+Click to open: <url>" string instead of the
+    // raw TextBlock type name. IsHitTestVisible=false in XAML keeps the
+    // banner out of the pointer-event chain but does NOT remove it from
+    // the UIA tree.
     private void UpdateUrlHoverBanner(string? url)
     {
         if (string.IsNullOrEmpty(url))
         {
             UrlHoverBanner.Visibility = Visibility.Collapsed;
-            UrlHoverBannerText.Text = string.Empty;
             return;
         }
-        UrlHoverBannerText.Text = HoverLinkText.Format(url);
+        var formatted = HoverLinkText.Format(url);
+        UrlHoverBannerText.Text = formatted;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            UrlHoverBanner, formatted);
         UrlHoverBanner.Visibility = Visibility.Visible;
     }
 
