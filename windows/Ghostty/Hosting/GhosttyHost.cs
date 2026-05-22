@@ -6,6 +6,7 @@ using Ghostty.Clipboard;
 using Ghostty.Controls;
 using Ghostty.Core.Clipboard;
 using Ghostty.Core.Hosting;
+using Ghostty.Core.Input;
 using Ghostty.Core.Interop;
 using Ghostty.Interop;
 using Microsoft.Extensions.Logging;
@@ -429,6 +430,21 @@ internal sealed class GhosttyHost : IDisposable
                 {
                     if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                         c.RaiseTitleChanged(title);
+                });
+                return 1;
+            }
+
+            case GhosttyActionTag.MouseShape:
+            {
+                // ghostty_action_mouse_shape_e is a single c_int payload;
+                // read it at +8 (skipping the 4-byte tag + 4-byte padding
+                // before the union, same offset as ProgressReport.State).
+                var raw = Marshal.ReadInt32(actionPtr, 8);
+                var shape = (MouseShape)raw;
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.SetMouseShape(shape);
                 });
                 return 1;
             }
