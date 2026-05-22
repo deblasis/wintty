@@ -449,6 +449,46 @@ internal sealed class GhosttyHost : IDisposable
                 return 1;
             }
 
+            case GhosttyActionTag.MouseOverLink:
+            {
+                GhosttyActionMouseOverLink payload;
+                unsafe
+                {
+                    payload = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMouseOverLink>(
+                        (void*)(actionPtr + 8));
+                }
+                // libghostty sends url=null+len=0 when the pointer leaves a link;
+                // surface that as a null hovered-URL so the C# side can clear its
+                // own hover state cleanly. Use the length-aware PtrToStringUTF8
+                // overload (vs SetTitle's null-terminated variant) because this
+                // payload carries an explicit length and the string is NOT
+                // guaranteed null-terminated. Guard the nuint -> int cast: OSC 8
+                // URLs are typically <2 KB but libghostty makes no upper-bound
+                // guarantee, and Marshal.PtrToStringUTF8(IntPtr, int) takes a
+                // signed length — silent truncation would corrupt the URL.
+                string? url;
+                if (payload.Url == IntPtr.Zero)
+                {
+                    url = null;
+                }
+                else if (payload.Len > int.MaxValue)
+                {
+                    // Pathologically long URL — drop the hover update rather
+                    // than truncate. Realistic OSC 8 URLs never approach this.
+                    return 1;
+                }
+                else
+                {
+                    url = Marshal.PtrToStringUTF8(payload.Url, (int)payload.Len);
+                }
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.SetHoveredLink(url);
+                });
+                return 1;
+            }
+
             case GhosttyActionTag.RingBell:
             {
                 PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
