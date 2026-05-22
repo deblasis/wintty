@@ -364,11 +364,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void DisposeAllLeaves()
     {
-        // Every leaf was already disposed one-by-one as the tree
-        // collapsed; _root still references the last-closed leaf but
-        // walking it here would double-dispose (DisposeSurface is
-        // idempotent, but the walk is wasted work and a trap for the
-        // next reader).
+        // Tree walk is gated on _allLeavesClosed: every leaf was
+        // already disposed one-by-one as the tree collapsed; _root
+        // still references the last-closed leaf but walking it here
+        // would double-dispose (DisposeSurface is idempotent, but the
+        // walk is wasted work and a trap for the next reader).
         if (!_allLeavesClosed)
         {
             foreach (var leaf in PaneTree.Leaves(_root))
@@ -377,9 +377,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             }
         }
 
-        // Drop subscribers so MainWindow / TabModel / VerticalTabHost
-        // are not rooted via these events after the tab tears down.
-        // Matches the pattern in TerminalControl.DisposeSurface.
+        // Event-nulling intentionally runs unconditionally: the gate
+        // above only controls whether we re-walk the tree, not whether
+        // this PaneHost is going away. Both code paths (tree-collapsed
+        // and not) reach here as part of tab teardown, so subscribers
+        // must always be dropped. Matches TerminalControl.DisposeSurface.
         LeafFocused = null;
         ProgressChanged = null;
         LastLeafClosed = null;
