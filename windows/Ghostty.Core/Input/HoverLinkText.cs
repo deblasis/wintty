@@ -15,13 +15,13 @@ public static class HoverLinkText
     /// Picked to fit comfortably below a typical pane width without
     /// running the banner across the whole surface.
     /// </summary>
-    public const int DefaultMaxUrlChars = 80;
+    internal const int DefaultMaxUrlChars = 80;
 
     /// <summary>
     /// Hint prefix shown ahead of the URL. Discoverability aid for
     /// Windows users; upstream macOS / GTK banners show URL only.
     /// </summary>
-    public const string HintPrefix = "Ctrl+Click to open: ";
+    internal const string HintPrefix = "Ctrl+Click to open: ";
 
     /// <summary>
     /// Produce the full banner text: <c>"Ctrl+Click to open: &lt;url&gt;"</c>,
@@ -48,7 +48,7 @@ public static class HoverLinkText
     /// is too small for the ellipsis to fit (degrades to a hard prefix
     /// truncation in that pathological case).
     /// </summary>
-    public static string TruncateMid(string s, int maxChars)
+    internal static string TruncateMid(string s, int maxChars)
     {
         if (string.IsNullOrEmpty(s)) return s;
         if (maxChars <= 0) return string.Empty;
@@ -59,8 +59,12 @@ public static class HoverLinkText
 
         // Bias slightly toward the END of the URL: the path tail is more
         // informative than the host prefix once we're already past
-        // truncation. (maxChars - 1) / 2 keeps the start, the remainder
-        // goes to the end.
+        // truncation. Integer division floors keepStart; the remainder
+        // accrues to keepEnd, so on odd splits the tail gets the extra
+        // character. Examples:
+        //   max=9  -> keepStart=4, keepEnd=4
+        //   max=10 -> keepStart=4, keepEnd=5
+        //   max=11 -> keepStart=5, keepEnd=5
         int keepStart = (maxChars - 1) / 2;
         int keepEnd = maxChars - 1 - keepStart;
         return string.Concat(s.AsSpan(0, keepStart), "…", s.AsSpan(s.Length - keepEnd));
