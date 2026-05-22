@@ -79,6 +79,10 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
         try { _serverTask?.GetAwaiter().GetResult(); }
         catch { /* expected OCE or pipe error */ }
         _cts.Dispose();
+
+        // Drop subscribers so MainWindow is not rooted via this event
+        // after the service tears down at window-close.
+        ListThemesRequested = null;
     }
 
     private async Task RunServer(CancellationToken ct)
