@@ -8,6 +8,8 @@
 
 // user32
 ClientToScreen
+CreateCursor
+DestroyCursor
 GetCursorPos
 GetForegroundWindow
 GetKeyState
