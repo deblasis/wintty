@@ -1,5 +1,4 @@
 using System;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Input;
 using Windows.Win32;
@@ -42,6 +41,11 @@ internal static partial class InvisibleCursorFactory
     [LibraryImport("combase.dll", EntryPoint = "RoGetActivationFactory")]
     private static partial int RoGetActivationFactory(nint activatableClassId, in Guid iid, out nint factory);
 
+    // Lazily-built, process-wide. Not thread-safe: today the only
+    // caller is TerminalControl.SetMouseVisibility which runs on the
+    // UI dispatcher thread, so concurrent first reads cannot race.
+    // If that ever changes, wrap in Lazy<InputCursor> with
+    // LazyThreadSafetyMode.ExecutionAndPublication.
     private static InputCursor? _invisible;
 
     /// <summary>

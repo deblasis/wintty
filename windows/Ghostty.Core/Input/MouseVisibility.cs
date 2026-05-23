@@ -5,6 +5,9 @@ namespace Ghostty.Core.Input;
 /// <c>include/ghostty.h</c>. Ordinals are pinned by
 /// <c>MouseVisibilityEnumTests</c>; do not renumber without updating
 /// the upstream enum first.
+///
+/// To re-verify against upstream after a rebase:
+///   grep -nE "GHOSTTY_MOUSE_(VISIBLE|HIDDEN)" include/ghostty.h
 /// </summary>
 public enum MouseVisibility
 {

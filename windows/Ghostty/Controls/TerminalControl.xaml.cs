@@ -624,11 +624,14 @@ public sealed partial class TerminalControl : UserControl
         // While the cursor is hidden by mouse-hide-while-typing,
         // suppress sub-threshold motion so libghostty's cursorPosCallback
         // doesn't fire showMouse for every DIP of sensor jitter. See
-        // _lastForwardedMouseX/Y comments above.
-        if (_cursorHidden)
+        // _lastForwardedMouseX/Y comments above. A null anchor means we
+        // haven't seen a real pointer event yet, so the current position
+        // becomes the anchor without forwarding (no genuine motion to
+        // report).
+        if (_cursorHidden && _lastForwardedMouseX is double ax && _lastForwardedMouseY is double ay)
         {
-            var dx = pt.X - _lastForwardedMouseX;
-            var dy = pt.Y - _lastForwardedMouseY;
+            var dx = pt.X - ax;
+            var dy = pt.Y - ay;
             if (dx * dx + dy * dy < HiddenCursorMotionThresholdDips * HiddenCursorMotionThresholdDips)
                 return;
         }
@@ -736,13 +739,19 @@ public sealed partial class TerminalControl : UserControl
 
     // Last pointer position forwarded to libghostty via SurfaceMousePos.
     // Used by OnPointerMoved to suppress sub-threshold motion while the
-    // cursor is hidden: libghostty's cursorPosCallback (Surface.zig:4569)
+    // cursor is hidden: libghostty's cursorPosCallback in Surface.zig
     // calls showMouse() on ANY mouse position update, so even 1-DIP
     // sensor jitter from a resting hand would flicker the cursor back on
     // immediately after every keystroke. Mac sidesteps this with NSCursor
     // OS-level filtering; on WinUI 3 we filter the forwarding ourselves.
-    private double _lastForwardedMouseX;
-    private double _lastForwardedMouseY;
+    //
+    // Nullable so the first OnPointerMoved seeds the anchor instead of
+    // comparing to a literal (0, 0) origin -- a cold launch where the
+    // user types before ever moving the mouse would otherwise blow past
+    // the threshold immediately and un-hide the cursor on the first
+    // genuine pointer event.
+    private double? _lastForwardedMouseX;
+    private double? _lastForwardedMouseY;
 
     // Threshold in DIPs. Real intentional mouse motion produces deltas
     // of 10+ DIPs between PointerMoved events; sensor jitter / hand
@@ -782,8 +791,8 @@ public sealed partial class TerminalControl : UserControl
     ///
     /// Hiding swaps ProtectedCursor to a transparent custom cursor
     /// (built via <see cref="Ghostty.Hosting.InvisibleCursorFactory"/>).
-    /// Showing restores ProtectedCursor to the shape that #390's
-    /// <see cref="SetMouseShape"/> last asked for. The two methods
+    /// Showing restores ProtectedCursor to the shape that
+    /// <see cref="SetMouseShape"/> last requested. The two methods
     /// coordinate through <see cref="_cursorHidden"/> and
     /// <see cref="_currentMouseShapeFamily"/> so a MouseShape arriving
     /// while hidden doesn't pop the cursor back on.
