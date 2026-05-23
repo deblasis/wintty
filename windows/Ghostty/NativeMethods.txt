@@ -17,6 +17,8 @@ GetWindowPlacement
 LoadImage
 MapVirtualKey
 MessageBeep
+CreateCursor
+DestroyCursor
 SendMessage
 SetForegroundWindow
 ShowWindow
