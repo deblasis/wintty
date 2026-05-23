@@ -620,6 +620,21 @@ public sealed partial class TerminalControl : UserControl
         // cursorPosToPixels using the surface's content scale. Multiplying
         // by CompositionScaleX/Y here would double-scale on high DPI.
         var pt = e.GetCurrentPoint(Panel).Position;
+
+        // While the cursor is hidden by mouse-hide-while-typing,
+        // suppress sub-threshold motion so libghostty's cursorPosCallback
+        // doesn't fire showMouse for every DIP of sensor jitter. See
+        // _lastForwardedMouseX/Y comments above.
+        if (_cursorHidden)
+        {
+            var dx = pt.X - _lastForwardedMouseX;
+            var dy = pt.Y - _lastForwardedMouseY;
+            if (dx * dx + dy * dy < HiddenCursorMotionThresholdDips * HiddenCursorMotionThresholdDips)
+                return;
+        }
+
+        _lastForwardedMouseX = pt.X;
+        _lastForwardedMouseY = pt.Y;
         NativeMethods.SurfaceMousePos(_surface, pt.X, pt.Y, CurrentMods());
     }
 
@@ -713,6 +728,27 @@ public sealed partial class TerminalControl : UserControl
     // the WinUI default when ProtectedCursor has not been assigned.
     private MouseShapeFamily _currentMouseShapeFamily = MouseShapeFamily.Arrow;
 
+    // Whether the mouse-hide-while-typing path has driven the cursor
+    // to its invisible state. While true, SetMouseShape only tracks
+    // the requested family; the visible cursor is restored from
+    // _currentMouseShapeFamily by SetMouseVisibility(Visible).
+    private bool _cursorHidden;
+
+    // Last pointer position forwarded to libghostty via SurfaceMousePos.
+    // Used by OnPointerMoved to suppress sub-threshold motion while the
+    // cursor is hidden: libghostty's cursorPosCallback (Surface.zig:4569)
+    // calls showMouse() on ANY mouse position update, so even 1-DIP
+    // sensor jitter from a resting hand would flicker the cursor back on
+    // immediately after every keystroke. Mac sidesteps this with NSCursor
+    // OS-level filtering; on WinUI 3 we filter the forwarding ourselves.
+    private double _lastForwardedMouseX;
+    private double _lastForwardedMouseY;
+
+    // Threshold in DIPs. Real intentional mouse motion produces deltas
+    // of 10+ DIPs between PointerMoved events; sensor jitter / hand
+    // tremor is 1-2 DIPs. 5 splits the difference.
+    private const double HiddenCursorMotionThresholdDips = 5.0;
+
     /// <summary>
     /// Set the panel cursor in response to libghostty's
     /// <c>apprt.action.MouseShape</c> (typically driven by OSC 22 from
@@ -721,14 +757,45 @@ public sealed partial class TerminalControl : UserControl
     /// libghostty re-emits this action whenever the active shape
     /// changes, including transitions back to <see cref="MouseShape.Default"/>,
     /// so we don't need to reset on PointerExited.
+    ///
+    /// While <see cref="_cursorHidden"/> is true the visible shape
+    /// is only tracked; <see cref="SetMouseVisibility"/> restores it
+    /// when libghostty asks for the cursor to come back.
     /// </summary>
     internal void SetMouseShape(MouseShape shape)
     {
         var family = MouseShapeMap.ToFamily(shape);
         if (family == _currentMouseShapeFamily) return;
         _currentMouseShapeFamily = family;
-        ProtectedCursor =
-            InputSystemCursor.Create(MouseShapeAdapter.ToWinUI(family));
+        if (!_cursorHidden)
+        {
+            ProtectedCursor =
+                InputSystemCursor.Create(MouseShapeAdapter.ToWinUI(family));
+        }
+    }
+
+    /// <summary>
+    /// Set the panel cursor's visibility in response to libghostty's
+    /// <c>apprt.action.MouseVisibility</c> (driven by the
+    /// <c>mouse-hide-while-typing</c> config: hide on text-producing key
+    /// press, show on pointer motion / focus / click).
+    ///
+    /// Hiding swaps ProtectedCursor to a transparent custom cursor
+    /// (built via <see cref="Ghostty.Hosting.InvisibleCursorFactory"/>).
+    /// Showing restores ProtectedCursor to the shape that #390's
+    /// <see cref="SetMouseShape"/> last asked for. The two methods
+    /// coordinate through <see cref="_cursorHidden"/> and
+    /// <see cref="_currentMouseShapeFamily"/> so a MouseShape arriving
+    /// while hidden doesn't pop the cursor back on.
+    /// </summary>
+    internal void SetMouseVisibility(MouseVisibility visibility)
+    {
+        var newHidden = visibility == MouseVisibility.Hidden;
+        if (newHidden == _cursorHidden) return;
+        _cursorHidden = newHidden;
+        ProtectedCursor = newHidden
+            ? Ghostty.Hosting.InvisibleCursorFactory.Invisible
+            : InputSystemCursor.Create(MouseShapeAdapter.ToWinUI(_currentMouseShapeFamily));
     }
 
     // Keyboard -----------------------------------------------------------
