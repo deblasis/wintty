@@ -23,6 +23,7 @@ internal enum GhosttyActionTag
     Scrollbar = 26,
     SetTitle = 32,
     MouseShape = 36,
+    MouseVisibility = 37,
     MouseOverLink = 38,
     OpenConfig = 40,
     ReloadConfig = 47,

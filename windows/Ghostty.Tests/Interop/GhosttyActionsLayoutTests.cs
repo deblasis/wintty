@@ -12,6 +12,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
+    [InlineData((int)GhosttyActionTag.MouseVisibility, 37)]
     [InlineData((int)GhosttyActionTag.MouseOverLink, 38)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]

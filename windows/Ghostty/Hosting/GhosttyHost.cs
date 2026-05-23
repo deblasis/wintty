@@ -50,6 +50,8 @@ internal sealed class GhosttyHost : IDisposable
     // Dispose consults this instead of a bare _sharesApp bool.
     private readonly IAppHandleOwnership _ownership;
 
+    private readonly ILogger<GhosttyHost> _logger;
+
     /// <summary>
     /// UTC timestamp of the most recent key event seen by any
     /// <see cref="Ghostty.Controls.TerminalControl"/> bound to this
@@ -124,6 +126,7 @@ internal sealed class GhosttyHost : IDisposable
             supervisor.RegisterBootstrap(),
             supervisor);
         _config = config;
+        _logger = loggerFactory.CreateLogger<GhosttyHost>();
 
         _wakeupCb = OnWakeup;
         _actionCb = OnAction;
@@ -187,6 +190,7 @@ internal sealed class GhosttyHost : IDisposable
         _ownership = new SupervisedOwnership(
             supervisor.RegisterPerWindow(),
             supervisor);
+        _logger = loggerFactory.CreateLogger<GhosttyHost>();
         _app = new GhosttyApp(sharedApp);
         // Per-window hosts do not own or read _config; the bootstrap host
         // manages the single GhosttyConfig. Left as default intentionally.
@@ -406,6 +410,12 @@ internal sealed class GhosttyHost : IDisposable
                         ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
                     return 1;
 
+                case GhosttyActionTag.MouseVisibility:
+                    // Mirror mac/GTK: mouse visibility against an app target is a
+                    // libghostty bug; log and absorb so we still report "handled".
+                    _logger.LogWarning("MouseVisibility action received with app target; ignoring");
+                    return 1;
+
                 default:
                     return 0;
             }
@@ -445,6 +455,21 @@ internal sealed class GhosttyHost : IDisposable
                 {
                     if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                         c.SetMouseShape(shape);
+                });
+                return 1;
+            }
+
+            case GhosttyActionTag.MouseVisibility:
+            {
+                // ghostty_action_mouse_visibility_e is a single c_int payload;
+                // read it at +8 (skipping the 4-byte tag + 4-byte padding before
+                // the union, same offset as MouseShape and ProgressReport).
+                var raw = Marshal.ReadInt32(actionPtr, 8);
+                var visibility = (MouseVisibility)raw;
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.SetMouseVisibility(visibility);
                 });
                 return 1;
             }
