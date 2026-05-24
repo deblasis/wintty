@@ -4,8 +4,8 @@ LANGUAGE 0, 0
 #define RT_MANIFEST 1
 RT_MANIFEST 24 "ghostty.manifest"
 
-#define ID_ICON_GHOSTTY 1
-ID_ICON_GHOSTTY ICON "ghostty.ico"
+#define ID_ICON_WINTTY 1
+ID_ICON_WINTTY ICON "wintty.ico"
 
 VS_VERSION_INFO VERSIONINFO
 //FILEVERSION     VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_COMMIT_HEIGHT
@@ -25,7 +25,7 @@ BEGIN
         //VALUE "FileVersion",        VERSION
         //VALUE "LegalCopyright",     "(C) 2024 ???"
         VALUE "OriginalFilename", "ghostty.exe"
-        VALUE "ProductName",        "Ghostty"
+        VALUE "ProductName",        "Wintty"
         //VALUE "ProductVersion",     VERSION
         END
     END
