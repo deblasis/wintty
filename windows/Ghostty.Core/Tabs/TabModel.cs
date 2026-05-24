@@ -64,6 +64,11 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// constructed from <see cref="ProfileSnapshot"/> so tabs opened
     /// via the legacy no-profile path still get a default icon
     /// without consulting the resolver up front.
+    ///
+    /// Thread-safety: the getter is UI-thread-only. Lazy initialization
+    /// is not synchronized; concurrent access from non-UI threads could
+    /// construct two VMs and lose one. Callers from background threads
+    /// must marshal via the DispatcherQueue first.
     /// </summary>
     public TabIconViewModel TabIcon
     {

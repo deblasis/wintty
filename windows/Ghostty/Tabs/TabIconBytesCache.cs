@@ -27,20 +27,16 @@ internal static class TabIconBytesCache
     {
         if (_resolver is null) return null;
         var key = SpecKey(spec);
-        if (!_cache.TryGetValue(key, out var bytes))
-        {
-            bytes = Task.Run(() => _resolver.ResolveAsync(spec, default)).GetAwaiter().GetResult();
-            _cache[key] = bytes;
-        }
-        return bytes;
+        return _cache.GetOrAdd(key, _ =>
+            Task.Run(() => _resolver.ResolveAsync(spec, default)).GetAwaiter().GetResult());
     }
 
     private static string SpecKey(IconSpec spec) => spec switch
     {
         IconSpec.BrandKey b => $"brand-{b.Key}-{b.Dpi ?? 0}",
         IconSpec.BundledKey b => $"bundled-{b.Key}",
-        IconSpec.Path p => $"path-{p.FilePath.GetHashCode():x}",
-        IconSpec.AutoForExe a => $"exe-{a.ExePath.GetHashCode():x}",
+        IconSpec.Path p => $"path-{p.FilePath}",
+        IconSpec.AutoForExe a => $"exe-{a.ExePath}",
         IconSpec.AutoForWslDistro w => $"wsl-{w.DistroName}",
         IconSpec.Mdl2Token m => $"mdl2-{m.CodePoint:x}",
         _ => "default",
