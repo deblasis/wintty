@@ -23,6 +23,14 @@ public abstract record IconSpec
     public sealed record BundledKey(string Key) : IconSpec;
 
     /// <summary>
+    /// Wintty-bundled brand icon by string key (e.g. "ubuntu", "pwsh", "rust").
+    /// Resolves to <c>&lt;key&gt;@&lt;dpi&gt;.png</c> in the IconAssets resource
+    /// namespace. <see cref="Dpi"/> selects the DPI variant; null lets the
+    /// resolver pick based on system scale.
+    /// </summary>
+    public sealed record BrandKey(string Key, int? Dpi) : IconSpec;
+
+    /// <summary>
     /// Extract the icon associated with a Windows .exe via SHGetFileInfo.
     /// </summary>
     public sealed record AutoForExe(string ExePath) : IconSpec;
