@@ -230,7 +230,19 @@ internal sealed class TabManager
         // without needing a shared dictionary.
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         host.ProgressChanged += progressHandler;
-        tab.OnClose = () => host.ProgressChanged -= progressHandler;
+        // Bridge "the last leaf in this tab closed" (e.g. the only shell
+        // in this tab exited via `exit`, or libghostty's close-surface
+        // callback fired for the sole pane) into a tab-level close. The
+        // window-close → quit-after-last-window-closed chain relies on
+        // CloseTab firing, which won't happen on its own when the close
+        // originates from the surface rather than from a manager call.
+        EventHandler lastLeafHandler = (_, _) => CloseTab(tab);
+        host.LastLeafClosed += lastLeafHandler;
+        tab.OnClose = () =>
+        {
+            host.ProgressChanged -= progressHandler;
+            host.LastLeafClosed -= lastLeafHandler;
+        };
         tab.PropertyChanged += OnTabPropertyChanged;
         return tab;
     }
@@ -340,29 +352,41 @@ internal sealed class TabManager
         tab.PaneHost.LeafFocused += OnLeafFocused;
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         tab.PaneHost.ProgressChanged += progressHandler;
+        // Re-attach the last-leaf-closed bridge in the adopter's event
+        // graph. See CreateTab for why the bridge exists; without it,
+        // a tab detached to a new window would no longer close that
+        // window when its shell exits.
+        EventHandler lastLeafHandler = (_, _) => CloseTab(tab);
+        tab.PaneHost.LastLeafClosed += lastLeafHandler;
         // OnClose stores the unsubscribe action so DetachTab /
-        // CloseTab can walk back the progress wiring without needing
-        // to re-capture the handler delegate.
-        tab.OnClose = () => tab.PaneHost.ProgressChanged -= progressHandler;
+        // CloseTab can walk back both wirings without needing to
+        // re-capture the handler delegates.
+        tab.OnClose = () =>
+        {
+            tab.PaneHost.ProgressChanged -= progressHandler;
+            tab.PaneHost.LastLeafClosed -= lastLeafHandler;
+        };
         tab.PropertyChanged += OnTabPropertyChanged;
     }
 
     /// <summary>
-    /// Walk back the progress-forwarder subscription installed by
-    /// <see cref="CreateTab"/> or <see cref="WireAdoptedTab"/>. Shared
+    /// Walk back the per-tab subscriptions installed by
+    /// <see cref="CreateTab"/> or <see cref="WireAdoptedTab"/>: today
+    /// the progress forwarder and the last-leaf-closed bridge. Shared
     /// between <see cref="CloseTab"/> and <see cref="DetachTab"/> so
-    /// neither path has to spell out "invoke OnClose and null it";
-    /// in particular, <see cref="DetachTab"/> must NOT invoke OnClose
-    /// (per spec) because OnClose is the close-signal hook,
-    /// not the detach hook.
+    /// neither path has to spell out "invoke OnClose and null it"; in
+    /// particular, <see cref="DetachTab"/> must NOT touch OnClose itself
+    /// because the adopter overwrites it in <see cref="WireAdoptedTab"/>.
     /// </summary>
     private void UnsubscribeProgressForwarder(TabModel tab)
     {
-        // OnClose is the unsubscribe action. Running it detaches the
-        // progress handler from PaneHost.ProgressChanged. On DetachTab
-        // we run this helper instead of tab.OnClose?.Invoke() at the
-        // call site so the semantics are obvious: we are dismantling
-        // ONE specific subscription, not running the full close.
+        // Name is historical; OnClose now also unhooks LastLeafClosed.
+        // OnClose is the aggregated unsubscribe action; running it
+        // detaches every handler this manager attached to the pane
+        // host. On DetachTab we go through this helper rather than
+        // tab.OnClose?.Invoke() at the call site so the semantics
+        // stay obvious: this is the per-tab teardown, not the full
+        // close sequence.
         tab.OnClose?.Invoke();
     }
 }
