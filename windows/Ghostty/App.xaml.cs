@@ -484,6 +484,12 @@ public partial class App : Application
         _iconResolver = new Ghostty.Core.Profiles.WindowsIconResolver(fileSystem);
         IconResolver = _iconResolver;
 
+        // Process-wide bytes cache for the tab strip's IValueConverter.
+        // The converter is synchronous (XAML binding contract); the cache
+        // memoizes the first resolve so subsequent reads do not block the
+        // UI thread.
+        Ghostty.Tabs.TabIconBytesCache.Install(_iconResolver);
+
         _profileRegistry = new Ghostty.Core.Profiles.ProfileRegistry(
             source: _configService,
             discover: (bypass, ct) => _discoveryService.DiscoverAsync(bypass, ct),
