@@ -2,7 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 /// A fully-parsed sixel image command. Output of the parser, input
-/// to the decoder (PR2).
+/// to the decoder (future commit).
+///
+/// Ownership: two heap-allocated slices are released by `deinit`.
+/// We carry the allocator on the struct rather than using an arena
+/// because there are only two slices and a `Command.deinit()` is
+/// easier to chain into the existing `dcs.Command.deinit` switch arm
+/// than an arena handle.
 pub const Command = struct {
     /// Allocator that owns palette_ops and paint_ops slices.
     /// Set by Parser.finalize; freed by deinit.

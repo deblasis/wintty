@@ -20,8 +20,8 @@ pub const Error = error{
 
 /// Parse a raster-attribs body — the bytes between `"` and the next
 /// non-attribute byte. Caller passes the slice WITHOUT the leading
-/// `"`. Format: `Pa;Pb;Ph;Pn3;Pn4` (all optional, trailing terminated
-/// by caller).
+/// `"` AND WITHOUT the terminating non-digit byte (the parser
+/// upstream strips both). Format: `Pa;Pb;Ph;Pn3;Pn4` (all optional).
 ///
 /// On `error.SixelTooLarge`, the declared geometry exceeded the
 /// budget; the caller should reject the whole sixel image.
@@ -99,10 +99,19 @@ test "raster: trailing semicolons leave fields null" {
     try testing.expectEqual(@as(u16, 0), r.grid_size);
 }
 
-test "raster: leading semicolon leaves first field default" {
-    // ";1;1" — empty first field maps to default (aspect_num=1), not 0.
+test "raster: null first field is skipped" {
+    // ";1;1" — empty first field stays at struct default (no field
+    // write); only the second and third fields populate.
     const r = try parseRasterAttribs(";1;1");
-    try testing.expectEqual(@as(u16, 1), r.aspect_num);
+    try testing.expectEqual(@as(u16, 1), r.aspect_num); // struct default
+    try testing.expectEqual(@as(u16, 1), r.aspect_den);
+}
+
+test "raster: zero-coerce first field exercises v==0 branch" {
+    // "0;1;1" — explicit 0 trips the if (v == 0) 1 else v coercion,
+    // distinct from the null path above.
+    const r = try parseRasterAttribs("0;1;1");
+    try testing.expectEqual(@as(u16, 1), r.aspect_num); // coerced from 0
     try testing.expectEqual(@as(u16, 1), r.aspect_den);
 }
 

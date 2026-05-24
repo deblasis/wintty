@@ -67,7 +67,9 @@ pub const Palette = struct {
 
 /// Scale a 0-100 DEC color value to 0-255. Saturates at 100.
 /// The `+ 50` rounds to nearest instead of truncating, so 50/100
-/// maps to 128 rather than 127.
+/// maps to 128 rather than 127. Matches libsixel's integer formula
+/// `(v * 255 + 50) / 100` for bit-exact round-trip with the
+/// reference encoder.
 fn scale100to255(v: u8) u8 {
     const clamped = if (v > 100) 100 else v;
     return @intCast((@as(u32, clamped) * 255 + 50) / 100);

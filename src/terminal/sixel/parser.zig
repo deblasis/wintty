@@ -10,7 +10,7 @@ const raster = @import("raster.zig");
 
 const log = std.log.scoped(.terminal_sixel);
 
-/// Parser state. Modeled on foot's `enum sixel_state`.
+/// Parser state.
 const State = enum {
     /// Expecting either a `"` prelude (raster attribs) or first
     /// paint byte.
@@ -77,6 +77,9 @@ pub const Parser = struct {
     pub fn put(self: *Parser, byte: u8) void {
         self.tryPut(byte) catch |err| {
             log.debug("sixel parser error, ignoring rest: {}", .{err});
+            // Drop any partially-accumulated state so we don't sit on
+            // up to max_bytes of accum until deinit.
+            self.accum.clearAndFree(self.alloc);
             self.state = .ignore;
         };
     }
@@ -126,8 +129,10 @@ pub const Parser = struct {
                     self.repeat_acc +|= byte - '0';
                 },
                 '?'...'~' => {
-                    // DEC spec: missing repeat count means 1. Matches
-                    // foot and libsixel.
+                    // DEC spec: missing repeat count means 1. Also
+                    // applies when the user explicitly typed `!0`, which
+                    // foot and libsixel both coerce to 1 rather than
+                    // emitting nothing.
                     const count: u16 = if (self.repeat_acc == 0) 1 else self.repeat_acc;
                     try self.appendSixel(byte, count);
                 },
@@ -163,6 +168,12 @@ pub const Parser = struct {
                     // End of raster — flush, then re-dispatch this
                     // byte in data state (matches the .color_def
                     // else-arm pattern).
+                    //
+                    // Note: flushRaster may set self.state = .ignore
+                    // on oversized geometry. The guard below skips the
+                    // .data transition + re-dispatch in that case.
+                    // flushColorDef has no analogous failure mode (no
+                    // size check there), so it doesn't need the guard.
                     self.flushRaster();
                     if (self.state == .ignore) return;
                     self.state = .data;
@@ -197,9 +208,19 @@ pub const Parser = struct {
     }
 
     fn flushColorDef(self: *Parser) Allocator.Error!void {
+        // Empty accumulator (e.g. `##` or `#?` arrived back-to-back)
+        // produces no op at all — there's no register index to act on.
+        if (self.accum.items.len == 0) {
+            log.debug("sixel color def empty, dropped", .{});
+            return;
+        }
+
         var it = std.mem.splitScalar(u8, self.accum.items, ';');
         const idx_str = it.next() orelse return;
-        const idx = parseU8(idx_str) orelse return;
+        const idx = parseU8(idx_str) orelse {
+            log.debug("sixel color def malformed: bad register idx, dropped", .{});
+            return;
+        };
 
         // Selection form: bare "#N" with no further fields.
         const pu_str = it.next() orelse {
@@ -207,13 +228,34 @@ pub const Parser = struct {
             return;
         };
 
-        const pu = parseU8(pu_str) orelse return;
-        const a_str = it.next() orelse return;
-        const b_str = it.next() orelse return;
-        const c_str = it.next() orelse return;
-        const a = parseU16(a_str) orelse return;
-        const b = parseU8(b_str) orelse return;
-        const c = parseU8(c_str) orelse return;
+        const pu = parseU8(pu_str) orelse {
+            log.debug("sixel color def malformed: bad Pu, dropped", .{});
+            return;
+        };
+        const a_str = it.next() orelse {
+            log.debug("sixel color def malformed: missing Pa, dropped", .{});
+            return;
+        };
+        const b_str = it.next() orelse {
+            log.debug("sixel color def malformed: missing Pb, dropped", .{});
+            return;
+        };
+        const c_str = it.next() orelse {
+            log.debug("sixel color def malformed: missing Pc, dropped", .{});
+            return;
+        };
+        const a = parseU16(a_str) orelse {
+            log.debug("sixel color def malformed: bad Pa, dropped", .{});
+            return;
+        };
+        const b = parseU8(b_str) orelse {
+            log.debug("sixel color def malformed: bad Pb, dropped", .{});
+            return;
+        };
+        const c = parseU8(c_str) orelse {
+            log.debug("sixel color def malformed: bad Pc, dropped", .{});
+            return;
+        };
 
         switch (pu) {
             1 => try self.palette_ops.append(self.alloc, .{
@@ -235,6 +277,7 @@ pub const Parser = struct {
             else => {
                 // Unknown Pu — silently drop (spec leaves room for
                 // future extensions).
+                log.debug("sixel color def unknown Pu={d}, dropped", .{pu});
             },
         }
     }
@@ -574,4 +617,59 @@ test "sixel parser: incomplete raster attribs at finalize is dropped" {
     defer c.deinit();
     try testing.expectEqual(@as(u16, 1), c.raster.aspect_num);
     try testing.expectEqual(@as(u16, 0), c.raster.declared_width);
+}
+
+test "sixel parser: incomplete repeat count at finalize is dropped" {
+    // The parser sits in .repeat_count with repeat_acc=42 but never
+    // sees a terminator. The orphan count produces no op.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!42") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
+}
+
+test "sixel parser: empty color def #? produces no op" {
+    // `#` enters .color_def with empty accum; `?` terminates and triggers
+    // flushColorDef with an empty buffer. Must not append a spurious
+    // select_color=0; must then re-dispatch ? as a paint byte.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .sixel);
+    try testing.expectEqual(@as(u8, '?'), c.paint_ops[0].sixel.byte);
+}
+
+test "sixel parser: back-to-back # # is dropped" {
+    // `##` — first # enters .color_def, second # terminates with empty
+    // accum (no op) then re-dispatches as a fresh color_def entry.
+    // Followed by `5?` to verify the second # actually re-armed
+    // color_def correctly.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("##5?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    // One select_color from the second #5, then the paint byte.
+    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
+    try testing.expect(c.paint_ops[1] == .sixel);
+}
+
+test "sixel parser: !0 ? coerces to count=1" {
+    // DEC spec is silent on `!0`; foot and libsixel both treat it as
+    // count=1 rather than emitting nothing. Pin that behavior.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!0?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
 }
