@@ -144,6 +144,46 @@ internal sealed class TabModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// Called by the active-process tracker when the foreground command
+    /// inside the pty changes. Routes through <see cref="ProcessIconTable"/>
+    /// to decide whether to install an icon override or revert to the
+    /// profile icon. If the mapped spec equals the profile spec (e.g. the
+    /// foreground IS the launch shell), the override is cleared -- no
+    /// churn at the prompt of the launch shell.
+    /// </summary>
+    public void OnActiveProcessChanged(string? exeBasename, string? commandLine)
+    {
+        var mapped = exeBasename is null
+            ? null
+            : ProcessIconTable.TryMap(exeBasename, commandLine);
+
+        // Touching the TabIcon getter lazily constructs the VM from the
+        // profile snapshot before we install or clear any override.
+        var vm = TabIcon;
+
+        if (mapped is null)
+        {
+            vm.RevertToProfile();
+            return;
+        }
+
+        // Suppress when the mapped spec equals the profile spec: steady
+        // state at the launch shell's prompt produces zero visual change
+        // and the tooltip stays as the profile's display name.
+        var profileIcon = ProfileSnapshot?.Icon;
+        if (profileIcon is not null && Equals(mapped, profileIcon))
+        {
+            vm.RevertToProfile();
+            return;
+        }
+
+        // Tooltip is the exe basename without extension: matches how the
+        // user thinks about the running command ("vim", not "vim.exe").
+        var tooltip = System.IO.Path.GetFileNameWithoutExtension(exeBasename) ?? string.Empty;
+        vm.SetOverride(mapped, tooltip);
+    }
+
+    /// <summary>
     /// Disposer assigned by <see cref="TabManager.CreateTab"/> so
     /// <see cref="TabManager.CloseTab"/> can unwire the per-tab
     /// <c>IPaneHost.ProgressChanged</c> handler captured as a local
