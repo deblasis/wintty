@@ -25,9 +25,11 @@ pub fn supported(alloc: Allocator, stdout: std.fs.File) bool {
     var env = std.process.getEnvMap(alloc) catch return false;
     defer env.deinit();
 
-    // Ghostty / wintty itself sets TERM_PROGRAM=ghostty (see termio/Exec.zig).
-    // WezTerm also sets TERM_PROGRAM and implements the kitty protocol.
+    // Wintty sets TERM_PROGRAM=wintty (and upstream Ghostty sets =ghostty)
+    // when spawning a shell. Accept both so already-running shells from
+    // pre-rebrand binaries still get the logo. WezTerm uses the same var.
     if (env.get("TERM_PROGRAM")) |v| {
+        if (std.mem.eql(u8, v, "wintty")) return true;
         if (std.mem.eql(u8, v, "ghostty")) return true;
         if (std.mem.eql(u8, v, "WezTerm")) return true;
     }
