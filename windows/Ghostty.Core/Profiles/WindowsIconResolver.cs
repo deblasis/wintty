@@ -18,6 +18,7 @@ namespace Ghostty.Core.Profiles;
 internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
 {
     private const string DefaultBundledKey = "default";
+    private const int DefaultSvgRasterSizePx = 32;
 
     public async Task<byte[]> ResolveAsync(IconSpec spec, CancellationToken ct)
     {
@@ -50,7 +51,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
     private async Task<byte[]> ResolveUncachedAsync(IconSpec spec, CancellationToken ct) => spec switch
     {
         IconSpec.Path p when p.FilePath.EndsWith(".svg", System.StringComparison.OrdinalIgnoreCase)
-            => RasterizeSvgFileOrDefault(await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false), sizePx: 32),
+            => RasterizeSvgFileOrDefault(await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false), DefaultSvgRasterSizePx),
         IconSpec.Path p => await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false),
         IconSpec.BrandKey b => ReadBrandedOrDefault(b.Key, b.Dpi ?? 16),
         IconSpec.BundledKey b => ReadBundledOrDefault(b.Key),
@@ -98,7 +99,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         return ms.ToArray();
     }
 
-    private static byte[] RasterizeSvgFileOrDefault(byte[] svgBytes, int sizePx)
+    private static byte[] RasterizeSvgFileOrDefault(byte[] svgBytes, int sizePx = DefaultSvgRasterSizePx)
     {
         var text = System.Text.Encoding.UTF8.GetString(svgBytes);
         var png = SvgRasterizer.Rasterize(text, sizePx);

@@ -41,6 +41,7 @@ public static class SvgRasterizer
             using var data = image.Encode(SKEncodedImageFormat.Png, 100);
             return data.ToArray();
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return Array.Empty<byte>();

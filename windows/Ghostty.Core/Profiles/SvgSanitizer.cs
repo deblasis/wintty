@@ -52,9 +52,7 @@ public static class SvgSanitizer
                     a.Remove();
                     continue;
                 }
-                if ((a.Name.LocalName.Equals("href", StringComparison.OrdinalIgnoreCase)
-                     || a.Name.LocalName.Equals("xlink:href", StringComparison.OrdinalIgnoreCase)
-                     || (a.Name.LocalName.Equals("href", StringComparison.OrdinalIgnoreCase) && a.Name.NamespaceName == "http://www.w3.org/1999/xlink"))
+                if (a.Name.LocalName.Equals("href", StringComparison.OrdinalIgnoreCase)
                     && IsExternalHref(a.Value))
                 {
                     a.Remove();
