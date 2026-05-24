@@ -41,7 +41,12 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _timer.Dispose();
+        using var done = new System.Threading.ManualResetEvent(false);
+        _timer.Dispose(done);
+        // Block briefly so any in-flight tick finishes before we return.
+        // OnActiveProcessChanged subscribers will see _disposed != 0 on
+        // re-entry and short-circuit.
+        done.WaitOne();
     }
 
     private void OnTick(object? state)
@@ -52,22 +57,28 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
         foreach (var (rootPid, _) in _roots)
         {
             string? exe;
+            string? cmdline;
             try
             {
                 exe = ProcessTreeWalker.FindInnermostDescendant((uint)rootPid);
+                cmdline = null;
             }
-            catch
+            catch (Exception ex)
             {
-                // Snapshot failures and access-denied during a teardown
-                // race are common; suppress and treat as "no foreground."
+                // Snapshot failures and access-denied during a teardown race are
+                // common; suppress and treat as "no foreground" but record so a
+                // regressed tracker is diagnosable from the debug log.
+                System.Diagnostics.Debug.WriteLine(
+                    $"WindowsActiveProcessTracker: snapshot failed for pid={rootPid}: {ex.GetType().Name}: {ex.Message}");
                 exe = null;
+                cmdline = null;
             }
 
             // V1: command line is not retrieved. ProcessIconTable handles
             // null commandLine correctly for everything except wsl.exe
             // distro disambiguation, which is acceptable until shell
             // integration scripts land in a follow-up.
-            var emission = _debouncer.Observe(rootPid, exe, commandLine: null, nowMs: now);
+            var emission = _debouncer.Observe(rootPid, exe, commandLine: cmdline, nowMs: now);
             if (emission is not null)
             {
                 try
@@ -75,9 +86,12 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
                     Changed?.Invoke(this, new ActiveProcessChangedEventArgs(
                         emission.RootPid, emission.ExeBasename, emission.CommandLine));
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Subscribers must not crash the tracker.
+                    // Subscribers must not crash the tracker. Log the failing handler
+                    // so it doesn't decay silently.
+                    System.Diagnostics.Debug.WriteLine(
+                        $"WindowsActiveProcessTracker: Changed subscriber threw: {ex.GetType().Name}: {ex.Message}");
                 }
             }
         }
