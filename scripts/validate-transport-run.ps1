@@ -25,17 +25,44 @@
     One of: pwsh-auto, pwsh-always, pwsh-never, cmd-auto.
 
 .PARAMETER TimeoutMs
-    Safety timeout. Defaults to 10000 (10 seconds).
+    Safety timeout. When omitted, picks a per-row default: 20 s for
+    cmd and bypass-mode pwsh (Debug Wintty cold-start dominates here,
+    ~10-15 s on a typical dev box; child-shell exit and teardown add
+    only a few hundred ms on top), 45 s for pwsh-never. The
+    pwsh-never row force-routes pwsh through full ConPTY init,
+    which combined with pwsh.exe cold-start JIT pushes the total to
+    20-25 s in Debug builds, so we leave generous headroom for
+    contended machines. Passing -TimeoutMs explicitly overrides the
+    table for every row. The runner's job is to detect true hangs
+    (PaneHost teardown wedged on a callback, libghostty subprocess
+    never reporting exit, etc.), not to police Debug-build cold-start
+    speed, so the floor is set well above expected p99.
 
 .PARAMETER ExePath
     Path to the built Wintty.exe. Defaults to the Debug x64 output.
 #>
 param(
     [Parameter(Mandatory)][string]$Row,
-    [int]$TimeoutMs = 10000,
+    [int]$TimeoutMs = -1,
     [string]$ExePath = './windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe'
 )
 $ErrorActionPreference = 'Stop'
+
+# Per-row default timeouts. Source of truth, shared with the all-runner
+# which simply omits -TimeoutMs so these kick in.
+$RowDefaultTimeouts = @{
+    'cmd-auto'    = 20000
+    'pwsh-auto'   = 20000
+    'pwsh-always' = 20000
+    'pwsh-never'  = 45000
+}
+if ($TimeoutMs -lt 0) {
+    if ($RowDefaultTimeouts.ContainsKey($Row)) {
+        $TimeoutMs = $RowDefaultTimeouts[$Row]
+    } else {
+        $TimeoutMs = 10000
+    }
+}
 
 $fixturePath = "dev-configs/validate-transport/$Row.conf"
 if (-not (Test-Path $fixturePath)) {
