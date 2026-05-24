@@ -31,12 +31,12 @@ public sealed partial class ProfileIconPickerControl : UserControl
         if (d is not ProfileIconPickerControl ctrl) return;
         if (e.NewValue is IconSpec spec)
         {
-            ctrl.PreviewHost.Content = new TabIconViewModel(spec, ctrl.LabelForSpec(spec));
+            ctrl.PreviewHost.Attach(new TabIconViewModel(spec, ctrl.LabelForSpec(spec)));
             ctrl.SpecLabel.Text = ctrl.LabelForSpec(spec);
         }
         else
         {
-            ctrl.PreviewHost.Content = null;
+            ctrl.PreviewHost.Attach(null);
             ctrl.SpecLabel.Text = "(default)";
         }
     }
