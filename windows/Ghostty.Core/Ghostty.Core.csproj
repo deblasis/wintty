@@ -85,7 +85,8 @@
       at build time but noisy in the evaluated item graph.
     -->
     <None Remove="Profiles\IconAssets\*.png" />
-    <EmbeddedResource Include="Profiles\IconAssets\*.png">
+    <EmbeddedResource Include="Profiles\IconAssets\*.png"
+                      Exclude="Profiles\IconAssets\*@*.png">
       <LogicalName>Ghostty.Core.Profiles.IconAssets.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
     <!--
@@ -166,4 +167,12 @@
       <Compile Include="$(_GeneratedBuildInfoFile)" Visible="false"/>
     </ItemGroup>
   </Target>
+
+  <Import Project="$(MSBuildThisFileDirectory)..\..\build\RasterizeIcons\RasterizeIcons.targets" />
+
+  <ItemGroup>
+    <EmbeddedResource Include="Profiles\IconAssets\*@*.png">
+      <LogicalName>Ghostty.Core.Profiles.IconAssets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>
