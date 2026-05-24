@@ -919,7 +919,7 @@ palette: Palette = .{},
 /// when the mouse is used (button, movement, etc.). Platform-specific behavior
 /// may dictate other scenarios where the mouse is shown. For example on macOS,
 /// the mouse is shown again when a new window, tab, or split is created.
-@"mouse-hide-while-typing": bool = false,
+@"mouse-hide-while-typing": bool = true,
 
 /// When to scroll the surface to the bottom. The format of this is a list of
 /// options to enable separated by commas. If you prefix an option with `no-`
@@ -10511,6 +10511,16 @@ test "clone default" {
 
     // I want to do this but this doesn't work (the API doesn't work)
     // try testing.expectEqualDeep(dest, source);
+}
+
+test "default mouse-hide-while-typing is true" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    try testing.expectEqual(true, cfg.@"mouse-hide-while-typing");
 }
 
 test "clone preserves conditional state" {
