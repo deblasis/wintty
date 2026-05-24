@@ -10,10 +10,9 @@
                 Background="{ThemeResource SubtleFillColorTertiaryBrush}"
                 CornerRadius="4"
                 Padding="4">
-            <ContentControl x:Name="PreviewHost"
-                            HorizontalAlignment="Center"
-                            VerticalAlignment="Center"
-                            ContentTemplateSelector="{StaticResource ProfileIconSelector}"/>
+            <tabs:TabIconPresenter x:Name="PreviewHost"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
         </Border>
         <TextBlock x:Name="SpecLabel"
                    FontFamily="Consolas"
