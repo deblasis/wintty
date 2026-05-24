@@ -103,7 +103,27 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (args.InRecycleQueue || args.Item is not TabModel tab)
         {
             args.ItemContainer.Tag = null;
+            // Clear the icon presenter on recycle so the next item
+            // doesn't briefly flash the previous tab's glyph.
+            if (args.ItemContainer.ContentTemplateRoot is Grid recycledGrid)
+            {
+                var oldPresenter = FindFirstChild<TabIconPresenter>(recycledGrid);
+                oldPresenter?.Attach(null);
+            }
             return;
+        }
+
+        var root = args.ItemContainer.ContentTemplateRoot as Grid;
+
+        // Icon presenter is the first TabIconPresenter in either template
+        // (collapsed: sole child of the 40x40 grid; expanded: Grid.Column=0).
+        // Wired up imperatively because {Binding TabIcon} on the Core type
+        // would require [WinRT.GeneratedBindableCustomProperty] (see
+        // TabIconPresenter.cs comment).
+        if (root is not null)
+        {
+            var presenter = FindFirstChild<TabIconPresenter>(root);
+            presenter?.Attach(tab.TabIcon);
         }
 
         // Bind: update the row's visual elements from the model.
@@ -113,15 +133,16 @@ internal sealed partial class VerticalTabStrip : UserControl
         args.ItemContainer.Tag = AotBinding.Create(tab, item =>
         {
             var t = (TabModel)item;
-            var root = args.ItemContainer.ContentTemplateRoot as FrameworkElement;
-            if (root is null) return;
+            var refreshRoot = args.ItemContainer.ContentTemplateRoot as FrameworkElement;
+            if (refreshRoot is null) return;
 
             // Tooltip on the outermost grid (both templates).
-            ToolTipService.SetToolTip(root, t.EffectiveTitle);
+            ToolTipService.SetToolTip(refreshRoot, t.EffectiveTitle);
 
-            // Expanded template: title TextBlock in column 1.
-            if (root is Grid grid && grid.Children.Count >= 3)
+            // Expanded template: title TextBlock in column 1, close button in column 2.
+            if (refreshRoot is Grid grid && grid.Children.Count >= 3)
             {
+                // Children are ordered: [TabIconPresenter, TextBlock, Button].
                 if (grid.Children[1] is TextBlock titleBlock)
                     titleBlock.Text = t.EffectiveTitle;
                 // Close button Tag -> TabModel for OnRowCloseClick.
@@ -132,6 +153,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle));
+    }
+
+    private static T? FindFirstChild<T>(Panel panel) where T : class
+    {
+        foreach (var child in panel.Children)
+            if (child is T match) return match;
+        return null;
     }
 
     private async void OnRowCloseClick(object sender, RoutedEventArgs e)
