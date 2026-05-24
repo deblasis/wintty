@@ -63,7 +63,7 @@ internal sealed partial class FrecencyStore
 
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Ghostty",
+        "Wintty",
         "command-frecency.json");
 
     public static FrecencyStore Load()

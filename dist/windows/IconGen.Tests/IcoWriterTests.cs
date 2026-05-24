@@ -10,7 +10,7 @@ public class IcoWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        var icoPath = Path.Combine(tempDir.Path, "ghostty.ico");
+        var icoPath = Path.Combine(tempDir.Path, "wintty.ico");
         IcoWriter.Write(masters, icoPath);
 
         Assert.True(File.Exists(icoPath));
