@@ -16,7 +16,7 @@ namespace Ghostty.Core.Tabs;
 /// </summary>
 public sealed class NewTabFlyoutController : IDisposable
 {
-    public readonly record struct Row(string Id, string Name, bool IsDefault);
+    public readonly record struct Row(string Id, string Name, bool IsDefault, IconSpec Icon);
 
     private readonly IProfileRegistry _registry;
     private readonly ObservableCollection<Row> _rows = new();
@@ -39,7 +39,7 @@ public sealed class NewTabFlyoutController : IDisposable
         if (_disposed) return;
         _rows.Clear();
         foreach (var p in _registry.Profiles)
-            _rows.Add(new Row(p.Id, p.Name, p.IsDefault));
+            _rows.Add(new Row(p.Id, p.Name, p.IsDefault, p.Icon));
     }
 
     public void Dispose()
