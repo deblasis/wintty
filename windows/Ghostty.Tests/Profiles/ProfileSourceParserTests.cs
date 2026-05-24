@@ -288,7 +288,7 @@ public sealed class ProfileSourceParserTests
     public void ParseIcon_BrandPrefix_ProducesBrandKey()
     {
         var parsed = ProfileSourceParser.Parse(
-            "profile.foo.name = Foo\nprofile.foo.icon = brand:ubuntu\n"
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.icon = brand:ubuntu\n"
         ).Profiles["foo"];
         var bk = Assert.IsType<IconSpec.BrandKey>(parsed.Icon);
         Assert.Equal("ubuntu", bk.Key);
@@ -299,7 +299,7 @@ public sealed class ProfileSourceParserTests
     public void ParseIcon_BrandPrefix_IsCaseInsensitive()
     {
         var parsed = ProfileSourceParser.Parse(
-            "profile.foo.name = Foo\nprofile.foo.icon = BRAND:Ubuntu\n"
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.icon = BRAND:Ubuntu\n"
         ).Profiles["foo"];
         var bk = Assert.IsType<IconSpec.BrandKey>(parsed.Icon);
         Assert.Equal("Ubuntu", bk.Key);
@@ -311,7 +311,7 @@ public sealed class ProfileSourceParserTests
         // "brand:" with no key is meaningless; treat as Path so the user
         // gets a clear "file not found" rather than a silent default.
         var parsed = ProfileSourceParser.Parse(
-            "profile.foo.name = Foo\nprofile.foo.icon = brand:\n"
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.icon = brand:\n"
         ).Profiles["foo"];
         Assert.IsType<IconSpec.Path>(parsed.Icon);
     }
