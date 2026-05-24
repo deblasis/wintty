@@ -679,6 +679,12 @@ const WindowsPty = struct {
     /// Get information about the process(es) attached to the PTY. Returns
     /// `null` if there was an error getting the information or the information
     /// is not available on a particular platform.
+    ///
+    /// On Windows the pty layer does not track a foreground process; the
+    /// caller-relevant PID is on Subprocess (the spawned shell HANDLE).
+    /// `Subprocess.getProcessInfo` special-cases `.foreground_pid` on
+    /// Windows and reads `cmd.pid` directly without going through this
+    /// layer, so this stub correctly returns null.
     pub fn getProcessInfo(_: *WindowsPty, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
         return null;
     }
