@@ -5,6 +5,9 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Storage.Streams;
 
 namespace Ghostty.Tabs;
 
@@ -138,17 +141,49 @@ internal sealed partial class NewTabSplitButton : UserControl
             {
                 Text = row.IsDefault ? row.Name + "  *" : row.Name,
                 Tag = row.Id,
+                Icon = BuildMenuIcon(row.Icon),
             };
             AutomationProperties.SetName(item, row.Name);
             item.Click += OnRowClick;
-
-            // Icon resolution is fire-and-forget; row keeps placeholder
-            // until the resolve completes. MenuFlyoutItem.Icon expects an
-            // IconElement, not a BitmapImage; full icon support lands when
-            // we wrap in an Image inside a custom MenuFlyoutItem template.
-
             ProfileMenu.Items.Add(item);
         }
+    }
+
+    /// <summary>
+    /// Builds the <see cref="MenuFlyoutItem.Icon"/> for a profile row.
+    /// MDL2 specs render directly as a <see cref="FontIcon"/>; PNG-backed
+    /// specs are resolved through <see cref="TabIconBytesCache"/> (the
+    /// same cache used by the tab strip, so brand assets are shared) and
+    /// rendered via <see cref="ImageIcon"/>. Returns null when the spec
+    /// resolves to no bytes -- WinUI then leaves the icon slot empty
+    /// rather than reserving space for a blank glyph.
+    /// </summary>
+    private static IconElement? BuildMenuIcon(IconSpec spec)
+    {
+        if (spec is IconSpec.Mdl2Token m && m.CodePoint > 0)
+        {
+            var fi = new FontIcon { Glyph = char.ConvertFromUtf32(m.CodePoint) };
+            if (Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out var ff)
+                && ff is FontFamily fam)
+            {
+                fi.FontFamily = fam;
+            }
+            return fi;
+        }
+
+        var bytes = TabIconBytesCache.GetBytesSync(spec);
+        if (bytes is null || bytes.Length == 0) return null;
+
+        var bmp = new BitmapImage();
+        using var stream = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+        {
+            writer.WriteBytes(bytes);
+            writer.StoreAsync().GetResults();
+        }
+        stream.Seek(0);
+        bmp.SetSource(stream);
+        return new ImageIcon { Source = bmp };
     }
 
     private void OnPrimaryClick(object sender, RoutedEventArgs e)
