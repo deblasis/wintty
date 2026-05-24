@@ -160,6 +160,15 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// </remarks>
     public void OnActiveProcessChanged(string? exeBasename, string? commandLine)
     {
+        // If the profile opts out of foreground tracking, any pending override
+        // is cleared and no new override is installed. The user pinned an icon
+        // intentionally; respect it.
+        if (ProfileSnapshot is { TabIconTracksForeground: false })
+        {
+            _tabIcon?.RevertToProfile();
+            return;
+        }
+
         var mapped = exeBasename is null
             ? null
             : ProcessIconTable.TryMap(exeBasename, commandLine);
