@@ -22,7 +22,7 @@ public static class ShellDetector
         {
             // VT-aware: safe to bypass ConPTY.
             ["pwsh.exe"]   = ShellCapability.VtAware,   // PowerShell 7+
-            ["wsl.exe"]    = ShellCapability.VtAware,   // WSL launcher (distro owns its PTY)
+            ["wsl.exe"]    = ShellCapability.VtAware,   // WSL launcher; speaks VT, but Zig side forces ConPTY so wsl.exe sees a console handle and allocates a Linux PTY
             ["ssh.exe"]    = ShellCapability.VtAware,   // OpenSSH client
             ["bash.exe"]   = ShellCapability.VtAware,   // Git Bash / MSYS2 / Cygwin / legacy WSL1 stub
             ["nu.exe"]     = ShellCapability.VtAware,   // Nushell
