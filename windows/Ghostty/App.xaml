@@ -27,37 +27,13 @@
             </ResourceDictionary.MergedDictionaries>
             <tabs:ProgressVisibilityConverter x:Key="ProgressVisibilityConverter"/>
 
-            <!-- Profile icon resources shared between the horizontal
-                 TabHost and the vertical tab strip. Lifted from
-                 VerticalTabStrip.xaml so TabHost.xaml.cs can resolve
-                 ProfileIconSelector via Application.Current.Resources
-                 and so both hosts use one set of definitions. -->
-            <tabs:IconSpecToBitmapImageConverter x:Key="IconSpecToBitmapImageConverter"/>
-            <tabs:CodePointToGlyphConverter x:Key="CodePointToGlyphConverter"/>
-
-            <DataTemplate x:Key="ProfileIconImageTemplate">
-                <Image Width="20" Height="20"
-                       Source="{Binding Icon, Converter={StaticResource IconSpecToBitmapImageConverter}}"
-                       Stretch="Uniform">
-                    <ToolTipService.ToolTip>
-                        <TextBlock Text="{Binding TooltipText}"/>
-                    </ToolTipService.ToolTip>
-                </Image>
-            </DataTemplate>
-
-            <DataTemplate x:Key="ProfileIconFontIconTemplate">
-                <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
-                          Glyph="{Binding Mdl2CodePoint, Converter={StaticResource CodePointToGlyphConverter}}"
-                          FontSize="16">
-                    <ToolTipService.ToolTip>
-                        <TextBlock Text="{Binding TooltipText}"/>
-                    </ToolTipService.ToolTip>
-                </FontIcon>
-            </DataTemplate>
-
-            <tabs:IconSpecTemplateSelector x:Key="ProfileIconSelector"
-                                           ImageTemplate="{StaticResource ProfileIconImageTemplate}"
-                                           FontIconTemplate="{StaticResource ProfileIconFontIconTemplate}"/>
+            <!-- Profile icons render through Ghostty.Tabs.TabIconPresenter
+                 (imperative code-behind) rather than {Binding}-driven
+                 DataTemplates. Runtime {Binding} on Ghostty.Core types
+                 requires [WinRT.GeneratedBindableCustomProperty] under
+                 CsWinRT 2.x, and {x:Bind} in shared
+                 Application.Resources templates crashed XamlCompiler
+                 silently in WinUI 3 1.8. -->
         </ResourceDictionary>
     </Application.Resources>
 </Application>
