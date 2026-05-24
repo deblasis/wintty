@@ -107,6 +107,7 @@ internal sealed partial class ProfilesPage : Page
             {
                 var card = _cardsByProfileId[id];
                 if (FindToggle(card) is ToggleSwitch t) t.Toggled -= OnHiddenToggled;
+                if (FindTracksToggle(card) is ToggleSwitch tt) tt.Toggled -= OnTracksForegroundToggled;
                 if (FindPicker(card) is ProfileIconPickerControl picker)
                     picker.IconChanged -= OnProfileIconChanged;
                 ProfilesGroup.Cards.Remove(card);
@@ -125,6 +126,9 @@ internal sealed partial class ProfilesPage : Page
                     card.Description = profile.Command;
                     if (FindToggle(card) is ToggleSwitch toggle && toggle.IsOn != isHidden)
                         toggle.IsOn = isHidden;
+                    if (FindTracksToggle(card) is ToggleSwitch tracks
+                        && tracks.IsOn != profile.TabIconTracksForeground)
+                        tracks.IsOn = profile.TabIconTracksForeground;
                     if (FindPicker(card) is ProfileIconPickerControl picker)
                         picker.CurrentIcon = profile.Icon;
 
@@ -142,11 +146,19 @@ internal sealed partial class ProfilesPage : Page
         finally { _loading = false; }
     }
 
-    // Builds one SettingsCard with the icon picker + hidden toggle on
-    // the right. SettingsCard.Control is a single UIElement slot, so we
-    // wrap both into a horizontal StackPanel. Tag on the toggle carries
-    // the profile id; the picker resolves its id via the shared
-    // StackPanel.Tag walked through FindPicker / FindToggle in Rebind.
+    // Sentinel Tag for the tracks-foreground ToggleSwitch so FindToggle
+    // (which looks for the hidden toggle) and FindTracksToggle can
+    // disambiguate between the two ToggleSwitch children of the row's
+    // StackPanel without depending on child-order invariants.
+    private const string TracksToggleTag = "tracks-foreground";
+
+    // Builds one SettingsCard with the icon picker, tracks-foreground
+    // toggle, and hidden toggle laid out left-to-right. SettingsCard.Control
+    // is a single UIElement slot, so we wrap them into a horizontal
+    // StackPanel. The hidden toggle's Tag carries the profile id; the
+    // picker and tracks toggle recover their id via the shared
+    // StackPanel.Tag walked through FindPicker / FindTracksToggle in
+    // Rebind.
     private SettingsCard BuildRow(ResolvedProfile profile, bool isHidden)
     {
         var picker = new ProfileIconPickerControl
@@ -154,6 +166,19 @@ internal sealed partial class ProfilesPage : Page
             CurrentIcon = profile.Icon,
         };
         picker.IconChanged += OnProfileIconChanged;
+
+        var tracksToggle = new ToggleSwitch
+        {
+            IsOn = profile.TabIconTracksForeground,
+            // The label describes the SETTING, not the state, so On/Off
+            // content are identical -- matching how a "Track foreground
+            // process" preference reads in surrounding apps.
+            OffContent = "Track foreground process",
+            OnContent = "Track foreground process",
+            VerticalAlignment = VerticalAlignment.Center,
+            Tag = TracksToggleTag,
+        };
+        tracksToggle.Toggled += OnTracksForegroundToggled;
 
         var toggle = new ToggleSwitch
         {
@@ -169,12 +194,14 @@ internal sealed partial class ProfilesPage : Page
             Orientation = Orientation.Horizontal,
             Spacing = 12,
             VerticalAlignment = VerticalAlignment.Center,
-            // Stash the profile id on the panel so the picker handler
-            // can recover it from the picker's parent without a per-row
-            // closure capture (matches the toggle's Tag pattern).
+            // Stash the profile id on the panel so the picker and
+            // tracks-toggle handlers can recover it from their parent
+            // without a per-row closure capture (matches the hidden
+            // toggle's Tag pattern).
             Tag = profile.Id,
         };
         panel.Children.Add(picker);
+        panel.Children.Add(tracksToggle);
         panel.Children.Add(toggle);
 
         return new SettingsCard
@@ -186,14 +213,32 @@ internal sealed partial class ProfilesPage : Page
     }
 
     // The SettingsCard.Control slot is a horizontal StackPanel
-    // (picker + toggle), so finding either child means walking the
-    // panel's Children rather than pattern-matching the slot directly.
+    // (picker + tracks toggle + hidden toggle), so finding any child
+    // means walking the panel's Children rather than pattern-matching
+    // the slot directly. Two ToggleSwitch instances share the panel,
+    // so the hidden toggle is identified as "any ToggleSwitch whose
+    // Tag isn't the tracks sentinel" -- the hidden toggle's Tag is
+    // the profile id.
     private static ToggleSwitch? FindToggle(SettingsCard card)
     {
         if (card.Control is not StackPanel panel) return null;
         foreach (var child in panel.Children)
         {
-            if (child is ToggleSwitch t) return t;
+            if (child is ToggleSwitch t
+                && (t.Tag as string) != TracksToggleTag)
+                return t;
+        }
+        return null;
+    }
+
+    private static ToggleSwitch? FindTracksToggle(SettingsCard card)
+    {
+        if (card.Control is not StackPanel panel) return null;
+        foreach (var child in panel.Children)
+        {
+            if (child is ToggleSwitch t
+                && (t.Tag as string) == TracksToggleTag)
+                return t;
         }
         return null;
     }
@@ -264,6 +309,34 @@ internal sealed partial class ProfilesPage : Page
         {
             if (value is null) _editor.RemoveValue(key);
             else _editor.SetValue(key, value);
+        }
+        finally { _configService.SuppressWatcher(false); }
+        _configService.Reload();
+    }
+
+    private void OnTracksForegroundToggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender is not ToggleSwitch toggle) return;
+        // Recover the profile id from the row's StackPanel Tag (set in
+        // BuildRow); the toggle's own Tag holds the sentinel that
+        // FindTracksToggle matches on.
+        if (toggle.Parent is not StackPanel panel) return;
+        if (panel.Tag is not string id) return;
+
+        // Same suppress-write-reload pattern as OnHiddenToggled /
+        // OnProfileIconChanged: keep the FileSystemWatcher quiet around
+        // our own write so its 300ms debounce doesn't double-fire Reload,
+        // then call Reload explicitly so the in-memory ProfileView updates
+        // deterministically. The key's default is true, so flipping back
+        // to true removes the override instead of writing an explicit
+        // "true" line and cluttering the config file.
+        var key = $"profile.{id}.tab-icon-tracks-foreground";
+        _configService.SuppressWatcher(true);
+        try
+        {
+            if (toggle.IsOn) _editor.RemoveValue(key);
+            else _editor.SetValue(key, "false");
         }
         finally { _configService.SuppressWatcher(false); }
         _configService.Reload();
