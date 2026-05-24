@@ -44,16 +44,20 @@ public sealed class WindowsActiveProcessTrackerSmokeTests
         var observed = new List<string>();
         var sw = Stopwatch.StartNew();
 
-        // Accept any cmd-tree leaf as proof of the transition: cmd.exe
-        // itself (caught between cmd start and exec of ping) or one of
-        // cmd's known descendants. conhost.exe is the console host that
-        // wraps cmd; ping.exe is cmd's child. We do NOT want to accept
-        // pwsh.exe (the root) or null (no descendant) as a transition.
+        // Acceptable: the test scenario spawns pwsh -> cmd -> ping; with the
+        // broker filter (conhost / OpenConsole) the walker reports the deepest
+        // non-broker descendant. cmd or ping both prove pwsh's descendants are
+        // being walked; conhost / OpenConsole appearing means the filter regressed.
         var acceptedExes = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
         {
             "cmd.exe",
-            "conhost.exe",
             "ping.exe",
+            "PING.EXE",
+        };
+        var brokerExes = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+        {
+            "conhost.exe",
+            "OpenConsole.exe",
         };
 
         tracker.Changed += (_, e) =>
@@ -63,6 +67,13 @@ public sealed class WindowsActiveProcessTrackerSmokeTests
                 observed.Add($"{sw.ElapsedMilliseconds}ms pid={e.RootPid} exe={e.ExeBasename ?? "<null>"}");
             }
             if (e.ExeBasename is not null
+                && brokerExes.Contains(e.ExeBasename)
+                && !tcs.Task.IsCompleted)
+            {
+                tcs.SetException(new Xunit.Sdk.XunitException(
+                    $"tracker reported broker exe {e.ExeBasename}; filter regressed"));
+            }
+            else if (e.ExeBasename is not null
                 && acceptedExes.Contains(e.ExeBasename)
                 && !tcs.Task.IsCompleted)
             {

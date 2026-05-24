@@ -24,6 +24,20 @@ namespace Ghostty.Core.Profiles.Tracking;
 [SupportedOSPlatform("windows6.0.6000")]
 internal static class ProcessTreeWalker
 {
+    // Broker / helper processes that are part of the Windows console
+    // infrastructure rather than something the user is interacting with.
+    // Filtered out so the walker reports the user-facing exe (e.g. cmd.exe
+    // rather than its conhost child).
+    private static readonly HashSet<string> IgnoredExes =
+        new(System.StringComparer.OrdinalIgnoreCase)
+        {
+            "conhost.exe",
+            "OpenConsole.exe",
+            "wslhost.exe",
+            "wslservice.exe",
+            "wsl-vsock-relay.exe",
+        };
+
     /// <summary>
     /// Returns the exe basename (e.g. "vim.exe") of the innermost
     /// descendant of <paramref name="rootPid"/>. Returns null when the
@@ -91,7 +105,10 @@ internal static class ProcessTreeWalker
         while (queue.Count > 0)
         {
             var (pid, name, depth) = queue.Dequeue();
-            if (depth >= bestDepth)
+            // Update best only when this descendant isn't a broker/helper.
+            // Brokers are visited so we still descend into THEIR children
+            // (e.g. wslhost may not own much, but conhost is always a leaf).
+            if (!IgnoredExes.Contains(name) && depth >= bestDepth)
             {
                 bestDepth = depth;
                 bestName = name;
