@@ -157,21 +157,32 @@ pub fn awarenessOf(kind: Kind) Awareness {
     };
 }
 
-/// Returns true if this shell relies on a real console handle for
-/// interactive input (PSReadLine, line-editing) and breaks under raw
-/// pipe stdin on Windows. Used to force ConPTY transport for these
-/// shells regardless of the user's `conpty-mode = auto` preference.
+/// Returns true if this shell relies on a real console handle on
+/// Windows and breaks under raw pipe stdio. Used to force ConPTY
+/// transport for these shells regardless of the user's
+/// `conpty-mode = auto` preference.
 ///
-/// Currently only pwsh.exe (PowerShell 7+) qualifies. PSReadLine
-/// throws InvalidOperationException when stdin is not a console
-/// handle, and pwsh falls back to Console.ReadLine which has no
-/// backspace, no arrow-key history, no tab completion.
+/// pwsh.exe (PowerShell 7+) qualifies because PSReadLine throws
+/// InvalidOperationException when stdin is not a console handle,
+/// and pwsh falls back to Console.ReadLine which has no backspace,
+/// no arrow-key history, no tab completion.
+///
+/// wsl.exe qualifies because the launcher inspects its standard
+/// handles to decide whether to allocate a Linux PTY for the inner
+/// session: console attached -> pty allocated, raw pipes -> pipes
+/// forwarded straight through with no controlling terminal. The
+/// pipe path makes any TUI inside WSL (btop, htop, mc, vim,
+/// neovim, ...) see `isatty(STDOUT) = false` and exit immediately,
+/// which under `quit-after-last-window-closed = true` looks like
+/// Wintty exiting on its own. Bare `wsl.exe` is in the same boat:
+/// the user's login shell starts without a tty and editing /
+/// prompt rendering silently degrade.
 ///
 /// powershell.exe (5.1) is .console_api in `awarenessOf` so it
 /// already routes to ConPTY without needing this gate.
 pub fn requiresConsoleInput(kind: Kind) bool {
     return switch (kind) {
-        .pwsh => true,
+        .pwsh, .wsl => true,
         // else explicit so adding a new Kind doesn't silently flip
         // its console-input requirement.
         else => false,
@@ -337,6 +348,27 @@ test "classify: handles very long path safely" {
     var long_path: [128]u8 = undefined;
     @memset(&long_path, 'a');
     try testing.expectEqual(Awareness.unknown, classify(&long_path));
+}
+
+test "requiresConsoleInput: pwsh and wsl require console" {
+    try testing.expect(requiresConsoleInput(.pwsh));
+    try testing.expect(requiresConsoleInput(.wsl));
+}
+
+test "requiresConsoleInput: other VT-aware shells stay on bypass" {
+    try testing.expect(!requiresConsoleInput(.ssh));
+    try testing.expect(!requiresConsoleInput(.bash));
+    try testing.expect(!requiresConsoleInput(.nu));
+    try testing.expect(!requiresConsoleInput(.zsh));
+    try testing.expect(!requiresConsoleInput(.fish));
+    try testing.expect(!requiresConsoleInput(.elvish));
+    try testing.expect(!requiresConsoleInput(.xonsh));
+}
+
+test "requiresConsoleInput: console-API and unknown stay false (routed via awareness)" {
+    try testing.expect(!requiresConsoleInput(.cmd));
+    try testing.expect(!requiresConsoleInput(.powershell));
+    try testing.expect(!requiresConsoleInput(.unknown));
 }
 
 test "utf8Preamble: cmd.exe returns .cmd" {

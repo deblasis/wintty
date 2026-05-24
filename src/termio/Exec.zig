@@ -2783,8 +2783,8 @@ test "resolveConptyMode: always forces bypass" {
 
 test "resolveConptyMode: auto picks bypass for vt_aware" {
     try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "wsl.exe"));
     try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash"));
+    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "ssh.exe"));
 }
 
 test "resolveConptyMode: auto picks conpty for pwsh (requires console for PSReadLine)" {
@@ -2792,6 +2792,13 @@ test "resolveConptyMode: auto picks conpty for pwsh (requires console for PSRead
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh.exe"));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh"));
     try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+}
+
+test "resolveConptyMode: auto picks conpty for wsl (requires console for Linux PTY)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "wsl.exe"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "wsl"));
+    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Windows\\System32\\wsl.exe"));
 }
 
 test "resolveConptyMode: auto picks conpty for console_api" {
