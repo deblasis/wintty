@@ -45,4 +45,19 @@ public sealed class TabIconViewModelTests
         Assert.Contains(nameof(TabIconViewModel.TooltipText), raised);
         Assert.Equal("Command Prompt", vm.TooltipText);
     }
+
+    [Fact]
+    public void SetIcon_FlippingKind_RaisesPropertyChangedForDerivedFlags()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("ubuntu", 16), "Ubuntu");
+        var raised = new List<string?>();
+        ((INotifyPropertyChanged)vm).PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        vm.SetIcon(new IconSpec.Mdl2Token(0xE756), "PowerShell");
+
+        Assert.Contains(nameof(TabIconViewModel.IsMdl2Glyph), raised);
+        Assert.Contains(nameof(TabIconViewModel.Mdl2CodePoint), raised);
+        Assert.True(vm.IsMdl2Glyph);
+        Assert.Equal(0xE756, vm.Mdl2CodePoint);
+    }
 }

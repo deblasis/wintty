@@ -24,7 +24,16 @@ public sealed class TabIconViewModel : INotifyPropertyChanged
     public IconSpec Icon
     {
         get;
-        private set { if (!Equals(field, value)) { field = value; Raise(); } }
+        private set
+        {
+            if (Equals(field, value)) return;
+            field = value;
+            Raise();
+            // IsMdl2Glyph and Mdl2CodePoint are computed; classic bindings
+            // listen for the exact property name, so raise them explicitly.
+            Raise(nameof(IsMdl2Glyph));
+            Raise(nameof(Mdl2CodePoint));
+        }
     }
 
     public string TooltipText
@@ -47,9 +56,9 @@ public sealed class TabIconViewModel : INotifyPropertyChanged
     public int Mdl2CodePoint => Icon is IconSpec.Mdl2Token m ? m.CodePoint : 0;
 
     /// <summary>
-    /// Atomic update of icon + tooltip. Single call site avoids two
-    /// PropertyChanged notifications racing the template selector on
-    /// profile re-resolution.
+    /// Updates the icon spec and tooltip in one call. Fires PropertyChanged
+    /// for Icon (and its derived flags IsMdl2Glyph / Mdl2CodePoint) before
+    /// TooltipText; subscribers observe sequential notifications.
     /// </summary>
     public void SetIcon(IconSpec icon, string tooltipText)
     {
