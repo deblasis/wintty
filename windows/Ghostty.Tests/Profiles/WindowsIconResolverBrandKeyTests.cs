@@ -7,7 +7,7 @@ namespace Ghostty.Tests.Profiles;
 
 public sealed class WindowsIconResolverBrandKeyTests
 {
-    [Fact(Skip = "awaits PR A3 asset bundle")]
+    [Fact]
     public async System.Threading.Tasks.Task Resolve_BrandKey_WithExplicitDpi_ReturnsThatVariant()
     {
         var fs = new FakeFileSystem();
@@ -21,7 +21,7 @@ public sealed class WindowsIconResolverBrandKeyTests
         Assert.Equal(0x50, bytes[1]);
     }
 
-    [Fact(Skip = "awaits PR A3 asset bundle")]
+    [Fact]
     public async System.Threading.Tasks.Task Resolve_BrandKey_WithNullDpi_PicksADefault()
     {
         var fs = new FakeFileSystem();
