@@ -91,6 +91,10 @@ pub const Parser = struct {
                     self.repeat_acc = 0;
                     self.state = .repeat_count;
                 },
+                '#' => {
+                    self.accum.clearRetainingCapacity();
+                    self.state = .color_def;
+                },
                 else => {
                     // Bytes outside the sixel data alphabet are
                     // silently ignored. We also promote .initial to
@@ -117,16 +121,29 @@ pub const Parser = struct {
                 },
                 else => {
                     // Non-digit, non-alphabet byte after `!` — abandon
-                    // the repeat and drop back to .data. Caveat: this
-                    // also drops the byte itself, so `!3#5` will lose
-                    // the `#`. Revisit when the # color-def arm lands
-                    // (either re-dispatch here or whitelist command
-                    // bytes for fall-through).
+                    // the pending count, drop back to .data, and
+                    // re-dispatch the byte so command bytes (#, $, -,
+                    // ", !) get their own handling.
                     self.state = .data;
+                    try self.tryPut(byte);
                 },
             },
 
-            .raster_attribs, .color_def => {},
+            .color_def => switch (byte) {
+                '0'...'9', ';' => {
+                    try self.accum.append(self.alloc, byte);
+                },
+                else => {
+                    // End of color def — flush, then re-dispatch this
+                    // byte in data state so it gets interpreted
+                    // (e.g. a sixel byte after `#5?` should paint).
+                    try self.flushColorDef();
+                    self.state = .data;
+                    try self.tryPut(byte);
+                },
+            },
+
+            .raster_attribs => {},
         }
     }
 
@@ -148,6 +165,57 @@ pub const Parser = struct {
             .paint_ops = try self.paint_ops.toOwnedSlice(self.alloc),
             .intro_params = self.intro_params,
         };
+    }
+
+    fn flushColorDef(self: *Parser) Allocator.Error!void {
+        var it = std.mem.splitScalar(u8, self.accum.items, ';');
+        const idx_str = it.next() orelse return;
+        const idx = parseU8(idx_str) orelse return;
+
+        // Selection form: bare "#N" with no further fields.
+        const pu_str = it.next() orelse {
+            try self.paint_ops.append(self.alloc, .{ .select_color = idx });
+            return;
+        };
+
+        const pu = parseU8(pu_str) orelse return;
+        const a_str = it.next() orelse return;
+        const b_str = it.next() orelse return;
+        const c_str = it.next() orelse return;
+        const a = parseU16(a_str) orelse return;
+        const b = parseU8(b_str) orelse return;
+        const c = parseU8(c_str) orelse return;
+
+        switch (pu) {
+            1 => try self.palette_ops.append(self.alloc, .{
+                .set_hls = .{ .idx = idx, .h = a, .l = b, .s = c },
+            }),
+            2 => try self.palette_ops.append(self.alloc, .{
+                .set_rgb = .{
+                    .idx = idx,
+                    // r is narrowed from u16, so we clamp explicitly to
+                    // keep @intCast safe. g and b come from parseU8
+                    // already in u8 range; out-of-spec values >100 pass
+                    // through here and get clamped downstream in
+                    // palette.setRgb's scale100to255.
+                    .r = @intCast(@min(a, 100)),
+                    .g = b,
+                    .b = c,
+                },
+            }),
+            else => {
+                // Unknown Pu — silently drop (spec leaves room for
+                // future extensions).
+            },
+        }
+    }
+
+    fn parseU8(s: []const u8) ?u8 {
+        return std.fmt.parseInt(u8, s, 10) catch null;
+    }
+
+    fn parseU16(s: []const u8) ?u16 {
+        return std.fmt.parseInt(u16, s, 10) catch null;
     }
 };
 
@@ -249,4 +317,108 @@ test "sixel parser: ! with no digits then sixel emits count=1" {
     defer c.deinit();
     try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
     try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
+}
+
+test "sixel parser: #5 selects color register 5" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#5?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
+    try testing.expect(c.paint_ops[1] == .sixel);
+}
+
+test "sixel parser: #1;2;100;50;0 defines RGB" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#1;2;100;50;0") |b| p.put(b);
+    // Color def needs a terminator byte to flush; feed a sixel byte.
+    p.put('?');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
+    try testing.expect(c.palette_ops[0] == .set_rgb);
+    const op = c.palette_ops[0].set_rgb;
+    try testing.expectEqual(@as(u8, 1), op.idx);
+    try testing.expectEqual(@as(u8, 100), op.r);
+    try testing.expectEqual(@as(u8, 50), op.g);
+    try testing.expectEqual(@as(u8, 0), op.b);
+}
+
+test "sixel parser: #1;1;180;50;75 defines HLS" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#1;1;180;50;75") |b| p.put(b);
+    p.put('?');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
+    try testing.expect(c.palette_ops[0] == .set_hls);
+    const op = c.palette_ops[0].set_hls;
+    try testing.expectEqual(@as(u8, 1), op.idx);
+    try testing.expectEqual(@as(u16, 180), op.h);
+    try testing.expectEqual(@as(u8, 50), op.l);
+    try testing.expectEqual(@as(u8, 75), op.s);
+}
+
+test "sixel parser: #N with invalid Pu silently ignored" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    // Pu=3 is invalid (only 1=HLS, 2=RGB defined).
+    for ("#1;3;0;0;0") |b| p.put(b);
+    p.put('?');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+}
+
+test "sixel parser: #N followed by sixel byte selects then paints" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#7~") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+    try testing.expectEqual(@as(u8, 7), c.paint_ops[0].select_color);
+    try testing.expectEqual(@as(u8, '~'), c.paint_ops[1].sixel.byte);
+}
+
+test "sixel parser: !3#5 re-dispatches # into color_def" {
+    // Regression: previously `#` was swallowed by the .repeat_count
+    // else-arm. Now the else-arm re-dispatches the byte after dropping
+    // the pending count.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!3#5?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    // !3 had no terminator paint byte (the next byte was #), so the
+    // pending repeat is discarded entirely. The #5 selects color 5,
+    // and the trailing ? paints with count=1.
+    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
+    try testing.expect(c.paint_ops[1] == .sixel);
+    try testing.expectEqual(@as(u8, '?'), c.paint_ops[1].sixel.byte);
+    try testing.expectEqual(@as(u16, 1), c.paint_ops[1].sixel.count);
+}
+
+test "sixel parser: #1;2;200;200;200 clamps r but passes g/b through" {
+    // Documents the intentional asymmetry: r is clamped at the parser
+    // because the u16→u8 narrowing requires it; g and b pass through
+    // unclamped and get scaled by palette.setRgb downstream.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#1;2;200;200;200") |b| p.put(b);
+    p.put('?');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
+    const op = c.palette_ops[0].set_rgb;
+    try testing.expectEqual(@as(u8, 100), op.r);  // clamped
+    try testing.expectEqual(@as(u8, 200), op.g);  // not clamped here
+    try testing.expectEqual(@as(u8, 200), op.b);  // not clamped here
 }
