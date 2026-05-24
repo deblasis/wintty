@@ -142,6 +142,14 @@ pub const exp = struct {
             nBufferLength: windows.DWORD,
             lpBuffer: windows.LPWSTR,
         ) callconv(.winapi) windows.DWORD;
+        /// std.os.windows only exposes GetCurrentProcessId via the TEB, not
+        /// the more general GetProcessId(HANDLE). Declared here so we can
+        /// translate a child HANDLE (returned by CreateProcessW) to a
+        /// numeric PID that the C# layer can hand to Toolhelp32.
+        /// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid
+        pub extern "kernel32" fn GetProcessId(
+            Process: windows.HANDLE,
+        ) callconv(.winapi) windows.DWORD;
     };
 
     pub const PROC_THREAD_ATTRIBUTE_NUMBER = 0x0000FFFF;
