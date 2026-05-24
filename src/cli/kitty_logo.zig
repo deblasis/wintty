@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const build_config = @import("../build_config.zig");
 
 const logo_png = @embedFile("wintty_logo.png");
 
@@ -25,11 +26,11 @@ pub fn supported(alloc: Allocator, stdout: std.fs.File) bool {
     var env = std.process.getEnvMap(alloc) catch return false;
     defer env.deinit();
 
-    // Wintty sets TERM_PROGRAM=wintty (and upstream Ghostty sets =ghostty)
-    // when spawning a shell. Accept both so already-running shells from
+    // Wintty sets TERM_PROGRAM=<build_config.term_program> when spawning a
+    // shell; "ghostty" stays in the match list so shells inherited from
     // pre-rebrand binaries still get the logo. WezTerm uses the same var.
     if (env.get("TERM_PROGRAM")) |v| {
-        if (std.mem.eql(u8, v, "wintty")) return true;
+        if (std.mem.eql(u8, v, build_config.term_program)) return true;
         if (std.mem.eql(u8, v, "ghostty")) return true;
         if (std.mem.eql(u8, v, "WezTerm")) return true;
     }
