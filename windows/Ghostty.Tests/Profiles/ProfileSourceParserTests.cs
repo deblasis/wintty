@@ -283,4 +283,36 @@ public sealed class ProfileSourceParserTests
         var token = Assert.IsType<IconSpec.Mdl2Token>(p.Icon);
         Assert.Equal(0xE756, token.CodePoint);
     }
+
+    [Fact]
+    public void ParseIcon_BrandPrefix_ProducesBrandKey()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.icon = brand:ubuntu\n"
+        ).Profiles["foo"];
+        var bk = Assert.IsType<IconSpec.BrandKey>(parsed.Icon);
+        Assert.Equal("ubuntu", bk.Key);
+        Assert.Null(bk.Dpi);
+    }
+
+    [Fact]
+    public void ParseIcon_BrandPrefix_IsCaseInsensitive()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.icon = BRAND:Ubuntu\n"
+        ).Profiles["foo"];
+        var bk = Assert.IsType<IconSpec.BrandKey>(parsed.Icon);
+        Assert.Equal("Ubuntu", bk.Key);
+    }
+
+    [Fact]
+    public void ParseIcon_BrandPrefix_EmptyKey_FallsBackToPath()
+    {
+        // "brand:" with no key is meaningless; treat as Path so the user
+        // gets a clear "file not found" rather than a silent default.
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.icon = brand:\n"
+        ).Profiles["foo"];
+        Assert.IsType<IconSpec.Path>(parsed.Icon);
+    }
 }
