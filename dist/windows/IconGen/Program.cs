@@ -23,12 +23,12 @@ internal static class Program
             {
                 using var striped = StripeMasters(masters);
                 PngWriter.WriteScalePngs(striped, options.OutputDir);
-                IcoWriter.Write(striped, Path.Combine(options.OutputDir, "ghostty.ico"));
+                IcoWriter.Write(striped, Path.Combine(options.OutputDir, "wintty.ico"));
             }
             else
             {
                 PngWriter.WriteScalePngs(masters, options.OutputDir);
-                IcoWriter.Write(masters, Path.Combine(options.OutputDir, "ghostty.ico"));
+                IcoWriter.Write(masters, Path.Combine(options.OutputDir, "wintty.ico"));
             }
 
             return 0;

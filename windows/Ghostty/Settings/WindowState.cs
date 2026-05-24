@@ -42,7 +42,7 @@ internal sealed class WindowState
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Ghostty");
+                "Wintty");
             Directory.CreateDirectory(dir);
             return dir;
         }
