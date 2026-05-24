@@ -60,4 +60,66 @@ public sealed class TabIconViewModelTests
         Assert.True(vm.IsMdl2Glyph);
         Assert.Equal(0xE756, vm.Mdl2CodePoint);
     }
+
+    [Fact]
+    public void Construct_WithProfileIcon_ResolvedIconEqualsProfile()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("pwsh", null), "PowerShell");
+        Assert.IsType<IconSpec.BrandKey>(vm.Icon);
+        Assert.Equal("pwsh", ((IconSpec.BrandKey)vm.Icon).Key);
+    }
+
+    [Fact]
+    public void SetOverride_ChangesResolvedIcon()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("pwsh", null), "PowerShell");
+        vm.SetOverride(new IconSpec.BrandKey("ubuntu", null), "Ubuntu");
+
+        var brand = Assert.IsType<IconSpec.BrandKey>(vm.Icon);
+        Assert.Equal("ubuntu", brand.Key);
+        Assert.Equal("Ubuntu", vm.TooltipText);
+    }
+
+    [Fact]
+    public void RevertToProfile_RestoresProfileIcon()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("pwsh", null), "PowerShell");
+        vm.SetOverride(new IconSpec.BrandKey("ubuntu", null), "Ubuntu");
+        vm.RevertToProfile();
+
+        var brand = Assert.IsType<IconSpec.BrandKey>(vm.Icon);
+        Assert.Equal("pwsh", brand.Key);
+        Assert.Equal("PowerShell", vm.TooltipText);
+    }
+
+    [Fact]
+    public void SetIcon_UpdatesProfileSlot_NotOverride()
+    {
+        // SetIcon represents a profile snapshot change.
+        // If an override is active, the resolved Icon stays the override.
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("pwsh", null), "PowerShell");
+        vm.SetOverride(new IconSpec.BrandKey("ubuntu", null), "Ubuntu");
+        vm.SetIcon(new IconSpec.BrandKey("cmd", null), "Command Prompt");
+
+        var brand = Assert.IsType<IconSpec.BrandKey>(vm.Icon);
+        Assert.Equal("ubuntu", brand.Key);
+        Assert.Equal("Ubuntu", vm.TooltipText);
+
+        vm.RevertToProfile();
+        Assert.Equal("cmd", ((IconSpec.BrandKey)vm.Icon).Key);
+        Assert.Equal("Command Prompt", vm.TooltipText);
+    }
+
+    [Fact]
+    public void SetOverride_FiresPropertyChanged()
+    {
+        var vm = new TabIconViewModel(new IconSpec.BrandKey("pwsh", null), "PowerShell");
+        var raised = new System.Collections.Generic.List<string?>();
+        ((System.ComponentModel.INotifyPropertyChanged)vm).PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        vm.SetOverride(new IconSpec.BrandKey("ubuntu", null), "Ubuntu");
+
+        Assert.Contains(nameof(TabIconViewModel.Icon), raised);
+        Assert.Contains(nameof(TabIconViewModel.TooltipText), raised);
+    }
 }
