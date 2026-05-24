@@ -182,6 +182,10 @@ pub const Parser = struct {
     /// Finalize the accumulated state into a `Command`. Caller owns
     /// the returned slices via `Command.deinit`. After `finalize`,
     /// the parser is consumed — do not call `put` or `finalize` again.
+    ///
+    /// Partial mid-state at end-of-stream (an incomplete color def or
+    /// raster prelude that never received a terminator) is silently
+    /// discarded; matches foot/libsixel's behavior for truncated DCS.
     pub fn finalize(self: *Parser) Allocator.Error!Command {
         return .{
             .alloc = self.alloc,
@@ -534,4 +538,40 @@ test "sixel parser: malformed raster falls back to defaults" {
     try testing.expectEqual(@as(u16, 0), c.raster.declared_width);
     // Painting continues after malformed raster
     try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+}
+
+test "sixel parser: ignore state drops all subsequent bytes" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    p.state = .ignore;
+    p.put('?');
+    p.put('#');
+    p.put('!');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+}
+
+test "sixel parser: incomplete color def at finalize is dropped" {
+    // No terminator byte after `#1;2;100` — flushColorDef never runs.
+    // The accumulated buffer is silently discarded by finalize.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("#1;2;100") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+}
+
+test "sixel parser: incomplete raster attribs at finalize is dropped" {
+    // No terminator byte after `"1;1;0;100` — flushRaster never runs.
+    // The accumulated buffer is silently discarded; raster stays default.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("\"1;1;0;100") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(u16, 1), c.raster.aspect_num);
+    try testing.expectEqual(@as(u16, 0), c.raster.declared_width);
 }
