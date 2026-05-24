@@ -198,6 +198,38 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// </summary>
     internal Action? OnClose { get; set; }
 
+    private int? _shellPid;
+
+    /// <summary>
+    /// Process id of the shell rooted at this tab's first leaf, or null
+    /// before the surface has spawned (or after teardown). Set by the
+    /// WinUI layer once <c>ghostty_surface_foreground_pid</c> returns a
+    /// non-zero value; raises <see cref="ShellPidChanged"/> so the
+    /// process tracker can register / unregister its descendant walk.
+    /// Today's Windows pty layer returns 0 for the foreground pid, so
+    /// this stays null on Windows until libghostty exposes the spawned
+    /// child pid; the lifecycle wiring here is the same shape we'll need
+    /// once that lands.
+    /// </summary>
+    public int? ShellPid
+    {
+        get => _shellPid;
+        internal set
+        {
+            if (_shellPid == value) return;
+            _shellPid = value;
+            ShellPidChanged?.Invoke(this, value);
+        }
+    }
+
+    /// <summary>
+    /// Fired when <see cref="ShellPid"/> changes. The active-process
+    /// tracker subscribes per tab to register the new pid and unregister
+    /// the old one; null means "no pid right now" (pre-spawn or
+    /// post-exit).
+    /// </summary>
+    public event Action<TabModel, int?>? ShellPidChanged;
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Raise([CallerMemberName] string? name = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
