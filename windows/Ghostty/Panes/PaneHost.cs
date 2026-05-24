@@ -120,8 +120,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         => ProgressChanged?.Invoke(this, state);
 
     /// <summary>
-    /// Raised when the last leaf in the tree closes. Subscribers should
-    /// close the window.
+    /// Raised when the last leaf in the tree closes. The owning
+    /// <c>TabManager</c> subscribes and routes to
+    /// <c>TabManager.CloseTab</c>; window-close then cascades via
+    /// <c>LastTabClosed</c> when this was the last tab.
     /// </summary>
     public event EventHandler? LastLeafClosed;
 
@@ -423,7 +425,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         {
             // Last leaf - flag the host so DisposeAllLeaves on window
             // close skips iterating a tree whose only node is already
-            // disposed, and tell MainWindow to close the window.
+            // disposed, and tell TabManager to close this tab. Window
+            // close then cascades through TabManager.LastTabClosed to
+            // MainWindow.Close when this was the only tab.
             _allLeavesClosed = true;
             LastLeafClosed?.Invoke(this, EventArgs.Empty);
             return;

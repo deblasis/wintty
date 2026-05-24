@@ -169,4 +169,83 @@ public class TabManagerTests
         mgr.Activate(mgr.ActiveTab);
         Assert.Equal(0, count);
     }
+
+    // Regression: PaneHost.LastLeafClosed must drive a tab close. When
+    // the shell auto-exits (cmd /c exit under quit-after-last-window-
+    // closed), libghostty's close-surface callback raises this event
+    // and TabManager owns the bridge into CloseTab. Without the bridge
+    // the tab leaks, the window stays open, and validate-transport-
+    // smoke times out instead of exiting cleanly.
+    [Fact]
+    public void PaneHost_LastLeafClosed_closes_the_owning_tab()
+    {
+        var mgr = NewManager(out var hosts);
+        mgr.NewTab(); // 2 tabs; close the first via its pane host
+        var first = mgr.Tabs[0];
+        TabModel? removed = null;
+        mgr.TabRemoved += (_, t) => removed = t;
+
+        hosts[0].RaiseLastLeafClosed();
+
+        Assert.Single(mgr.Tabs);
+        Assert.Same(first, removed);
+    }
+
+    [Fact]
+    public void PaneHost_LastLeafClosed_on_only_tab_raises_LastTabClosed()
+    {
+        var mgr = NewManager(out var hosts);
+        bool fired = false;
+        mgr.LastTabClosed += (_, _) => fired = true;
+
+        hosts[0].RaiseLastLeafClosed();
+
+        Assert.Empty(mgr.Tabs);
+        Assert.True(fired);
+    }
+
+    // After DetachTab the source manager must stop reacting to the
+    // detached tab's pane-host events: the adopter owns the lifecycle.
+    [Fact]
+    public void DetachTab_unwires_LastLeafClosed_bridge_on_source()
+    {
+        var mgr = NewManager(out var hosts);
+        mgr.NewTab(); // need >=2 tabs so DetachTab is legal
+        var detached = mgr.DetachTab(mgr.Tabs[0]);
+        int removedCount = 0;
+        mgr.TabRemoved += (_, _) => removedCount++;
+
+        // Fire on the now-orphaned pane host. The source manager must
+        // not touch its tab list in response.
+        hosts[0].RaiseLastLeafClosed();
+
+        Assert.Equal(0, removedCount);
+        Assert.Single(mgr.Tabs);
+        Assert.NotNull(detached);
+    }
+
+    // The adopter must take over the bridge so a tab moved to a new
+    // window still closes its tab when the shell exits.
+    [Fact]
+    public void AdoptTab_wires_LastLeafClosed_bridge_on_adopter()
+    {
+        var source = NewManager(out var sourceHosts);
+        source.NewTab(); // 2 tabs in source
+        var detached = source.DetachTab(source.Tabs[0]);
+
+        var adopter = NewManager(out _);
+        adopter.AdoptTab(detached);
+        // adopter has its own seed tab plus the adopted one.
+        Assert.Equal(2, adopter.Tabs.Count);
+
+        TabModel? removed = null;
+        adopter.TabRemoved += (_, t) => removed = t;
+
+        // sourceHosts[0] is the detached tab's pane host; raising
+        // LastLeafClosed on it must remove the tab from the adopter.
+        sourceHosts[0].RaiseLastLeafClosed();
+
+        Assert.Same(detached, removed);
+        Assert.Single(adopter.Tabs);
+    }
 }
