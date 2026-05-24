@@ -49,7 +49,10 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
 
     private async Task<byte[]> ResolveUncachedAsync(IconSpec spec, CancellationToken ct) => spec switch
     {
+        IconSpec.Path p when p.FilePath.EndsWith(".svg", System.StringComparison.OrdinalIgnoreCase)
+            => RasterizeSvgFileOrDefault(await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false), sizePx: 32),
         IconSpec.Path p => await fs.ReadAllBytesAsync(p.FilePath, ct).ConfigureAwait(false),
+        IconSpec.BrandKey b => ReadBrandedOrDefault(b.Key, b.Dpi ?? 16),
         IconSpec.BundledKey b => ReadBundledOrDefault(b.Key),
         IconSpec.Mdl2Token => ReadBundledOrDefault(DefaultBundledKey),
         IconSpec.AutoForExe a => ExtractExeIconAsPng(a.ExePath),
@@ -95,6 +98,29 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         return ms.ToArray();
     }
 
+    private static byte[] RasterizeSvgFileOrDefault(byte[] svgBytes, int sizePx)
+    {
+        var text = System.Text.Encoding.UTF8.GetString(svgBytes);
+        var png = SvgRasterizer.Rasterize(text, sizePx);
+        return png.Length > 0 ? png : ReadBundledOrDefault(DefaultBundledKey);
+    }
+
+    private static byte[] ReadBrandedOrDefault(string key, int dpi)
+    {
+        var resource = $"Ghostty.Core.Profiles.IconAssets.{key}@{dpi}.png";
+        using var stream = typeof(WindowsIconResolver).Assembly.GetManifestResourceStream(resource);
+        if (stream is not null)
+        {
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            return ms.ToArray();
+        }
+        // Try the same key without DPI suffix (legacy single-size bundle).
+        var legacy = TryReadBundled(key);
+        if (legacy is not null) return legacy;
+        return ReadBundledOrDefault(DefaultBundledKey);
+    }
+
     private string SpecToCacheKey(IconSpec spec)
     {
         // Casing note: Windows paths are case-insensitive, so tokens
@@ -105,6 +131,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         var baseToken = spec switch
         {
             IconSpec.Path p => "path:" + p.FilePath,
+            IconSpec.BrandKey br => "brand:" + br.Key + ":dpi:" + (br.Dpi?.ToString() ?? "auto"),
             IconSpec.Mdl2Token m => "mdl2:" + m.CodePoint.ToString("x"),
             IconSpec.BundledKey b => "bundled:" + b.Key,
             IconSpec.AutoForExe a => "exe:" + a.ExePath,
