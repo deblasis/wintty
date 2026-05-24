@@ -921,7 +921,7 @@ const Subprocess = struct {
 
         // Set environment variables used by some programs (such as neovim) to detect
         // which terminal emulator and version they're running under.
-        try env.put("TERM_PROGRAM", "wintty");
+        try env.put("TERM_PROGRAM", build_config.term_program);
         try env.put("TERM_PROGRAM_VERSION", build_config.version_string);
 
         // VTE_VERSION is set by gnome-terminal and other VTE-based terminals.
