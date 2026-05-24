@@ -171,6 +171,12 @@ public static partial class ProfileSourceParser
                 return new IconSpec.Mdl2Token(cp);
             return null;
         }
+        if (value.StartsWith("brand:", System.StringComparison.OrdinalIgnoreCase))
+        {
+            var key = value.Substring(6);
+            if (key.Length == 0) return new IconSpec.Path(value);
+            return new IconSpec.BrandKey(key, null);
+        }
         return new IconSpec.Path(value);
     }
 

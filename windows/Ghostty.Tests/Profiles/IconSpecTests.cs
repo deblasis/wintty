@@ -51,4 +51,28 @@ public sealed class IconSpecTests
         Assert.Equal(new IconSpec.Path("a"), new IconSpec.Path("a"));
         Assert.NotEqual<IconSpec>(new IconSpec.Path("a"), new IconSpec.BundledKey("a"));
     }
+
+    [Fact]
+    public void BrandKey_HoldsKeyAndDpi()
+    {
+        IconSpec spec = new IconSpec.BrandKey("ubuntu", 16);
+        var b = Assert.IsType<IconSpec.BrandKey>(spec);
+        Assert.Equal("ubuntu", b.Key);
+        Assert.Equal(16, b.Dpi);
+    }
+
+    [Fact]
+    public void BrandKey_DpiIsOptional()
+    {
+        IconSpec spec = new IconSpec.BrandKey("ubuntu", null);
+        var b = Assert.IsType<IconSpec.BrandKey>(spec);
+        Assert.Null(b.Dpi);
+    }
+
+    [Fact]
+    public void BrandKey_RecordEqualityHolds()
+    {
+        Assert.Equal(new IconSpec.BrandKey("a", 16), new IconSpec.BrandKey("a", 16));
+        Assert.NotEqual<IconSpec>(new IconSpec.BrandKey("a", 16), new IconSpec.BundledKey("a"));
+    }
 }
