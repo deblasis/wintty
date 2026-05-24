@@ -392,10 +392,8 @@ test "utf8Preamble: powershell 5.1 returns .pwsh" {
 }
 
 test "utf8Preamble: vt-aware non-powershell shells return .none" {
-    // bash/wsl/ssh/nu don't observe the Windows console CP the same way
-    // powershell does, and auto-mode routes them through the bypass
-    // path anyway. Only powershell-family shells need the preamble
-    // under forced conpty-mode=never.
+    // bash/wsl/ssh/nu don't observe the Windows console CP the way
+    // powershell does. Only powershell-family shells need the preamble.
     try testing.expectEqual(Preamble.none, utf8Preamble("bash.exe"));
     try testing.expectEqual(Preamble.none, utf8Preamble("wsl.exe"));
     try testing.expectEqual(Preamble.none, utf8Preamble("ssh.exe"));

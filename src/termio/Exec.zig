@@ -2345,8 +2345,10 @@ fn resolveConptyMode(
         .always => .bypass,
         .auto => blk: {
             const kind = internal_os.windows_shell.identify(exe_path);
-            // Force ConPTY for shells whose interactive input layer
-            // (e.g. PSReadLine for pwsh) requires a real console handle.
+            // Force ConPTY for shells that need a real console handle:
+            // pwsh for PSReadLine's input layer, wsl because its
+            // launcher uses the parent handle type to decide whether
+            // to allocate a Linux PTY.
             if (internal_os.windows_shell.requiresConsoleInput(kind)) {
                 break :blk .conpty;
             }
