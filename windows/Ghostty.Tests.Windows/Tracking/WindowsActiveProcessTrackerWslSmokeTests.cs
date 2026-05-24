@@ -46,52 +46,56 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         });
         Assert.NotNull(pwsh);
 
-        using var tracker = new WindowsActiveProcessTracker();
-        var tcs = new TaskCompletionSource<(string exe, string? cmd)>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var observed = new List<string>();
-        var sw = Stopwatch.StartNew();
-
-        tracker.Changed += (_, e) =>
+        try
         {
+            using var tracker = new WindowsActiveProcessTracker();
+            var tcs = new TaskCompletionSource<(string exe, string? cmd)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observed = new List<string>();
+            var sw = Stopwatch.StartNew();
+
+            tracker.Changed += (_, e) =>
+            {
+                lock (observed)
+                {
+                    observed.Add($"{sw.ElapsedMilliseconds}ms pid={e.RootPid} exe={e.ExeBasename ?? "<null>"} cmd={e.CommandLine ?? "<null>"}");
+                }
+                // We want wsl.exe specifically. The broker filter already removes
+                // wslhost / conhost / OpenConsole. Anything deeper (the linux side)
+                // is invisible to the Win32 walker.
+                if (string.Equals(e.ExeBasename, "wsl.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    tcs.TrySetResult((e.ExeBasename!, e.CommandLine));
+                }
+            };
+            tracker.Register(pwsh!.Id);
+
+            var winner = await Task.WhenAny(tcs.Task, Task.Delay(8000));
             lock (observed)
             {
-                observed.Add($"{sw.ElapsedMilliseconds}ms pid={e.RootPid} exe={e.ExeBasename ?? "<null>"} cmd={e.CommandLine ?? "<null>"}");
+                foreach (var line in observed)
+                    _output.WriteLine(line);
             }
-            // We want wsl.exe specifically. The broker filter already removes
-            // wslhost / conhost / OpenConsole. Anything deeper (the linux side)
-            // is invisible to the Win32 walker.
-            if (string.Equals(e.ExeBasename, "wsl.exe", StringComparison.OrdinalIgnoreCase)
-                && !tcs.Task.IsCompleted)
-            {
-                tcs.SetResult((e.ExeBasename!, e.CommandLine));
-            }
-        };
-        tracker.Register(pwsh!.Id);
+            Assert.True(
+                winner == tcs.Task,
+                $"tracker did not report wsl.exe within 8s; observed: [{string.Join(", ", observed)}]");
 
-        var winner = await Task.WhenAny(tcs.Task, Task.Delay(8000));
-        lock (observed)
-        {
-            foreach (var line in observed)
-                _output.WriteLine(line);
+            var (exe, cmd) = await tcs.Task;
+            Assert.Equal("wsl.exe", exe, ignoreCase: true);
+            Assert.NotNull(cmd);
+            Assert.Contains(distro, cmd, StringComparison.OrdinalIgnoreCase);
+            _output.WriteLine($"tracker reported {exe} cmd=[{cmd}] after {sw.ElapsedMilliseconds}ms");
+
+            // Full chain: ProcessIconTable.TryMap maps wsl.exe + cmdline to
+            // AutoForWslDistro(<distro>). This is the icon UX contract that
+            // TabIconViewModel relies on.
+            var spec = ProcessIconTable.TryMap(exe, cmd);
+            var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
+            Assert.Equal(distro, auto.DistroName, ignoreCase: true);
         }
-        Assert.True(
-            winner == tcs.Task,
-            $"tracker did not report wsl.exe within 8s; observed: [{string.Join(", ", observed)}]");
-
-        var (exe, cmd) = await tcs.Task;
-        Assert.Equal("wsl.exe", exe, ignoreCase: true);
-        Assert.NotNull(cmd);
-        Assert.Contains(distro, cmd, StringComparison.OrdinalIgnoreCase);
-        _output.WriteLine($"tracker reported {exe} cmd=[{cmd}] after {sw.ElapsedMilliseconds}ms");
-
-        // Full chain: ProcessIconTable.TryMap maps wsl.exe + cmdline to
-        // AutoForWslDistro(<distro>). This is the icon UX contract that
-        // TabIconViewModel relies on.
-        var spec = ProcessIconTable.TryMap(exe, cmd);
-        var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
-        Assert.Equal(distro, auto.DistroName, ignoreCase: true);
-
-        try { pwsh.Kill(entireProcessTree: true); } catch { }
+        finally
+        {
+            try { pwsh.Kill(entireProcessTree: true); } catch { }
+        }
     }
 
     /// <summary>

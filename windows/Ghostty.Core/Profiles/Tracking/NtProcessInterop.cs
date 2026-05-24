@@ -68,7 +68,9 @@ internal static partial class NtProcessInterop
             PROCESS_ACCESS_RIGHTS.PROCESS_QUERY_LIMITED_INFORMATION,
             false,
             pid);
-        if (handle == default(HANDLE) || handle.IsNull) return null;
+        // OpenProcess returns NULL (not INVALID_HANDLE_VALUE) on failure, unlike
+        // CreateToolhelp32Snapshot in ProcessTreeWalker.cs which uses the latter.
+        if (handle.IsNull) return null;
         try
         {
             return GetCommandLine(handle);
@@ -94,8 +96,9 @@ internal static partial class NtProcessInterop
         var status = NtQueryInformationProcess(
             ntHandle, ProcessCommandLineInformation, IntPtr.Zero, 0, out var required);
         if (status != STATUS_INFO_LENGTH_MISMATCH && status != 0) return null;
-        if (required == 0) return null;
-
+        // Class 60 payload is bounded by a UNICODE_STRING (ushort.MaxValue header)
+        // plus a few bytes; cap defensively so a bogus kernel response can't OOM us.
+        if (required is 0 or > 65 * 1024) return null;
         var buffer = Marshal.AllocHGlobal((int)required);
         try
         {
