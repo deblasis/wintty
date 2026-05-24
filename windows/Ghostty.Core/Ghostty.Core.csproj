@@ -86,6 +86,15 @@
     <EmbeddedResource Include="Profiles\IconAssets\*.png">
       <LogicalName>Ghostty.Core.Profiles.IconAssets.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
+    <!--
+      Wintty logo painted above `wintty +version` output via the kitty
+      graphics protocol (Ghostty.Core.Version.KittyLogo). Mirror of
+      images/icons/icon_128.png; refresh both when the icon changes.
+    -->
+    <None Remove="Branding\wintty_logo.png" />
+    <EmbeddedResource Include="Branding\wintty_logo.png">
+      <LogicalName>Ghostty.Core.Branding.wintty_logo.png</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <Target Name="GenerateBuildInfo"
