@@ -439,7 +439,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             GetFileValue("cursor-style-blink", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
         MouseHideWhileTyping = string.Equals(
-            GetFileValue("mouse-hide-while-typing", "false"),
+            GetFileValue("mouse-hide-while-typing", "true"),
             "true", StringComparison.OrdinalIgnoreCase);
         if (int.TryParse(
                 GetFileValue("scrollback-limit", "10000000"),
