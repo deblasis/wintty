@@ -33,4 +33,39 @@ public sealed class ProcessIconTableTests
         Assert.Null(ProcessIconTable.TryMap(null!));
         Assert.Null(ProcessIconTable.TryMap(""));
     }
+
+    [Theory]
+    [InlineData("python.exe",  "python")]
+    [InlineData("python3.exe", "python")]
+    [InlineData("node.exe",    "node")]
+    [InlineData("deno.exe",    "deno")]
+    [InlineData("bun.exe",     "bun")]
+    [InlineData("vim.exe",     "vim")]
+    [InlineData("nvim.exe",    "vim")]
+    [InlineData("git.exe",     "git")]
+    [InlineData("ssh.exe",     "ssh")]
+    [InlineData("docker.exe",  "docker")]
+    [InlineData("kubectl.exe", "k8s")]
+    [InlineData("cargo.exe",   "rust")]
+    [InlineData("rustc.exe",   "rust")]
+    [InlineData("dotnet.exe",  "dotnet")]
+    [InlineData("go.exe",      "go")]
+    [InlineData("make.exe",    "make")]
+    [InlineData("htop.exe",    "monitor")]
+    [InlineData("btop.exe",    "monitor")]
+    [InlineData("top.exe",     "monitor")]
+    public void TryMap_KnownExe_ReturnsExpectedBrand(string exe, string expectedKey)
+    {
+        var spec = ProcessIconTable.TryMap(exe);
+        var brand = Assert.IsType<IconSpec.BrandKey>(spec);
+        Assert.Equal(expectedKey, brand.Key);
+    }
+
+    [Fact]
+    public void TryMap_WslHostExe_ReturnsNull()
+    {
+        // wslhost.exe is the WSL broker; it appears in every WSL tab's
+        // descendant tree but is not what the user is interacting with.
+        Assert.Null(ProcessIconTable.TryMap("wslhost.exe"));
+    }
 }
