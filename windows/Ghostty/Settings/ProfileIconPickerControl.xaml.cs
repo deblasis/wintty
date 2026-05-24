@@ -54,16 +54,25 @@ public sealed partial class ProfileIconPickerControl : UserControl
 
     private async void OnChangeClick(object sender, RoutedEventArgs e)
     {
-        var dialog = new IconPickerDialog
+        try
         {
-            XamlRoot = this.XamlRoot,
-            InitialSpec = CurrentIcon,
-        };
-        var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary && dialog.PickedSpec is { } picked)
+            var dialog = new IconPickerDialog
+            {
+                XamlRoot = this.XamlRoot,
+                InitialSpec = CurrentIcon,
+            };
+            var result = await dialog.ShowAsync();
+            if (result == ContentDialogResult.Primary && dialog.PickedSpec is { } picked)
+            {
+                CurrentIcon = picked;
+                IconChanged?.Invoke(this, picked);
+            }
+        }
+        catch (Exception ex)
         {
-            CurrentIcon = picked;
-            IconChanged?.Invoke(this, picked);
+            // async void: unhandled exceptions tear down the process via
+            // the SynchronizationContext. Swallow and log instead.
+            System.Diagnostics.Debug.WriteLine($"OnChangeClick failed: {ex}");
         }
     }
 

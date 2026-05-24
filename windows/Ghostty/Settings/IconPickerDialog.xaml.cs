@@ -19,6 +19,8 @@ public sealed partial class IconPickerDialog : ContentDialog
 
     public ObservableCollection<BundledRow> BundledItems { get; } = new();
 
+    private bool _bundledLoaded;
+
     public IconPickerDialog()
     {
         InitializeComponent();
@@ -27,6 +29,12 @@ public sealed partial class IconPickerDialog : ContentDialog
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        // Loaded can fire more than once (DPI change, template swap,
+        // theme reload). Populate the bundled grid only the first time.
+        if (_bundledLoaded) return;
+        _bundledLoaded = true;
+        Loaded -= OnLoaded;
+
         // The set of keys this picker exposes. Keep in sync with the
         // asset bundle in IconAssets.Source.
         var keys = new[]
@@ -61,6 +69,9 @@ public sealed partial class IconPickerDialog : ContentDialog
     {
         if (e.ClickedItem is BundledRow row)
         {
+            // Persist with Dpi=null so the resolver re-picks the right size
+            // on monitor change; the gallery preview rasterized at 32 for
+            // crisp display in the picker only.
             PickedSpec = new IconSpec.BrandKey(row.Key, null);
         }
     }
@@ -72,27 +83,47 @@ public sealed partial class IconPickerDialog : ContentDialog
             Mdl2Preview.Glyph = char.ConvertFromUtf32(cp);
             PickedSpec = new IconSpec.Mdl2Token(cp);
         }
+        else
+        {
+            Mdl2Preview.Glyph = string.Empty;
+            // Clear the Mdl2 selection so an empty/invalid input doesn't return
+            // a stale value. A non-Mdl2 PickedSpec (e.g. user just clicked a
+            // bundled brand) is preserved.
+            if (PickedSpec is IconSpec.Mdl2Token)
+            {
+                PickedSpec = null;
+            }
+        }
     }
 
     private async void OnPickFileClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FileOpenPicker();
-        // Window.Current is a UWP API that returns null in WinUI 3 desktop
-        // apps. The dialog's XamlRoot exposes the AppWindowId of its host
-        // window via ContentIslandEnvironment, which Win32Interop can map
-        // back to an HWND for the file-picker COM initializer.
-        var windowId = XamlRoot.ContentIslandEnvironment.AppWindowId;
-        var hwnd = Win32Interop.GetWindowFromWindowId(windowId);
-        InitializeWithWindow.Initialize(picker, hwnd);
-        picker.FileTypeFilter.Add(".png");
-        picker.FileTypeFilter.Add(".ico");
-        picker.FileTypeFilter.Add(".svg");
-        picker.FileTypeFilter.Add(".jpg");
-        var file = await picker.PickSingleFileAsync();
-        if (file is not null)
+        try
         {
-            PickedPathLabel.Text = file.Path;
-            PickedSpec = new IconSpec.Path(file.Path);
+            var picker = new FileOpenPicker();
+            // Window.Current is a UWP API that returns null in WinUI 3 desktop
+            // apps. The dialog's XamlRoot exposes the AppWindowId of its host
+            // window via ContentIslandEnvironment, which Win32Interop can map
+            // back to an HWND for the file-picker COM initializer.
+            var windowId = XamlRoot.ContentIslandEnvironment.AppWindowId;
+            var hwnd = Win32Interop.GetWindowFromWindowId(windowId);
+            InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeFilter.Add(".png");
+            picker.FileTypeFilter.Add(".ico");
+            picker.FileTypeFilter.Add(".svg");
+            picker.FileTypeFilter.Add(".jpg");
+            var file = await picker.PickSingleFileAsync();
+            if (file is not null)
+            {
+                PickedPathLabel.Text = file.Path;
+                PickedSpec = new IconSpec.Path(file.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            // async void: unhandled exceptions tear down the process via
+            // the SynchronizationContext. Swallow and log instead.
+            System.Diagnostics.Debug.WriteLine($"OnPickFileClick failed: {ex}");
         }
     }
 
