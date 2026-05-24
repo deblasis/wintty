@@ -95,6 +95,14 @@ pub const Parser = struct {
                     self.accum.clearRetainingCapacity();
                     self.state = .color_def;
                 },
+                '$' => {
+                    try self.paint_ops.append(self.alloc, .carriage_return);
+                    self.state = .data;
+                },
+                '-' => {
+                    try self.paint_ops.append(self.alloc, .next_line);
+                    self.state = .data;
+                },
                 else => {
                     // Bytes outside the sixel data alphabet are
                     // silently ignored. We also promote .initial to
@@ -421,4 +429,37 @@ test "sixel parser: #1;2;200;200;200 clamps r but passes g/b through" {
     try testing.expectEqual(@as(u8, 100), op.r);  // clamped
     try testing.expectEqual(@as(u8, 200), op.g);  // not clamped here
     try testing.expectEqual(@as(u8, 200), op.b);  // not clamped here
+}
+
+test "sixel parser: $ emits carriage_return" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    p.put('$');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .carriage_return);
+}
+
+test "sixel parser: - emits next_line" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    p.put('-');
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .next_line);
+}
+
+test "sixel parser: ?$-? emits sixel/CR/NL/sixel" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("?$-?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 4), c.paint_ops.len);
+    try testing.expect(c.paint_ops[0] == .sixel);
+    try testing.expect(c.paint_ops[1] == .carriage_return);
+    try testing.expect(c.paint_ops[2] == .next_line);
+    try testing.expect(c.paint_ops[3] == .sixel);
 }
