@@ -291,6 +291,14 @@ pub const exp = struct {
             lpNumberOfBytesRead: ?*DWORD,
             lpOverlapped: ?*OVERLAPPED,
         ) callconv(.winapi) BOOL;
+        /// std.os.windows only exposes GetCurrentProcessId via the TEB, not
+        /// the more general GetProcessId(HANDLE). Declared here so we can
+        /// translate a child HANDLE (returned by CreateProcessW) to a
+        /// numeric PID that the C# layer can hand to Toolhelp32.
+        /// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid
+        pub extern "kernel32" fn GetProcessId(
+            Process: HANDLE,
+        ) callconv(.winapi) DWORD;
     };
     pub const user32 = struct {
         // Used by `ensureUtf8Console` in Command.zig to hide the console
