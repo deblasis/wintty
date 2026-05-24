@@ -61,7 +61,7 @@ foreach (var svgPath in svgs)
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"failed {svgPath} @{size}: {ex.Message}");
+            Console.Error.WriteLine($"failed {svgPath} @{size}: {ex.GetType().Name}: {ex.Message}");
             failures++;
         }
     }
