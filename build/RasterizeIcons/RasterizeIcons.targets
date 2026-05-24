@@ -26,7 +26,7 @@
           BeforeTargets="BeforeBuild"
           Condition="'@(IconSourceSvg)' != ''"
           Inputs="@(IconSourceSvg)"
-          Outputs="@(IconSourceSvg -> '$(IconAssetsOutputDir)\%(Filename)@32.png')">
+          Outputs="@(IconSourceSvg -> '$(IconAssetsOutputDir)\%(Filename)@16.png');@(IconSourceSvg -> '$(IconAssetsOutputDir)\%(Filename)@24.png');@(IconSourceSvg -> '$(IconAssetsOutputDir)\%(Filename)@32.png')">
     <Message Text="Prebaking SVG icons from $(IconAssetsSourceDir) -> $(IconAssetsOutputDir)" Importance="high"/>
     <Exec Command="dotnet run --project &quot;$(RasterizeIconsProj)&quot; -- &quot;$(IconAssetsSourceDir)&quot; &quot;$(IconAssetsOutputDir)&quot;" />
   </Target>
