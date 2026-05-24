@@ -76,5 +76,6 @@ public static class ProfileSnapshotStore
             WorkingDirectory: profile.WorkingDirectory,
             DisplayName: profile.Name,
             Icon: profile.Icon,
-            Visuals: profile.Visuals);
+            Visuals: profile.Visuals,
+            TabIconTracksForeground: profile.TabIconTracksForeground);
 }

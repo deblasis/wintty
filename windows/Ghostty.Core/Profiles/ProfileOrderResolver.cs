@@ -103,7 +103,8 @@ public static class ProfileOrderResolver
             Visuals: def.Visuals,
             ProbeId: def.ProbeId,
             OrderIndex: orderIndex,
-            IsDefault: isDefault);
+            IsDefault: isDefault,
+            TabIconTracksForeground: def.TabIconTracksForeground);
 
     private static string? ResolveDefault(
         string? requested,

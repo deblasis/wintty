@@ -79,7 +79,15 @@ public static partial class ProfileSourceParser
                 TabTitle: bag.GetValueOrDefault("tab-title"),
                 Hidden: ParseBool(bag.GetValueOrDefault("hidden")),
                 ProbeId: null,
-                VisualsOrNull: visuals.HasAny ? visuals.Value : null);
+                VisualsOrNull: visuals.HasAny ? visuals.Value : null,
+                // Default true so profiles without an explicit override
+                // still participate in active-process icon tracking.
+                // Malformed values silently retain the default, matching
+                // how the existing parser treats other bad values rather
+                // than failing the profile load.
+                TabIconTracksForeground: ParseBoolOrDefault(
+                    bag.GetValueOrDefault("tab-icon-tracks-foreground"),
+                    defaultValue: true));
         }
 
         return new ProfileParseResult(profiles, warnings);
@@ -184,6 +192,15 @@ public static partial class ProfileSourceParser
         => value is not null
            && bool.TryParse(value, out var b)
            && b;
+
+    // Trinary variant: distinguishes absent / malformed (use default)
+    // from explicit true / false. ParseBool collapses everything that
+    // isn't "true" into false, which is wrong for keys whose default
+    // is true (e.g. tab-icon-tracks-foreground).
+    private static bool ParseBoolOrDefault(string? value, bool defaultValue)
+        => value is not null && bool.TryParse(value, out var b)
+            ? b
+            : defaultValue;
 
     private static double? ParseDouble(string? value)
     {

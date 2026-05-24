@@ -13,4 +13,5 @@ public sealed record ProfileSnapshot(
     string? WorkingDirectory,
     string DisplayName,
     IconSpec Icon,
-    EffectiveVisualOverrides Visuals);
+    EffectiveVisualOverrides Visuals,
+    bool TabIconTracksForeground = true);
