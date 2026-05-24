@@ -2985,10 +2985,13 @@ keybind: Keybinds = .{},
 
 /// Controls how Windows terminal sessions communicate with the child
 /// shell. `auto` picks the bypass path (raw stdin/stdout/stderr
-/// pipes, no CreatePseudoConsole) for VT-aware shells like pwsh,
-/// wsl, ssh, bash, and nu, and keeps ConPTY for cmd.exe and
-/// PowerShell 5.1. `always` forces the bypass path; `never` forces
-/// ConPTY. Has no effect on non-Windows platforms.
+/// pipes, no CreatePseudoConsole) for VT-aware shells like ssh,
+/// bash, and nu, and keeps ConPTY for cmd.exe, PowerShell 5.1,
+/// pwsh.exe (PSReadLine needs a real console handle for input),
+/// and wsl.exe (the WSL launcher inspects stdio handle types to
+/// decide whether to allocate a Linux PTY, and pipes get no PTY).
+/// `always` forces the bypass path; `never` forces ConPTY. Has no
+/// effect on non-Windows platforms.
 ///
 /// Bypass enables Kitty graphics and avoids conhost's VT mangling,
 /// at the cost of losing ConPTY's compatibility shims for Win32
