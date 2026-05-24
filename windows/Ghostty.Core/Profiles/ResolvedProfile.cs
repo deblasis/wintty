@@ -15,4 +15,5 @@ public sealed record ResolvedProfile(
     EffectiveVisualOverrides Visuals,
     string? ProbeId,
     int OrderIndex,
-    bool IsDefault);
+    bool IsDefault,
+    bool TabIconTracksForeground = true);
