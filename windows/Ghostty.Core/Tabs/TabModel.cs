@@ -103,7 +103,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     // before the shell sends a title); then the hardcoded fallback
     // for the no-profile / pre-OSC-2 cold-start case.
     public string EffectiveTitle =>
-        UserOverrideTitle ?? ShellReportedTitle ?? ProfileSnapshot?.DisplayName ?? "Ghostty";
+        UserOverrideTitle ?? ShellReportedTitle ?? ProfileSnapshot?.DisplayName ?? "Wintty";
 
     public TabModel(IPaneHost paneHost)
     {

@@ -4,7 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:cmdpalette="using:Ghostty.Controls.CommandPalette"
-    Title="Ghostty">
+    Title="Wintty">
 
     <!--
         Declarative layout for the dual tab-host shell.

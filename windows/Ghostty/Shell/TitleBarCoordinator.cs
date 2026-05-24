@@ -129,7 +129,7 @@ internal sealed class TitleBarCoordinator
     }
 
     private void UpdateVerticalTitleText()
-        => _verticalTitleText.Text = _boundTab?.EffectiveTitle ?? "Ghostty";
+        => _verticalTitleText.Text = _boundTab?.EffectiveTitle ?? "Wintty";
 
     /// <summary>
     /// Subscribe the active tab's active leaf to live title-change

@@ -80,6 +80,6 @@ public class TabModelProfileSnapshotTests
     {
         var tab = new TabModel(new FakePaneHost());
 
-        Assert.Equal("Ghostty", tab.EffectiveTitle);
+        Assert.Equal("Wintty", tab.EffectiveTitle);
     }
 }

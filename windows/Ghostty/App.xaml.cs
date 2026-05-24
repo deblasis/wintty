@@ -282,12 +282,12 @@ public partial class App : Application
         // (MSIX) builds Windows virtualizes this to the package's
         // private app-data directory; the file still lands somewhere
         // the user can find via the Settings app, just not the literal
-        // `%LOCALAPPDATA%\Ghostty\`.
+        // `%LOCALAPPDATA%\Wintty\`.
         try
         {
             var localAppData = Environment.GetFolderPath(
                 Environment.SpecialFolder.LocalApplicationData);
-            var dir = Path.Combine(localAppData, "Ghostty");
+            var dir = Path.Combine(localAppData, "Wintty");
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "crash.log");
             lock (_crashLogLock)
@@ -355,7 +355,7 @@ public partial class App : Application
         // one folder to attach.
         var logDir = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "Ghostty", "logs");
+            "Wintty", "logs");
         var (factory, fileSink, filters) = Ghostty.Core.Logging.LoggingBootstrap.Build(
             logLevel: _configService.LogLevel,
             logFilter: _configService.LogFilter,

@@ -88,7 +88,7 @@ public static partial class Program
     /// </summary>
     private static readonly string GpuLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Ghostty", "gpu.log");
+        "Wintty", "gpu.log");
 
     /// <summary>
     /// Redirect stderr to a file so all diagnostic output (Zig std.log,

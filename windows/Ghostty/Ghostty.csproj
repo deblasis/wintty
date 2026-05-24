@@ -85,10 +85,10 @@
       instead of reusing the stale one. MSBuild only skips the
       GenerateBrandingAssets target when its declared Output already
       exists AND is newer than its Inputs; keeping each channel in
-      its own directory makes "does ghostty.ico exist?" channel-aware.
+      its own directory makes "does wintty.ico exist?" channel-aware.
     -->
     <GeneratedBrandingDir>$(BaseIntermediateOutputPath)$(Platform)\$(Configuration)\$(TargetFramework)\Branding\$(Channel)\</GeneratedBrandingDir>
-    <ApplicationIcon>$(GeneratedBrandingDir)ghostty.ico</ApplicationIcon>
+    <ApplicationIcon>$(GeneratedBrandingDir)wintty.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -261,7 +261,7 @@
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
           Inputs="..\..\dist\windows\IconGen\**\*.cs;..\..\images\icons\icon_*.png"
-          Outputs="$(GeneratedBrandingDir)ghostty.ico">
+          Outputs="$(GeneratedBrandingDir)wintty.ico">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
     <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
           WorkingDirectory="$(MSBuildThisFileDirectory)" />
