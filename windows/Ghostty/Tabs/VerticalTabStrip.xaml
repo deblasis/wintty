@@ -10,11 +10,13 @@
 
         <SolidColorBrush x:Key="StripAccentBrush" Color="{ThemeResource SystemAccentColor}" />
 
-        <!-- Icon converters / templates / selector live in App.xaml so
-             both this strip and the horizontal TabHost share one set
-             of definitions. StaticResource walks the parent chain up
-             to the application dictionary, so the collapsed/expanded
-             row templates below still resolve ProfileIconSelector. -->
+        <!-- Per-row icon is assigned imperatively by
+             OnContainerContentChanging (see code-behind). We can't use
+             {Binding TabIcon} here because Ghostty.Core.Tabs.TabModel
+             intentionally lacks the [WinRT.GeneratedBindableCustomProperty]
+             attribute (Core stays UI-framework-agnostic), and
+             {x:Bind} in shared Application.Resources DataTemplates
+             tripped a silent WinUI 3 1.8 XamlCompiler Pass-2 crash. -->
 
         <!--
             Collapsed row: 40x40 centered icon, nothing else.
@@ -29,11 +31,8 @@
             <Grid Width="40" Height="40"
                   HorizontalAlignment="Left"
                   Background="Transparent">
-                <ContentControl Content="{Binding TabIcon}"
-                                ContentTemplateSelector="{StaticResource ProfileIconSelector}"
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center"
-                                IsTabStop="False"/>
+                <tabs:TabIconPresenter HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
             </Grid>
         </DataTemplate>
 
@@ -52,12 +51,9 @@
                     <ColumnDefinition Width="28"/>
                 </Grid.ColumnDefinitions>
 
-                <ContentControl Grid.Column="0"
-                                Content="{Binding TabIcon}"
-                                ContentTemplateSelector="{StaticResource ProfileIconSelector}"
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center"
-                                IsTabStop="False"/>
+                <tabs:TabIconPresenter Grid.Column="0"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
 
                 <TextBlock Grid.Column="1"
                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
