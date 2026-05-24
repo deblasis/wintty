@@ -151,6 +151,13 @@ internal sealed class TabModel : INotifyPropertyChanged
     /// foreground IS the launch shell), the override is cleared -- no
     /// churn at the prompt of the launch shell.
     /// </summary>
+    /// <remarks>
+    /// Must be called on the UI thread. The method mutates the lazy
+    /// TabIcon VM and raises PropertyChanged; off-thread invocation can
+    /// tear lazy init or fire change notifications on a non-UI thread.
+    /// Callers from background threads (e.g. the active-process tracker
+    /// timer) must marshal via the DispatcherQueue first.
+    /// </remarks>
     public void OnActiveProcessChanged(string? exeBasename, string? commandLine)
     {
         var mapped = exeBasename is null

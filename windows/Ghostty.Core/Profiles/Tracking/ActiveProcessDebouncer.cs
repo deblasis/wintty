@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Ghostty.Core.Profiles.Tracking;
@@ -18,6 +19,7 @@ public sealed class ActiveProcessDebouncer
 
     public ActiveProcessDebouncer(int windowMs)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(windowMs);
         _windowMs = windowMs;
     }
 
@@ -27,6 +29,11 @@ public sealed class ActiveProcessDebouncer
     /// the window AND differs from the last-emitted value for this root;
     /// otherwise null.
     /// </summary>
+    /// <remarks>
+    /// nowMs must come from a monotonic clock (e.g. Environment.TickCount64).
+    /// Mixing tick sources or wall-clock-with-NTP-adjustments will misalign
+    /// the stability window.
+    /// </remarks>
     public DebouncerEmission? Observe(int rootPid, string? exeBasename, string? commandLine, long nowMs)
     {
         if (!_state.TryGetValue(rootPid, out var s))
@@ -61,6 +68,11 @@ public sealed class ActiveProcessDebouncer
         return null;
     }
 
+    /// <summary>
+    /// Drop state for a root that has gone away (typically called when
+    /// a tab closes). Subsequent Observe calls for the same rootPid start
+    /// fresh.
+    /// </summary>
     public void Forget(int rootPid) => _state.Remove(rootPid);
 
     private sealed class RootState
