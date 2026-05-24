@@ -49,6 +49,39 @@ internal sealed class TabModel : INotifyPropertyChanged
                 "TabModel.ProfileSnapshot is set exactly once for V1; " +
                 "PR 6 introduces a hot-apply path that replaces this guard.");
         ProfileSnapshot = snapshot;
+
+        // Keep the cached TabIcon's subscribers attached across snapshot
+        // attaches; cheaper than tearing down and rebuilding the VM, and
+        // future-proofs the hot-apply path that lands when this guard
+        // becomes a no-op.
+        _tabIcon?.SetIcon(snapshot.Icon, snapshot.DisplayName);
+    }
+
+    private TabIconViewModel? _tabIcon;
+
+    /// <summary>
+    /// Per-tab icon view-model rendered by the tab strip. Lazily
+    /// constructed from <see cref="ProfileSnapshot"/> so tabs opened
+    /// via the legacy no-profile path still get a default icon
+    /// without consulting the resolver up front.
+    ///
+    /// Thread-safety: the getter is UI-thread-only. Lazy initialization
+    /// is not synchronized; concurrent access from non-UI threads could
+    /// construct two VMs and lose one. Callers from background threads
+    /// must marshal via the DispatcherQueue first.
+    /// </summary>
+    public TabIconViewModel TabIcon
+    {
+        get
+        {
+            if (_tabIcon is null)
+            {
+                _tabIcon = ProfileSnapshot is { } snap
+                    ? new TabIconViewModel(snap.Icon, snap.DisplayName)
+                    : new TabIconViewModel(new IconSpec.BundledKey("default"), "Terminal");
+            }
+            return _tabIcon;
+        }
     }
 
     public string? UserOverrideTitle
