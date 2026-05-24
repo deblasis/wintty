@@ -166,4 +166,10 @@
       <Compile Include="$(_GeneratedBuildInfoFile)" Visible="false"/>
     </ItemGroup>
   </Target>
+
+  <Import Project="$(MSBuildThisFileDirectory)..\..\build\RasterizeIcons\RasterizeIcons.targets" />
+
+  <ItemGroup>
+    <EmbeddedResource Include="Profiles\IconAssets\*@*.png" />
+  </ItemGroup>
 </Project>

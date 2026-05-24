@@ -1,0 +1,33 @@
+<Project>
+  <!--
+    Imported by Ghostty.Core.csproj. Runs the RasterizeIcons console tool
+    before Core compiles, ensuring every <key>.svg under IconAssets.Source
+    has matching <key>@16.png, <key>@24.png, <key>@32.png under IconAssets.
+    Outputs are tracked as inputs to the EmbeddedResource glob so MSBuild
+    incrementally rebuilds only when sources change.
+  -->
+  <PropertyGroup>
+    <IconAssetsSourceDir>$(MSBuildThisFileDirectory)..\..\windows\Ghostty.Core\Profiles\IconAssets.Source</IconAssetsSourceDir>
+    <IconAssetsOutputDir>$(MSBuildThisFileDirectory)..\..\windows\Ghostty.Core\Profiles\IconAssets</IconAssetsOutputDir>
+    <RasterizeIconsProj>$(MSBuildThisFileDirectory)RasterizeIcons.csproj</RasterizeIconsProj>
+  </PropertyGroup>
+
+  <!--
+    Populate at project-evaluation time so Inputs/Outputs on the target
+    below resolve before MSBuild's up-to-date check. Items defined inside
+    the target run too late: MSBuild would skip the target as "no outputs"
+    on the first build, leaving the prebake un-invoked.
+  -->
+  <ItemGroup>
+    <IconSourceSvg Include="$(IconAssetsSourceDir)\**\*.svg"/>
+  </ItemGroup>
+
+  <Target Name="PrebakeIconAssets"
+          BeforeTargets="BeforeBuild"
+          Condition="'@(IconSourceSvg)' != ''"
+          Inputs="@(IconSourceSvg)"
+          Outputs="@(IconSourceSvg -> '$(IconAssetsOutputDir)\%(Filename)@32.png')">
+    <Message Text="Prebaking SVG icons from $(IconAssetsSourceDir) -> $(IconAssetsOutputDir)" Importance="high"/>
+    <Exec Command="dotnet run --project &quot;$(RasterizeIconsProj)&quot; -- &quot;$(IconAssetsSourceDir)&quot; &quot;$(IconAssetsOutputDir)&quot;" />
+  </Target>
+</Project>
