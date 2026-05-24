@@ -49,7 +49,7 @@
                         </ComboBoxItem>
                         <ComboBoxItem Tag="ghostty">
                             <StackPanel>
-                                <TextBlock Text="Ghostty" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="Wintty" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                 <TextBlock Text="Color title bar from the terminal palette."
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

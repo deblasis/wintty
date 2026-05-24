@@ -16,7 +16,7 @@ public class EndToEndTests
             repoRoot);
 
         Assert.Equal(0, exitCode);
-        Assert.True(File.Exists(Path.Combine(tempDir.Path, "ghostty.ico")));
+        Assert.True(File.Exists(Path.Combine(tempDir.Path, "wintty.ico")));
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "AppIcon.scale-100.png")));
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "AppIcon.scale-400.png")));
     }
@@ -81,8 +81,8 @@ public class EndToEndTests
         Program.Run(new[] { "--channel", "nightly", "--out", dir1.Path }, repoRoot);
         Program.Run(new[] { "--channel", "nightly", "--out", dir2.Path }, repoRoot);
 
-        var bytes1 = File.ReadAllBytes(Path.Combine(dir1.Path, "ghostty.ico"));
-        var bytes2 = File.ReadAllBytes(Path.Combine(dir2.Path, "ghostty.ico"));
+        var bytes1 = File.ReadAllBytes(Path.Combine(dir1.Path, "wintty.ico"));
+        var bytes2 = File.ReadAllBytes(Path.Combine(dir2.Path, "wintty.ico"));
         Assert.Equal(bytes1, bytes2);
     }
 }
