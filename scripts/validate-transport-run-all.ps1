@@ -8,7 +8,10 @@
     and exits non-zero if any row failed or timed out.
 #>
 param(
-    [int]$TimeoutMs = 15000
+    # Per-row timeout when omitted: defers to the table in
+    # scripts/validate-transport-run.ps1 (20s for fast rows, 45s for
+    # pwsh-never). Pass an explicit value to override every row uniformly.
+    [int]$TimeoutMs = -1
 )
 $ErrorActionPreference = 'Stop'
 
@@ -17,7 +20,11 @@ $results = [ordered]@{}
 
 foreach ($r in $rows) {
     Write-Host "===== $r ====="
-    pwsh -NoProfile -File scripts/validate-transport-run.ps1 -Row $r -TimeoutMs $TimeoutMs
+    if ($TimeoutMs -ge 0) {
+        pwsh -NoProfile -File scripts/validate-transport-run.ps1 -Row $r -TimeoutMs $TimeoutMs
+    } else {
+        pwsh -NoProfile -File scripts/validate-transport-run.ps1 -Row $r
+    }
     $results[$r] = switch ($LASTEXITCODE) {
         0 { 'pass' }
         1 { 'fail' }

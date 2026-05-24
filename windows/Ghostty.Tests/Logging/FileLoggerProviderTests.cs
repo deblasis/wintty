@@ -105,6 +105,80 @@ public class FileLoggerProviderTests : IDisposable
     }
 
     [Fact]
+    public void Dispose_FlushesSingleVerdictRecord_WrittenJustBeforeDispose()
+    {
+        // Regression: smoke runner spawns Wintty with a one-shot shell
+        // (cmd.exe /c exit). Zig writes one "transport resolved:" line,
+        // then the shell exits and the WinUI shell calls Dispose() within
+        // ~200ms. Without a flush-on-Dispose contract the verdict line
+        // can sit unwritten on the bounded channel when the file handle
+        // is released; the assertion script then fails with "no verdict
+        // line in ghostty-YYYYMMDD.log".
+        var clock = new FakeClock(new DateTime(2026, 4, 17, 12, 0, 0, DateTimeKind.Utc));
+        var sink = new FileLoggerProvider(NewOptions(_tempDir), clock, RealFileSystem.Instance);
+        var logger = sink.CreateLogger("Ghostty.Zig.validate_transport");
+
+        logger.LogInformation(
+            new EventId(1, "Verdict"),
+            "transport resolved: shell=\"cmd.exe\" config_mode=auto resolved=conpty");
+
+        // No drain wait: dispose immediately so the test fails unless
+        // Dispose synchronously drains the channel and flushes the stream.
+        sink.Dispose();
+
+        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        Assert.Contains("transport resolved:", body);
+        Assert.Contains("resolved=conpty", body);
+    }
+
+    [Fact]
+    public void Dispose_DrainsBurst_BeforeReleasingHandle()
+    {
+        // Heavier variant: many records produced back-to-back, dispose
+        // called immediately. If Dispose returns before the writer
+        // task has processed the queue, the late records are lost.
+        var clock = new FakeClock(new DateTime(2026, 4, 17, 12, 0, 0, DateTimeKind.Utc));
+        var sink = new FileLoggerProvider(NewOptions(_tempDir), clock, RealFileSystem.Instance);
+        var logger = sink.CreateLogger("Burst");
+
+        const int count = 500;
+        for (int i = 0; i < count; i++)
+            logger.LogInformation(new EventId(i, "E"), "record-{Index}", i);
+
+        sink.Dispose();
+
+        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        // Count "record-" occurrences rather than asserting a specific
+        // index: BoundedChannel + DropOldest may discard records under
+        // burst, but every successfully-enqueued record must reach disk.
+        var lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.True(lines.Length >= 1, $"expected at least one record on disk, got {lines.Length}");
+        Assert.Contains($"record-{count - 1}\n", body); // last record must land
+    }
+
+    [Fact]
+    public void Dispose_IsIdempotent_WhenInvokedByBothExplicitAndFactoryPath()
+    {
+        // App.OnAnyWindowClosedInternal calls DisposeAsync explicitly,
+        // then LoggerFactory.Dispose (via AddProvider registration)
+        // calls Dispose on the same instance. Both paths must succeed
+        // without throwing and without corrupting state on the second
+        // invocation.
+        var clock = new FakeClock(new DateTime(2026, 4, 17, 12, 0, 0, DateTimeKind.Utc));
+        var sink = new FileLoggerProvider(NewOptions(_tempDir), clock, RealFileSystem.Instance);
+        var logger = sink.CreateLogger("Idem");
+
+        logger.LogInformation(new EventId(1, "E"), "single-line");
+
+        sink.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        sink.Dispose(); // second teardown via LoggerFactory.Dispose path
+        sink.Dispose(); // tolerate a third pass too
+
+        var body = ReadAllTextShared(Path.Combine(_tempDir, "ghostty-20260417.log"));
+        Assert.Contains("single-line", body);
+    }
+
+    [Fact]
     public void RetentionSweep_DeletesFilesOlderThanCutoff_OnConstruction()
     {
         // Today = 2026-04-17. Retention 14 days => cutoff 2026-04-03.

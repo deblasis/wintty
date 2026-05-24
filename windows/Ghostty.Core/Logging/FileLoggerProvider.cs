@@ -34,6 +34,14 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
 
     private long _droppedCount;
 
+    // 0 = live, 1 = disposed. Guarded via Interlocked so Dispose and
+    // DisposeAsync can be invoked in any order or concurrently without
+    // double-completing the channel or double-disposing _cts. Both paths
+    // run during normal shutdown: App.OnAnyWindowClosedInternal calls
+    // DisposeAsync explicitly, then LoggerFactory.Dispose later calls
+    // Dispose() on every registered provider.
+    private int _disposed;
+
     // Reused across FormatRecord calls on the single writer task. Not
     // thread-safe, which is fine: only WriterLoopAsync touches it.
     // Caching it removes the per-record StringBuilder allocation the
@@ -88,10 +96,43 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         return false;
     }
 
-    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+    // Process shutdown calls Dispose() (sync) via LoggerFactory.Dispose;
+    // app teardown also calls DisposeAsync() directly. Both must drain
+    // the channel and dispose the underlying FileStream before returning,
+    // otherwise records emitted in the last few hundred ms of the
+    // process lifetime never reach disk. The synchronous path uses
+    // Task.Wait rather than sync-over-async so it cannot deadlock under
+    // a UI SynchronizationContext, and avoids the ValueTask -> Task
+    // allocation on the hot shutdown path.
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        _writer.TryComplete();
+        try
+        {
+            if (!_writerTask.Wait(TimeSpan.FromSeconds(2)))
+            {
+                // Writer stuck (e.g. disk hung); cancel and let it unwind
+                // so the CTS Dispose below doesn't race a still-propagating
+                // OperationCanceledException. The inner catch handles the
+                // expected OperationCanceledException-wrapped-in-
+                // AggregateException case; the outer catch below only
+                // fires on a genuine writer fault from the initial Wait,
+                // before we ever asked the writer to cancel.
+                _cts.Cancel();
+                try { _writerTask.Wait(); }
+                catch { /* expected: cancellation propagating out */ }
+            }
+        }
+        catch (AggregateException) { /* writer faulted before timeout; nothing useful we can do here */ }
+        _cts.Dispose();
+    }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         _writer.TryComplete();
         try
         {
@@ -99,12 +140,11 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         }
         catch (TimeoutException)
         {
-            // Writer stuck; force-cancel and wait for unwind so _cts.Dispose()
-            // below doesn't race the still-propagating OperationCanceledException.
             _cts.Cancel();
             try { await _writerTask.ConfigureAwait(false); }
             catch { /* expected OperationCanceledException */ }
         }
+        catch { /* writer faulted; nothing useful we can do here */ }
         _cts.Dispose();
     }
 
@@ -235,6 +275,30 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         catch (OperationCanceledException) { /* shutdown */ }
         finally
         {
+            // Force the OS write cache to commit before releasing the
+            // handle. Without this, FileStream.Dispose returns once the
+            // managed buffer is in the OS cache, but the OS may take
+            // hundreds of ms to push to disk. Cross-process readers that
+            // open the file the instant Wintty.exe exits (validate-
+            // transport smoke runner, third-party log tailers) then see
+            // a truncated view. Flush(true) calls FlushFileBuffers on
+            // Windows which is synchronous and forces commit. We only
+            // pay it once per writer-task lifetime so the cost is
+            // negligible compared to the per-batch Flush() that already
+            // runs in the steady-state loop.
+            // Cast guard: IFileSystem.OpenAppend's return type is the
+            // base Stream so test fakes can plug in MemoryStream, but
+            // the production RealFileSystem hands back a FileStream
+            // whose Flush(bool) overload calls FlushFileBuffers when
+            // flushToDisk=true. Fall back to the parameterless Flush
+            // for fakes; in-memory writes are already disk-equivalent
+            // for them.
+            try
+            {
+                if (stream is FileStream fs) fs.Flush(flushToDisk: true);
+                else stream?.Flush();
+            }
+            catch (IOException) { /* drop */ }
             stream?.Dispose();
             ArrayPool<byte>.Shared.Return(buffer);
         }
