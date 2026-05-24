@@ -38,6 +38,12 @@ pub const Parser = struct {
     raster: Raster,
     intro_params: [3]?u16,
 
+    /// Accumulator for repeat-count digits (after `!`). Cleared when
+    /// `!` is seen, applied when the next sixel byte arrives.
+    /// Saturating add/multiply keep this clamped at u16::MAX, which
+    /// matches PaintOp.sixel.count's width.
+    repeat_acc: u16,
+
     paint_ops: std.ArrayListUnmanaged(PaintOp),
     palette_ops: std.ArrayListUnmanaged(PaletteOp),
 
@@ -52,6 +58,7 @@ pub const Parser = struct {
             .state = .initial,
             .raster = .{},
             .intro_params = intro_params,
+            .repeat_acc = 0,
             .paint_ops = .empty,
             .palette_ops = .empty,
             .accum = .empty,
@@ -80,6 +87,10 @@ pub const Parser = struct {
 
             .initial, .data => switch (byte) {
                 '?'...'~' => try self.appendSixel(byte, 1),
+                '!' => {
+                    self.repeat_acc = 0;
+                    self.state = .repeat_count;
+                },
                 else => {
                     // Bytes outside the sixel data alphabet are
                     // silently ignored. We also promote .initial to
@@ -90,7 +101,32 @@ pub const Parser = struct {
                 },
             },
 
-            .raster_attribs, .repeat_count, .color_def => {},
+            .repeat_count => switch (byte) {
+                '0'...'9' => {
+                    // Saturating ops match Parser.zig's CSI param
+                    // accumulator; once we hit u16::MAX further digits
+                    // are absorbed without overflow.
+                    self.repeat_acc *|= 10;
+                    self.repeat_acc +|= byte - '0';
+                },
+                '?'...'~' => {
+                    // DEC spec: missing repeat count means 1. Matches
+                    // foot and libsixel.
+                    const count: u16 = if (self.repeat_acc == 0) 1 else self.repeat_acc;
+                    try self.appendSixel(byte, count);
+                },
+                else => {
+                    // Non-digit, non-alphabet byte after `!` — abandon
+                    // the repeat and drop back to .data. Caveat: this
+                    // also drops the byte itself, so `!3#5` will lose
+                    // the `#`. Revisit when the # color-def arm lands
+                    // (either re-dispatch here or whitelist command
+                    // bytes for fall-through).
+                    self.state = .data;
+                },
+            },
+
+            .raster_attribs, .color_def => {},
         }
     }
 
@@ -173,4 +209,44 @@ test "sixel parser: byte outside ?..~ in data state is ignored" {
     var c = try p.finalize();
     defer c.deinit();
     try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+}
+
+test "sixel parser: !3 ? produces count=3" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!3?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expectEqual(@as(u16, 3), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(u8, '?'), c.paint_ops[0].sixel.byte);
+}
+
+test "sixel parser: !65535 saturates at u16 max" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!65535~") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(u16, 65535), c.paint_ops[0].sixel.count);
+}
+
+test "sixel parser: !99999 saturates without overflow" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!99999~") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    // Saturated to u16 max
+    try testing.expectEqual(@as(u16, 65535), c.paint_ops[0].sixel.count);
+}
+
+test "sixel parser: ! with no digits then sixel emits count=1" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("!?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
 }
