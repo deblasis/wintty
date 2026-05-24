@@ -21,8 +21,10 @@ courtesy to the project.
 
 - shells/cmd.svg
 - shells/zsh.svg
-- tools/ssh.svg
 - default.svg
+- tools/ssh.svg
+- tools/monitor.svg
+- tools/make.svg
 
 ## Existing third-party assets
 
