@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Settings.ProfileIconPickerControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tabs="using:Ghostty.Tabs">
+
+    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+        <Border Width="28" Height="28"
+                Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                CornerRadius="4"
+                Padding="4">
+            <ContentControl x:Name="PreviewHost"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            ContentTemplateSelector="{StaticResource ProfileIconSelector}"/>
+        </Border>
+        <TextBlock x:Name="SpecLabel"
+                   FontFamily="Consolas"
+                   FontSize="12"
+                   VerticalAlignment="Center"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        <Button x:Name="ChangeButton"
+                Content="Change..."
+                Click="OnChangeClick"/>
+        <Button x:Name="ResetButton"
+                Content="Reset"
+                Click="OnResetClick"/>
+    </StackPanel>
+</UserControl>
