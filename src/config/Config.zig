@@ -915,16 +915,10 @@ palette: Palette = .{},
 /// behavior around edge cases is possible.
 @"cursor-click-to-move": bool = true,
 
-/// Hide the mouse cursor immediately when typing. The cursor becomes visible
-/// again when the mouse is used (button, movement, etc.). Set to `false` to
-/// keep the cursor always visible.
-///
-/// Platform-specific behavior may dictate other scenarios where the cursor is
-/// shown. For example on macOS, the cursor is shown again when a new window,
-/// tab, or split is created.
-///
-/// Default is `true` on the Wintty fork (matches Windows Terminal, iTerm2,
-/// WezTerm, and Alacritty). Upstream Ghostty keeps the default at `false`.
+/// Hide the mouse immediately when typing. The mouse becomes visible again
+/// when the mouse is used (button, movement, etc.). Platform-specific behavior
+/// may dictate other scenarios where the mouse is shown. For example on macOS,
+/// the mouse is shown again when a new window, tab, or split is created.
 @"mouse-hide-while-typing": bool = true,
 
 /// When to scroll the surface to the bottom. The format of this is a list of
@@ -10553,7 +10547,7 @@ test "clone default" {
     // try testing.expectEqualDeep(dest, source);
 }
 
-test "default mouse-hide-while-typing is true (Wintty fork)" {
+test "default mouse-hide-while-typing is true" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
