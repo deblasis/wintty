@@ -11,6 +11,9 @@ pub const Command = @import("sixel/command.zig").Command;
 pub const PaintOp = @import("sixel/command.zig").PaintOp;
 pub const PaletteOp = @import("sixel/command.zig").PaletteOp;
 pub const Raster = @import("sixel/command.zig").Raster;
+pub const parseRasterAttribs = @import("sixel/raster.zig").parseRasterAttribs;
+pub const RasterError = @import("sixel/raster.zig").Error;
+pub const MAX_RGBA_BYTES = @import("sixel/raster.zig").MAX_RGBA_BYTES;
 
 test {
     @import("std").testing.refAllDecls(@This());
