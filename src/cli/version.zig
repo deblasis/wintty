@@ -9,6 +9,7 @@ const renderer = @import("../renderer.zig");
 
 const gtk_version = @import("../apprt/gtk/gtk_version.zig");
 const adw_version = @import("../apprt/gtk/adw_version.zig");
+const kitty_logo = @import("kitty_logo.zig");
 
 pub const Options = struct {};
 
@@ -21,6 +22,13 @@ pub fn run(alloc: Allocator) !u8 {
 
     const stdout = &stdout_writer.interface;
     const tty = stdout_file.isTty();
+
+    // When the receiving terminal is known to speak the kitty graphics
+    // protocol, paint the wintty logo above the version text. Silent no-op
+    // in pipes and unknown terminals (see kitty_logo.supported).
+    if (kitty_logo.supported(alloc, stdout_file)) {
+        kitty_logo.write(alloc, stdout) catch {};
+    }
 
     if (tty) if (build_config.version.build) |commit_hash| {
         try stdout.print(
