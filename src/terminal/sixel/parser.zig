@@ -103,6 +103,10 @@ pub const Parser = struct {
                     try self.paint_ops.append(self.alloc, .next_line);
                     self.state = .data;
                 },
+                '"' => {
+                    self.accum.clearRetainingCapacity();
+                    self.state = .raster_attribs;
+                },
                 else => {
                     // Bytes outside the sixel data alphabet are
                     // silently ignored. We also promote .initial to
@@ -151,7 +155,20 @@ pub const Parser = struct {
                 },
             },
 
-            .raster_attribs => {},
+            .raster_attribs => switch (byte) {
+                '0'...'9', ';' => {
+                    try self.accum.append(self.alloc, byte);
+                },
+                else => {
+                    // End of raster — flush, then re-dispatch this
+                    // byte in data state (matches the .color_def
+                    // else-arm pattern).
+                    self.flushRaster();
+                    if (self.state == .ignore) return;
+                    self.state = .data;
+                    try self.tryPut(byte);
+                },
+            },
         }
     }
 
@@ -216,6 +233,23 @@ pub const Parser = struct {
                 // future extensions).
             },
         }
+    }
+
+    fn flushRaster(self: *Parser) void {
+        const r = raster.parseRasterAttribs(self.accum.items) catch |err| {
+            switch (err) {
+                error.SixelTooLarge => {
+                    log.warn("sixel raster oversized, dropping image", .{});
+                    self.state = .ignore;
+                    return;
+                },
+                error.Malformed => {
+                    log.debug("sixel raster malformed, using defaults", .{});
+                    return;
+                },
+            }
+        };
+        self.raster = r;
     }
 
     fn parseU8(s: []const u8) ?u8 {
@@ -462,4 +496,42 @@ test "sixel parser: ?$-? emits sixel/CR/NL/sixel" {
     try testing.expect(c.paint_ops[1] == .carriage_return);
     try testing.expect(c.paint_ops[2] == .next_line);
     try testing.expect(c.paint_ops[3] == .sixel);
+}
+
+test "sixel parser: \" then 1;1;0;100;200 sets raster" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("\"1;1;0;100;200?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(u16, 100), c.raster.declared_width);
+    try testing.expectEqual(@as(u16, 200), c.raster.declared_height);
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+}
+
+test "sixel parser: oversized raster transitions to ignore" {
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("\"1;1;0;8192;8192") |b| p.put(b);
+    p.put('?'); // would normally paint, but parser is in .ignore
+    var c = try p.finalize();
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
+}
+
+test "sixel parser: malformed raster falls back to defaults" {
+    // 99999 overflows u16 and trips parseRasterAttribs's Malformed
+    // branch. The `<` (0x3C, below the `?..~` sixel data alphabet)
+    // terminates raster mode and re-dispatches as a silently-dropped
+    // byte. `?` then paints.
+    var p = Parser.init(testing.allocator, .{ null, null, null });
+    defer p.deinit();
+    for ("\"99999<?") |b| p.put(b);
+    var c = try p.finalize();
+    defer c.deinit();
+    // Raster defaults preserved
+    try testing.expectEqual(@as(u16, 1), c.raster.aspect_num);
+    try testing.expectEqual(@as(u16, 0), c.raster.declared_width);
+    // Painting continues after malformed raster
+    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
 }
