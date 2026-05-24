@@ -25,3 +25,9 @@ SHGFI_FLAGS
 // user32 for icon lifetime
 DestroyIcon
 HICON
+
+// toolhelp32 for ProcessTreeWalker
+CreateToolhelp32Snapshot
+Process32FirstW
+Process32NextW
+CloseHandle

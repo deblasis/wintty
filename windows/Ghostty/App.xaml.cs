@@ -36,6 +36,12 @@ public partial class App : Application
     private Ghostty.Core.Profiles.ProfileRegistry? _profileRegistry;
     private Ghostty.Input.Win32ModifierKeyState? _modifierKeyState;
     private Ghostty.Core.Profiles.WindowsIconResolver? _iconResolver;
+    private Ghostty.Core.Profiles.Tracking.IActiveProcessTracker? _activeProcessTracker;
+    // Reverse lookup so the tracker's Changed event (which only knows the
+    // root pid) can find the TabModel to route into. ConcurrentDictionary
+    // because the Changed event fires from the tracker's timer thread.
+    private readonly ConcurrentDictionary<int, Ghostty.Core.Tabs.TabModel> _tabsByPid = new();
+    private DispatcherQueue? _uiDispatcher;
     private GhosttyHost? _bootstrapHost;
     private HostLifetimeSupervisor? _lifetimeSupervisor;
     private Microsoft.Extensions.Logging.ILoggerFactory? _loggerFactory;
@@ -72,6 +78,17 @@ public partial class App : Application
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
     internal static Ghostty.Core.Input.IModifierKeyState? ModifierKeyState { get; private set; }
     internal static Ghostty.Core.Profiles.IIconResolver? IconResolver { get; private set; }
+
+    /// <summary>
+    /// Process-wide tracker that watches each tab's shell process tree
+    /// for foreground command changes. Per-window <see cref="MainWindow"/>
+    /// instances enrol their <see cref="Ghostty.Core.Tabs.TabModel"/>s
+    /// via <see cref="RegisterTabForProcessTracking"/> on
+    /// <see cref="Ghostty.Core.Tabs.TabManager.TabAdded"/> and remove
+    /// them on <see cref="Ghostty.Core.Tabs.TabManager.TabRemoved"/>.
+    /// Null before OnLaunched runs; null after the last window closes.
+    /// </summary>
+    internal static Ghostty.Core.Profiles.Tracking.IActiveProcessTracker? ActiveProcessTracker { get; private set; }
 
     /// <summary>
     /// Process-wide power-saving-mode monitor. Null before OnLaunched
@@ -490,6 +507,15 @@ public partial class App : Application
         // UI thread.
         Ghostty.Tabs.TabIconBytesCache.Install(_iconResolver);
 
+        // Cache the UI dispatcher up front: the active-process tracker
+        // fires Changed from a Timer threadpool callback, and the handler
+        // touches TabIconViewModel which raises PropertyChanged consumed
+        // by WinUI bindings — those need the UI thread.
+        _uiDispatcher = uiDispatcher;
+        _activeProcessTracker = new Ghostty.Core.Profiles.Tracking.WindowsActiveProcessTracker();
+        _activeProcessTracker.Changed += OnActiveProcessChanged;
+        ActiveProcessTracker = _activeProcessTracker;
+
         _profileRegistry = new Ghostty.Core.Profiles.ProfileRegistry(
             source: _configService,
             discover: (bypass, ct) => _discoveryService.DiscoverAsync(bypass, ct),
@@ -557,6 +583,79 @@ public partial class App : Application
         window.Activate();
     }
 
+    /// <summary>
+    /// Enrol <paramref name="tab"/> with the process tracker. Idempotent:
+    /// re-registering the same tab is a no-op for the tracker and only
+    /// re-installs the <see cref="Ghostty.Core.Tabs.TabModel.ShellPidChanged"/>
+    /// subscription once via the underlying event's reentrancy semantics.
+    /// Called from <see cref="MainWindow"/> on <c>TabManager.TabAdded</c>;
+    /// the shell pid may be null at this point (the libghostty surface
+    /// has not loaded yet) so we hook ShellPidChanged for the late path.
+    /// </summary>
+    internal void RegisterTabForProcessTracking(Ghostty.Core.Tabs.TabModel tab)
+    {
+        if (_activeProcessTracker is null) return;
+        tab.ShellPidChanged += OnTabShellPidChanged;
+        // Pick up a pid already set before we subscribed (e.g. a future
+        // path that resolves the pid synchronously at TabManager.NewTab).
+        if (tab.ShellPid is int pid)
+        {
+            _tabsByPid[pid] = tab;
+            _activeProcessTracker.Register(pid);
+        }
+    }
+
+    /// <summary>
+    /// Reverse of <see cref="RegisterTabForProcessTracking"/>. Detaches
+    /// the ShellPidChanged subscription and removes any registered pid
+    /// from the tracker. Called from <see cref="MainWindow"/> on
+    /// <c>TabManager.TabRemoved</c>.
+    /// </summary>
+    internal void UnregisterTabForProcessTracking(Ghostty.Core.Tabs.TabModel tab)
+    {
+        tab.ShellPidChanged -= OnTabShellPidChanged;
+        if (tab.ShellPid is int pid)
+        {
+            _activeProcessTracker?.Unregister(pid);
+            _tabsByPid.TryRemove(pid, out _);
+        }
+    }
+
+    private void OnTabShellPidChanged(Ghostty.Core.Tabs.TabModel tab, int? newPid)
+    {
+        if (_activeProcessTracker is null) return;
+        // Old pid may still be registered if the shell respawned without
+        // an explicit unregister; drop it before adopting the new one.
+        // Snapshot the entries that point at this tab so we don't leak
+        // stale rows when a tab cycles through pids.
+        foreach (var kv in _tabsByPid)
+        {
+            if (!ReferenceEquals(kv.Value, tab)) continue;
+            if (newPid is int np && np == kv.Key) continue;
+            _activeProcessTracker.Unregister(kv.Key);
+            _tabsByPid.TryRemove(kv.Key, out _);
+        }
+
+        if (newPid is int pid)
+        {
+            _tabsByPid[pid] = tab;
+            _activeProcessTracker.Register(pid);
+        }
+    }
+
+    private void OnActiveProcessChanged(
+        object? sender,
+        Ghostty.Core.Profiles.Tracking.ActiveProcessChangedEventArgs e)
+    {
+        if (!_tabsByPid.TryGetValue(e.RootPid, out var tab)) return;
+        // The tracker fires Changed from a Timer threadpool callback.
+        // TabModel.OnActiveProcessChanged mutates TabIconViewModel, which
+        // raises PropertyChanged consumed by WinUI bindings, so marshal
+        // onto the UI thread before invoking it. Null dispatcher means we
+        // are mid-shutdown; drop the event.
+        _uiDispatcher?.TryEnqueue(() => tab.OnActiveProcessChanged(e.ExeBasename, e.CommandLine));
+    }
+
     private void OnConfigChanged_ApplyLogFilters(Ghostty.Core.Config.IConfigService cfg)
     {
         if (_logFilters is null) return;
@@ -594,6 +693,18 @@ public partial class App : Application
         {
             try
             {
+                // Stop the process tracker before any tab teardown could
+                // race its Timer callback. Dispose unsubscribes the
+                // Changed handler in addition to cancelling the timer,
+                // so straggler tab.OnActiveProcessChanged enqueues stop
+                // here. The reverse-lookup dictionary is cleared in the
+                // finally block below alongside the static accessor.
+                if (_activeProcessTracker is not null)
+                {
+                    _activeProcessTracker.Changed -= OnActiveProcessChanged;
+                    _activeProcessTracker.Dispose();
+                }
+
                 // Dispose the registry first: its Dispose cancels any
                 // pending discovery and unsubscribes from
                 // _configService's ProfileConfigChanged event. The
@@ -664,6 +775,10 @@ public partial class App : Application
                 _modifierKeyState = null;
                 IconResolver = null;
                 _iconResolver = null;
+                ActiveProcessTracker = null;
+                _activeProcessTracker = null;
+                _tabsByPid.Clear();
+                _uiDispatcher = null;
                 _discoveryService = null;
                 _configWriteScheduler = null;
                 ConfigWriteScheduler = null;
