@@ -9,6 +9,14 @@ using Windows.Win32.System.Diagnostics.ToolHelp;
 namespace Ghostty.Core.Profiles.Tracking;
 
 /// <summary>
+/// Innermost-descendant info returned by <see cref="ProcessTreeWalker"/>.
+/// <c>ExeBasename</c> is always populated; <c>CommandLine</c> is the raw
+/// command line of the same process when readable, else null (e.g. exited,
+/// access denied, protected process).
+/// </summary>
+internal readonly record struct DescendantInfo(string ExeBasename, string? CommandLine);
+
+/// <summary>
 /// Walks the Windows process tree to find the innermost descendant of a
 /// given root PID. "Innermost" = deepest by tree depth; ties broken by
 /// the snapshot's natural iteration order (deterministic on stable input).
@@ -39,11 +47,13 @@ internal static class ProcessTreeWalker
         };
 
     /// <summary>
-    /// Returns the exe basename (e.g. "vim.exe") of the innermost
-    /// descendant of <paramref name="rootPid"/>. Returns null when the
-    /// root has no descendants, has exited, or the snapshot fails.
+    /// Returns the exe basename + command line of the innermost descendant
+    /// of <paramref name="rootPid"/>. Returns null when the root has no
+    /// descendants, has exited, or the snapshot fails. The command line
+    /// component is null when it could not be read (access denied, race
+    /// with process exit, etc.) but the basename is still reported.
     /// </summary>
-    public static string? FindInnermostDescendant(uint rootPid)
+    public static DescendantInfo? FindInnermostDescendant(uint rootPid)
     {
         var snapshot = DWritePInvoke.CreateToolhelp32Snapshot(
             CREATE_TOOLHELP_SNAPSHOT_FLAGS.TH32CS_SNAPPROCESS, 0);
@@ -83,7 +93,7 @@ internal static class ProcessTreeWalker
         }
     }
 
-    private static string? DeepestDescendant(
+    private static DescendantInfo? DeepestDescendant(
         IReadOnlyDictionary<uint, List<(uint Pid, string ExeBasename)>> byParent,
         uint rootPid)
     {
@@ -101,6 +111,7 @@ internal static class ProcessTreeWalker
         }
 
         string? bestName = null;
+        uint bestPid = 0;
         int bestDepth = 0;
         while (queue.Count > 0)
         {
@@ -112,6 +123,7 @@ internal static class ProcessTreeWalker
             {
                 bestDepth = depth;
                 bestName = name;
+                bestPid = pid;
             }
             if (byParent.TryGetValue(pid, out var kids))
             {
@@ -121,6 +133,13 @@ internal static class ProcessTreeWalker
                 }
             }
         }
-        return bestName;
+
+        if (bestName is null) return null;
+
+        // Command line retrieval is best-effort: a NULL here just means we
+        // fall back to exe-only icon mapping. Callers (e.g. wsl distro
+        // disambiguation) already handle null gracefully.
+        var cmdline = NtProcessInterop.TryGetCommandLine(bestPid);
+        return new DescendantInfo(bestName, cmdline);
     }
 }
