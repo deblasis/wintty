@@ -72,11 +72,8 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
             }
 
             var exe = info?.ExeBasename;
-            // The walker can now retrieve the command line of the leaf;
-            // wiring it through the debouncer is intentionally deferred
-            // to the next commit so this change stays purely about the
-            // walker's API surface.
-            var emission = _debouncer.Observe(rootPid, exe, commandLine: null, nowMs: now);
+            var cmdline = info?.CommandLine;
+            var emission = _debouncer.Observe(rootPid, exe, commandLine: cmdline, nowMs: now);
             if (emission is not null)
             {
                 try
