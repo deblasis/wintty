@@ -57,6 +57,13 @@ pub const i18n: bool = config.i18n;
 /// avoid it in Zig coe as much as possible.
 pub const bundle_id = "com.mitchellh.ghostty";
 
+/// The value we publish as `TERM_PROGRAM` to child processes. Programs like
+/// neovim, tmux, and various shells use it to detect which terminal emulator
+/// they're running under. Keeping this in build_config (and not as a literal
+/// in src/termio/Exec.zig) means upstream Ghostty rebases don't conflict on
+/// the brand string -- the fork only diverges in this one file.
+pub const term_program: []const u8 = "wintty";
+
 /// True if we should have "slow" runtime safety checks. The initial motivation
 /// for this was terminal page/pagelist integrity checks. These were VERY
 /// slow but very thorough. But they made it so slow that the terminal couldn't
