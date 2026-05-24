@@ -19,12 +19,13 @@ public static class SvgRasterizer
 
         try
         {
+            // Svg.Skia 3.x: the parsed SKPicture is exposed via the .Picture
+            // property; the Load() return value is for chaining/null-check only.
+            // Use FromSvg(string) directly to skip the MemoryStream dance.
             using var svg = new SKSvg();
-            using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(clean));
-            var picture = svg.Load(stream);
-            if (picture is null) return Array.Empty<byte>();
+            if (svg.FromSvg(clean) is null || svg.Picture is null) return Array.Empty<byte>();
 
-            var srcRect = picture.CullRect;
+            var srcRect = svg.Picture.CullRect;
             if (srcRect.Width <= 0 || srcRect.Height <= 0) return Array.Empty<byte>();
 
             var info = new SKImageInfo(sizePx, sizePx, SKColorType.Bgra8888, SKAlphaType.Premul);
@@ -33,7 +34,7 @@ public static class SvgRasterizer
             canvas.Clear(SKColors.Transparent);
             var scale = Math.Min(sizePx / srcRect.Width, sizePx / srcRect.Height);
             canvas.Scale(scale, scale);
-            canvas.DrawPicture(picture);
+            canvas.DrawPicture(svg.Picture);
             canvas.Flush();
 
             using var image = surface.Snapshot();
