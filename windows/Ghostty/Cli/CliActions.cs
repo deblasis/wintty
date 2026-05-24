@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using Ghostty.Core.Version;
 
 namespace Ghostty.Cli;
@@ -19,6 +20,18 @@ internal static class CliActions
         var output = Console.IsOutputRedirected
             ? VersionRenderer.RenderPlain(info)
             : VersionRenderer.RenderAnsi(info);
+
+        // Paint the wintty logo above the version text when the receiving
+        // terminal is known to speak the kitty graphics protocol. Silent
+        // no-op in pipes and unknown terminals.
+        if (KittyLogo.Supported())
+        {
+            var sb = new StringBuilder();
+            KittyLogo.Render(sb);
+            sb.Append(output);
+            output = sb.ToString();
+        }
+
         Console.Out.Write(output);
         Console.Out.Flush();
         return 0;
