@@ -56,4 +56,17 @@ internal sealed class FakePaneHost : IPaneHost
 
     public void SetPaneCount(int n) => PaneCount = n;
     public void RaiseLeafFocused() => LeafFocused?.Invoke(this, ActiveLeaf);
+
+    /// <summary>
+    /// Raise <see cref="LastLeafClosed"/> directly, without going
+    /// through <see cref="CloseActive"/>. Mirrors what the real
+    /// <c>PaneHost.CloseLeaf</c> does when the surface's child
+    /// process exits (libghostty fires close-surface → the C# side
+    /// raises LastLeafClosed inside <c>CloseLeaf</c>).
+    /// </summary>
+    public void RaiseLastLeafClosed()
+    {
+        PaneCount = 0;
+        LastLeafClosed?.Invoke(this, EventArgs.Empty);
+    }
 }
