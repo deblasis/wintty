@@ -10,36 +10,11 @@
 
         <SolidColorBrush x:Key="StripAccentBrush" Color="{ThemeResource SystemAccentColor}" />
 
-        <tabs:IconSpecToBitmapImageConverter x:Key="IconSpecToBitmapImageConverter"/>
-        <tabs:CodePointToGlyphConverter x:Key="CodePointToGlyphConverter"/>
-
-        <!-- Icon presenters: chosen at runtime by ProfileIconSelector
-             from the TabIconViewModel bound through TabModel.TabIcon.
-             Image template handles bundled / brand / path / exe / WSL
-             specs; FontIcon template handles MDL2 code points. -->
-        <DataTemplate x:Key="ProfileIconImageTemplate">
-            <Image Width="20" Height="20"
-                   Source="{Binding Icon, Converter={StaticResource IconSpecToBitmapImageConverter}}"
-                   Stretch="Uniform">
-                <ToolTipService.ToolTip>
-                    <TextBlock Text="{Binding TooltipText}"/>
-                </ToolTipService.ToolTip>
-            </Image>
-        </DataTemplate>
-
-        <DataTemplate x:Key="ProfileIconFontIconTemplate">
-            <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
-                      Glyph="{Binding Mdl2CodePoint, Converter={StaticResource CodePointToGlyphConverter}}"
-                      FontSize="16">
-                <ToolTipService.ToolTip>
-                    <TextBlock Text="{Binding TooltipText}"/>
-                </ToolTipService.ToolTip>
-            </FontIcon>
-        </DataTemplate>
-
-        <tabs:IconSpecTemplateSelector x:Key="ProfileIconSelector"
-                                       ImageTemplate="{StaticResource ProfileIconImageTemplate}"
-                                       FontIconTemplate="{StaticResource ProfileIconFontIconTemplate}"/>
+        <!-- Icon converters / templates / selector live in App.xaml so
+             both this strip and the horizontal TabHost share one set
+             of definitions. StaticResource walks the parent chain up
+             to the application dictionary, so the collapsed/expanded
+             row templates below still resolve ProfileIconSelector. -->
 
         <!--
             Collapsed row: 40x40 centered icon, nothing else.
