@@ -121,6 +121,28 @@ public sealed partial class TerminalControl : UserControl
     internal IntPtr SurfaceHandle => _surface.Handle;
 
     /// <summary>
+    /// Returns the pid of the shell process attached to this surface, or
+    /// null when libghostty cannot report one (surface not yet created,
+    /// already disposed, or the platform's pty layer is a stub). The
+    /// active-process tracker uses this to root its descendant walk.
+    /// On Windows today this currently returns null because
+    /// <c>WindowsPty.getProcessInfo</c> upstream still returns 0; the
+    /// wiring is in place so the tracker picks up the pid automatically
+    /// once libghostty exposes it.
+    /// </summary>
+    internal int? TryGetShellPid()
+    {
+        if (_surface.Handle == IntPtr.Zero) return null;
+        var pid = NativeMethods.SurfaceForegroundPid(_surface);
+        if (pid == 0) return null;
+        // The C api uses u64 to match macOS/Linux pids in unsigned form;
+        // Windows process ids are DWORDs and Toolhelp32 takes uint, but
+        // .NET's Process.Id is int and our tracker stores int, so cast
+        // through int for the contract. Clamp to int.MaxValue defensively.
+        return pid > int.MaxValue ? null : (int)pid;
+    }
+
+    /// <summary>
     /// Last title pushed by libghostty for this surface, or null if no
     /// title has been set yet. Used by MainWindow to update the window
     /// chrome immediately on focus change without waiting for the next

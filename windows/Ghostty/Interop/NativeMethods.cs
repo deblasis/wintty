@@ -427,6 +427,15 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
 
+    // Returns the pid of the foreground process attached to the pty, or
+    // 0 when the platform-specific pty layer cannot report it. On
+    // Windows today this returns 0 (WindowsPty.getProcessInfo is a
+    // stub); the binding still lives here so the active-process tracker
+    // can poll without owning the libghostty call site.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_foreground_pid")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial ulong SurfaceForegroundPid(GhosttySurface surface);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_shared_texture")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial byte SurfaceSharedTextureNative(

@@ -401,16 +401,30 @@ public sealed partial class MainWindow : Window
         // container declared in MainWindow.xaml. This is the single
         // owner for PaneHost lifetime in the visual tree — both tab
         // hosts read from it without ever reparenting.
-        foreach (var t in _tabManager.Tabs) AddPaneHost(t);
+        foreach (var t in _tabManager.Tabs)
+        {
+            AddPaneHost(t);
+            // The seed tab does NOT raise TabManager.TabAdded (see
+            // TabManager ctor comment), so attach the process-tracker
+            // bridge here for every pre-existing tab before subscribing
+            // to TabAdded below. AttachProcessTracking is idempotent
+            // against TabAdded re-firing for the same tab.
+            AttachProcessTracking(t);
+        }
         SwapActivePane();
         _tabManager.TabAdded += (_, t) =>
         {
             AddPaneHost(t);
+            AttachProcessTracking(t);
             SwapActivePane();
             // Apply current cursor color to new tabs' pane borders.
             UpdateCursorAccentColors();
         };
-        _tabManager.TabRemoved += (_, t) => RemovePaneHost(t);
+        _tabManager.TabRemoved += (_, t) =>
+        {
+            DetachProcessTracking(t);
+            RemovePaneHost(t);
+        };
         _tabManager.ActiveTabChanged += (_, _) => SwapActivePane();
 
         // Apply initial cursor-color-derived pane border.
@@ -987,6 +1001,55 @@ public sealed partial class MainWindow : Window
         var paneHost = (PaneHost)tab.PaneHost;
         PaneHostContainer.Children.Remove(paneHost);
     }
+
+    /// <summary>
+    /// Register <paramref name="tab"/> with the process-global tracker
+    /// and arrange for its <see cref="TabModel.ShellPid"/> to be
+    /// populated once libghostty has spawned the surface's shell. Hook
+    /// PaneHost.LeafFocused (the first fire lands from PaneHost.Loaded,
+    /// at which point the TerminalControl's libghostty surface exists)
+    /// and query <c>ghostty_surface_foreground_pid</c>. Re-fires on
+    /// every focus change so split/zoom retains the tab's root pid;
+    /// the assignment is idempotent when the value is unchanged.
+    /// </summary>
+    private void AttachProcessTracking(TabModel tab)
+    {
+        ((App)Application.Current).RegisterTabForProcessTracking(tab);
+
+        // First leaf's surface drives the pid. If the tab grows splits
+        // later, we keep the first-spawned shell as the tracker root
+        // because that is the lineage the user originally opened (e.g.
+        // a "Bash" tab whose split panes spawned PowerShell shouldn't
+        // re-root the icon onto pwsh). Re-querying on every LeafFocused
+        // would race: by the time we sample, the pid we'd grab could be
+        // the wrong leaf's. Instead we snapshot exactly once.
+        void OnLeafFocused(object? _, Ghostty.Core.Panes.LeafPane leaf)
+        {
+            if (tab.ShellPid is not null) return;
+            var pid = leaf.Terminal().TryGetShellPid();
+            if (pid is null) return;
+            tab.ShellPid = pid;
+        }
+        tab.PaneHost.LeafFocused += OnLeafFocused;
+        // Stash the unsubscriber so DetachProcessTracking can walk back
+        // the LeafFocused handler without a side dictionary.
+        _processTrackingDetach[tab] = () => tab.PaneHost.LeafFocused -= OnLeafFocused;
+    }
+
+    private void DetachProcessTracking(TabModel tab)
+    {
+        if (_processTrackingDetach.TryGetValue(tab, out var detach))
+        {
+            detach();
+            _processTrackingDetach.Remove(tab);
+        }
+        ((App)Application.Current).UnregisterTabForProcessTracking(tab);
+    }
+
+    // Per-tab cleanup map for the LeafFocused subscription installed by
+    // AttachProcessTracking. TabModel is unique per tab so reference
+    // equality is the natural key.
+    private readonly Dictionary<TabModel, Action> _processTrackingDetach = new();
 
     private void SwapActivePane()
     {
