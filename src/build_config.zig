@@ -57,6 +57,12 @@ pub const i18n: bool = config.i18n;
 /// avoid it in Zig coe as much as possible.
 pub const bundle_id = "com.mitchellh.ghostty";
 
+/// The value we publish as `TERM_PROGRAM` to child processes. Programs like
+/// neovim, tmux, and various shells read this to detect which terminal
+/// emulator they're running under. Hardcoded here rather than at call sites
+/// so there's one authoritative spelling of the brand string.
+pub const term_program = "wintty";
+
 /// True if we should have "slow" runtime safety checks. The initial motivation
 /// for this was terminal page/pagelist integrity checks. These were VERY
 /// slow but very thorough. But they made it so slow that the terminal couldn't
