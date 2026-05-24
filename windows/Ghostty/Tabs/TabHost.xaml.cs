@@ -92,7 +92,36 @@ internal sealed partial class TabHost : UserControl, ITabHost
             Margin = new Thickness(0, 1, 0, 0),
         };
         var headerPanel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 0 };
-        headerPanel.Children.Add(headerText);
+
+        // Profile icon slot. ContentTemplateSelector picks between the
+        // bundled-image template and the MDL2 FontIcon template based
+        // on the TabIconViewModel kind. Resources live in App.xaml so
+        // both this host and VerticalTabStrip resolve the same selector.
+        // Application.Current.Resources is used rather than this.Resources
+        // because the host UserControl has no local resource dictionary
+        // entry for these keys.
+        var iconRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 0 };
+        var iconHost = new ContentControl
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        };
+        iconHost.SetBinding(
+            ContentControl.ContentProperty,
+            new Microsoft.UI.Xaml.Data.Binding
+            {
+                Source = tab,
+                Path = new PropertyPath("TabIcon"),
+            });
+        if (Application.Current.Resources.TryGetValue("ProfileIconSelector", out var sel)
+            && sel is DataTemplateSelector dts)
+        {
+            iconHost.ContentTemplateSelector = dts;
+        }
+        iconRow.Children.Add(iconHost);
+        iconRow.Children.Add(headerText);
+
+        headerPanel.Children.Add(iconRow);
         headerPanel.Children.Add(headerBar);
 
         // Tab color tint. We paint headerPanel.Background, not
