@@ -57,9 +57,29 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         IconSpec.BundledKey b => ReadBrandedOrDefault(b.Key, 32),
         IconSpec.Mdl2Token => ReadBundledOrDefault(DefaultBundledKey),
         IconSpec.AutoForExe a => ExtractExeIconAsPng(a.ExePath),
-        IconSpec.AutoForWslDistro => ReadBundledOrDefault("wsl"),
+        // Unknown distros fall back to the legacy flat wsl.png; a generic
+        // tux block is preferable to nothing when we can't pick a brand.
+        IconSpec.AutoForWslDistro w => DistroBrandKey(w.DistroName) is { } k
+            ? ReadBrandedOrDefault(k, 32)
+            : ReadBundledOrDefault("wsl"),
         _ => ReadBundledOrDefault(DefaultBundledKey),
     };
+
+    private static string? DistroBrandKey(string distroName)
+    {
+        if (string.IsNullOrEmpty(distroName)) return null;
+        var lower = distroName.ToLowerInvariant();
+        // Order matters: more-specific tokens first so "kali-linux" doesn't
+        // accidentally match "linux"-shaped substrings.
+        if (lower.Contains("ubuntu")) return "ubuntu";
+        if (lower.Contains("debian")) return "debian";
+        if (lower.Contains("alpine")) return "alpine";
+        if (lower.Contains("kali")) return "kali";
+        if (lower.Contains("fedora")) return "fedora";
+        if (lower.Contains("opensuse") || lower.Contains("suse")) return "opensuse";
+        if (lower.Contains("arch")) return "arch";
+        return null;
+    }
 
     // Best-effort: any SHGetFileInfoW / GDI failure falls back to the
     // default bundled icon rather than failing a profile resolve.
@@ -136,7 +156,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
             IconSpec.Mdl2Token m => "mdl2:" + m.CodePoint.ToString("x"),
             IconSpec.BundledKey b => "bundled-v2:" + b.Key,
             IconSpec.AutoForExe a => "exe:" + a.ExePath,
-            IconSpec.AutoForWslDistro w => "wsl-distro:" + w.DistroName,
+            IconSpec.AutoForWslDistro w => "wsl-distro-v2:" + (DistroBrandKey(w.DistroName) ?? "wsl") + ":" + w.DistroName,
             _ => "unknown",
         };
         var mtime = MtimeTokenFor(spec);
