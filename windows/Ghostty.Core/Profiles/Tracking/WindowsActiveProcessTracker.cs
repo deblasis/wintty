@@ -56,12 +56,10 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
 
         foreach (var (rootPid, _) in _roots)
         {
-            string? exe;
-            string? cmdline;
+            DescendantInfo? info;
             try
             {
-                exe = ProcessTreeWalker.FindInnermostDescendant((uint)rootPid);
-                cmdline = null;
+                info = ProcessTreeWalker.FindInnermostDescendant((uint)rootPid);
             }
             catch (Exception ex)
             {
@@ -70,14 +68,11 @@ public sealed class WindowsActiveProcessTracker : IActiveProcessTracker
                 // regressed tracker is diagnosable from the debug log.
                 System.Diagnostics.Debug.WriteLine(
                     $"WindowsActiveProcessTracker: snapshot failed for pid={rootPid}: {ex.GetType().Name}: {ex.Message}");
-                exe = null;
-                cmdline = null;
+                info = null;
             }
 
-            // V1: command line is not retrieved. ProcessIconTable handles
-            // null commandLine correctly for everything except wsl.exe
-            // distro disambiguation, which is acceptable until shell
-            // integration scripts land in a follow-up.
+            var exe = info?.ExeBasename;
+            var cmdline = info?.CommandLine;
             var emission = _debouncer.Observe(rootPid, exe, commandLine: cmdline, nowMs: now);
             if (emission is not null)
             {

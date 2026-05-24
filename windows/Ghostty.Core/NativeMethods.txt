@@ -31,3 +31,8 @@ CreateToolhelp32Snapshot
 Process32FirstW
 Process32NextW
 CloseHandle
+
+// kernel32 for opening other processes to read their command line
+// (ProcessTreeWalker + NtProcessInterop)
+OpenProcess
+PROCESS_ACCESS_RIGHTS
