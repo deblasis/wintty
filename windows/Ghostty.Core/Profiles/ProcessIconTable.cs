@@ -26,6 +26,7 @@ public static class ProcessIconTable
             ["fish.exe"]       = _ => new IconSpec.BrandKey("fish", null),
             ["nu.exe"]         = _ => new IconSpec.BrandKey("nu", null),
             ["zsh.exe"]        = _ => new IconSpec.BrandKey("zsh", null),
+            ["wsl.exe"]        = cmd => new IconSpec.AutoForWslDistro(ParseWslDistro(cmd)),
 
             // Languages
             ["python.exe"]     = _ => new IconSpec.BrandKey("python", null),
@@ -62,5 +63,34 @@ public static class ProcessIconTable
         return _table.TryGetValue(exeBasename, out var factory)
             ? factory(commandLine)
             : null;
+    }
+
+    /// <summary>
+    /// Extracts the distro from a wsl.exe command line. Recognized forms:
+    /// <c>--distribution &lt;name&gt;</c>, <c>--distribution=&lt;name&gt;</c>,
+    /// <c>-d &lt;name&gt;</c>. Returns empty string if no flag is present;
+    /// the resolver treats that as "use the legacy wsl bundle."
+    /// </summary>
+    private static string ParseWslDistro(string? commandLine)
+    {
+        if (string.IsNullOrEmpty(commandLine)) return string.Empty;
+
+        var tokens = commandLine.Split(
+            new[] { ' ', '\t' },
+            StringSplitOptions.RemoveEmptyEntries);
+        // The first token is the program name; argv parsing starts at 1.
+        for (var i = 1; i < tokens.Length; i++)
+        {
+            var t = tokens[i];
+            if (t.StartsWith("--distribution=", StringComparison.OrdinalIgnoreCase))
+                return t.Substring("--distribution=".Length);
+            if ((t.Equals("--distribution", StringComparison.OrdinalIgnoreCase)
+                 || t.Equals("-d", StringComparison.OrdinalIgnoreCase))
+                && i + 1 < tokens.Length)
+            {
+                return tokens[i + 1];
+            }
+        }
+        return string.Empty;
     }
 }

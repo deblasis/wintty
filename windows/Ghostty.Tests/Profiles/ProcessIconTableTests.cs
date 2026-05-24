@@ -68,4 +68,36 @@ public sealed class ProcessIconTableTests
         // descendant tree but is not what the user is interacting with.
         Assert.Null(ProcessIconTable.TryMap("wslhost.exe"));
     }
+
+    [Fact]
+    public void TryMap_Wsl_WithDistributionFlag_ReturnsAutoForWslDistro()
+    {
+        var spec = ProcessIconTable.TryMap("wsl.exe", "wsl.exe --distribution Ubuntu-22.04");
+        var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
+        Assert.Equal("Ubuntu-22.04", auto.DistroName);
+    }
+
+    [Fact]
+    public void TryMap_Wsl_ShortFlag_ReturnsAutoForWslDistro()
+    {
+        var spec = ProcessIconTable.TryMap("wsl.exe", "wsl.exe -d Debian");
+        var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
+        Assert.Equal("Debian", auto.DistroName);
+    }
+
+    [Fact]
+    public void TryMap_Wsl_NoCmdline_ReturnsAutoForWslDistroEmpty()
+    {
+        var spec = ProcessIconTable.TryMap("wsl.exe", null);
+        var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
+        Assert.Equal(string.Empty, auto.DistroName);
+    }
+
+    [Fact]
+    public void TryMap_Wsl_EqualsFlag_ReturnsAutoForWslDistro()
+    {
+        var spec = ProcessIconTable.TryMap("wsl.exe", "wsl.exe --distribution=kali-linux");
+        var auto = Assert.IsType<IconSpec.AutoForWslDistro>(spec);
+        Assert.Equal("kali-linux", auto.DistroName);
+    }
 }
