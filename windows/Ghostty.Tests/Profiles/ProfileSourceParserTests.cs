@@ -315,4 +315,41 @@ public sealed class ProfileSourceParserTests
         ).Profiles["foo"];
         Assert.IsType<IconSpec.Path>(parsed.Icon);
     }
+
+    [Fact]
+    public void ParseTracksForeground_NotSpecified_DefaultsToTrue()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\n"
+        ).Profiles["foo"];
+        // Default true: profile with no override participates in tracking.
+        Assert.True(parsed.TabIconTracksForeground);
+    }
+
+    [Fact]
+    public void ParseTracksForeground_True_IsTrue()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.tab-icon-tracks-foreground = true\n"
+        ).Profiles["foo"];
+        Assert.True(parsed.TabIconTracksForeground);
+    }
+
+    [Fact]
+    public void ParseTracksForeground_False_IsFalse()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.tab-icon-tracks-foreground = false\n"
+        ).Profiles["foo"];
+        Assert.False(parsed.TabIconTracksForeground);
+    }
+
+    [Fact]
+    public void ParseTracksForeground_IsCaseInsensitive()
+    {
+        var parsed = ProfileSourceParser.Parse(
+            "profile.foo.name = Foo\nprofile.foo.command = pwsh\nprofile.foo.tab-icon-tracks-foreground = FALSE\n"
+        ).Profiles["foo"];
+        Assert.False(parsed.TabIconTracksForeground);
+    }
 }
