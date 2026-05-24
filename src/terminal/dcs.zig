@@ -3,6 +3,7 @@ const build_options = @import("terminal_options");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const terminal = @import("main.zig");
+const sixel = @import("sixel.zig");
 const DCS = terminal.DCS;
 
 const log = std.log.scoped(.terminal_dcs);
@@ -71,6 +72,18 @@ pub const Handler = struct {
                             },
                         },
                         .command = .{ .tmux = .enter },
+                    };
+                },
+
+                // Sixel image (DEC DCS final='q' with no intermediates).
+                'q' => sixel_hook: {
+                    var intro: [3]?u16 = .{ null, null, null };
+                    for (dcs.params, 0..) |p, i| {
+                        if (i >= intro.len) break;
+                        intro[i] = p;
+                    }
+                    break :sixel_hook .{
+                        .state = .{ .sixel = sixel.Parser.init(alloc, intro) },
                     };
                 },
 
@@ -149,6 +162,8 @@ pub const Handler = struct {
                 buffer.data[buffer.len] = byte;
                 buffer.len += 1;
             },
+
+            .sixel => |*p| p.put(byte),
         }
 
         return null;
@@ -195,6 +210,21 @@ pub const Handler = struct {
                 },
                 else => unreachable,
             } },
+
+            .sixel => |*p| sixel: {
+                const c = p.finalize() catch |err| {
+                    log.info("sixel finalize failed err={}", .{err});
+                    p.deinit();
+                    break :sixel null;
+                };
+                // finalize transferred paint_ops and palette_ops to
+                // the returned Command, but `accum` (the working
+                // buffer for raster/color/repeat strings) stays with
+                // the parser and needs releasing. deinit on the
+                // now-empty paint/palette lists is a no-op.
+                p.deinit();
+                break :sixel .{ .sixel = c };
+            },
         };
     }
 
@@ -217,11 +247,15 @@ pub const Command = union(enum) {
     else
         void,
 
+    /// Sixel image
+    sixel: sixel.Command,
+
     pub fn deinit(self: *Command) void {
         switch (self.*) {
             .xtgettcap => |*v| v.data.deinit(),
             .decrqss => {},
             .tmux => {},
+            .sixel => |*v| v.deinit(),
         }
     }
 
@@ -280,6 +314,9 @@ const State = union(enum) {
     else
         void,
 
+    /// Sixel image (DEC DCS final='q' with no intermediates).
+    sixel: sixel.Parser,
+
     pub fn deinit(self: *State) void {
         switch (self.*) {
             .inactive,
@@ -291,6 +328,7 @@ const State = union(enum) {
             .tmux => |*v| if (comptime build_options.tmux_control_mode) {
                 v.deinit();
             } else unreachable,
+            .sixel => |*v| v.deinit(),
         }
     }
 };
@@ -427,4 +465,43 @@ test "tmux enter and implicit exit" {
         try testing.expect(cmd == .tmux);
         try testing.expect(cmd.tmux == .exit);
     }
+}
+
+test "sixel DCS command" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var h: Handler = .{};
+    defer h.deinit();
+
+    // ESC P q (no intermediates, final = 'q') is the sixel intro.
+    try testing.expect(h.hook(alloc, .{ .final = 'q' }) == null);
+    try testing.expect(h.state == .sixel);
+
+    // Feed a tiny sixel: paint one cell.
+    _ = h.put('?');
+
+    var cmd = h.unhook().?;
+    defer cmd.deinit();
+    try testing.expect(cmd == .sixel);
+    try testing.expectEqual(@as(usize, 1), cmd.sixel.paint_ops.len);
+    try testing.expect(h.state == .inactive);
+}
+
+test "sixel DCS with raster attribs" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var h: Handler = .{};
+    defer h.deinit();
+
+    try testing.expect(h.hook(alloc, .{ .params = &.{ 1, 1, 75 }, .final = 'q' }) == null);
+    for ("\"1;1;0;100;200") |b| _ = h.put(b);
+    _ = h.put('?');
+
+    var cmd = h.unhook().?;
+    defer cmd.deinit();
+    try testing.expect(cmd == .sixel);
+    try testing.expectEqual(@as(u16, 100), cmd.sixel.raster.declared_width);
+    try testing.expectEqual(@as(u16, 200), cmd.sixel.raster.declared_height);
 }
