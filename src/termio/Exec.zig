@@ -1501,6 +1501,27 @@ const Subprocess = struct {
     /// Returns `null` if there was an error getting the information or the
     /// information is not available on a particular platform.
     pub fn getProcessInfo(self: *Subprocess, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
+        // On Windows the pty layer does not (and cannot) track a foreground
+        // process group the way POSIX does. The semantically-useful PID for
+        // our callers (the apprt active-process tracker / tab-icon picker)
+        // is the spawned shell itself; descendants are walked client-side
+        // via Toolhelp32. Resolve that here from the Command HANDLE rather
+        // than going through Pty, which returns null on Windows.
+        if (comptime builtin.os.tag == .windows) {
+            if (info == .foreground_pid) {
+                const cmd = switch (self.process orelse return null) {
+                    .fork_exec => |*c| c,
+                    // Flatpak path is POSIX-only; unreachable on Windows
+                    // but keep the switch exhaustive.
+                    .flatpak => return null,
+                };
+                const handle = cmd.pid orelse return null;
+                const pid = windows.exp.kernel32.GetProcessId(handle);
+                if (pid == 0) return null;
+                return @intCast(pid);
+            }
+        }
+
         const pty = &(self.pty orelse return null);
         return pty.getProcessInfo(info);
     }
