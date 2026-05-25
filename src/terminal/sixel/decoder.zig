@@ -236,3 +236,259 @@ test "decoder: ~ paints a 1x6 column of foreground (all bits set)" {
         try testing.expectEqual(@as(u8, 0), img.rgba[off + 2]);
     }
 }
+
+// ---- Run-length expansion ----
+
+test "decoder: !4 ~ produces 4-wide column" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '~', .count = 4 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 200, .g = 200, .b = 200, .a = 255 },
+    });
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 4), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+    // Every cell should be black (current_color), not gray bg.
+    for (0..6) |y| for (0..4) |x| {
+        const off = (y * 4 + x) * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off]);
+    };
+}
+
+test "decoder: count at u16 max produces 65535-wide image" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 65535 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 65535), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+}
+
+test "decoder: budget rejection on oversized image" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 65535 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    const result = decode(alloc, c, .{ .budget = 1024 });
+    try testing.expectError(error.SixelTooLarge, result);
+}
+
+// ---- Color selection + interleaved palette mutation ----
+
+test "decoder: select_color switches active paint color" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 255), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 2]);
+    }
+}
+
+test "decoder: interleaved palette mutation respects source order" {
+    // Regression test for the ops-unification refactor: without it,
+    // both columns would render green.
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+        .{ .set_rgb = .{ .idx = 1, .r = 0, .g = 100, .b = 0 } },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 2), img.width);
+    // Column 0 = red, column 1 = green.
+    try testing.expectEqual(@as(u8, 255), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[1]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[4]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[5]);
+}
+
+test "decoder: set_hls applies HLS color" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_hls = .{ .idx = 1, .h = 0, .l = 50, .s = 100 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    // DEC blue (H=0): RGB (0, 0, 255).
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 255), img.rgba[off + 2]);
+    }
+}
+
+// ---- Carriage return + next line ----
+
+test "decoder: $ resets paint cursor to column 0" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 100, .b = 100 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 3 } }, // 3 white cells
+        .{ .carriage_return = {} },
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .sixel = .{ .byte = '~', .count = 2 } }, // overpaint cols 0-1 red
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 3), img.width);
+    // Col 0, row 0: red (overpainted).
+    try testing.expectEqual(@as(u8, 255), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[1]);
+    // Col 2, row 0: white (not overpainted).
+    try testing.expectEqual(@as(u8, 255), img.rgba[8]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[9]);
+}
+
+test "decoder: - advances paint cursor down 6 pixels and resets x" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+        .{ .next_line = {} },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 200, .g = 200, .b = 200, .a = 255 },
+    });
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 12), img.height);
+    for (0..12) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+    }
+}
+
+// ---- Raster bounds clamping ----
+
+test "decoder: raster.declared_width clamps output width" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '~', .count = 10 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{ .declared_width = 5, .declared_height = 6 },
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 5), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+}
+
+test "decoder: raster.declared_height clamps output height" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+        .{ .next_line = {} },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{ .declared_width = 1, .declared_height = 6 },
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+}
+
+test "decoder: raster larger than paint bounds doesn't expand output" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '~', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{ .declared_width = 100, .declared_height = 100 },
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+}
