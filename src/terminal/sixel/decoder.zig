@@ -42,6 +42,10 @@ pub const Error = error{
 /// Decode a parsed sixel Command into an RGBA Image. The Palette
 /// starts in its DEC default state; set_rgb/set_hls ops in the
 /// stream mutate it as encountered.
+///
+/// Two-pass algorithm: first pass measures the bounding box without
+/// allocating, second pass allocates the RGBA buffer and walks the
+/// op stream painting each sixel byte's 6-pixel vertical column.
 pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
     if (cmd.ops.len == 0) {
         return .{
@@ -51,14 +55,116 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
             .height = 0,
         };
     }
-    _ = ctx;
-    // Full implementation lands in a follow-on commit.
+
+    const bounds = measureBounds(cmd);
+    const w: u32 = if (cmd.raster.declared_width > 0)
+        @min(bounds.w, cmd.raster.declared_width)
+    else
+        bounds.w;
+    const h: u32 = if (cmd.raster.declared_height > 0)
+        @min(bounds.h, cmd.raster.declared_height)
+    else
+        bounds.h;
+
+    if (w == 0 or h == 0) {
+        return .{
+            .alloc = alloc,
+            .rgba = try alloc.alloc(u8, 0),
+            .width = 0,
+            .height = 0,
+        };
+    }
+
+    const total_bytes: usize = @as(usize, w) * @as(usize, h) * 4;
+    if (total_bytes > ctx.budget) return error.SixelTooLarge;
+
+    var rgba = try alloc.alloc(u8, total_bytes);
+    errdefer alloc.free(rgba);
+    // Initial fill: P1 (default) uses ctx.bg; P2 and P3 modes land
+    // in later commits.
+    fillBg(rgba, ctx.bg);
+
+    var palette = Palette.init();
+    var paint_x: u32 = 0;
+    var paint_y: u32 = 0;
+    var current_color: u8 = 0;
+
+    for (cmd.ops) |op| switch (op) {
+        .sixel => |s| {
+            const color = palette.query(current_color);
+            const bits: u8 = s.byte -% '?';
+            var col: u32 = 0;
+            while (col < s.count) : (col += 1) {
+                const px = paint_x + col;
+                if (px >= w) break;
+                var bit: u3 = 0;
+                while (bit < 6) : (bit += 1) {
+                    if ((bits >> bit) & 1 == 0) continue;
+                    const py = paint_y + bit;
+                    if (py >= h) continue;
+                    const off = (@as(usize, py) * @as(usize, w) + @as(usize, px)) * 4;
+                    rgba[off] = color.r;
+                    rgba[off + 1] = color.g;
+                    rgba[off + 2] = color.b;
+                    rgba[off + 3] = color.a;
+                }
+            }
+            paint_x +|= s.count;
+        },
+        .select_color => |idx| current_color = idx,
+        .carriage_return => paint_x = 0,
+        .next_line => {
+            paint_x = 0;
+            paint_y +|= 6;
+        },
+        .set_rgb => |rgb| palette.setRgb(rgb.idx, rgb.r, rgb.g, rgb.b),
+        .set_hls => |hls| palette.setHls(hls.idx, hls.h, hls.l, hls.s),
+    };
+
     return .{
         .alloc = alloc,
-        .rgba = try alloc.alloc(u8, 0),
-        .width = 0,
-        .height = 0,
+        .rgba = rgba,
+        .width = w,
+        .height = h,
     };
+}
+
+const Bounds = struct { w: u32, h: u32 };
+
+/// First pass: walk the op stream tracking the max x and max y
+/// reached. Doesn't allocate.
+fn measureBounds(cmd: Command) Bounds {
+    var paint_x: u32 = 0;
+    var paint_y: u32 = 0;
+    var max_x: u32 = 0;
+    var max_y: u32 = 0;
+
+    for (cmd.ops) |op| switch (op) {
+        .sixel => |s| {
+            paint_x +|= s.count;
+            if (paint_x > max_x) max_x = paint_x;
+            const reach_y = paint_y + 6;
+            if (reach_y > max_y) max_y = reach_y;
+        },
+        .carriage_return => paint_x = 0,
+        .next_line => {
+            paint_x = 0;
+            paint_y +|= 6;
+        },
+        .select_color, .set_rgb, .set_hls => {},
+    };
+
+    return .{ .w = max_x, .h = max_y };
+}
+
+fn fillBg(rgba: []u8, bg: Rgba) void {
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) {
+        rgba[i] = bg.r;
+        rgba[i + 1] = bg.g;
+        rgba[i + 2] = bg.b;
+        rgba[i + 3] = bg.a;
+    }
 }
 
 test "decoder: empty Command yields 0x0 image" {
@@ -76,4 +182,57 @@ test "decoder: empty Command yields 0x0 image" {
     try testing.expectEqual(@as(u32, 0), img.width);
     try testing.expectEqual(@as(u32, 0), img.height);
     try testing.expectEqual(@as(usize, 0), img.rgba.len);
+}
+
+test "decoder: single ? paints a 1x6 column of background" {
+    // '?' = 0x3F. byte - '?' = 0, so no bits set → all 6 pixels
+    // stay at background (P1 default = ctx.bg = black).
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 2]);
+        try testing.expectEqual(@as(u8, 255), img.rgba[off + 3]);
+    }
+}
+
+test "decoder: ~ paints a 1x6 column of foreground (all bits set)" {
+    // '~' = 0x7E. byte - '?' = 0x3F = 0b111111 → all 6 pixels painted.
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '~', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 255, .g = 255, .b = 255, .a = 255 }, // white bg
+    });
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+    // All 6 pixels should be black (palette default entry 0).
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 2]);
+    }
 }
