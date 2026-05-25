@@ -27,10 +27,8 @@ pub fn synthKittyCommand(
     ctx: decoder_mod.DecodeCtx,
 ) Error!kitty_graphics.Command {
     var img = try decoder_mod.decode(alloc, sixel_cmd, ctx);
-    // Two failure modes after decode: zero-dim images (empty op
-    // stream, oversized geometry caught upstream, etc.) and decode
-    // errors handled by the `try` above. For zero-dim we explicitly
-    // free the (empty) rgba and signal the caller to skip dispatch.
+    // Zero-dim image means there's nothing to render. Free the
+    // (empty) rgba and signal the caller to skip dispatch.
     if (img.width == 0 or img.height == 0) {
         img.deinit();
         return error.EmptyImage;
