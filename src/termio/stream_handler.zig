@@ -568,6 +568,27 @@ pub const StreamHandler = struct {
                 tagResponse(&msg);
                 self.messageWriter(msg);
             },
+
+            .sixel => |sixel_cmd| {
+                // Sixel decode + kitty graphics dispatch. The bridge
+                // owns the decoded RGBA and hands it off to kitty.
+                // EmptyImage is the expected "nothing to render" path
+                // (empty op stream, oversized geometry caught upstream,
+                // raster clamped to 0×0); other errors are unexpected.
+                var kcmd = terminal.sixel.synthKittyCommand(
+                    self.alloc,
+                    sixel_cmd,
+                    .{},
+                ) catch |err| {
+                    if (err != error.EmptyImage)
+                        log.warn("sixel dispatch failed: {t}", .{err});
+                    return;
+                };
+                defer kcmd.deinit(self.alloc);
+                // Sixel has no response channel; drop any kitty
+                // response (DEC didn't define a query path for sixel).
+                _ = self.terminal.kittyGraphics(self.alloc, &kcmd);
+            },
         }
     }
 
