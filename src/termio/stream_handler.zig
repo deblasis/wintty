@@ -904,13 +904,14 @@ pub const StreamHandler = struct {
         switch (req) {
             .primary => self.messageWriter(.{
                 // 62 = Level 2 conformance
+                //  4 = Sixel graphics
                 // 22 = Color text
                 // 52 = Clipboard access
                 .write_stable = .{
                     .data = if (self.clipboard_write != .deny)
-                        "\x1B[?62;22;52c"
+                        "\x1B[?62;4;22;52c"
                     else
-                        "\x1B[?62;22c",
+                        "\x1B[?62;4;22c",
                     .kind = .response,
                 },
             }),
