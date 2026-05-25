@@ -572,6 +572,35 @@ pub const StreamHandler = struct {
                 tagResponse(&msg);
                 self.messageWriter(msg);
             },
+
+            .sixel => |sixel_cmd| {
+                // Sixel decode + kitty graphics dispatch. The bridge
+                // owns the decoded RGBA and hands it off to kitty.
+                // TODO: thread terminal bg color into ctx.bg so P1
+                // mode renders against the actual background instead
+                // of opaque black.
+                var kcmd = terminal.sixel.synthKittyCommand(
+                    self.alloc,
+                    sixel_cmd,
+                    .{},
+                ) catch |err| {
+                    switch (err) {
+                        // Expected no-render paths — empty stream,
+                        // oversized geometry already dropped upstream.
+                        error.EmptyImage,
+                        error.SixelTooLarge,
+                        => log.debug("sixel skipped: {t}", .{err}),
+                        // Unexpected.
+                        error.OutOfMemory,
+                        => log.warn("sixel dispatch failed: {t}", .{err}),
+                    }
+                    return;
+                };
+                defer kcmd.deinit(self.alloc);
+                // Sixel has no response channel; drop any kitty
+                // response (DEC didn't define a query path for sixel).
+                _ = self.terminal.kittyGraphics(self.alloc, &kcmd);
+            },
         }
     }
 
