@@ -1509,8 +1509,11 @@ const Subprocess = struct {
         // than going through Pty, which returns null on Windows.
         if (comptime builtin.os.tag == .windows) {
             if (info == .foreground_pid) {
+                // Local capture intentionally named differently from the
+                // file-level `c = @cImport(...)` to avoid a shadow error
+                // under Zig 0.15.
                 const cmd = switch (self.process orelse return null) {
-                    .fork_exec => |*c| c,
+                    .fork_exec => |*sub| sub,
                     // Flatpak path is POSIX-only; unreachable on Windows
                     // but keep the switch exhaustive.
                     .flatpak => return null,
