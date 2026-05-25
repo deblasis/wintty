@@ -1,29 +1,53 @@
 const std = @import("std");
 const testing = std.testing;
 
+/// A single operation in a sixel DCS stream. Paint operations
+/// (sixel bytes, color selection, cursor control) and palette
+/// definitions live in the same union because their source-order
+/// interleaving matters: `#1;2;100;0;0?#1;2;0;100;0?` paints red
+/// then green; if palette ops were applied as a separate first
+/// pass, both sixels would paint with green.
+pub const Op = union(enum) {
+    /// A sixel data byte (?..~ in source), optionally run-length-repeated.
+    /// `byte` is the raw character; the decoder maps it to 6 vertical pixels.
+    /// `count` is u16 because the `!N` run-length is unbounded in the
+    /// DEC spec — u8 would clip common encoder output, u32 wastes
+    /// memory in the op stream. The parser saturates at u16 max.
+    sixel: struct { byte: u8, count: u16 },
+    /// Select color register `idx` as the current paint color.
+    select_color: u8,
+    /// `$` — return paint cursor to leftmost column.
+    carriage_return,
+    /// `-` — advance paint cursor down 6 pixels, reset to leftmost column.
+    next_line,
+    /// `#N;2;Pr;Pg;Pb` — set register N to RGB triple.
+    /// Values are 0-100 from the DEC source (clamped/scaled downstream).
+    set_rgb: struct { idx: u8, r: u8, g: u8, b: u8 },
+    /// `#N;1;Ph;Pl;Ps` — set register N to DEC HLS triple.
+    /// H is 0-360, L is 0-100, S is 0-100. Decoder converts to RGB.
+    set_hls: struct { idx: u8, h: u16, l: u8, s: u8 },
+};
+
 /// A fully-parsed sixel image command. Output of the parser, input
-/// to the decoder (future commit).
+/// to the decoder.
 ///
-/// Ownership: two heap-allocated slices are released by `deinit`.
-/// We carry the allocator on the struct rather than using an arena
-/// because there are only two slices and a `Command.deinit()` is
-/// easier to chain into the existing `dcs.Command.deinit` switch arm
-/// than an arena handle.
+/// Ownership: one heap-allocated slice released by `deinit`. We carry
+/// the allocator on the struct rather than using an arena because
+/// `Command.deinit()` chains cleanly into the existing
+/// `dcs.Command.deinit` switch arm without an arena handle.
 pub const Command = struct {
-    /// Allocator that owns palette_ops and paint_ops slices.
-    /// Set by Parser.finalize; freed by deinit.
+    /// Allocator that owns the ops slice. Set by Parser.finalize;
+    /// freed by deinit.
     alloc: std.mem.Allocator,
 
     /// Raster attributes (geometry, aspect ratio). May be defaulted
     /// if the sender omitted the `"` prelude.
     raster: Raster,
 
-    /// Palette register set operations, in source order.
-    palette_ops: []const PaletteOp,
-
-    /// Paint operations (sixel bytes, color selects, CR, NL), in
-    /// source order.
-    paint_ops: []const PaintOp,
+    /// All operations in source order. Paint and palette ops mixed,
+    /// applied by the decoder in stream order so mid-stream palette
+    /// mutation has the correct effect.
+    ops: []const Op,
 
     /// The `Pa;Pb;Ph` parameters from the DCS introducer
     /// (`ESC P Pa;Pb;Ph q`). All optional; null when omitted.
@@ -33,8 +57,7 @@ pub const Command = struct {
     intro_params: [3]?u16,
 
     pub fn deinit(self: *Command) void {
-        self.alloc.free(self.palette_ops);
-        self.alloc.free(self.paint_ops);
+        self.alloc.free(self.ops);
     }
 };
 
@@ -51,37 +74,12 @@ pub const Raster = struct {
     declared_height: u16 = 0,
 };
 
-pub const PaintOp = union(enum) {
-    /// A sixel data byte (?..~ in source), optionally run-length-repeated.
-    /// `byte` is the raw character; the decoder maps it to 6 vertical pixels.
-    /// `count` is u16 because the `!N` run-length is unbounded in the
-    /// DEC spec — u8 would clip common encoder output, u32 wastes
-    /// memory in the op stream. The parser saturates at u16 max.
-    sixel: struct { byte: u8, count: u16 },
-    /// Select color register `idx` as the current paint color.
-    select_color: u8,
-    /// `$` — return paint cursor to leftmost column.
-    carriage_return,
-    /// `-` — advance paint cursor down 6 pixels, reset to leftmost column.
-    next_line,
-};
-
-pub const PaletteOp = union(enum) {
-    /// `#N;2;Pr;Pg;Pb` — set register N to RGB triple.
-    /// Values normalized to 0-255 from the source 0-100 range.
-    set_rgb: struct { idx: u8, r: u8, g: u8, b: u8 },
-    /// `#N;1;Ph;Pl;Ps` — set register N to DEC HLS triple.
-    /// H is 0-360, L is 0-100, S is 0-100. Decoder converts to RGB.
-    set_hls: struct { idx: u8, h: u16, l: u8, s: u8 },
-};
-
-test "Command: deinit frees slices" {
+test "Command: deinit frees ops slice" {
     const alloc = testing.allocator;
     var cmd = Command{
         .alloc = alloc,
         .raster = .{},
-        .palette_ops = try alloc.alloc(PaletteOp, 2),
-        .paint_ops = try alloc.alloc(PaintOp, 3),
+        .ops = try alloc.alloc(Op, 3),
         .intro_params = .{ null, null, null },
     };
     cmd.deinit();
@@ -96,14 +94,20 @@ test "Raster: defaults match spec" {
     try testing.expectEqual(@as(u16, 0), r.declared_height);
 }
 
-test "PaintOp: sixel variant carries byte and count" {
-    const op = PaintOp{ .sixel = .{ .byte = '?', .count = 1 } };
+test "Op: sixel variant carries byte and count" {
+    const op = Op{ .sixel = .{ .byte = '?', .count = 1 } };
     try testing.expectEqual(@as(u8, '?'), op.sixel.byte);
     try testing.expectEqual(@as(u16, 1), op.sixel.count);
 }
 
-test "PaletteOp: set_rgb variant carries normalized values" {
-    const op = PaletteOp{ .set_rgb = .{ .idx = 0, .r = 255, .g = 128, .b = 0 } };
+test "Op: set_rgb variant carries values" {
+    const op = Op{ .set_rgb = .{ .idx = 0, .r = 100, .g = 50, .b = 0 } };
     try testing.expectEqual(@as(u8, 0), op.set_rgb.idx);
-    try testing.expectEqual(@as(u8, 255), op.set_rgb.r);
+    try testing.expectEqual(@as(u8, 100), op.set_rgb.r);
+}
+
+test "Op: set_hls variant carries values with u16 hue" {
+    const op = Op{ .set_hls = .{ .idx = 1, .h = 240, .l = 50, .s = 100 } };
+    try testing.expectEqual(@as(u16, 240), op.set_hls.h);
+    try testing.expectEqual(@as(u8, 50), op.set_hls.l);
 }
