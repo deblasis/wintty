@@ -59,11 +59,24 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         IconSpec.AutoForExe a => ExtractExeIconAsPng(a.ExePath),
         // Unknown distros fall back to the legacy flat wsl.png; a generic
         // tux block is preferable to nothing when we can't pick a brand.
-        IconSpec.AutoForWslDistro w => DistroBrandKey(w.DistroName) is { } k
+        // Empty distro name (bare `wsl.exe` with no -d flag) consults the
+        // registry for the user's default distro before falling back.
+        IconSpec.AutoForWslDistro w => DistroBrandKey(EffectiveDistroName(w.DistroName)) is { } k
             ? ReadBrandedOrDefault(k, 32)
             : ReadBundledOrDefault("wsl"),
         _ => ReadBundledOrDefault(DefaultBundledKey),
     };
+
+    // For bare `wsl.exe` (no -d), the active-shell tracker emits
+    // AutoForWslDistro("") and we should pick the brand of whichever
+    // distro WSL would actually launch. The registry default is the
+    // best signal we have without spawning a probe process.
+    private static string EffectiveDistroName(string distroName)
+    {
+        if (!string.IsNullOrEmpty(distroName)) return distroName;
+        if (!OperatingSystem.IsWindows()) return distroName;
+        return WslDefaultDistro.Resolve() ?? distroName;
+    }
 
     private static string? DistroBrandKey(string distroName)
     {
@@ -156,7 +169,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
             IconSpec.Mdl2Token m => "mdl2:" + m.CodePoint.ToString("x"),
             IconSpec.BundledKey b => "bundled-v2:" + b.Key,
             IconSpec.AutoForExe a => "exe:" + a.ExePath,
-            IconSpec.AutoForWslDistro w => "wsl-distro-v2:" + (DistroBrandKey(w.DistroName) ?? "wsl") + ":" + w.DistroName,
+            IconSpec.AutoForWslDistro w => "wsl-distro-v2:" + (DistroBrandKey(EffectiveDistroName(w.DistroName)) ?? "wsl") + ":" + EffectiveDistroName(w.DistroName),
             _ => "unknown",
         };
         var mtime = MtimeTokenFor(spec);
