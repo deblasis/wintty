@@ -673,3 +673,114 @@ test "decoder: P3 mode falls back to ctx.bg without a declared bg" {
         try testing.expectEqual(@as(u8, 200), img.rgba[off + 2]);
     }
 }
+
+// ---- Golden multi-feature compositions ----
+
+test "decoder: 2-stripe palette switch produces alternating columns" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 100, .b = 100 } }, // white
+        .{ .sixel = .{ .byte = '~', .count = 1 } }, // col 0: black (default)
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } }, // col 1: white
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 2), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+    // Col 0 = black, col 1 = white.
+    try testing.expectEqual(@as(u8, 0), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[4]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[5]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[6]);
+}
+
+test "decoder: partial-bit sixel paints only y=0 and y=5" {
+    // '`' = 0x60. 0x60 - '?' = 0x21 = 0b100001 (bits 0 and 5 set).
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '`', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 200, .g = 200, .b = 200, .a = 255 },
+    });
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 6), img.height);
+    try testing.expectEqual(@as(u8, 0), img.rgba[0]); // y=0 black
+    try testing.expectEqual(@as(u8, 200), img.rgba[4]); // y=1 gray
+    try testing.expectEqual(@as(u8, 200), img.rgba[8]); // y=2 gray
+    try testing.expectEqual(@as(u8, 200), img.rgba[12]); // y=3 gray
+    try testing.expectEqual(@as(u8, 200), img.rgba[16]); // y=4 gray
+    try testing.expectEqual(@as(u8, 0), img.rgba[20]); // y=5 black
+}
+
+test "decoder: two-row CR/NL composition" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .set_rgb = .{ .idx = 2, .r = 0, .g = 0, .b = 100 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } }, // row 0 red
+        .{ .next_line = {} },
+        .{ .select_color = 2 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } }, // row 1 blue
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 1), img.width);
+    try testing.expectEqual(@as(u32, 12), img.height);
+    for (0..6) |y| {
+        try testing.expectEqual(@as(u8, 255), img.rgba[y * 4]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[y * 4 + 2]);
+    }
+    for (6..12) |y| {
+        try testing.expectEqual(@as(u8, 0), img.rgba[y * 4]);
+        try testing.expectEqual(@as(u8, 255), img.rgba[y * 4 + 2]);
+    }
+}
+
+test "decoder: HLS palette entry produces correct color end-to-end" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_hls = .{ .idx = 1, .h = 120, .l = 50, .s = 100 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    // DEC red (H=120 L=50 S=100): RGB (255, 0, 0).
+    try testing.expectEqual(@as(u8, 255), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[1]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[2]);
+}
