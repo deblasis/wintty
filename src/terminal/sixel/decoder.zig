@@ -39,6 +39,25 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Background-pixel mode from the DCS introducer Pb parameter.
+const BgMode = enum { p1, p2, p3 };
+
+/// Decode the background-pixel mode from the DCS introducer Pb
+/// parameter (`ESC P Pa;Pb;Ph q`):
+///   Pb=0 (or missing) → P1: unpainted pixels show current bg color
+///   Pb=1              → P2: unpainted pixels are transparent (alpha=0)
+///   Pb=2              → P3: unpainted pixels show the raster-declared
+///                            bg from the device-attributes register
+/// Unknown Pb values fall back to P1.
+fn decodeBgMode(intro_params: [3]?u16) BgMode {
+    const pb = intro_params[1] orelse 0;
+    return switch (pb) {
+        2 => .p3,
+        1 => .p2,
+        else => .p1,
+    };
+}
+
 /// Decode a parsed sixel Command into an RGBA Image. The Palette
 /// starts in its DEC default state; set_rgb/set_hls ops in the
 /// stream mutate it as encountered.
@@ -80,9 +99,19 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
 
     var rgba = try alloc.alloc(u8, total_bytes);
     errdefer alloc.free(rgba);
-    // Initial fill: P1 (default) uses ctx.bg; P2 and P3 modes land
-    // in later commits.
-    fillBg(rgba, ctx.bg);
+
+    const bg_mode = decodeBgMode(cmd.intro_params);
+    switch (bg_mode) {
+        .p1 => fillBg(rgba, ctx.bg),
+        .p2 => fillBg(rgba, .{ .r = 0, .g = 0, .b = 0, .a = 0 }),
+        .p3 => {
+            // True P3 expects a raster-declared bg from a DEC
+            // device-attributes register; we don't carry that field
+            // yet (PR 3 territory). Fall back to ctx.bg so P3
+            // streams render without crashing.
+            fillBg(rgba, ctx.bg);
+        },
+    }
 
     var palette = Palette.init();
     var paint_x: u32 = 0;
@@ -106,7 +135,10 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
                     rgba[off] = color.r;
                     rgba[off + 1] = color.g;
                     rgba[off + 2] = color.b;
-                    rgba[off + 3] = color.a;
+                    // In P2 mode the palette entry's alpha is ignored;
+                    // any painted pixel becomes fully opaque. P1/P3
+                    // honor the palette alpha (defaults to 255).
+                    rgba[off + 3] = if (bg_mode == .p2) 255 else color.a;
                 }
             }
             paint_x +|= s.count;
@@ -491,4 +523,153 @@ test "decoder: raster larger than paint bounds doesn't expand output" {
     defer img.deinit();
     try testing.expectEqual(@as(u32, 1), img.width);
     try testing.expectEqual(@as(u32, 6), img.height);
+}
+
+// ---- BgMode dispatch + P1/P2/P3 modes ----
+
+test "decoder: BgMode helper recognizes Pb correctly" {
+    try testing.expectEqual(BgMode.p1, decodeBgMode(.{ null, null, null }));
+    try testing.expectEqual(BgMode.p1, decodeBgMode(.{ null, 0, null }));
+    try testing.expectEqual(BgMode.p2, decodeBgMode(.{ null, 1, null }));
+    try testing.expectEqual(BgMode.p3, decodeBgMode(.{ null, 2, null }));
+    try testing.expectEqual(BgMode.p1, decodeBgMode(.{ null, 99, null }));
+}
+
+test "decoder: P1 mode (default) unpainted pixels show ctx.bg" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null }, // missing Pb = P1
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 255, .g = 165, .b = 0, .a = 255 }, // orange
+    });
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 255), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 165), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 2]);
+        try testing.expectEqual(@as(u8, 255), img.rgba[off + 3]);
+    }
+}
+
+test "decoder: P1 explicit (Pb=0) matches default behavior" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, 0, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 255, .g = 165, .b = 0, .a = 255 },
+    });
+    defer img.deinit();
+    try testing.expectEqual(@as(u8, 255), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 165), img.rgba[1]);
+}
+
+test "decoder: P2 mode unpainted pixels have alpha=0" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, 1, null }, // P2
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 255, .g = 0, .b = 0, .a = 255 }, // red bg ignored in P2
+    });
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 3]); // alpha
+    }
+}
+
+test "decoder: P2 mode painted pixels have alpha=255" {
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '~', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, 1, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 255), img.rgba[off + 3]);
+    }
+}
+
+test "decoder: P2 mode preserves painted pixels through subsequent zero-pattern" {
+    // Paint red, $ (CR), then ? (no bits set) at the same position.
+    // The bit-check in the walk loop already prevents zero-pattern
+    // from writing, so red pixels survive.
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 1 } },
+        .{ .carriage_return = {} },
+        .{ .sixel = .{ .byte = '?', .count = 1 } },
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, 1, null }, // P2
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 255), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 0), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 255), img.rgba[off + 3]);
+    }
+}
+
+test "decoder: P3 mode falls back to ctx.bg without a declared bg" {
+    // Our Raster doesn't carry a declared bg color (the DEC spec
+    // stores it in a device-attributes register that's outside this
+    // PR's scope). For now P3 mirrors P1.
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{.{ .sixel = .{ .byte = '?', .count = 1 } }};
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{},
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, 2, null }, // P3
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{
+        .bg = .{ .r = 100, .g = 50, .b = 200, .a = 255 },
+    });
+    defer img.deinit();
+    for (0..6) |y| {
+        const off = y * 4;
+        try testing.expectEqual(@as(u8, 100), img.rgba[off]);
+        try testing.expectEqual(@as(u8, 50), img.rgba[off + 1]);
+        try testing.expectEqual(@as(u8, 200), img.rgba[off + 2]);
+    }
 }
