@@ -3393,7 +3393,7 @@ test "device attributes: primary DA" {
     defer s.deinit();
 
     s.nextSlice("\x1B[c");
-    try testing.expectEqualStrings("\x1b[?62;22c", S.written.?);
+    try testing.expectEqualStrings("\x1b[?62;4;22c", S.written.?);
 }
 
 test "device attributes: secondary DA" {
