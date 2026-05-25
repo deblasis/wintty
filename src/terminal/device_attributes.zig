@@ -42,8 +42,12 @@ pub const Primary = struct {
     /// Conformance level sent as the first parameter.
     conformance_level: ConformanceLevel = .vt220,
 
-    /// Optional feature attributes.
-    features: []const Feature = &.{.ansi_color},
+    /// Optional feature attributes. Defaults match what the
+    /// stream_handler DA1 response advertises (sixel + ansi_color).
+    /// Note: the live response in termio.stream_handler is hard-
+    /// coded for cheap dispatch; this struct is the spec-correct
+    /// shape and stays in sync with that hardcoded string.
+    features: []const Feature = &.{ .sixel, .ansi_color },
 
     /// DA1 feature attribute codes.
     pub const Feature = enum(u16) {
@@ -172,10 +176,21 @@ pub const DeviceType = enum(u16) {
 };
 
 test "primary default" {
+    // Defaults advertise sixel (;4) and ansi_color (;22). Matches the
+    // hardcoded string in termio.stream_handler.deviceAttributes.
     var buf: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try (Primary{}).encode(&writer);
-    try testing.expectEqualStrings("\x1b[?62;22c", writer.buffered());
+    try testing.expectEqualStrings("\x1b[?62;4;22c", writer.buffered());
+}
+
+test "primary sixel feature bit is advertised" {
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try (Primary{}).encode(&writer);
+    // Apps that probe DA1 to decide whether to emit sixel rely on
+    // the ;4 bit being present. Lock the contract.
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";4") != null);
 }
 
 test "primary with clipboard" {
