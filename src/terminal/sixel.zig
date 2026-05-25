@@ -16,6 +16,7 @@ pub const Palette = @import("sixel/palette.zig").Palette;
 pub const decode = @import("sixel/decoder.zig").decode;
 pub const Image = @import("sixel/decoder.zig").Image;
 pub const DecodeCtx = @import("sixel/decoder.zig").DecodeCtx;
+pub const synthKittyCommand = @import("sixel/image.zig").synthKittyCommand;
 
 test {
     @import("std").testing.refAllDecls(@This());
