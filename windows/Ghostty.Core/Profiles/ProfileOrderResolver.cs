@@ -98,13 +98,63 @@ public static class ProfileOrderResolver
             Name: def.Name,
             Command: def.Command,
             WorkingDirectory: def.WorkingDirectory,
-            Icon: def.Icon ?? new IconSpec.BundledKey("default"),
+            Icon: ResolveFallbackIcon(def),
             TabTitle: def.TabTitle ?? def.Name,
             Visuals: def.Visuals,
             ProbeId: def.ProbeId,
             OrderIndex: orderIndex,
             IsDefault: isDefault,
             TabIconTracksForeground: def.TabIconTracksForeground);
+
+    // When a profile has no explicit icon, derive one from the command's
+    // exe basename via ProcessIconTable so user-defined profiles like
+    // `command = pwsh.exe` pick up the pwsh brand glyph instead of the
+    // generic wintty default.
+    private static IconSpec ResolveFallbackIcon(ProfileDef def)
+    {
+        if (def.Icon is not null) return def.Icon;
+
+        var basename = TryGetCommandBasename(def.Command);
+        if (basename is not null)
+        {
+            var mapped = ProcessIconTable.TryMap(basename, def.Command);
+            if (mapped is not null) return mapped;
+        }
+        return new IconSpec.BundledKey("default");
+    }
+
+    // Hoisted so each call doesn't allocate a fresh char[] for IndexOfAny.
+    private static readonly char[] s_whitespace = [' ', '\t'];
+
+    private static string? TryGetCommandBasename(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        // Strip leading whitespace + outer quotes; take the first token.
+        // Tokens after the first are intentionally ignored: the basename
+        // of argv[0] is what runs as the foreground process at exec time.
+        var trimmed = command.TrimStart();
+        string first;
+        if (trimmed.StartsWith('"'))
+        {
+            var endQuote = trimmed.IndexOf('"', 1);
+            if (endQuote < 0) return null;
+            first = trimmed.Substring(1, endQuote - 1);
+        }
+        else
+        {
+            var space = trimmed.IndexOfAny(s_whitespace);
+            first = space < 0 ? trimmed : trimmed.Substring(0, space);
+        }
+        if (first.Length == 0) return null;
+        // Path.GetFileName handles both forward and backward slashes.
+        var name = System.IO.Path.GetFileName(first);
+        if (string.IsNullOrEmpty(name)) return null;
+        // ProcessIconTable keys end in .exe; treat a bare `command = pwsh`
+        // (no extension) as if the user wrote `pwsh.exe`. This is the
+        // PATH-resolution case where the shell would append .exe anyway.
+        if (!name.Contains('.')) name += ".exe";
+        return name;
+    }
 
     private static string? ResolveDefault(
         string? requested,
