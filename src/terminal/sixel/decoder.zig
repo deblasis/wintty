@@ -8,8 +8,6 @@ const Palette = palette_mod.Palette;
 const Rgba = palette_mod.Rgba;
 const raster = @import("raster.zig");
 
-const log = std.log.scoped(.terminal_sixel);
-
 /// A decoded sixel image. Owns its RGBA buffer; caller releases via
 /// `deinit`. Layout is row-major, 4 bytes per pixel (R, G, B, A).
 pub const Image = struct {
@@ -48,7 +46,10 @@ const BgMode = enum { p1, p2, p3 };
 ///   Pb=1              → P2: unpainted pixels are transparent (alpha=0)
 ///   Pb=2              → P3: unpainted pixels show the raster-declared
 ///                            bg from the device-attributes register
-/// Unknown Pb values fall back to P1.
+///
+/// Unknown Pb values fall back to P1. xterm and libsixel apply the
+/// same "treat unknown as P1" default; the spec doesn't require it
+/// but no real-world emitter relies on a stricter behavior.
 fn decodeBgMode(intro_params: [3]?u16) BgMode {
     const pb = intro_params[1] orelse 0;
     return switch (pb) {
@@ -66,14 +67,7 @@ fn decodeBgMode(intro_params: [3]?u16) BgMode {
 /// allocating, second pass allocates the RGBA buffer and walks the
 /// op stream painting each sixel byte's 6-pixel vertical column.
 pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
-    if (cmd.ops.len == 0) {
-        return .{
-            .alloc = alloc,
-            .rgba = try alloc.alloc(u8, 0),
-            .width = 0,
-            .height = 0,
-        };
-    }
+    if (cmd.ops.len == 0) return emptyImage(alloc);
 
     const bounds = measureBounds(cmd);
     const w: u32 = if (cmd.raster.declared_width > 0)
@@ -85,14 +79,7 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
     else
         bounds.h;
 
-    if (w == 0 or h == 0) {
-        return .{
-            .alloc = alloc,
-            .rgba = try alloc.alloc(u8, 0),
-            .width = 0,
-            .height = 0,
-        };
-    }
+    if (w == 0 or h == 0) return emptyImage(alloc);
 
     const total_bytes: usize = @as(usize, w) * @as(usize, h) * 4;
     if (total_bytes > ctx.budget) return error.SixelTooLarge;
@@ -106,9 +93,10 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
         .p2 => fillBg(rgba, .{ .r = 0, .g = 0, .b = 0, .a = 0 }),
         .p3 => {
             // True P3 expects a raster-declared bg from a DEC
-            // device-attributes register; we don't carry that field
-            // yet (PR 3 territory). Fall back to ctx.bg so P3
-            // streams render without crashing.
+            // device-attributes register; Raster doesn't carry that
+            // field yet. Fall back to ctx.bg so P3 streams render
+            // without crashing. TODO: thread the declared bg
+            // through once Raster grows the field.
             fillBg(rgba, ctx.bg);
         },
     }
@@ -141,7 +129,14 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
                     rgba[off + 3] = if (bg_mode == .p2) 255 else color.a;
                 }
             }
-            paint_x +|= s.count;
+            // Advance only by the columns actually painted, capped
+            // at the canvas width. Without the clamp, a `!10 ~` on
+            // a 5-wide raster would leave paint_x=10 and silently
+            // discard a subsequent paint at "col 11"; with the clamp
+            // it stays at the right edge so a following `$` + paint
+            // restarts correctly.
+            const painted: u32 = @min(s.count, w -| paint_x);
+            paint_x +|= painted;
         },
         .select_color => |idx| current_color = idx,
         .carriage_return => paint_x = 0,
@@ -158,6 +153,17 @@ pub fn decode(alloc: Allocator, cmd: Command, ctx: DecodeCtx) Error!Image {
         .rgba = rgba,
         .width = w,
         .height = h,
+    };
+}
+
+/// Build a 0x0 Image without allocating. Avoids the inconsistent
+/// behavior of `alloc.alloc(u8, 0)` across allocators.
+fn emptyImage(alloc: Allocator) Image {
+    return .{
+        .alloc = alloc,
+        .rgba = &[_]u8{},
+        .width = 0,
+        .height = 0,
     };
 }
 
@@ -506,6 +512,40 @@ test "decoder: raster.declared_height clamps output height" {
     defer img.deinit();
     try testing.expectEqual(@as(u32, 1), img.width);
     try testing.expectEqual(@as(u32, 6), img.height);
+}
+
+test "decoder: paint_x clamps after raster-truncated paint" {
+    // Regression: a 10-wide run-length on a 5-wide raster used to
+    // saturate paint_x to 10, so a subsequent $-then-paint started
+    // at the wrong column relative to a clamped width.
+    const alloc = testing.allocator;
+    var ops_buf = [_]Op{
+        .{ .set_rgb = .{ .idx = 1, .r = 100, .g = 0, .b = 0 } },
+        .{ .select_color = 1 },
+        .{ .sixel = .{ .byte = '~', .count = 10 } }, // would-be 10-wide red
+        .{ .carriage_return = {} },
+        .{ .set_rgb = .{ .idx = 1, .r = 0, .g = 100, .b = 0 } },
+        .{ .sixel = .{ .byte = '~', .count = 2 } }, // 2-wide green
+    };
+    var c = Command{
+        .alloc = alloc,
+        .raster = .{ .declared_width = 5, .declared_height = 6 },
+        .ops = try alloc.dupe(Op, &ops_buf),
+        .intro_params = .{ null, null, null },
+    };
+    defer c.deinit();
+
+    var img = try decode(alloc, c, .{});
+    defer img.deinit();
+    try testing.expectEqual(@as(u32, 5), img.width);
+    // Col 0-1 should be green (overpainted), cols 2-4 red.
+    try testing.expectEqual(@as(u8, 0), img.rgba[0]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[1]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[4]);
+    try testing.expectEqual(@as(u8, 255), img.rgba[5]);
+    // Col 2 should still be red (not overpainted).
+    try testing.expectEqual(@as(u8, 255), img.rgba[8]);
+    try testing.expectEqual(@as(u8, 0), img.rgba[9]);
 }
 
 test "decoder: raster larger than paint bounds doesn't expand output" {
