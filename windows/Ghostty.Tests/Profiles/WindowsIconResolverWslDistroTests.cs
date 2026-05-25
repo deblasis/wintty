@@ -38,4 +38,26 @@ public sealed class WindowsIconResolverWslDistroTests
         var bytes = await resolver.ResolveAsync(new IconSpec.AutoForWslDistro("Nixos"), CancellationToken.None);
         Assert.NotEmpty(bytes);
     }
+
+    [Fact]
+    public async System.Threading.Tasks.Task Resolve_WslDistro_EmptyDistro_FallsBackThroughResolver()
+    {
+        // When distro name is empty, the resolver consults the registry for
+        // the default distro. The test machine may or may not have WSL
+        // configured: if it does, we get the matching brand; if not, we
+        // fall back to the legacy wsl.png. Either way the result is a
+        // non-empty PNG, which is the user-visible contract.
+        var fs = new FakeFileSystem();
+        fs.SetKnownFolder(KnownFolderId.LocalAppData, @"C:\cache");
+        var resolver = new WindowsIconResolver(fs);
+
+        var bytes = await resolver.ResolveAsync(
+            new IconSpec.AutoForWslDistro(string.Empty),
+            CancellationToken.None);
+
+        Assert.NotEmpty(bytes);
+        // PNG signature: 89 50 4E 47.
+        Assert.Equal(0x89, bytes[0]);
+        Assert.Equal(0x50, bytes[1]);
+    }
 }
