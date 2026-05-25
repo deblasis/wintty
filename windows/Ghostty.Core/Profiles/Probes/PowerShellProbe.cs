@@ -43,7 +43,7 @@ internal sealed class PowerShellProbe(IFileSystem fs, IProcessRunner runner) : I
                 Name: "Windows PowerShell",
                 Command: ProbeUtil.QuoteIfNeeded(winps),
                 ProbeId: ProbeId,
-                Icon: new IconSpec.BundledKey("powershell")));
+                Icon: new IconSpec.BundledKey("pwsh")));
         }
 
         return list;

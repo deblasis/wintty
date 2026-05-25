@@ -1008,32 +1008,98 @@ public sealed partial class MainWindow : Window
     /// populated once libghostty has spawned the surface's shell. Hook
     /// PaneHost.LeafFocused (the first fire lands from PaneHost.Loaded,
     /// at which point the TerminalControl's libghostty surface exists)
-    /// and query <c>ghostty_surface_foreground_pid</c>. Re-fires on
-    /// every focus change so split/zoom retains the tab's root pid;
-    /// the assignment is idempotent when the value is unchanged.
+    /// and query <c>ghostty_surface_foreground_pid</c>. The first leaf's
+    /// surface drives the tracker root; we keep the first-spawned shell
+    /// as the lineage the user originally opened (e.g. a "Bash" tab
+    /// whose split panes spawn PowerShell shouldn't re-root the icon
+    /// onto pwsh).
+    ///
+    /// Race: libghostty's <c>ghostty_surface_foreground_pid</c> returns
+    /// 0 between surface init and the Termio thread completing
+    /// <c>CreateProcessW</c> for the spawned shell. LeafFocused is a
+    /// one-shot snapshot (focus does not change again on a cold start
+    /// with a single pane), so a single failed query would leave the
+    /// tab pid-less forever. We absorb the race by polling
+    /// <c>TryGetShellPid</c> every 500 ms for up to 10 s once a leaf
+    /// has been focused, stopping on the first non-null result.
     /// </summary>
+    // 500 ms tick × 20 ticks = 10 s budget. Surfaced as named constants so
+    // the interval / budget relationship is legible at a glance and a future
+    // adjustment doesn't have to keep them in sync mentally.
+    private static readonly TimeSpan ShellPidPollInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan ShellPidPollBudget = TimeSpan.FromSeconds(10);
+
     private void AttachProcessTracking(TabModel tab)
     {
         ((App)Application.Current).RegisterTabForProcessTracking(tab);
 
-        // First leaf's surface drives the pid. If the tab grows splits
-        // later, we keep the first-spawned shell as the tracker root
-        // because that is the lineage the user originally opened (e.g.
-        // a "Bash" tab whose split panes spawned PowerShell shouldn't
-        // re-root the icon onto pwsh). Re-querying on every LeafFocused
-        // would race: by the time we sample, the pid we'd grab could be
-        // the wrong leaf's. Instead we snapshot exactly once.
-        void OnLeafFocused(object? _, Ghostty.Core.Panes.LeafPane leaf)
+        Microsoft.UI.Dispatching.DispatcherQueueTimer? pidPoll = null;
+        int pollTicks = 0;
+        int maxPollTicks = (int)(ShellPidPollBudget.TotalMilliseconds / ShellPidPollInterval.TotalMilliseconds);
+
+        void TryAssignPid(Ghostty.Core.Panes.LeafPane leaf)
         {
             if (tab.ShellPid is not null) return;
             var pid = leaf.Terminal().TryGetShellPid();
             if (pid is null) return;
             tab.ShellPid = pid;
+            // Stop polling once we have it.
+            pidPoll?.Stop();
+            pidPoll = null;
+        }
+
+        void StartPollingFor(Ghostty.Core.Panes.LeafPane leaf)
+        {
+            if (pidPoll is not null) return;       // already polling
+            if (tab.ShellPid is not null) return;  // race-won by the immediate path
+            pidPoll = DispatcherQueue.CreateTimer();
+            pidPoll.Interval = ShellPidPollInterval;
+            pidPoll.Tick += (_, _) =>
+            {
+                pollTicks++;
+                TryAssignPid(leaf);
+                if (tab.ShellPid is not null)
+                {
+                    pidPoll?.Stop();
+                    pidPoll = null;
+                    return;
+                }
+                if (pollTicks >= maxPollTicks)
+                {
+                    // Budget exhausted without a pid. Most likely cause is a
+                    // libghostty regression where ghostty_surface_foreground_pid
+                    // never publishes a non-zero value, leaving the active-shell
+                    // icon stuck on the profile glyph. Logged so the regression
+                    // is visible without attaching a debugger.
+                    _logger.LogWarning(
+                        "Active-shell tracker: shell pid never resolved for tab {TabId} within {BudgetMs} ms",
+                        tab.Id, (int)ShellPidPollBudget.TotalMilliseconds);
+                    pidPoll?.Stop();
+                    pidPoll = null;
+                }
+            };
+            pidPoll.Start();
+        }
+
+        void OnLeafFocused(object? _, Ghostty.Core.Panes.LeafPane leaf)
+        {
+            // Immediate attempt first (fast path: libghostty already done
+            // with CreateProcessW by the time the leaf gains focus).
+            TryAssignPid(leaf);
+            // If still null, start (or keep) polling until libghostty
+            // catches up or we hit the 10 s budget.
+            if (tab.ShellPid is null) StartPollingFor(leaf);
         }
         tab.PaneHost.LeafFocused += OnLeafFocused;
         // Stash the unsubscriber so DetachProcessTracking can walk back
-        // the LeafFocused handler without a side dictionary.
-        _processTrackingDetach[tab] = () => tab.PaneHost.LeafFocused -= OnLeafFocused;
+        // the LeafFocused handler without a side dictionary, and stop
+        // any in-flight poll when the tab is removed before we resolved.
+        _processTrackingDetach[tab] = () =>
+        {
+            tab.PaneHost.LeafFocused -= OnLeafFocused;
+            pidPoll?.Stop();
+            pidPoll = null;
+        };
     }
 
     private void DetachProcessTracking(TabModel tab)
