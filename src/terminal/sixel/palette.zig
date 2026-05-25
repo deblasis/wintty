@@ -60,6 +60,21 @@ pub const Palette = struct {
         };
     }
 
+    /// Set register `idx` from a DEC HLS triple.
+    ///
+    /// DEC HLS conventions:
+    ///   H: 0-359 degrees canonical; taken mod 360 (so H=360 wraps to 0).
+    ///      Hue 0=blue, 120=red, 240=green — rotated 120° from standard
+    ///      HSL where 0=red.
+    ///   L: 0-100, where 0=black, 50=full chroma, 100=white
+    ///   S: 0-100, where 0=grayscale
+    ///
+    /// Source: DEC VT3xx Programmer Reference, libsixel reference impl.
+    pub fn setHls(self: *Palette, idx: u8, h: u16, l: u8, s: u8) void {
+        self.entries[idx] = hlsToRgba(h, l, s);
+    }
+
+    /// Look up register `idx`. u8 indexing guarantees in-range access.
     pub fn query(self: Palette, idx: u8) Rgba {
         return self.entries[idx];
     }
@@ -73,6 +88,55 @@ pub const Palette = struct {
 fn scale100to255(v: u8) u8 {
     const clamped = if (v > 100) 100 else v;
     return @intCast((@as(u32, clamped) * 255 + 50) / 100);
+}
+
+/// Convert a DEC HLS triple to RGBA. The DEC hue space is rotated
+/// 120° from standard HSL so that hue=0 maps to DEC's blue. L=0
+/// always returns black, L=100 always returns white, S=0 returns
+/// grayscale at the requested L.
+fn hlsToRgba(h_in: u16, l: u8, s: u8) Rgba {
+    const h_mod: u16 = h_in % 360;
+    const l_c: u32 = @min(l, 100);
+    const s_c: u32 = @min(s, 100);
+
+    if (l_c == 0) return .{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    if (l_c == 100) return .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+    if (s_c == 0) {
+        const v = scale100to255(@intCast(l_c));
+        return .{ .r = v, .g = v, .b = v, .a = 255 };
+    }
+
+    // Rotate DEC hue into standard HSL coordinate space. DEC hue 0
+    // is blue; standard HSL blue lives at 240°. Adding 240 (mod 360)
+    // maps DEC→HSL: 0→240 (blue), 120→0 (red), 240→120 (green).
+    const h_std: f64 = @floatFromInt((h_mod + 240) % 360);
+    const l_f: f64 = @as(f64, @floatFromInt(l_c)) / 100.0;
+    const s_f: f64 = @as(f64, @floatFromInt(s_c)) / 100.0;
+
+    const c: f64 = (1.0 - @abs(2.0 * l_f - 1.0)) * s_f;
+    const h_sector: f64 = h_std / 60.0;
+    const x: f64 = c * (1.0 - @abs(@mod(h_sector, 2.0) - 1.0));
+    const m: f64 = l_f - c / 2.0;
+
+    var r1: f64 = 0;
+    var g1: f64 = 0;
+    var b1: f64 = 0;
+    if (h_sector < 1) { r1 = c; g1 = x; b1 = 0; }
+    else if (h_sector < 2) { r1 = x; g1 = c; b1 = 0; }
+    else if (h_sector < 3) { r1 = 0; g1 = c; b1 = x; }
+    else if (h_sector < 4) { r1 = 0; g1 = x; b1 = c; }
+    else if (h_sector < 5) { r1 = x; g1 = 0; b1 = c; }
+    else { r1 = c; g1 = 0; b1 = x; }
+
+    // The L/S clamps above mean (r1+m)*255 etc. can't escape [0, 255]
+    // mathematically; the saturating min/max here is defensive against
+    // float-rounding spillover near the bounds.
+    return .{
+        .r = @intFromFloat(@max(0.0, @min(255.0, @round((r1 + m) * 255.0)))),
+        .g = @intFromFloat(@max(0.0, @min(255.0, @round((g1 + m) * 255.0)))),
+        .b = @intFromFloat(@max(0.0, @min(255.0, @round((b1 + m) * 255.0)))),
+        .a = 255,
+    };
 }
 
 test "palette: init populates DEC 16 defaults" {
@@ -112,4 +176,94 @@ test "palette: query returns set value" {
     try testing.expectEqual(@as(u8, 255), rgba.r);
     try testing.expectEqual(@as(u8, 255), rgba.g);
     try testing.expectEqual(@as(u8, 255), rgba.b);
+}
+
+test "palette: setHls H=0 L=0 S=0 is black" {
+    var p = Palette.init();
+    p.setHls(0, 0, 0, 0);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 0), c.r);
+    try testing.expectEqual(@as(u8, 0), c.g);
+    try testing.expectEqual(@as(u8, 0), c.b);
+}
+
+test "palette: setHls L=100 is white regardless of H,S" {
+    var p = Palette.init();
+    p.setHls(0, 180, 100, 100);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 255), c.r);
+    try testing.expectEqual(@as(u8, 255), c.g);
+    try testing.expectEqual(@as(u8, 255), c.b);
+}
+
+test "palette: setHls S=0 produces grayscale" {
+    var p = Palette.init();
+    p.setHls(0, 90, 50, 0);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 128), c.r);
+    try testing.expectEqual(@as(u8, 128), c.g);
+    try testing.expectEqual(@as(u8, 128), c.b);
+}
+
+test "palette: setHls H=0 L=50 S=100 is DEC blue" {
+    var p = Palette.init();
+    p.setHls(0, 0, 50, 100);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 0), c.r);
+    try testing.expectEqual(@as(u8, 0), c.g);
+    try testing.expectEqual(@as(u8, 255), c.b);
+}
+
+test "palette: setHls H=120 L=50 S=100 is DEC red" {
+    var p = Palette.init();
+    p.setHls(0, 120, 50, 100);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 255), c.r);
+    try testing.expectEqual(@as(u8, 0), c.g);
+    try testing.expectEqual(@as(u8, 0), c.b);
+}
+
+test "palette: setHls H=240 L=50 S=100 is DEC green" {
+    var p = Palette.init();
+    p.setHls(0, 240, 50, 100);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 0), c.r);
+    try testing.expectEqual(@as(u8, 255), c.g);
+    try testing.expectEqual(@as(u8, 0), c.b);
+}
+
+test "palette: setHls H=360 wraps to H=0" {
+    var p = Palette.init();
+    p.setHls(0, 360, 50, 100);
+    const c = p.query(0);
+    try testing.expectEqual(@as(u8, 0), c.r);
+    try testing.expectEqual(@as(u8, 0), c.g);
+    try testing.expectEqual(@as(u8, 255), c.b);
+}
+
+test "palette: setHls H=60 sits between DEC blue and red" {
+    // H=60 in DEC is halfway between blue (0) and red (120) — should
+    // produce a purple/magenta. Pins the rotation direction beyond the
+    // primary hues.
+    var p = Palette.init();
+    p.setHls(0, 60, 50, 100);
+    const c = p.query(0);
+    // Both red and blue channels active, green absent.
+    try testing.expect(c.r > 0);
+    try testing.expect(c.b > 0);
+    try testing.expectEqual(@as(u8, 0), c.g);
+}
+
+test "palette: setHls L=25 darker than L=50 at same hue" {
+    var p1 = Palette.init();
+    p1.setHls(0, 120, 50, 100);
+    const c1 = p1.query(0);
+
+    var p2 = Palette.init();
+    p2.setHls(0, 120, 25, 100);
+    const c2 = p2.query(0);
+
+    try testing.expect(c2.r < c1.r);
+    try testing.expectEqual(@as(u8, 0), c2.g);
+    try testing.expectEqual(@as(u8, 0), c2.b);
 }
