@@ -3,8 +3,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const cmd = @import("command.zig");
 const Command = cmd.Command;
-const PaintOp = cmd.PaintOp;
-const PaletteOp = cmd.PaletteOp;
+const Op = cmd.Op;
 const Raster = cmd.Raster;
 const raster = @import("raster.zig");
 
@@ -41,11 +40,14 @@ pub const Parser = struct {
     /// Accumulator for repeat-count digits (after `!`). Cleared when
     /// `!` is seen, applied when the next sixel byte arrives.
     /// Saturating add/multiply keep this clamped at u16::MAX, which
-    /// matches PaintOp.sixel.count's width.
+    /// matches Op.sixel.count's width.
     repeat_acc: u16,
 
-    paint_ops: std.ArrayListUnmanaged(PaintOp),
-    palette_ops: std.ArrayListUnmanaged(PaletteOp),
+    /// All paint and palette operations in source order. The decoder
+    /// applies them in stream order so mid-stream palette mutation
+    /// has the spec-correct effect (rather than all palette ops
+    /// applying as a separate pre-pass).
+    ops: std.ArrayListUnmanaged(Op),
 
     /// Working buffer for raster_attribs / color_def / repeat_count.
     accum: std.ArrayListUnmanaged(u8),
@@ -59,15 +61,13 @@ pub const Parser = struct {
             .raster = .{},
             .intro_params = intro_params,
             .repeat_acc = 0,
-            .paint_ops = .empty,
-            .palette_ops = .empty,
+            .ops = .empty,
             .accum = .empty,
         };
     }
 
     pub fn deinit(self: *Parser) void {
-        self.paint_ops.deinit(self.alloc);
-        self.palette_ops.deinit(self.alloc);
+        self.ops.deinit(self.alloc);
         self.accum.deinit(self.alloc);
     }
 
@@ -99,11 +99,11 @@ pub const Parser = struct {
                     self.state = .color_def;
                 },
                 '$' => {
-                    try self.paint_ops.append(self.alloc, .carriage_return);
+                    try self.ops.append(self.alloc, .carriage_return);
                     self.state = .data;
                 },
                 '-' => {
-                    try self.paint_ops.append(self.alloc, .next_line);
+                    try self.ops.append(self.alloc, .next_line);
                     self.state = .data;
                 },
                 '"' => {
@@ -184,7 +184,7 @@ pub const Parser = struct {
     }
 
     fn appendSixel(self: *Parser, byte: u8, count: u16) Allocator.Error!void {
-        try self.paint_ops.append(self.alloc, .{
+        try self.ops.append(self.alloc, .{
             .sixel = .{ .byte = byte, .count = count },
         });
         self.state = .data;
@@ -201,8 +201,7 @@ pub const Parser = struct {
         return .{
             .alloc = self.alloc,
             .raster = self.raster,
-            .palette_ops = try self.palette_ops.toOwnedSlice(self.alloc),
-            .paint_ops = try self.paint_ops.toOwnedSlice(self.alloc),
+            .ops = try self.ops.toOwnedSlice(self.alloc),
             .intro_params = self.intro_params,
         };
     }
@@ -224,7 +223,7 @@ pub const Parser = struct {
 
         // Selection form: bare "#N" with no further fields.
         const pu_str = it.next() orelse {
-            try self.paint_ops.append(self.alloc, .{ .select_color = idx });
+            try self.ops.append(self.alloc, .{ .select_color = idx });
             return;
         };
 
@@ -258,10 +257,10 @@ pub const Parser = struct {
         };
 
         switch (pu) {
-            1 => try self.palette_ops.append(self.alloc, .{
+            1 => try self.ops.append(self.alloc, .{
                 .set_hls = .{ .idx = idx, .h = a, .l = b, .s = c },
             }),
-            2 => try self.palette_ops.append(self.alloc, .{
+            2 => try self.ops.append(self.alloc, .{
                 .set_rgb = .{
                     .idx = idx,
                     // r is narrowed from u16, so we clamp explicitly to
@@ -319,8 +318,7 @@ test "sixel parser: empty finalize yields empty Command" {
     defer p.deinit();
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
-    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.ops.len);
 }
 
 test "sixel parser: intro params round-trip" {
@@ -339,10 +337,10 @@ test "sixel parser: single sixel byte appends count=1" {
     p.put('?');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .sixel);
-    try testing.expectEqual(@as(u8, '?'), c.paint_ops[0].sixel.byte);
-    try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expect(c.ops[0] == .sixel);
+    try testing.expectEqual(@as(u8, '?'), c.ops[0].sixel.byte);
+    try testing.expectEqual(@as(u16, 1), c.ops[0].sixel.count);
 }
 
 test "sixel parser: multiple sixel bytes append separately" {
@@ -351,8 +349,8 @@ test "sixel parser: multiple sixel bytes append separately" {
     for ("?@AB") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 4), c.paint_ops.len);
-    for (c.paint_ops, "?@AB") |op, expected| {
+    try testing.expectEqual(@as(usize, 4), c.ops.len);
+    for (c.ops, "?@AB") |op, expected| {
         try testing.expectEqual(@as(u8, expected), op.sixel.byte);
     }
 }
@@ -365,7 +363,7 @@ test "sixel parser: byte outside ?..~ in data state is ignored" {
     p.put('@');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
 }
 
 test "sixel parser: !3 ? produces count=3" {
@@ -374,9 +372,9 @@ test "sixel parser: !3 ? produces count=3" {
     for ("!3?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expectEqual(@as(u16, 3), c.paint_ops[0].sixel.count);
-    try testing.expectEqual(@as(u8, '?'), c.paint_ops[0].sixel.byte);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expectEqual(@as(u16, 3), c.ops[0].sixel.count);
+    try testing.expectEqual(@as(u8, '?'), c.ops[0].sixel.byte);
 }
 
 test "sixel parser: !65535 saturates at u16 max" {
@@ -385,7 +383,7 @@ test "sixel parser: !65535 saturates at u16 max" {
     for ("!65535~") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(u16, 65535), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(u16, 65535), c.ops[0].sixel.count);
 }
 
 test "sixel parser: !99999 saturates without overflow" {
@@ -395,7 +393,7 @@ test "sixel parser: !99999 saturates without overflow" {
     var c = try p.finalize();
     defer c.deinit();
     // Saturated to u16 max
-    try testing.expectEqual(@as(u16, 65535), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(u16, 65535), c.ops[0].sixel.count);
 }
 
 test "sixel parser: ! with no digits then sixel emits count=1" {
@@ -404,8 +402,8 @@ test "sixel parser: ! with no digits then sixel emits count=1" {
     for ("!?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expectEqual(@as(u16, 1), c.ops[0].sixel.count);
 }
 
 test "sixel parser: #5 selects color register 5" {
@@ -414,10 +412,10 @@ test "sixel parser: #5 selects color register 5" {
     for ("#5?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .select_color);
-    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
-    try testing.expect(c.paint_ops[1] == .sixel);
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.ops[0].select_color);
+    try testing.expect(c.ops[1] == .sixel);
 }
 
 test "sixel parser: #1;2;100;50;0 defines RGB" {
@@ -428,13 +426,14 @@ test "sixel parser: #1;2;100;50;0 defines RGB" {
     p.put('?');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
-    try testing.expect(c.palette_ops[0] == .set_rgb);
-    const op = c.palette_ops[0].set_rgb;
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .set_rgb);
+    const op = c.ops[0].set_rgb;
     try testing.expectEqual(@as(u8, 1), op.idx);
     try testing.expectEqual(@as(u8, 100), op.r);
     try testing.expectEqual(@as(u8, 50), op.g);
     try testing.expectEqual(@as(u8, 0), op.b);
+    try testing.expect(c.ops[1] == .sixel);
 }
 
 test "sixel parser: #1;1;180;50;75 defines HLS" {
@@ -444,13 +443,14 @@ test "sixel parser: #1;1;180;50;75 defines HLS" {
     p.put('?');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
-    try testing.expect(c.palette_ops[0] == .set_hls);
-    const op = c.palette_ops[0].set_hls;
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .set_hls);
+    const op = c.ops[0].set_hls;
     try testing.expectEqual(@as(u8, 1), op.idx);
     try testing.expectEqual(@as(u16, 180), op.h);
     try testing.expectEqual(@as(u8, 50), op.l);
     try testing.expectEqual(@as(u8, 75), op.s);
+    try testing.expect(c.ops[1] == .sixel);
 }
 
 test "sixel parser: #N with invalid Pu silently ignored" {
@@ -461,7 +461,9 @@ test "sixel parser: #N with invalid Pu silently ignored" {
     p.put('?');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+    // Only the trailing ? produces an op; the bad color def is dropped.
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expect(c.ops[0] == .sixel);
 }
 
 test "sixel parser: #N followed by sixel byte selects then paints" {
@@ -470,9 +472,9 @@ test "sixel parser: #N followed by sixel byte selects then paints" {
     for ("#7~") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
-    try testing.expectEqual(@as(u8, 7), c.paint_ops[0].select_color);
-    try testing.expectEqual(@as(u8, '~'), c.paint_ops[1].sixel.byte);
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expectEqual(@as(u8, 7), c.ops[0].select_color);
+    try testing.expectEqual(@as(u8, '~'), c.ops[1].sixel.byte);
 }
 
 test "sixel parser: !3#5 re-dispatches # into color_def" {
@@ -487,12 +489,12 @@ test "sixel parser: !3#5 re-dispatches # into color_def" {
     // !3 had no terminator paint byte (the next byte was #), so the
     // pending repeat is discarded entirely. The #5 selects color 5,
     // and the trailing ? paints with count=1.
-    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .select_color);
-    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
-    try testing.expect(c.paint_ops[1] == .sixel);
-    try testing.expectEqual(@as(u8, '?'), c.paint_ops[1].sixel.byte);
-    try testing.expectEqual(@as(u16, 1), c.paint_ops[1].sixel.count);
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.ops[0].select_color);
+    try testing.expect(c.ops[1] == .sixel);
+    try testing.expectEqual(@as(u8, '?'), c.ops[1].sixel.byte);
+    try testing.expectEqual(@as(u16, 1), c.ops[1].sixel.count);
 }
 
 test "sixel parser: #1;2;200;200;200 clamps r but passes g/b through" {
@@ -505,11 +507,12 @@ test "sixel parser: #1;2;200;200;200 clamps r but passes g/b through" {
     p.put('?');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.palette_ops.len);
-    const op = c.palette_ops[0].set_rgb;
-    try testing.expectEqual(@as(u8, 100), op.r);  // clamped
-    try testing.expectEqual(@as(u8, 200), op.g);  // not clamped here
-    try testing.expectEqual(@as(u8, 200), op.b);  // not clamped here
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .set_rgb);
+    const op = c.ops[0].set_rgb;
+    try testing.expectEqual(@as(u8, 100), op.r); // clamped
+    try testing.expectEqual(@as(u8, 200), op.g); // not clamped here
+    try testing.expectEqual(@as(u8, 200), op.b); // not clamped here
 }
 
 test "sixel parser: $ emits carriage_return" {
@@ -518,8 +521,8 @@ test "sixel parser: $ emits carriage_return" {
     p.put('$');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .carriage_return);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expect(c.ops[0] == .carriage_return);
 }
 
 test "sixel parser: - emits next_line" {
@@ -528,8 +531,8 @@ test "sixel parser: - emits next_line" {
     p.put('-');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .next_line);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expect(c.ops[0] == .next_line);
 }
 
 test "sixel parser: ?$-? emits sixel/CR/NL/sixel" {
@@ -538,11 +541,11 @@ test "sixel parser: ?$-? emits sixel/CR/NL/sixel" {
     for ("?$-?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 4), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .sixel);
-    try testing.expect(c.paint_ops[1] == .carriage_return);
-    try testing.expect(c.paint_ops[2] == .next_line);
-    try testing.expect(c.paint_ops[3] == .sixel);
+    try testing.expectEqual(@as(usize, 4), c.ops.len);
+    try testing.expect(c.ops[0] == .sixel);
+    try testing.expect(c.ops[1] == .carriage_return);
+    try testing.expect(c.ops[2] == .next_line);
+    try testing.expect(c.ops[3] == .sixel);
 }
 
 test "sixel parser: \" then 1;1;0;100;200 sets raster" {
@@ -553,7 +556,7 @@ test "sixel parser: \" then 1;1;0;100;200 sets raster" {
     defer c.deinit();
     try testing.expectEqual(@as(u16, 100), c.raster.declared_width);
     try testing.expectEqual(@as(u16, 200), c.raster.declared_height);
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
 }
 
 test "sixel parser: oversized raster transitions to ignore" {
@@ -563,7 +566,7 @@ test "sixel parser: oversized raster transitions to ignore" {
     p.put('?'); // would normally paint, but parser is in .ignore
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.ops.len);
 }
 
 test "sixel parser: malformed raster falls back to defaults" {
@@ -580,7 +583,7 @@ test "sixel parser: malformed raster falls back to defaults" {
     try testing.expectEqual(@as(u16, 1), c.raster.aspect_num);
     try testing.expectEqual(@as(u16, 0), c.raster.declared_width);
     // Painting continues after malformed raster
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
 }
 
 test "sixel parser: ignore state drops all subsequent bytes" {
@@ -592,8 +595,7 @@ test "sixel parser: ignore state drops all subsequent bytes" {
     p.put('!');
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
-    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.ops.len);
 }
 
 test "sixel parser: incomplete color def at finalize is dropped" {
@@ -604,7 +606,7 @@ test "sixel parser: incomplete color def at finalize is dropped" {
     for ("#1;2;100") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.ops.len);
 }
 
 test "sixel parser: incomplete raster attribs at finalize is dropped" {
@@ -627,7 +629,7 @@ test "sixel parser: incomplete repeat count at finalize is dropped" {
     for ("!42") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.paint_ops.len);
+    try testing.expectEqual(@as(usize, 0), c.ops.len);
 }
 
 test "sixel parser: empty color def #? produces no op" {
@@ -639,10 +641,9 @@ test "sixel parser: empty color def #? produces no op" {
     for ("#?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 0), c.palette_ops.len);
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .sixel);
-    try testing.expectEqual(@as(u8, '?'), c.paint_ops[0].sixel.byte);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expect(c.ops[0] == .sixel);
+    try testing.expectEqual(@as(u8, '?'), c.ops[0].sixel.byte);
 }
 
 test "sixel parser: back-to-back # # is dropped" {
@@ -656,10 +657,10 @@ test "sixel parser: back-to-back # # is dropped" {
     var c = try p.finalize();
     defer c.deinit();
     // One select_color from the second #5, then the paint byte.
-    try testing.expectEqual(@as(usize, 2), c.paint_ops.len);
-    try testing.expect(c.paint_ops[0] == .select_color);
-    try testing.expectEqual(@as(u8, 5), c.paint_ops[0].select_color);
-    try testing.expect(c.paint_ops[1] == .sixel);
+    try testing.expectEqual(@as(usize, 2), c.ops.len);
+    try testing.expect(c.ops[0] == .select_color);
+    try testing.expectEqual(@as(u8, 5), c.ops[0].select_color);
+    try testing.expect(c.ops[1] == .sixel);
 }
 
 test "sixel parser: !0 ? coerces to count=1" {
@@ -670,6 +671,6 @@ test "sixel parser: !0 ? coerces to count=1" {
     for ("!0?") |b| p.put(b);
     var c = try p.finalize();
     defer c.deinit();
-    try testing.expectEqual(@as(usize, 1), c.paint_ops.len);
-    try testing.expectEqual(@as(u16, 1), c.paint_ops[0].sixel.count);
+    try testing.expectEqual(@as(usize, 1), c.ops.len);
+    try testing.expectEqual(@as(u16, 1), c.ops[0].sixel.count);
 }
