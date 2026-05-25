@@ -217,11 +217,11 @@ pub const Handler = struct {
                     p.deinit();
                     break :sixel null;
                 };
-                // finalize transferred paint_ops and palette_ops to
-                // the returned Command, but `accum` (the working
-                // buffer for raster/color/repeat strings) stays with
-                // the parser and needs releasing. deinit on the
-                // now-empty paint/palette lists is a no-op.
+                // finalize transferred the ops slice to the returned
+                // Command, but `accum` (the working buffer for
+                // raster/color/repeat strings) stays with the parser
+                // and needs releasing. deinit on the now-empty ops
+                // list is a no-op.
                 p.deinit();
                 break :sixel .{ .sixel = c };
             },
@@ -484,7 +484,7 @@ test "sixel DCS command" {
     var cmd = h.unhook().?;
     defer cmd.deinit();
     try testing.expect(cmd == .sixel);
-    try testing.expectEqual(@as(usize, 1), cmd.sixel.paint_ops.len);
+    try testing.expectEqual(@as(usize, 1), cmd.sixel.ops.len);
     try testing.expect(h.state == .inactive);
 }
 
