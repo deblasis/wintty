@@ -4,10 +4,11 @@ using Microsoft.Win32;
 namespace Ghostty.Core.Profiles;
 
 /// <summary>
-/// Reads the user's default WSL distribution from the registry. Cached
-/// for the process lifetime — distros change at install time, not at
-/// runtime. Returns null if WSL isn't installed or the registry shape
-/// changes.
+/// Reads the user's default WSL distribution from the registry. Successful
+/// lookups are cached for the process lifetime because distros change at
+/// install time, not at runtime. A null result is intentionally NOT cached:
+/// a user who installs WSL after wintty launched would otherwise see the
+/// generic wsl.png until app restart, so we retry on the next call instead.
 ///
 /// The default-distro lookup feeds <see cref="WindowsIconResolver"/>'s
 /// AutoForWslDistro fallback: when a profile resolves to
@@ -25,17 +26,16 @@ internal static class WslDefaultDistro
     private const string LxssRoot = @"Software\Microsoft\Windows\CurrentVersion\Lxss";
 
     private static string? _cached;
-    private static bool _resolved;
     private static readonly object _lock = new();
 
     public static string? Resolve()
     {
         lock (_lock)
         {
-            if (_resolved) return _cached;
-            _resolved = true;
-            _cached = TryReadFromRegistry();
-            return _cached;
+            if (_cached is not null) return _cached;
+            var fresh = TryReadFromRegistry();
+            if (fresh is not null) _cached = fresh;
+            return fresh;
         }
     }
 
@@ -46,18 +46,30 @@ internal static class WslDefaultDistro
             using var root = Registry.CurrentUser.OpenSubKey(LxssRoot);
             if (root is null) return null;
 
-            var defaultGuid = root.GetValue("DefaultDistribution") as string;
-            if (string.IsNullOrEmpty(defaultGuid)) return null;
+            if (root.GetValue("DefaultDistribution") is not string defaultGuid
+                || defaultGuid.Length == 0)
+            {
+                return null;
+            }
 
             using var distro = root.OpenSubKey(defaultGuid);
             if (distro is null) return null;
 
             return distro.GetValue("DistributionName") as string;
         }
-        catch
+        catch (Exception ex) when (
+            ex is System.Security.SecurityException
+            or System.IO.IOException
+            or UnauthorizedAccessException
+            or ObjectDisposedException)
         {
-            // Registry access denied / shape changed / WSL uninstalled mid-session.
-            // Silent fallback: caller sees null and lands on the legacy wsl.png.
+            // Registry access denied, shape changed, or WSL uninstalled
+            // mid-session. Silent fallback: caller sees null and lands on
+            // the legacy wsl.png. Surfaced to Debug so a regressed
+            // resolver is diagnosable from a devenv-attached run without
+            // pulling ILogger into a pure-Core helper.
+            System.Diagnostics.Debug.WriteLine(
+                $"WslDefaultDistro: registry read failed: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }

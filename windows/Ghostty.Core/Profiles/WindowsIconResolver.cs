@@ -61,11 +61,17 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         // tux block is preferable to nothing when we can't pick a brand.
         // Empty distro name (bare `wsl.exe` with no -d flag) consults the
         // registry for the user's default distro before falling back.
-        IconSpec.AutoForWslDistro w => DistroBrandKey(EffectiveDistroName(w.DistroName)) is { } k
-            ? ReadBrandedOrDefault(k, 32)
-            : ReadBundledOrDefault("wsl"),
+        IconSpec.AutoForWslDistro w => ResolveWslDistro(w.DistroName),
         _ => ReadBundledOrDefault(DefaultBundledKey),
     };
+
+    private byte[] ResolveWslDistro(string distroName)
+    {
+        var effective = EffectiveDistroName(distroName);
+        return DistroBrandKey(effective) is { } k
+            ? ReadBrandedOrDefault(k, 32)
+            : ReadBundledOrDefault("wsl");
+    }
 
     // For bare `wsl.exe` (no -d), the active-shell tracker emits
     // AutoForWslDistro("") and we should pick the brand of whichever
@@ -169,7 +175,7 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
             IconSpec.Mdl2Token m => "mdl2:" + m.CodePoint.ToString("x"),
             IconSpec.BundledKey b => "bundled-v2:" + b.Key,
             IconSpec.AutoForExe a => "exe:" + a.ExePath,
-            IconSpec.AutoForWslDistro w => "wsl-distro-v2:" + (DistroBrandKey(EffectiveDistroName(w.DistroName)) ?? "wsl") + ":" + EffectiveDistroName(w.DistroName),
+            IconSpec.AutoForWslDistro w => BuildWslCacheToken(w.DistroName),
             _ => "unknown",
         };
         var mtime = MtimeTokenFor(spec);
@@ -177,6 +183,15 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(token), hash);
         return Convert.ToHexStringLower(hash);
+    }
+
+    // Cache key for AutoForWslDistro. Resolves the effective distro once
+    // so an empty incoming name shares the same cache entry as the
+    // explicitly-named default distro (one PNG decode per process).
+    private static string BuildWslCacheToken(string distroName)
+    {
+        var effective = EffectiveDistroName(distroName);
+        return "wsl-distro-v2:" + (DistroBrandKey(effective) ?? "wsl") + ":" + effective;
     }
 
     private async Task<byte[]?> TryReadCacheAsync(string sha, CancellationToken ct)

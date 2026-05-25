@@ -61,6 +61,18 @@ public sealed class ProfileOrderResolverIconFallbackTests
         Assert.Equal("default", bundled.Key);
     }
 
+    [Fact]
+    public void Resolve_NoIcon_BareCommandWithoutExtension_FallsBackToBrand()
+    {
+        // PATH-resolution case: user writes `command = pwsh` and relies on
+        // the shell to append .exe. ProcessIconTable keys end in .exe, so
+        // the fallback parser should treat the basename as if it did.
+        var def = MakeDef(command: "pwsh", icon: null);
+        var resolved = ResolveSingle(def);
+        var brand = Assert.IsType<IconSpec.BrandKey>(resolved.Icon);
+        Assert.Equal("pwsh", brand.Key);
+    }
+
     private static ProfileDef MakeDef(string command, IconSpec? icon) =>
         new(Id: "test", Name: "Test", Command: command, Icon: icon);
 

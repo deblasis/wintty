@@ -1023,13 +1023,19 @@ public sealed partial class MainWindow : Window
     /// <c>TryGetShellPid</c> every 500 ms for up to 10 s once a leaf
     /// has been focused, stopping on the first non-null result.
     /// </summary>
+    // 500 ms tick × 20 ticks = 10 s budget. Surfaced as named constants so
+    // the interval / budget relationship is legible at a glance and a future
+    // adjustment doesn't have to keep them in sync mentally.
+    private static readonly TimeSpan ShellPidPollInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan ShellPidPollBudget = TimeSpan.FromSeconds(10);
+
     private void AttachProcessTracking(TabModel tab)
     {
         ((App)Application.Current).RegisterTabForProcessTracking(tab);
 
         Microsoft.UI.Dispatching.DispatcherQueueTimer? pidPoll = null;
         int pollTicks = 0;
-        const int MaxPollTicks = 20;  // 20 * 500 ms = 10 s
+        int maxPollTicks = (int)(ShellPidPollBudget.TotalMilliseconds / ShellPidPollInterval.TotalMilliseconds);
 
         void TryAssignPid(Ghostty.Core.Panes.LeafPane leaf)
         {
@@ -1047,13 +1053,27 @@ public sealed partial class MainWindow : Window
             if (pidPoll is not null) return;       // already polling
             if (tab.ShellPid is not null) return;  // race-won by the immediate path
             pidPoll = DispatcherQueue.CreateTimer();
-            pidPoll.Interval = TimeSpan.FromMilliseconds(500);
+            pidPoll.Interval = ShellPidPollInterval;
             pidPoll.Tick += (_, _) =>
             {
                 pollTicks++;
                 TryAssignPid(leaf);
-                if (tab.ShellPid is not null || pollTicks >= MaxPollTicks)
+                if (tab.ShellPid is not null)
                 {
+                    pidPoll?.Stop();
+                    pidPoll = null;
+                    return;
+                }
+                if (pollTicks >= maxPollTicks)
+                {
+                    // Budget exhausted without a pid. Most likely cause is a
+                    // libghostty regression where ghostty_surface_foreground_pid
+                    // never publishes a non-zero value, leaving the active-shell
+                    // icon stuck on the profile glyph. Logged so the regression
+                    // is visible without attaching a debugger.
+                    _logger.LogWarning(
+                        "Active-shell tracker: shell pid never resolved for tab {TabId} within {BudgetMs} ms",
+                        tab.Id, (int)ShellPidPollBudget.TotalMilliseconds);
                     pidPoll?.Stop();
                     pidPoll = null;
                 }

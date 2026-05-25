@@ -123,10 +123,15 @@ public static class ProfileOrderResolver
         return new IconSpec.BundledKey("default");
     }
 
+    // Hoisted so each call doesn't allocate a fresh char[] for IndexOfAny.
+    private static readonly char[] s_whitespace = [' ', '\t'];
+
     private static string? TryGetCommandBasename(string? command)
     {
         if (string.IsNullOrWhiteSpace(command)) return null;
         // Strip leading whitespace + outer quotes; take the first token.
+        // Tokens after the first are intentionally ignored: the basename
+        // of argv[0] is what runs as the foreground process at exec time.
         var trimmed = command.TrimStart();
         string first;
         if (trimmed.StartsWith('"'))
@@ -137,13 +142,18 @@ public static class ProfileOrderResolver
         }
         else
         {
-            var space = trimmed.IndexOfAny(new[] { ' ', '\t' });
+            var space = trimmed.IndexOfAny(s_whitespace);
             first = space < 0 ? trimmed : trimmed.Substring(0, space);
         }
         if (first.Length == 0) return null;
         // Path.GetFileName handles both forward and backward slashes.
         var name = System.IO.Path.GetFileName(first);
-        return string.IsNullOrEmpty(name) ? null : name;
+        if (string.IsNullOrEmpty(name)) return null;
+        // ProcessIconTable keys end in .exe; treat a bare `command = pwsh`
+        // (no extension) as if the user wrote `pwsh.exe`. This is the
+        // PATH-resolution case where the shell would append .exe anyway.
+        if (!name.Contains('.')) name += ".exe";
+        return name;
     }
 
     private static string? ResolveDefault(
