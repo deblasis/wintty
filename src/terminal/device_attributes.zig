@@ -42,8 +42,9 @@ pub const Primary = struct {
     /// Conformance level sent as the first parameter.
     conformance_level: ConformanceLevel = .vt220,
 
-    /// Optional feature attributes.
-    features: []const Feature = &.{.ansi_color},
+    /// Optional feature attributes. Defaults match the hardcoded
+    /// response in termio.stream_handler.deviceAttributes.
+    features: []const Feature = &.{ .sixel, .ansi_color },
 
     /// DA1 feature attribute codes.
     pub const Feature = enum(u16) {
@@ -175,7 +176,7 @@ test "primary default" {
     var buf: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try (Primary{}).encode(&writer);
-    try testing.expectEqualStrings("\x1b[?62;22c", writer.buffered());
+    try testing.expectEqualStrings("\x1b[?62;4;22c", writer.buffered());
 }
 
 test "primary with clipboard" {
