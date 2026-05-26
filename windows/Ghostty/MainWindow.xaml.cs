@@ -247,10 +247,6 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // Wire the brand into the taskbar group, thumbnail-hover
-        // preview, alt-tab list, and the system title-bar icon slot.
-        // ApplicationIcon embeds the same .ico as the exe resource, but
-        // AppWindow.SetIcon is what makes the OS use it at runtime.
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
         _configService = configService;
