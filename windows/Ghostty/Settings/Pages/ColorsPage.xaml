@@ -124,7 +124,7 @@
                     </StackPanel>
                 </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Accent color"
-                                   Description="Chrome accent for the active tab, focus border, and rail. Defaults to cursor-color so a vivid cursor no longer paints the chrome unless you want it to."
+                                   Description="Color of the active tab background, focus border, and tab strip rail. When unset, the chrome follows cursor-color."
                                    ctrl:SettingsCard.ConfigKey="accent-color">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <ctrl:ColorPickerControl x:Name="AccentColorPicker"
