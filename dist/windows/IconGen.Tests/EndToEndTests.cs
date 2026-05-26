@@ -25,13 +25,15 @@ public class EndToEndTests
     [Fact]
     public void SettingsIcoIsRenderedFromGearGlyph()
     {
-        // The gear glyph is hollow in the centre by design (it's a
-        // ring with teeth), so a centre-pixel check would fail on the
-        // intentional cutout. Instead, count total non-transparent
-        // pixels in the largest .ico frame: the gear should fill
-        // 8-30% of the canvas. Below that, GearMasters fell through
-        // to a font without E713 (or no font at all) and rendered
-        // empty / a placeholder rectangle.
+        // The gear glyph is hollow in the centre by design (a ring
+        // with teeth), so a centre-pixel check would fail on the
+        // intentional cutout. Instead, count non-transparent pixels
+        // in the largest .ico frame and assert coverage is in the
+        // band a real gear lands in. Lower bound 0.08 excludes the
+        // empty / placeholder-rectangle outline a font without E713
+        // would draw (~5-8% area at the 78% canvas fill we use);
+        // upper bound 0.35 excludes a solid filled rectangle from a
+        // .notdef fallback.
         using var tempDir = new TempDir();
         var repoRoot = TempDir.FindRepoRoot();
 
@@ -44,8 +46,8 @@ public class EndToEndTests
         int total = img.Width * img.Height;
         int opaque = CountOpaquePixels(img);
         double coverage = (double)opaque / total;
-        Assert.True(coverage is > 0.05 and < 0.5,
-            $"Expected gear glyph coverage in [5%, 50%] in wintty-settings.ico; " +
+        Assert.True(coverage is > 0.08 and < 0.35,
+            $"Expected gear glyph coverage in [8%, 35%] in wintty-settings.ico; " +
             $"got {coverage:P1}. Likely cause: Segoe Fluent Icons / Segoe MDL2 " +
             $"Assets font missing or wrong glyph code point.");
     }
@@ -160,5 +162,13 @@ public class EndToEndTests
         var bytes1 = File.ReadAllBytes(Path.Combine(dir1.Path, "wintty.ico"));
         var bytes2 = File.ReadAllBytes(Path.Combine(dir2.Path, "wintty.ico"));
         Assert.Equal(bytes1, bytes2);
+
+        // Same caveat applies to the gear .ico: GDI+ DrawString is
+        // deterministic on a given GDI+ build but may drift across
+        // Windows versions. Pinning both files catches a regression in
+        // either rendering path with one assertion run.
+        var settings1 = File.ReadAllBytes(Path.Combine(dir1.Path, "wintty-settings.ico"));
+        var settings2 = File.ReadAllBytes(Path.Combine(dir2.Path, "wintty-settings.ico"));
+        Assert.Equal(settings1, settings2);
     }
 }

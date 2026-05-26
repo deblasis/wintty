@@ -21,31 +21,24 @@ namespace Ghostty.IconGen;
 /// </summary>
 internal static class GearMasters
 {
-    // Mirrors IcoWriter.FrameSizes so each .ico frame has a master
-    // rendered directly at the target px. Downscaling from a single
-    // 256-px master loses the gear-tooth detail at 16/20/24, which is
-    // exactly where the taskbar lives.
-    private static readonly int[] MasterSizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
-
     // U+E713 = "Settings" in both Segoe Fluent Icons and the older
     // Segoe MDL2 Assets. Matches SettingsWindow.xaml's FontIconSource.
     private const string GearGlyph = "\uE713";
 
-    // Soft off-white so the gear stays readable on the default dark
-    // taskbar; pure white loses subpixel definition once GDI+
-    // antialiases against the dark background, pure black is invisible
-    // there. The alt-tab pane uses a translucent panel that this tone
-    // also reads against. We deliberately do not theme this to the OS
-    // accent color: the taskbar background tone is not theme-bound
-    // (it tracks the wallpaper), so a single tone that survives both
-    // ends is more reliable than two themed variants.
+    // Off-white reads on both the default dark taskbar and the
+    // translucent alt-tab pane.
     private static readonly Color GearColor = Color.FromArgb(0xFF, 0xE6, 0xE6, 0xE6);
 
     public static MasterRasters Render()
     {
         var fontName = ResolveIconFontName();
         var dict = new Dictionary<int, Bitmap>();
-        foreach (var px in MasterSizes)
+        // Render one master per IcoWriter frame size so each frame is
+        // rasterized directly at its target px; downscaling from a
+        // single 256-px master loses the gear-tooth detail at 16/20/24
+        // (exactly where the taskbar lives). Shared array prevents the
+        // two size lists from drifting silently.
+        foreach (var px in IcoWriter.FrameSizes)
             dict[px] = RenderOne(px, fontName);
         return MasterRasters.FromDictionary(dict);
     }

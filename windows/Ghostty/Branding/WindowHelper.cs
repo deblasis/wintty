@@ -35,21 +35,18 @@ internal static class WindowHelper
     }
 
     /// <summary>
-    /// Stamp the brand .ico (wintty.ico) into <paramref name="window"/>'s
-    /// AppWindow icon slots so the taskbar group, thumbnail preview,
-    /// alt-tab list, and (when WinUI 3 renders one) the system title-bar
-    /// show the brand. ApplicationIcon embeds the same .ico as the exe
-    /// resource but does NOT wire those runtime slots; without this call
-    /// they fall back to the default WinUI 3 icon.
+    /// Stamp the brand .ico into the AppWindow icon slots (taskbar
+    /// group, thumbnail preview, alt-tab list, system title-bar when
+    /// WinUI 3 renders one). ApplicationIcon embeds the same .ico as
+    /// the exe resource but does NOT wire those runtime slots.
     /// </summary>
     public static void TryApplyAppIcon(Window window)
         => TryApplyIcon(window, "wintty.ico");
 
     /// <summary>
-    /// Settings-window variant: stamps the gear .ico
-    /// (wintty-settings.ico) so the OS slots visually match
-    /// SettingsWindow.xaml's TitleBar.IconSource and are
-    /// distinguishable from terminal windows in alt-tab.
+    /// Settings-window variant. Uses the gear .ico so the OS slots
+    /// visually match SettingsWindow.xaml's TitleBar.IconSource and
+    /// the window is distinguishable from terminal windows in alt-tab.
     /// </summary>
     public static void TryApplySettingsIcon(Window window)
         => TryApplyIcon(window, "wintty-settings.ico");
