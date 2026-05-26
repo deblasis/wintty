@@ -286,5 +286,21 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </Content>
+    <!--
+      Deploy the generated .ico alongside the runtime PNGs. ApplicationIcon
+      already embeds this same file as the exe resource (which Explorer and
+      the default-fallback path use), but AppWindow.SetIcon needs a real
+      file path on disk to wire the icon into the taskbar group, the
+      thumbnail-hover preview, the alt-tab list, and the title-bar slot
+      WinUI 3 renders when ExtendsContentIntoTitleBar is true. The Link
+      drops the channel segment from the runtime path so the SetIcon call
+      site stays channel-blind; the .ico contents already encode the
+      channel-specific glyph.
+    -->
+    <Content Include="$(GeneratedBrandingDir)wintty.ico">
+      <Link>Assets\wintty.ico</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
   </ItemGroup>
 </Project>
