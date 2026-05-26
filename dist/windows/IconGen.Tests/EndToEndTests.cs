@@ -31,7 +31,7 @@ public class EndToEndTests
         // in the largest .ico frame and assert coverage is in the
         // band a real gear lands in. Lower bound 0.08 excludes the
         // empty / placeholder-rectangle outline a font without E713
-        // would draw (~5-8% area at the 78% canvas fill we use);
+        // would draw (~5-8% area at the 72% canvas fill we use);
         // upper bound 0.35 excludes a solid filled rectangle from a
         // .notdef fallback.
         using var tempDir = new TempDir();
