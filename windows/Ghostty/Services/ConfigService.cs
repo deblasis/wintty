@@ -40,11 +40,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public bool SettingsUiEnabled { get; private set; }
     public double BackgroundOpacity { get; private set; } = 1.0;
 
-    // Cached during ReadFlagsCore while _configFileCache is populated;
-    // the cache is nulled in ReadFlags' finally, so expression-bodied
-    // getters reading GetFileValue would always return defaults outside
-    // of reload. Backing-field pattern matches the existing
-    // BackgroundStyle / BackgroundTint* properties below.
+    // Cached during ReadFlagsCore so typed getters do not have to consult
+    // _configFileCache on every read; the backing-field pattern keeps the
+    // hot path allocation-free and matches BackgroundStyle / BackgroundTint*
+    // below. The cache itself now survives past ReadFlagsCore (live readers
+    // like IsConfiguredInFile depend on that), so the backing-field copy is
+    // no longer required for correctness, only for the no-lookup-per-read
+    // optimization.
     public bool VerticalTabs { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
     public string CommandPaletteBackground { get; private set; } = "acrylic";
@@ -148,21 +150,22 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
     /// <summary>
     /// Snapshot of the config file's key/value lines, populated at the
-    /// top of <see cref="ReadFlags"/> and cleared when it exits. Every
-    /// file-read helper on this class reads from here instead of
-    /// reopening the file; otherwise one reload turns into one
-    /// <see cref="File.ReadLines"/> per key looked up, which the config
-    /// watcher then amplifies on every save. Keys are case-insensitive
-    /// (matches ghostty's own config parser), each key maps to the
-    /// list of raw values in the order they appear in the file.
+    /// top of <see cref="ReadFlags"/> and replaced on each subsequent reload.
+    /// Survives between reloads so live readers (IsConfiguredInFile,
+    /// GetRawFileValue, GetFileValue) see the last-loaded state.
+    /// Keys are case-insensitive; each maps to the list of raw values in
+    /// file order.
     /// </summary>
     private Dictionary<string, List<string>>? _configFileCache;
 
     /// <summary>
-    /// Same idea as <see cref="_configFileCache"/> but for the active
-    /// theme file resolved from the config (handling the light:X,dark:Y
-    /// split on the OS scheme). Null when there's no active theme or
-    /// the theme file is missing.
+    /// Snapshot of the active theme file's key/value lines. The theme is
+    /// resolved via ResolveActiveThemeName / ResolveThemePath, accounting
+    /// for the light:X,dark:Y split on the OS color scheme. Populated at
+    /// the top of <see cref="ReadFlags"/> whenever a theme is active,
+    /// replaced on each subsequent reload, and survives between reloads so
+    /// theme-color readers can consult it from any call into the service.
+    /// Null when there is no active theme or the theme file is missing.
     /// </summary>
     private Dictionary<string, List<string>>? _activeThemeFileCache;
 
@@ -322,15 +325,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
         _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
 
-        try
-        {
-            ReadFlagsCore();
-        }
-        finally
-        {
-            _configFileCache = null;
-            _activeThemeFileCache = null;
-        }
+        // _configFileCache and _activeThemeFileCache deliberately survive
+        // past ReadFlagsCore. Live readers (IsConfiguredInFile, GetRawFileValue,
+        // GetFileValue) are consulted from UI page constructors and event
+        // handlers that run between reloads, not just during reload, so the
+        // caches must persist or those readers always return the empty-cache
+        // fallback. Each reload overwrites both fields at the top of ReadFlags,
+        // so memory cost stays bounded (~few KB per reload, no accumulation).
+        ReadFlagsCore();
     }
 
     private void ReadFlagsCore()
@@ -345,9 +347,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // needing their own validation. WindowTransparencyState also
         // clamps defensively as a standalone value type.
         BackgroundOpacity = Math.Clamp(GetDouble("background-opacity", 1.0), 0.0, 1.0);
-        // Windows-only UI keys migrated from the legacy ui-settings.json
-        // shim. Cached here because GetFileValue only works while
-        // _configFileCache is populated (ReadFlags' scope).
+        // Windows-only UI keys. The backing fields avoid a dictionary lookup
+        // on every property read; GetFileValue now works at any time after
+        // the first reload, so the copies are an optimization, not a
+        // correctness requirement.
         VerticalTabs = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("vertical-tabs", ""),
             defaultValue: false);
