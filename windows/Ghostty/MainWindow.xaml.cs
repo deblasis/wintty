@@ -247,6 +247,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
+        Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
+
         _configService = configService;
         _configEditor = App.ConfigFileEditor
             ?? throw new InvalidOperationException(
