@@ -71,6 +71,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public uint BackgroundColor { get; private set; } = 0x001E1E2E;
     public uint? CursorColor { get; private set; }
     public uint? CursorTextColor { get; private set; }
+    // Explicit chrome accent. Null when the user hasn't set accent-color;
+    // ShellThemeService then falls back to cursor-color and finally the
+    // palette. Kept nullable (unlike CursorColor, which is always
+    // populated via the foreground fallback) so the "unset" state is
+    // distinguishable downstream and the settings UI can show the row
+    // as "no override".
+    public uint? AccentColor { get; private set; }
     public uint[] AnsiPalette { get; private set; } = new uint[16];
     public string CurrentTheme { get; private set; } = "";
 
@@ -427,6 +434,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         {
             CursorTextColor = BackgroundColor;
         }
+
+        // accent-color is a Windows-only key (no Zig schema entry).
+        // Read from the user's config file only -- not the active theme
+        // -- so accent-color is purely a user override; themes don't
+        // get to paint the chrome.
+        AccentColor = ThemeParser.TryParseHexRgb(GetFileValue("accent-color", ""), out var accentPacked)
+            ? accentPacked
+            : null;
 
         CurrentTheme = GetFileValue("theme", "");
         var (parsedLight, parsedDark) = ThemeParser.ParseThemePair(CurrentTheme);

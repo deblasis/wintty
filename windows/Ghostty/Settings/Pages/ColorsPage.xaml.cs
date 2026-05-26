@@ -53,6 +53,8 @@ internal sealed partial class ColorsPage : Page
                 () => ThemeParser.TryParseHexRgb(cs.GetRawFileValue("selection-background"), out var packed)
                     ? Rgb.FromRgb24(packed).ToHex()
                     : "");
+            SyncColorOverride("accent-color", AccentColorPicker, AccentColorResetButton,
+                () => cs.AccentColor is uint accent ? Rgb.FromRgb24(accent).ToHex() : "");
 
             var currentTheme = cs.CurrentTheme;
             if (cs.LightTheme is not null && cs.DarkTheme is not null)
@@ -183,6 +185,12 @@ internal sealed partial class ColorsPage : Page
         SelectionColorResetButton.Visibility = Visibility.Visible;
     }
 
+    private void AccentColor_ColorChanged(object? sender, string hex)
+    {
+        OnValueChanged("accent-color", hex);
+        AccentColorResetButton.Visibility = Visibility.Visible;
+    }
+
     private void Foreground_Reset(object sender, RoutedEventArgs e)
         => ResetColorOverride("foreground", ForegroundPicker, ForegroundResetButton);
 
@@ -194,6 +202,9 @@ internal sealed partial class ColorsPage : Page
 
     private void SelectionColor_Reset(object sender, RoutedEventArgs e)
         => ResetColorOverride("selection-background", SelectionColorPicker, SelectionColorResetButton);
+
+    private void AccentColor_Reset(object sender, RoutedEventArgs e)
+        => ResetColorOverride("accent-color", AccentColorPicker, AccentColorResetButton);
 
     // Drop the override key from the config file, then clear the picker
     // and hide the reset button so the row reads as "no override set".
@@ -252,6 +263,8 @@ internal sealed partial class ColorsPage : Page
                     () => ThemeParser.TryParseHexRgb(impl.GetRawFileValue("selection-background"), out var packed)
                         ? Rgb.FromRgb24(packed).ToHex()
                         : "");
+                SyncColorOverride("accent-color", AccentColorPicker, AccentColorResetButton,
+                    () => impl.AccentColor is uint accent ? Rgb.FromRgb24(accent).ToHex() : "");
             }
             finally
             {
