@@ -435,11 +435,11 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             CursorTextColor = BackgroundColor;
         }
 
-        // accent-color is a Windows-only key (no Zig schema entry), so
-        // it has to come through the file/theme cache rather than
-        // ghostty_config_get. Leave null when unset so ShellThemeService
-        // can distinguish "no override" from "explicit value".
-        AccentColor = ThemeParser.TryParseHexRgb(GetThemeValue("accent-color") ?? "", out var accentPacked)
+        // accent-color is a Windows-only key (no Zig schema entry).
+        // Read from the user's config file only -- not the active theme
+        // -- so accent-color is purely a user override; themes don't
+        // get to paint the chrome.
+        AccentColor = ThemeParser.TryParseHexRgb(GetFileValue("accent-color", ""), out var accentPacked)
             ? accentPacked
             : null;
 
