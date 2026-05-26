@@ -35,23 +35,36 @@ internal static class WindowHelper
     }
 
     /// <summary>
-    /// Stamp the deployed wintty.ico into <paramref name="window"/>'s
+    /// Stamp the brand .ico (wintty.ico) into <paramref name="window"/>'s
     /// AppWindow icon slots so the taskbar group, thumbnail preview,
     /// alt-tab list, and (when WinUI 3 renders one) the system title-bar
     /// show the brand. ApplicationIcon embeds the same .ico as the exe
     /// resource but does NOT wire those runtime slots; without this call
     /// they fall back to the default WinUI 3 icon.
-    ///
+    /// </summary>
+    public static void TryApplyAppIcon(Window window)
+        => TryApplyIcon(window, "wintty.ico");
+
+    /// <summary>
+    /// Settings-window variant: stamps the gear .ico
+    /// (wintty-settings.ico) so the OS slots visually match
+    /// SettingsWindow.xaml's TitleBar.IconSource and are
+    /// distinguishable from terminal windows in alt-tab.
+    /// </summary>
+    public static void TryApplySettingsIcon(Window window)
+        => TryApplyIcon(window, "wintty-settings.ico");
+
+    /// <summary>
     /// Swallows the file-not-found race (asset deleted between the
     /// File.Exists check and the SetIcon call) and the native HRESULT
     /// path. A missing window icon is cosmetic, not crash-worthy.
     /// </summary>
-    public static void TryApplyAppIcon(Window window)
+    private static void TryApplyIcon(Window window, string iconFileName)
     {
         try
         {
             var appDir = AppContext.BaseDirectory;
-            var iconPath = Path.Combine(appDir, "Assets", "wintty.ico");
+            var iconPath = Path.Combine(appDir, "Assets", iconFileName);
             if (!File.Exists(iconPath)) return;
             window.AppWindow.SetIcon(iconPath);
         }
