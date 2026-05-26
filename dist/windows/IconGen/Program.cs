@@ -31,6 +31,18 @@ internal static class Program
                 IcoWriter.Write(masters, Path.Combine(options.OutputDir, "wintty.ico"));
             }
 
+            // The Settings window uses a separate gear .ico so the
+            // taskbar / alt-tab distinguish it from a terminal window.
+            // The glyph matches SettingsWindow.xaml's TitleBar.IconSource;
+            // channel-independent because the gear is a UI affordance,
+            // not a brand mark.
+            using (var gearMasters = GearMasters.Render())
+            {
+                IcoWriter.Write(
+                    gearMasters,
+                    Path.Combine(options.OutputDir, "wintty-settings.ico"));
+            }
+
             return 0;
         }
         catch (Exception ex)
