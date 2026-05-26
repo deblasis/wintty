@@ -75,6 +75,9 @@ internal sealed partial class ColorsPage : Page
         }
 
         _loading = false;
+
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     private void ThemeMode_Changed(object sender, RoutedEventArgs e)
@@ -210,6 +213,51 @@ internal sealed partial class ColorsPage : Page
         try { picker.Color = ""; }
         finally { _loading = false; }
         resetButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _configService.ConfigChanged += OnConfigChanged;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _configService.ConfigChanged -= OnConfigChanged;
+    }
+
+    // External config edits (Raw Editor in this dialog, FSW auto-reload,
+    // direct file edit) update _configService but won't otherwise refresh
+    // the picker rows that were seeded in the constructor. AppearancePage
+    // and RawEditorPage subscribe to ConfigChanged for the same reason.
+    private void OnConfigChanged(IConfigService cs)
+    {
+        if (cs is not ConfigService impl) return;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            // Guard against the page having been detached between the event
+            // fire and this lambda running -- e.g., navigated away mid-cycle.
+            // SyncColorOverride on a detached control is harmless but a
+            // wasted dispatch.
+            if (!IsLoaded) return;
+            _loading = true;
+            try
+            {
+                SyncColorOverride("foreground", ForegroundPicker, ForegroundResetButton,
+                    () => Rgb.FromRgb24(impl.ForegroundColor).ToHex());
+                SyncColorOverride("background", BackgroundPicker, BackgroundResetButton,
+                    () => Rgb.FromRgb24(impl.BackgroundColor).ToHex());
+                SyncColorOverride("cursor-color", CursorColorPicker, CursorColorResetButton,
+                    () => impl.CursorColor is uint cursor ? Rgb.FromRgb24(cursor).ToHex() : "");
+                SyncColorOverride("selection-background", SelectionColorPicker, SelectionColorResetButton,
+                    () => ThemeParser.TryParseHexRgb(impl.GetRawFileValue("selection-background"), out var packed)
+                        ? Rgb.FromRgb24(packed).ToHex()
+                        : "");
+            }
+            finally
+            {
+                _loading = false;
+            }
+        });
     }
 
     // Seed one color row from the cached config: if the user has actually
