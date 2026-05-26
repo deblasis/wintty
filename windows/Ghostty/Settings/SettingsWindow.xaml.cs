@@ -58,6 +58,8 @@ internal sealed partial class SettingsWindow : Window
         _theme = theme;
         InitializeComponent();
 
+        Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
+
         // Branded window title and custom title bar. Title is used by the
         // taskbar / alt-tab; AppTitleBar.Title renders the same text inside
         // the window next to the gear FontIcon. Both read from
