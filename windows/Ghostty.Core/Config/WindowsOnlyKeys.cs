@@ -39,6 +39,8 @@ public static class WindowsOnlyKeys
             "Whether the gradient renders over or under terminal text."),
         new("background-gradient-opacity",
             "Strength of the gradient tint layer."),
+        new("accent-color",
+            "Chrome accent for the active tab background, focus border, and vertical strip rail. Overrides the default of using cursor-color so a vivid cursor does not paint the chrome."),
         new("vertical-tabs",
             "Tab strip orientation. When true, tabs render in a vertical sidebar instead of the default horizontal strip."),
         new("command-palette-group-commands",

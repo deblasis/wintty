@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Theming;
 
 namespace Ghostty.Services;
 
@@ -61,12 +62,16 @@ internal sealed class ShellThemeService
         var newTitleBarBg = bg;
         var newTitleBarFg = fg;
         var newTabBarBg = ShiftBrightness(bg, fg, 0.05f);
-        // Active tab uses cursor colors: cursor-color as background,
-        // cursor-text as foreground. This matches the terminal cursor
-        // appearance and creates a consistent visual accent.
-        var newAccent = _configService.CursorColor.HasValue
-            ? UnpackColor(_configService.CursorColor.Value)
-            : FindAccent(palette);
+        // Chrome accent precedence: explicit accent-color first, then
+        // cursor-color (the original "consistent visual accent" intent
+        // when this service shipped), then a palette-derived fallback.
+        // The cursor-color inheritance keeps backward compat for users
+        // who only set cursor-color; accent-color is the opt-out for
+        // anyone who wants a vivid cursor without staining the chrome.
+        var newAccent = UnpackColor(AccentColorResolver.Resolve(
+            accentColor: _configService.AccentColor,
+            cursorColor: _configService.CursorColor,
+            paletteFallback: () => FindAccent(palette)));
         var newActiveTabText = _configService.CursorTextColor.HasValue
             ? UnpackColor(_configService.CursorTextColor.Value)
             : bg; // fallback: background color on cursor-color bg
@@ -99,9 +104,12 @@ internal sealed class ShellThemeService
     /// <summary>
     /// Pick an accent color from the ANSI palette. Prefers blue
     /// (index 4 / 12) as it's the most natural UI accent. Falls
-    /// back to cyan, then the most saturated non-red color.
+    /// back to cyan, then the most saturated non-red color. Returns
+    /// the packed 0x00RRGGBB so it can flow through
+    /// <see cref="AccentColorResolver"/> alongside accent-color and
+    /// cursor-color without an intermediate Windows.UI.Color hop.
     /// </summary>
-    private static Windows.UI.Color FindAccent(uint[] palette)
+    private static uint FindAccent(uint[] palette)
     {
         // Preference order: blue, bright blue, cyan, bright cyan.
         // These make the best UI accents across light/dark themes.
@@ -109,7 +117,7 @@ internal sealed class ShellThemeService
         foreach (var i in preferred)
         {
             if (i < palette.Length && GetSaturation(UnpackColor(palette[i])) > 0.15f)
-                return UnpackColor(palette[i]);
+                return palette[i];
         }
 
         // Fallback: most saturated color, skipping black/white
@@ -125,7 +133,7 @@ internal sealed class ShellThemeService
             if (sat > maxSat) { maxSat = sat; bestIdx = i; }
         }
 
-        return UnpackColor(palette[bestIdx]);
+        return palette[bestIdx];
     }
 
     private static float GetSaturation(Windows.UI.Color c)
