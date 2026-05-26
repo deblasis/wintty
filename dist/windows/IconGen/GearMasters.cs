@@ -63,12 +63,22 @@ internal static class GearMasters
         // the outer teeth at the canvas edge.
         var fontPx = px * 0.72f;
         using var family = new FontFamily(fontName);
-        using var path = new GraphicsPath();
+        using var path = new GraphicsPath
+        {
+            // Glyph paths use non-zero winding; the default Alternate
+            // mode would hollow out the inner contours (the gear arms
+            // and hub), leaving FillPath painting only the thin
+            // outline rim.
+            FillMode = FillMode.Winding,
+        };
         using var fmt = new StringFormat(StringFormat.GenericTypographic)
         {
             Alignment = StringAlignment.Center,
             LineAlignment = StringAlignment.Center,
         };
+        // GDI+ AddString predates the FontStyle enum: the style
+        // parameter is typed as int. Keep the explicit cast --
+        // dropping it to FontStyle.Regular fails to compile.
         path.AddString(
             GearGlyph,
             family,
@@ -76,25 +86,22 @@ internal static class GearMasters
             fontPx,
             new RectangleF(0, 0, px, px),
             fmt);
-        // Glyph paths use non-zero winding; the default Alternate
-        // mode would hollow out the inner contours (the gear arms and
-        // hub), leaving FillPath painting only the thin outline rim.
-        path.FillMode = FillMode.Winding;
 
         // Fill first, stroke on top so the dark outline sits at the
         // glyph edge rather than under the fill.
         using (var brush = new SolidBrush(FillColor))
             g.FillPath(brush, path);
 
-        // Stroke scales with canvas, clamped >= 1 px so the small
-        // frames don't antialias the outline into nothing. The 2.2%
-        // ratio gives a halo that's perceptible on a light taskbar
-        // without eating the arm interior on the 256 frame.
+        // The 2.2% ratio crosses 1 px at ~46 px canvas, so for every
+        // sub-46 frame (16/20/24/32/40) the floor wins and the stroke
+        // is a flat 1 px. That's the design: the floor keeps the
+        // outline visible at small sizes; the ratio only kicks in on
+        // the 48/64/256 frames so the halo doesn't eat the arm
+        // interior on the 256 frame.
         var strokePx = MathF.Max(px * 0.022f, 1f);
         using var pen = new Pen(StrokeColor, strokePx)
         {
             LineJoin = LineJoin.Round,
-            MiterLimit = 1f,
         };
         g.DrawPath(pen, path);
 
