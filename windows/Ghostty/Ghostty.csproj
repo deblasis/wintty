@@ -261,7 +261,7 @@
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
           Inputs="..\..\dist\windows\IconGen\**\*.cs;..\..\images\icons\icon_*.png"
-          Outputs="$(GeneratedBrandingDir)wintty.ico">
+          Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
     <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
           WorkingDirectory="$(MSBuildThisFileDirectory)" />
@@ -299,6 +299,18 @@
     -->
     <Content Include="$(GeneratedBrandingDir)wintty.ico">
       <Link>Assets\wintty.ico</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <!--
+      Settings-window variant. Generated procedurally from the
+      Segoe Fluent Icons gear glyph (U+E713) by IconGen so the
+      taskbar / alt-tab icon for SettingsWindow visually matches the
+      in-chrome TitleBar.IconSource and is distinguishable from the
+      branded terminal-window icon.
+    -->
+    <Content Include="$(GeneratedBrandingDir)wintty-settings.ico">
+      <Link>Assets\wintty-settings.ico</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </Content>
