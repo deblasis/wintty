@@ -123,6 +123,21 @@
                         </Button>
                     </StackPanel>
                 </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Accent color"
+                                   Description="Color of the active tab background, focus border, and tab strip rail. When unset, the chrome follows cursor-color."
+                                   ctrl:SettingsCard.ConfigKey="accent-color">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <ctrl:ColorPickerControl x:Name="AccentColorPicker"
+                                                 ColorChanged="AccentColor_ColorChanged" />
+                        <Button x:Name="AccentColorResetButton"
+                                Click="AccentColor_Reset"
+                                ToolTipService.ToolTip="Follow cursor-color"
+                                Padding="6,4"
+                                Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE894;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
+                </ctrl:SettingsCard>
             </ctrl:SettingsGroup>
         </StackPanel>
     </ScrollViewer>
