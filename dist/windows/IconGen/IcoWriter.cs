@@ -7,7 +7,10 @@ internal static class IcoWriter
 {
     // Standard Windows icon sizes for an app .ico. Covers taskbar (16,
     // 20, 24, 32, 40, 48), larger icon views (64), and full-size (256).
-    private static readonly int[] FrameSizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
+    // Exposed internally so procedural-master generators (GearMasters)
+    // can render directly at each frame size and avoid downscale-loss
+    // on fine detail, without the two arrays drifting silently.
+    internal static readonly int[] FrameSizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
 
     public static void Write(MasterRasters masters, string outPath)
     {
