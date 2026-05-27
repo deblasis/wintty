@@ -27,9 +27,8 @@ namespace Ghostty.Controls.Search;
 /// </summary>
 public sealed partial class SearchBarControl : UserControl
 {
-    // 80ms is the same debounce VS Code uses for its scrollback search
-    // box; long enough to coalesce keystrokes from a fast typist but
-    // short enough to feel responsive on a slow drag-replace.
+    // 80ms is long enough to coalesce keystrokes from a fast typist
+    // but short enough to feel responsive on a slow drag-replace.
     private static readonly TimeSpan DebounceInterval = TimeSpan.FromMilliseconds(80);
 
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _debounceTimer;
@@ -39,7 +38,7 @@ public sealed partial class SearchBarControl : UserControl
         State = new SearchState();
         InitializeComponent();
 
-        // Microsoft.UI.Dispatching.DispatcherQueueTimer fires on the UI thread, so no marshalling
+        // DispatcherQueueTimer fires on the UI thread, so no marshalling
         // is needed when the tick handler reads NeedleBox.Text. The
         // timer is created once and reused; Start() resets it on each
         // keystroke so it only fires after the user pauses typing.
@@ -47,6 +46,18 @@ public sealed partial class SearchBarControl : UserControl
         _debounceTimer.Interval = DebounceInterval;
         _debounceTimer.IsRepeating = false;
         _debounceTimer.Tick += OnDebounceTick;
+
+        // Drop the Tick handler when the control leaves the tree so a
+        // reparented or torn-down pane doesn't accumulate handler links
+        // on the dispatcher's timer list.
+        Unloaded += OnControlUnloaded;
+    }
+
+    private void OnControlUnloaded(object sender, RoutedEventArgs e)
+    {
+        _debounceTimer.Stop();
+        _debounceTimer.Tick -= OnDebounceTick;
+        Unloaded -= OnControlUnloaded;
     }
 
     /// <summary>
@@ -87,7 +98,7 @@ public sealed partial class SearchBarControl : UserControl
     /// Move keyboard focus into the needle box and select all existing
     /// text. Selecting on focus lets the user immediately type to
     /// replace the previous query rather than appending to it, which
-    /// matches the convention in VS Code, browsers, and macOS find UI.
+    /// matches the convention in most find UIs.
     /// </summary>
     public void FocusNeedle()
     {
@@ -97,7 +108,7 @@ public sealed partial class SearchBarControl : UserControl
 
     // ── Event handlers ────────────────────────────────────────────────
 
-    private void OnNeedleTextChanged(object sender, TextChangedEventArgs e)
+    private void OnNeedleTextChanged(object _, TextChangedEventArgs __)
     {
         // Each keystroke resets the timer; the tick only fires once
         // the user pauses for DebounceInterval. Start() on an already-
@@ -107,7 +118,7 @@ public sealed partial class SearchBarControl : UserControl
         _debounceTimer.Start();
     }
 
-    private void OnDebounceTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    private void OnDebounceTick(Microsoft.UI.Dispatching.DispatcherQueueTimer _, object __)
     {
         // The two-way x:Bind on Text has already pushed the latest
         // value into State.Needle; read from the TextBox directly so

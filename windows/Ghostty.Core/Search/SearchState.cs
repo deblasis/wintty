@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel;
 using System.Globalization;
 
@@ -48,7 +49,7 @@ public sealed class SearchState : INotifyPropertyChanged
         set
         {
             var next = value ?? string.Empty;
-            if (string.Equals(_needle, next)) return;
+            if (string.Equals(_needle, next, StringComparison.Ordinal)) return;
             _needle = next;
             Notify(nameof(Needle));
             Notify(nameof(CounterText));
