@@ -22,6 +22,7 @@ MapVirtualKey
 MessageBeep
 MONITORINFO
 MONITOR_FROM_FLAGS
+MonitorFromPoint
 MonitorFromWindow
 RegisterHotKey
 SendMessage
