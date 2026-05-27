@@ -94,6 +94,29 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public double FontSize { get; private set; } = 13.0;
 
     /// <summary>
+    /// Where the quake window docks on the chosen monitor.
+    /// Default `top` matches upstream Ghostty.
+    /// </summary>
+    public Ghostty.Core.Hosting.QuickTerminalPosition QuickTerminalPosition =>
+        Ghostty.Core.Hosting.QuickTerminalPositionExtensions.Parse(
+            GetString("quick-terminal-position", "top"));
+
+    /// <summary>
+    /// Which monitor the quake window targets.
+    /// Default `main` matches upstream Ghostty.
+    /// </summary>
+    public Ghostty.Core.Hosting.QuickTerminalScreen QuickTerminalScreen =>
+        Ghostty.Core.Hosting.QuickTerminalScreenExtensions.Parse(
+            GetString("quick-terminal-screen", "main"));
+
+    /// <summary>
+    /// Size of the quake window on each axis. Either axis can be
+    /// null in which case the resolver uses sensible defaults
+    /// (50% primary, 100% secondary).
+    /// </summary>
+    public Ghostty.Core.Hosting.QuickTerminalSize QuickTerminalSize => ReadQuickTerminalSize();
+
+    /// <summary>
     /// Parsed light theme name from a conditional theme pair, or null
     /// if the theme is a single (non-conditional) value.
     /// </summary>
@@ -610,6 +633,35 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
                 (UIntPtr)keyBytes.Length);
             return found ? result : defaultValue;
         }
+    }
+
+    /// <summary>
+    /// Read the <c>quick-terminal-size</c> two-axis struct via
+    /// <c>ghostty_config_get</c>. libghostty writes a
+    /// <c>ghostty_qt_size_s</c> (two axes, each tagged percentage /
+    /// pixels / none) into the supplied buffer. Returns a
+    /// <see cref="Ghostty.Core.Hosting.QuickTerminalSize"/> with both
+    /// axes null when the key is unset, which the placement resolver
+    /// then fills with its defaults (50% primary, 100% secondary).
+    /// </summary>
+    private unsafe Ghostty.Core.Hosting.QuickTerminalSize ReadQuickTerminalSize()
+    {
+        Ghostty.Core.Interop.QuickTerminalSizeC raw = default;
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes("quick-terminal-size");
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)(&raw),
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            if (!found)
+            {
+                return new Ghostty.Core.Hosting.QuickTerminalSize(
+                    Primary: null, Secondary: null);
+            }
+        }
+        return raw.ToManaged();
     }
 
     /// <summary>
