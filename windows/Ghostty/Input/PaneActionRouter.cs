@@ -86,6 +86,12 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? ToggleFullscreenRequested;
 
+    /// <summary>
+    /// Raised when the Ctrl+Shift+F chord fires. MainWindow listens
+    /// and calls OpenSearch() on the active leaf's TerminalControl.
+    /// </summary>
+    public event EventHandler? OpenSearchRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -103,6 +109,9 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ToggleFullscreen:
                 ToggleFullscreenRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.OpenSearch:
+                OpenSearchRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding

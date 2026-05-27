@@ -544,6 +544,61 @@ internal sealed class GhosttyHost : IDisposable
                 return 1;
             }
 
+            case GhosttyActionTag.StartSearch:
+            {
+                // ghostty_action_start_search_s: { const char* needle; }
+                // Pointer at +8; decode the null-terminated UTF-8 needle
+                // off the libghostty thread to avoid touching it after the
+                // action call returns and libghostty frees the buffer.
+                var needlePtr = Marshal.ReadIntPtr(actionPtr, 8);
+                var needle = needlePtr == IntPtr.Zero
+                    ? string.Empty
+                    : Marshal.PtrToStringUTF8(needlePtr) ?? string.Empty;
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.OnSearchStarted(needle);
+                });
+                return 1;
+            }
+
+            case GhosttyActionTag.EndSearch:
+            {
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.OnSearchEnded();
+                });
+                return 1;
+            }
+
+            case GhosttyActionTag.SearchTotal:
+            {
+                // ssize_t total; at +8. Read as nint so the layout matches
+                // the C ssize_t on both 32- and 64-bit builds; cast to long
+                // for the SearchState API.
+                var total = (long)Marshal.ReadIntPtr(actionPtr, 8);
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.OnSearchTotalChanged(total);
+                });
+                return 1;
+            }
+
+            case GhosttyActionTag.SearchSelected:
+            {
+                // ssize_t selected; at +8. -1 (or any negative) means no
+                // match is selected yet -- SearchState normalises display.
+                var selected = (long)Marshal.ReadIntPtr(actionPtr, 8);
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.OnSearchSelectedChanged(selected);
+                });
+                return 1;
+            }
+
             case GhosttyActionTag.ProgressReport:
             {
                 var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
