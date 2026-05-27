@@ -216,12 +216,23 @@ public sealed partial class MainWindow : Window
     // WinUI 3 tears Content down before Closed fires.
     internal XamlRoot? RegisteredRoot { get; private set; }
 
+    /// <summary>
+    /// True when this window is the singleton quick (quake / drop-down)
+    /// terminal. Quick terminals are hidden from the taskbar and Alt+Tab,
+    /// and their close button hides the window instead of disposing it
+    /// (so the global hotkey can resurrect it without reopening a fresh
+    /// surface). The full positioning logic for quick terminals lives in
+    /// <see cref="MoveToQuakePosition"/> and <see cref="ToggleVisibility"/>.
+    /// </summary>
+    internal bool IsQuickTerminal { get; }
+
     internal MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
-        ILoggerFactory loggerFactory)
-        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null)
+        ILoggerFactory loggerFactory,
+        bool isQuickTerminal = false)
+        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null, isQuickTerminal)
     {
     }
 
@@ -243,9 +254,12 @@ public sealed partial class MainWindow : Window
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
-        TabModel? seedTab)
+        TabModel? seedTab,
+        bool isQuickTerminal = false)
     {
         InitializeComponent();
+
+        IsQuickTerminal = isQuickTerminal;
 
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
@@ -275,7 +289,14 @@ public sealed partial class MainWindow : Window
         // App.OnAnyWindowClosedInternal handler can remove the entry on
         // Window.Closed even if Content.XamlRoot has gone null by then
         // (which WinUI 3 does during window teardown).
-        if (Content is FrameworkElement fe)
+        //
+        // The quake window is deliberately excluded from this registry.
+        // WindowsByRoot.Count == 0 is the trigger for app shutdown; if
+        // the quake (which lives the entire app lifetime) participated,
+        // closing the last regular window would never drop the count to
+        // zero and the process would never exit. App.OnLaunched closes
+        // the quake explicitly when the last regular window goes away.
+        if (!IsQuickTerminal && Content is FrameworkElement fe)
         {
             fe.Loaded += OnContentLoadedOnce;
             void OnContentLoadedOnce(object s, RoutedEventArgs e)
@@ -629,6 +650,9 @@ public sealed partial class MainWindow : Window
             += OnVerticalTabsToggledFromSettings;
         _configService.ConfigChanged += OnConfigReloaded;
 
+        if (IsQuickTerminal)
+            ApplyQuickTerminalBehaviour();
+
         Closed += OnClosedAsync;
     }
 
@@ -684,7 +708,9 @@ public sealed partial class MainWindow : Window
         ILoggerFactory loggerFactory,
         TabModel adoptedTab)
     {
-        return new MainWindow(configService, bootstrapHost, supervisor, loggerFactory, seedTab: adoptedTab);
+        return new MainWindow(
+            configService, bootstrapHost, supervisor, loggerFactory,
+            seedTab: adoptedTab, isQuickTerminal: false);
     }
 
     /// <summary>
@@ -704,7 +730,9 @@ public sealed partial class MainWindow : Window
         ILoggerFactory loggerFactory,
         ProfileSnapshot? initialSnapshot)
     {
-        var window = new MainWindow(configService, bootstrapHost, supervisor, loggerFactory);
+        var window = new MainWindow(
+            configService, bootstrapHost, supervisor, loggerFactory,
+            isQuickTerminal: false);
         if (initialSnapshot is not null)
         {
             window._tabManager.ActiveTab.AttachProfileSnapshot(initialSnapshot);
@@ -1247,6 +1275,12 @@ public sealed partial class MainWindow : Window
             var terminal = leaf?.Terminal();
             terminal?.OpenSearch();
         };
+
+        // Quake / drop-down chord (default Ctrl+`). Forward to the
+        // App singleton; App owns the quake window and its global
+        // hotkey, so any MainWindow can be the chord source.
+        _router.QuickTerminalToggleRequested += (_, _) =>
+            ((App)Application.Current).ToggleQuickTerminal();
     }
 
     /// <summary>
@@ -1699,6 +1733,84 @@ public sealed partial class MainWindow : Window
             kind == Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen
                 ? Microsoft.UI.Windowing.AppWindowPresenterKind.Default
                 : Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen);
+    }
+
+    /// <summary>
+    /// One-shot setup applied when this window is the singleton quick
+    /// (quake / drop-down) terminal:
+    ///   - <c>AppWindow.IsShownInSwitchers = false</c> hides the icon
+    ///     from the taskbar.
+    ///   - <c>WS_EX_TOOLWINDOW</c> hides the window from the Alt+Tab
+    ///     switcher (IsShownInSwitchers alone leaves it visible there).
+    ///   - <c>AppWindow.Closing</c> is intercepted so the close button
+    ///     hides the window instead of disposing it; the global hotkey
+    ///     can then re-summon the same surface without recreating the
+    ///     shell process.
+    /// </summary>
+    private void ApplyQuickTerminalBehaviour()
+    {
+        AppWindow.IsShownInSwitchers = false;
+
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        var ex = (WINDOW_EX_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+        // unchecked because WINDOW_EX_STYLE is uint-backed but
+        // SetWindowLong takes int. WS_EX_LAYERED and friends set the
+        // high bit on some configurations; we want a bit-preserving
+        // reinterpret, not arithmetic saturation.
+        PInvoke.SetWindowLong(
+            hwnd,
+            WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
+            unchecked((int)(ex | WINDOW_EX_STYLE.WS_EX_TOOLWINDOW)));
+
+        AppWindow.Closing += (_, args) =>
+        {
+            args.Cancel = true;
+            AppWindow.Hide();
+        };
+    }
+
+    /// <summary>
+    /// Position the window at the top of the primary monitor's work area,
+    /// full width and half height. V1 hardcoded geometry; the
+    /// quick-terminal-position / size / screen config knobs that drive
+    /// per-user placement land separately.
+    /// </summary>
+    public void MoveToQuakePosition()
+    {
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        var monitor = PInvoke.MonitorFromWindow(hwnd, MONITOR_FROM_FLAGS.MONITOR_DEFAULTTOPRIMARY);
+        if (monitor == IntPtr.Zero) return;
+
+        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        if (!PInvoke.GetMonitorInfo(monitor, ref info)) return;
+
+        var work = info.rcWork;
+        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
+        {
+            X = work.left,
+            Y = work.top,
+            Width = work.right - work.left,
+            Height = (work.bottom - work.top) / 2,
+        });
+    }
+
+    /// <summary>
+    /// Show the window at its quake position with focus on the active
+    /// terminal, or hide it if currently visible. The global hotkey
+    /// service in <c>App</c> wires this method up to <c>WM_HOTKEY</c>.
+    /// </summary>
+    public void ToggleVisibility()
+    {
+        if (AppWindow.IsVisible)
+        {
+            AppWindow.Hide();
+            return;
+        }
+        MoveToQuakePosition();
+        AppWindow.Show();
+        DispatcherQueue.TryEnqueue(() =>
+            _tabManager.ActiveTab?.PaneHost?.ActiveLeaf?.Terminal()
+                .Focus(FocusState.Programmatic));
     }
 
     /// <summary>
