@@ -153,6 +153,53 @@ internal static class PaneTree
     }
 
     /// <summary>
+    /// Return the leaf that follows <paramref name="current"/> in
+    /// left-to-right depth-first traversal order, wrapping back to
+    /// the first leaf when called on the last one. Returns null if
+    /// <paramref name="current"/> is not in the tree or the tree
+    /// contains a single leaf.
+    ///
+    /// Tree-order navigation is the complement to spatial focus
+    /// (Alt+Arrows): it always advances even when no leaf lies in
+    /// any spatial direction, which is the discoverable model
+    /// upstream Ghostty uses for goto_split:next.
+    /// </summary>
+    public static LeafPane? NextLeafInOrder(PaneNode root, LeafPane current)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(current);
+
+        var ordered = new List<LeafPane>();
+        foreach (var l in Leaves(root)) ordered.Add(l);
+        if (ordered.Count <= 1) return null;
+
+        var idx = ordered.IndexOf(current);
+        if (idx < 0) return null;
+        return ordered[(idx + 1) % ordered.Count];
+    }
+
+    /// <summary>
+    /// Return the leaf that precedes <paramref name="current"/> in
+    /// left-to-right depth-first traversal order, wrapping back to
+    /// the last leaf when called on the first one. Returns null if
+    /// <paramref name="current"/> is not in the tree or the tree
+    /// contains a single leaf. Mirror of <see cref="NextLeafInOrder"/>.
+    /// </summary>
+    public static LeafPane? PreviousLeafInOrder(PaneNode root, LeafPane current)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(current);
+
+        var ordered = new List<LeafPane>();
+        foreach (var l in Leaves(root)) ordered.Add(l);
+        if (ordered.Count <= 1) return null;
+
+        var idx = ordered.IndexOf(current);
+        if (idx < 0) return null;
+        return ordered[(idx - 1 + ordered.Count) % ordered.Count];
+    }
+
+    /// <summary>
     /// Reset every <see cref="SplitPane.Ratio"/> in the tree to 0.5,
     /// giving all leaves equal space. No-op for parity with Zig/Swift
     /// on a single leaf.
