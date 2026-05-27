@@ -15,6 +15,7 @@ pub const Shell = enum {
     elvish,
     fish,
     nushell,
+    powershell,
     zsh,
 };
 
@@ -59,6 +60,13 @@ pub fn setup(
         ),
 
         .nushell => try setupNushell(
+            alloc_arena,
+            command,
+            resource_dir,
+            env,
+        ),
+
+        .powershell => try setupPowerShell(
             alloc_arena,
             command,
             resource_dir,
@@ -162,6 +170,17 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     if (std.mem.eql(u8, "nu", exe)) return .nushell;
     if (std.mem.eql(u8, "zsh", exe)) return .zsh;
 
+    // PowerShell exes on Windows literally end in `.exe`; the other
+    // shells we detect don't. Match both forms for robustness so users
+    // can spell their shell as either `pwsh` or `pwsh.exe` (likewise
+    // `powershell` for Windows PowerShell 5.1).
+    const exe_no_ext = if (std.mem.endsWith(u8, exe, ".exe"))
+        exe[0 .. exe.len - 4]
+    else
+        exe;
+    if (std.mem.eql(u8, "pwsh", exe_no_ext)) return .powershell;
+    if (std.mem.eql(u8, "powershell", exe_no_ext)) return .powershell;
+
     return null;
 }
 
@@ -182,6 +201,18 @@ test detectShell {
 
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "bash -c 'command'" }));
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "\"/a b/bash\"" }));
+
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "pwsh" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "pwsh.exe" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell.exe" }));
+
+    // std.fs.path.basename uses POSIX semantics on non-Windows hosts,
+    // so a backslash-only path is treated as a single component. Only
+    // assert the fully-qualified case where basename actually splits.
+    if (comptime builtin.target.os.tag == .windows) {
+        try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"" }));
+    }
 }
 
 /// Set up the shell integration features environment variable.
@@ -887,6 +918,59 @@ test "nushell: missing resources" {
 
     try testing.expect(try setupNushell(alloc, .{ .shell = "nu" }, resources_dir, &env) == null);
     try testing.expectEqual(0, env.count());
+}
+
+/// Setup PowerShell shell integration. PowerShell has no equivalent
+/// of bash's `ENV` or zsh's `ZDOTDIR` to auto-source a script, so we
+/// only export the absolute path to our integration script via the
+/// `GHOSTTY_SHELL_INTEGRATION_PS1` environment variable. Users opt in
+/// by adding a one-liner to their `$PROFILE` that dot-sources it.
+///
+/// We deliberately don't modify the command line (no `-NoProfile`, no
+/// `-Command . path`) so the user's existing profile execution
+/// semantics are preserved.
+fn setupPowerShell(
+    alloc_arena: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+) !?config.Command {
+    // Use forward slashes for path composition to match the style of the
+    // other shell-integration setup functions. PowerShell on Windows
+    // accepts forward slashes in paths just fine.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const script_path = try std.fmt.bufPrint(
+        &path_buf,
+        "{s}/shell-integration/powershell/ghostty.ps1",
+        .{resource_dir},
+    );
+
+    try env.put("GHOSTTY_SHELL_INTEGRATION_PS1", script_path);
+
+    return try command.clone(alloc_arena);
+}
+
+test "powershell" {
+    const testing = std.testing;
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    const command = try setupPowerShell(alloc, .{ .shell = "pwsh" }, res.path, &env);
+    try testing.expectEqualStrings("pwsh", command.?.shell);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
+        env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
+    );
 }
 
 /// Setup the zsh automatic shell integration. This works by setting
