@@ -210,9 +210,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// file for the first time. On Windows, ghostty_config_open_path()
     /// creates the file empty -- so on first launch (or whenever the
     /// user has deleted the contents) we drop in the same starter
-    /// header so they don't stare at a blank file. Failures are
-    /// swallowed: an unwritable config dir is the user's problem to
-    /// notice via diagnostics, not ours to crash on.
+    /// header so they don't stare at a blank file.
+    ///
+    /// Sequencing note: libghostty already loaded the (empty) file at
+    /// ConfigNew+LoadDefaultFiles above, so the seeded comments only
+    /// take effect on the next reload. That's fine -- every seeded
+    /// line is a comment, so the loaded config is functionally
+    /// identical to "no file" anyway.
     /// </summary>
     private void SeedConfigIfEmpty()
     {
@@ -234,10 +238,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
             File.WriteAllText(ConfigFilePath, seed);
         }
-        catch
+        catch (Exception ex)
         {
-            // Diagnostics surface the real error to the user via the
-            // settings UI; we don't want a startup crash here.
+            // Don't crash startup over a writable-config-dir hiccup;
+            // the diagnostic still lands in the log stream so it's
+            // discoverable.
+            StaticLoggers.ConfigService.LogSeedFailed(ex);
         }
     }
 
@@ -995,6 +1001,15 @@ internal static partial class ConfigServiceLogExtensions
                    Level = LogLevel.Error,
                    Message = "[ConfigService] Reload failed to create new config")]
     internal static partial void LogReloadFailed(
+        this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Warning, not Error: the user just loses the first-launch comment
+    // header. Functionally the config still loads and the file is
+    // still editable.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.SeedFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] Could not seed comment header into empty config file")]
+    internal static partial void LogSeedFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
 
     // Surfaces each warning string returned by
