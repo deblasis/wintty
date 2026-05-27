@@ -9,6 +9,7 @@ public class GhosttyActionsLayoutTests
 {
     // int (not enum) parameter: xUnit needs public test class, internal enum can't leak.
     [Theory]
+    [InlineData((int)GhosttyActionTag.ToggleQuickTerminal, 10)]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]

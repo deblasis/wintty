@@ -81,4 +81,9 @@ public enum PaneAction
     ResizeSplitDown = 45,
     ResizeSplitLeft = 46,
     ResizeSplitRight = 47,
+
+    // Toggle the singleton quake / drop-down window. Routed via an
+    // App-level singleton rather than the active leaf because the
+    // quake window may not even be open when the action fires.
+    ToggleQuickTerminal = 48,
 }
