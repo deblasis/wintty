@@ -210,4 +210,71 @@ internal static class PaneTree
         Equalize(split.Child1);
         Equalize(split.Child2);
     }
+
+    /// <summary>
+    /// Move the divider of the nearest matching-orientation ancestor
+    /// of <paramref name="current"/> by <paramref name="delta"/>.
+    /// Up/Down look for a horizontal (top/bottom) split; Left/Right
+    /// look for a vertical (left/right) split. Left/Up shrink Child1,
+    /// Right/Down grow it. Ratio is clamped to
+    /// [<see cref="SplitPane.MinRatio"/>, <see cref="SplitPane.MaxRatio"/>]
+    /// so no pane collapses below a usable size; same clamp the
+    /// mouse-drag Splitter uses.
+    ///
+    /// Returns true if a target divider was found and adjusted, false
+    /// when no matching ancestor exists (e.g. resize Up but the
+    /// active leaf has no horizontal-split ancestor) or
+    /// <paramref name="current"/> is the root leaf.
+    /// </summary>
+    public static bool ResizeSplit(
+        PaneNode root,
+        LeafPane current,
+        ResizeDirection direction,
+        double delta)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(current);
+
+        var targetOrientation = direction switch
+        {
+            ResizeDirection.Up or ResizeDirection.Down => PaneOrientation.Horizontal,
+            ResizeDirection.Left or ResizeDirection.Right => PaneOrientation.Vertical,
+            _ => PaneOrientation.Vertical,
+        };
+
+        // Walk up from `current` looking for the nearest ancestor
+        // split whose orientation matches the resize direction.
+        // FindParent is itself O(n), so the loop is O(depth * n);
+        // trees are tiny in practice (depth <= 4 for typical layouts)
+        // so this is fine and beats the bookkeeping cost of parent
+        // back-pointers, consistent with the file header rationale.
+        PaneNode node = current;
+        SplitPane? target = null;
+        while (true)
+        {
+            var parent = FindParent(root, node);
+            if (parent is null) break;
+            var (split, _) = parent.Value;
+            if (split.Orientation == targetOrientation)
+            {
+                target = split;
+                break;
+            }
+            node = split;
+        }
+
+        if (target is null) return false;
+
+        var signedDelta = direction switch
+        {
+            ResizeDirection.Left or ResizeDirection.Up => -delta,
+            ResizeDirection.Right or ResizeDirection.Down => delta,
+            _ => 0.0,
+        };
+        target.Ratio = Math.Clamp(
+            target.Ratio + signedDelta,
+            SplitPane.MinRatio,
+            SplitPane.MaxRatio);
+        return true;
+    }
 }

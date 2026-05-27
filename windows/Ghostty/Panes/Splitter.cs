@@ -27,12 +27,6 @@ namespace Ghostty.Panes;
 /// </summary>
 internal sealed partial class Splitter : Grid
 {
-    // Clamp range: prevents either side from being dragged to zero,
-    // which would lose the pane visually and make it impossible to
-    // recover with the mouse.
-    private const double MinRatio = 0.1;
-    private const double MaxRatio = 0.9;
-
     private readonly SplitPane _split;
     private readonly Action _onRatioChanged;
     private bool _capturing;
@@ -128,7 +122,7 @@ internal sealed partial class Splitter : Grid
             newRatio = pInParent.Y / parent.ActualHeight;
         }
 
-        newRatio = Math.Clamp(newRatio, MinRatio, MaxRatio);
+        newRatio = Math.Clamp(newRatio, SplitPane.MinRatio, SplitPane.MaxRatio);
         if (Math.Abs(newRatio - _split.Ratio) < 0.0005) return;
 
         _split.Ratio = newRatio;

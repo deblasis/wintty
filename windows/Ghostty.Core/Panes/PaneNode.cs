@@ -31,6 +31,19 @@ internal sealed class LeafPane : PaneNode
 
 internal sealed class SplitPane : PaneNode
 {
+    /// <summary>
+    /// Minimum ratio a divider can be pushed to without making either
+    /// side too small to recover. Both mouse-drag (Splitter) and
+    /// keyboard resize (PaneTree.ResizeSplit) must clamp to this so
+    /// the two paths agree.
+    /// </summary>
+    public const double MinRatio = 0.1;
+
+    /// <summary>
+    /// Maximum ratio counterpart of <see cref="MinRatio"/>.
+    /// </summary>
+    public const double MaxRatio = 0.9;
+
     public PaneOrientation Orientation { get; }
     public PaneNode Child1 { get; set; }
     public PaneNode Child2 { get; set; }
@@ -43,3 +56,11 @@ internal sealed class SplitPane : PaneNode
 }
 
 internal enum PaneOrientation { Vertical, Horizontal }
+
+/// <summary>
+/// Direction the split divider moves in response to a
+/// <c>resize_split</c> chord. Up/Down move a horizontal divider;
+/// Left/Right move a vertical divider. The active pane's nearest
+/// matching-orientation ancestor is the target.
+/// </summary>
+internal enum ResizeDirection { Up, Down, Left, Right }

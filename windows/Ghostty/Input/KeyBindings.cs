@@ -173,6 +173,14 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)219, PaneAction.GotoSplitPrevious),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)221, PaneAction.GotoSplitNext),
 
+        // Keyboard-driven splitter resize. Alt+Shift+Arrow moves the
+        // nearest matching-orientation divider by 5% per press. Matches
+        // Windows Terminal muscle memory for keyboard pane resize.
+        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Up, PaneAction.ResizeSplitUp),
+        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Down, PaneAction.ResizeSplitDown),
+        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Left, PaneAction.ResizeSplitLeft),
+        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Right, PaneAction.ResizeSplitRight),
+
         // Scrollback search. Ctrl+Shift+F matches Windows Terminal
         // muscle memory; plain Ctrl+F is reserved for in-find inside
         // the Settings raw editor.
