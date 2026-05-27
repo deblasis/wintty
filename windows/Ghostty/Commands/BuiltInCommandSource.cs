@@ -61,6 +61,8 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddBindingCommand(commands, "clear_screen", "Clear Screen", "Clear the terminal screen and scrollback", CommandCategory.Terminal, "\uE894");
         AddBindingCommand(commands, "scroll_to_top", "Scroll to Top", "Jump to the top of scrollback", CommandCategory.Terminal);
         AddBindingCommand(commands, "scroll_to_bottom", "Scroll to Bottom", "Jump to the bottom of scrollback", CommandCategory.Terminal);
+        AddBindingCommand(commands, "jump_to_prompt:-1", "Jump to Previous Prompt", "Scroll to the previous shell prompt (requires OSC 133)", CommandCategory.Terminal);
+        AddBindingCommand(commands, "jump_to_prompt:1", "Jump to Next Prompt", "Scroll to the next shell prompt (requires OSC 133)", CommandCategory.Terminal);
         AddBindingCommand(commands, "open_config", "Open Config", "Open the Ghostty configuration file", CommandCategory.Config, "\uE713");
         AddBindingCommand(commands, "reload_config", "Reload Config", "Reload configuration from disk", CommandCategory.Config, "\uE72C");
 
