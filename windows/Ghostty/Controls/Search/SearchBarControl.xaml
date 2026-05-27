@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SearchBarControl: in-pane scrollback search overlay.
+
+    Layout is a single Border-wrapped Grid with three columns:
+    [needle TextBox *] [counter TextBlock Auto] [prev/next/close icon buttons Auto].
+    Consumers wire up an ISearchHost via the SearchHost dependency property
+    and call FocusNeedle() after toggling Visibility, since WinUI does not
+    automatically move focus into a control that becomes visible.
+-->
+<UserControl
+    x:Class="Ghostty.Controls.Search.SearchBarControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    mc:Ignorable="d"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Top"
+    MinHeight="36">
+
+    <Border Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="{ThemeResource ControlCornerRadius}"
+            Padding="8,4">
+        <Grid ColumnSpacing="8" VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <!--
+                Needle box. Two-way bound to State.Needle so external
+                resets (e.g. Reset()) flow back into the TextBox without
+                code-behind plumbing. Enter / Shift+Enter / Esc are
+                handled in code-behind via KeyDown.
+            -->
+            <TextBox x:Name="NeedleBox"
+                     Grid.Column="0"
+                     PlaceholderText="Search scrollback"
+                     AcceptsReturn="False"
+                     VerticalAlignment="Center"
+                     Text="{x:Bind State.Needle, Mode=TwoWay}"
+                     TextChanged="OnNeedleTextChanged"
+                     KeyDown="OnNeedleKeyDown"/>
+
+            <!-- Match counter, e.g. "3 of 12" / "No matches" / "" -->
+            <TextBlock x:Name="CounterText"
+                       Grid.Column="1"
+                       VerticalAlignment="Center"
+                       HorizontalAlignment="Right"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="{x:Bind State.CounterText, Mode=OneWay}"/>
+
+            <!--
+                Inline navigation + close. Subtle padding keeps the bar
+                compact; tooltips spell out the keyboard alternatives.
+            -->
+            <StackPanel Grid.Column="2"
+                        Orientation="Horizontal"
+                        Spacing="2"
+                        VerticalAlignment="Center">
+                <Button x:Name="PrevButton"
+                        Padding="6,4"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Previous match (Shift+Enter)"
+                        Click="OnPrevClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE70E;"
+                              FontSize="12"/>
+                </Button>
+                <Button x:Name="NextButton"
+                        Padding="6,4"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Next match (Enter)"
+                        Click="OnNextClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE70D;"
+                              FontSize="12"/>
+                </Button>
+                <Button x:Name="CloseButton"
+                        Padding="6,4"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Close (Esc)"
+                        Click="OnCloseClick">
+                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                              Glyph="&#xE711;"
+                              FontSize="12"/>
+                </Button>
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>
