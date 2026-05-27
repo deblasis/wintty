@@ -65,4 +65,11 @@ public enum PaneAction
     // positive N is next.
     JumpToPreviousPrompt = 40,
     JumpToNextPrompt = 41,
+
+    // Tree-order pane navigation. Complements the spatial focus
+    // (FocusLeft/Right/Up/Down): these always advance even when no
+    // leaf lies in any spatial direction, matching Ghostty's
+    // goto_split:previous and goto_split:next bindings.
+    GotoSplitPrevious = 42,
+    GotoSplitNext = 43,
 }
