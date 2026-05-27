@@ -31,6 +31,7 @@ internal sealed class PaneActionRouter
     private readonly TabManager _tabs;
     private readonly Func<IReadOnlyList<ResolvedProfile>>? _getProfiles = null;
     private readonly Action<string, ProfileLaunchTarget>? _openProfile = null;
+    private readonly Action<string>? _bindingAction = null;
 
     public PaneActionRouter(TabManager tabs)
     {
@@ -40,11 +41,13 @@ internal sealed class PaneActionRouter
     public PaneActionRouter(
         TabManager tabs,
         Func<IReadOnlyList<ResolvedProfile>>? getProfiles,
-        Action<string, ProfileLaunchTarget>? openProfile)
+        Action<string, ProfileLaunchTarget>? openProfile,
+        Action<string>? bindingAction = null)
         : this(tabs)
     {
         _getProfiles = getProfiles;
         _openProfile = openProfile;
+        _bindingAction = bindingAction;
     }
 
     public TabManager Tabs => _tabs;
@@ -100,6 +103,17 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ToggleFullscreen:
                 ToggleFullscreenRequested?.Invoke(this, EventArgs.Empty);
+                return;
+
+            // Scrollback jumps are dispatched as libghostty binding
+            // actions against the active surface. The injected delegate
+            // resolves the active leaf so we don't need to reach through
+            // the pane tree here. Silent no-op if no delegate wired.
+            case PaneAction.ScrollToTop:
+                _bindingAction?.Invoke("scroll_to_top");
+                return;
+            case PaneAction.ScrollToBottom:
+                _bindingAction?.Invoke("scroll_to_bottom");
                 return;
 
             // Profile slot chords resolve via the live registry; out-of-range
