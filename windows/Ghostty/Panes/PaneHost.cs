@@ -540,6 +540,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_zoomedLeaf is not null) return;
         Rebuild();
         UpdateHighlightPosition();
+        // Rebuild detaches every TerminalControl and re-parents into
+        // a fresh Grid; without restoring focus the user lands in a
+        // focus-less window. Same restore path as ToggleSplitZoom +
+        // ResizeSplit.
+        DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
     }
 
     /// <summary>
@@ -672,6 +677,29 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_zoomedLeaf is not null) return;
         var target = PaneTree.PreviousLeafInOrder(_root, _activeLeaf);
         target?.Terminal().Focus(FocusState.Keyboard);
+    }
+
+    // Default ratio delta per resize_split chord. 0.05 = 5% of the
+    // split per press, giving the user 18-19 presses to slide the
+    // divider from edge to edge. Tuned by feel; configurable later.
+    private const double ResizeSplitDelta = 0.05;
+
+    /// <summary>
+    /// Move the divider closest to the active leaf in the requested
+    /// direction. No-op while zoomed, with a single leaf, or when
+    /// the active leaf has no ancestor split of the matching
+    /// orientation (e.g. resize Up but all ancestors are vertical).
+    /// Maps to Ghostty's <c>resize_split:DIRECTION</c> binding.
+    /// </summary>
+    public void ResizeSplit(ResizeDirection direction)
+    {
+        if (_zoomedLeaf is not null) return;
+        if (PaneTree.Leaves(_root).Take(2).Count() <= 1) return;
+
+        if (!PaneTree.ResizeSplit(_root, _activeLeaf, direction, ResizeSplitDelta)) return;
+        Rebuild();
+        UpdateHighlightPosition();
+        DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
     }
 
     // Internals ---------------------------------------------------------
