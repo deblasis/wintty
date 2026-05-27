@@ -410,6 +410,15 @@ internal sealed class GhosttyHost : IDisposable
                         ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
                     return 1;
 
+                case GhosttyActionTag.ToggleQuickTerminal:
+                    // Routed to App rather than a per-window event because
+                    // the quake window is a singleton owned by App; any
+                    // surface (including ones in regular MainWindows) can
+                    // be the source of the action.
+                    _dispatcher.TryEnqueue(() =>
+                        ((Ghostty.App)Microsoft.UI.Xaml.Application.Current).ToggleQuickTerminal());
+                    return 1;
+
                 case GhosttyActionTag.MouseVisibility:
                     // Mirror mac/GTK: mouse visibility against an app target is a
                     // libghostty bug; log and absorb so we still report "handled".
