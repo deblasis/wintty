@@ -1236,6 +1236,17 @@ public sealed partial class MainWindow : Window
 
         // Fullscreen toggle via F11.
         _router.ToggleFullscreenRequested += (_, _) => ToggleFullscreen();
+
+        // Ctrl+Shift+F opens the in-pane scrollback search bar on the
+        // active leaf. The control owns its visibility; we just route
+        // the chord through TerminalControl so the right surface
+        // receives the libghostty binding-action calls.
+        _router.OpenSearchRequested += (_, _) =>
+        {
+            var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+            var terminal = leaf?.Terminal();
+            terminal?.OpenSearch();
+        };
     }
 
     /// <summary>

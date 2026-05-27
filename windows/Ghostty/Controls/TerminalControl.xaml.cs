@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using Ghostty.Core.Input;
+using Ghostty.Core.Search;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Interop;
@@ -24,7 +25,7 @@ namespace Ghostty.Controls;
 /// Config and app handle ownership lives in <see cref="Ghostty.Hosting.GhosttyHost"/>,
 /// which is constructed by MainWindow and assigned via the Host property before load.
 /// </summary>
-public sealed partial class TerminalControl : UserControl
+public sealed partial class TerminalControl : UserControl, ISearchHost
 {
     /// <summary>
     /// Set by MainWindow when the command palette opens/closes. When true,
@@ -302,6 +303,11 @@ public sealed partial class TerminalControl : UserControl
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
         DisableAncestorScrollViewerTabStop();
+
+        // SearchBar lifetime matches the control's; wiring `this` as the
+        // host is idempotent so doing it on every Loaded is safe and
+        // survives any visual-tree reparent.
+        SearchBar.SearchHost = this;
 
         // Surface creation runs exactly once per control instance,
         // even across multiple reparents. Subsequent Loaded events
@@ -1013,4 +1019,87 @@ public sealed partial class TerminalControl : UserControl
         return mods;
     }
 
+    // Search --------------------------------------------------------------
+    //
+    // In-pane scrollback search is owned by the SearchBarControl child;
+    // TerminalControl plays both the ISearchHost (UI -> libghostty) and
+    // the action-callback sink (libghostty -> UI state). Visibility is
+    // toggled here so the search bar disappears as soon as the user
+    // dismisses it, without round-tripping through libghostty first.
+
+    /// <summary>
+    /// Show the search bar and move keyboard focus into its needle box.
+    /// Called from MainWindow when the Ctrl+Shift+F chord fires against
+    /// this leaf. Idempotent: repeated calls just re-focus the needle.
+    /// </summary>
+    internal void OpenSearch()
+    {
+        SearchBar.State.IsOpen = true;
+        SearchBar.Visibility = Visibility.Visible;
+        SearchBar.FocusNeedle();
+    }
+
+    private void OnSearchClosed(object sender, EventArgs e)
+    {
+        SearchBar.Visibility = Visibility.Collapsed;
+        SearchBar.State.IsOpen = false;
+        // Return focus to the terminal surface so the user can keep typing
+        // immediately after dismissing the bar.
+        this.Focus(FocusState.Programmatic);
+    }
+
+    /// <inheritdoc />
+    public void StartSearch(string needle)
+        => SendBindingAction("search:" + (needle ?? string.Empty));
+
+    /// <inheritdoc />
+    public void NavigateNext()
+        => SendBindingAction("navigate_search:next");
+
+    /// <inheritdoc />
+    public void NavigatePrevious()
+        => SendBindingAction("navigate_search:previous");
+
+    /// <inheritdoc />
+    public void EndSearch()
+        => SendBindingAction("end_search");
+
+    // Mirrors MainWindow.ExecuteBindingAction's encode-and-call pattern.
+    // Heap-allocates per call (intent: low-frequency, user-driven), unlike
+    // the OnScrollBarScroll hot path which uses stackalloc.
+    private void SendBindingAction(string action)
+    {
+        if (_surface.Handle == IntPtr.Zero) return;
+        var bytes = Encoding.UTF8.GetBytes(action);
+        unsafe
+        {
+            fixed (byte* p = bytes)
+            {
+                NativeMethods.SurfaceBindingAction(_surface, p, (UIntPtr)bytes.Length);
+            }
+        }
+    }
+
+    // Mutators invoked by GhosttyHost after dispatching a search action
+    // to this leaf. All four run on the UI thread because GhosttyHost
+    // already DispatcherQueue.TryEnqueues the callback body.
+    internal void OnSearchStarted(string needle)
+    {
+        SearchBar.State.Needle = needle;
+    }
+
+    internal void OnSearchEnded()
+    {
+        if (SearchBar.Visibility == Visibility.Visible)
+        {
+            SearchBar.Visibility = Visibility.Collapsed;
+            SearchBar.State.IsOpen = false;
+        }
+    }
+
+    internal void OnSearchTotalChanged(long total)
+        => SearchBar.State.Total = total;
+
+    internal void OnSearchSelectedChanged(long selected)
+        => SearchBar.State.Selected = selected;
 }
