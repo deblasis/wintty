@@ -60,11 +60,9 @@ public enum PaneAction
     // MainWindow which forwards to the active leaf's TerminalControl.
     OpenSearch = 39,
 
-    // OSC 133 prompt navigation. Router dispatches the upstream
-    // jump_to_prompt:N libghostty binding through the existing
-    // injectable Action<string> delegate. Negative N moves to a
-    // previous prompt, positive N to a following one; we only ship
-    // single-step chords for now.
+    // OSC 133 prompt navigation. Router dispatches the
+    // jump_to_prompt:N libghostty binding. Negative N is previous,
+    // positive N is next.
     JumpToPreviousPrompt = 40,
     JumpToNextPrompt = 41,
 }

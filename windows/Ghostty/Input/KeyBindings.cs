@@ -158,9 +158,8 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.End, PaneAction.ScrollToBottom),
 
         // OSC 133 prompt navigation. Ctrl+Up/Down steps between
-        // shell prompts in scrollback when the user's shell emits
-        // OSC 133 marks (every Wintty-shipped integration script
-        // does). No-op otherwise.
+        // shell prompts in scrollback in shells that emit OSC 133
+        // prompt marking. No-op otherwise.
         new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Up, PaneAction.JumpToPreviousPrompt),
         new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Down, PaneAction.JumpToNextPrompt),
 
