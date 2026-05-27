@@ -92,6 +92,13 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? OpenSearchRequested;
 
+    /// <summary>
+    /// Raised when the quake / drop-down chord fires. MainWindow listens
+    /// and forwards to App.ToggleQuickTerminal(), which owns the
+    /// singleton quake window.
+    /// </summary>
+    public event EventHandler? QuickTerminalToggleRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -112,6 +119,9 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.OpenSearch:
                 OpenSearchRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ToggleQuickTerminal:
+                QuickTerminalToggleRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding

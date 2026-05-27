@@ -35,4 +35,10 @@ internal static class LogEvents
         public const int DiscoveryRefreshFailed  = 1204;
         public const int ProfileParseWarning     = 1205;
     }
+
+    // 1300-1399: Hosting / window infrastructure
+    internal static class Hosting
+    {
+        public const int HotKeyRegisterFailed = 1300;
+    }
 }

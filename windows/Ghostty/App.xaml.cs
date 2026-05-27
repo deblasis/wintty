@@ -57,6 +57,22 @@ public partial class App : Application
     // into a pre-factory buffer that is then replayed.
     private Ghostty.Core.Logging.LibghosttyLogBridge? _zigLogBridge;
 
+    // Singleton quake / drop-down window and its global hotkey owner.
+    // Lifecycle is App-scoped (rather than per-window) so the chord
+    // works from anywhere in the process and the hidden window stays
+    // alive across regular window close/reopen cycles.
+    private MainWindow? _quakeWindow;
+    private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
+
+    // Win32 RegisterHotKey constants for the default quake chord
+    // (Ctrl+backtick, no auto-fire while held). MOD_CONTROL = 0x0002,
+    // MOD_NOREPEAT = 0x4000, VK_OEM_3 = 0xC0. CsWin32 doesn't expose
+    // these as a single typed enum we'd want to combine, so naming
+    // them locally keeps the call site readable. The quick-terminal-key
+    // config override will replace these in a later PR.
+    private const uint QuakeHotKeyModifiers = 0x0002 | 0x4000;
+    private const uint QuakeHotKeyVirtualKey = 0xC0;
+
     // Top-level window registry keyed by XamlRoot. Replaces the old
     // singular RootWindow and the earlier List<Window> draft: XamlRoot
     // is the identity every UserControl already has in hand, so
@@ -581,6 +597,50 @@ public partial class App : Application
         var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
         window.Closed += OnAnyWindowClosedInternal;
         window.Activate();
+
+        // Singleton quake / drop-down window. Created hidden; summoned
+        // by the global hotkey via WindowsGlobalHotKey. Same MainWindow
+        // class as a regular window, just with IsQuickTerminal = true
+        // for the no-taskbar / no-AltTab / close-hides behaviour.
+        _quakeWindow = new MainWindow(
+            _configService, _bootstrapHost, _lifetimeSupervisor, factory,
+            isQuickTerminal: true);
+        _quakeWindow.Closed += OnAnyWindowClosedInternal;
+        _quakeWindow.Activate();          // creates the HWND
+        _quakeWindow.AppWindow.Hide();    // immediately hide
+
+        // Default chord Ctrl+` (VK_OEM_3). MOD_NOREPEAT (0x4000)
+        // prevents auto-fire while the user holds the chord;
+        // MOD_CONTROL (0x0002) is the modifier. The
+        // quick-terminal-key config override lands in a later PR.
+        _quakeHotKey = new Ghostty.Hosting.WindowsGlobalHotKey(
+            DispatcherQueue.GetForCurrentThread(),
+            factory.CreateLogger<Ghostty.Hosting.WindowsGlobalHotKey>());
+        _quakeHotKey.Pressed += (_, _) => ToggleQuickTerminal();
+        _quakeHotKey.Register(
+            modifiers: QuakeHotKeyModifiers,
+            virtualKey: QuakeHotKeyVirtualKey);
+    }
+
+    /// <summary>
+    /// Toggle the singleton quake / drop-down terminal window. Called
+    /// from PaneActionRouter.QuickTerminalToggleRequested (chord),
+    /// GhosttyHost.OnAction (libghostty action callback), and the
+    /// command palette. The quake window is the same MainWindow class
+    /// as regular windows, just with IsQuickTerminal = true and a
+    /// no-taskbar / no-AltTab / close-hides behaviour profile.
+    /// </summary>
+    internal void ToggleQuickTerminal()
+    {
+        // Off-thread callers (libghostty's action callback fires on a
+        // worker thread) need the captured UI dispatcher; the
+        // GetForCurrentThread() fallback returns null on those threads
+        // and silently drops the toggle.
+        var dispatcher = _uiDispatcher ?? DispatcherQueue.GetForCurrentThread();
+        dispatcher?.TryEnqueue(() =>
+        {
+            _quakeWindow?.ToggleVisibility();
+        });
     }
 
     /// <summary>
@@ -717,6 +777,34 @@ public partial class App : Application
                 // callback so disk writes happen-before the host tears
                 // down the ghostty app.
                 _configWriteScheduler?.Dispose();
+
+                // Unregister the quake-mode global hotkey before the
+                // bootstrap host tears down. WindowsGlobalHotKey.Dispose
+                // calls UnregisterHotKey on the UI thread (same thread
+                // that registered it).
+                _quakeHotKey?.Dispose();
+
+                // Force-close the quake window. It does not participate
+                // in WindowsByRoot (so this branch fires when the last
+                // *regular* window closes), but the quake window is a
+                // real top-level Window the OS will keep the process
+                // alive for unless we close it explicitly. Closing it
+                // triggers its own Window.Closed -> per-window host
+                // dispose path before the bootstrap host disposes
+                // below.
+                if (_quakeWindow is not null)
+                {
+                    var quake = _quakeWindow;
+                    _quakeWindow = null;
+                    quake.Closed -= OnAnyWindowClosedInternal;
+                    // Opt out of the AppWindow.Closing intercept that
+                    // turns Close() into Hide() during normal user
+                    // interaction. Without this the force-close below
+                    // would silently hide and the process would never
+                    // exit.
+                    quake.RequestHardClose();
+                    quake.Close();
+                }
 
                 // Bootstrap host is the LAST host. Its Dispose drains
                 // _hostBySurface (asserts empty), notifies the
