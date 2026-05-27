@@ -166,7 +166,10 @@ internal sealed class KeyBindings
         // Tree-order pane navigation. Ctrl+Alt+[ / Ctrl+Alt+] match
         // Ghostty mac/linux conventions for goto_split:previous /
         // goto_split:next. Spatial Alt+Arrows (above) cover the
-        // direction-based variants.
+        // direction-based variants. On non-US layouts Ctrl+Alt is
+        // the AltGr modifier and may need to be rebound; the chord
+        // table is the single source of truth so a future
+        // config-driven loader can override.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)219, PaneAction.GotoSplitPrevious),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)221, PaneAction.GotoSplitNext),
 

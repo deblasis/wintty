@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Ghostty.Core.Panes;
 
@@ -159,18 +160,16 @@ internal static class PaneTree
     /// <paramref name="current"/> is not in the tree or the tree
     /// contains a single leaf.
     ///
-    /// Tree-order navigation is the complement to spatial focus
-    /// (Alt+Arrows): it always advances even when no leaf lies in
-    /// any spatial direction, which is the discoverable model
-    /// upstream Ghostty uses for goto_split:next.
+    /// Tree-order navigation complements spatial focus (Alt+Arrows):
+    /// it always advances even when no leaf lies in any spatial
+    /// direction. Matches Ghostty's goto_split:next semantics.
     /// </summary>
     public static LeafPane? NextLeafInOrder(PaneNode root, LeafPane current)
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(current);
 
-        var ordered = new List<LeafPane>();
-        foreach (var l in Leaves(root)) ordered.Add(l);
+        var ordered = Leaves(root).ToList();
         if (ordered.Count <= 1) return null;
 
         var idx = ordered.IndexOf(current);
@@ -190,8 +189,7 @@ internal static class PaneTree
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(current);
 
-        var ordered = new List<LeafPane>();
-        foreach (var l in Leaves(root)) ordered.Add(l);
+        var ordered = Leaves(root).ToList();
         if (ordered.Count <= 1) return null;
 
         var idx = ordered.IndexOf(current);
