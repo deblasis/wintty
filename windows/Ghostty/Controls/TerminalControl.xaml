@@ -23,6 +23,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
+    xmlns:search="using:Ghostty.Controls.Search"
     IsTabStop="True"
     TabNavigation="Cycle"
     HorizontalAlignment="Stretch"
@@ -131,5 +132,22 @@
                 Style="{ThemeResource CaptionTextBlockStyle}"
                 MaxLines="1" />
         </Border>
+
+        <!--
+            In-pane scrollback search overlay. Anchored top-right to
+            mirror Windows Terminal's "Find" UX; appears on Ctrl+Shift+F
+            and stays Collapsed otherwise. The TerminalControl wires
+            itself as the ISearchHost in code-behind so the control owns
+            its own State and only escalates intents (start/navigate/
+            end) back to the libghostty surface.
+        -->
+        <search:SearchBarControl
+            x:Name="SearchBar"
+            VerticalAlignment="Top"
+            HorizontalAlignment="Right"
+            MaxWidth="480"
+            Margin="0,8,8,0"
+            Visibility="Collapsed"
+            Closed="OnSearchClosed" />
     </Grid>
 </UserControl>
