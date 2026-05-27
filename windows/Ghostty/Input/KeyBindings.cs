@@ -157,6 +157,13 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Home, PaneAction.ScrollToTop),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.End, PaneAction.ScrollToBottom),
 
+        // OSC 133 prompt navigation. Ctrl+Up/Down steps between
+        // shell prompts in scrollback when the user's shell emits
+        // OSC 133 marks (every Wintty-shipped integration script
+        // does). No-op otherwise.
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Up, PaneAction.JumpToPreviousPrompt),
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Down, PaneAction.JumpToNextPrompt),
+
         // Scrollback search. Ctrl+Shift+F matches Windows Terminal
         // muscle memory; plain Ctrl+F is reserved for in-find inside
         // the Settings raw editor.

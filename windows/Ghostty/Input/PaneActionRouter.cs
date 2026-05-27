@@ -124,6 +124,12 @@ internal sealed class PaneActionRouter
             case PaneAction.ScrollToBottom:
                 _bindingAction?.Invoke("scroll_to_bottom");
                 return;
+            case PaneAction.JumpToPreviousPrompt:
+                _bindingAction?.Invoke("jump_to_prompt:-1");
+                return;
+            case PaneAction.JumpToNextPrompt:
+                _bindingAction?.Invoke("jump_to_prompt:1");
+                return;
 
             // Profile slot chords resolve via the live registry; out-of-range
             // and missing-delegate are silent no-ops.
