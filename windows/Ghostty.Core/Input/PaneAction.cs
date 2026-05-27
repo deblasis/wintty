@@ -50,4 +50,9 @@ public enum PaneAction
     OpenProfile7 = 34,
     OpenProfile8 = 35,
     OpenProfile9 = 36,
+
+    // Scrollback navigation. Router dispatches via libghostty bindings;
+    // see PaneActionRouter.Invoke for the wiring.
+    ScrollToTop = 37,
+    ScrollToBottom = 38,
 }
