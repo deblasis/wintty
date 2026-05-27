@@ -360,4 +360,102 @@ public sealed class PaneTreeTests
         Assert.Equal(0.5, mid.Ratio);
         Assert.Equal(0.5, deep.Ratio);
     }
+
+    // NextLeafInOrder / PreviousLeafInOrder ----------------------------
+
+    [Fact]
+    public void NextLeafInOrder_SingleLeaf_ReturnsNull()
+    {
+        var leaf = new LeafPane();
+        Assert.Null(PaneTree.NextLeafInOrder(leaf, leaf));
+    }
+
+    [Fact]
+    public void PreviousLeafInOrder_SingleLeaf_ReturnsNull()
+    {
+        var leaf = new LeafPane();
+        Assert.Null(PaneTree.PreviousLeafInOrder(leaf, leaf));
+    }
+
+    [Fact]
+    public void NextLeafInOrder_TwoLeaves_AlternatesAndWraps()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+
+        Assert.Same(b, PaneTree.NextLeafInOrder(root, a));
+        // Wraps back to the first leaf from the last.
+        Assert.Same(a, PaneTree.NextLeafInOrder(root, b));
+    }
+
+    [Fact]
+    public void PreviousLeafInOrder_TwoLeaves_AlternatesAndWraps()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+
+        Assert.Same(a, PaneTree.PreviousLeafInOrder(root, b));
+        // Wraps from the first leaf back to the last.
+        Assert.Same(b, PaneTree.PreviousLeafInOrder(root, a));
+    }
+
+    [Fact]
+    public void NextLeafInOrder_DeepTree_FollowsLeftToRightTraversal()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var d = new LeafPane();
+        var root = new SplitPane(
+            PaneOrientation.Vertical,
+            new SplitPane(PaneOrientation.Horizontal, a, b),
+            new SplitPane(PaneOrientation.Horizontal, c, d));
+
+        Assert.Same(b, PaneTree.NextLeafInOrder(root, a));
+        Assert.Same(c, PaneTree.NextLeafInOrder(root, b));
+        Assert.Same(d, PaneTree.NextLeafInOrder(root, c));
+        Assert.Same(a, PaneTree.NextLeafInOrder(root, d));
+    }
+
+    [Fact]
+    public void PreviousLeafInOrder_DeepTree_WalksBackwards()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var c = new LeafPane();
+        var d = new LeafPane();
+        var root = new SplitPane(
+            PaneOrientation.Vertical,
+            new SplitPane(PaneOrientation.Horizontal, a, b),
+            new SplitPane(PaneOrientation.Horizontal, c, d));
+
+        Assert.Same(c, PaneTree.PreviousLeafInOrder(root, d));
+        Assert.Same(b, PaneTree.PreviousLeafInOrder(root, c));
+        Assert.Same(a, PaneTree.PreviousLeafInOrder(root, b));
+        Assert.Same(d, PaneTree.PreviousLeafInOrder(root, a));
+    }
+
+    [Fact]
+    public void NextLeafInOrder_LeafNotInTree_ReturnsNull()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+        var orphan = new LeafPane();
+
+        Assert.Null(PaneTree.NextLeafInOrder(root, orphan));
+    }
+
+    [Fact]
+    public void PreviousLeafInOrder_LeafNotInTree_ReturnsNull()
+    {
+        var a = new LeafPane();
+        var b = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, a, b);
+        var orphan = new LeafPane();
+
+        Assert.Null(PaneTree.PreviousLeafInOrder(root, orphan));
+    }
 }

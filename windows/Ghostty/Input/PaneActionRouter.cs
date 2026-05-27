@@ -158,6 +158,8 @@ internal sealed class PaneActionRouter
             case PaneAction.FocusDown:       concrete.FocusDirection(FocusDirection.Down); break;
             case PaneAction.EqualizeSplits:  concrete.EqualizeSplits(); break;
             case PaneAction.ToggleSplitZoom: concrete.ToggleSplitZoom(); break;
+            case PaneAction.GotoSplitPrevious: concrete.GotoPreviousSplit(); break;
+            case PaneAction.GotoSplitNext:     concrete.GotoNextSplit(); break;
 
             // Tabs
             case PaneAction.NewTab: _tabs.NewTab(); break;

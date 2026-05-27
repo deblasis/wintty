@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Ghostty.Core.Panes;
 
@@ -150,6 +151,50 @@ internal static class PaneTree
         if (parentIsChild1) gpSplit.Child1 = sibling;
         else gpSplit.Child2 = sibling;
         return root;
+    }
+
+    /// <summary>
+    /// Return the leaf that follows <paramref name="current"/> in
+    /// left-to-right depth-first traversal order, wrapping back to
+    /// the first leaf when called on the last one. Returns null if
+    /// <paramref name="current"/> is not in the tree or the tree
+    /// contains a single leaf.
+    ///
+    /// Tree-order navigation complements spatial focus (Alt+Arrows):
+    /// it always advances even when no leaf lies in any spatial
+    /// direction. Matches Ghostty's goto_split:next semantics.
+    /// </summary>
+    public static LeafPane? NextLeafInOrder(PaneNode root, LeafPane current)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(current);
+
+        var ordered = Leaves(root).ToList();
+        if (ordered.Count <= 1) return null;
+
+        var idx = ordered.IndexOf(current);
+        if (idx < 0) return null;
+        return ordered[(idx + 1) % ordered.Count];
+    }
+
+    /// <summary>
+    /// Return the leaf that precedes <paramref name="current"/> in
+    /// left-to-right depth-first traversal order, wrapping back to
+    /// the last leaf when called on the first one. Returns null if
+    /// <paramref name="current"/> is not in the tree or the tree
+    /// contains a single leaf. Mirror of <see cref="NextLeafInOrder"/>.
+    /// </summary>
+    public static LeafPane? PreviousLeafInOrder(PaneNode root, LeafPane current)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(current);
+
+        var ordered = Leaves(root).ToList();
+        if (ordered.Count <= 1) return null;
+
+        var idx = ordered.IndexOf(current);
+        if (idx < 0) return null;
+        return ordered[(idx - 1 + ordered.Count) % ordered.Count];
     }
 
     /// <summary>
