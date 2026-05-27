@@ -95,6 +95,27 @@ source $GHOSTTY_RESOURCES_DIR/shell-integration/nushell/vendor/autoload/ghostty.
 use ghostty *
 ```
 
+### PowerShell
+
+For [PowerShell](https://learn.microsoft.com/powershell/), wintty (the
+Windows build of Ghostty) exports the absolute path of
+`powershell/ghostty.ps1` in the `GHOSTTY_SHELL_INTEGRATION_PS1` environment
+variable. PowerShell has no equivalent of bash's `ENV` or zsh's `ZDOTDIR`
+that would let us auto-source a script, so the user opts in by adding a
+single line to their `$PROFILE`:
+
+```powershell
+if ($env:GHOSTTY_SHELL_INTEGRATION_PS1) { . $env:GHOSTTY_SHELL_INTEGRATION_PS1 }
+```
+
+The script works on both Windows PowerShell 5.1 and PowerShell 7+, has no
+external dependencies, and is safe to source more than once. See
+[`powershell/README.md`](powershell/README.md) for the full user-facing
+instructions.
+
+This shell integration is currently manual-sourcing only; we do not modify
+the PowerShell command line or inject the script automatically.
+
 ### Zsh
 
 Automatic [Zsh](https://www.zsh.org/) integration works by temporarily setting
