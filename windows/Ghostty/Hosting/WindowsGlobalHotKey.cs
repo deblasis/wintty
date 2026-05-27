@@ -102,7 +102,7 @@ internal sealed partial class WindowsGlobalHotKey : IDisposable
             // Throw rather than silently producing a service that can
             // never fire; the caller can catch and log if needed.
             throw new InvalidOperationException(
-                $"WindowsGlobalHotKey: CreateWindowExW failed (LastWin32Error={Marshal.GetLastWin32Error()})");
+                $"WindowsGlobalHotKey: CreateWindowExW failed (LastWin32Error={Marshal.GetLastPInvokeError()})");
         }
 
         lock (s_byHwndLock)
@@ -205,7 +205,7 @@ internal sealed partial class WindowsGlobalHotKey : IDisposable
                 if (atom == 0)
                 {
                     throw new InvalidOperationException(
-                        $"WindowsGlobalHotKey: RegisterClassExW failed (LastWin32Error={Marshal.GetLastWin32Error()})");
+                        $"WindowsGlobalHotKey: RegisterClassExW failed (LastWin32Error={Marshal.GetLastPInvokeError()})");
                 }
                 s_classRegistered = true;
             }

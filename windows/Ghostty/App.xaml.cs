@@ -64,6 +64,15 @@ public partial class App : Application
     private MainWindow? _quakeWindow;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
 
+    // Win32 RegisterHotKey constants for the default quake chord
+    // (Ctrl+backtick, no auto-fire while held). MOD_CONTROL = 0x0002,
+    // MOD_NOREPEAT = 0x4000, VK_OEM_3 = 0xC0. CsWin32 doesn't expose
+    // these as a single typed enum we'd want to combine, so naming
+    // them locally keeps the call site readable. The quick-terminal-key
+    // config override will replace these in a later PR.
+    private const uint QuakeHotKeyModifiers = 0x0002 | 0x4000;
+    private const uint QuakeHotKeyVirtualKey = 0xC0;
+
     // Top-level window registry keyed by XamlRoot. Replaces the old
     // singular RootWindow and the earlier List<Window> draft: XamlRoot
     // is the identity every UserControl already has in hand, so
@@ -608,7 +617,9 @@ public partial class App : Application
             DispatcherQueue.GetForCurrentThread(),
             factory.CreateLogger<Ghostty.Hosting.WindowsGlobalHotKey>());
         _quakeHotKey.Pressed += (_, _) => ToggleQuickTerminal();
-        _quakeHotKey.Register(modifiers: 0x0002 | 0x4000, virtualKey: 0xC0);
+        _quakeHotKey.Register(
+            modifiers: QuakeHotKeyModifiers,
+            virtualKey: QuakeHotKeyVirtualKey);
     }
 
     /// <summary>
@@ -621,9 +632,12 @@ public partial class App : Application
     /// </summary>
     internal void ToggleQuickTerminal()
     {
-        // Defensive dispatcher wrap so off-thread callers (libghostty's
-        // action callback) land safely on the UI thread.
-        DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() =>
+        // Off-thread callers (libghostty's action callback fires on a
+        // worker thread) need the captured UI dispatcher; the
+        // GetForCurrentThread() fallback returns null on those threads
+        // and silently drops the toggle.
+        var dispatcher = _uiDispatcher ?? DispatcherQueue.GetForCurrentThread();
+        dispatcher?.TryEnqueue(() =>
         {
             _quakeWindow?.ToggleVisibility();
         });
@@ -783,6 +797,12 @@ public partial class App : Application
                     var quake = _quakeWindow;
                     _quakeWindow = null;
                     quake.Closed -= OnAnyWindowClosedInternal;
+                    // Opt out of the AppWindow.Closing intercept that
+                    // turns Close() into Hide() during normal user
+                    // interaction. Without this the force-close below
+                    // would silently hide and the process would never
+                    // exit.
+                    quake.RequestHardClose();
                     quake.Close();
                 }
 

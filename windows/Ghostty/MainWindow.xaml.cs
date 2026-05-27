@@ -1764,10 +1764,26 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Closing += (_, args) =>
         {
+            // The shutdown path in App.OnAnyWindowClosedInternal sets
+            // _hardCloseQuake before calling Close() to opt out of the
+            // hide-instead semantics. Without that escape, force-close
+            // would silently turn into a hide and the process would
+            // never exit when the last regular window closes.
+            if (_hardCloseQuake) return;
             args.Cancel = true;
             AppWindow.Hide();
         };
     }
+
+    /// <summary>
+    /// Opt-out flag for the quake-window close-intercept handler.
+    /// Set by <c>App.OnAnyWindowClosedInternal</c> right before
+    /// calling <see cref="Microsoft.UI.Xaml.Window.Close"/> on the
+    /// singleton quake window during app shutdown, so the handler
+    /// lets the close through instead of converting it to a hide.
+    /// </summary>
+    internal void RequestHardClose() => _hardCloseQuake = true;
+    private bool _hardCloseQuake;
 
     /// <summary>
     /// Position the window at the top of the primary monitor's work area,
