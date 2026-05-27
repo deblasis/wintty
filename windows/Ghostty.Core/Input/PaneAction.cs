@@ -59,4 +59,10 @@ public enum PaneAction
     // Open the in-pane scrollback search bar. Routed via event to
     // MainWindow which forwards to the active leaf's TerminalControl.
     OpenSearch = 39,
+
+    // OSC 133 prompt navigation. Router dispatches the
+    // jump_to_prompt:N libghostty binding. Negative N is previous,
+    // positive N is next.
+    JumpToPreviousPrompt = 40,
+    JumpToNextPrompt = 41,
 }

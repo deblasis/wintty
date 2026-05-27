@@ -1857,6 +1857,7 @@ public sealed partial class MainWindow : Window
             ["clear_screen"] = new() { Name = "clear_screen", Description = "Clear screen and scrollback", RequiresParameter = false },
             ["scroll_to_top"] = new() { Name = "scroll_to_top", Description = "Scroll to top of scrollback", RequiresParameter = false },
             ["scroll_to_bottom"] = new() { Name = "scroll_to_bottom", Description = "Scroll to bottom", RequiresParameter = false },
+            ["jump_to_prompt"] = new() { Name = "jump_to_prompt", Description = "Jump to previous/next shell prompt (OSC 133)", RequiresParameter = true, Parameters = ["-1", "1"] },
             ["open_config"] = new() { Name = "open_config", Description = "Open configuration file", RequiresParameter = false },
             ["reload_config"] = new() { Name = "reload_config", Description = "Reload configuration", RequiresParameter = false },
             ["toggle_fullscreen"] = new() { Name = "toggle_fullscreen", Description = "Toggle fullscreen mode", RequiresParameter = false },
