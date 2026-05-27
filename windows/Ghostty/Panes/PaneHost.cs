@@ -648,6 +648,32 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         best?.Terminal().Focus(FocusState.Keyboard);
     }
 
+    /// <summary>
+    /// Move focus to the next leaf in left-to-right depth-first
+    /// tree-order, wrapping back to the first leaf from the last.
+    /// Complements the spatial <see cref="FocusDirection"/>: this one
+    /// always advances even when no leaf lies in any spatial direction,
+    /// matching Ghostty's <c>goto_split:next</c> binding.
+    /// No-op while zoomed or with a single leaf.
+    /// </summary>
+    public void GotoNextSplit()
+    {
+        if (_zoomedLeaf is not null) return;
+        var target = PaneTree.NextLeafInOrder(_root, _activeLeaf);
+        target?.Terminal().Focus(FocusState.Keyboard);
+    }
+
+    /// <summary>
+    /// Mirror of <see cref="GotoNextSplit"/> walking in reverse.
+    /// Maps to Ghostty's <c>goto_split:previous</c> binding.
+    /// </summary>
+    public void GotoPreviousSplit()
+    {
+        if (_zoomedLeaf is not null) return;
+        var target = PaneTree.PreviousLeafInOrder(_root, _activeLeaf);
+        target?.Terminal().Focus(FocusState.Keyboard);
+    }
+
     // Internals ---------------------------------------------------------
 
     private TerminalControl CreateTerminal(ProfileSnapshot? snapshot)
