@@ -1,3 +1,5 @@
+using System;
+
 namespace Ghostty.Core.Hosting;
 
 internal enum DimensionKind
@@ -24,9 +26,9 @@ internal readonly record struct Dimension(DimensionKind Kind, double Value)
     public int ToPixels(int parentDimension) => Kind switch
     {
         DimensionKind.Percentage =>
-            (int)System.Math.Max(0, System.Math.Round(parentDimension * (Value / 100.0))),
+            (int)Math.Max(0, Math.Round(parentDimension * (Value / 100.0))),
         DimensionKind.Pixels =>
-            (int)System.Math.Max(0, System.Math.Round(Value)),
+            (int)Math.Max(0, Math.Round(Value)),
         _ => 0,
     };
 }

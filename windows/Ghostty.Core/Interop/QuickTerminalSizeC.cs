@@ -3,16 +3,14 @@ using Ghostty.Core.Hosting;
 
 namespace Ghostty.Core.Interop;
 
-// Mirrors the ghostty_qt_size_s C ABI from
-// src/config/Config.zig:9484-9517.
+// Mirrors the ghostty_qt_size_s C ABI surfaced by libghostty.
 //
 // Layout:
 //   { tag: c_int; value: union { f32, u32 } }   per axis = 8 bytes
 //   { primary: per-axis; secondary: per-axis }  total    = 16 bytes
 //
-// QuickTerminalSizeCLayoutTests in Ghostty.Tests pins size +
-// offsets at build time; an upstream layout drift will trip
-// the FFI suite there before runtime.
+// QuickTerminalSizeCLayoutTests pins size + offsets at build time;
+// an ABI drift will trip the FFI suite before runtime.
 
 internal enum QuickTerminalSizeTag : int
 {

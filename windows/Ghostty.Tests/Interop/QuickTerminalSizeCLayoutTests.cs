@@ -4,7 +4,7 @@ using Xunit;
 
 namespace Ghostty.Tests.Interop;
 
-// Pins ghostty_qt_size_s ABI shape (FFI with src/config/Config.zig:9484-9517).
+// Pins ghostty_qt_size_s ABI shape (FFI with libghostty).
 public class QuickTerminalSizeCLayoutTests
 {
     [Fact]
