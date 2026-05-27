@@ -216,8 +216,10 @@ internal static class PaneTree
     /// of <paramref name="current"/> by <paramref name="delta"/>.
     /// Up/Down look for a horizontal (top/bottom) split; Left/Right
     /// look for a vertical (left/right) split. Left/Up shrink Child1,
-    /// Right/Down grow it. Ratio is clamped to [0.05, 0.95] so no
-    /// pane collapses below a usable size.
+    /// Right/Down grow it. Ratio is clamped to
+    /// [<see cref="SplitPane.MinRatio"/>, <see cref="SplitPane.MaxRatio"/>]
+    /// so no pane collapses below a usable size; same clamp the
+    /// mouse-drag Splitter uses.
     ///
     /// Returns true if a target divider was found and adjusted, false
     /// when no matching ancestor exists (e.g. resize Up but the
@@ -242,6 +244,10 @@ internal static class PaneTree
 
         // Walk up from `current` looking for the nearest ancestor
         // split whose orientation matches the resize direction.
+        // FindParent is itself O(n), so the loop is O(depth * n);
+        // trees are tiny in practice (depth <= 4 for typical layouts)
+        // so this is fine and beats the bookkeeping cost of parent
+        // back-pointers, consistent with the file header rationale.
         PaneNode node = current;
         SplitPane? target = null;
         while (true)
@@ -265,7 +271,10 @@ internal static class PaneTree
             ResizeDirection.Right or ResizeDirection.Down => delta,
             _ => 0.0,
         };
-        target.Ratio = Math.Clamp(target.Ratio + signedDelta, 0.05, 0.95);
+        target.Ratio = Math.Clamp(
+            target.Ratio + signedDelta,
+            SplitPane.MinRatio,
+            SplitPane.MaxRatio);
         return true;
     }
 }

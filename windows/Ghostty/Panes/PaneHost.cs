@@ -540,6 +540,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_zoomedLeaf is not null) return;
         Rebuild();
         UpdateHighlightPosition();
+        // Rebuild detaches every TerminalControl and re-parents into
+        // a fresh Grid; without restoring focus the user lands in a
+        // focus-less window. Same restore path as ToggleSplitZoom +
+        // ResizeSplit.
+        DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
     }
 
     /// <summary>

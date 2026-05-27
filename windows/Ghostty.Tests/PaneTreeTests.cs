@@ -548,10 +548,10 @@ public sealed class PaneTreeTests
     {
         var left = new LeafPane();
         var right = new LeafPane();
-        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.9);
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: SplitPane.MaxRatio - 0.01);
 
         Assert.True(PaneTree.ResizeSplit(root, left, ResizeDirection.Right, 0.5));
-        Assert.Equal(0.95, root.Ratio, 6);
+        Assert.Equal(SplitPane.MaxRatio, root.Ratio, 6);
     }
 
     [Fact]
@@ -559,9 +559,9 @@ public sealed class PaneTreeTests
     {
         var left = new LeafPane();
         var right = new LeafPane();
-        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.1);
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: SplitPane.MinRatio + 0.01);
 
         Assert.True(PaneTree.ResizeSplit(root, right, ResizeDirection.Left, 0.5));
-        Assert.Equal(0.05, root.Ratio, 6);
+        Assert.Equal(SplitPane.MinRatio, root.Ratio, 6);
     }
 }
