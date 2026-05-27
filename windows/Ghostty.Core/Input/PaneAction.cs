@@ -55,4 +55,8 @@ public enum PaneAction
     // see PaneActionRouter.Invoke for the wiring.
     ScrollToTop = 37,
     ScrollToBottom = 38,
+
+    // Open the in-pane scrollback search bar. Routed via event to
+    // MainWindow which forwards to the active leaf's TerminalControl.
+    OpenSearch = 39,
 }

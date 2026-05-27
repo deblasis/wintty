@@ -30,6 +30,10 @@ internal enum GhosttyActionTag
     CloseWindow = 49,
     RingBell = 50,
     ProgressReport = 56,
+    StartSearch    = 59,
+    EndSearch      = 60,
+    SearchTotal    = 61,
+    SearchSelected = 62,
 }
 
 // ghostty_action_scrollbar_s:
@@ -73,4 +77,36 @@ internal struct GhosttyActionProgressReport
 {
     public int State;
     public sbyte Progress;
+}
+
+// ghostty_action_start_search_s:
+//   { const char* needle; }
+// All values are pointer-sized. On x64: 8 bytes total. GhosttyHost
+// reads at (actionPtr + 8) and decodes the null-terminated UTF-8
+// needle via Marshal.PtrToStringUTF8.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionStartSearch
+{
+    public nint Needle;
+}
+
+// ghostty_action_search_total_s:
+//   { ssize_t total; }
+// All values are pointer-sized. On x64: 8 bytes total. Stored as
+// `nint` so the layout matches the C ssize_t on both 32- and 64-bit
+// builds; consumers cast to `long` for the SearchState API.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionSearchTotal
+{
+    public nint Total;
+}
+
+// ghostty_action_search_selected_s:
+//   { ssize_t selected; }
+// All values are pointer-sized. Same shape as SearchTotal; libghostty
+// reports -1 (or negative) when no match is selected yet.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionSearchSelected
+{
+    public nint Selected;
 }
