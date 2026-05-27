@@ -33,7 +33,7 @@ function Get-GhosttyFileUri([string] $path) {
     $normalized = $path -replace '\\', '/'
     if ($normalized -match '^([A-Za-z]):') {
         $drive = $matches[1].ToLowerInvariant()
-        $normalized = "$drive`:" + $normalized.Substring(2)
+        $normalized = "${drive}:" + $normalized.Substring(2)
     }
     return "file://$env:COMPUTERNAME/$normalized"
 }
@@ -55,6 +55,9 @@ function global:prompt {
     $lastNative = $LASTEXITCODE
     $lastOk = $?
     if ($null -eq $lastNative) { $lastNative = 0 }
+    # Cmdlet failures set $? to false without setting $LASTEXITCODE
+    # (no native process ran). Synthesize 1 for that case so the OSC
+    # 133;D consumer sees a non-zero exit and can render an error mark.
     $exitCode = if ($lastOk) { 0 } else { if ($lastNative -ne 0) { $lastNative } else { 1 } }
 
     # Close out the previous command's execution window if we opened one.

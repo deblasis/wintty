@@ -173,13 +173,15 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     // PowerShell exes on Windows literally end in `.exe`; the other
     // shells we detect don't. Match both forms for robustness so users
     // can spell their shell as either `pwsh` or `pwsh.exe` (likewise
-    // `powershell` for Windows PowerShell 5.1).
-    const exe_no_ext = if (std.mem.endsWith(u8, exe, ".exe"))
+    // `powershell` for Windows PowerShell 5.1). Windows filesystems
+    // are case-insensitive, so a Start Menu shortcut spelled
+    // `PWSH.EXE` or `Pwsh.Exe` still needs to detect.
+    const exe_no_ext = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
         exe[0 .. exe.len - 4]
     else
         exe;
-    if (std.mem.eql(u8, "pwsh", exe_no_ext)) return .powershell;
-    if (std.mem.eql(u8, "powershell", exe_no_ext)) return .powershell;
+    if (std.ascii.eqlIgnoreCase("pwsh", exe_no_ext)) return .powershell;
+    if (std.ascii.eqlIgnoreCase("powershell", exe_no_ext)) return .powershell;
 
     return null;
 }
@@ -925,10 +927,7 @@ test "nushell: missing resources" {
 /// only export the absolute path to our integration script via the
 /// `GHOSTTY_SHELL_INTEGRATION_PS1` environment variable. Users opt in
 /// by adding a one-liner to their `$PROFILE` that dot-sources it.
-///
-/// We deliberately don't modify the command line (no `-NoProfile`, no
-/// `-Command . path`) so the user's existing profile execution
-/// semantics are preserved.
+/// We do not modify the command line; users opt in via their $PROFILE.
 fn setupPowerShell(
     alloc_arena: Allocator,
     command: config.Command,
