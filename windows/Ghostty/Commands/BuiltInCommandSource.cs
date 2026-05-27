@@ -45,6 +45,8 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.FocusRight, "Focus Pane Right", "Move focus to the right pane", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.FocusUp, "Focus Pane Up", "Move focus to the pane above", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.FocusDown, "Focus Pane Down", "Move focus to the pane below", CommandCategory.Pane);
+        AddPaneCommand(commands, PaneAction.GotoSplitPrevious, "Focus Previous Pane", "Move focus to the previous pane in tree order", CommandCategory.Pane);
+        AddPaneCommand(commands, PaneAction.GotoSplitNext, "Focus Next Pane", "Move focus to the next pane in tree order", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.MoveTabRight, "Move Tab Right", "Move the active tab one position right", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.MoveTabLeft, "Move Tab Left", "Move the active tab one position left", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.ToggleVerticalTabsPinned, "Toggle Vertical Tabs Pinned", "Pin or unpin the vertical tab sidebar", CommandCategory.Tab);
