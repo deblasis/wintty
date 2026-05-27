@@ -1786,27 +1786,27 @@ public sealed partial class MainWindow : Window
     private bool _hardCloseQuake;
 
     /// <summary>
-    /// Position the window at the top of the primary monitor's work area,
-    /// full width and half height. V1 hardcoded geometry; the
-    /// quick-terminal-position / size / screen config knobs that drive
-    /// per-user placement land separately.
+    /// Position the window per <c>quick-terminal-position</c>,
+    /// <c>quick-terminal-size</c>, and <c>quick-terminal-screen</c>.
+    /// The monitor adapter handles the Win32 lookup and the pure-logic
+    /// resolver in <see cref="Ghostty.Core.Hosting.QuickTerminalGeometry"/>
+    /// turns the config plus monitor work area into the final rect.
     /// </summary>
     public void MoveToQuakePosition()
     {
-        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
-        var monitor = PInvoke.MonitorFromWindow(hwnd, MONITOR_FROM_FLAGS.MONITOR_DEFAULTTOPRIMARY);
-        if (monitor == IntPtr.Zero) return;
-
-        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-        if (!PInvoke.GetMonitorInfo(monitor, ref info)) return;
-
-        var work = info.rcWork;
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var bounds = QuickTerminalMonitorResolver.Resolve(
+            hwnd, _configService.QuickTerminalScreen);
+        var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
+            _configService.QuickTerminalPosition,
+            _configService.QuickTerminalSize,
+            bounds);
         AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
         {
-            X = work.left,
-            Y = work.top,
-            Width = work.right - work.left,
-            Height = (work.bottom - work.top) / 2,
+            X = rect.X,
+            Y = rect.Y,
+            Width = rect.Width,
+            Height = rect.Height,
         });
     }
 
