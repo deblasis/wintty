@@ -458,4 +458,110 @@ public sealed class PaneTreeTests
 
         Assert.Null(PaneTree.PreviousLeafInOrder(root, orphan));
     }
+
+    // ResizeSplit ------------------------------------------------------
+
+    [Fact]
+    public void ResizeSplit_SingleLeafRoot_ReturnsFalse()
+    {
+        var leaf = new LeafPane();
+        Assert.False(PaneTree.ResizeSplit(leaf, leaf, ResizeDirection.Right, 0.1));
+    }
+
+    [Fact]
+    public void ResizeSplit_VerticalSplit_RightGrowsChild1()
+    {
+        var left = new LeafPane();
+        var right = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.5);
+
+        Assert.True(PaneTree.ResizeSplit(root, left, ResizeDirection.Right, 0.1));
+        Assert.Equal(0.6, root.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_VerticalSplit_LeftShrinksChild1()
+    {
+        var left = new LeafPane();
+        var right = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.5);
+
+        Assert.True(PaneTree.ResizeSplit(root, right, ResizeDirection.Left, 0.1));
+        Assert.Equal(0.4, root.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_HorizontalSplit_DownGrowsChild1()
+    {
+        var top = new LeafPane();
+        var bottom = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Horizontal, top, bottom, ratio: 0.5);
+
+        Assert.True(PaneTree.ResizeSplit(root, top, ResizeDirection.Down, 0.1));
+        Assert.Equal(0.6, root.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_HorizontalSplit_UpShrinksChild1()
+    {
+        var top = new LeafPane();
+        var bottom = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Horizontal, top, bottom, ratio: 0.5);
+
+        Assert.True(PaneTree.ResizeSplit(root, bottom, ResizeDirection.Up, 0.1));
+        Assert.Equal(0.4, root.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_NoMatchingAncestor_ReturnsFalse()
+    {
+        // Vertical split only. Pressing Up/Down has no horizontal
+        // ancestor to act on; should no-op.
+        var left = new LeafPane();
+        var right = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.5);
+
+        Assert.False(PaneTree.ResizeSplit(root, left, ResizeDirection.Up, 0.1));
+        Assert.Equal(0.5, root.Ratio);
+    }
+
+    [Fact]
+    public void ResizeSplit_WalksToNearestMatchingAncestor()
+    {
+        // Active leaf is `leafB`, sitting inside an inner vertical
+        // split. Pressing Down should walk past the vertical parent
+        // to find the outer horizontal split and adjust IT.
+        var leafA = new LeafPane();
+        var leafB = new LeafPane();
+        var leafC = new LeafPane();
+        var innerVert = new SplitPane(PaneOrientation.Vertical, leafB, leafC, ratio: 0.5);
+        var outerHorz = new SplitPane(PaneOrientation.Horizontal, leafA, innerVert, ratio: 0.5);
+
+        Assert.True(PaneTree.ResizeSplit(outerHorz, leafB, ResizeDirection.Down, 0.1));
+        // Inner vertical untouched, outer horizontal grew Child1 (leafA).
+        Assert.Equal(0.5, innerVert.Ratio);
+        Assert.Equal(0.6, outerHorz.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_ClampsToMaxRatio()
+    {
+        var left = new LeafPane();
+        var right = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.9);
+
+        Assert.True(PaneTree.ResizeSplit(root, left, ResizeDirection.Right, 0.5));
+        Assert.Equal(0.95, root.Ratio, 6);
+    }
+
+    [Fact]
+    public void ResizeSplit_ClampsToMinRatio()
+    {
+        var left = new LeafPane();
+        var right = new LeafPane();
+        var root = new SplitPane(PaneOrientation.Vertical, left, right, ratio: 0.1);
+
+        Assert.True(PaneTree.ResizeSplit(root, right, ResizeDirection.Left, 0.5));
+        Assert.Equal(0.05, root.Ratio, 6);
+    }
 }

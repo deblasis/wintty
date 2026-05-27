@@ -72,4 +72,13 @@ public enum PaneAction
     // goto_split:previous and goto_split:next bindings.
     GotoSplitPrevious = 42,
     GotoSplitNext = 43,
+
+    // Keyboard-driven splitter resize. Each chord nudges the
+    // nearest matching-orientation divider by a fixed ratio delta
+    // (default 5%). Matches Ghostty's resize_split:DIRECTION
+    // binding. Direction is which way the divider moves.
+    ResizeSplitUp = 44,
+    ResizeSplitDown = 45,
+    ResizeSplitLeft = 46,
+    ResizeSplitRight = 47,
 }

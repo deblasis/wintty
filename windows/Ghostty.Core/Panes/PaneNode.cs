@@ -43,3 +43,11 @@ internal sealed class SplitPane : PaneNode
 }
 
 internal enum PaneOrientation { Vertical, Horizontal }
+
+/// <summary>
+/// Direction the split divider moves in response to a
+/// <c>resize_split</c> chord. Up/Down move a horizontal divider;
+/// Left/Right move a vertical divider. The active pane's nearest
+/// matching-orientation ancestor is the target.
+/// </summary>
+internal enum ResizeDirection { Up, Down, Left, Right }
