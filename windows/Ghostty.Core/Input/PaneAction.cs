@@ -50,4 +50,11 @@ public enum PaneAction
     OpenProfile7 = 34,
     OpenProfile8 = 35,
     OpenProfile9 = 36,
+
+    // Scrollback navigation. The router dispatches these as libghostty
+    // binding actions ("scroll_to_top", "scroll_to_bottom") so we reuse
+    // the existing terminal-side scrollback logic rather than driving the
+    // viewport from the C# side.
+    ScrollToTop = 37,
+    ScrollToBottom = 38,
 }

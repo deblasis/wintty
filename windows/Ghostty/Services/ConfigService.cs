@@ -200,8 +200,45 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // (backslash) so the path looks clean in UI and logs.
         ConfigFilePath = Path.GetFullPath(rawPath);
 
+        SeedConfigIfEmpty();
         CacheDiagnostics();
         ReadFlags();
+    }
+
+    /// <summary>
+    /// Mac Ghostty seeds a comment header when it creates the config
+    /// file for the first time. On Windows, ghostty_config_open_path()
+    /// creates the file empty -- so on first launch (or whenever the
+    /// user has deleted the contents) we drop in the same starter
+    /// header so they don't stare at a blank file. Failures are
+    /// swallowed: an unwritable config dir is the user's problem to
+    /// notice via diagnostics, not ours to crash on.
+    /// </summary>
+    private void SeedConfigIfEmpty()
+    {
+        try
+        {
+            if (!File.Exists(ConfigFilePath)) return;
+            if (new FileInfo(ConfigFilePath).Length != 0) return;
+
+            var seed =
+                "# This is the configuration file for Wintty (a Windows fork of Ghostty).\n" +
+                "#\n" +
+                "# All available options and their defaults can be listed with\n" +
+                "# `wintty +show-config --default --docs`. Each option below is\n" +
+                "# commented out with the default value. Uncomment it and set\n" +
+                "# your preferred value to change it.\n" +
+                "#\n" +
+                "# Config docs:  https://ghostty.org/docs/config\n" +
+                "# Config path:  " + ConfigFilePath + "\n";
+
+            File.WriteAllText(ConfigFilePath, seed);
+        }
+        catch
+        {
+            // Diagnostics surface the real error to the user via the
+            // settings UI; we don't want a startup crash here.
+        }
     }
 
     /// <summary>
