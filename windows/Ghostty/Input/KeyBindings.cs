@@ -152,6 +152,11 @@ internal sealed class KeyBindings
         // Command palette
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.P, PaneAction.ToggleCommandPalette),
 
+        // Scrollback navigation. Ctrl+Shift+Home/End matches Windows
+        // Terminal muscle memory for full-scrollback jumps.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Home, PaneAction.ScrollToTop),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.End, PaneAction.ScrollToBottom),
+
         // Profiles. Slot N = Profiles[N-1] (post hidden filter, ordered by
         // profile-order). Out-of-range slots silently no-op in the router.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number1, PaneAction.OpenProfile1),

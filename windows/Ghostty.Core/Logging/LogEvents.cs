@@ -14,6 +14,7 @@ internal static class LogEvents
         public const int ReloadFailed      = 1000; // reserved, populated in Phase 3 (ConfigService)
         public const int WriteSchedulerErr = 1001;
         public const int TimerDisposeSlow  = 1002;
+        public const int SeedFailed        = 1003;
     }
 
     // 1100-1199: Frecency / command history

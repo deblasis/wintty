@@ -361,7 +361,8 @@ public sealed partial class MainWindow : Window
         _router = new PaneActionRouter(
             _tabManager,
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
-            openProfile: OpenProfile);
+            openProfile: OpenProfile,
+            bindingAction: ExecuteBindingAction);
         _windowState = WindowState.Load();
         RestoreWindowPlacement();
 
