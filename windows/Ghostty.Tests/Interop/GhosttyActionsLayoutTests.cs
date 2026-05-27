@@ -17,6 +17,10 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 56)]
+    [InlineData((int)GhosttyActionTag.StartSearch, 59)]
+    [InlineData((int)GhosttyActionTag.EndSearch, 60)]
+    [InlineData((int)GhosttyActionTag.SearchTotal, 61)]
+    [InlineData((int)GhosttyActionTag.SearchSelected, 62)]
     public void ActionTag_Ordinal_Matches_Upstream(int tag, int expected)
     {
         Assert.Equal(expected, tag);
@@ -115,5 +119,29 @@ public class GhosttyActionsLayoutTests
         // Read at (actionPtr + 8); Url at struct offset 0, Len at 8.
         Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionMouseOverLink>(nameof(GhosttyActionMouseOverLink.Url)));
         Assert.Equal(8, (int)Marshal.OffsetOf<GhosttyActionMouseOverLink>(nameof(GhosttyActionMouseOverLink.Len)));
+    }
+
+    [Fact]
+    public void StartSearchStruct_Size_Is_8_Bytes()
+    {
+        // { const char* needle; } on x64 = 8.
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionStartSearch>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionStartSearch>(nameof(GhosttyActionStartSearch.Needle)));
+    }
+
+    [Fact]
+    public void SearchTotalStruct_Size_Is_8_Bytes()
+    {
+        // { ssize_t total; } on x64 = 8.
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionSearchTotal>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionSearchTotal>(nameof(GhosttyActionSearchTotal.Total)));
+    }
+
+    [Fact]
+    public void SearchSelectedStruct_Size_Is_8_Bytes()
+    {
+        // { ssize_t selected; } on x64 = 8.
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionSearchSelected>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionSearchSelected>(nameof(GhosttyActionSearchSelected.Selected)));
     }
 }
