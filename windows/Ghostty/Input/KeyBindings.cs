@@ -181,6 +181,11 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Left, PaneAction.ResizeSplitLeft),
         new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Right, PaneAction.ResizeSplitRight),
 
+        // Quake / drop-down terminal. Ctrl+` is the wintty default; the
+        // quick-terminal-key config override lands in a later PR. Backtick =
+        // VirtualKey 0xC0 (VK_OEM_3).
+        new KeyBinding(VirtualKeyModifiers.Control, (VirtualKey)0xC0, PaneAction.ToggleQuickTerminal),
+
         // Scrollback search. Ctrl+Shift+F matches Windows Terminal
         // muscle memory; plain Ctrl+F is reserved for in-find inside
         // the Settings raw editor.
