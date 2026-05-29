@@ -1773,6 +1773,23 @@ public sealed partial class MainWindow : Window
             args.Cancel = true;
             AppWindow.Hide();
         };
+
+        // Autohide: when the quake window loses activation to another window,
+        // hide it (unless the user opted out). In-window overlays (command
+        // palette, ContentDialog) do NOT deactivate the window, so this only
+        // fires on a genuine switch to another app/window. Gated on
+        // _autohideArmed so the activation churn during Show()/focus does not
+        // self-trigger.
+        Activated += OnQuakeActivated;
+    }
+
+    private void OnQuakeActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState != WindowActivationState.Deactivated) return;
+        if (!_autohideArmed) return;
+        if (!AppWindow.IsVisible) return;
+        if (!_configService.QuickTerminalAutohide) return;
+        Hide();
     }
 
     /// <summary>
@@ -1784,6 +1801,16 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal void RequestHardClose() => _hardCloseQuake = true;
     private bool _hardCloseQuake;
+
+    // Lazily-built slide/fade animator for the quake window. Null until the
+    // first show (the XAML content visual must exist first). Only used when
+    // IsQuickTerminal and animation duration > 0.
+    private QuickTerminalSlideAnimator? _slideAnimator;
+
+    // Autohide is only armed once a show animation has fully settled, so the
+    // transient activation churn during Show()/focus does not immediately
+    // trigger a hide.
+    private bool _autohideArmed;
 
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
@@ -1819,11 +1846,63 @@ public sealed partial class MainWindow : Window
     {
         if (AppWindow.IsVisible)
         {
+            Hide();
+            return;
+        }
+
+        MoveToQuakePosition();
+        AppWindow.Show();
+
+        var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration <= 0)
+        {
+            _slideAnimator?.SnapToShown();
+            _autohideArmed = true;
+            FocusActiveLeaf();
+            return;
+        }
+
+        _autohideArmed = false;
+        _slideAnimator ??= new QuickTerminalSlideAnimator(RootGrid);
+        _slideAnimator.AnimateIn(
+            _configService.QuickTerminalPosition,
+            AppWindow.Size.Width,
+            AppWindow.Size.Height,
+            TimeSpan.FromSeconds(duration),
+            onCompleted: () =>
+            {
+                _autohideArmed = true;
+                FocusActiveLeaf();
+            });
+        // Focus immediately too so typing works during the slide; the
+        // onCompleted re-focus is a no-op if focus already landed.
+        FocusActiveLeaf();
+    }
+
+    /// <summary>
+    /// Hide the quake window, animating the slide-out first when a non-zero
+    /// animation duration is configured. Used by the toggle and by autohide.
+    /// </summary>
+    private void Hide()
+    {
+        _autohideArmed = false;
+        var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration <= 0 || _slideAnimator is null)
+        {
             AppWindow.Hide();
             return;
         }
-        MoveToQuakePosition();
-        AppWindow.Show();
+
+        _slideAnimator.AnimateOut(
+            _configService.QuickTerminalPosition,
+            AppWindow.Size.Width,
+            AppWindow.Size.Height,
+            TimeSpan.FromSeconds(duration),
+            onCompleted: () => AppWindow.Hide());
+    }
+
+    private void FocusActiveLeaf()
+    {
         DispatcherQueue.TryEnqueue(() =>
             _tabManager.ActiveTab?.PaneHost?.ActiveLeaf?.Terminal()
                 .Focus(FocusState.Programmatic));
