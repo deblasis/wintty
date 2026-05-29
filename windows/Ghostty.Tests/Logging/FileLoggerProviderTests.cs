@@ -179,6 +179,37 @@ public class FileLoggerProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task PrunesOldestRollFiles_WhenTotalSizeBudgetExceeded()
+    {
+        var clock = new FakeClock(new DateTime(2026, 4, 17, 12, 0, 0, DateTimeKind.Utc));
+        // Tiny per-file cap forces a roll on nearly every record; small
+        // total budget forces oldest-file pruning. This is the runaway-
+        // producer scenario in miniature: without a byte ceiling these
+        // 200 writes would leave ~200 same-day files on disk.
+        var opts = NewOptions(_tempDir) with { MaxBytesPerFile = 60, MaxTotalBytes = 300 };
+        await using var sink = new FileLoggerProvider(opts, clock, RealFileSystem.Instance);
+        var logger = sink.CreateLogger("Cat");
+
+        for (int i = 0; i < 200; i++)
+            logger.LogWarning(new EventId(i, "E"), "message-{Index}", i);
+
+        await DrainAsync(sink);
+
+        var files = Directory.EnumerateFiles(_tempDir, "ghostty-*.log").ToArray();
+        long total = files.Sum(f => new FileInfo(f).Length);
+
+        // The budget is enforced before each new roll file opens, so the
+        // on-disk total may transiently exceed it by at most one full file.
+        Assert.True(
+            total <= opts.MaxTotalBytes + opts.MaxBytesPerFile,
+            $"total {total} bytes exceeded budget {opts.MaxTotalBytes} (+1 file {opts.MaxBytesPerFile})");
+
+        // Oldest files were pruned: nowhere near the ~200 a runaway would
+        // otherwise leave behind.
+        Assert.True(files.Length <= 10, $"expected pruning, found {files.Length} files");
+    }
+
+    [Fact]
     public void RetentionSweep_DeletesFilesOlderThanCutoff_OnConstruction()
     {
         // Today = 2026-04-17. Retention 14 days => cutoff 2026-04-03.

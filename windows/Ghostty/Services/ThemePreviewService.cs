@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Pipes;
 using System.Threading;
 using System.Threading.Tasks;
+using Ghostty.Core.Pipes;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 
@@ -85,19 +86,67 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
         ListThemesRequested = null;
     }
 
+    // Decides what to do after each server-loop iteration. Extracted to
+    // Ghostty.Core so the retry/stand-down logic is unit-tested: the bug
+    // that filled the disk was this loop treating a server-creation failure
+    // ("All pipe instances are busy") like a client disconnect and retrying
+    // it instantly, forever.
+    private readonly PipeServerRetryPolicy _retryPolicy = new();
+
     private async Task RunServer(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            try
+            var outcome = await RunOneServerSession(ct);
+            switch (_retryPolicy.Decide(outcome))
             {
-                using var server = new NamedPipeServerStream(
-                    PipeName,
-                    PipeDirection.In,
-                    1, // single instance
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
+                case PipeLoopDecision.Stop:
+                case PipeLoopDecision.StandDown:
+                    return;
+                case PipeLoopDecision.RetryAfterBackoff:
+                    try { await Task.Delay(_retryPolicy.Backoff, ct); }
+                    catch (OperationCanceledException) { return; }
+                    break;
+                case PipeLoopDecision.RetryImmediately:
+                default:
+                    break;
+            }
+        }
+    }
 
+    /// <summary>
+    /// Runs one accept-serve cycle of the named-pipe server and classifies
+    /// how it ended. Never throws (cancellation and I/O faults are mapped to
+    /// outcomes); the caller's policy decides whether to retry, back off, or
+    /// stand down.
+    /// </summary>
+    private async Task<PipeLoopOutcome> RunOneServerSession(CancellationToken ct)
+    {
+        // Creating the server is its own failure mode. With FirstPipeInstance
+        // + a per-process PipeName, the ctor throws "All pipe instances are
+        // busy" when another ThemePreviewService in this process already owns
+        // the name -- permanent for this loop, so the policy stands it down
+        // rather than retrying.
+        NamedPipeServerStream server;
+        try
+        {
+            server = new NamedPipeServerStream(
+                PipeName,
+                PipeDirection.In,
+                1, // single instance
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogPipeServerUnavailable(ex);
+            return PipeLoopOutcome.ServerCreationFailed;
+        }
+
+        try
+        {
+            using (server)
+            {
                 _logger.LogPipeWaiting(PipeName);
                 await server.WaitForConnectionAsync(ct);
                 _logger.LogClientConnected();
@@ -145,16 +194,18 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
                     _logger.LogPreviewConfirmed();
                 }
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (IOException ex)
-            {
-                // Pipe broken, client disconnected. Loop back to accept
-                // next connection.
-                _logger.LogPipeError(ex);
-            }
+
+            return PipeLoopOutcome.SessionEnded;
+        }
+        catch (OperationCanceledException)
+        {
+            return PipeLoopOutcome.Cancelled;
+        }
+        catch (IOException ex)
+        {
+            // A connected client dropped or the pipe broke mid-session.
+            _logger.LogPipeError(ex);
+            return PipeLoopOutcome.SessionFaulted;
         }
     }
 
@@ -289,6 +340,12 @@ internal static partial class ThemePreviewServiceLogExtensions
                    Level = LogLevel.Warning,
                    Message = "[theme-preview] pipe error")]
     internal static partial void LogPipeError(
+        this ILogger<ThemePreviewService> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.PipeServerUnavailable,
+                   Level = LogLevel.Information,
+                   Message = "[theme-preview] pipe server unavailable; standing down (another instance owns it)")]
+    internal static partial void LogPipeServerUnavailable(
         this ILogger<ThemePreviewService> logger, System.Exception ex);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.InvalidThemeName,

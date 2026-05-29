@@ -170,6 +170,77 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Deletes oldest <c>ghostty-*.log</c> files until the combined size of
+    /// the directory is within <see cref="FileLoggerOptions.MaxTotalBytes"/>.
+    /// Called on every rollover (no file handle is open at those points, so
+    /// deletion is safe). This is the source-agnostic backstop that bounds
+    /// disk use even when <see cref="SweepRetention"/>'s date cutoff cannot
+    /// (a same-day storm produces thousands of today-dated files).
+    /// </summary>
+    private void EnforceTotalSizeBudget()
+    {
+        if (!_fs.DirectoryExists(_opts.Directory))
+            return;
+
+        var files = new System.Collections.Generic.List<(string Path, long Length, long Order)>();
+        long total = 0;
+        foreach (var path in _fs.EnumerateFiles(_opts.Directory, "ghostty-*.log"))
+        {
+            long len;
+            try { len = _fs.FileLength(path); }
+            catch (IOException) { continue; }   // vanished between enumerate and stat
+            total += len;
+            files.Add((path, len, RollSortKey(path)));
+        }
+
+        if (total <= _opts.MaxTotalBytes)
+            return;
+
+        // Oldest-first by the logger's own naming (date, then numeric roll
+        // counter) so we evict the least useful logs and keep the newest.
+        files.Sort((a, b) => a.Order.CompareTo(b.Order));
+        foreach (var f in files)
+        {
+            if (total <= _opts.MaxTotalBytes)
+                break;
+            try
+            {
+                _fs.DeleteFile(f.Path);
+                total -= f.Length;
+            }
+            catch (IOException) { /* locked/in use: skip, try the next */ }
+        }
+    }
+
+    /// <summary>
+    /// Chronological sort key parsed from a <c>ghostty-YYYYMMDD[-N].log</c>
+    /// name: date major, numeric roll counter minor. Filesystem-timestamp
+    /// independent so behavior is deterministic and testable. Unrecognized
+    /// names sort last (pruned only as a last resort).
+    /// </summary>
+    private static long RollSortKey(string path)
+    {
+        const string prefix = "ghostty-";
+        var name = Path.GetFileNameWithoutExtension(path);
+        if (!name.StartsWith(prefix, StringComparison.Ordinal) ||
+            name.Length < prefix.Length + 8)
+            return long.MaxValue;
+
+        if (!long.TryParse(
+                name.AsSpan(prefix.Length, 8), NumberStyles.None,
+                CultureInfo.InvariantCulture, out var date))
+            return long.MaxValue;
+
+        long counter = 0;
+        var rest = name.AsSpan(prefix.Length + 8); // "" or "-N"
+        if (rest.Length > 1 && rest[0] == '-')
+            long.TryParse(rest[1..], NumberStyles.None, CultureInfo.InvariantCulture, out counter);
+
+        // date (yyyyMMdd, already monotonic) dominates; counter breaks ties.
+        return date * 100_000_000L + counter;
+    }
+
     private async Task WriterLoopAsync()
     {
         DateOnly openDate = default;
@@ -211,6 +282,12 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
                                 try { SweepRetention(); } catch { /* best-effort */ }
                             }
 
+                            // Bound total on-disk size before opening the next
+                            // file. Date-based retention cannot prune same-day
+                            // files, so a storm would otherwise grow unbounded;
+                            // this deletes oldest files regardless of date.
+                            try { EnforceTotalSizeBudget(); } catch { /* best-effort */ }
+
                             try
                             {
                                 stream = _fs.OpenAppend(PathFor(openDate, rollCounter));
@@ -243,6 +320,10 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
                                 stream.Flush();
                                 stream.Dispose();
                                 rollCounter++;
+                                // Prune oldest files to honor the byte budget
+                                // before the next roll file is created. No
+                                // handle is open here, so deleting is safe.
+                                try { EnforceTotalSizeBudget(); } catch { /* best-effort */ }
                                 stream = _fs.OpenAppend(PathFor(openDate, rollCounter));
                             }
                             catch (IOException)

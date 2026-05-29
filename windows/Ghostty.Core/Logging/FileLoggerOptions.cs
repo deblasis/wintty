@@ -12,4 +12,15 @@ internal sealed record FileLoggerOptions
     public int RetentionDays { get; init; } = 14;
     public int ChannelCapacity { get; init; } = 4096;
     public int BatchMaxRecords { get; init; } = 64;
+
+    /// <summary>
+    /// Hard ceiling on the combined size of all <c>ghostty-*.log</c> files
+    /// in the directory. Date-based <see cref="RetentionDays"/> pruning
+    /// cannot bound a same-day storm: a runaway producer rolls thousands of
+    /// today-dated files that no date cutoff will ever delete. This cap is
+    /// enforced on every rollover by deleting the oldest files first, so a
+    /// logging fault in any component can never fill the disk. Default
+    /// 512 MB; normal sessions log a few MB/day and never approach it.
+    /// </summary>
+    public long MaxTotalBytes { get; init; } = 512L * 1024 * 1024;
 }
