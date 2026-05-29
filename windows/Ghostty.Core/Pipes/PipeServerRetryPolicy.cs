@@ -50,6 +50,10 @@ public enum PipeLoopDecision
 /// forever and filling the disk with rolled log files. This policy makes the
 /// distinctions explicit and bounds <em>both</em> failure paths so no outcome
 /// can produce an unbounded hot loop.
+///
+/// Not thread-safe: the consecutive-fault count is mutated without locking.
+/// Drive it from a single server loop (one <see cref="Decide"/> call at a
+/// time), which is how <c>ThemePreviewService</c> uses it.
 /// </summary>
 public sealed class PipeServerRetryPolicy
 {

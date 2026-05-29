@@ -209,6 +209,24 @@ public class FileLoggerProviderTests : IDisposable
         Assert.True(files.Length <= 10, $"expected pruning, found {files.Length} files");
     }
 
+    [Theory]
+    // Same day, ascending roll counter: 0 (unsuffixed) is oldest, then 1, 2,
+    // 9, 10. A lexical sort would wrongly place "-10" before "-2"; the numeric
+    // parse must not. This pins the one subtle property the pruner relies on
+    // to evict the genuinely-oldest files.
+    [InlineData("ghostty-20260417.log", "ghostty-20260417-1.log")]
+    [InlineData("ghostty-20260417-1.log", "ghostty-20260417-2.log")]
+    [InlineData("ghostty-20260417-2.log", "ghostty-20260417-10.log")]
+    [InlineData("ghostty-20260417-9.log", "ghostty-20260417-10.log")]
+    // Older day sorts before newer day regardless of counter.
+    [InlineData("ghostty-20260417-99.log", "ghostty-20260418.log")]
+    public void RollSortKey_OrdersChronologically_NotLexically(string older, string newer)
+    {
+        Assert.True(
+            FileLoggerProvider.RollSortKey(older) < FileLoggerProvider.RollSortKey(newer),
+            $"expected {older} to sort before {newer}");
+    }
+
     [Fact]
     public void RetentionSweep_DeletesFilesOlderThanCutoff_OnConstruction()
     {

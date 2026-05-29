@@ -201,9 +201,17 @@ internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
         {
             return PipeLoopOutcome.Cancelled;
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // A connected client dropped or the pipe broke mid-session.
+            // A connected client dropped, the pipe broke mid-session, or the
+            // stream was disposed under a teardown race. Map every such fault
+            // to an outcome so this method honors its "never throws" contract
+            // and the policy's fault bound always applies -- an escaping
+            // exception would otherwise propagate into the fire-and-forget
+            // server task and skip the bounded retry entirely. A cancellation
+            // that surfaces as a non-OCE here (it can, depending on pipe
+            // state) is treated as a fault: harmless, since the next loop turn
+            // observes the token and the backoff delay cancels immediately.
             _logger.LogPipeError(ex);
             return PipeLoopOutcome.SessionFaulted;
         }

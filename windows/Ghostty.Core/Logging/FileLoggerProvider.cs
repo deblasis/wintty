@@ -219,7 +219,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider, IAsyncDisposable
     /// independent so behavior is deterministic and testable. Unrecognized
     /// names sort last (pruned only as a last resort).
     /// </summary>
-    private static long RollSortKey(string path)
+    internal static long RollSortKey(string path)
     {
         const string prefix = "ghostty-";
         var name = Path.GetFileNameWithoutExtension(path);
