@@ -34,6 +34,7 @@ internal static class LogEvents
         public const int PreviewConfirmed  = 2203;
         public const int PipeError         = 2204;
         public const int InvalidThemeName  = 2205;
+        public const int PipeServerUnavailable = 2206;
     }
 
     // 2300-2399: WindowState + migration
