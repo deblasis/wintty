@@ -69,6 +69,18 @@ internal sealed class GhosttyHost : IDisposable
     public event EventHandler? ReloadConfigRequested;
 
     /// <summary>
+    /// Raised when libghostty matches a keybind that resolves to a
+    /// pane/tab apprt action this window should perform (new tab/split,
+    /// focus or resize a split, switch/move tabs, fullscreen, zoom,
+    /// equalize). The decoded payload is already mapped to a
+    /// <see cref="Ghostty.Core.Input.PaneAction"/>;
+    /// <c>MainWindow</c> forwards it straight into the
+    /// <c>PaneActionRouter</c>. Mirrors the per-window event pattern of
+    /// <see cref="CommandPaletteToggleRequested"/>.
+    /// </summary>
+    public event Action<Ghostty.Core.Input.PaneAction>? PaneActionRequested;
+
+    /// <summary>
     /// Raised when a terminal surface requests an opacity adjustment
     /// (Ctrl+Shift+scroll wheel). The int argument is the direction:
     /// +1 = increase, -1 = decrease.
@@ -441,6 +453,39 @@ internal sealed class GhosttyHost : IDisposable
                     CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
                 return 1;
 
+            // Pane/tab actions libghostty matched from a keybind. The
+            // payload-free tags carry no value; the directional/indexed
+            // tags read their value at +8 (same offset every other
+            // surface payload uses: 4-byte tag + 4-byte padding before
+            // the union). ApprtActionMap turns (tag, value) into a
+            // PaneAction; a null result means this apprt does not act on
+            // that variant, so we return 0 and let libghostty fall back.
+            case GhosttyActionTag.NewTab:
+            case GhosttyActionTag.CloseTab:
+            case GhosttyActionTag.ToggleFullscreen:
+            case GhosttyActionTag.EqualizeSplits:
+            case GhosttyActionTag.ToggleSplitZoom:
+                return DispatchPaneAction(tag, 0);
+
+            case GhosttyActionTag.NewSplit:
+            case GhosttyActionTag.GotoSplit:
+            case GhosttyActionTag.GotoTab:
+                return DispatchPaneAction(tag, Marshal.ReadInt32(actionPtr, 8));
+
+            case GhosttyActionTag.ResizeSplit:
+            {
+                var rs = Marshal.PtrToStructure<GhosttyActionResizeSplit>(actionPtr + 8);
+                return DispatchPaneAction(tag, (int)rs.Direction);
+            }
+
+            case GhosttyActionTag.MoveTab:
+            {
+                var mt = Marshal.PtrToStructure<GhosttyActionMoveTab>(actionPtr + 8);
+                // Collapse the signed amount to a direction; the router
+                // moves one position per invocation.
+                return DispatchPaneAction(tag, mt.Amount > 0 ? 1 : -1);
+            }
+
             case GhosttyActionTag.SetTitle:
             {
                 var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
@@ -633,6 +678,24 @@ internal sealed class GhosttyHost : IDisposable
             default:
                 return 0;
         }
+    }
+
+    /// <summary>
+    /// Map a surface-targeted pane/tab action tag (with its already
+    /// decoded value) to a <see cref="Ghostty.Core.Input.PaneAction"/>
+    /// and surface it on the UI thread via
+    /// <see cref="PaneActionRequested"/>. Returns 1 when the action was
+    /// mapped and dispatched, 0 when this apprt does not act on the
+    /// variant so libghostty can fall back.
+    /// </summary>
+    private byte DispatchPaneAction(GhosttyActionTag tag, int value)
+    {
+        var action = ApprtActionMap.Map(tag, value);
+        if (action is not { } paneAction) return 0;
+
+        _dispatcher.TryEnqueue(() =>
+            PaneActionRequested?.Invoke(paneAction));
+        return 1;
     }
 
     private byte OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)

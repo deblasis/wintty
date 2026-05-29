@@ -549,6 +549,11 @@ public sealed partial class MainWindow : Window
         _host.CommandPaletteToggleRequested += (_, _) =>
             DispatcherQueue.TryEnqueue(ToggleCommandPalette);
 
+        // Pane/tab keybinds libghostty matched arrive already mapped to a
+        // PaneAction (and already hopped to the UI thread by the host);
+        // forward straight into the router that owns the pane/tab state.
+        _host.PaneActionRequested += action => _router.Invoke(action);
+
         // App-targeted actions (OpenConfig, ReloadConfig) fire on the
         // bootstrap host because libghostty sends them with target=app,
         // not target=surface. The per-window _host never receives them.
