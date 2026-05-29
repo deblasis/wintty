@@ -474,16 +474,24 @@ internal sealed class GhosttyHost : IDisposable
 
             case GhosttyActionTag.ResizeSplit:
             {
-                var rs = Marshal.PtrToStructure<GhosttyActionResizeSplit>(actionPtr + 8);
+                GhosttyActionResizeSplit rs;
+                unsafe
+                {
+                    rs = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionResizeSplit>(
+                        (void*)(actionPtr + 8));
+                }
                 return DispatchPaneAction(tag, (int)rs.Direction);
             }
 
             case GhosttyActionTag.MoveTab:
             {
-                var mt = Marshal.PtrToStructure<GhosttyActionMoveTab>(actionPtr + 8);
-                // Collapse the signed amount to a direction; the router
-                // moves one position per invocation.
-                return DispatchPaneAction(tag, mt.Amount > 0 ? 1 : -1);
+                GhosttyActionMoveTab mt;
+                unsafe
+                {
+                    mt = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMoveTab>(
+                        (void*)(actionPtr + 8));
+                }
+                return DispatchPaneAction(tag, (int)mt.Amount);
             }
 
             case GhosttyActionTag.SetTitle:
