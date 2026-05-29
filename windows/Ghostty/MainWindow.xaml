@@ -163,6 +163,7 @@
                       Visibility="Collapsed"
                       Checked="OnQuakePinChanged"
                       Unchecked="OnQuakePinChanged"
+                      AutomationProperties.Name="Pin quick terminal open"
                       ToolTipService.ToolTip="Pin: keep open on focus loss">
             <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
                       Glyph="&#xE718;"
