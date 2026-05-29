@@ -1776,6 +1776,10 @@ public sealed partial class MainWindow : Window
             presenter.IsMaximizable = false;
         }
 
+        // Borderless quake has no OS caption buttons; collapse the dead inset
+        // and drop the vertical-mode title text.
+        _titleBar.SetCaptionless(true);
+
         AppWindow.Closing += (_, args) =>
         {
             // The shutdown path in App.OnAnyWindowClosedInternal sets
