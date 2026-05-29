@@ -59,4 +59,13 @@ public class ApprtActionMapTests
 
     [Fact] public void UnknownTag_ReturnsNull() =>
         Assert.Null(ApprtActionMap.Map((GhosttyActionTag)9999, 0));
+
+    [Theory]
+    [InlineData(GhosttyActionTag.GotoTab, 0)]   // below the 1..8 index range
+    [InlineData(GhosttyActionTag.GotoTab, 9)]   // above the 1..8 index range
+    [InlineData(GhosttyActionTag.MoveTab, 0)]   // zero amount has no direction
+    [InlineData(GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Left)] // not represented in PaneAction
+    [InlineData(GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Up)]   // not represented in PaneAction
+    internal void UnrepresentedValue_ReturnsNull(GhosttyActionTag tag, int value) =>
+        Assert.Null(ApprtActionMap.Map(tag, value));
 }
