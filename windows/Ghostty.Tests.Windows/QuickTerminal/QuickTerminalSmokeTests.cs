@@ -41,4 +41,46 @@ public class QuickTerminalSmokeTests
     public void CtrlBacktick_SummonsAndDismissesQuakeWindow()
     {
     }
+
+    // PR C adds three config-driven behaviours on top of the foundation
+    // above. Each needs a real HWND + compositor + the user watching, so
+    // they stay manual. Validate by editing the wintty config and
+    // reloading (Ctrl+Shift+R) between each:
+    //
+    //  Animation (quick-terminal-animation-duration, default 0.2):
+    //   - default: Ctrl+` slides the window down from the top over ~0.2s,
+    //     and slides back up on the second press.
+    //   - quick-terminal-position = bottom + duration = 0.4 -> slides up
+    //     from the bottom over ~0.4s.
+    //   - quick-terminal-position = center + duration = 0.3 -> fades in
+    //     centered (no slide).
+    //   - duration = 0 -> appears/disappears instantly (PR B behaviour).
+    //   - Rapidly mashing Ctrl+` must never leave the window stuck
+    //     half-on-screen, and must not hide-after-show / show-after-hide
+    //     (the animator's monotonic token guards superseded completions).
+    //
+    //  Autohide (quick-terminal-autohide, default true):
+    //   - default: summon the window, then click another app -> it hides.
+    //   - quick-terminal-autohide = false -> it stays open when clicked
+    //     away from.
+    //
+    //  Key override (quick-terminal-key, default ctrl+backquote):
+    //   - quick-terminal-key = alt+space -> after reload, Ctrl+` no longer
+    //     toggles; Alt+Space does.
+    //   - quick-terminal-key = ctrl+nonsense (invalid) -> after reload,
+    //     falls back to Ctrl+` (a parse-fallback the log notes).
+    [Fact(Skip = "Manual smoke; compositor slide/fade over quick-terminal-animation-duration, plus 0=instant and rapid-toggle stability.")]
+    public void Animation_SlidesOrFades_FromConfiguredEdge()
+    {
+    }
+
+    [Fact(Skip = "Manual smoke; quick-terminal-autohide=true hides on focus loss, =false keeps the window open.")]
+    public void Autohide_HidesOnFocusLoss_WhenEnabled()
+    {
+    }
+
+    [Fact(Skip = "Manual smoke; quick-terminal-key rebinds the global hotkey on reload; invalid values fall back to Ctrl+`.")]
+    public void KeyOverride_RebindsGlobalHotkey_OnReload()
+    {
+    }
 }

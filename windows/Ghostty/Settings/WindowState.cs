@@ -36,6 +36,12 @@ internal sealed class WindowState
     public int? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }
 
+    // User-resized height of the quake / drop-down window, remembered
+    // per-user so a manual resize survives restarts. Null until the user
+    // first resizes. Distinct from WindowHeight (regular window placement);
+    // the quake window's X/Y/Width come from quick-terminal-* config.
+    public int? QuakeHeight { get; set; }
+
     private static string Dir
     {
         get

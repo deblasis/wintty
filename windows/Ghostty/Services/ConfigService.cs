@@ -117,6 +117,36 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public Ghostty.Core.Hosting.QuickTerminalSize QuickTerminalSize => ReadQuickTerminalSize();
 
     /// <summary>
+    /// Hide the quake window when it loses focus. libghostty defaults this
+    /// to <c>false</c> on Windows (the non-mac/non-linux branch), but the
+    /// canonical quake behaviour (and macOS) is hide-on-focus-loss, so we
+    /// read it from the raw config file with a wintty default of <c>true</c>.
+    /// An explicit <c>quick-terminal-autohide = false</c> still disables it.
+    /// </summary>
+    public bool QuickTerminalAutohide =>
+        WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("quick-terminal-autohide", ""),
+            defaultValue: true);
+
+    /// <summary>
+    /// Slide/fade duration in seconds. libghostty key (f64, default 0.2,
+    /// platform-independent). 0 disables animation (instant show/hide).
+    /// Clamped to a sane ceiling so a typo can't freeze the window mid-slide.
+    /// </summary>
+    public double QuickTerminalAnimationDuration =>
+        Math.Clamp(GetDouble("quick-terminal-animation-duration", 0.2), 0.0, 2.0);
+
+    /// <summary>
+    /// Global hotkey that toggles the quake window. Wintty-only key, read
+    /// from the raw config file. Parse failure falls back to the built-in
+    /// Ctrl+backtick chord so the user is never left without a hotkey.
+    /// </summary>
+    public Ghostty.Core.Input.QuickTerminalKeyChord QuickTerminalKeyChord =>
+        Ghostty.Core.Input.QuickTerminalKeyChord.Parse(
+            GetFileValue("quick-terminal-key", ""))
+        ?? Ghostty.Core.Input.QuickTerminalKeyChord.Default;
+
+    /// <summary>
     /// Parsed light theme name from a conditional theme pair, or null
     /// if the theme is a single (non-conditional) value.
     /// </summary>

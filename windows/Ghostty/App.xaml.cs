@@ -64,14 +64,10 @@ public partial class App : Application
     private MainWindow? _quakeWindow;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
 
-    // Win32 RegisterHotKey constants for the default quake chord
-    // (Ctrl+backtick, no auto-fire while held). MOD_CONTROL = 0x0002,
-    // MOD_NOREPEAT = 0x4000, VK_OEM_3 = 0xC0. CsWin32 doesn't expose
-    // these as a single typed enum we'd want to combine, so naming
-    // them locally keeps the call site readable. The quick-terminal-key
-    // config override will replace these in a later PR.
-    private const uint QuakeHotKeyModifiers = 0x0002 | 0x4000;
-    private const uint QuakeHotKeyVirtualKey = 0xC0;
+    // The quake chord comes from the quick-terminal-key config value
+    // (read via ConfigService.QuickTerminalKeyChord). QuickTerminalKeyChord.Default
+    // is Ctrl+backtick (MOD_CONTROL|MOD_NOREPEAT, VK_OEM_3) when the
+    // user has not set the key explicitly.
 
     // Top-level window registry keyed by XamlRoot. Replaces the old
     // singular RootWindow and the earlier List<Window> draft: XamlRoot
@@ -609,17 +605,17 @@ public partial class App : Application
         _quakeWindow.Activate();          // creates the HWND
         _quakeWindow.AppWindow.Hide();    // immediately hide
 
-        // Default chord Ctrl+` (VK_OEM_3). MOD_NOREPEAT (0x4000)
-        // prevents auto-fire while the user holds the chord;
-        // MOD_CONTROL (0x0002) is the modifier. The
-        // quick-terminal-key config override lands in a later PR.
+        // Chord comes from quick-terminal-key config (Default = Ctrl+`).
+        // MOD_NOREPEAT prevents auto-fire while the user holds the chord.
         _quakeHotKey = new Ghostty.Hosting.WindowsGlobalHotKey(
             DispatcherQueue.GetForCurrentThread(),
             factory.CreateLogger<Ghostty.Hosting.WindowsGlobalHotKey>());
         _quakeHotKey.Pressed += (_, _) => ToggleQuickTerminal();
-        _quakeHotKey.Register(
-            modifiers: QuakeHotKeyModifiers,
-            virtualKey: QuakeHotKeyVirtualKey);
+        RegisterQuakeHotKey();
+
+        // Re-claim the chord whenever the config changes so an edited
+        // quick-terminal-key takes effect without a restart.
+        _configService.ConfigChanged += OnConfigReloaded_ReRegisterHotKey;
     }
 
     /// <summary>
@@ -641,6 +637,25 @@ public partial class App : Application
         {
             _quakeWindow?.ToggleVisibility();
         });
+    }
+
+    private void RegisterQuakeHotKey()
+    {
+        if (_quakeHotKey is null) return;
+        var chord = _configService.QuickTerminalKeyChord;
+        // Register already logs a warning + returns false when another
+        // process holds the chord; the app stays usable (command-palette
+        // entry + in-window chord still toggle the quake window), so there
+        // is nothing to do on failure here.
+        _quakeHotKey.Register(chord.Modifiers, chord.VirtualKey);
+    }
+
+    private void OnConfigReloaded_ReRegisterHotKey(Ghostty.Core.Config.IConfigService cfg)
+    {
+        // Register is idempotent (drops the prior chord first), so calling it
+        // on every reload is safe even when the chord did not change. Marshal
+        // to the UI thread (the thread that created the message-only window).
+        _uiDispatcher?.TryEnqueue(RegisterQuakeHotKey);
     }
 
     /// <summary>
@@ -782,6 +797,7 @@ public partial class App : Application
                 // bootstrap host tears down. WindowsGlobalHotKey.Dispose
                 // calls UnregisterHotKey on the UI thread (same thread
                 // that registered it).
+                _configService.ConfigChanged -= OnConfigReloaded_ReRegisterHotKey;
                 _quakeHotKey?.Dispose();
 
                 // Force-close the quake window. It does not participate
