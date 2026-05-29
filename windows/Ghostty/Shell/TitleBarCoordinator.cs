@@ -45,6 +45,12 @@ internal sealed class TitleBarCoordinator
     private TabModel? _boundTab;
     private LeafPane? _activeLeaf;
 
+    // Quake window: borderless, no OS caption buttons, so the reserved
+    // caption inset (vertical column + horizontal drag-region MinWidth) is
+    // dead space and the vertical-mode window title is noise. When set,
+    // SyncCaptionInset keeps the inset collapsed instead of re-expanding.
+    private bool _captionless;
+
     public TitleBarCoordinator(
         Window window,
         TabManager tabs,
@@ -95,6 +101,12 @@ internal sealed class TitleBarCoordinator
     /// </summary>
     public void SyncCaptionInset()
     {
+        if (_captionless)
+        {
+            _captionInset.Width = new GridLength(0);
+            return;
+        }
+
         try
         {
             var inset = _window.AppWindow.TitleBar.RightInset;
@@ -108,6 +120,21 @@ internal sealed class TitleBarCoordinator
             // RightInset can throw early during construction; leave
             // the XAML default in place.
         }
+    }
+
+    /// <summary>
+    /// Quake-only: collapse the caption-button inset (the OS buttons are
+    /// gone in borderless mode) and hide the vertical-mode title text for
+    /// a minimal look. Idempotent.
+    /// </summary>
+    public void SetCaptionless(bool value)
+    {
+        _captionless = value;
+        if (!value) return;
+        _captionInset.Width = new GridLength(0);
+        if (_horizontalTabHost.DragRegion is FrameworkElement dragRegion)
+            dragRegion.MinWidth = 0;
+        _verticalTitleText.Visibility = Visibility.Collapsed;
     }
 
     private void RebindVerticalTitle()
