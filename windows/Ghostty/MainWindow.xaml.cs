@@ -1784,6 +1784,11 @@ public sealed partial class MainWindow : Window
         // and drop the vertical-mode title text.
         _titleBar.SetCaptionless(true);
 
+        // Quake never shows the top vertical title bar; the strip's own wintty
+        // icon sits above the tabs instead. Layout toggle stays available via
+        // the Ctrl+Shift+, chord.
+        _layout.SuppressVerticalTitleBar(true, _verticalTabsVisible);
+
         // Show the session-only pin button so the user can keep the quake
         // window open on focus loss. Invisible on regular windows by default.
         QuakePinButton.Visibility = Visibility.Visible;
