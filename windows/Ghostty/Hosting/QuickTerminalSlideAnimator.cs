@@ -124,6 +124,10 @@ internal sealed class QuickTerminalSlideAnimator : IDisposable
         }
         else
         {
+            // Seed the start translation synchronously (mirrors the fade
+            // path's Opacity pre-set) so no frame renders at the resting
+            // position before the compositor applies keyframe 0.
+            _visual.Properties.InsertVector3("Translation", appearing ? off : Vector3.Zero);
             var slide = _compositor.CreateVector3KeyFrameAnimation();
             slide.InsertKeyFrame(0f, appearing ? off : Vector3.Zero);
             slide.InsertKeyFrame(1f, appearing ? Vector3.Zero : off, easing);
@@ -135,7 +139,6 @@ internal sealed class QuickTerminalSlideAnimator : IDisposable
         _batch = batch;
         _anim = anim;
 
-        batch.End();
         batch.Completed += (_, _) =>
         {
             if (token != _token) return; // superseded by a newer toggle
@@ -143,6 +146,7 @@ internal sealed class QuickTerminalSlideAnimator : IDisposable
             if (isCenter) _visual.Opacity = appearing ? 1f : 0f;
             onCompleted?.Invoke();
         };
+        batch.End();
     }
 
     /// <summary>

@@ -135,7 +135,7 @@ public readonly record struct QuickTerminalKeyChord(uint Modifiers, uint Virtual
             return 0x70 + (fn - 1); // VK_F1 = 0x70
         }
 
-        // Named keys (Ghostty W3C enum names + aliases).
+        // Named keys -> Win32 virtual-key codes (winuser.h VK_*).
         return token switch
         {
             "backquote" or "grave_accent" => 0xC0,

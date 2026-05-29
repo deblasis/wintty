@@ -1879,6 +1879,11 @@ public sealed partial class MainWindow : Window
     // trigger a hide.
     private bool _autohideArmed;
 
+    // True while a slide-out is in flight (window still IsVisible until the
+    // animation completes). A toggle during this window means "bring it
+    // back", so ToggleVisibility must re-show rather than hide again.
+    private bool _hiding;
+
     // Session-only pin: while true, the quake window does not auto-hide on
     // focus loss. Toggled by the top-right pin button (quake window only).
     // Not persisted; resets on app restart.
@@ -1949,14 +1954,26 @@ public sealed partial class MainWindow : Window
     /// </summary>
     public void ToggleVisibility()
     {
-        if (AppWindow.IsVisible)
+        // Shown and not already sliding out -> hide. If mid-slide-out, a
+        // toggle means "bring it back", so fall through to Show(), which
+        // cancels the hide (the animator's token guard suppresses the
+        // superseded slide-out completion) and animates back in.
+        if (AppWindow.IsVisible && !_hiding)
         {
             Hide();
             return;
         }
+        Show();
+    }
 
-        MoveToQuakePosition();
-        AppWindow.Show();
+    private void Show()
+    {
+        _hiding = false;
+        if (!AppWindow.IsVisible)
+        {
+            MoveToQuakePosition();
+            AppWindow.Show();
+        }
 
         var duration = _configService.QuickTerminalAnimationDuration;
         if (duration <= 0)
@@ -1999,6 +2016,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        _hiding = true;
         _slideAnimator.AnimateOut(
             _configService.QuickTerminalPosition,
             AppWindow.Size.Width,
@@ -2006,9 +2024,17 @@ public sealed partial class MainWindow : Window
             TimeSpan.FromSeconds(duration),
             onCompleted: () =>
             {
-                // Completed fires on the UI thread (same context as the
-                // GetElementVisual visual), so AppWindow.Hide() is safe here.
-                AppWindow.Hide();
+                // A re-show during the slide-out clears _hiding to cancel the
+                // hide (the animator token guard already suppresses a
+                // superseded Completed; this is belt-and-suspenders). Also
+                // skip when the window is hard-closing on shutdown.
+                if (!_hiding || _hardCloseQuake) return;
+                _hiding = false;
+                // Completed fires on the UI thread (same context as
+                // GetElementVisual), so AppWindow.Hide() is safe; guard
+                // against a COM teardown race during shutdown.
+                try { AppWindow.Hide(); }
+                catch (System.Runtime.InteropServices.COMException) { }
             });
     }
 
