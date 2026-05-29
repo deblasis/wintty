@@ -24,12 +24,23 @@ namespace Ghostty.Hosting;
 /// user re-toggles mid-animation, the stale batch's Completed handler is
 /// ignored so a half-finished hide does not call Hide() after a new show.
 /// </summary>
-internal sealed class QuickTerminalSlideAnimator
+internal sealed class QuickTerminalSlideAnimator : IDisposable
 {
     private readonly UIElement _content;
     private readonly Visual _visual;
     private readonly Compositor _compositor;
     private long _token;
+
+    // Cached easing functions (constants) created once and reused across
+    // toggles, disposed in Dispose(). Avoids per-toggle allocation.
+    private CubicBezierEasingFunction? _easeIn;
+    private CubicBezierEasingFunction? _easeOut;
+
+    // The most recent run's compositor objects. Disposed at the start of the
+    // next run (and in Dispose()), so at most one batch+animation lingers
+    // between toggles rather than accumulating one pair per toggle.
+    private CompositionScopedBatch? _batch;
+    private CompositionAnimation? _anim;
 
     public QuickTerminalSlideAnimator(UIElement content)
     {
@@ -86,12 +97,19 @@ internal sealed class QuickTerminalSlideAnimator
         };
         var isCenter = position == QuickTerminalPosition.Center;
 
+        // Dispose the previous run's compositor objects before starting a
+        // new one, so at most one batch+animation lingers between toggles.
+        _anim?.Dispose();
+        _batch?.Dispose();
+
         // Ease-out on appear (decelerate into place), ease-in on hide.
-        var easing = appearing
-            ? _compositor.CreateCubicBezierEasingFunction(new Vector2(0.1f, 0.9f), new Vector2(0.2f, 1.0f))
-            : _compositor.CreateCubicBezierEasingFunction(new Vector2(0.8f, 0.0f), new Vector2(0.9f, 0.1f));
+        // Cached: the bezier control points are constants.
+        _easeIn ??= _compositor.CreateCubicBezierEasingFunction(new Vector2(0.1f, 0.9f), new Vector2(0.2f, 1.0f));
+        _easeOut ??= _compositor.CreateCubicBezierEasingFunction(new Vector2(0.8f, 0.0f), new Vector2(0.9f, 0.1f));
+        var easing = appearing ? _easeIn : _easeOut;
 
         var batch = _compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        CompositionAnimation anim;
 
         if (isCenter)
         {
@@ -102,6 +120,7 @@ internal sealed class QuickTerminalSlideAnimator
             fade.InsertKeyFrame(1f, appearing ? 1f : 0f, easing);
             fade.Duration = duration;
             _visual.StartAnimation("Opacity", fade);
+            anim = fade;
         }
         else
         {
@@ -110,7 +129,11 @@ internal sealed class QuickTerminalSlideAnimator
             slide.InsertKeyFrame(1f, appearing ? Vector3.Zero : off, easing);
             slide.Duration = duration;
             _visual.StartAnimation("Translation", slide);
+            anim = slide;
         }
+
+        _batch = batch;
+        _anim = anim;
 
         batch.End();
         batch.Completed += (_, _) =>
@@ -132,7 +155,21 @@ internal sealed class QuickTerminalSlideAnimator
         _token++;
         _visual.StopAnimation("Translation");
         _visual.StopAnimation("Opacity");
+        _anim?.Dispose();
+        _batch?.Dispose();
+        _anim = null;
+        _batch = null;
         _visual.Properties.InsertVector3("Translation", Vector3.Zero);
         _visual.Opacity = 1f;
+    }
+
+    public void Dispose()
+    {
+        _visual.StopAnimation("Translation");
+        _visual.StopAnimation("Opacity");
+        _anim?.Dispose();
+        _batch?.Dispose();
+        _easeIn?.Dispose();
+        _easeOut?.Dispose();
     }
 }

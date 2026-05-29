@@ -1004,6 +1004,7 @@ public sealed partial class MainWindow : Window
 
         _gradientVisual?.Dispose();
         _gradientVisual = null;
+        _slideAnimator?.Dispose();
         _taskbar.Dispose();
         _themeManager.Dispose();
 
@@ -1882,6 +1883,7 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// Hide the quake window, animating the slide-out first when a non-zero
     /// animation duration is configured. Used by the toggle and by autohide.
+    /// (Hides the AppWindow; this is not a Window override -- Window has no Hide().)
     /// </summary>
     private void Hide()
     {
@@ -1898,7 +1900,12 @@ public sealed partial class MainWindow : Window
             AppWindow.Size.Width,
             AppWindow.Size.Height,
             TimeSpan.FromSeconds(duration),
-            onCompleted: () => AppWindow.Hide());
+            onCompleted: () =>
+            {
+                // Completed fires on the UI thread (same context as the
+                // GetElementVisual visual), so AppWindow.Hide() is safe here.
+                AppWindow.Hide();
+            });
     }
 
     private void FocusActiveLeaf()
