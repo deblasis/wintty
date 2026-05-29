@@ -958,9 +958,18 @@ public sealed partial class MainWindow : Window
             powerMonitor.LowPowerChanged -= OnLowPowerChanged;
         }
 
-        // Persist window placement for next launch. Skip when
-        // fullscreen -- restore to the normal size instead.
-        if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
+        if (IsQuickTerminal)
+        {
+            // Persist only the session-resized height, via read-modify-write
+            // so we never clobber the regular window placement other windows
+            // save. The quake window's X/Y/Width are config-driven
+            // (MoveToQuakePosition), so its geometry must NOT become the
+            // restore placement.
+            var quakeState = WindowState.Load();
+            quakeState.QuakeHeight = _quakeSessionHeight;
+            quakeState.Save();
+        }
+        else if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
         {
             var hwnd = new HWND(WindowNative.GetWindowHandle(this));
             var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
@@ -1818,6 +1827,10 @@ public sealed partial class MainWindow : Window
         _tabManager.TabAdded += (_, _) => UpdateQuakeStripVisibility();
         _tabManager.TabRemoved += (_, _) => UpdateQuakeStripVisibility();
         UpdateQuakeStripVisibility();
+
+        // Restore the per-user remembered quake height so the first show after
+        // login uses it (MoveToQuakePosition applies it for top/bottom docking).
+        _quakeSessionHeight = _windowState.QuakeHeight;
     }
 
     /// <summary>
