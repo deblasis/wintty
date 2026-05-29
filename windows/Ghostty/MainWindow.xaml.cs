@@ -1763,6 +1763,19 @@ public sealed partial class MainWindow : Window
             WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
             unchecked((int)(ex | WINDOW_EX_STYLE.WS_EX_TOOLWINDOW)));
 
+        // Borderless: a quake terminal is positioned by config and toggled by
+        // the global hotkey, so it needs no title bar, border, caption buttons,
+        // or user resize/min/max. Keep it activatable so autohide's
+        // Activated/Deactivated still fire, and keep the close->hide intercept
+        // (Alt+F4 still routes through Closing).
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        {
+            presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
+            presenter.IsResizable = false;
+            presenter.IsMinimizable = false;
+            presenter.IsMaximizable = false;
+        }
+
         AppWindow.Closing += (_, args) =>
         {
             // The shutdown path in App.OnAnyWindowClosedInternal sets
