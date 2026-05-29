@@ -141,5 +141,33 @@
                   Visibility="Collapsed"
                   ToolTipService.ToolTip="Power saving mode active."/>
 
+        <!--
+            Quake pin toggle. Always-visible top-right toggle shown only
+            on the singleton quake window (made Visible in
+            ApplyQuickTerminalBehaviour). While pinned, the window does
+            not auto-hide on focus loss. Session-only: not persisted.
+            Spans both rows so it stays anchored to the window top-right
+            even when the tab strip (row 0) is collapsed at one tab. Sits
+            where the OS caption buttons used to be.
+        -->
+        <ToggleButton x:Name="QuakePinButton"
+                      Grid.Row="0" Grid.RowSpan="2"
+                      Grid.Column="0" Grid.ColumnSpan="2"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Margin="0,6,8,0"
+                      Width="32" Height="28"
+                      Padding="0"
+                      Background="Transparent"
+                      BorderThickness="0"
+                      Visibility="Collapsed"
+                      Checked="OnQuakePinChanged"
+                      Unchecked="OnQuakePinChanged"
+                      ToolTipService.ToolTip="Pin: keep open on focus loss">
+            <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
+                      Glyph="&#xE718;"
+                      FontSize="14"/>
+        </ToggleButton>
+
     </Grid>
 </Window>

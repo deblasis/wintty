@@ -1780,6 +1780,10 @@ public sealed partial class MainWindow : Window
         // and drop the vertical-mode title text.
         _titleBar.SetCaptionless(true);
 
+        // Show the session-only pin button so the user can keep the quake
+        // window open on focus loss. Invisible on regular windows by default.
+        QuakePinButton.Visibility = Visibility.Visible;
+
         AppWindow.Closing += (_, args) =>
         {
             // The shutdown path in App.OnAnyWindowClosedInternal sets
@@ -1818,9 +1822,15 @@ public sealed partial class MainWindow : Window
         _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
     }
 
+    private void OnQuakePinChanged(object sender, RoutedEventArgs e)
+    {
+        _quakePinned = QuakePinButton.IsChecked == true;
+    }
+
     private void OnQuakeActivated(object sender, WindowActivatedEventArgs args)
     {
         if (args.WindowActivationState != WindowActivationState.Deactivated) return;
+        if (_quakePinned) return;   // user pinned the window open this session
         if (!_autohideArmed) return;
         if (!AppWindow.IsVisible) return;
         if (!_configService.QuickTerminalAutohide) return;
@@ -1846,6 +1856,11 @@ public sealed partial class MainWindow : Window
     // transient activation churn during Show()/focus does not immediately
     // trigger a hide.
     private bool _autohideArmed;
+
+    // Session-only pin: while true, the quake window does not auto-hide on
+    // focus loss. Toggled by the top-right pin button (quake window only).
+    // Not persisted; resets on app restart.
+    private bool _quakePinned;
 
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
