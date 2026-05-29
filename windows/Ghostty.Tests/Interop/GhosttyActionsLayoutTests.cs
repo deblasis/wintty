@@ -145,4 +145,44 @@ public class GhosttyActionsLayoutTests
         Assert.Equal(8, Marshal.SizeOf<GhosttyActionSearchSelected>());
         Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionSearchSelected>(nameof(GhosttyActionSearchSelected.Selected)));
     }
+
+    [Fact]
+    public void ApprtActionTags_MatchHeaderOrdinals()
+    {
+        Assert.Equal(2,  (int)GhosttyActionTag.NewTab);
+        Assert.Equal(3,  (int)GhosttyActionTag.CloseTab);
+        Assert.Equal(4,  (int)GhosttyActionTag.NewSplit);
+        Assert.Equal(7,  (int)GhosttyActionTag.ToggleFullscreen);
+        Assert.Equal(14, (int)GhosttyActionTag.MoveTab);
+        Assert.Equal(15, (int)GhosttyActionTag.GotoTab);
+        Assert.Equal(16, (int)GhosttyActionTag.GotoSplit);
+        Assert.Equal(18, (int)GhosttyActionTag.ResizeSplit);
+        Assert.Equal(19, (int)GhosttyActionTag.EqualizeSplits);
+        Assert.Equal(20, (int)GhosttyActionTag.ToggleSplitZoom);
+    }
+
+    [Fact]
+    public void ResizeSplitStruct_HasExpectedLayout()
+    {
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionResizeSplit>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionResizeSplit>(nameof(GhosttyActionResizeSplit.Amount)));
+        Assert.Equal(4, (int)Marshal.OffsetOf<GhosttyActionResizeSplit>(nameof(GhosttyActionResizeSplit.Direction)));
+    }
+
+    [Fact]
+    public void SplitDirectionEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttySplitDirection.Right);
+        Assert.Equal(1, (int)GhosttySplitDirection.Down);
+        Assert.Equal(2, (int)GhosttySplitDirection.Left);
+        Assert.Equal(3, (int)GhosttySplitDirection.Up);
+    }
+
+    [Fact]
+    public void GotoTabSentinels_MatchHeader()
+    {
+        Assert.Equal(-1, (int)GhosttyGotoTab.Previous);
+        Assert.Equal(-2, (int)GhosttyGotoTab.Next);
+        Assert.Equal(-3, (int)GhosttyGotoTab.Last);
+    }
 }
