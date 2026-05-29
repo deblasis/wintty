@@ -41,6 +41,11 @@ internal sealed class LayoutCoordinator
     private readonly Grid _verticalTitleBar;
 
     private bool _switching;
+    // When true (quake window with a single tab), the strip + vertical
+    // title bar are forced hidden regardless of layout mode, leaving only
+    // the pane host. Snap and Animate both honor it so the layout toggle
+    // cannot resurrect the strip.
+    private bool _stripHidden;
     private DispatcherTimer? _columnTimer;
 
     public LayoutCoordinator(
@@ -101,6 +106,30 @@ internal sealed class LayoutCoordinator
         GetOrCreateTranslate(_verticalHost).Y = 0;
         GetOrCreateTranslate(_horizontalHost).X = 0;
         GetOrCreateTranslate(_horizontalHost).Y = 0;
+
+        if (_stripHidden)
+        {
+            // Collapse everything in the strip/title row + column,
+            // leaving only the pane host (row 1, col 1) visible.
+            _stripColumn.Width = new GridLength(0);
+            _titleBarStripMirror.Width = new GridLength(0);
+            _horizontalHost.Visibility = Visibility.Collapsed;
+            _horizontalHost.IsHitTestVisible = false;
+            _verticalHost.Visibility = Visibility.Collapsed;
+            _verticalHost.IsHitTestVisible = false;
+            _verticalTitleBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// Force the tab strip (and vertical title bar) hidden or restore it
+    /// to the normal end-state for the current layout. Used by the quake
+    /// window to hide tab chrome when only one tab is open.
+    /// </summary>
+    public void SetStripHidden(bool hidden, bool verticalTabs)
+    {
+        _stripHidden = hidden;
+        Snap(verticalTabs);
     }
 
     /// <summary>
@@ -114,6 +143,12 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void Animate(bool verticalTabs, Action? onCompleted = null)
     {
+        if (_stripHidden)
+        {
+            Snap(verticalTabs);
+            onCompleted?.Invoke();
+            return;
+        }
         if (_switching) return;
         _switching = true;
 

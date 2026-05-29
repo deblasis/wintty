@@ -1795,6 +1795,23 @@ public sealed partial class MainWindow : Window
         // _autohideArmed so the activation churn during Show()/focus does not
         // self-trigger.
         Activated += OnQuakeActivated;
+
+        // Hide the tab strip while a single tab is open; show it at 2+.
+        // Tab count is already updated when these events fire.
+        _tabManager.TabAdded += (_, _) => UpdateQuakeStripVisibility();
+        _tabManager.TabRemoved += (_, _) => UpdateQuakeStripVisibility();
+        UpdateQuakeStripVisibility();
+    }
+
+    /// <summary>
+    /// Quake-only: hide the tab strip when a single tab is open, show it
+    /// at two or more. Routed through the LayoutCoordinator so it honors
+    /// the current horizontal/vertical mode and survives layout toggles.
+    /// </summary>
+    private void UpdateQuakeStripVisibility()
+    {
+        if (!IsQuickTerminal) return;
+        _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
     }
 
     private void OnQuakeActivated(object sender, WindowActivatedEventArgs args)
