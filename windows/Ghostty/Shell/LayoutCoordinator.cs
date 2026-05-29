@@ -41,6 +41,16 @@ internal sealed class LayoutCoordinator
     private readonly Grid _verticalTitleBar;
 
     private bool _switching;
+    // When true (quake window with a single tab), the strip + vertical
+    // title bar are forced hidden regardless of layout mode, leaving only
+    // the pane host. Snap and Animate both honor it so the layout toggle
+    // cannot resurrect the strip.
+    private bool _stripHidden;
+    // Quake window: the top VerticalTitleBar (layout-toggle chevron +
+    // window title) is suppressed entirely. The wintty icon at the top of
+    // the vertical strip becomes the topmost element above the tabs. Layout
+    // switching still works via the keyboard chord.
+    private bool _verticalTitleBarSuppressed;
     private DispatcherTimer? _columnTimer;
 
     public LayoutCoordinator(
@@ -91,8 +101,16 @@ internal sealed class LayoutCoordinator
         _horizontalHost.Visibility = verticalTabs ? Visibility.Collapsed : Visibility.Visible;
         _horizontalHost.IsHitTestVisible = !verticalTabs;
 
-        _verticalTitleBar.Visibility = verticalTabs ? Visibility.Visible : Visibility.Collapsed;
-        _verticalTitleBar.Opacity = verticalTabs ? 1 : 0;
+        if (_verticalTitleBarSuppressed)
+        {
+            _verticalTitleBar.Visibility = Visibility.Collapsed;
+            _verticalTitleBar.Opacity = 0;
+        }
+        else
+        {
+            _verticalTitleBar.Visibility = verticalTabs ? Visibility.Visible : Visibility.Collapsed;
+            _verticalTitleBar.Opacity = verticalTabs ? 1 : 0;
+        }
 
         // Reset any dangling translate offsets so future switches
         // start from origin. Safe to overwrite: Snap is only called
@@ -101,6 +119,36 @@ internal sealed class LayoutCoordinator
         GetOrCreateTranslate(_verticalHost).Y = 0;
         GetOrCreateTranslate(_horizontalHost).X = 0;
         GetOrCreateTranslate(_horizontalHost).Y = 0;
+
+        if (_stripHidden)
+        {
+            // Collapse everything in the strip/title row + column,
+            // leaving only the pane host (row 1, col 1) visible.
+            _stripColumn.Width = new GridLength(0);
+            _titleBarStripMirror.Width = new GridLength(0);
+            _horizontalHost.Visibility = Visibility.Collapsed;
+            _horizontalHost.IsHitTestVisible = false;
+            _verticalHost.Visibility = Visibility.Collapsed;
+            _verticalHost.IsHitTestVisible = false;
+            _verticalTitleBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// Force the tab strip (and vertical title bar) hidden or restore it
+    /// to the normal end-state for the current layout. Used by the quake
+    /// window to hide tab chrome when only one tab is open.
+    /// </summary>
+    public void SetStripHidden(bool hidden, bool verticalTabs)
+    {
+        _stripHidden = hidden;
+        Snap(verticalTabs);
+    }
+
+    public void SuppressVerticalTitleBar(bool suppress, bool verticalTabs)
+    {
+        _verticalTitleBarSuppressed = suppress;
+        Snap(verticalTabs);
     }
 
     /// <summary>
@@ -114,12 +162,19 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void Animate(bool verticalTabs, Action? onCompleted = null)
     {
+        if (_stripHidden)
+        {
+            Snap(verticalTabs);
+            onCompleted?.Invoke();
+            return;
+        }
         if (_switching) return;
         _switching = true;
 
         var targetColWidth = verticalTabs ? VerticalStripCollapsedWidth : 0;
 
-        _verticalTitleBar.Visibility = Visibility.Visible;
+        if (!_verticalTitleBarSuppressed)
+            _verticalTitleBar.Visibility = Visibility.Visible;
         _verticalHost.Visibility = Visibility.Visible;
         _horizontalHost.Visibility = Visibility.Visible;
 
@@ -146,8 +201,9 @@ internal sealed class LayoutCoordinator
         var sb = new Storyboard();
         sb.Children.Add(MakeDoubleAnim(incoming, "Opacity", 0, 1));
         sb.Children.Add(MakeDoubleAnim(outgoing, "Opacity", outgoing.Opacity, 0));
-        sb.Children.Add(MakeDoubleAnim(_verticalTitleBar, "Opacity",
-            verticalTabs ? 0 : 1, verticalTabs ? 1 : 0));
+        if (!_verticalTitleBarSuppressed)
+            sb.Children.Add(MakeDoubleAnim(_verticalTitleBar, "Opacity",
+                verticalTabs ? 0 : 1, verticalTabs ? 1 : 0));
 
         sb.Children.Add(MakeTransformAnim(incoming, "X", incomingTx.X, 0));
         sb.Children.Add(MakeTransformAnim(incoming, "Y", incomingTx.Y, 0));
