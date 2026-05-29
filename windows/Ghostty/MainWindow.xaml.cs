@@ -488,10 +488,14 @@ public sealed partial class MainWindow : Window
 
         _taskbar = new TaskbarHost(this, _tabManager, loggerFactory.CreateLogger<TaskbarHost>());
 
-        AppWindow.Changed += (_, _) =>
+        AppWindow.Changed += (_, args) =>
         {
             _taskbar.OnAppWindowChanged(AppWindow);
             _titleBar.SyncCaptionInset();
+            if (IsQuickTerminal && args.DidSizeChange && !_movingQuake && AppWindow.IsVisible)
+            {
+                _quakeSessionHeight = AppWindow.Size.Height;
+            }
         };
 
         InstallPaneAccelerators();
@@ -1765,13 +1769,13 @@ public sealed partial class MainWindow : Window
 
         // Borderless: a quake terminal is positioned by config and toggled by
         // the global hotkey, so it needs no title bar, border, caption buttons,
-        // or user resize/min/max. Keep it activatable so autohide's
-        // Activated/Deactivated still fire, and keep the close->hide intercept
-        // (Alt+F4 still routes through Closing).
+        // or min/max. IsResizable=true keeps the (unpainted) resize frame so
+        // the user can drag the bottom edge to change height; the docked
+        // top/side edges sit at the monitor bounds and stay fixed.
         if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
-            presenter.IsResizable = false;
+            presenter.IsResizable = true;
             presenter.IsMinimizable = false;
             presenter.IsMaximizable = false;
         }
@@ -1862,6 +1866,17 @@ public sealed partial class MainWindow : Window
     // Not persisted; resets on app restart.
     private bool _quakePinned;
 
+    // User-resized height for the quake window, remembered for the session
+    // so toggling hide/show preserves it instead of snapping back to the
+    // quick-terminal-size config. Null until the user first resizes. Resets
+    // on app restart (session-only, like the pin).
+    private int? _quakeSessionHeight;
+
+    // True while MoveToQuakePosition is programmatically moving/resizing the
+    // window, so the AppWindow.Changed size-capture below ignores our own
+    // resize and only records genuine user drags.
+    private bool _movingQuake;
+
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
     /// <c>quick-terminal-size</c>, and <c>quick-terminal-screen</c>.
@@ -1871,20 +1886,42 @@ public sealed partial class MainWindow : Window
     /// </summary>
     public void MoveToQuakePosition()
     {
-        var hwnd = WindowNative.GetWindowHandle(this);
-        var bounds = QuickTerminalMonitorResolver.Resolve(
-            hwnd, _configService.QuickTerminalScreen);
-        var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
-            _configService.QuickTerminalPosition,
-            _configService.QuickTerminalSize,
-            bounds);
-        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
+        _movingQuake = true;
+        try
         {
-            X = rect.X,
-            Y = rect.Y,
-            Width = rect.Width,
-            Height = rect.Height,
-        });
+            var hwnd = WindowNative.GetWindowHandle(this);
+            var bounds = QuickTerminalMonitorResolver.Resolve(
+                hwnd, _configService.QuickTerminalScreen);
+            var position = _configService.QuickTerminalPosition;
+            var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
+                position,
+                _configService.QuickTerminalSize,
+                bounds);
+
+            // Apply a session resize (height only) for top/bottom docking.
+            // Top keeps Y at the monitor top and grows downward; bottom keeps
+            // its bottom edge pinned and grows upward.
+            if (_quakeSessionHeight is int sessionH &&
+                (position == Ghostty.Core.Hosting.QuickTerminalPosition.Top ||
+                 position == Ghostty.Core.Hosting.QuickTerminalPosition.Bottom))
+            {
+                var h = Math.Clamp(sessionH, 100, bounds.Height);
+                rect = position == Ghostty.Core.Hosting.QuickTerminalPosition.Bottom
+                    ? rect with { Y = bounds.Bottom - h, Height = h }
+                    : rect with { Height = h };
+            }
+
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
+            {
+                X = rect.X, Y = rect.Y, Width = rect.Width, Height = rect.Height,
+            });
+        }
+        finally
+        {
+            // Reset on the dispatcher so any queued AppWindow.Changed from our
+            // own MoveAndResize is still guarded (it can fire after this returns).
+            DispatcherQueue.TryEnqueue(() => _movingQuake = false);
+        }
     }
 
     /// <summary>
