@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 namespace Ghostty.Core.Input;
 
@@ -51,10 +52,9 @@ public readonly record struct QuickTerminalKeyChord(uint Modifiers, uint Virtual
         uint mods = ModNoRepeat;
         uint? vk = null;
 
-        foreach (var part in raw.Split('+', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var part in raw.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
-            var token = part.Trim().ToLowerInvariant();
-            if (token.Length == 0) return null;
+            var token = part.ToLowerInvariant();
 
             switch (token)
             {
@@ -130,7 +130,7 @@ public readonly record struct QuickTerminalKeyChord(uint Modifiers, uint Virtual
 
         // Function keys f1..f24.
         if (token.Length is 2 or 3 && token[0] == 'f'
-            && uint.TryParse(token.AsSpan(1), out var fn) && fn is >= 1 and <= 24)
+            && uint.TryParse(token.AsSpan(1), NumberStyles.None, CultureInfo.InvariantCulture, out var fn) && fn is >= 1 and <= 24)
         {
             return 0x70 + (fn - 1); // VK_F1 = 0x70
         }

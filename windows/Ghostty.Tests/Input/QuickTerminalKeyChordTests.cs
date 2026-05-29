@@ -37,6 +37,9 @@ public class QuickTerminalKeyChordTests
     [InlineData("CTRL+BackQuote", Control | NoRepeat, 0xC0u)]    // case-insensitive
     [InlineData("ctrl + backquote", Control | NoRepeat, 0xC0u)]  // surrounding spaces
     [InlineData("f12", NoRepeat, 0x7Bu)]                         // modifier-less function key OK
+    [InlineData("ctrl+f24", Control | NoRepeat, 0x87u)]
+    [InlineData("ctrl+bracket_left", Control | NoRepeat, 0xDBu)]
+    [InlineData("alt+page_up", Alt | NoRepeat, 0x21u)]
     public void Parse_Valid(string input, uint expectedMods, uint expectedVk)
     {
         var chord = QuickTerminalKeyChord.Parse(input);
@@ -54,12 +57,10 @@ public class QuickTerminalKeyChordTests
     [InlineData("ctrl+nonsense")]     // unknown key token
     [InlineData("ctrl+a+b")]          // two non-modifier keys
     [InlineData("a")]                 // modifier-less printable key (foot-gun guard)
-    [InlineData("ctrl+ctrl+a")]       // see note: short-circuited, asserted in dedicated fact
+    [InlineData("f0")]
+    [InlineData("f25")]
     public void Parse_Invalid_Returns_Null(string? input)
     {
-        // "ctrl+ctrl+a" is intentionally valid (dup modifier, key a); it is
-        // excluded here and asserted in the dedicated fact below.
-        if (input == "ctrl+ctrl+a") return;
         Assert.Null(QuickTerminalKeyChord.Parse(input));
     }
 
