@@ -488,10 +488,14 @@ public sealed partial class MainWindow : Window
 
         _taskbar = new TaskbarHost(this, _tabManager, loggerFactory.CreateLogger<TaskbarHost>());
 
-        AppWindow.Changed += (_, _) =>
+        AppWindow.Changed += (_, args) =>
         {
             _taskbar.OnAppWindowChanged(AppWindow);
             _titleBar.SyncCaptionInset();
+            if (IsQuickTerminal && args.DidSizeChange && !_movingQuake && AppWindow.IsVisible)
+            {
+                _quakeSessionHeight = AppWindow.Size.Height;
+            }
         };
 
         InstallPaneAccelerators();
@@ -954,9 +958,18 @@ public sealed partial class MainWindow : Window
             powerMonitor.LowPowerChanged -= OnLowPowerChanged;
         }
 
-        // Persist window placement for next launch. Skip when
-        // fullscreen -- restore to the normal size instead.
-        if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
+        if (IsQuickTerminal)
+        {
+            // Persist only the session-resized height, via read-modify-write
+            // so we never clobber the regular window placement other windows
+            // save. The quake window's X/Y/Width are config-driven
+            // (MoveToQuakePosition), so its geometry must NOT become the
+            // restore placement.
+            var quakeState = WindowState.Load();
+            quakeState.QuakeHeight = _quakeSessionHeight;
+            quakeState.Save();
+        }
+        else if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
         {
             var hwnd = new HWND(WindowNative.GetWindowHandle(this));
             var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
@@ -1004,6 +1017,7 @@ public sealed partial class MainWindow : Window
 
         _gradientVisual?.Dispose();
         _gradientVisual = null;
+        _slideAnimator?.Dispose();
         _taskbar.Dispose();
         _themeManager.Dispose();
 
@@ -1762,6 +1776,32 @@ public sealed partial class MainWindow : Window
             WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
             unchecked((int)(ex | WINDOW_EX_STYLE.WS_EX_TOOLWINDOW)));
 
+        // Borderless: a quake terminal is positioned by config and toggled by
+        // the global hotkey, so it needs no title bar, border, caption buttons,
+        // or min/max. IsResizable=true keeps the (unpainted) resize frame so
+        // the user can drag the bottom edge to change height; the docked
+        // top/side edges sit at the monitor bounds and stay fixed.
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        {
+            presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
+            presenter.IsResizable = true;
+            presenter.IsMinimizable = false;
+            presenter.IsMaximizable = false;
+        }
+
+        // Borderless quake has no OS caption buttons; collapse the dead inset
+        // and drop the vertical-mode title text.
+        _titleBar.SetCaptionless(true);
+
+        // Quake never shows the top vertical title bar; the strip's own wintty
+        // icon sits above the tabs instead. Layout toggle stays available via
+        // the Ctrl+Shift+, chord.
+        _layout.SuppressVerticalTitleBar(true, _verticalTabsVisible);
+
+        // Show the session-only pin button so the user can keep the quake
+        // window open on focus loss. Invisible on regular windows by default.
+        QuakePinButton.Visibility = Visibility.Visible;
+
         AppWindow.Closing += (_, args) =>
         {
             // The shutdown path in App.OnAnyWindowClosedInternal sets
@@ -1773,6 +1813,50 @@ public sealed partial class MainWindow : Window
             args.Cancel = true;
             AppWindow.Hide();
         };
+
+        // Autohide: when the quake window loses activation to another window,
+        // hide it (unless the user opted out). In-window overlays (command
+        // palette, ContentDialog) do NOT deactivate the window, so this only
+        // fires on a genuine switch to another app/window. Gated on
+        // _autohideArmed so the activation churn during Show()/focus does not
+        // self-trigger.
+        Activated += OnQuakeActivated;
+
+        // Hide the tab strip while a single tab is open; show it at 2+.
+        // Tab count is already updated when these events fire.
+        _tabManager.TabAdded += (_, _) => UpdateQuakeStripVisibility();
+        _tabManager.TabRemoved += (_, _) => UpdateQuakeStripVisibility();
+        UpdateQuakeStripVisibility();
+
+        // Restore the per-user remembered quake height so the first show after
+        // login uses it (MoveToQuakePosition applies it for top/bottom docking).
+        _quakeSessionHeight = _windowState.QuakeHeight;
+    }
+
+    /// <summary>
+    /// Quake-only: hide the tab strip when a single tab is open, show it
+    /// at two or more. Routed through the LayoutCoordinator so it honors
+    /// the current horizontal/vertical mode and survives layout toggles.
+    /// </summary>
+    private void UpdateQuakeStripVisibility()
+    {
+        if (!IsQuickTerminal) return;
+        _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
+    }
+
+    private void OnQuakePinChanged(object sender, RoutedEventArgs e)
+    {
+        _quakePinned = QuakePinButton.IsChecked == true;
+    }
+
+    private void OnQuakeActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState != WindowActivationState.Deactivated) return;
+        if (_quakePinned) return;   // user pinned the window open this session
+        if (!_autohideArmed) return;
+        if (!AppWindow.IsVisible) return;
+        if (!_configService.QuickTerminalAutohide) return;
+        Hide();
     }
 
     /// <summary>
@@ -1785,6 +1869,37 @@ public sealed partial class MainWindow : Window
     internal void RequestHardClose() => _hardCloseQuake = true;
     private bool _hardCloseQuake;
 
+    // Lazily-built slide/fade animator for the quake window. Null until the
+    // first show (the XAML content visual must exist first). Only used when
+    // IsQuickTerminal and animation duration > 0.
+    private QuickTerminalSlideAnimator? _slideAnimator;
+
+    // Autohide is only armed once a show animation has fully settled, so the
+    // transient activation churn during Show()/focus does not immediately
+    // trigger a hide.
+    private bool _autohideArmed;
+
+    // True while a slide-out is in flight (window still IsVisible until the
+    // animation completes). A toggle during this window means "bring it
+    // back", so ToggleVisibility must re-show rather than hide again.
+    private bool _hiding;
+
+    // Session-only pin: while true, the quake window does not auto-hide on
+    // focus loss. Toggled by the top-right pin button (quake window only).
+    // Not persisted; resets on app restart.
+    private bool _quakePinned;
+
+    // User-resized height for the quake window, remembered for the session
+    // so toggling hide/show preserves it instead of snapping back to the
+    // quick-terminal-size config. Null until the user first resizes. Resets
+    // on app restart (session-only, like the pin).
+    private int? _quakeSessionHeight;
+
+    // True while MoveToQuakePosition is programmatically moving/resizing the
+    // window, so the AppWindow.Changed size-capture below ignores our own
+    // resize and only records genuine user drags.
+    private bool _movingQuake;
+
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
     /// <c>quick-terminal-size</c>, and <c>quick-terminal-screen</c>.
@@ -1794,20 +1909,42 @@ public sealed partial class MainWindow : Window
     /// </summary>
     public void MoveToQuakePosition()
     {
-        var hwnd = WindowNative.GetWindowHandle(this);
-        var bounds = QuickTerminalMonitorResolver.Resolve(
-            hwnd, _configService.QuickTerminalScreen);
-        var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
-            _configService.QuickTerminalPosition,
-            _configService.QuickTerminalSize,
-            bounds);
-        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
+        _movingQuake = true;
+        try
         {
-            X = rect.X,
-            Y = rect.Y,
-            Width = rect.Width,
-            Height = rect.Height,
-        });
+            var hwnd = WindowNative.GetWindowHandle(this);
+            var bounds = QuickTerminalMonitorResolver.Resolve(
+                hwnd, _configService.QuickTerminalScreen);
+            var position = _configService.QuickTerminalPosition;
+            var rect = Ghostty.Core.Hosting.QuickTerminalGeometry.Resolve(
+                position,
+                _configService.QuickTerminalSize,
+                bounds);
+
+            // Apply a session resize (height only) for top/bottom docking.
+            // Top keeps Y at the monitor top and grows downward; bottom keeps
+            // its bottom edge pinned and grows upward.
+            if (_quakeSessionHeight is int sessionH &&
+                (position == Ghostty.Core.Hosting.QuickTerminalPosition.Top ||
+                 position == Ghostty.Core.Hosting.QuickTerminalPosition.Bottom))
+            {
+                var h = Math.Clamp(sessionH, 100, bounds.Height);
+                rect = position == Ghostty.Core.Hosting.QuickTerminalPosition.Bottom
+                    ? rect with { Y = bounds.Bottom - h, Height = h }
+                    : rect with { Height = h };
+            }
+
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32
+            {
+                X = rect.X, Y = rect.Y, Width = rect.Width, Height = rect.Height,
+            });
+        }
+        finally
+        {
+            // Reset on the dispatcher so any queued AppWindow.Changed from our
+            // own MoveAndResize is still guarded (it can fire after this returns).
+            DispatcherQueue.TryEnqueue(() => _movingQuake = false);
+        }
     }
 
     /// <summary>
@@ -1817,13 +1954,92 @@ public sealed partial class MainWindow : Window
     /// </summary>
     public void ToggleVisibility()
     {
-        if (AppWindow.IsVisible)
+        // Shown and not already sliding out -> hide. If mid-slide-out, a
+        // toggle means "bring it back", so fall through to Show(), which
+        // cancels the hide (the animator's token guard suppresses the
+        // superseded slide-out completion) and animates back in.
+        if (AppWindow.IsVisible && !_hiding)
+        {
+            Hide();
+            return;
+        }
+        Show();
+    }
+
+    private void Show()
+    {
+        _hiding = false;
+        if (!AppWindow.IsVisible)
+        {
+            MoveToQuakePosition();
+            AppWindow.Show();
+        }
+
+        var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration <= 0)
+        {
+            _slideAnimator?.SnapToShown();
+            _autohideArmed = true;
+            FocusActiveLeaf();
+            return;
+        }
+
+        _autohideArmed = false;
+        _slideAnimator ??= new QuickTerminalSlideAnimator(RootGrid);
+        _slideAnimator.AnimateIn(
+            _configService.QuickTerminalPosition,
+            AppWindow.Size.Width,
+            AppWindow.Size.Height,
+            TimeSpan.FromSeconds(duration),
+            onCompleted: () =>
+            {
+                _autohideArmed = true;
+                FocusActiveLeaf();
+            });
+        // Focus immediately too so typing works during the slide; the
+        // onCompleted re-focus is a no-op if focus already landed.
+        FocusActiveLeaf();
+    }
+
+    /// <summary>
+    /// Hide the quake window, animating the slide-out first when a non-zero
+    /// animation duration is configured. Used by the toggle and by autohide.
+    /// (Hides the AppWindow; this is not a Window override -- Window has no Hide().)
+    /// </summary>
+    private void Hide()
+    {
+        _autohideArmed = false;
+        var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration <= 0 || _slideAnimator is null)
         {
             AppWindow.Hide();
             return;
         }
-        MoveToQuakePosition();
-        AppWindow.Show();
+
+        _hiding = true;
+        _slideAnimator.AnimateOut(
+            _configService.QuickTerminalPosition,
+            AppWindow.Size.Width,
+            AppWindow.Size.Height,
+            TimeSpan.FromSeconds(duration),
+            onCompleted: () =>
+            {
+                // A re-show during the slide-out clears _hiding to cancel the
+                // hide (the animator token guard already suppresses a
+                // superseded Completed; this is belt-and-suspenders). Also
+                // skip when the window is hard-closing on shutdown.
+                if (!_hiding || _hardCloseQuake) return;
+                _hiding = false;
+                // Completed fires on the UI thread (same context as
+                // GetElementVisual), so AppWindow.Hide() is safe; guard
+                // against a COM teardown race during shutdown.
+                try { AppWindow.Hide(); }
+                catch (System.Runtime.InteropServices.COMException) { }
+            });
+    }
+
+    private void FocusActiveLeaf()
+    {
         DispatcherQueue.TryEnqueue(() =>
             _tabManager.ActiveTab?.PaneHost?.ActiveLeaf?.Terminal()
                 .Focus(FocusState.Programmatic));
