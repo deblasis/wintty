@@ -40,5 +40,6 @@ internal static class LogEvents
     internal static class Hosting
     {
         public const int HotKeyRegisterFailed = 1300;
+        public const int QuakeFrameSubclassFailed = 1301;
     }
 }
