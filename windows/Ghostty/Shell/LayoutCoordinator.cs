@@ -33,12 +33,31 @@ internal sealed class LayoutCoordinator
     public const double VerticalStripCollapsedWidth = 40;
     public const int SwitchDurationMs = 220;
 
+    // Vertical-mode title bar height. The horizontal host slides this
+    // far vertically during the cross-fade so the swap feels like the
+    // strip lifting away. Must match VerticalTitleBar.Height in
+    // MainWindow.xaml.
+    private const double VerticalTitleBarHeight = 34;
+
+    // Feel constants for the icon spin/pop, tuned by eye. The spin is one
+    // full turn; the pop dips the scale partway through and springs back
+    // past 1.0 as it lands.
+    private const double IconSpinOvershoot = 0.25; // BackEase amplitude on the rotation settle
+    private const double IconPopMidpoint = 0.45;   // fraction of the switch where the scale dip bottoms out
+    private const double IconPopDipScale = 0.78;   // smallest scale at the dip
+    private const double IconPopOvershoot = 0.6;   // BackEase amplitude springing the scale back past 1.0
+
     private readonly ColumnDefinition _stripColumn;
     private readonly ColumnDefinition _titleBarStripMirror;
     private readonly FrameworkElement _horizontalHost;
     private readonly VerticalTabHost _verticalTabHost;
     private readonly FrameworkElement _verticalHost;
     private readonly Grid _verticalTitleBar;
+    // The wintty icon in each layout. Only the incoming one is spun on a
+    // switch (see Animate), so the icon looks like the surrounding chrome
+    // is shoving it into its new home.
+    private readonly FrameworkElement _horizontalIcon;
+    private readonly FrameworkElement _verticalIcon;
 
     private bool _switching;
     // When true (quake window with a single tab), the strip + vertical
@@ -58,7 +77,8 @@ internal sealed class LayoutCoordinator
         ColumnDefinition titleBarStripMirror,
         FrameworkElement horizontalHost,
         VerticalTabHost verticalTabHost,
-        Grid verticalTitleBar)
+        Grid verticalTitleBar,
+        FrameworkElement horizontalIcon)
     {
         _stripColumn = stripColumn;
         _titleBarStripMirror = titleBarStripMirror;
@@ -66,6 +86,8 @@ internal sealed class LayoutCoordinator
         _verticalTabHost = verticalTabHost;
         _verticalHost = verticalTabHost;
         _verticalTitleBar = verticalTitleBar;
+        _horizontalIcon = horizontalIcon;
+        _verticalIcon = verticalTabHost.IconBadge;
 
         // The chevron toggle inside VerticalTabHost asks the outer
         // shell to widen the strip column. Forward through the same
@@ -112,13 +134,18 @@ internal sealed class LayoutCoordinator
             _verticalTitleBar.Opacity = verticalTabs ? 1 : 0;
         }
 
-        // Reset any dangling translate offsets so future switches
-        // start from origin. Safe to overwrite: Snap is only called
-        // when no transform animation is in flight.
+        // Reset any dangling transform offsets so future switches start
+        // from origin. Snap is the single end-state authority, so it
+        // also returns the spun icons to identity -- without this, a
+        // switch interrupted by SetStripHidden / SuppressVerticalTitleBar
+        // (which call Snap directly) could leave an icon rotated or
+        // scaled once the strip is shown again.
         GetOrCreateTranslate(_verticalHost).X = 0;
         GetOrCreateTranslate(_verticalHost).Y = 0;
         GetOrCreateTranslate(_horizontalHost).X = 0;
         GetOrCreateTranslate(_horizontalHost).Y = 0;
+        ResetIconTransform(_horizontalIcon);
+        ResetIconTransform(_verticalIcon);
 
         if (_stripHidden)
         {
@@ -182,9 +209,9 @@ internal sealed class LayoutCoordinator
         var outgoing = verticalTabs ? _horizontalHost : _verticalHost;
         var incomingOffset = verticalTabs
             ? new Windows.Foundation.Point(-VerticalStripCollapsedWidth, 0)
-            : new Windows.Foundation.Point(0, -32);
+            : new Windows.Foundation.Point(0, -VerticalTitleBarHeight);
         var outgoingOffset = verticalTabs
-            ? new Windows.Foundation.Point(0, -32)
+            ? new Windows.Foundation.Point(0, -VerticalTitleBarHeight)
             : new Windows.Foundation.Point(-VerticalStripCollapsedWidth, 0);
 
         incoming.IsHitTestVisible = true;
@@ -211,6 +238,28 @@ internal sealed class LayoutCoordinator
         sb.Children.Add(MakeTransformAnim(outgoing, "X", outgoingTx.X, outgoingOffset.X));
         sb.Children.Add(MakeTransformAnim(outgoing, "Y", outgoingTx.Y, outgoingOffset.Y));
 
+        // Spin + pop the wintty icon while keeping it pinned in place.
+        // Each icon counter-translates its own host's slide, so it stays
+        // glued to the same anchor point while the strip/title-bar chrome
+        // slides around it -- the icon reads as a fixed pivot the layout
+        // rotates about, not something that flies in with the rest. This
+        // only cancels because the icon is a child of its host: the two
+        // translates compose, so equal-and-opposite nets to zero.
+        //
+        // Both icons spin the same way so the cross-fade between them
+        // (one per layout, sitting at the same spot) looks like a single
+        // steady, turning ghost. Direction follows the chrome sweep:
+        // going vertical (top bar -> left rail) is counter-clockwise,
+        // going horizontal (left rail -> top bar) clockwise. One full
+        // turn lands it upright.
+        var spin = verticalTabs ? -360.0 : 360.0;
+        var incomingIcon = verticalTabs ? _verticalIcon : _horizontalIcon;
+        var outgoingIcon = verticalTabs ? _horizontalIcon : _verticalIcon;
+        SpinIconInPlace(sb, incomingIcon, spin,
+            -incomingOffset.X, -incomingOffset.Y, 0, 0);
+        SpinIconInPlace(sb, outgoingIcon, spin,
+            0, 0, -outgoingOffset.X, -outgoingOffset.Y);
+
         // Snap the strip column width immediately. The crossfade
         // hides the jump; see the Animate summary for rationale.
         _stripColumn.Width = new GridLength(targetColWidth);
@@ -219,6 +268,9 @@ internal sealed class LayoutCoordinator
 
         sb.Completed += (_, _) =>
         {
+            // Snap returns the icons to identity (360 lands them upright
+            // anyway; this just stops the angle accumulating across
+            // switches) along with the rest of the end state.
             Snap(verticalTabs);
             _switching = false;
             onCompleted?.Invoke();
@@ -268,6 +320,109 @@ internal sealed class LayoutCoordinator
         var nt = new TranslateTransform();
         fe.RenderTransform = nt;
         return nt;
+    }
+
+    // Spin + pop one icon while holding it at a fixed anchor. The
+    // translate runs from/to the negative of the host's slide so it
+    // exactly cancels it (same easing + duration as the host slide),
+    // leaving only the in-place rotate and scale visible.
+    private static void SpinIconInPlace(
+        Storyboard sb, FrameworkElement? icon, double spin,
+        double fromX, double fromY, double toX, double toY)
+    {
+        if (icon is null) return;
+        var (scale, rotate, translate) = EnsureIconTransform(icon);
+        rotate.Angle = 0;
+        scale.ScaleX = 1;
+        scale.ScaleY = 1;
+        translate.X = fromX;
+        translate.Y = fromY;
+        sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
+        sb.Children.Add(MakePopAnim(scale, "ScaleX"));
+        sb.Children.Add(MakePopAnim(scale, "ScaleY"));
+        // Same easing + duration helper as the host slide, so the
+        // counter-translate cancels it frame for frame, not just at the
+        // endpoints.
+        sb.Children.Add(MakeDoubleAnim(translate, "X", fromX, toX));
+        sb.Children.Add(MakeDoubleAnim(translate, "Y", fromY, toY));
+    }
+
+    // Give the icon a Scale+Rotate+Translate group: scale and rotate
+    // pivot on its centre (RenderTransformOrigin), the translate (applied
+    // last, so it stays axis-aligned) cancels the host slide.
+    private static (ScaleTransform Scale, RotateTransform Rotate, TranslateTransform Translate) EnsureIconTransform(FrameworkElement fe)
+    {
+        if (fe.RenderTransform is TransformGroup g
+            && g.Children.Count == 3
+            && g.Children[0] is ScaleTransform existingScale
+            && g.Children[1] is RotateTransform existingRotate
+            && g.Children[2] is TranslateTransform existingTranslate)
+            return (existingScale, existingRotate, existingTranslate);
+
+        var scale = new ScaleTransform();
+        var rotate = new RotateTransform();
+        var translate = new TranslateTransform();
+        var group = new TransformGroup();
+        group.Children.Add(scale);
+        group.Children.Add(rotate);
+        group.Children.Add(translate);
+        fe.RenderTransform = group;
+        fe.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
+        return (scale, rotate, translate);
+    }
+
+    private static void ResetIconTransform(FrameworkElement? fe)
+    {
+        if (fe is null) return;
+        var (scale, rotate, translate) = EnsureIconTransform(fe);
+        rotate.Angle = 0;
+        scale.ScaleX = 1;
+        scale.ScaleY = 1;
+        translate.X = 0;
+        translate.Y = 0;
+    }
+
+    private static DoubleAnimation MakeRotateAnim(RotateTransform target, double from, double to)
+    {
+        // A touch of back-ease overshoot at the end sells the "shoved
+        // and settling" feel rather than a mechanical stop.
+        var anim = new DoubleAnimation
+        {
+            From = from,
+            To = to,
+            Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
+            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconSpinOvershoot },
+        };
+        Storyboard.SetTarget(anim, target);
+        Storyboard.SetTargetProperty(anim, "Angle");
+        return anim;
+    }
+
+    // Dip the icon's scale mid-spin then spring back past 1.0, so it
+    // pops as it lands.
+    private static DoubleAnimationUsingKeyFrames MakePopAnim(ScaleTransform target, string axis)
+    {
+        var anim = new DoubleAnimationUsingKeyFrames();
+        anim.KeyFrames.Add(new EasingDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
+            Value = 1.0,
+        });
+        anim.KeyFrames.Add(new EasingDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs * IconPopMidpoint)),
+            Value = IconPopDipScale,
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+        });
+        anim.KeyFrames.Add(new EasingDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs)),
+            Value = 1.0,
+            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconPopOvershoot },
+        });
+        Storyboard.SetTarget(anim, target);
+        Storyboard.SetTargetProperty(anim, axis);
+        return anim;
     }
 
     private static DoubleAnimation MakeDoubleAnim(DependencyObject target, string path, double from, double to)
