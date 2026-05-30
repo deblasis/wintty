@@ -164,6 +164,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CurrentProgress = state;
         ProgressChanged?.Invoke(this, state);
     }
+    internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
 
     // Called on the libghostty thread. Stashes the latest state and
     // enqueues a single UI-thread flush. Coalescing: if libghostty
@@ -287,6 +288,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public event EventHandler<string>? TitleChanged;
     public event EventHandler? CloseRequested;
     internal event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
+
+    /// <summary>Raised when the shell prompt becomes interactive (OSC 133;B).
+    /// The first such event per surface marks the shell as responsive.</summary>
+    public event EventHandler? PromptReady;
 
     public TerminalControl()
     {
@@ -466,6 +471,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CloseRequested = null;
         HoveredLinkChanged = null;
         ProgressChanged = null;
+        PromptReady = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
