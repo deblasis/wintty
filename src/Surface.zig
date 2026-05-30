@@ -1201,6 +1201,16 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .prompt_input => {
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .prompt_ready,
+                {},
+            ) catch |err| {
+                log.warn("apprt failed to notify prompt ready={}", .{err});
+            };
+        },
+
         .search_total => |v| {
             _ = try self.rt_app.performAction(
                 .{ .surface = self },
