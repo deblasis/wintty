@@ -62,7 +62,7 @@
             SelectionChanged="OnSelectionChanged"
             TabDragCompleted="OnTabDragCompleted">
             <controls:TabView.TabStripHeader>
-                <branding:AppIconBadge />
+                <branding:AppIconBadge x:Name="IconBadgeHost" />
             </controls:TabView.TabStripHeader>
             <!--
                 TabStripFooter is a two-cell row. Cell 0 holds the

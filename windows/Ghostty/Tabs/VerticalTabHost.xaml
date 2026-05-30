@@ -29,6 +29,7 @@
              TabView's strip header so it does not jump when the layout
              toggles. -->
         <branding:AppIconBadge
+            x:Name="IconBadgeHost"
             Grid.Row="0"
             Grid.Column="0"
             HorizontalAlignment="Left"

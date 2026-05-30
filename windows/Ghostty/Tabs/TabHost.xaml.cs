@@ -39,6 +39,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
     public FrameworkElement HostElement => this;
 
     /// <summary>
+    /// The wintty icon shown at the start of the tab strip. Exposed so
+    /// the layout switch can spin it independently of the strip chrome.
+    /// </summary>
+    public FrameworkElement IconBadge => IconBadgeHost;
+
+    /// <summary>
     /// The Grid that sits in the TabView's TabStripFooter and
     /// reserves room for the OS caption buttons. <see cref="MainWindow"/>
     /// passes this to <c>Window.SetTitleBar</c> so clicks on the

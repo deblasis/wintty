@@ -462,7 +462,8 @@ public sealed partial class MainWindow : Window
             TitleBarStripMirror,
             (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
-            VerticalTitleBar);
+            VerticalTitleBar,
+            _horizontalTabHost.IconBadge);
         _layout.Snap(_verticalTabsVisible);
 
         _titleBar = new TitleBarCoordinator(
