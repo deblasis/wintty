@@ -976,10 +976,12 @@ fn setupPowerShell(
     if (iter.next() != null) return try command.clone(alloc_arena);
 
     // Build the dot-source command. Single quotes keep the path literal
-    // for PowerShell even if it contains spaces. We emit a `.direct`
-    // command so the `-Command` payload survives downstream argv parsing
-    // as a single argument (a `.shell` string would be re-split on
-    // spaces, breaking the dot-source expression).
+    // for PowerShell even if it contains spaces; this assumes resource_dir
+    // (Ghostty-owned) never contains a single quote, which PowerShell would
+    // otherwise require doubled. We emit a `.direct` command so the
+    // `-Command` payload survives downstream argv parsing as a single
+    // argument (a `.shell` string would be re-split on spaces, breaking the
+    // dot-source expression).
     const dot_source = try std.fmt.allocPrintSentinel(
         alloc_arena,
         ". '{s}'",
@@ -1063,7 +1065,9 @@ test "powershell: user-supplied args are left untouched" {
 /// hooks, but it re-expands the PROMPT env var on every prompt and supports
 /// `$e` (ESC) on Windows 10+. We wrap the prompt body in OSC 133;A / 133;B
 /// (prompt-start / input-start) and report cwd via OSC 9;9. No command
-/// start/end (C/D) marks are possible.
+/// start/end (C/D) marks are possible. Unlike the script-based shells, cmd
+/// has no way to read GHOSTTY_SHELL_FEATURES at runtime, so these marks are
+/// always emitted (the gated features do not apply to cmd anyway).
 fn setupCmd(
     alloc_arena: Allocator,
     command: config.Command,
