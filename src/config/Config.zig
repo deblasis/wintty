@@ -8786,6 +8786,7 @@ pub const ShellIntegration = enum {
     elvish,
     fish,
     nushell,
+    powershell,
     zsh,
 };
 
