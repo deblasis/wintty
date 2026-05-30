@@ -12,6 +12,7 @@ const log = std.log.scoped(.shell_integration);
 /// Shell types we support
 pub const Shell = enum {
     bash,
+    cmd,
     elvish,
     fish,
     nushell,
@@ -79,6 +80,8 @@ pub fn setup(
             resource_dir,
             env,
         ),
+
+        .cmd => try setupCmd(alloc_arena, command, env),
 
         .elvish, .fish => xdg: {
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
@@ -182,6 +185,7 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
         exe;
     if (std.ascii.eqlIgnoreCase("pwsh", exe_no_ext)) return .powershell;
     if (std.ascii.eqlIgnoreCase("powershell", exe_no_ext)) return .powershell;
+    if (std.ascii.eqlIgnoreCase("cmd", exe_no_ext)) return .cmd;
 
     return null;
 }
@@ -208,6 +212,9 @@ test detectShell {
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "pwsh.exe" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell.exe" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd.exe" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "CMD.EXE" }));
 
     // std.fs.path.basename uses POSIX semantics on non-Windows hosts,
     // so a backslash-only path is treated as a single component. Only
@@ -1050,6 +1057,64 @@ test "powershell: user-supplied args are left untouched" {
         try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
         env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
     );
+}
+
+/// Setup cmd.exe shell integration. cmd has no rc file or pre/post-exec
+/// hooks, but it re-expands the PROMPT env var on every prompt and supports
+/// `$e` (ESC) on Windows 10+. We wrap the prompt body in OSC 133;A / 133;B
+/// (prompt-start / input-start) and report cwd via OSC 9;9. No command
+/// start/end (C/D) marks are possible.
+fn setupCmd(
+    alloc_arena: Allocator,
+    command: config.Command,
+    env: *EnvMap,
+) !?config.Command {
+    // Preserve the user's prompt body if set, else cmd's default `$p$g`.
+    const body = env.get("PROMPT") orelse "$p$g";
+    // `$e` = ESC, terminator ST = `$e\`. OSC 9;9 carries cwd via `$p`.
+    const wrapped = try std.fmt.allocPrint(
+        alloc_arena,
+        "$e]133;A$e\\$e]9;9;$p$e\\{s}$e]133;B$e\\",
+        .{body},
+    );
+    try env.put("PROMPT", wrapped);
+    return try command.clone(alloc_arena);
+}
+
+test "cmd: PROMPT carries OSC 133 marks" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env);
+
+    const prompt = env.get("PROMPT") orelse return error.NoPrompt;
+    try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "9;9") != null);
+}
+
+test "cmd: preserves existing PROMPT body" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    try env.put("PROMPT", "$p$g$s");
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env);
+
+    const prompt = env.get("PROMPT") orelse return error.NoPrompt;
+    try testing.expect(std.mem.indexOf(u8, prompt, "$p$g$s") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
 }
 
 /// Setup the zsh automatic shell integration. This works by setting
