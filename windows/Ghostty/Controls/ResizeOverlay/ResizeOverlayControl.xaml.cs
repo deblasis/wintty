@@ -1,0 +1,122 @@
+using System;
+using Ghostty.Core.ResizeOverlay;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+
+namespace Ghostty.Controls.ResizeOverlay;
+
+/// <summary>
+/// The transient grid-dimension pill ("80 x 24") shown over a pane while
+/// it is resized. Mirrors macOS Ghostty's SurfaceResizeOverlay.
+///
+/// The control owns its <see cref="ResizeOverlayState"/> and a one-shot
+/// auto-hide timer. The per-pane <see cref="TerminalControl"/> feeds it
+/// resize events via <see cref="NotifyResize"/>, passing the current
+/// config values (read fresh each time so hot-reload is honored) and an
+/// <c>allowShow</c> flag that folds in the time-based guards the view-side
+/// owner tracks (startup settle grace, focus-bounce window).
+/// </summary>
+public sealed partial class ResizeOverlayControl : UserControl
+{
+    private readonly DispatcherQueueTimer _hideTimer;
+
+    public ResizeOverlayControl()
+    {
+        State = new ResizeOverlayState();
+        InitializeComponent();
+
+        // DispatcherQueueTimer fires on the UI thread, so the Tick handler
+        // can touch Visibility with no marshalling. Non-repeating: each
+        // pulse restarts it, so it only fires once the resizing settles.
+        _hideTimer = DispatcherQueue.CreateTimer();
+        _hideTimer.IsRepeating = false;
+        _hideTimer.Tick += OnHideTick;
+
+        // Drop the Tick handler when the control leaves the tree so a
+        // reparented or torn-down pane does not accumulate handler links
+        // on the dispatcher's timer list.
+        Unloaded += OnControlUnloaded;
+    }
+
+    /// <summary>
+    /// Observable state bound by the XAML. The control owns the instance;
+    /// <see cref="NotifyResize"/> mutates it as resize events arrive.
+    /// </summary>
+    public ResizeOverlayState State { get; }
+
+    /// <summary>
+    /// Record a resize and, when warranted, flash the pill. Always updates
+    /// the displayed size; only makes the pill visible when
+    /// <paramref name="allowShow"/> is true and the
+    /// <see cref="ResizeOverlayState"/> decides this change should pulse
+    /// (per <paramref name="mode"/> and first-layout / dedup rules).
+    /// </summary>
+    /// <param name="cols">Current grid column count.</param>
+    /// <param name="rows">Current grid row count.</param>
+    /// <param name="mode">The resolved resize-overlay mode.</param>
+    /// <param name="position">Where the pill should sit in the pane.</param>
+    /// <param name="durationMs">How long the pill stays visible.</param>
+    /// <param name="allowShow">
+    /// False suppresses the visual pulse (e.g. during the startup settle or
+    /// just after a focus change) while still letting the state track the
+    /// latest size and baseline.
+    /// </param>
+    public void NotifyResize(
+        ushort cols,
+        ushort rows,
+        ResizeOverlayMode mode,
+        ResizeOverlayPosition position,
+        int durationMs,
+        bool allowShow)
+    {
+        State.Mode = mode;
+        var pulse = State.ShouldPulse(cols, rows);
+        if (!allowShow || !pulse) return;
+
+        ApplyPosition(position);
+
+        // Clamp to a sane floor: a zero/negative duration would make the
+        // timer never fire, leaving the pill stuck on screen.
+        _hideTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, durationMs));
+        Visibility = Visibility.Visible;
+        _hideTimer.Stop();
+        _hideTimer.Start();
+    }
+
+    private void OnHideTick(DispatcherQueueTimer sender, object args)
+    {
+        sender.Stop();
+        Visibility = Visibility.Collapsed;
+    }
+
+    private void ApplyPosition(ResizeOverlayPosition position)
+    {
+        Pill.HorizontalAlignment = position switch
+        {
+            ResizeOverlayPosition.TopLeft or
+            ResizeOverlayPosition.BottomLeft => HorizontalAlignment.Left,
+            ResizeOverlayPosition.TopRight or
+            ResizeOverlayPosition.BottomRight => HorizontalAlignment.Right,
+            _ => HorizontalAlignment.Center,
+        };
+
+        Pill.VerticalAlignment = position switch
+        {
+            ResizeOverlayPosition.TopLeft or
+            ResizeOverlayPosition.TopCenter or
+            ResizeOverlayPosition.TopRight => VerticalAlignment.Top,
+            ResizeOverlayPosition.BottomLeft or
+            ResizeOverlayPosition.BottomCenter or
+            ResizeOverlayPosition.BottomRight => VerticalAlignment.Bottom,
+            _ => VerticalAlignment.Center,
+        };
+    }
+
+    private void OnControlUnloaded(object sender, RoutedEventArgs e)
+    {
+        _hideTimer.Stop();
+        _hideTimer.Tick -= OnHideTick;
+        Unloaded -= OnControlUnloaded;
+    }
+}
