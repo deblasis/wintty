@@ -922,12 +922,23 @@ test "nushell: missing resources" {
     try testing.expectEqual(0, env.count());
 }
 
-/// Setup PowerShell shell integration. PowerShell has no equivalent
-/// of bash's `ENV` or zsh's `ZDOTDIR` to auto-source a script, so we
-/// only export the absolute path to our integration script via the
-/// `GHOSTTY_SHELL_INTEGRATION_PS1` environment variable. Users opt in
-/// by adding a one-liner to their `$PROFILE` that dot-sources it.
-/// We do not modify the command line; users opt in via their $PROFILE.
+/// Setup PowerShell shell integration. PowerShell has no equivalent of
+/// bash's `ENV` or zsh's `ZDOTDIR` to auto-source a script, so we always
+/// export the absolute path to our integration script via the
+/// `GHOSTTY_SHELL_INTEGRATION_PS1` environment variable. Users can opt in
+/// manually by dot-sourcing that path from their `$PROFILE`.
+///
+/// For a bare interactive shell (the user configured just `pwsh` with no
+/// arguments of their own) we go further and rewrite the launch command to
+/// auto-source the script:
+///
+///     <pwsh> -NoExit -Command ". '<resource_dir>/.../ghostty.ps1'"
+///
+/// PowerShell still loads the user's `$PROFILE` first, then runs the
+/// `-Command`, which dot-sources our script. The script wraps the
+/// now-final prompt and emits the OSC 133 marks. If the user supplied
+/// their own command or arguments we leave the command untouched so we
+/// never clobber their invocation (the env var fallback still works).
 fn setupPowerShell(
     alloc_arena: Allocator,
     command: config.Command,
@@ -937,16 +948,45 @@ fn setupPowerShell(
     // Use forward slashes for path composition to match the style of the
     // other shell-integration setup functions. PowerShell on Windows
     // accepts forward slashes in paths just fine.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const script_path = try std.fmt.bufPrint(
-        &path_buf,
+    const script_path = try std.fmt.allocPrint(
+        alloc_arena,
         "{s}/shell-integration/powershell/ghostty.ps1",
         .{resource_dir},
     );
 
     try env.put("GHOSTTY_SHELL_INTEGRATION_PS1", script_path);
 
-    return try command.clone(alloc_arena);
+    // Inspect the configured command. We auto-inject only when it's a
+    // bare interactive shell: argv is exactly the executable with no
+    // user-supplied arguments. Anything else (e.g. `pwsh -NoLogo` or a
+    // `-Command`/`-File` invocation) is left alone so we don't override
+    // what the user asked for.
+    var iter = try command.argIterator(alloc_arena);
+    defer iter.deinit();
+
+    const exe = iter.next() orelse return null;
+    // A second argument means the user provided their own command line.
+    if (iter.next() != null) return try command.clone(alloc_arena);
+
+    // Build the dot-source command. Single quotes keep the path literal
+    // for PowerShell even if it contains spaces. We emit a `.direct`
+    // command so the `-Command` payload survives downstream argv parsing
+    // as a single argument (a `.shell` string would be re-split on
+    // spaces, breaking the dot-source expression).
+    const dot_source = try std.fmt.allocPrintSentinel(
+        alloc_arena,
+        ". '{s}'",
+        .{script_path},
+        0,
+    );
+
+    const argv = try alloc_arena.alloc([:0]const u8, 4);
+    argv[0] = try alloc_arena.dupeZ(u8, exe);
+    argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
+    argv[2] = try alloc_arena.dupeZ(u8, "-Command");
+    argv[3] = dot_source;
+
+    return .{ .direct = argv };
 }
 
 test "powershell" {
@@ -962,8 +1002,48 @@ test "powershell" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
+    // A bare `pwsh` is rewritten to auto-source the integration script.
     const command = try setupPowerShell(alloc, .{ .shell = "pwsh" }, res.path, &env);
-    try testing.expectEqualStrings("pwsh", command.?.shell);
+    try testing.expect(command.? == .direct);
+    const argv = command.?.direct;
+    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqualStrings("pwsh", argv[0]);
+    try testing.expectEqualStrings("-NoExit", argv[1]);
+    try testing.expectEqualStrings("-Command", argv[2]);
+    // The dot-source argument references our integration script.
+    try testing.expect(std.mem.indexOf(u8, argv[3], "ghostty.ps1") != null);
+    try testing.expect(std.mem.startsWith(u8, argv[3], ". '"));
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.ps1", .{res.shell_path}),
+        env.get("GHOSTTY_SHELL_INTEGRATION_PS1").?,
+    );
+}
+
+test "powershell: user-supplied args are left untouched" {
+    const testing = std.testing;
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    // The user gave their own arguments, so we don't rewrite the command;
+    // we only export the opt-in env var.
+    const command = try setupPowerShell(
+        alloc,
+        .{ .shell = "pwsh -NoLogo -NoProfile" },
+        res.path,
+        &env,
+    );
+    try testing.expect(command.? == .shell);
+    try testing.expectEqualStrings("pwsh -NoLogo -NoProfile", command.?.shell);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
