@@ -99,6 +99,10 @@ pub const Message = union(enum) {
     /// of the command.
     stop_command: ?u8,
 
+    /// The shell prompt is now interactive (OSC 133;B / input-start).
+    /// Forwarded to the apprt as the `prompt_ready` action.
+    prompt_input,
+
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,
 
