@@ -1,5 +1,8 @@
 using System;
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
+using Windows.Win32.Foundation;
+using Ghostty.Core.Hosting;
 
 namespace Ghostty.Hosting;
 
@@ -23,8 +26,10 @@ namespace Ghostty.Hosting;
 /// can no longer be hit-tested for resize. The strip stays uncovered, which is
 /// why native OS resize (and its cursor) still works there.
 ///
-/// Win32 surface is hand-written (matching <see cref="WindowsGlobalHotKey"/>)
-/// because the SUBCLASSPROC is passed as a raw function pointer via
+/// The edge-direction math lives in <see cref="QuickTerminalFrameGeometry"/>
+/// (pure, unit-tested); this file is only the Win32 plumbing. Win32 surface is
+/// hand-written (matching <see cref="WindowsGlobalHotKey"/>) because the
+/// SUBCLASSPROC is passed as a raw function pointer via
 /// Marshal.GetFunctionPointerForDelegate, which the source-generated CsWin32
 /// signatures do not model.
 /// </summary>
@@ -57,24 +62,33 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     private static readonly UIntPtr SubclassId = (UIntPtr)0x5157; // 'QW'
 
     private readonly IntPtr _hwnd;
-    private readonly Func<Ghostty.Core.Hosting.QuickTerminalPosition> _position;
+    private readonly Func<QuickTerminalPosition> _position;
+    private readonly ILogger<QuickTerminalFrame>? _logger;
 
     // Held for the subclass's lifetime: the GC must not collect the delegate
-    // while Windows holds its function pointer.
+    // while Windows holds its function pointer. GetFunctionPointerForDelegate
+    // returns the same thunk for this instance, so the ctor and Dispose pass an
+    // identical pointer to Set/RemoveWindowSubclass.
     private readonly SubclassProcDelegate _proc;
+
+    // Resize-border depth in physical pixels. Computed once: the sizing border
+    // is square on standard themes, so a single value covers both axes
+    // (SM_CYSIZEFRAME + SM_CXPADDEDBORDER == the per-edge frame thickness). Read
+    // at construction-time DPI; a few px off after a cross-monitor DPI change is
+    // immaterial for an 8px grab strip, so it is deliberately not recomputed.
     private readonly int _grip;
     private bool _installed;
 
     public QuickTerminalFrame(
         IntPtr hwnd,
-        Func<Ghostty.Core.Hosting.QuickTerminalPosition> position)
+        Func<QuickTerminalPosition> position,
+        ILogger<QuickTerminalFrame>? logger)
     {
         ArgumentNullException.ThrowIfNull(position);
         _hwnd = hwnd;
         _position = position;
+        _logger = logger;
         _proc = WndProc;
-        // Resize-grip depth = the sizing border Windows would have drawn, so the
-        // grab zone matches what the user expects from a normal window edge.
         _grip = Math.Max(1, GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER));
 
         _installed = SetWindowSubclass(
@@ -86,52 +100,59 @@ internal sealed partial class QuickTerminalFrame : IDisposable
             SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
+        else
+        {
+            // Degrade rather than throw: the window stays usable, it just keeps
+            // its default sizing border (and the dark band). SetWindowSubclass
+            // does not set a useful last error, so the warning stands alone.
+            _logger?.LogQuakeFrameSubclassFailed();
+        }
     }
 
     public void Dispose()
     {
-        if (_installed)
-        {
-            RemoveWindowSubclass(_hwnd, Marshal.GetFunctionPointerForDelegate(_proc), SubclassId);
-            _installed = false;
-        }
+        if (!_installed) return;
+        // Best-effort: comctl32 also removes the subclass automatically on
+        // WM_NCDESTROY, so if the HWND is already gone (teardown ordering) this
+        // is a benign no-op. Either way no further message reaches _proc after
+        // this, so the delegate is safe to collect once this instance is.
+        RemoveWindowSubclass(_hwnd, Marshal.GetFunctionPointerForDelegate(_proc), SubclassId);
+        _installed = false;
     }
 
     private IntPtr WndProc(
         IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
     {
-        var pos = _position();
+        var edge = QuickTerminalFrameGeometry.ResizableEdge(_position());
 
-        // Center docking has no edge flush against the monitor, so there is no
-        // band to hide: keep the normal resizable frame on every edge.
-        if (pos != Ghostty.Core.Hosting.QuickTerminalPosition.Center)
+        // None == Center docking: no edge is flush to the monitor, so leave the
+        // normal resizable frame on every edge (there is no band to hide).
+        if (edge != QuickTerminalResizeEdge.None)
         {
             switch (msg)
             {
                 // wParam == TRUE: lParam points at NCCALCSIZE_PARAMS whose first
                 // RECT (rgrc[0], at offset 0) is the proposed window rect and
                 // becomes the client rect on return. Pull the client out to every
-                // edge EXCEPT the one opposite the dock, where a thin non-client
-                // strip is kept. That strip is the only thing Windows can draw a
-                // resize border on (and hit-test for the drag); removing the
-                // frame on the other three edges drops the dark sizing band,
-                // including the prominent one at the docked edge.
+                // edge except the resizable one, where a thin non-client strip is
+                // kept so Windows still draws a sizing border there. Maximize is
+                // disabled on this window, so no work-area clamp is needed.
                 case WM_NCCALCSIZE when wParam != IntPtr.Zero:
                 {
                     var rc = Marshal.PtrToStructure<RECT>(lParam);
-                    switch (pos)
+                    switch (edge)
                     {
-                        case Ghostty.Core.Hosting.QuickTerminalPosition.Top: rc.bottom -= _grip; break;
-                        case Ghostty.Core.Hosting.QuickTerminalPosition.Bottom: rc.top += _grip; break;
-                        case Ghostty.Core.Hosting.QuickTerminalPosition.Left: rc.right -= _grip; break;
-                        case Ghostty.Core.Hosting.QuickTerminalPosition.Right: rc.left += _grip; break;
+                        case QuickTerminalResizeEdge.Bottom: rc.bottom -= _grip; break;
+                        case QuickTerminalResizeEdge.Top: rc.top += _grip; break;
+                        case QuickTerminalResizeEdge.Left: rc.left += _grip; break;
+                        case QuickTerminalResizeEdge.Right: rc.right -= _grip; break;
                     }
                     Marshal.StructureToPtr(rc, lParam, false);
                     return IntPtr.Zero;
                 }
 
                 case WM_NCHITTEST:
-                    return (IntPtr)HitTest(lParam, pos);
+                    return (IntPtr)HitTest(lParam);
             }
         }
 
@@ -139,12 +160,11 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     }
 
     /// <summary>
-    /// Report a resize grip on the edge opposite the docked edge -- the only
-    /// edge left non-client by WM_NCCALCSIZE, so it is the only one the cursor
-    /// can reach here (XAML's content HWND covers the client edges). Anything
-    /// else is client.
+    /// Map the cursor position to a resize hit-code for the kept strip, or
+    /// HTCLIENT everywhere else. The strip is the only non-client area left, so
+    /// it is the only place the cursor reaches this proc.
     /// </summary>
-    private int HitTest(IntPtr lParam, Ghostty.Core.Hosting.QuickTerminalPosition pos)
+    private int HitTest(IntPtr lParam)
     {
         if (!GetWindowRect(_hwnd, out var r))
             return HTCLIENT;
@@ -154,27 +174,15 @@ internal sealed partial class QuickTerminalFrame : IDisposable
         int x = unchecked((short)(lp & 0xFFFF));
         int y = unchecked((short)((lp >> 16) & 0xFFFF));
 
-        return pos switch
+        return QuickTerminalFrameGeometry.HitTest(
+            _position(), r.left, r.top, r.right, r.bottom, x, y, _grip) switch
         {
-            Ghostty.Core.Hosting.QuickTerminalPosition.Top =>
-                y >= r.bottom - _grip ? HTBOTTOM : HTCLIENT,
-            Ghostty.Core.Hosting.QuickTerminalPosition.Bottom =>
-                y <= r.top + _grip ? HTTOP : HTCLIENT,
-            Ghostty.Core.Hosting.QuickTerminalPosition.Left =>
-                x >= r.right - _grip ? HTRIGHT : HTCLIENT,
-            Ghostty.Core.Hosting.QuickTerminalPosition.Right =>
-                x <= r.left + _grip ? HTLEFT : HTCLIENT,
+            QuickTerminalResizeEdge.Bottom => HTBOTTOM,
+            QuickTerminalResizeEdge.Top => HTTOP,
+            QuickTerminalResizeEdge.Left => HTLEFT,
+            QuickTerminalResizeEdge.Right => HTRIGHT,
             _ => HTCLIENT,
         };
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int left;
-        public int top;
-        public int right;
-        public int bottom;
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
@@ -211,4 +219,14 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetWindowPos(
         IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+}
+
+internal static partial class QuickTerminalFrameLogExtensions
+{
+    // Warning, not Error: a failed subclass just means the quake window keeps
+    // its default sizing border. The window still works.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Hosting.QuakeFrameSubclassFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[QuickTerminalFrame] SetWindowSubclass failed; quake window keeps its default sizing border")]
+    internal static partial void LogQuakeFrameSubclassFailed(this ILogger<QuickTerminalFrame> logger);
 }

@@ -1771,9 +1771,9 @@ public sealed partial class MainWindow : Window
 
         // Borderless: a quake terminal is positioned by config and toggled by
         // the global hotkey, so it needs no title bar, border, caption buttons,
-        // or min/max. IsResizable=true keeps the (unpainted) resize frame so
-        // the user can drag the bottom edge to change height; the docked
-        // top/side edges sit at the monitor bounds and stay fixed.
+        // or min/max. IsResizable=true keeps a sizing frame so the window can be
+        // resize-dragged; QuickTerminalFrame (below) reshapes that frame to drop
+        // the docked-edge band and confine resize to the edge opposite the dock.
         if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
@@ -1788,7 +1788,8 @@ public sealed partial class MainWindow : Window
         // allow drag-resize only on the edge opposite the dock.
         _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
             WindowNative.GetWindowHandle(this),
-            () => _configService.QuickTerminalPosition);
+            () => _configService.QuickTerminalPosition,
+            App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
 
         // Borderless quake has no OS caption buttons; collapse the dead inset
         // and drop the vertical-mode title text.
