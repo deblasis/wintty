@@ -110,6 +110,30 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             GetString("quick-terminal-screen", "main"));
 
     /// <summary>
+    /// When the resize overlay (the cols x rows pill shown while a pane
+    /// is resized) is allowed to appear. Default `after-first` matches
+    /// upstream Ghostty.
+    /// </summary>
+    public Ghostty.Core.ResizeOverlay.ResizeOverlayMode ResizeOverlayMode =>
+        Ghostty.Core.ResizeOverlay.ResizeOverlayModeExtensions.Parse(
+            GetString("resize-overlay", "after-first"));
+
+    /// <summary>
+    /// Where the resize overlay pill sits inside the pane. Default
+    /// `center` matches upstream Ghostty.
+    /// </summary>
+    public Ghostty.Core.ResizeOverlay.ResizeOverlayPosition ResizeOverlayPosition =>
+        Ghostty.Core.ResizeOverlay.ResizeOverlayPositionExtensions.Parse(
+            GetString("resize-overlay-position", "center"));
+
+    /// <summary>
+    /// How long the resize overlay stays visible after the last size
+    /// change, in milliseconds. Default 750 matches upstream Ghostty.
+    /// </summary>
+    public int ResizeOverlayDurationMs =>
+        GetDurationMs("resize-overlay-duration", 750);
+
+    /// <summary>
     /// Size of the quake window on each axis. Either axis can be
     /// null in which case the resolver uses sensible defaults
     /// (50% primary, 100% secondary).
@@ -662,6 +686,34 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
                 (IntPtr)keyPtr,
                 (UIntPtr)keyBytes.Length);
             return found ? result : defaultValue;
+        }
+    }
+
+    /// <summary>
+    /// Read a libghostty <c>Duration</c>-typed config value in
+    /// milliseconds. <c>Duration.cval()</c> returns a Zig <c>usize</c>, so
+    /// the output buffer must be pointer-width (<see cref="nuint"/>) -
+    /// using a 4-byte <c>uint</c> would let ghostty_config_get write past
+    /// the buffer on 64-bit. The value is already milliseconds (cval calls
+    /// asMilliseconds), so no conversion is needed here.
+    /// </summary>
+    private unsafe int GetDurationMs(string key, int defaultValue)
+    {
+        nuint result = 0;
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)(&result),
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            // Clamp rather than truncate: asMilliseconds is a c_uint that can
+            // exceed int.MaxValue (~24.8 days), and a raw (int) cast would wrap
+            // to a negative the timer logic would then floor to ~nothing.
+            return found
+                ? (int)Math.Min(result, (nuint)int.MaxValue)
+                : defaultValue;
         }
     }
 

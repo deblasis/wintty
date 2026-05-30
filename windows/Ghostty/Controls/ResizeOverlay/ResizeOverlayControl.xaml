@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ResizeOverlayControl: the transient "cols x rows" pill shown over a
+    pane while it is being resized (window resize, split-divider drag,
+    keyboard split resize, font-size change). Mirrors macOS Ghostty's
+    SurfaceResizeOverlay.
+
+    The UserControl fills the pane (Stretch) and aligns the inner Border
+    per the resolved resize-overlay-position; the parent toggles nothing,
+    the control flips its own Visibility and runs its own auto-hide timer.
+
+    IsHitTestVisible=False so the pill never steals pointer events from the
+    SwapChainPanel underneath - a terminal app running mouse=a keeps seeing
+    every mouse move through the pill's footprint.
+-->
+<UserControl
+    x:Class="Ghostty.Controls.ResizeOverlay.ResizeOverlayControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    mc:Ignorable="d"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch"
+    IsHitTestVisible="False">
+
+    <Border x:Name="Pill"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Margin="8"
+            Padding="12,6"
+            Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="{ThemeResource ControlCornerRadius}">
+        <TextBlock x:Name="SizeLabel"
+                   FontSize="14"
+                   Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                   Text="{x:Bind State.SizeText, Mode=OneWay}" />
+    </Border>
+</UserControl>

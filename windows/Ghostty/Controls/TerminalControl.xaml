@@ -24,6 +24,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
     xmlns:search="using:Ghostty.Controls.Search"
+    xmlns:resize="using:Ghostty.Controls.ResizeOverlay"
     IsTabStop="True"
     TabNavigation="Cycle"
     HorizontalAlignment="Stretch"
@@ -149,5 +150,15 @@
             Margin="0,8,8,0"
             Visibility="Collapsed"
             Closed="OnSearchClosed" />
+
+        <!--
+            Transient cols x rows pill shown while the pane is resized.
+            Fills the cell and self-positions per resize-overlay-position;
+            starts Collapsed and flips its own Visibility. Last child so it
+            layers above the SwapChainPanel and the other overlays.
+        -->
+        <resize:ResizeOverlayControl
+            x:Name="ResizeOverlay"
+            Visibility="Collapsed" />
     </Grid>
 </UserControl>
