@@ -706,6 +706,19 @@ internal sealed class GhosttyHost : IDisposable
         return 1;
     }
 
+    /// <summary>
+    /// Raise <see cref="PaneActionRequested"/> for a chord that the
+    /// Windows-only residual matcher in <see cref="Controls.TerminalControl"/>
+    /// resolved. libghostty owns matching for every standard action; the
+    /// few Windows-only chords have no libghostty action, so the apprt
+    /// matches them itself and feeds them through the same event
+    /// <c>MainWindow</c> already forwards to the <c>PaneActionRouter</c>.
+    /// The caller runs on the UI thread (a key-event handler), so no
+    /// dispatch hop is needed.
+    /// </summary>
+    public void RequestPaneAction(Ghostty.Core.Input.PaneAction action) =>
+        PaneActionRequested?.Invoke(action);
+
     private byte OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
         => (_clipboardBridge?.HandleRead(userdata, kind, state) ?? false) ? (byte)1 : (byte)0;
 
