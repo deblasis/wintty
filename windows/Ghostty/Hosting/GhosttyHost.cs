@@ -394,18 +394,16 @@ internal sealed class GhosttyHost : IDisposable
     {
         if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return 0;
 
-        // OnAction is a native callback: libghostty (Zig) invokes it directly
-        // on its own thread via the function pointer held in _actionCb. A
-        // managed exception that unwinds out of this method would cross the
-        // unmanaged ABI back into Zig, which is undefined behavior. Guard the
-        // whole synchronous decode and report "not handled" (0) on failure so
-        // libghostty falls back gracefully. The _dispatcher.TryEnqueue lambdas
-        // below run later on the UI thread, so their exceptions are a separate
-        // concern (unobserved dispatcher-queue exceptions) and are not covered
-        // by this boundary guard.
-        // tag is decoded inside the try (it can throw), but declared here so
-        // it is in scope for the catch's log message.
-        GhosttyActionTag tag = default;
+        // OnAction is a native callback invoked directly by libghostty (Zig)
+        // on its own thread via the function pointer in _actionCb. Letting a
+        // managed exception unwind across the ABI back into Zig is undefined
+        // behavior, so guard the synchronous decode and return 0 ("not
+        // handled") on failure. The _dispatcher.TryEnqueue lambdas run later
+        // on the UI thread, so their exceptions are a separate concern and are
+        // deliberately not covered here.
+        // tag stays null until decoded so the catch does not misreport a
+        // failure in the very first read as a real action.
+        GhosttyActionTag? tag = null;
         try
         {
             tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
