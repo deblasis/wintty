@@ -355,12 +355,20 @@ internal sealed class GhosttyHost : IDisposable
 
     private void OnWakeup(IntPtr userdata)
     {
-        // Fires on libghostty's thread. Hop to the UI dispatcher so the
-        // tick (and any resulting draws) lands on the right queue.
-        _dispatcher.TryEnqueue(() =>
+        // Native callback on libghostty's thread (see OnAction for why the
+        // boundary is guarded). Hop to the UI dispatcher so the tick and any
+        // resulting draws land on the right queue.
+        try
         {
-            if (_app.Handle != IntPtr.Zero) NativeMethods.AppTick(_app);
-        });
+            _dispatcher.TryEnqueue(() =>
+            {
+                if (_app.Handle != IntPtr.Zero) NativeMethods.AppTick(_app);
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OnWakeup threw at the native boundary");
+        }
     }
 
     // ghostty_target_s tag values, mirroring ghostty.h ghostty_target_tag_e.
@@ -653,26 +661,72 @@ internal sealed class GhosttyHost : IDisposable
         }
     }
 
+    // The clipboard and close-surface callbacks below are also invoked
+    // directly by libghostty on its own thread (see OnAction for the
+    // native-boundary rationale). Their synchronous bodies decode raw
+    // pointers and handles -- PtrToStringUTF8, the content marshaller,
+    // GCHandle.FromIntPtr -- any of which can throw, so each guards the
+    // boundary and swallows (logs) rather than letting the exception cross
+    // the ABI into Zig. The bridge's deferred dispatcher work self-guards.
     private byte OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
-        => (_clipboardBridge?.HandleRead(userdata, kind, state) ?? false) ? (byte)1 : (byte)0;
+    {
+        try
+        {
+            return (_clipboardBridge?.HandleRead(userdata, kind, state) ?? false) ? (byte)1 : (byte)0;
+        }
+        catch (Exception ex)
+        {
+            // Returning 0 ("not handled") here cannot strand a request:
+            // HandleRead only throws on its synchronous prefix, before it
+            // returns true and takes on the obligation to complete the
+            // clipboard request via SurfaceCompleteClipboardRequest.
+            _logger.LogError(ex, "OnReadClipboard threw at the native boundary");
+            return 0;
+        }
+    }
 
     private void OnConfirmReadClipboard(IntPtr userdata, IntPtr str, IntPtr state, GhosttyClipboardRequest request)
-        => _clipboardBridge?.HandleConfirm(userdata, str, state, request);
+    {
+        try
+        {
+            _clipboardBridge?.HandleConfirm(userdata, str, state, request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OnConfirmReadClipboard threw at the native boundary");
+        }
+    }
 
     private void OnWriteClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr content, UIntPtr count, byte confirm)
-        => _clipboardBridge?.HandleWrite(userdata, kind, content, count, confirm != 0);
+    {
+        try
+        {
+            _clipboardBridge?.HandleWrite(userdata, kind, content, count, confirm != 0);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OnWriteClipboard threw at the native boundary");
+        }
+    }
 
     private void OnCloseSurface(IntPtr userdata, byte processAlive)
     {
-        if (userdata == IntPtr.Zero) return;
-
-        var control = GCHandle.FromIntPtr(userdata).Target as TerminalControl;
-        if (control is null) return;
-        if (!IsRegistered(control)) return;
-        _dispatcher.TryEnqueue(() =>
+        try
         {
-            if (IsRegistered(control)) control.RaiseCloseRequested();
-        });
+            if (userdata == IntPtr.Zero) return;
+
+            var control = GCHandle.FromIntPtr(userdata).Target as TerminalControl;
+            if (control is null) return;
+            if (!IsRegistered(control)) return;
+            _dispatcher.TryEnqueue(() =>
+            {
+                if (IsRegistered(control)) control.RaiseCloseRequested();
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OnCloseSurface threw at the native boundary");
+        }
     }
 
     private bool IsRegistered(TerminalControl control)
