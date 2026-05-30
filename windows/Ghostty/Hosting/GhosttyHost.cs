@@ -676,6 +676,10 @@ internal sealed class GhosttyHost : IDisposable
         }
         catch (Exception ex)
         {
+            // Returning 0 ("not handled") here cannot strand a request:
+            // HandleRead only throws on its synchronous prefix, before it
+            // returns true and takes on the obligation to complete the
+            // clipboard request via SurfaceCompleteClipboardRequest.
             _logger.LogError(ex, "OnReadClipboard threw at the native boundary");
             return 0;
         }
