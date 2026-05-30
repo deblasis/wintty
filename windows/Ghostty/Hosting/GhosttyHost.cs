@@ -628,6 +628,16 @@ internal sealed class GhosttyHost : IDisposable
                     return 1;
                 }
 
+                case GhosttyActionTag.PromptReady:
+                {
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaisePromptReady();
+                    });
+                    return 1;
+                }
+
                 case GhosttyActionTag.ProgressReport:
                 {
                     var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
