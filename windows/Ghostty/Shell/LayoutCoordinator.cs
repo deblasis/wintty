@@ -33,6 +33,12 @@ internal sealed class LayoutCoordinator
     public const double VerticalStripCollapsedWidth = 40;
     public const int SwitchDurationMs = 220;
 
+    // Vertical-mode title bar height. The horizontal host slides this
+    // far vertically during the cross-fade so the swap feels like the
+    // strip lifting away. Must match VerticalTitleBar.Height in
+    // MainWindow.xaml.
+    private const double VerticalTitleBarHeight = 34;
+
     private readonly ColumnDefinition _stripColumn;
     private readonly ColumnDefinition _titleBarStripMirror;
     private readonly FrameworkElement _horizontalHost;
@@ -182,9 +188,9 @@ internal sealed class LayoutCoordinator
         var outgoing = verticalTabs ? _horizontalHost : _verticalHost;
         var incomingOffset = verticalTabs
             ? new Windows.Foundation.Point(-VerticalStripCollapsedWidth, 0)
-            : new Windows.Foundation.Point(0, -32);
+            : new Windows.Foundation.Point(0, -VerticalTitleBarHeight);
         var outgoingOffset = verticalTabs
-            ? new Windows.Foundation.Point(0, -32)
+            ? new Windows.Foundation.Point(0, -VerticalTitleBarHeight)
             : new Windows.Foundation.Point(-VerticalStripCollapsedWidth, 0);
 
         incoming.IsHitTestVisible = true;

@@ -63,9 +63,13 @@
             No Background on the outer Grid so clicks in Col 0 pass
             through to the VerticalTabHost (chevron) below.
         -->
+        <!-- Height matches the horizontal TabView strip so the wintty
+             icon and the terminal top edge stay put when toggling
+             between the two layouts. Keep in sync with the slide
+             distance in LayoutCoordinator.Animate. -->
         <Grid x:Name="VerticalTitleBar"
               Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
-              Height="32"
+              Height="34"
               Visibility="Collapsed">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="TitleBarStripMirror" Width="0"/>

@@ -25,11 +25,14 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
+        <!-- Top margin centers the icon at the same Y as the horizontal
+             TabView's strip header so it does not jump when the layout
+             toggles. -->
         <branding:AppIconBadge
             Grid.Row="0"
             Grid.Column="0"
             HorizontalAlignment="Left"
-            Margin="4,4,0,4"/>
+            Margin="4,3,0,4"/>
 
         <ContentPresenter x:Name="StripHost"
                           Grid.Row="1"
