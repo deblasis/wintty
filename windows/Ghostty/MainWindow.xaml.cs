@@ -952,6 +952,10 @@ public sealed partial class MainWindow : Window
 
         if (IsQuickTerminal)
         {
+            // Remove the window-proc subclass before the HWND is torn down.
+            _quakeFrame?.Dispose();
+            _quakeFrame = null;
+
             // Persist only the session-resized height, via read-modify-write
             // so we never clobber the regular window placement other windows
             // save. The quake window's X/Y/Width are config-driven
@@ -1778,6 +1782,14 @@ public sealed partial class MainWindow : Window
             presenter.IsMaximizable = false;
         }
 
+        // IsResizable leaves a WS_THICKFRAME sizing border that Windows paints
+        // as a dark band at the docked edge and exposes as a resize grip there.
+        // Subclass the window proc to drop that non-client frame (no band) and
+        // allow drag-resize only on the edge opposite the dock.
+        _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
+            WindowNative.GetWindowHandle(this),
+            () => _configService.QuickTerminalPosition);
+
         // Borderless quake has no OS caption buttons; collapse the dead inset
         // and drop the vertical-mode title text.
         _titleBar.SetCaptionless(true);
@@ -1888,6 +1900,12 @@ public sealed partial class MainWindow : Window
     // window, so the AppWindow.Changed size-capture below ignores our own
     // resize and only records genuine user drags.
     private bool _movingQuake;
+
+    // Window-proc subclass that drops the borderless quake window's non-client
+    // sizing border (the dark band) and confines drag-resize to the edge
+    // opposite the dock. Null on regular windows; lives for the quake window's
+    // lifetime and is disposed on close.
+    private Ghostty.Hosting.QuickTerminalFrame? _quakeFrame;
 
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
