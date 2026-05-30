@@ -43,8 +43,15 @@
          reparenting the SwapChainPanels. This UserControl now renders
          only the tab strip chrome. -->
     <Grid HorizontalAlignment="Stretch" VerticalAlignment="Top">
+        <!-- Trim the default 8px top gap above the tab strip
+             (TabViewHeaderPadding) so the strip is not taller than it
+             needs to be. The vertical-mode title bar height and the
+             strip-header icon margin are matched to the resulting
+             height so the icon and terminal top do not jump when the
+             layout toggles. -->
         <controls:TabView
             x:Name="TabViewControl"
+            Padding="0,2,0,0"
             HorizontalAlignment="Stretch"
             CanReorderTabs="True"
             CanDragTabs="True"
@@ -55,7 +62,7 @@
             SelectionChanged="OnSelectionChanged"
             TabDragCompleted="OnTabDragCompleted">
             <controls:TabView.TabStripHeader>
-                <branding:AppIconBadge />
+                <branding:AppIconBadge x:Name="IconBadgeHost" />
             </controls:TabView.TabStripHeader>
             <!--
                 TabStripFooter is a two-cell row. Cell 0 holds the

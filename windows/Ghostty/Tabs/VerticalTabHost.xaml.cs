@@ -37,6 +37,12 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     private readonly VerticalTabStrip _strip;
     private readonly ColumnDragHandle _dragHandle;
 
+    /// <summary>
+    /// The wintty icon pinned at the top of the vertical strip. Exposed
+    /// so the layout switch can spin it independently of the chrome.
+    /// </summary>
+    public FrameworkElement IconBadge => IconBadgeHost;
+
     // TODO(config): vertical-tabs-width (int px, default 220)
     private const double ExpandedWidth = 220;
     // TODO(config): vertical-tabs-pinned (bool, default false)
