@@ -39,6 +39,14 @@ internal sealed class LayoutCoordinator
     // MainWindow.xaml.
     private const double VerticalTitleBarHeight = 34;
 
+    // Feel constants for the icon spin/pop, tuned by eye. The spin is one
+    // full turn; the pop dips the scale partway through and springs back
+    // past 1.0 as it lands.
+    private const double IconSpinOvershoot = 0.25; // BackEase amplitude on the rotation settle
+    private const double IconPopMidpoint = 0.45;   // fraction of the switch where the scale dip bottoms out
+    private const double IconPopDipScale = 0.78;   // smallest scale at the dip
+    private const double IconPopOvershoot = 0.6;   // BackEase amplitude springing the scale back past 1.0
+
     private readonly ColumnDefinition _stripColumn;
     private readonly ColumnDefinition _titleBarStripMirror;
     private readonly FrameworkElement _horizontalHost;
@@ -126,13 +134,18 @@ internal sealed class LayoutCoordinator
             _verticalTitleBar.Opacity = verticalTabs ? 1 : 0;
         }
 
-        // Reset any dangling translate offsets so future switches
-        // start from origin. Safe to overwrite: Snap is only called
-        // when no transform animation is in flight.
+        // Reset any dangling transform offsets so future switches start
+        // from origin. Snap is the single end-state authority, so it
+        // also returns the spun icons to identity -- without this, a
+        // switch interrupted by SetStripHidden / SuppressVerticalTitleBar
+        // (which call Snap directly) could leave an icon rotated or
+        // scaled once the strip is shown again.
         GetOrCreateTranslate(_verticalHost).X = 0;
         GetOrCreateTranslate(_verticalHost).Y = 0;
         GetOrCreateTranslate(_horizontalHost).X = 0;
         GetOrCreateTranslate(_horizontalHost).Y = 0;
+        ResetIconTransform(_horizontalIcon);
+        ResetIconTransform(_verticalIcon);
 
         if (_stripHidden)
         {
@@ -229,7 +242,9 @@ internal sealed class LayoutCoordinator
         // Each icon counter-translates its own host's slide, so it stays
         // glued to the same anchor point while the strip/title-bar chrome
         // slides around it -- the icon reads as a fixed pivot the layout
-        // rotates about, not something that flies in with the rest.
+        // rotates about, not something that flies in with the rest. This
+        // only cancels because the icon is a child of its host: the two
+        // translates compose, so equal-and-opposite nets to zero.
         //
         // Both icons spin the same way so the cross-fade between them
         // (one per layout, sitting at the same spot) looks like a single
@@ -253,10 +268,9 @@ internal sealed class LayoutCoordinator
 
         sb.Completed += (_, _) =>
         {
-            // 360 lands upright, but reset to 0 so the next spin starts
-            // from a clean angle rather than accumulating.
-            ResetIconTransform(incomingIcon);
-            ResetIconTransform(outgoingIcon);
+            // Snap returns the icons to identity (360 lands them upright
+            // anyway; this just stops the angle accumulating across
+            // switches) along with the rest of the end state.
             Snap(verticalTabs);
             _switching = false;
             onCompleted?.Invoke();
@@ -326,8 +340,11 @@ internal sealed class LayoutCoordinator
         sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
         sb.Children.Add(MakePopAnim(scale, "ScaleX"));
         sb.Children.Add(MakePopAnim(scale, "ScaleY"));
-        sb.Children.Add(MakeIconTranslateAnim(translate, "X", fromX, toX));
-        sb.Children.Add(MakeIconTranslateAnim(translate, "Y", fromY, toY));
+        // Same easing + duration helper as the host slide, so the
+        // counter-translate cancels it frame for frame, not just at the
+        // endpoints.
+        sb.Children.Add(MakeDoubleAnim(translate, "X", fromX, toX));
+        sb.Children.Add(MakeDoubleAnim(translate, "Y", fromY, toY));
     }
 
     // Give the icon a Scale+Rotate+Translate group: scale and rotate
@@ -365,22 +382,6 @@ internal sealed class LayoutCoordinator
         translate.Y = 0;
     }
 
-    private static DoubleAnimation MakeIconTranslateAnim(TranslateTransform target, string axis, double from, double to)
-    {
-        // Match the host slide's easing + duration so the cancellation
-        // holds at every frame, not just the endpoints.
-        var anim = new DoubleAnimation
-        {
-            From = from,
-            To = to,
-            Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-        };
-        Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, axis);
-        return anim;
-    }
-
     private static DoubleAnimation MakeRotateAnim(RotateTransform target, double from, double to)
     {
         // A touch of back-ease overshoot at the end sells the "shoved
@@ -390,7 +391,7 @@ internal sealed class LayoutCoordinator
             From = from,
             To = to,
             Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.25 },
+            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconSpinOvershoot },
         };
         Storyboard.SetTarget(anim, target);
         Storyboard.SetTargetProperty(anim, "Angle");
@@ -409,15 +410,15 @@ internal sealed class LayoutCoordinator
         });
         anim.KeyFrames.Add(new EasingDoubleKeyFrame
         {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs * 0.45)),
-            Value = 0.78,
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs * IconPopMidpoint)),
+            Value = IconPopDipScale,
             EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
         });
         anim.KeyFrames.Add(new EasingDoubleKeyFrame
         {
             KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs)),
             Value = 1.0,
-            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.6 },
+            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconPopOvershoot },
         });
         Storyboard.SetTarget(anim, target);
         Storyboard.SetTargetProperty(anim, axis);
