@@ -394,244 +394,264 @@ internal sealed class GhosttyHost : IDisposable
     {
         if (actionPtr == IntPtr.Zero || targetPtr == IntPtr.Zero) return 0;
 
-        var tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
-        var targetTag = Marshal.ReadInt32(targetPtr);
-        if (targetTag == GhosttyTargetApp)
+        // OnAction is a native callback: libghostty (Zig) invokes it directly
+        // on its own thread via the function pointer held in _actionCb. A
+        // managed exception that unwinds out of this method would cross the
+        // unmanaged ABI back into Zig, which is undefined behavior. Guard the
+        // whole synchronous decode and report "not handled" (0) on failure so
+        // libghostty falls back gracefully. The _dispatcher.TryEnqueue lambdas
+        // below run later on the UI thread, so their exceptions are a separate
+        // concern (unobserved dispatcher-queue exceptions) and are not covered
+        // by this boundary guard.
+        // tag is decoded inside the try (it can throw), but declared here so
+        // it is in scope for the catch's log message.
+        GhosttyActionTag tag = default;
+        try
         {
+            tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
+            var targetTag = Marshal.ReadInt32(targetPtr);
+            if (targetTag == GhosttyTargetApp)
+            {
+                switch (tag)
+                {
+                    case GhosttyActionTag.OpenConfig:
+                        _dispatcher.TryEnqueue(() =>
+                            OpenConfigRequested?.Invoke(this, EventArgs.Empty));
+                        return 1;
+
+                    case GhosttyActionTag.ReloadConfig:
+                        _dispatcher.TryEnqueue(() =>
+                            ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
+                        return 1;
+
+                    case GhosttyActionTag.ToggleQuickTerminal:
+                        // Routed to App rather than a per-window event because
+                        // the quake window is a singleton owned by App; any
+                        // surface (including ones in regular MainWindows) can
+                        // be the source of the action.
+                        _dispatcher.TryEnqueue(() =>
+                            ((Ghostty.App)Microsoft.UI.Xaml.Application.Current).ToggleQuickTerminal());
+                        return 1;
+
+                    case GhosttyActionTag.MouseVisibility:
+                        // Mirror mac/GTK: mouse visibility against an app target is a
+                        // libghostty bug; log and absorb so we still report "handled".
+                        _logger.LogWarning("MouseVisibility action received with app target; ignoring");
+                        return 1;
+
+                    default:
+                        return 0;
+                }
+            }
+
+            if (targetTag != GhosttyTargetSurface) return 0;
+            var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
+            if (!TryResolveControl(surfaceHandle, out var control) || control is null) return 0;
+
             switch (tag)
             {
-                case GhosttyActionTag.OpenConfig:
+                case GhosttyActionTag.ToggleCommandPalette:
                     _dispatcher.TryEnqueue(() =>
-                        OpenConfigRequested?.Invoke(this, EventArgs.Empty));
+                        CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
                     return 1;
 
-                case GhosttyActionTag.ReloadConfig:
+                case GhosttyActionTag.SetTitle:
+                {
+                    var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
+                    var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
                     _dispatcher.TryEnqueue(() =>
-                        ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaiseTitleChanged(title);
+                    });
                     return 1;
+                }
 
-                case GhosttyActionTag.ToggleQuickTerminal:
-                    // Routed to App rather than a per-window event because
-                    // the quake window is a singleton owned by App; any
-                    // surface (including ones in regular MainWindows) can
-                    // be the source of the action.
+                case GhosttyActionTag.MouseShape:
+                {
+                    // ghostty_action_mouse_shape_e is a single c_int payload;
+                    // read it at +8 (skipping the 4-byte tag + 4-byte padding
+                    // before the union, same offset as ProgressReport.State).
+                    var raw = Marshal.ReadInt32(actionPtr, 8);
+                    var shape = (MouseShape)raw;
                     _dispatcher.TryEnqueue(() =>
-                        ((Ghostty.App)Microsoft.UI.Xaml.Application.Current).ToggleQuickTerminal());
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.SetMouseShape(shape);
+                    });
                     return 1;
+                }
 
                 case GhosttyActionTag.MouseVisibility:
-                    // Mirror mac/GTK: mouse visibility against an app target is a
-                    // libghostty bug; log and absorb so we still report "handled".
-                    _logger.LogWarning("MouseVisibility action received with app target; ignoring");
+                {
+                    // ghostty_action_mouse_visibility_e is a single c_int payload;
+                    // read it at +8 (skipping the 4-byte tag + 4-byte padding before
+                    // the union, same offset as MouseShape and ProgressReport).
+                    var raw = Marshal.ReadInt32(actionPtr, 8);
+                    var visibility = (MouseVisibility)raw;
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.SetMouseVisibility(visibility);
+                    });
                     return 1;
+                }
+
+                case GhosttyActionTag.MouseOverLink:
+                {
+                    GhosttyActionMouseOverLink payload;
+                    unsafe
+                    {
+                        payload = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMouseOverLink>(
+                            (void*)(actionPtr + 8));
+                    }
+                    // libghostty sends url=null+len=0 when the pointer leaves a link;
+                    // surface that as a null hovered-URL so the C# side can clear its
+                    // own hover state cleanly. Use the length-aware PtrToStringUTF8
+                    // overload (vs SetTitle's null-terminated variant) because this
+                    // payload carries an explicit length and the string is NOT
+                    // guaranteed null-terminated. Guard the nuint -> int cast: OSC 8
+                    // URLs are typically <2 KB but libghostty makes no upper-bound
+                    // guarantee, and Marshal.PtrToStringUTF8(IntPtr, int) takes a
+                    // signed length — silent truncation would corrupt the URL.
+                    string? url;
+                    if (payload.Url == IntPtr.Zero)
+                    {
+                        url = null;
+                    }
+                    else if (payload.Len > int.MaxValue)
+                    {
+                        // Pathologically long URL — drop the hover update rather
+                        // than truncate. Realistic OSC 8 URLs never approach this.
+                        return 1;
+                    }
+                    else
+                    {
+                        url = Marshal.PtrToStringUTF8(payload.Url, (int)payload.Len);
+                    }
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.SetHoveredLink(url);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.RingBell:
+                {
+                    PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
+                    return 1;
+                }
+
+                case GhosttyActionTag.CloseWindow:
+                {
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaiseCloseRequested();
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.Scrollbar:
+                {
+                    GhosttyActionScrollbar s;
+                    unsafe
+                    {
+                        s = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionScrollbar>(
+                            (void*)(actionPtr + 8));
+                    }
+
+                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                        c.QueueScrollbarChanged(s.Total, s.Offset, s.Len);
+                    return 1;
+                }
+
+                case GhosttyActionTag.StartSearch:
+                {
+                    // ghostty_action_start_search_s: { const char* needle; }
+                    // Pointer at +8; decode the null-terminated UTF-8 needle
+                    // off the libghostty thread to avoid touching it after the
+                    // action call returns and libghostty frees the buffer.
+                    var needlePtr = Marshal.ReadIntPtr(actionPtr, 8);
+                    var needle = needlePtr == IntPtr.Zero
+                        ? string.Empty
+                        : Marshal.PtrToStringUTF8(needlePtr) ?? string.Empty;
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.OnSearchStarted(needle);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.EndSearch:
+                {
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.OnSearchEnded();
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.SearchTotal:
+                {
+                    // ssize_t total; at +8. Read as nint so the layout matches
+                    // the C ssize_t on both 32- and 64-bit builds; cast to long
+                    // for the SearchState API.
+                    var total = (long)Marshal.ReadIntPtr(actionPtr, 8);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.OnSearchTotalChanged(total);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.SearchSelected:
+                {
+                    // ssize_t selected; at +8. -1 (or any negative) means no
+                    // match is selected yet -- SearchState normalises display.
+                    var selected = (long)Marshal.ReadIntPtr(actionPtr, 8);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.OnSearchSelectedChanged(selected);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.ProgressReport:
+                {
+                    var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
+                    var rawPct = (sbyte)Marshal.ReadByte(actionPtr, 12);
+                    int pct = rawPct < 0 ? 0 : rawPct;
+                    var tabState = state switch
+                    {
+                        GhosttyProgressState.Remove        => Ghostty.Core.Tabs.TabProgressState.None,
+                        GhosttyProgressState.Set           => Ghostty.Core.Tabs.TabProgressState.Normal(pct),
+                        GhosttyProgressState.Error         => Ghostty.Core.Tabs.TabProgressState.Error(pct),
+                        GhosttyProgressState.Indeterminate => Ghostty.Core.Tabs.TabProgressState.Indeterminate,
+                        GhosttyProgressState.Pause         => Ghostty.Core.Tabs.TabProgressState.Paused(pct),
+                        _ => Ghostty.Core.Tabs.TabProgressState.None,
+                    };
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaiseProgressChanged(tabState);
+                    });
+                    return 1;
+                }
 
                 default:
                     return 0;
             }
         }
-
-        if (targetTag != GhosttyTargetSurface) return 0;
-        var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
-        if (!TryResolveControl(surfaceHandle, out var control) || control is null) return 0;
-
-        switch (tag)
+        catch (Exception ex)
         {
-            case GhosttyActionTag.ToggleCommandPalette:
-                _dispatcher.TryEnqueue(() =>
-                    CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
-                return 1;
-
-            case GhosttyActionTag.SetTitle:
-            {
-                var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
-                var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.RaiseTitleChanged(title);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.MouseShape:
-            {
-                // ghostty_action_mouse_shape_e is a single c_int payload;
-                // read it at +8 (skipping the 4-byte tag + 4-byte padding
-                // before the union, same offset as ProgressReport.State).
-                var raw = Marshal.ReadInt32(actionPtr, 8);
-                var shape = (MouseShape)raw;
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.SetMouseShape(shape);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.MouseVisibility:
-            {
-                // ghostty_action_mouse_visibility_e is a single c_int payload;
-                // read it at +8 (skipping the 4-byte tag + 4-byte padding before
-                // the union, same offset as MouseShape and ProgressReport).
-                var raw = Marshal.ReadInt32(actionPtr, 8);
-                var visibility = (MouseVisibility)raw;
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.SetMouseVisibility(visibility);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.MouseOverLink:
-            {
-                GhosttyActionMouseOverLink payload;
-                unsafe
-                {
-                    payload = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMouseOverLink>(
-                        (void*)(actionPtr + 8));
-                }
-                // libghostty sends url=null+len=0 when the pointer leaves a link;
-                // surface that as a null hovered-URL so the C# side can clear its
-                // own hover state cleanly. Use the length-aware PtrToStringUTF8
-                // overload (vs SetTitle's null-terminated variant) because this
-                // payload carries an explicit length and the string is NOT
-                // guaranteed null-terminated. Guard the nuint -> int cast: OSC 8
-                // URLs are typically <2 KB but libghostty makes no upper-bound
-                // guarantee, and Marshal.PtrToStringUTF8(IntPtr, int) takes a
-                // signed length — silent truncation would corrupt the URL.
-                string? url;
-                if (payload.Url == IntPtr.Zero)
-                {
-                    url = null;
-                }
-                else if (payload.Len > int.MaxValue)
-                {
-                    // Pathologically long URL — drop the hover update rather
-                    // than truncate. Realistic OSC 8 URLs never approach this.
-                    return 1;
-                }
-                else
-                {
-                    url = Marshal.PtrToStringUTF8(payload.Url, (int)payload.Len);
-                }
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.SetHoveredLink(url);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.RingBell:
-            {
-                PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
-                return 1;
-            }
-
-            case GhosttyActionTag.CloseWindow:
-            {
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.RaiseCloseRequested();
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.Scrollbar:
-            {
-                GhosttyActionScrollbar s;
-                unsafe
-                {
-                    s = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionScrollbar>(
-                        (void*)(actionPtr + 8));
-                }
-
-                if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                    c.QueueScrollbarChanged(s.Total, s.Offset, s.Len);
-                return 1;
-            }
-
-            case GhosttyActionTag.StartSearch:
-            {
-                // ghostty_action_start_search_s: { const char* needle; }
-                // Pointer at +8; decode the null-terminated UTF-8 needle
-                // off the libghostty thread to avoid touching it after the
-                // action call returns and libghostty frees the buffer.
-                var needlePtr = Marshal.ReadIntPtr(actionPtr, 8);
-                var needle = needlePtr == IntPtr.Zero
-                    ? string.Empty
-                    : Marshal.PtrToStringUTF8(needlePtr) ?? string.Empty;
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.OnSearchStarted(needle);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.EndSearch:
-            {
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.OnSearchEnded();
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.SearchTotal:
-            {
-                // ssize_t total; at +8. Read as nint so the layout matches
-                // the C ssize_t on both 32- and 64-bit builds; cast to long
-                // for the SearchState API.
-                var total = (long)Marshal.ReadIntPtr(actionPtr, 8);
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.OnSearchTotalChanged(total);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.SearchSelected:
-            {
-                // ssize_t selected; at +8. -1 (or any negative) means no
-                // match is selected yet -- SearchState normalises display.
-                var selected = (long)Marshal.ReadIntPtr(actionPtr, 8);
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.OnSearchSelectedChanged(selected);
-                });
-                return 1;
-            }
-
-            case GhosttyActionTag.ProgressReport:
-            {
-                var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
-                var rawPct = (sbyte)Marshal.ReadByte(actionPtr, 12);
-                int pct = rawPct < 0 ? 0 : rawPct;
-                var tabState = state switch
-                {
-                    GhosttyProgressState.Remove        => Ghostty.Core.Tabs.TabProgressState.None,
-                    GhosttyProgressState.Set           => Ghostty.Core.Tabs.TabProgressState.Normal(pct),
-                    GhosttyProgressState.Error         => Ghostty.Core.Tabs.TabProgressState.Error(pct),
-                    GhosttyProgressState.Indeterminate => Ghostty.Core.Tabs.TabProgressState.Indeterminate,
-                    GhosttyProgressState.Pause         => Ghostty.Core.Tabs.TabProgressState.Paused(pct),
-                    _ => Ghostty.Core.Tabs.TabProgressState.None,
-                };
-                _dispatcher.TryEnqueue(() =>
-                {
-                    if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                        c.RaiseProgressChanged(tabState);
-                });
-                return 1;
-            }
-
-            default:
-                return 0;
+            _logger.LogError(ex, "OnAction threw while handling {Tag}", tag);
+            return 0;
         }
     }
 
