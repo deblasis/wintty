@@ -399,9 +399,9 @@ public sealed partial class MainWindow : Window
         // Both tab hosts are inserted at the back of the Z-order so
         // the XAML-declared VerticalTitleBar stays on top in the Row 0
         // overlap region. Without this, the expanded vertical strip
-        // covers the layout-switch button in the title bar. The
-        // VerticalTitleBar's Background="Transparent" already enables
-        // hit-testing for its drag region and switch button.
+        // covers the title bar. The VerticalTitleBar's
+        // Background="Transparent" already enables hit-testing for its
+        // drag region.
         var hostElement = (FrameworkElement)_horizontalTabHost.HostElement;
         Grid.SetRow(hostElement, 0);
         Grid.SetColumn(hostElement, 0);
@@ -454,15 +454,6 @@ public sealed partial class MainWindow : Window
         // Apply initial cursor-color-derived pane border.
         UpdateCursorAccentColors();
 
-        // Tooltip chord label is sourced from KeyBindings.Default so
-        // the button description cannot drift from the accelerator.
-        var chord = KeyBindings.Default.Label(PaneAction.ToggleTabLayout);
-        ToolTipService.SetToolTip(
-            VerticalSwitchButton,
-            chord is null
-                ? "Switch to horizontal tabs"
-                : $"Switch to horizontal tabs ({chord})");
-
         _verticalTabsVisible = _configService.VerticalTabs;
         _tabHost = _verticalTabsVisible ? _verticalTabHost : _horizontalTabHost;
 
@@ -471,7 +462,8 @@ public sealed partial class MainWindow : Window
             TitleBarStripMirror,
             (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
-            VerticalTitleBar);
+            VerticalTitleBar,
+            _horizontalTabHost.IconBadge);
         _layout.Snap(_verticalTabsVisible);
 
         _titleBar = new TitleBarCoordinator(
@@ -1028,9 +1020,6 @@ public sealed partial class MainWindow : Window
         foreach (var t in _tabManager.Tabs) t.PaneHost.DisposeAllLeaves();
         _host.Dispose();
     }
-
-    private void OnVerticalSwitchButtonClick(object sender, RoutedEventArgs e)
-        => _router.RequestToggleTabLayout();
 
     private void AddPaneHost(TabModel tab)
     {
