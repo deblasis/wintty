@@ -61,6 +61,11 @@ namespace Ghostty;
 public sealed partial class MainWindow : Window
 {
     private readonly GhosttyHost _host;
+
+    // Subclasses this window's WndProc to swallow WM_SYSCHAR so Alt chords
+    // (e.g. the Alt+Shift+= / Alt+Shift+- splits) do not ring the Win32
+    // menu beep. Disposed in OnClosedAsync to restore the original proc.
+    private SysCharBeepSuppressor? _beepSuppressor;
     private readonly ConfigService _configService;
     // Single process-wide editor (owned by App). The per-instance
     // RMW lock only serializes if every writer hits the SAME editor,
@@ -169,20 +174,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private enum PaletteCloseState { Idle, ClosingFromCommand, ClosingFromToggle }
     private PaletteCloseState _paletteCloseState;
-
-    // Dedup guard for KeyboardAccelerator double-dispatch. WinUI 3
-    // fires accelerator Invoked twice for a single key event when the
-    // accelerator is registered on a parent of the focused element,
-    // even with args.Handled = true and ScopeOwner explicitly set.
-    //
-    // Workaround: remember which action just fired and swallow any
-    // subsequent Invoked for the same action until the next KeyUp
-    // resets the flag. Framework dupes arrive inside the same physical
-    // keypress (no KeyUp between them) so they are filtered, while
-    // legitimate user repeats (KeyDown -> KeyUp -> KeyDown) come
-    // through unmodified. This replaces an earlier 150 ms wall-clock
-    // window that ate muscle-memory double-splits.
-    private PaneAction? _acceleratorFiredThisKeyDown;
 
     // Win32 interop for the window class background brush. WinUI 3 hosts
     // the XAML island inside a Win32 HWND whose WNDCLASS hbrBackground
@@ -490,7 +481,7 @@ public sealed partial class MainWindow : Window
             }
         };
 
-        InstallPaneAccelerators();
+        WirePaneActionEvents();
 
         _commandPaletteVm = CreateCommandPaletteViewModel();
         CommandPaletteUI.Configure(_configService);
@@ -540,6 +531,11 @@ public sealed partial class MainWindow : Window
 
         _host.CommandPaletteToggleRequested += (_, _) =>
             DispatcherQueue.TryEnqueue(ToggleCommandPalette);
+
+        // Pane/tab keybinds libghostty matched arrive already mapped to a
+        // PaneAction (and already hopped to the UI thread by the host);
+        // forward straight into the router that owns the pane/tab state.
+        _host.PaneActionRequested += action => _router.Invoke(action);
 
         // App-targeted actions (OpenConfig, ReloadConfig) fire on the
         // bootstrap host because libghostty sends them with target=app,
@@ -649,7 +645,27 @@ public sealed partial class MainWindow : Window
         if (IsQuickTerminal)
             ApplyQuickTerminalBehaviour();
 
+        // Kill the Win32 Alt-menu beep that the Alt+Shift split chords
+        // would otherwise ring on every press. The input-site child HWND
+        // that actually receives WM_SYSCHAR is created when the content
+        // island is realized, so install on Activated (idempotent; it
+        // retries until the input site exists, then unsubscribes).
+        _beepSuppressor = new SysCharBeepSuppressor();
+        Activated += OnActivatedInstallBeepSuppressor;
+
         Closed += OnClosedAsync;
+    }
+
+    private void OnActivatedInstallBeepSuppressor(object sender, WindowActivatedEventArgs args)
+    {
+        if (_beepSuppressor is null)
+        {
+            Activated -= OnActivatedInstallBeepSuppressor;
+            return;
+        }
+
+        if (_beepSuppressor.Install(WindowNative.GetWindowHandle(this)) > 0)
+            Activated -= OnActivatedInstallBeepSuppressor;
     }
 
     private void OnVerticalTabsToggledFromSettings(bool vertical)
@@ -1023,6 +1039,10 @@ public sealed partial class MainWindow : Window
         // down the libghostty host.
         foreach (var t in _tabManager.Tabs) t.PaneHost.DisposeAllLeaves();
         _host.Dispose();
+
+        // Restore the original WndProc before the HWND is destroyed.
+        _beepSuppressor?.Dispose();
+        _beepSuppressor = null;
     }
 
     private void AddPaneHost(TabModel tab)
@@ -1189,60 +1209,25 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Install one <see cref="KeyboardAccelerator"/> per binding from
-    /// <see cref="KeyBindings.Default"/>. Each accelerator dispatches
-    /// through <see cref="PaneActionRouter.Invoke"/>, so adding a new
-    /// pane chord is one line in <see cref="KeyBindings.Default"/> and
-    /// one case in <see cref="PaneActionRouter.Invoke"/>.
+    /// Wire the per-window <see cref="PaneActionRouter"/> events to their
+    /// handlers. libghostty matches every standard chord and the
+    /// Windows-only residual matcher in <see cref="Controls.TerminalControl"/>
+    /// handles the rest; both feed <see cref="PaneActionRouter.Invoke"/>,
+    /// which raises the events subscribed below.
     ///
-    /// Why KeyboardAccelerators rather than KeyDown / PreviewKeyDown:
-    /// WinUI 3 routed key events ALL bubble (despite the "Preview"
-    /// naming inherited from WPF, PreviewKeyDown does not tunnel). The
-    /// focused TerminalControl receives KeyDown first, and would
-    /// forward the chord to libghostty if we did nothing. Accelerators
-    /// fire AFTER routed key events but BEFORE the framework gives up,
-    /// AND only when the focused element has not marked the event
-    /// handled - so TerminalControl actively short-circuits known
-    /// chords (it asks the same KeyBindings registry) to let the
-    /// accelerator fire.
+    /// No <c>KeyboardAccelerator</c>s are registered. They were the source
+    /// of the double-dispatch in https://github.com/deblasis/ghostty/issues/165
+    /// -- WinUI 3 fires Invoked twice for an accelerator registered on a
+    /// parent of the focused element, even with args.Handled and ScopeOwner
+    /// set. Routing every chord through libghostty plus the residual matcher
+    /// removes that path entirely.
     ///
-    /// Router events are instance-scoped (no static subscriptions),
-    /// so MainWindow can be closed and garbage-collected cleanly once
-    /// the last tab closes.
+    /// Router events are instance-scoped (no static subscriptions), so
+    /// MainWindow can be closed and garbage-collected cleanly once the
+    /// last tab closes.
     /// </summary>
-    private void InstallPaneAccelerators()
+    private void WirePaneActionEvents()
     {
-        // Accelerators live on RootGrid (the common ancestor of both
-        // tab hosts and PaneHostContainer) so the focused
-        // TerminalControl -- which is a child of PaneHostContainer,
-        // NOT a descendant of any tab host -- is within scope.
-        // ScopeOwner is intentionally left unset. Double-dispatch is
-        // prevented by the _acceleratorFiredThisKeyDown guard below,
-        // not by ScopeOwner (which would over-constrain the scope
-        // and prevent the accelerator from firing at all when focus
-        // is inside PaneHostContainer).
-        // See https://github.com/deblasis/ghostty/issues/165.
-        foreach (var binding in KeyBindings.Default.All)
-        {
-            var captured = binding;
-            var accel = new KeyboardAccelerator
-            {
-                Modifiers = captured.Modifiers,
-                Key = captured.Key,
-            };
-            accel.Invoked += (_, args) =>
-            {
-                args.Handled = true;
-                if (_acceleratorFiredThisKeyDown == captured.Action) return;
-                _acceleratorFiredThisKeyDown = captured.Action;
-                _router.Invoke(captured.Action);
-            };
-            RootGrid.KeyboardAccelerators.Add(accel);
-        }
-
-        RootGrid.KeyUp += (_, _) => _acceleratorFiredThisKeyDown = null;
-        RootGrid.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
-
         // Listen for keyboard-driven full-tab close. Route through
         // TabHost.RequestCloseTabAsync so the confirmation dialog
         // is the same code path as the per-tab X button and the
