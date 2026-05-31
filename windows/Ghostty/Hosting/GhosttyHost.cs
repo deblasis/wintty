@@ -446,11 +446,20 @@ internal sealed class GhosttyHost : IDisposable
         var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
         if (!TryResolveControl(surfaceHandle, out var control) || control is null) return 0;
 
+        // OnAction always runs on the bootstrap host -- the singleton
+        // callback receiver. The per-window events below (CommandPalette
+        // toggle, PaneActionRequested) have their subscribers on the host
+        // that OWNS this surface, not on the bootstrap host. Raise them on
+        // the owning host; the control-direct cases further down already
+        // forward correctly because they call the resolved control itself.
+        var owner = control.Host;
+        if (owner is null) return 0;
+
         switch (tag)
         {
             case GhosttyActionTag.ToggleCommandPalette:
                 _dispatcher.TryEnqueue(() =>
-                    CommandPaletteToggleRequested?.Invoke(this, EventArgs.Empty));
+                    owner.CommandPaletteToggleRequested?.Invoke(owner, EventArgs.Empty));
                 return 1;
 
             // Pane/tab actions libghostty matched from a keybind. The
@@ -465,12 +474,12 @@ internal sealed class GhosttyHost : IDisposable
             case GhosttyActionTag.ToggleFullscreen:
             case GhosttyActionTag.EqualizeSplits:
             case GhosttyActionTag.ToggleSplitZoom:
-                return DispatchPaneAction(tag, 0);
+                return DispatchPaneAction(owner, tag, 0);
 
             case GhosttyActionTag.NewSplit:
             case GhosttyActionTag.GotoSplit:
             case GhosttyActionTag.GotoTab:
-                return DispatchPaneAction(tag, Marshal.ReadInt32(actionPtr, 8));
+                return DispatchPaneAction(owner, tag, Marshal.ReadInt32(actionPtr, 8));
 
             case GhosttyActionTag.ResizeSplit:
             {
@@ -480,7 +489,7 @@ internal sealed class GhosttyHost : IDisposable
                     rs = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionResizeSplit>(
                         (void*)(actionPtr + 8));
                 }
-                return DispatchPaneAction(tag, (int)rs.Direction);
+                return DispatchPaneAction(owner, tag, (int)rs.Direction);
             }
 
             case GhosttyActionTag.MoveTab:
@@ -491,7 +500,7 @@ internal sealed class GhosttyHost : IDisposable
                     mt = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMoveTab>(
                         (void*)(actionPtr + 8));
                 }
-                return DispatchPaneAction(tag, (int)mt.Amount);
+                return DispatchPaneAction(owner, tag, (int)mt.Amount);
             }
 
             case GhosttyActionTag.SetTitle:
@@ -696,13 +705,15 @@ internal sealed class GhosttyHost : IDisposable
     /// mapped and dispatched, 0 when this apprt does not act on the
     /// variant so libghostty can fall back.
     /// </summary>
-    private byte DispatchPaneAction(GhosttyActionTag tag, int value)
+    private byte DispatchPaneAction(GhosttyHost owner, GhosttyActionTag tag, int value)
     {
         var action = ApprtActionMap.Map(tag, value);
         if (action is not { } paneAction) return 0;
 
+        // Raise on the surface's owning per-window host (where MainWindow
+        // subscribed), not on the bootstrap host this callback runs on.
         _dispatcher.TryEnqueue(() =>
-            PaneActionRequested?.Invoke(paneAction));
+            owner.PaneActionRequested?.Invoke(paneAction));
         return 1;
     }
 
