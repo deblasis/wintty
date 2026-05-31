@@ -17,6 +17,7 @@ GetMonitorInfo
 GetSystemMenu
 GetWindowLong
 GetWindowPlacement
+GetWindowRect
 LoadImage
 MapVirtualKey
 MessageBeep
