@@ -9,7 +9,17 @@ public class GhosttyActionsLayoutTests
 {
     // int (not enum) parameter: xUnit needs public test class, internal enum can't leak.
     [Theory]
+    [InlineData((int)GhosttyActionTag.NewTab, 2)]
+    [InlineData((int)GhosttyActionTag.CloseTab, 3)]
+    [InlineData((int)GhosttyActionTag.NewSplit, 4)]
+    [InlineData((int)GhosttyActionTag.ToggleFullscreen, 7)]
     [InlineData((int)GhosttyActionTag.ToggleQuickTerminal, 10)]
+    [InlineData((int)GhosttyActionTag.MoveTab, 14)]
+    [InlineData((int)GhosttyActionTag.GotoTab, 15)]
+    [InlineData((int)GhosttyActionTag.GotoSplit, 16)]
+    [InlineData((int)GhosttyActionTag.ResizeSplit, 18)]
+    [InlineData((int)GhosttyActionTag.EqualizeSplits, 19)]
+    [InlineData((int)GhosttyActionTag.ToggleSplitZoom, 20)]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
@@ -145,5 +155,56 @@ public class GhosttyActionsLayoutTests
         // { ssize_t selected; } on x64 = 8.
         Assert.Equal(8, Marshal.SizeOf<GhosttyActionSearchSelected>());
         Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionSearchSelected>(nameof(GhosttyActionSearchSelected.Selected)));
+    }
+
+    [Fact]
+    public void ResizeSplitStruct_HasExpectedLayout()
+    {
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionResizeSplit>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionResizeSplit>(nameof(GhosttyActionResizeSplit.Amount)));
+        Assert.Equal(4, (int)Marshal.OffsetOf<GhosttyActionResizeSplit>(nameof(GhosttyActionResizeSplit.Direction)));
+    }
+
+    [Fact]
+    public void SplitDirectionEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttySplitDirection.Right);
+        Assert.Equal(1, (int)GhosttySplitDirection.Down);
+        Assert.Equal(2, (int)GhosttySplitDirection.Left);
+        Assert.Equal(3, (int)GhosttySplitDirection.Up);
+    }
+
+    [Fact]
+    public void GotoTabSentinels_MatchHeader()
+    {
+        Assert.Equal(-1, (int)GhosttyGotoTab.Previous);
+        Assert.Equal(-2, (int)GhosttyGotoTab.Next);
+        Assert.Equal(-3, (int)GhosttyGotoTab.Last);
+    }
+
+    [Fact]
+    public void GotoSplitEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttyGotoSplit.Previous);
+        Assert.Equal(1, (int)GhosttyGotoSplit.Next);
+        Assert.Equal(2, (int)GhosttyGotoSplit.Up);
+        Assert.Equal(3, (int)GhosttyGotoSplit.Left);
+        Assert.Equal(4, (int)GhosttyGotoSplit.Down);
+        Assert.Equal(5, (int)GhosttyGotoSplit.Right);
+    }
+
+    [Fact]
+    public void ResizeSplitDirectionEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttyResizeSplitDirection.Up);
+        Assert.Equal(1, (int)GhosttyResizeSplitDirection.Down);
+        Assert.Equal(2, (int)GhosttyResizeSplitDirection.Left);
+        Assert.Equal(3, (int)GhosttyResizeSplitDirection.Right);
+    }
+
+    [Fact]
+    public void MoveTabStruct_Size_Is_8_Bytes()
+    {
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionMoveTab>());
     }
 }

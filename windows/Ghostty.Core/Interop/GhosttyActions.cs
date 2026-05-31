@@ -19,8 +19,18 @@ namespace Ghostty.Core.Interop;
 // to "return false" in GhosttyHost.OnAction.
 internal enum GhosttyActionTag
 {
+    NewTab = 2,
+    CloseTab = 3,
+    NewSplit = 4,
+    ToggleFullscreen = 7,
     ToggleQuickTerminal = 10,
     ToggleCommandPalette = 11,
+    MoveTab = 14,
+    GotoTab = 15,
+    GotoSplit = 16,
+    ResizeSplit = 18,
+    EqualizeSplits = 19,
+    ToggleSplitZoom = 20,
     Scrollbar = 26,
     SetTitle = 32,
     MouseShape = 36,
@@ -60,6 +70,45 @@ internal struct GhosttyActionMouseOverLink
 {
     public nint Url;
     public nuint Len;
+}
+
+// ghostty_action_new_split_direction_e: where the new split is placed
+// relative to the focused surface.
+internal enum GhosttySplitDirection { Right = 0, Down = 1, Left = 2, Up = 3 }
+
+// ghostty_action_goto_split_e: the focus-movement variants accept a
+// directional sibling; Previous/Next walk tree order, the rest pick a
+// spatial neighbour.
+internal enum GhosttyGotoSplit { Previous = 0, Next = 1, Up = 2, Left = 3, Down = 4, Right = 5 }
+
+// ghostty_action_resize_split_direction_e. Note this is a *different*
+// ordering from GhosttySplitDirection — resize grows the split toward
+// the named edge, so the values do not line up with placement.
+internal enum GhosttyResizeSplitDirection { Up = 0, Down = 1, Left = 2, Right = 3 }
+
+// Sentinel tab targets carried in ghostty_action_goto_tab_s. Positive
+// values are 1-based tab indices; these negatives select relative tabs.
+internal enum GhosttyGotoTab { Previous = -1, Next = -2, Last = -3 }
+
+// ghostty_action_resize_split_s:
+//   { uint16 amount; <enum int> direction; }
+// On x64: amount@0, then 2 bytes of padding to align the int-sized
+// direction enum to +4, total 8 bytes.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionResizeSplit
+{
+    public ushort Amount;
+    public GhosttyResizeSplitDirection Direction;
+}
+
+// ghostty_action_move_tab_s:
+//   { ssize_t amount; }
+// Stored as `nint` so the layout matches the C ssize_t on both 32- and
+// 64-bit builds. Negative moves left, positive moves right.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionMoveTab
+{
+    public nint Amount;
 }
 
 // ghostty_action_progress_report_state_e.

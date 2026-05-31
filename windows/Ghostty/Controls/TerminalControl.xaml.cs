@@ -951,24 +951,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // (including chords and IME composition keys) to count.
         Host?.NoteKeystroke();
 
-        // Reserved-chord short-circuit: if this chord is bound to an
-        // application-level KeyboardAccelerator (registered by
-        // MainWindow from KeyBindings.Default), do NOT forward it to
-        // libghostty and do NOT mark the event handled. WinUI 3
-        // KeyboardAccelerators fire AFTER routed key events and only
-        // when the focused element has not marked the event handled,
-        // so the focused TerminalControl has to actively step out of
-        // the way for the chord to reach the accelerator.
+        // Windows-only residual match: a handful of chords have no
+        // libghostty action (search-bar widget, vertical-tabs pin,
+        // tab-layout switch, profile slots), so the apprt matches them
+        // itself. A hit is dispatched through GhosttyHost.PaneActionRequested
+        // -- the same event MainWindow forwards to PaneActionRouter for
+        // libghostty-matched actions -- and the key is NOT forwarded to
+        // libghostty. We mark the event handled so it stops here; every
+        // standard chord falls through to SendKey and is matched inside
+        // libghostty.
         //
         // We also set _suppressNextCharacter so the matching
         // OnCharacterReceived (which fires independently with the
-        // WM_CHAR text, e.g. U+0005 for Ctrl+E) does not forward the
-        // control char to libghostty as text. Without this, the shell
-        // sees the C0 control char even though we filtered the key
-        // event itself.
-        if (KeyBindings.Default.Match(CurrentChordModifiers(), e.Key) is not null)
+        // WM_CHAR text) does not forward a control char to libghostty as
+        // text. Without this, the shell sees the C0 control char even
+        // though we filtered the key event itself.
+        if (KeyBindings.WindowsOnly.Match(CurrentChordModifiers(), e.Key) is { } residualAction)
         {
+            Host?.RequestPaneAction(residualAction);
             _suppressNextCharacter = true;
+            e.Handled = true;
             return;
         }
         SendKey(e, GhosttyInputAction.Press);
@@ -982,7 +984,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // chord has at least one modifier; a plain unmodified bound
         // key would swallow its key-up silently here.
         var mods = CurrentChordModifiers();
-        if (KeyBindings.Default.Match(mods, e.Key) is not null) return;
+        if (KeyBindings.WindowsOnly.Match(mods, e.Key) is not null)
+        {
+            e.Handled = true;
+            return;
+        }
         SendKey(e, GhosttyInputAction.Release);
     }
 
