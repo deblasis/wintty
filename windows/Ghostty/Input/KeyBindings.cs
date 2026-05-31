@@ -15,24 +15,28 @@ internal readonly record struct KeyBinding(
     PaneAction Action);
 
 /// <summary>
-/// Single source of truth for chord -> <see cref="PaneAction"/> bindings.
-/// Two consumers read from the same registry:
+/// The Windows-only residual chord table. libghostty owns matching for
+/// every standard action (splits, tabs, fullscreen, scrollback, prompt
+/// navigation) through the curated Windows defaults in
+/// <c>Config.zig</c>; those chords match inside libghostty and surface
+/// back through <c>GhosttyHost.PaneActionRequested</c>.
 ///
-///   1. <see cref="Controls.TerminalControl"/> calls
-///      <see cref="Match"/> to decide whether to short-circuit a key
-///      event before forwarding it to libghostty (so the chord can
-///      reach a window-level KeyboardAccelerator instead of being
-///      consumed by the shell).
-///   2. <see cref="MainWindow"/> iterates <see cref="All"/> at startup
-///      to install one KeyboardAccelerator per binding.
+/// What remains here are the chords that have no libghostty action, so
+/// the apprt has to match them itself:
+/// <see cref="PaneAction.OpenSearch"/> (shows the search-bar widget,
+/// which libghostty has no concept of),
+/// <see cref="PaneAction.ToggleVerticalTabsPinned"/>,
+/// <see cref="PaneAction.ToggleTabLayout"/>, and the nine profile slots.
 ///
-/// Adding or changing a binding is one change: edit
-/// <see cref="Default"/>. Both consumers pick it up automatically.
+/// <see cref="Controls.TerminalControl"/> calls <see cref="Match"/> on
+/// each key event; a hit is dispatched through the same
+/// <c>PaneActionRouter</c> path as the libghostty-matched actions and
+/// the key is not forwarded to libghostty.
 ///
-/// Future work: a config-driven loader will replace
-/// <see cref="Default"/> with bindings parsed from the user's
-/// ghostty config. The rest of the codebase only sees a
-/// <see cref="KeyBindings"/> instance and does not need to change.
+/// <see cref="Label"/> / <see cref="Find"/> still answer "what chord
+/// runs this action?" for the command palette and settings, but only
+/// for these residual actions; chord labels for libghostty-owned
+/// actions return once the keybind-enumeration ABI is wired.
 /// </summary>
 internal sealed class KeyBindings
 {
@@ -45,15 +49,6 @@ internal sealed class KeyBindings
 
     public IReadOnlyList<KeyBinding> All => _bindings;
 
-    /// <summary>
-    /// Return the action bound to the given chord, or null if no
-    /// binding matches. Modifier comparison is exact: a binding for
-    /// Ctrl+Shift+D will not match Ctrl+Shift+Alt+D, by design.
-    ///
-    /// Linear scan is fine at the current ~7 bindings. If the
-    /// config-driven loader lands with 50+ bindings, switch to a
-    /// Dictionary&lt;(mods,key), action&gt; built once in the ctor.
-    /// </summary>
     /// <summary>
     /// Render the binding for <paramref name="action"/> as a
     /// human-readable chord (e.g. <c>Ctrl+Shift+,</c>), or
@@ -77,6 +72,12 @@ internal sealed class KeyBindings
         return null;
     }
 
+    /// <summary>
+    /// Return the action bound to the given chord, or null if no binding
+    /// matches. Modifier comparison is exact: a binding for Ctrl+Shift+F
+    /// will not match Ctrl+Shift+Alt+F, by design. Linear scan over the
+    /// ~12 residual bindings.
+    /// </summary>
     public PaneAction? Match(VirtualKeyModifiers modifiers, VirtualKey key)
     {
         foreach (var b in _bindings)
@@ -105,91 +106,29 @@ internal sealed class KeyBindings
     }
 
     /// <summary>
-    /// Hardcoded default bindings; mirrors Windows Terminal muscle
-    /// memory: Ctrl+Shift+D / E for splits, Ctrl+Shift+W to close,
-    /// Alt+Arrows for directional focus.
+    /// The residual Windows-only bindings: chords with no libghostty
+    /// action, which the apprt therefore matches itself. Everything else
+    /// (splits, tabs, fullscreen, zoom, equalize, scrollback, prompt
+    /// navigation, quake, command palette) now lives in the curated
+    /// Windows defaults in <c>Config.zig</c> and is matched by libghostty.
     /// </summary>
-    // OEM virtual-key codes that lack a named VirtualKey member.
-    private const VirtualKey VkEquals = (VirtualKey)187;
-
-    public static KeyBindings Default { get; } = new(new[]
+    public static KeyBindings WindowsOnly { get; } = new(new[]
     {
-        // Panes
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.D, PaneAction.SplitVertical),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.E, PaneAction.SplitHorizontal),
-        new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Left, PaneAction.FocusLeft),
-        new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Right, PaneAction.FocusRight),
-        new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Up, PaneAction.FocusUp),
-        new KeyBinding(VirtualKeyModifiers.Menu, VirtualKey.Down, PaneAction.FocusDown),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Enter, PaneAction.ToggleSplitZoom),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VkEquals, PaneAction.EqualizeSplits),
-        new KeyBinding(VirtualKeyModifiers.None, VirtualKey.F11, PaneAction.ToggleFullscreen),
+        // Open the in-pane search bar. libghostty's start_search only
+        // reports the needle back (OnSearchStarted); showing the search
+        // widget is purely an apprt concern, so the chord stays here.
+        // Ctrl+Shift+F matches Windows Terminal muscle memory; plain
+        // Ctrl+F is reserved for in-find inside the Settings raw editor.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.F, PaneAction.OpenSearch),
 
-        // Tabs (this PR). Ctrl+Shift+W is now CloseActiveProgressive
-        // (pane -> tab -> window with confirmation), no longer plain ClosePane.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.T, PaneAction.NewTab),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.W, PaneAction.CloseActiveProgressive),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.PageDown, PaneAction.NextTab),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.PageUp, PaneAction.PrevTab),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number1, PaneAction.JumpTab1),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number2, PaneAction.JumpTab2),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number3, PaneAction.JumpTab3),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number4, PaneAction.JumpTab4),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number5, PaneAction.JumpTab5),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number6, PaneAction.JumpTab6),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number7, PaneAction.JumpTab7),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number8, PaneAction.JumpTab8),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Number9, PaneAction.JumpTabLast),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.PageDown, PaneAction.MoveTabRight),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.PageUp, PaneAction.MoveTabLeft),
-        // Vertical tabs (plan 2). Only meaningful when vertical-tabs
+        // Vertical-tabs pinned toggle. Only meaningful when vertical-tabs
         // is enabled; PaneActionRouter no-ops if the host is not a
         // VerticalTabHost.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Space, PaneAction.ToggleVerticalTabsPinned),
+
         // Runtime switch between horizontal and vertical tab layouts
         // (Ctrl+Shift+, -- same chord as Edge's vertical tabs toggle).
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)188, PaneAction.ToggleTabLayout),
-        // Command palette
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.P, PaneAction.ToggleCommandPalette),
-
-        // Scrollback navigation. Ctrl+Shift+Home/End matches Windows
-        // Terminal muscle memory for full-scrollback jumps.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Home, PaneAction.ScrollToTop),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.End, PaneAction.ScrollToBottom),
-
-        // OSC 133 prompt navigation. Ctrl+Up/Down steps between
-        // shell prompts in scrollback in shells that emit OSC 133
-        // prompt marking. No-op otherwise.
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Up, PaneAction.JumpToPreviousPrompt),
-        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Down, PaneAction.JumpToNextPrompt),
-
-        // Tree-order pane navigation. Ctrl+Alt+[ / Ctrl+Alt+] match
-        // Ghostty mac/linux conventions for goto_split:previous /
-        // goto_split:next. Spatial Alt+Arrows (above) cover the
-        // direction-based variants. On non-US layouts Ctrl+Alt is
-        // the AltGr modifier and may need to be rebound; the chord
-        // table is the single source of truth so a future
-        // config-driven loader can override.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)219, PaneAction.GotoSplitPrevious),
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Menu, (VirtualKey)221, PaneAction.GotoSplitNext),
-
-        // Keyboard-driven splitter resize. Alt+Shift+Arrow moves the
-        // nearest matching-orientation divider by 5% per press. Matches
-        // Windows Terminal muscle memory for keyboard pane resize.
-        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Up, PaneAction.ResizeSplitUp),
-        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Down, PaneAction.ResizeSplitDown),
-        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Left, PaneAction.ResizeSplitLeft),
-        new KeyBinding(VirtualKeyModifiers.Menu | VirtualKeyModifiers.Shift, VirtualKey.Right, PaneAction.ResizeSplitRight),
-
-        // Quake / drop-down terminal. Ctrl+` is the wintty default; the
-        // quick-terminal-key config override lands in a later PR. Backtick =
-        // VirtualKey 0xC0 (VK_OEM_3).
-        new KeyBinding(VirtualKeyModifiers.Control, (VirtualKey)0xC0, PaneAction.ToggleQuickTerminal),
-
-        // Scrollback search. Ctrl+Shift+F matches Windows Terminal
-        // muscle memory; plain Ctrl+F is reserved for in-find inside
-        // the Settings raw editor.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.F, PaneAction.OpenSearch),
 
         // Profiles. Slot N = Profiles[N-1] (post hidden filter, ordered by
         // profile-order). Out-of-range slots silently no-op in the router.
