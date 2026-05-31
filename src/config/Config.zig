@@ -6742,7 +6742,7 @@ pub const Keybinds = struct {
         );
 
         // Windowing
-        if (comptime !builtin.target.os.tag.isDarwin()) {
+        if (comptime !builtin.target.os.tag.isDarwin() and builtin.target.os.tag != .windows) {
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'n' }, .mods = .{ .ctrl = true, .shift = true } },
@@ -6953,11 +6953,185 @@ pub const Keybinds = struct {
                 .{ .paste_from_selection = {} },
             );
         }
+        // Windows: curated defaults matched to Windows conventions.
+        // Splits use the Alt+Shift family (Windows Terminal style); pane
+        // focus/resize use Alt/Alt+Shift to avoid the Super chords the
+        // Windows shell eats and the Ctrl+Alt+Arrow GPU-rotation collision.
+        // goto_tab (Ctrl+1..9) is handled by the loop below. Quake is owned
+        // by the Win32 global hotkey, so it is intentionally not bound here.
+        if (comptime builtin.target.os.tag == .windows) {
+            // Splits (geometry on Alt+Shift)
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = '=' }, .mods = .{ .alt = true, .shift = true } },
+                .{ .new_split = .right },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = '-' }, .mods = .{ .alt = true, .shift = true } },
+                .{ .new_split = .down },
+            );
+            // Pane focus (Alt+Arrows)
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .alt = true } },
+                .{ .goto_split = .left },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .alt = true } },
+                .{ .goto_split = .right },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .alt = true } },
+                .{ .goto_split = .up },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .alt = true } },
+                .{ .goto_split = .down },
+                .{ .performable = true },
+            );
+            // Resize splits (Alt+Shift+Arrows)
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .up, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .down, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .left, 10 } },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .alt = true, .shift = true } },
+                .{ .resize_split = .{ .right, 10 } },
+                .{ .performable = true },
+            );
+            // Equalize splits (Ctrl+Shift+=)
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = '=' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .equalize_splits = {} },
+            );
+            // Fullscreen (F11)
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .f11 } },
+                .{ .toggle_fullscreen = {} },
+            );
+            // Tabs
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 't' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .new_tab = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'w' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .close_tab = .this },
+            );
+            // Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab) are bound
+            // cross-platform above; Windows adds Ctrl+PageDown/PageUp too.
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .page_down }, .mods = .{ .ctrl = true } },
+                .{ .next_tab = {} },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .page_up }, .mods = .{ .ctrl = true } },
+                .{ .previous_tab = {} },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .page_down }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .move_tab = 1 },
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .page_up }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .move_tab = -1 },
+                .{ .performable = true },
+            );
+            // Search
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'f' }, .mods = .{ .ctrl = true, .shift = true } },
+                .start_search,
+                .{ .performable = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .escape } },
+                .end_search,
+                .{ .performable = true },
+            );
+            // Scrollback
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .home }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .scroll_to_top = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .end }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .scroll_to_bottom = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .page_up }, .mods = .{ .shift = true } },
+                .{ .scroll_page_up = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true } },
+                .{ .scroll_page_down = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .ctrl = true } },
+                .{ .jump_to_prompt = -1 },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .ctrl = true } },
+                .{ .jump_to_prompt = 1 },
+            );
+            // Clipboard / edit. Shift+Insert is intentionally NOT bound here:
+            // the cross-platform non-Darwin block already maps it to
+            // paste_from_clipboard, which is the correct Windows behavior
+            // (Windows has no primary selection; every native terminal treats
+            // Shift+Insert as paste-from-clipboard).
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'a' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .select_all = {} },
+            );
+        }
         {
             // On macOS we default to super but everywhere else
             // is alt.
             const mods: inputpkg.Mods = if (builtin.target.os.tag.isDarwin())
                 .{ .super = true }
+            else if (builtin.target.os.tag == .windows)
+                .{ .ctrl = true }
             else
                 .{ .alt = true };
 
@@ -10502,6 +10676,69 @@ const TestIterator = struct {
         return result;
     }
 };
+
+test "keybind: windows default keybinds" {
+    // The Windows default block is comptime-gated on the target OS, so we
+    // can only assert it on a Windows host.
+    if (comptime builtin.target.os.tag != .windows) return;
+
+    const testing = std.testing;
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+
+    const set = cfg.keybind.set;
+
+    // ctrl+shift+t -> new_tab
+    {
+        const entry = set.get(.{
+            .key = .{ .unicode = 't' },
+            .mods = .{ .ctrl = true, .shift = true },
+        }).?.value_ptr.*;
+        try testing.expect(entry == .leaf);
+        try testing.expect(entry.leaf.action == .new_tab);
+    }
+
+    // alt+shift+'=' -> new_split right
+    {
+        const entry = set.get(.{
+            .key = .{ .unicode = '=' },
+            .mods = .{ .alt = true, .shift = true },
+        }).?.value_ptr.*;
+        try testing.expect(entry == .leaf);
+        try testing.expect(entry.leaf.action == .new_split);
+        try testing.expectEqual(.right, entry.leaf.action.new_split);
+    }
+
+    // ctrl+'1' -> goto_tab 1
+    {
+        const entry = set.get(.{
+            .key = .{ .unicode = '1' },
+            .mods = .{ .ctrl = true },
+        }).?.value_ptr.*;
+        try testing.expect(entry == .leaf);
+        try testing.expect(entry.leaf.action == .goto_tab);
+        try testing.expectEqual(@as(usize, 1), entry.leaf.action.goto_tab);
+    }
+
+    // f11 -> toggle_fullscreen
+    {
+        const entry = set.get(.{
+            .key = .{ .physical = .f11 },
+        }).?.value_ptr.*;
+        try testing.expect(entry == .leaf);
+        try testing.expect(entry.leaf.action == .toggle_fullscreen);
+    }
+
+    // ctrl+shift+home -> scroll_to_top
+    {
+        const entry = set.get(.{
+            .key = .{ .physical = .home },
+            .mods = .{ .ctrl = true, .shift = true },
+        }).?.value_ptr.*;
+        try testing.expect(entry == .leaf);
+        try testing.expect(entry.leaf.action == .scroll_to_top);
+    }
+}
 
 test "parse hook: invalid command" {
     const testing = std.testing;

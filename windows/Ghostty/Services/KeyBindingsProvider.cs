@@ -46,13 +46,15 @@ internal sealed class KeyBindingsProvider : IKeyBindingsProvider, IDisposable
 
     private void Refresh()
     {
-        // Read bindings from the hardcoded defaults for now.
-        // When ghostty_config_trigger P/Invoke is fully wired,
-        // this will query libghostty for each known action.
+        // Only the Windows-only residual chords have C# labels now;
+        // libghostty owns matching (and the chord text) for every
+        // standard action. When ghostty_config_trigger P/Invoke is
+        // wired this will query libghostty for each known action and
+        // the standard chords reappear here.
         var entries = new List<BindingEntry>();
-        foreach (var b in Input.KeyBindings.Default.All)
+        foreach (var b in Input.KeyBindings.WindowsOnly.All)
         {
-            var label = Input.KeyBindings.Default.Label(b.Action);
+            var label = Input.KeyBindings.WindowsOnly.Label(b.Action);
             if (label != null)
             {
                 entries.Add(new BindingEntry(
