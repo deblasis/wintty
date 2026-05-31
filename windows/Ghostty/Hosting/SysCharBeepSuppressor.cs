@@ -34,18 +34,21 @@ internal sealed partial class SysCharBeepSuppressor : IDisposable
     private const int GWLP_WNDPROC = -4;
     private const string InputSiteClass = "InputSiteWindowClass";
 
-    // One shared proc for every subclassed HWND; per-HWND original procs
-    // are looked up in _oldProcs. Held in a field (plus its function
-    // pointer) so the GC cannot collect the delegate while Win32 holds the
-    // pointer as the window proc.
+    // Delegates plus their function pointers are held in fields so the GC
+    // cannot collect them while Win32 holds the pointers (the window proc,
+    // and the EnumChildWindows callback reused across Install retries).
     private readonly WndProcDelegate _proc;
     private readonly IntPtr _procPtr;
+    private readonly EnumChildProc _enumProc;
+    private readonly IntPtr _enumProcPtr;
     private readonly Dictionary<IntPtr, IntPtr> _oldProcs = new();
 
     public SysCharBeepSuppressor()
     {
         _proc = WndProc;
         _procPtr = Marshal.GetFunctionPointerForDelegate(_proc);
+        _enumProc = EnumChild;
+        _enumProcPtr = Marshal.GetFunctionPointerForDelegate(_enumProc);
     }
 
     /// <summary>
@@ -57,20 +60,22 @@ internal sealed partial class SysCharBeepSuppressor : IDisposable
     public int Install(IntPtr topLevel)
     {
         if (topLevel == IntPtr.Zero) return _oldProcs.Count;
-
-        EnumChildProc cb = (hWnd, _) =>
-        {
-            if (!_oldProcs.ContainsKey(hWnd) && GetClassName(hWnd) == InputSiteClass)
-            {
-                var old = SetWindowLongPtrW(hWnd, GWLP_WNDPROC, _procPtr);
-                if (old != IntPtr.Zero) _oldProcs[hWnd] = old;
-            }
-            return true;
-        };
-
-        EnumChildWindows(topLevel, Marshal.GetFunctionPointerForDelegate(cb), IntPtr.Zero);
-        GC.KeepAlive(cb);
+        EnumChildWindows(topLevel, _enumProcPtr, IntPtr.Zero);
         return _oldProcs.Count;
+    }
+
+    // EnumChildWindows callback. Returns a Win32 BOOL (nonzero = keep
+    // enumerating); typed as int per the project's interop convention
+    // (CLR bool is 1 byte, Win32 BOOL is 4 bytes, and this assembly
+    // disables runtime marshalling).
+    private int EnumChild(IntPtr hWnd, IntPtr lParam)
+    {
+        if (!_oldProcs.ContainsKey(hWnd) && GetClassName(hWnd) == InputSiteClass)
+        {
+            var old = SetWindowLongPtrW(hWnd, GWLP_WNDPROC, _procPtr);
+            if (old != IntPtr.Zero) _oldProcs[hWnd] = old;
+        }
+        return 1;
     }
 
     private IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -88,7 +93,12 @@ internal sealed partial class SysCharBeepSuppressor : IDisposable
     public void Dispose()
     {
         foreach (var kv in _oldProcs)
-            SetWindowLongPtrW(kv.Key, GWLP_WNDPROC, kv.Value);
+        {
+            // Only restore if our proc is still installed; otherwise we would
+            // clobber a proc that was chained on top of ours.
+            if (GetWindowLongPtrW(kv.Key, GWLP_WNDPROC) == _procPtr)
+                SetWindowLongPtrW(kv.Key, GWLP_WNDPROC, kv.Value);
+        }
         _oldProcs.Clear();
     }
 
@@ -105,16 +115,20 @@ internal sealed partial class SysCharBeepSuppressor : IDisposable
 
     // ----- hand-written P/Invoke ----------------------------------------
     // Hand-written (not CsWin32) so the WndProc-as-IntPtr subclassing shape
-    // stays obvious and local, matching WindowsGlobalHotKey. The callback is
-    // passed as a function pointer (not a marshalled delegate parameter) for
-    // the same reason that file does it.
+    // stays obvious and local, matching WindowsGlobalHotKey. The callbacks
+    // are passed as function pointers (not marshalled delegate parameters)
+    // for the same reason that file does it.
 
     private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-    private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
+    private delegate int EnumChildProc(IntPtr hWnd, IntPtr lParam);
 
     [LibraryImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial IntPtr SetWindowLongPtrW(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
 
     [LibraryImport("user32.dll", EntryPoint = "CallWindowProcW")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
@@ -127,8 +141,7 @@ internal sealed partial class SysCharBeepSuppressor : IDisposable
 
     [LibraryImport("user32.dll", EntryPoint = "EnumChildWindows")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool EnumChildWindows(IntPtr hWndParent, IntPtr lpEnumFunc, IntPtr lParam);
+    private static partial int EnumChildWindows(IntPtr hWndParent, IntPtr lpEnumFunc, IntPtr lParam);
 
     [LibraryImport("user32.dll", EntryPoint = "GetClassNameW")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

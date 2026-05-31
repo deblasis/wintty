@@ -7100,16 +7100,15 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .arrow_down }, .mods = .{ .ctrl = true } },
                 .{ .jump_to_prompt = 1 },
             );
-            // Clipboard / edit
+            // Clipboard / edit. Shift+Insert is intentionally NOT bound here:
+            // the cross-platform non-Darwin block already maps it to
+            // paste_from_clipboard, which is the correct Windows behavior
+            // (Windows has no primary selection; every native terminal treats
+            // Shift+Insert as paste-from-clipboard).
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'a' }, .mods = .{ .ctrl = true, .shift = true } },
                 .{ .select_all = {} },
-            );
-            try self.set.put(
-                alloc,
-                .{ .key = .{ .physical = .insert }, .mods = .{ .shift = true } },
-                .{ .paste_from_selection = {} },
             );
         }
         {

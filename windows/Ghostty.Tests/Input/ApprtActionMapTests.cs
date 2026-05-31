@@ -60,12 +60,15 @@ public class ApprtActionMapTests
     [Fact] public void UnknownTag_ReturnsNull() =>
         Assert.Null(ApprtActionMap.Map((GhosttyActionTag)9999, 0));
 
+    // Tag passed as int (not GhosttyActionTag) so the test method can be
+    // public -- xUnit only discovers public methods, and a public signature
+    // cannot expose the internal GhosttyActionTag type (CS0051).
     [Theory]
-    [InlineData(GhosttyActionTag.GotoTab, 0)]   // below the 1..8 index range
-    [InlineData(GhosttyActionTag.GotoTab, 9)]   // above the 1..8 index range
-    [InlineData(GhosttyActionTag.MoveTab, 0)]   // zero amount has no direction
-    [InlineData(GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Left)] // not represented in PaneAction
-    [InlineData(GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Up)]   // not represented in PaneAction
-    internal void UnrepresentedValue_ReturnsNull(GhosttyActionTag tag, int value) =>
-        Assert.Null(ApprtActionMap.Map(tag, value));
+    [InlineData((int)GhosttyActionTag.GotoTab, 0)]   // below the 1..8 index range
+    [InlineData((int)GhosttyActionTag.GotoTab, 9)]   // above the 1..8 index range
+    [InlineData((int)GhosttyActionTag.MoveTab, 0)]   // zero amount has no direction
+    [InlineData((int)GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Left)] // not in PaneAction
+    [InlineData((int)GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Up)]   // not in PaneAction
+    public void UnrepresentedValue_ReturnsNull(int tag, int value) =>
+        Assert.Null(ApprtActionMap.Map((GhosttyActionTag)tag, value));
 }
