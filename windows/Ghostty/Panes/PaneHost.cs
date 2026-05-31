@@ -247,6 +247,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         ToolTipService.SetToolTip(_restoreZoomButton, "Zoomed in — click to restore");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_restoreZoomButton, "Restore zoomed pane");
         Canvas.SetZIndex(_restoreZoomButton, 1000);
+        // These handlers capture `this`, but the button is owned solely by
+        // this PaneHost (a child of its host Grid), so the reference is an
+        // internal cycle that dies with the PaneHost - not a leak across the
+        // GhosttyHost boundary, so unlike the public events it needs no
+        // explicit teardown.
         _restoreZoomButton.Click += (_, _) => ToggleSplitZoom();
         // Resting glyph signals "zoomed"; hover previews the zoom-out action.
         _restoreZoomButton.PointerEntered += (_, _) => _restoreZoomIcon.Glyph = RestoreZoomGlyphHover;
@@ -458,6 +463,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void CloseLeaf(LeafPane leaf)
     {
+        // Which leaf (if any) was zoomed before this close. Used at the
+        // end to keep an unrelated background close (e.g. a pane's shell
+        // exiting on its own) from yanking the user out of zoom.
+        var zoomedBefore = _zoomedLeaf;
+
         // Detach the terminal from focus tracking BEFORE we drop it.
         leaf.Terminal().GotFocus -= OnTerminalGotFocus;
 
@@ -497,11 +507,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         _root = newRoot;
         // Clear zoom if the zoomed leaf was closed or if only one leaf
-        // remains (zoom is meaningless on a single pane).
+        // remains (zoom is meaningless on a single pane). Reset the whole
+        // zoom state locally rather than relying on the downstream Rebuild
+        // so the restore button and slot can never be left stranded.
         if (_zoomedLeaf is not null
             && (ReferenceEquals(_zoomedLeaf, leaf) || _root is LeafPane))
         {
             _zoomedLeaf = null;
+            _zoomRestoreParent = null;
+            HideRestoreZoomButton();
         }
 
         // Focus the first leaf of the (former) sibling subtree. We
@@ -522,6 +536,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
         UpdateHighlightPosition();
         DispatcherQueue.TryEnqueue(() => nextActive.Terminal().Focus(FocusState.Programmatic));
+
+        // A close while zoomed always force-unzooms (the structural rebuild
+        // clears zoom state). If the pane that closed was NOT the zoomed
+        // one and the zoomed pane is still alive, re-enter zoom on it so an
+        // unrelated background close does not disrupt the user's view.
+        if (zoomedBefore is not null
+            && !ReferenceEquals(zoomedBefore, leaf)
+            && _zoomedLeaf is null
+            && PaneCount > 1
+            && PaneTree.Leaves(_root).Any(l => ReferenceEquals(l, zoomedBefore)))
+        {
+            _activeLeaf = zoomedBefore;
+            ToggleSplitZoom();
+        }
     }
 
     /// <summary>
