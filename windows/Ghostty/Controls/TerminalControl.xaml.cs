@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using Ghostty.Core.Input;
+using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Search;
 using Ghostty.Hosting;
 using Ghostty.Input;
@@ -163,6 +164,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CurrentProgress = state;
         ProgressChanged?.Invoke(this, state);
     }
+    internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
 
     // Called on the libghostty thread. Stashes the latest state and
     // enqueues a single UI-thread flush. Coalescing: if libghostty
@@ -287,6 +289,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public event EventHandler? CloseRequested;
     internal event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
 
+    /// <summary>Raised when the shell prompt becomes interactive (OSC 133;B).
+    /// The first such event per surface marks the shell as responsive.</summary>
+    public event EventHandler? PromptReady;
+
     public TerminalControl()
     {
         InitializeComponent();
@@ -398,6 +404,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             _surface,
             (uint)Math.Max(1, w * sx),
             (uint)Math.Max(1, h * sy));
+
+        // Start the resize-overlay startup grace from this first settled
+        // layout (and again after any reparent that re-arms this handler),
+        // so the initial layout passes do not flash the cols x rows pill.
+        ArmResizeOverlayGrace();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -414,6 +425,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // sure it does not fire spuriously after the panel detaches.
         // OnLoaded re-subscribes when the control re-enters a tree.
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
+
+        // Stop the grace timer so its Tick cannot flip _resizeOverlayReady
+        // while the control is detached. The timer (and its single Tick
+        // subscription) is kept for reuse when the control re-enters a tree;
+        // ArmResizeOverlayGrace restarts it.
+        _resizeOverlayGraceTimer?.Stop();
     }
 
     /// <summary>
@@ -454,6 +471,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         CloseRequested = null;
         HoveredLinkChanged = null;
         ProgressChanged = null;
+        PromptReady = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
@@ -482,6 +500,86 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surface.Handle == IntPtr.Zero) return;
         PushSurfaceSize();
+        UpdateResizeOverlay();
+    }
+
+    // Resize overlay -----------------------------------------------------
+    //
+    // The cols x rows pill mirrors macOS's SurfaceResizeOverlay. The Core
+    // ResizeOverlayState decides whether a given size change should pulse
+    // (mode + first-layout + dedup); the two time-based guards live here
+    // because they depend on wall-clock instants this control already sees.
+
+    // Roughly half a second of grace after the surface first sizes, during
+    // which the initial layout settle (often several passes) must not flash
+    // the overlay. Matches macOS's `ready` delay.
+    private static readonly TimeSpan ResizeOverlayStartupGrace =
+        TimeSpan.FromMilliseconds(500);
+
+    // Suppress the overlay for this long after the pane gains focus, so a
+    // focus-driven relayout does not flash it. Matches macOS's focusInstant
+    // guard.
+    private static readonly TimeSpan ResizeOverlayFocusGuard =
+        TimeSpan.FromMilliseconds(500);
+
+    private bool _resizeOverlayReady;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resizeOverlayGraceTimer;
+    // Monotonic (TickCount64) so an NTP/DST wall-clock jump cannot widen or
+    // collapse the focus guard. 0 means "never focused yet".
+    private long _lastFocusGainedTick;
+
+    private void ArmResizeOverlayGrace()
+    {
+        // The first settled layout (and each reparent that re-arms this) opens
+        // the grace window; once it elapses, real user resizes may pulse the
+        // overlay. Reuse one one-shot timer so re-arming just restarts it
+        // instead of leaking a fresh timer + closure each reparent.
+        _resizeOverlayReady = false;
+        if (_resizeOverlayGraceTimer is null)
+        {
+            _resizeOverlayGraceTimer = DispatcherQueue.CreateTimer();
+            _resizeOverlayGraceTimer.Interval = ResizeOverlayStartupGrace;
+            _resizeOverlayGraceTimer.IsRepeating = false;
+            _resizeOverlayGraceTimer.Tick += OnResizeOverlayGraceTick;
+        }
+        _resizeOverlayGraceTimer.Stop();
+        _resizeOverlayGraceTimer.Start();
+    }
+
+    private void OnResizeOverlayGraceTick(
+        Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        sender.Stop();
+        _resizeOverlayReady = true;
+    }
+
+    private void UpdateResizeOverlay()
+    {
+        var cfg = App.ConfigService;
+        if (cfg is null) return;
+
+        // Read config fresh each pulse so hot-reload is honored with no
+        // subscription to unwind on teardown.
+        var mode = cfg.ResizeOverlayMode;
+
+        // SurfaceSetSize (called above via PushSurfaceSize) recalculates the
+        // grid synchronously on this thread, so this read already reflects the
+        // new cols/rows; only the GPU buffer resize is deferred.
+        var size = NativeMethods.SurfaceSize(_surface);
+
+        var withinFocusGuard =
+            _lastFocusGainedTick != 0 &&
+            Environment.TickCount64 - _lastFocusGainedTick
+                < ResizeOverlayFocusGuard.TotalMilliseconds;
+        var allowShow = _resizeOverlayReady && !withinFocusGuard;
+
+        ResizeOverlay.NotifyResize(
+            size.Columns,
+            size.Rows,
+            mode,
+            cfg.ResizeOverlayPosition,
+            cfg.ResizeOverlayDurationMs,
+            allowShow);
     }
 
     private void PushSurfaceSize()
@@ -528,7 +626,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private bool _focused;
 
-    private void OnGotFocus(object sender, RoutedEventArgs e) => SetFocusState(true);
+    private void OnGotFocus(object sender, RoutedEventArgs e)
+    {
+        // Stamp the focus instant so a focus-driven relayout in the next
+        // ~500 ms does not flash the resize overlay (matches macOS).
+        _lastFocusGainedTick = Environment.TickCount64;
+        SetFocusState(true);
+    }
 
     private void OnLostFocus(object sender, RoutedEventArgs e) => SetFocusState(false);
 

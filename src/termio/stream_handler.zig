@@ -1175,8 +1175,11 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.{ .stop_command = code });
             },
 
+            .end_prompt_start_input => {
+                self.surfaceMessageWriter(.prompt_input);
+            },
+
             // Handled by Terminal, no special handling by us
-            .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
             .fresh_line_new_prompt,

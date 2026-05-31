@@ -390,9 +390,9 @@ public sealed partial class MainWindow : Window
         // Both tab hosts are inserted at the back of the Z-order so
         // the XAML-declared VerticalTitleBar stays on top in the Row 0
         // overlap region. Without this, the expanded vertical strip
-        // covers the layout-switch button in the title bar. The
-        // VerticalTitleBar's Background="Transparent" already enables
-        // hit-testing for its drag region and switch button.
+        // covers the title bar. The VerticalTitleBar's
+        // Background="Transparent" already enables hit-testing for its
+        // drag region.
         var hostElement = (FrameworkElement)_horizontalTabHost.HostElement;
         Grid.SetRow(hostElement, 0);
         Grid.SetColumn(hostElement, 0);
@@ -445,15 +445,6 @@ public sealed partial class MainWindow : Window
         // Apply initial cursor-color-derived pane border.
         UpdateCursorAccentColors();
 
-        // Tooltip chord label is sourced from KeyBindings.WindowsOnly so
-        // the button description cannot drift from the residual matcher.
-        var chord = KeyBindings.WindowsOnly.Label(PaneAction.ToggleTabLayout);
-        ToolTipService.SetToolTip(
-            VerticalSwitchButton,
-            chord is null
-                ? "Switch to horizontal tabs"
-                : $"Switch to horizontal tabs ({chord})");
-
         _verticalTabsVisible = _configService.VerticalTabs;
         _tabHost = _verticalTabsVisible ? _verticalTabHost : _horizontalTabHost;
 
@@ -462,7 +453,8 @@ public sealed partial class MainWindow : Window
             TitleBarStripMirror,
             (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
-            VerticalTitleBar);
+            VerticalTitleBar,
+            _horizontalTabHost.IconBadge);
         _layout.Snap(_verticalTabsVisible);
 
         _titleBar = new TitleBarCoordinator(
@@ -976,6 +968,10 @@ public sealed partial class MainWindow : Window
 
         if (IsQuickTerminal)
         {
+            // Remove the window-proc subclass before the HWND is torn down.
+            _quakeFrame?.Dispose();
+            _quakeFrame = null;
+
             // Persist only the session-resized height, via read-modify-write
             // so we never clobber the regular window placement other windows
             // save. The quake window's X/Y/Width are config-driven
@@ -1048,9 +1044,6 @@ public sealed partial class MainWindow : Window
         _beepSuppressor?.Dispose();
         _beepSuppressor = null;
     }
-
-    private void OnVerticalSwitchButtonClick(object sender, RoutedEventArgs e)
-        => _router.RequestToggleTabLayout();
 
     private void AddPaneHost(TabModel tab)
     {
@@ -1763,9 +1756,9 @@ public sealed partial class MainWindow : Window
 
         // Borderless: a quake terminal is positioned by config and toggled by
         // the global hotkey, so it needs no title bar, border, caption buttons,
-        // or min/max. IsResizable=true keeps the (unpainted) resize frame so
-        // the user can drag the bottom edge to change height; the docked
-        // top/side edges sit at the monitor bounds and stay fixed.
+        // or min/max. IsResizable=true keeps a sizing frame so the window can be
+        // resize-dragged; QuickTerminalFrame (below) reshapes that frame to drop
+        // the docked-edge band and confine resize to the edge opposite the dock.
         if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
@@ -1773,6 +1766,15 @@ public sealed partial class MainWindow : Window
             presenter.IsMinimizable = false;
             presenter.IsMaximizable = false;
         }
+
+        // IsResizable leaves a WS_THICKFRAME sizing border that Windows paints
+        // as a dark band at the docked edge and exposes as a resize grip there.
+        // Subclass the window proc to drop that non-client frame (no band) and
+        // allow drag-resize only on the edge opposite the dock.
+        _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
+            WindowNative.GetWindowHandle(this),
+            () => _configService.QuickTerminalPosition,
+            App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
 
         // Borderless quake has no OS caption buttons; collapse the dead inset
         // and drop the vertical-mode title text.
@@ -1884,6 +1886,12 @@ public sealed partial class MainWindow : Window
     // window, so the AppWindow.Changed size-capture below ignores our own
     // resize and only records genuine user drags.
     private bool _movingQuake;
+
+    // Window-proc subclass that drops the borderless quake window's non-client
+    // sizing border (the dark band) and confines drag-resize to the edge
+    // opposite the dock. Null on regular windows; lives for the quake window's
+    // lifetime and is disposed on close.
+    private Ghostty.Hosting.QuickTerminalFrame? _quakeFrame;
 
     /// <summary>
     /// Position the window per <c>quick-terminal-position</c>,
