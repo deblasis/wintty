@@ -32,6 +32,13 @@ internal sealed partial class Splitter : Grid
     private bool _capturing;
     private Point _lastPosition;
 
+    /// <summary>
+    /// The split this divider adjusts. PaneHost reads it when walking
+    /// the live visual tree to re-apply ratios in place after a keyboard
+    /// resize / equalize, instead of tearing the tree down with Rebuild.
+    /// </summary>
+    internal SplitPane Split => _split;
+
     public Splitter(SplitPane split, Action onRatioChanged)
     {
         _split = split;
