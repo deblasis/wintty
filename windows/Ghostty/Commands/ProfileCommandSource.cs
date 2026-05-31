@@ -93,5 +93,5 @@ internal sealed class ProfileCommandSource : ICommandSource
     };
 
     private static KeyBinding? LookupShortcut(PaneAction? action) =>
-        action is null ? null : KeyBindings.Default.Find(action.Value);
+        action is null ? null : KeyBindings.WindowsOnly.Find(action.Value);
 }
