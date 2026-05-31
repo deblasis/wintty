@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
 using Ghostty.Controls;
 using Ghostty.Hosting;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -66,6 +69,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
+    // Top-right "restore" affordance shown only while a pane is zoomed,
+    // styled like the quake pin button. Clicking it unzooms. The resting
+    // glyph is a plain magnifier (status: this pane is magnified); on
+    // hover it swaps to the zoom-out magnifier (action hint: click to
+    // restore). Lives permanently in the host Grid above the floated
+    // pane, Collapsed except during zoom.
+    private readonly Button _restoreZoomButton;
+    private readonly FontIcon _restoreZoomIcon;
+    private const string RestoreZoomGlyphRest = "";  // Zoom (magnifier)
+    private const string RestoreZoomGlyphHover = ""; // ZoomOut (magnifier minus)
+
     private static readonly Brush DefaultActiveBorderBrush =
         new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
     // Subtle dark film over inactive panes. ~22% black matches the
@@ -77,9 +91,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private PaneNode _root;
     private LeafPane _activeLeaf;
     // When non-null, the active leaf is "zoomed" — it fills the entire
-    // host and the rest of the tree is hidden. Mirrors upstream's
-    // toggle_split_zoom keybind. Unzoom restores the tree via Rebuild.
+    // host and the rest of the tree is hidden. Mirrors the
+    // toggle_split_zoom keybind. Zoom keeps the split tree mounted but
+    // Collapsed and floats the active leaf full-size above it; unzoom
+    // splices the leaf back into its slot. We never rebuild the tree on
+    // zoom toggle, so deep trees do not leave stale divider visuals.
     private LeafPane? _zoomedLeaf;
+    // The split Grid and cell the zoomed leaf was detached from, so
+    // unzoom can put it back without rebuilding. Valid only while
+    // _zoomedLeaf is non-null.
+    private Grid? _zoomRestoreParent;
+    private int _zoomRestoreColumn;
+    private int _zoomRestoreRow;
     // Set once the last leaf has been closed and the window is tearing
     // down. DisposeAllLeaves honors it so it does not walk a tree that
     // has already been disposed leaf-by-leaf in CloseLeaf.
@@ -198,6 +221,42 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // the chrome never gets composited under the terminal.
         Canvas.SetZIndex(_highlightOverlay, 999);
 
+        // Restore-from-zoom affordance. Mirrors the quake pin button:
+        // transparent, borderless, top-right, 32x28. Hidden until a pane
+        // is zoomed (ToggleSplitZoom shows it). Sits above the floated
+        // pane (ZIndex over the overlay) so it stays clickable.
+        _restoreZoomIcon = new FontIcon
+        {
+            FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons"),
+            Glyph = RestoreZoomGlyphRest,
+            FontSize = 14,
+        };
+        _restoreZoomButton = new Button
+        {
+            Content = _restoreZoomIcon,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 6, 8, 0),
+            Width = 32,
+            Height = 28,
+            Padding = new Thickness(0),
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Visibility = Visibility.Collapsed,
+        };
+        ToolTipService.SetToolTip(_restoreZoomButton, "Zoomed in — click to restore");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_restoreZoomButton, "Restore zoomed pane");
+        Canvas.SetZIndex(_restoreZoomButton, 1000);
+        // These handlers capture `this`, but the button is owned solely by
+        // this PaneHost (a child of its host Grid), so the reference is an
+        // internal cycle that dies with the PaneHost - not a leak across the
+        // GhosttyHost boundary, so unlike the public events it needs no
+        // explicit teardown.
+        _restoreZoomButton.Click += (_, _) => ToggleSplitZoom();
+        // Resting glyph signals "zoomed"; hover previews the zoom-out action.
+        _restoreZoomButton.PointerEntered += (_, _) => _restoreZoomIcon.Glyph = RestoreZoomGlyphHover;
+        _restoreZoomButton.PointerExited += (_, _) => _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
+
         // Initial single leaf. Pass the initialSnapshot so the terminal
         // spawns with the right command/working-directory from OnLoaded.
         var firstTerminal = CreateTerminal(initialSnapshot);
@@ -212,6 +271,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _treeRoot = BuildVisual(_root);
         hostGrid.Children.Add(_treeRoot);
         hostGrid.Children.Add(_highlightOverlay);
+        hostGrid.Children.Add(_restoreZoomButton);
         Content = hostGrid;
 
         // Reposition the highlight whenever layout settles. Cheap;
@@ -286,12 +346,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             ? (SplitPane)_root
             : PaneTree.FindParent(_root, oldActive)?.Parent;
 
-        if (newSubSplit is null || oldActive.Terminal().Parent is not Grid currentParent)
+        if (newSubSplit is null || wasRoot || oldActive.Terminal().Parent is not Grid currentParent)
         {
             // Root replacement (oldActive was the entire content of
             // PaneHost), or some unexpected state. Full rebuild handles
             // both cases correctly because there is no nested visual
             // tree to confuse WinUI 3's parent tracking.
+            //
+            // wasRoot is checked explicitly: the single root leaf IS a
+            // direct child of the host Grid, so the Parent-is-not-Grid
+            // guard below never catches it. Without this the first split
+            // would splice in place but leave _treeRoot pointing at the
+            // old leaf, so every later Rebuild / ApplyAllRatios / zoom
+            // operates on the wrong element (stale dividers, dead resize).
             Rebuild();
         }
         else
@@ -396,6 +463,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void CloseLeaf(LeafPane leaf)
     {
+        // Which leaf (if any) was zoomed before this close. Used at the
+        // end to keep an unrelated background close (e.g. a pane's shell
+        // exiting on its own) from yanking the user out of zoom.
+        var zoomedBefore = _zoomedLeaf;
+
         // Detach the terminal from focus tracking BEFORE we drop it.
         leaf.Terminal().GotFocus -= OnTerminalGotFocus;
 
@@ -435,11 +507,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         _root = newRoot;
         // Clear zoom if the zoomed leaf was closed or if only one leaf
-        // remains (zoom is meaningless on a single pane).
+        // remains (zoom is meaningless on a single pane). Reset the whole
+        // zoom state locally rather than relying on the downstream Rebuild
+        // so the restore button and slot can never be left stranded.
         if (_zoomedLeaf is not null
             && (ReferenceEquals(_zoomedLeaf, leaf) || _root is LeafPane))
         {
             _zoomedLeaf = null;
+            _zoomRestoreParent = null;
+            HideRestoreZoomButton();
         }
 
         // Focus the first leaf of the (former) sibling subtree. We
@@ -460,6 +536,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (!TryIncrementalCloseRebuild(leafParentGrid)) Rebuild();
         UpdateHighlightPosition();
         DispatcherQueue.TryEnqueue(() => nextActive.Terminal().Focus(FocusState.Programmatic));
+
+        // A close while zoomed always force-unzooms (the structural rebuild
+        // clears zoom state). If the pane that closed was NOT the zoomed
+        // one and the zoomed pane is still alive, re-enter zoom on it so an
+        // unrelated background close does not disrupt the user's view.
+        if (zoomedBefore is not null
+            && !ReferenceEquals(zoomedBefore, leaf)
+            && _zoomedLeaf is null
+            && PaneCount > 1
+            && PaneTree.Leaves(_root).Any(l => ReferenceEquals(l, zoomedBefore)))
+        {
+            _activeLeaf = zoomedBefore;
+            ToggleSplitZoom();
+        }
     }
 
     /// <summary>
@@ -535,16 +625,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     public void EqualizeSplits()
     {
         PaneTree.Equalize(_root);
-        // When zoomed, only update ratios - ToggleSplitZoom.Rebuild()
-        // will apply them when the user unzooms.
+        // When zoomed, only update the model - unzoom re-applies every
+        // ratio to the live tree when the user toggles back.
         if (_zoomedLeaf is not null) return;
-        Rebuild();
+        // Structure is unchanged - only ratios. Apply them to the
+        // existing Grids in place (the mouse-drag mechanism) instead of
+        // Rebuild(): a full rebuild recreates every Splitter and leaves
+        // stale divider visuals on deep trees. In-place keeps focus too,
+        // so no focus-restore is needed.
+        ApplyAllRatios();
         UpdateHighlightPosition();
-        // Rebuild detaches every TerminalControl and re-parents into
-        // a fresh Grid; without restoring focus the user lands in a
-        // focus-less window. Same restore path as ToggleSplitZoom +
-        // ResizeSplit.
-        DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
     }
 
     /// <summary>
@@ -557,26 +647,104 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     {
         if (PaneCount <= 1) return;
 
+        if (Content is not Grid hostGrid) return;
+
         if (_zoomedLeaf is not null)
         {
-            // Unzoom: restore the full tree visual.
+            // Unzoom: splice the floated leaf back into the slot it came
+            // from and slide the still-mounted tree back into view. No
+            // Rebuild(), so no stale divider visuals. If the restore slot
+            // was lost (should not happen), fall back to a full rebuild.
+            var zoomed = _zoomedLeaf;
             _zoomedLeaf = null;
-            Rebuild();
+            HideRestoreZoomButton();
+            if (_zoomRestoreParent is null)
+            {
+                Rebuild();
+                UpdateHighlightPosition();
+                DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
+                return;
+            }
+
+            var leafCtl = zoomed.Terminal();
+            DetachFromParent(leafCtl); // remove from the host's float slot
+            Grid.SetColumn(leafCtl, _zoomRestoreColumn);
+            Grid.SetRow(leafCtl, _zoomRestoreRow);
+            _zoomRestoreParent.Children.Add(leafCtl);
+            _zoomRestoreParent = null;
+            ParkTree(park: false); // translate the tree back to its resting spot
+            // A ratio change while zoomed (EqualizeSplits) only touched
+            // the model; sync the live Grids now that they are shown.
+            ApplyAllRatios();
+            _highlightOverlay.Visibility = Visibility.Visible;
             UpdateHighlightPosition();
             DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
         }
         else
         {
-            // Zoom: replace the tree visual with just the active leaf.
+            // Zoom: keep the tree mounted but parked OFF-SCREEN, and float
+            // the active leaf full-size above it. We park via an
+            // ancestor-visual Translation rather than Visibility.Collapsed
+            // because collapsing does NOT stop a SwapChainPanel's DX12
+            // chain from compositing (the other panes would stay on
+            // screen) - but a Translation moves the bound swap chain with
+            // it. The tree is never torn down, so unzoom needs no
+            // ghost-prone reconstruction.
             _zoomedLeaf = _activeLeaf;
-            if (Content is not Grid hostGrid) return;
-            ClearVisualTree(_treeRoot);
-            hostGrid.Children.Remove(_treeRoot);
-            DetachFromParent(_activeLeaf.Terminal());
-            _treeRoot = _activeLeaf.Terminal();
-            hostGrid.Children.Insert(0, _treeRoot);
+            var leafCtl = _activeLeaf.Terminal();
+            _zoomRestoreParent = leafCtl.Parent as Grid;
+            _zoomRestoreColumn = Grid.GetColumn(leafCtl);
+            _zoomRestoreRow = Grid.GetRow(leafCtl);
+            DetachFromParent(leafCtl);
+            ParkTree(park: true);
+            // hostGrid has no row/column defs, so a child at cell 0,0 fills
+            // it. The z-ordered overlay (collapsed here) stays on top.
+            Grid.SetColumn(leafCtl, 0);
+            Grid.SetRow(leafCtl, 0);
+            hostGrid.Children.Insert(1, leafCtl);
             _highlightOverlay.Visibility = Visibility.Collapsed;
-            DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
+            // Surface the restore affordance over the now-full-size pane.
+            _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
+            _restoreZoomButton.Visibility = Visibility.Visible;
+            DispatcherQueue.TryEnqueue(() => leafCtl.Focus(FocusState.Programmatic));
+        }
+    }
+
+    // Hide the restore-from-zoom button and reset its glyph to the
+    // resting magnifier. Called on every unzoom path, including the
+    // force-unzoom that falls back to Rebuild from Split / Close.
+    private void HideRestoreZoomButton()
+    {
+        _restoreZoomButton.Visibility = Visibility.Collapsed;
+        _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
+    }
+
+    /// <summary>
+    /// Slide the whole split tree off the bottom of the host (park) or
+    /// back to rest (unpark) using the element's Composition Translation
+    /// facade. Used by zoom to hide the non-zoomed panes without
+    /// unmounting them: Translation moves a SwapChainPanel-bound DX12
+    /// chain with no swap-chain resize (the same facade the quake-terminal
+    /// slide uses), whereas Visibility.Collapsed leaves the chain
+    /// compositing. Keeping the tree mounted means unzoom restores it
+    /// without a reconstruction that would leave stale divider visuals.
+    /// </summary>
+    private void ParkTree(bool park)
+    {
+        ElementCompositionPreview.SetIsTranslationEnabled(_treeRoot, true);
+        var visual = ElementCompositionPreview.GetElementVisual(_treeRoot);
+        if (park)
+        {
+            // Translate down by the tree's own height so it sits entirely
+            // below the visible host bounds (clipped away by the window).
+            // Fall back to a large constant if it has not been measured.
+            var dy = (float)_treeRoot.ActualHeight;
+            if (dy <= 0) dy = 100_000f;
+            visual.Properties.InsertVector3("Translation", new Vector3(0f, dy, 0f));
+        }
+        else
+        {
+            visual.Properties.InsertVector3("Translation", Vector3.Zero);
         }
     }
 
@@ -697,9 +865,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (PaneTree.Leaves(_root).Take(2).Count() <= 1) return;
 
         if (!PaneTree.ResizeSplit(_root, _activeLeaf, direction, ResizeSplitDelta)) return;
-        Rebuild();
+        // Ratio-only change: apply in place (see EqualizeSplits) rather
+        // than Rebuild(), which ghosts dividers on deep trees.
+        ApplyAllRatios();
         UpdateHighlightPosition();
-        DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
     }
 
     // Internals ---------------------------------------------------------
@@ -835,6 +1004,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // visual tree directly without a full rebuild.
         if (Content is not Grid hostGrid) return;
 
+        // Rebuild always reconstructs the full tree from _root, so any
+        // zoom is necessarily off afterward. Clearing the zoom state here
+        // keeps the force-unzoom paths (Split / Close fall back to
+        // Rebuild) consistent without each having to reset it.
+        _zoomedLeaf = null;
+        _zoomRestoreParent = null;
+        HideRestoreZoomButton();
+
         // Clear old tree children recursively before removal so the
         // compositor drops all references to stale swap chain panels.
         // Without this, removed Grids that still contain child elements
@@ -910,6 +1087,41 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
 
         return grid;
+    }
+
+    /// <summary>
+    /// Re-apply every split's ratio to its existing Grid, walking the
+    /// live visual tree. The keyboard resize and equalize paths use this
+    /// instead of <see cref="Rebuild"/>: only ratios changed, the tree
+    /// structure is identical, so updating the existing
+    /// ColumnDefinitions / RowDefinitions in place (exactly what the
+    /// mouse-drag <see cref="Splitter"/> does) avoids recreating any
+    /// Splitter. A full Rebuild recreates them and leaves stale divider
+    /// DCOMP visuals on screen once the tree is 3+ levels deep - the same
+    /// ghost-visual behavior Split / Close sidestep via incremental
+    /// splicing.
+    /// </summary>
+    private void ApplyAllRatios() => ApplyRatiosRecursive(_treeRoot);
+
+    private static void ApplyRatiosRecursive(FrameworkElement? visual)
+    {
+        // A Splitter is itself a Grid but hosts no split children; never
+        // recurse into it or mistake it for a split Grid. A leaf is a
+        // TerminalControl (not a Grid), which ends the recursion.
+        if (visual is Splitter) return;
+        if (visual is not Grid grid) return;
+
+        // Each split Grid built by BuildVisual carries exactly one
+        // Splitter child whose Split identifies the ratio it represents.
+        // Child order is irrelevant (incremental Split can reorder
+        // children), so we scan rather than index.
+        Splitter? splitter = null;
+        foreach (var child in grid.Children)
+        {
+            if (child is Splitter s) splitter = s;
+            else if (child is FrameworkElement fe) ApplyRatiosRecursive(fe);
+        }
+        if (splitter is not null) ApplyRatio(grid, splitter.Split);
     }
 
     /// <summary>
