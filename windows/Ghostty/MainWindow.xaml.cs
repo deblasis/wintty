@@ -61,6 +61,11 @@ namespace Ghostty;
 public sealed partial class MainWindow : Window
 {
     private readonly GhosttyHost _host;
+
+    // Subclasses this window's WndProc to swallow WM_SYSCHAR so Alt chords
+    // (e.g. the Alt+Shift+= / Alt+Shift+- splits) do not ring the Win32
+    // menu beep. Disposed in OnClosedAsync to restore the original proc.
+    private SysCharBeepSuppressor? _beepSuppressor;
     private readonly ConfigService _configService;
     // Single process-wide editor (owned by App). The per-instance
     // RMW lock only serializes if every writer hits the SAME editor,
@@ -648,7 +653,27 @@ public sealed partial class MainWindow : Window
         if (IsQuickTerminal)
             ApplyQuickTerminalBehaviour();
 
+        // Kill the Win32 Alt-menu beep that the Alt+Shift split chords
+        // would otherwise ring on every press. The input-site child HWND
+        // that actually receives WM_SYSCHAR is created when the content
+        // island is realized, so install on Activated (idempotent; it
+        // retries until the input site exists, then unsubscribes).
+        _beepSuppressor = new SysCharBeepSuppressor();
+        Activated += OnActivatedInstallBeepSuppressor;
+
         Closed += OnClosedAsync;
+    }
+
+    private void OnActivatedInstallBeepSuppressor(object sender, WindowActivatedEventArgs args)
+    {
+        if (_beepSuppressor is null)
+        {
+            Activated -= OnActivatedInstallBeepSuppressor;
+            return;
+        }
+
+        if (_beepSuppressor.Install(WindowNative.GetWindowHandle(this)) > 0)
+            Activated -= OnActivatedInstallBeepSuppressor;
     }
 
     private void OnVerticalTabsToggledFromSettings(bool vertical)
@@ -1018,6 +1043,10 @@ public sealed partial class MainWindow : Window
         // down the libghostty host.
         foreach (var t in _tabManager.Tabs) t.PaneHost.DisposeAllLeaves();
         _host.Dispose();
+
+        // Restore the original WndProc before the HWND is destroyed.
+        _beepSuppressor?.Dispose();
+        _beepSuppressor = null;
     }
 
     private void OnVerticalSwitchButtonClick(object sender, RoutedEventArgs e)
