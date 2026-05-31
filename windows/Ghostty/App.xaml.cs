@@ -63,6 +63,11 @@ public partial class App : Application
     // alive across regular window close/reopen cycles.
     private MainWindow? _quakeWindow;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
+    private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
+    // Reentrancy guard for the Alt+Space system menu: TrackPopupMenu runs
+    // a modal loop, and the keyboard hook keeps firing inside it, so a
+    // repeat press would otherwise stack a second menu on top.
+    private bool _systemMenuOpen;
 
     // The quake chord comes from the quick-terminal-key config value
     // (read via ConfigService.QuickTerminalKeyChord). QuickTerminalKeyChord.Default
@@ -611,6 +616,22 @@ public partial class App : Application
             DispatcherQueue.GetForCurrentThread(),
             factory.CreateLogger<Ghostty.Hosting.WindowsGlobalHotKey>());
         _quakeHotKey.Pressed += (_, _) => ToggleQuickTerminal();
+
+        // Alt+Space opens the window system menu (Move / Size / Close...).
+        // WinUI's input pre-translate consumes the Alt+Space key-down
+        // before any window proc sees it, so a thread keyboard hook is the
+        // only place to catch the chord. Scoped to this UI thread and torn
+        // down on shutdown alongside the quake hotkey.
+        _systemMenuHook = new Ghostty.Hosting.WindowsSystemMenuHook(
+            DispatcherQueue.GetForCurrentThread(),
+            hwnd =>
+            {
+                if (_systemMenuOpen) return;
+                _systemMenuOpen = true;
+                try { Ghostty.Branding.SystemMenuPopup.ShowForWindow(hwnd); }
+                finally { _systemMenuOpen = false; }
+            });
+        _systemMenuHook.Enable();
         RegisterQuakeHotKey();
 
         // Re-claim the chord whenever the config changes so an edited
@@ -799,6 +820,7 @@ public partial class App : Application
                 // that registered it).
                 _configService.ConfigChanged -= OnConfigReloaded_ReRegisterHotKey;
                 _quakeHotKey?.Dispose();
+                _systemMenuHook?.Dispose();
 
                 // Force-close the quake window. It does not participate
                 // in WindowsByRoot (so this branch fires when the last
