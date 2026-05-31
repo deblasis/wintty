@@ -144,5 +144,5 @@ internal sealed class BuiltInCommandSource : ICommandSource
     }
 
     private static KeyBinding? FindShortcut(PaneAction action) =>
-        KeyBindings.Default.Find(action);
+        KeyBindings.WindowsOnly.Find(action);
 }
