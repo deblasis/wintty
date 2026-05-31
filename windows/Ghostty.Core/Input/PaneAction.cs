@@ -40,7 +40,7 @@ public enum PaneAction
     ToggleCommandPalette = 27,
 
     // Profiles (PR 5). One concrete member per slot mirrors JumpTab1..JumpTab8.
-    // KeyBindings.Default maps Ctrl+Shift+Number1..Number9 -> these.
+    // KeyBindings.WindowsOnly maps Ctrl+Shift+Number1..Number9 -> these.
     OpenProfile1 = 28,
     OpenProfile2 = 29,
     OpenProfile3 = 30,
