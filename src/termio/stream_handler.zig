@@ -32,6 +32,10 @@ pub const StreamHandler = struct {
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
 
+    /// Set once we have emitted the first_render signal for this surface,
+    /// so we emit it at most once. Surface-scoped: never reset.
+    first_render_sent: bool = false,
+
     /// The shared render state
     renderer_state: *renderer.State,
 
@@ -226,6 +230,10 @@ pub const StreamHandler = struct {
             .print => {
                 @branchHint(.likely);
                 try self.terminal.print(value.cp);
+                if (!self.first_render_sent) {
+                    self.first_render_sent = true;
+                    self.surfaceMessageWriter(.first_render);
+                }
             },
             .print_slice => {
                 @branchHint(.likely);
