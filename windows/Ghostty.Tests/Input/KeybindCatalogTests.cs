@@ -62,4 +62,46 @@ public class KeybindCatalogTests
         var rows = KeybindCatalog.Build(Sample()).Filter("   ");
         Assert.Equal(3, rows.OfType<KeybindListItem>().Count());
     }
+
+    [Fact]
+    public void Build_AttachesTerminalShadowConflict()
+    {
+        // key_c = 22, Ctrl only -> shadow. (Action text is arbitrary here.)
+        var binds = new System.Collections.Generic.List<EnumeratedKeybind>
+        {
+            Kb("copy_to_clipboard:mixed", 22, 1u << 1), // Ctrl+C
+        };
+        var cat = KeybindCatalog.Build(binds);
+        var item = cat.Categories.SelectMany(c => c.Items).Single();
+        Assert.Equal(ConflictKind.TerminalShadow, item.Conflict.Kind);
+    }
+
+    [Fact]
+    public void Build_NoConflictForNormalChord()
+    {
+        var cat = KeybindCatalog.Build(Sample());
+        Assert.All(cat.Categories.SelectMany(c => c.Items),
+            i => Assert.Equal(ConflictKind.None, i.Conflict.Kind));
+    }
+
+    [Fact]
+    public void Filter_ConflictsOnly_KeepsOnlyConflicting()
+    {
+        var binds = new System.Collections.Generic.List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 39, 1u << 1),                 // Ctrl+T  (no shadow)
+            Kb("copy_to_clipboard:mixed", 22, 1u << 1), // Ctrl+C  (shadow)
+        };
+        var rows = KeybindCatalog.Build(binds).Filter(null, conflictsOnly: true);
+        var items = rows.OfType<KeybindListItem>().ToList();
+        Assert.Single(items);
+        Assert.Equal("copy_to_clipboard:mixed", items[0].RawAction);
+    }
+
+    [Fact]
+    public void Filter_ConflictsOnly_False_ReturnsAll()
+    {
+        var rows = KeybindCatalog.Build(Sample()).Filter(null, conflictsOnly: false);
+        Assert.Equal(3, rows.OfType<KeybindListItem>().Count());
+    }
 }
