@@ -4,6 +4,7 @@ const Binding = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.keybind);
 const assert = @import("../quirks.zig").inlineAssert;
 const build_config = @import("../build_config.zig");
 const uucode = @import("uucode");
@@ -2274,6 +2275,76 @@ pub const Set = struct {
             };
         }
     };
+
+    /// Maximum trigger steps in a flattened keybind (leader sequences).
+    /// Keep in sync with GHOSTTY_KEYBIND_MAX_STEPS (ghostty.h) and
+    /// KeybindInterop.MaxSteps (C#).
+    pub const keybind_max_steps = 4;
+
+    /// A flattened keybind for the C ABI. Sync with ghostty_keybind_s.
+    /// A leader sequence becomes one entry with step_count > 1.
+    pub const CEntry = extern struct {
+        steps: [keybind_max_steps]Trigger.C = @splat(.{}),
+        step_count: u32 = 0,
+        action: [*:0]const u8 = "",
+        flags: u32 = 0,
+    };
+
+    /// Flatten every binding (depth-first over the insertion-ordered map) into a
+    /// slice of CEntry allocated with `alloc`. Action strings are allocPrintZ'd
+    /// with `alloc`; the caller owns the returned slice and its strings.
+    pub fn cList(self: *const Set, alloc: Allocator) ![]CEntry {
+        var list: std.ArrayListUnmanaged(CEntry) = .{};
+        errdefer list.deinit(alloc);
+        var path: [keybind_max_steps]Trigger = undefined;
+        try cListWalk(self, alloc, &path, 0, &list);
+        return list.toOwnedSlice(alloc);
+    }
+
+    fn cListWalk(
+        set: *const Set,
+        alloc: Allocator,
+        path: *[keybind_max_steps]Trigger,
+        depth: usize,
+        list: *std.ArrayListUnmanaged(CEntry),
+    ) !void {
+        var it = set.bindings.iterator();
+        while (it.next()) |entry| {
+            if (depth < keybind_max_steps) path[depth] = entry.key_ptr.*;
+            switch (entry.value_ptr.*) {
+                .leader => |next| try cListWalk(next, alloc, path, depth + 1, list),
+                .leaf => |leaf| try cListEmit(alloc, path, depth, leaf.action, leaf.flags, list),
+                // A chained trigger emits one entry per action, all sharing the
+                // same trigger path and flags. Consumers see repeated triggers.
+                .leaf_chained => |chain| for (chain.actions.items) |action| {
+                    try cListEmit(alloc, path, depth, action, chain.flags, list);
+                },
+            }
+        }
+    }
+
+    fn cListEmit(
+        alloc: Allocator,
+        path: *const [keybind_max_steps]Trigger,
+        depth: usize,
+        action: Action,
+        flags: Flags,
+        list: *std.ArrayListUnmanaged(CEntry),
+    ) !void {
+        // Sequences deeper than the cap are truncated to the first
+        // keybind_max_steps triggers. Two such sequences sharing a prefix
+        // collapse to the same entry, so (steps, step_count) is not a unique key.
+        const count = @min(depth + 1, keybind_max_steps);
+        if (depth + 1 > keybind_max_steps) {
+            log.warn("keybind sequence exceeds {d} steps; clamping", .{keybind_max_steps});
+        }
+        var e: CEntry = .{};
+        for (0..count) |i| e.steps[i] = path[i].cval();
+        e.step_count = @intCast(count);
+        e.action = (try std.fmt.allocPrintSentinel(alloc, "{f}", .{action}, 0)).ptr;
+        e.flags = @intCast(flags.cval());
+        try list.append(alloc, e);
+    }
 
     /// A full key-value entry for the set.
     pub const Entry = HashMap.Entry;
@@ -4884,4 +4955,44 @@ test "set: formatEntries leaf_chained with text action" {
         \\
     ;
     try testing.expectEqualStrings(expected, output.written());
+}
+
+test "Set.cList: single chord" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var set: Set = .{};
+    try set.parseAndPut(alloc, "ctrl+shift+t=new_tab");
+
+    const entries = try set.cList(alloc);
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqual(@as(u32, 1), entries[0].step_count);
+    try testing.expectEqualStrings("new_tab", std.mem.span(entries[0].action));
+}
+
+test "Set.cList: sequence and flags" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var set: Set = .{};
+    try set.parseAndPut(alloc, "performable:alt+shift+equal=new_split:right");
+    try set.parseAndPut(alloc, "ctrl+k>ctrl+s=write_screen_file:paste");
+
+    const entries = try set.cList(alloc);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+
+    var seq: ?Set.CEntry = null;
+    var perf: ?Set.CEntry = null;
+    for (entries) |e| {
+        if (e.step_count == 2) seq = e;
+        if (std.mem.eql(u8, std.mem.span(e.action), "new_split:right")) perf = e;
+    }
+    try testing.expect(seq != null);
+    try testing.expectEqual(@as(u32, 2), seq.?.step_count);
+    try testing.expect(perf != null);
+    try testing.expectEqual(@as(u32, 0b1001), perf.?.flags); // consumed(1) + performable(8)
 }

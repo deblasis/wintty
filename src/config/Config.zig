@@ -3952,6 +3952,10 @@ _arena: ?ArenaAllocator = null,
 /// the configuration.
 _diagnostics: cli.DiagnosticList = .{},
 
+/// Lazily-built flattened keybind list for the enumerate-keybinds C ABI.
+/// Allocated in _arena, so freed by _arena.deinit (no explicit free).
+_keybinds_c: ?[]inputpkg.Binding.Set.CEntry = null,
+
 /// The conditional truths for the configuration. This is used to
 /// determine if a conditional configuration matches or not.
 _conditional_state: conditional.State = .{},
@@ -3971,6 +3975,22 @@ _replay_steps: std.ArrayList(Replay.Step) = .empty,
 pub fn deinit(self: *Config) void {
     if (self._arena) |arena| arena.deinit();
     self.* = undefined;
+}
+
+/// Returns the flattened keybind list, building + caching it on first call.
+/// Slice + strings live in _arena (freed at deinit). Empty on alloc failure.
+/// The cache assumes a finalized, immutable config; it is not rebuilt if the
+/// keybind set changes after the first call (callers re-enumerate via a fresh
+/// config on reload, matching the cached-diagnostics lifetime model).
+pub fn keybindsCList(self: *Config) []const inputpkg.Binding.Set.CEntry {
+    if (self._keybinds_c) |list| return list;
+    const alloc = self._arena.?.allocator();
+    const list = self.keybind.set.cList(alloc) catch |err| {
+        log.warn("failed to build keybind C list: {}", .{err});
+        return &.{};
+    };
+    self._keybinds_c = list;
+    return list;
 }
 
 /// Load the configuration according to the default rules:
