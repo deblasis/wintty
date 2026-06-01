@@ -64,7 +64,7 @@ internal sealed partial class KeybindingsPage : Page
     {
         var binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
         _catalog = KeybindCatalog.Build(binds);
-        BindingsList.ItemsSource = _catalog.Flatten();
+        ApplyFilter();
     }
 
     private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
@@ -79,6 +79,19 @@ internal sealed partial class KeybindingsPage : Page
             case KeybindListItem item when root is Grid grid:
                 if (grid.FindName("FriendlyText") is TextBlock f) f.Text = item.Friendly;
                 if (grid.FindName("LabelText") is TextBlock l) l.Text = item.Label;
+                if (grid.FindName("ConflictIcon") is FontIcon icon)
+                {
+                    if (item.Conflict.HasConflict)
+                    {
+                        icon.Visibility = Visibility.Visible;
+                        ToolTipService.SetToolTip(icon, item.Conflict.Message);
+                    }
+                    else
+                    {
+                        icon.Visibility = Visibility.Collapsed;
+                        ToolTipService.SetToolTip(icon, null);
+                    }
+                }
                 break;
         }
     }
@@ -86,6 +99,11 @@ internal sealed partial class KeybindingsPage : Page
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
         if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
-        BindingsList.ItemsSource = _catalog.Filter(sender.Text);
+        ApplyFilter();
     }
+
+    private void ConflictsToggle_Toggled(object sender, RoutedEventArgs e) => ApplyFilter();
+
+    private void ApplyFilter()
+        => BindingsList.ItemsSource = _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true);
 }
