@@ -953,6 +953,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (CommandPaletteIsOpen) return;
 
+        // Suppress forwarding while the in-pane search bar owns keyboard
+        // focus: its controls are children of this visual tree, so their
+        // KeyDown bubbles up here and would otherwise also run in the
+        // shell. Gate on live focus rather than the bar's open state so
+        // typing keeps reaching the terminal when the bar is left visible
+        // after the user clicks back into the surface.
+        if (SearchBar.ContainsFocus) return;
+
         // Stamp the shared host so VerticalTabHost's hover-expand
         // suppression knows the user is mid-typing and holds back
         // the sidebar pop-open. Unconditional: we want every key
@@ -986,6 +994,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
+        // Mirror OnKeyDown: while the search bar owns focus, swallow the
+        // key-up too so libghostty never sees a release for a press it
+        // never received.
+        if (SearchBar.ContainsFocus) return;
+
         // Same short-circuit so the matching key-up never reaches
         // libghostty either. Without this, libghostty would see a
         // stray release for a press it never saw. Assumes every bound
@@ -1083,6 +1096,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void OnCharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+
+        // WM_CHAR from the focused search bar bubbles up here too. Drop it
+        // so typed characters edit the needle only and never reach
+        // libghostty as terminal text. See the matching guard in OnKeyDown.
+        if (SearchBar.ContainsFocus) return;
 
         // If the matching OnKeyDown short-circuited a bound chord, drop
         // the WM_CHAR that follows. WinUI 3 raises CharacterReceived
