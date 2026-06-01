@@ -39,4 +39,23 @@ public class UserKeybindEditorTests
         var lines = new[] { "ctrl+key_t=unbind" };
         Assert.Empty(UserKeybindEditor.Reset(lines, Kb(39, 1u << 1)));
     }
+
+    [Fact]
+    public void Reset_RemovesAllSameTriggerLines_ButKeepsSequencesAndOtherTriggers()
+    {
+        // ctrl+key_t bound twice (last-wins keeps one active); a sequence that only
+        // shares the first step; and an unrelated trigger. Reset of ctrl+key_t drops
+        // both ctrl+key_t lines, keeps the sequence and the other trigger.
+        var lines = new[]
+        {
+            "ctrl+key_t=new_tab",
+            "ctrl+key_t=new_window",
+            "ctrl+key_t>key_x=new_window", // sequence: different whole-trigger
+            "ctrl+key_a=copy_to_clipboard",
+        };
+        var result = UserKeybindEditor.Reset(lines, Kb(39, 1u << 1)); // ctrl+key_t
+        Assert.Equal(
+            new[] { "ctrl+key_t>key_x=new_window", "ctrl+key_a=copy_to_clipboard" },
+            result);
+    }
 }

@@ -23,7 +23,14 @@ public static class UserKeybindEditor
         return already ? lines.ToArray() : lines.Append(unbindLine).ToArray();
     }
 
-    /// <summary>Remove every user line whose trigger matches the binding's trigger.</summary>
+    /// <summary>
+    /// Remove every user line whose (whole) trigger matches the binding's trigger,
+    /// reverting that trigger fully to its compiled default. This is intentionally
+    /// trigger-only (not trigger+action like Unbind): "reset this trigger" drops all
+    /// of the user's customizations of it, which is correct under last-wins where only
+    /// one user line for a trigger is ever active. A sequence line that merely shares
+    /// the first step has a different whole-trigger canonical form and is NOT removed.
+    /// </summary>
     public static string[] Reset(IReadOnlyList<string> lines, EnumeratedKeybind binding)
     {
         var canonical = KeybindTriggerSyntax.Canonicalize(KeybindTriggerSyntax.Encode(binding));
