@@ -1191,6 +1191,16 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .first_render => {
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .first_render,
+                {},
+            ) catch |err| {
+                log.warn("apprt failed to notify first render={}", .{err});
+            };
+        },
+
         .search_total => |v| {
             _ = try self.rt_app.performAction(
                 .{ .surface = self },
