@@ -165,6 +165,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         ProgressChanged?.Invoke(this, state);
     }
     internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
+    internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
 
     // Called on the libghostty thread. Stashes the latest state and
     // enqueues a single UI-thread flush. Coalescing: if libghostty
@@ -292,6 +293,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>Raised when the shell prompt becomes interactive (OSC 133;B).
     /// The first such event per surface marks the shell as responsive.</summary>
     public event EventHandler? PromptReady;
+
+    /// <summary>Raised once, the first time this surface produces
+    /// renderable content (libghostty first_render). Shell-agnostic, so
+    /// it fires for any command; PaneHost uses it to end the startup
+    /// glow.</summary>
+    public event EventHandler? FirstRender;
 
     public TerminalControl()
     {
@@ -472,6 +479,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         HoveredLinkChanged = null;
         ProgressChanged = null;
         PromptReady = null;
+        FirstRender = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
