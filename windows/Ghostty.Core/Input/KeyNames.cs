@@ -29,7 +29,7 @@ public static class KeyNames
         "escape", "f1", "f2", "f3", "f4", "f5", "f6", "f7",
         "f8", "f9", "f10", "f11", "f12", "f13", "f14", "f15",
         "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
-        "f24", "f25", "fn_lock", "print_screen", "scroll_lock", "pause", "browser_back", "browser_favorites",
+        "f24", "f25", "fn", "fn_lock", "print_screen", "scroll_lock", "pause", "browser_back", "browser_favorites",
         "browser_forward", "browser_home", "browser_refresh", "browser_search", "browser_stop", "eject", "launch_app_1", "launch_app_2",
         "launch_mail", "media_play_pause", "media_select", "media_stop", "media_track_next", "media_track_previous", "power", "sleep",
         "audio_volume_down", "audio_volume_mute", "audio_volume_up", "wake_up", "copy", "cut", "paste",

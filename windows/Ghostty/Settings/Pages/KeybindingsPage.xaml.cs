@@ -36,10 +36,19 @@ internal sealed partial class KeybindingsPage : Page
 
         _catalog = KeybindCatalog.Build(Array.Empty<EnumeratedKeybind>());
         BindingsList.ContainerContentChanging += OnContainerContentChanging;
-        Rebuild();
 
-        _configService.ConfigChanged += OnConfigChanged;
+        // Subscribe in Loaded (not the ctor): SettingsWindow caches pages and
+        // reuses the instance, so the ctor runs once but Loaded/Unloaded fire on
+        // every navigation. Pairing here keeps the subscription correct across
+        // re-shows (matches ColorsPage / RawEditorPage).
+        Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _configService.ConfigChanged += OnConfigChanged;
+        Rebuild(); // refresh in case the config changed while detached
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
