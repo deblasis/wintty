@@ -122,11 +122,25 @@ internal sealed partial class AppearancePage : Page
 
         // Re-seed the gradient editor when the config file changes on disk.
         // The editor's own writes set _loading/SuppressWatcher, so this only
-        // fires for genuine external edits.
-        _configService.ConfigChanged += OnConfigChanged;
-        Unloaded += (_, _) => _configService.ConfigChanged -= OnConfigChanged;
+        // fires for genuine external edits. Subscribe in Loaded rather than the
+        // ctor: SettingsWindow caches and reuses page instances, so the ctor
+        // runs once while Loaded/Unloaded fire on every navigation. A ctor-time
+        // subscription paired with an Unloaded unsubscribe would be dropped the
+        // first time the user navigates away and never restored on return.
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
 
         LoadFontsAsync();
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _configService.ConfigChanged += OnConfigChanged;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _configService.ConfigChanged -= OnConfigChanged;
     }
 
     private void SelectWindowTheme(string theme)
