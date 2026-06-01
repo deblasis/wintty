@@ -2331,7 +2331,7 @@ pub const Set = struct {
         var e: CEntry = .{};
         for (0..count) |i| e.steps[i] = path[i].cval();
         e.step_count = @intCast(count);
-        e.action = try std.fmt.allocPrintZ(alloc, "{f}", .{action});
+        e.action = (try std.fmt.allocPrintSentinel(alloc, "{f}", .{action}, 0)).ptr;
         e.flags = @intCast(flags.cval());
         try list.append(alloc, e);
     }
