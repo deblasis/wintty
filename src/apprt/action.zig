@@ -350,6 +350,13 @@ pub const Action = union(Key) {
     /// The shell prompt became interactive (OSC 133;B). Payload-less.
     prompt_ready,
 
+    /// The surface has produced renderable content for the first time
+    /// since it was created. Fired exactly once per surface. The source
+    /// of this signal is intentionally unspecified (see prompt_ready for
+    /// the same pattern) so the trigger can change without affecting
+    /// apprt consumers.
+    first_render,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -419,6 +426,7 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         prompt_ready,
+        first_render,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
