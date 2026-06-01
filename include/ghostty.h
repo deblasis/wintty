@@ -385,6 +385,21 @@ typedef struct {
   ghostty_input_mods_e mods;
 } ghostty_input_trigger_s;
 
+// Maximum trigger steps in a single enumerated keybind (leader sequences).
+// Bindings longer than this are clamped with a logged warning. Keep in sync
+// with input.Binding.keybind_max_steps (Zig) and KeybindInterop.MaxSteps (C#).
+#define GHOSTTY_KEYBIND_MAX_STEPS 4
+
+// A single parsed keybind, flattened so a leader sequence (e.g. "ctrl+k>ctrl+s")
+// is one entry with multiple steps. Pointers are owned by the ghostty_config_t
+// and are valid until it is freed. Produced by ghostty_config_get_keybind.
+typedef struct {
+  ghostty_input_trigger_s steps[GHOSTTY_KEYBIND_MAX_STEPS];
+  uint32_t step_count;   // number of valid entries in steps (1 for a chord)
+  const char* action;    // null-terminated action string, e.g. "new_split:right"
+  uint32_t flags;        // bitfield of ghostty_binding_flags_e
+} ghostty_keybind_s;
+
 typedef struct {
   const char* action_key;
   const char* action;
@@ -1115,6 +1130,8 @@ GHOSTTY_API ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
 GHOSTTY_API bool ghostty_config_key_is_binding(ghostty_config_t, ghostty_input_key_s);
 GHOSTTY_API uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 GHOSTTY_API ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
+GHOSTTY_API uint32_t ghostty_config_keybinds_count(ghostty_config_t);
+GHOSTTY_API ghostty_keybind_s ghostty_config_get_keybind(ghostty_config_t, uint32_t);
 GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
 
 GHOSTTY_API ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
