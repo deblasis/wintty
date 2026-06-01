@@ -340,6 +340,14 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyDiagnostic ConfigGetDiagnostic(GhosttyConfig config, uint index);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_keybinds_count")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial uint ConfigKeybindsCount(GhosttyConfig config);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_get_keybind")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyKeybindC ConfigGetKeybind(GhosttyConfig config, uint idx);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_config_open_path")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyString ConfigOpenPath();
