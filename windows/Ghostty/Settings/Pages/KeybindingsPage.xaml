@@ -11,9 +11,18 @@
                        Margin="0,12,0,4" />
         </DataTemplate>
         <DataTemplate x:Key="KeybindEntryTemplate">
-            <Grid ColumnDefinitions="*,Auto" Padding="8,4">
+            <Grid ColumnDefinitions="*,Auto,Auto" Padding="8,4">
                 <TextBlock x:Name="FriendlyText" VerticalAlignment="Center" />
-                <Border Grid.Column="1"
+                <FontIcon x:Name="ConflictIcon"
+                          Grid.Column="1"
+                          Glyph="&#xE7BA;"
+                          FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                          FontSize="14"
+                          Margin="0,0,8,0"
+                          VerticalAlignment="Center"
+                          Visibility="Collapsed" />
+                <Border Grid.Column="2"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
                         CornerRadius="4" Padding="8,2">
                     <TextBlock x:Name="LabelText"
@@ -31,13 +40,20 @@
     <Grid Padding="24" RowDefinitions="Auto,Auto,*">
         <TextBlock Text="Keybindings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
 
-        <AutoSuggestBox
-            x:Name="SearchBox"
-            Grid.Row="1"
-            PlaceholderText="Search by action or key..."
-            QueryIcon="Find"
-            TextChanged="SearchBox_TextChanged"
-            Margin="0,0,0,16" />
+        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
+            <AutoSuggestBox
+                x:Name="SearchBox"
+                PlaceholderText="Search by action or key..."
+                QueryIcon="Find"
+                TextChanged="SearchBox_TextChanged" />
+            <ToggleButton
+                x:Name="ConflictsToggle"
+                Grid.Column="1"
+                Content="Conflicts"
+                Margin="8,0,0,0"
+                Checked="ConflictsToggle_Toggled"
+                Unchecked="ConflictsToggle_Toggled" />
+        </Grid>
 
         <ListView x:Name="BindingsList"
                   Grid.Row="2"
