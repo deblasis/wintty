@@ -4961,3 +4961,28 @@ test "Set.cList: single chord" {
     try testing.expectEqual(@as(u32, 1), entries[0].step_count);
     try testing.expectEqualStrings("new_tab", std.mem.span(entries[0].action));
 }
+
+test "Set.cList: sequence and flags" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var set: Set = .{};
+    try set.parseAndPut(alloc, "performable:alt+shift+equal=new_split:right");
+    try set.parseAndPut(alloc, "ctrl+k>ctrl+s=write_screen_file:paste");
+
+    const entries = try set.cList(alloc);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+
+    var seq: ?Set.CEntry = null;
+    var perf: ?Set.CEntry = null;
+    for (entries) |e| {
+        if (e.step_count == 2) seq = e;
+        if (std.mem.eql(u8, std.mem.span(e.action), "new_split:right")) perf = e;
+    }
+    try testing.expect(seq != null);
+    try testing.expectEqual(@as(u32, 2), seq.?.step_count);
+    try testing.expect(perf != null);
+    try testing.expectEqual(@as(u32, 0b1001), perf.?.flags); // consumed(1) + performable(8)
+}
