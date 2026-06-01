@@ -106,6 +106,38 @@ public sealed partial class SearchBarControl : UserControl
         NeedleBox.SelectAll();
     }
 
+    /// <summary>
+    /// True while keyboard focus is anywhere inside the search bar (the
+    /// needle box or the prev/next/close buttons). The parent reads this
+    /// to gate terminal key forwarding: the bar is a child of
+    /// TerminalControl's visual tree, so its KeyDown and CharacterReceived
+    /// events bubble up to the TerminalControl handlers that forward input
+    /// to libghostty. Without this gate, keystrokes (and characters, while
+    /// the needle is focused) would also reach the shell.
+    ///
+    /// Tracking live focus rather than the bar's open state is deliberate:
+    /// the bar can stay visible after the user clicks back into the
+    /// terminal surface, and in that case typing must keep flowing to the
+    /// shell. Containment (not just the needle) matters because focusing a
+    /// nav button would otherwise re-open the same leak for keys the button
+    /// does not consume.
+    /// </summary>
+    public bool ContainsFocus
+    {
+        get
+        {
+            // XamlRoot is null until the control is loaded; no focus to own.
+            if (XamlRoot is null) return false;
+            var node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+            while (node is not null)
+            {
+                if (ReferenceEquals(node, this)) return true;
+                node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+            }
+            return false;
+        }
+    }
+
     // ── Event handlers ────────────────────────────────────────────────
 
     private void OnNeedleTextChanged(object _, TextChangedEventArgs __)

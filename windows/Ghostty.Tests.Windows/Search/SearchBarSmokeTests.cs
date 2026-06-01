@@ -53,4 +53,32 @@ public class SearchBarSmokeTests
     public void SearchTotalAndSelected_FromLibghostty_FlowToCounterText()
     {
     }
+
+    // Smoke spec for keyboard-focus isolation while the search bar is open.
+    //
+    // The search bar's controls are children of TerminalControl's visual
+    // tree, so their KeyDown / CharacterReceived routed events bubble to
+    // the TerminalControl handlers that forward input to libghostty.
+    // Without a guard, every character typed into the needle also reaches
+    // the shell. TerminalControl.OnKeyDown / OnKeyUp / OnCharacterReceived
+    // gate on SearchBarControl.ContainsFocus (live focus anywhere in the
+    // bar, not the bar's open state) so the leak is closed without killing
+    // terminal typing when the bar is left visible and the user clicks back
+    // into the surface.
+    //
+    // To validate by hand once the binary lands:
+    //
+    // 1. Open wintty on a pwsh pane.
+    // 2. Press Ctrl+Shift+F, then type "hello". The text appears ONLY in
+    //    the search needle; nothing is echoed at the shell prompt.
+    // 3. Press Esc. Focus returns to the terminal; type "echo hi" and
+    //    confirm it reaches the shell normally.
+    // 4. Press Ctrl+Shift+F again, then click back into the terminal
+    //    surface while the bar stays visible. Typing now reaches the shell
+    //    (the needle no longer holds focus), confirming the gate keys off
+    //    focus rather than the bar's open state.
+    [Fact(Skip = "Manual smoke; key forwarding needs a live MainWindow + libghostty surface.")]
+    public void SearchNeedleFocused_KeystrokesDoNotLeakToShell_ButReachShellWhenSurfaceFocused()
+    {
+    }
 }
