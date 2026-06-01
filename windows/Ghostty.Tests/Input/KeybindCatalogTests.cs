@@ -8,7 +8,7 @@ namespace Ghostty.Tests.Input;
 
 public class KeybindCatalogTests
 {
-    private static EnumeratedKeybind Kb(string action, int key, uint mods)
+    private static EnumeratedKeybind Kb(string action, uint key, uint mods)
         => new(new[] { new KeybindTrigger(0, key, mods) }, action, GhosttyBindingFlags.Consumed);
 
     private static List<EnumeratedKeybind> Sample() => new()
