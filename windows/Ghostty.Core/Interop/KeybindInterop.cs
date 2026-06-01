@@ -54,9 +54,8 @@ public static class KeybindInterop
         var count = (int)Math.Min(c.StepCount, (uint)MaxSteps);
         var steps = new List<KeybindTrigger>(count);
 
-        // InlineArray indexing needs a writable ref, but `c` is an `in`
-        // parameter; copy the inline buffer to a local first so the
-        // indexer is happy.
+        // InlineArray's indexer requires a writable ref, which an `in`
+        // parameter forbids, so copy the (small, cold-path) buffer locally.
         var stepBuffer = c.Steps;
         for (var i = 0; i < count; i++)
         {

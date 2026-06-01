@@ -46,4 +46,26 @@ public class KeybindMapperTests
         Assert.Equal(KeybindInterop.MaxSteps, result.Steps.Count);
         Assert.Equal(string.Empty, result.Action);
     }
+
+    [Fact]
+    public void ToEnumerated_PreservesMultiStepSequenceOrder()
+    {
+        var c = new GhosttyKeybindC { StepCount = 2, Action = IntPtr.Zero };
+        c.Steps[0] = new GhosttyTriggerC { Tag = 0, Key = 11, Mods = 1 };
+        c.Steps[1] = new GhosttyTriggerC { Tag = 0, Key = 22, Mods = 2 };
+
+        var result = KeybindInterop.ToEnumerated(c);
+
+        Assert.Equal(2, result.Steps.Count);
+        Assert.Equal(11u, result.Steps[0].Key);
+        Assert.Equal(22u, result.Steps[1].Key);
+    }
+
+    [Fact]
+    public void ToEnumerated_HandlesZeroSteps()
+    {
+        var c = new GhosttyKeybindC { StepCount = 0, Action = IntPtr.Zero };
+        var result = KeybindInterop.ToEnumerated(c);
+        Assert.Empty(result.Steps);
+    }
 }

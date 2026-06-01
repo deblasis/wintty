@@ -34,6 +34,9 @@ public class KeybindInteropLayoutTests
         Assert.Equal(48, (int)Marshal.OffsetOf<GhosttyKeybindC>(nameof(GhosttyKeybindC.StepCount)));
         Assert.Equal(56, (int)Marshal.OffsetOf<GhosttyKeybindC>(nameof(GhosttyKeybindC.Action)));
         Assert.Equal(64, (int)Marshal.OffsetOf<GhosttyKeybindC>(nameof(GhosttyKeybindC.Flags)));
+        // Whole-struct size (64 + flags u32 + 4 tail pad) catches a trailing
+        // field or padding change the per-field offsets alone would miss.
+        Assert.Equal(72, Marshal.SizeOf<GhosttyKeybindC>());
     }
 
     [Theory]
