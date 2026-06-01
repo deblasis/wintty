@@ -33,6 +33,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.SearchTotal, 61)]
     [InlineData((int)GhosttyActionTag.SearchSelected, 62)]
     [InlineData((int)GhosttyActionTag.PromptReady, 65)]
+    [InlineData((int)GhosttyActionTag.FirstRender, 66)]
     public void ActionTag_Ordinal_Matches_Upstream(int tag, int expected)
     {
         Assert.Equal(expected, tag);
