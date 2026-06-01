@@ -46,6 +46,7 @@ internal enum GhosttyActionTag
     SearchTotal    = 61,
     SearchSelected = 62,
     PromptReady    = 65,
+    FirstRender    = 66,
 }
 
 // ghostty_action_scrollbar_s:
