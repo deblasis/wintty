@@ -103,6 +103,11 @@ pub const Message = union(enum) {
     /// Forwarded to the apprt as the `prompt_ready` action.
     prompt_input,
 
+    /// The terminal produced renderable content for the first time since
+    /// the surface was created. Forwarded to the apprt as the
+    /// `first_render` action.
+    first_render,
+
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,
 
