@@ -15,6 +15,10 @@ public enum KeybindSource
 /// </summary>
 public static class KeybindSourceClassifier
 {
+    // '|' cannot appear in an encoded trigger (mods/'+'/'>'/key-name) or in an
+    // action string, so distinct (trigger, action) pairs never collide.
+    private const char Separator = '|';
+
     public static KeybindSource Classify(EnumeratedKeybind kb, HashSet<string> defaultKeys)
         => defaultKeys.Contains(KeyOf(kb)) ? KeybindSource.Default : KeybindSource.User;
 
@@ -26,5 +30,5 @@ public static class KeybindSourceClassifier
     }
 
     private static string KeyOf(EnumeratedKeybind kb)
-        => KeybindTriggerSyntax.Encode(kb) + "" + kb.Action;
+        => KeybindTriggerSyntax.Encode(kb) + Separator + kb.Action;
 }
