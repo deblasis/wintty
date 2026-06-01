@@ -5,7 +5,7 @@ using System.Linq;
 namespace Ghostty.Core.Input;
 
 /// <summary>One displayed keybind row.</summary>
-public sealed record KeybindListItem(string Friendly, string RawAction, string Label, Interop.GhosttyBindingFlags Flags);
+public sealed record KeybindListItem(string Friendly, string RawAction, string Label, Interop.GhosttyBindingFlags Flags, KeybindConflict Conflict);
 
 /// <summary>A category header row in the flattened list.</summary>
 public sealed record KeybindCategoryHeader(string Name);
@@ -29,7 +29,9 @@ public sealed class KeybindCatalog
         foreach (var kb in binds)
         {
             var desc = KeybindActionCatalog.Describe(kb.Action);
-            var item = new KeybindListItem(desc.Friendly, kb.Action, TriggerLabeler.Describe(kb), kb.Flags);
+            var item = new KeybindListItem(
+                desc.Friendly, kb.Action, TriggerLabeler.Describe(kb), kb.Flags,
+                KeybindConflictAnalyzer.Analyze(kb));
             if (!byCategory.TryGetValue(desc.Category, out var list))
                 byCategory[desc.Category] = list = new List<KeybindListItem>();
             list.Add(item);
@@ -49,15 +51,19 @@ public sealed class KeybindCatalog
     /// <summary>Header + item rows for a flat ListView (all categories).</summary>
     public IReadOnlyList<object> Flatten() => FlattenFrom(Categories);
 
-    /// <summary>Filtered header + item rows; empty groups are dropped.</summary>
-    public IReadOnlyList<object> Filter(string? query)
+    /// <summary>Filtered header + item rows; empty groups dropped. Optional conflicts-only.</summary>
+    public IReadOnlyList<object> Filter(string? query, bool conflictsOnly = false)
     {
-        if (string.IsNullOrWhiteSpace(query)) return Flatten();
-        var q = query.Trim();
+        var hasQuery = !string.IsNullOrWhiteSpace(query);
+        if (!hasQuery && !conflictsOnly) return Flatten();
+
+        var q = query?.Trim() ?? string.Empty;
         var filtered = Categories
             .Select(c => new KeybindCategory(
                 c.Name,
-                c.Items.Where(i => Matches(i, q)).ToList()))
+                c.Items.Where(i =>
+                    (!hasQuery || Matches(i, q)) &&
+                    (!conflictsOnly || i.Conflict.HasConflict)).ToList()))
             .Where(c => c.Items.Count > 0)
             .ToList();
         return FlattenFrom(filtered);
