@@ -2309,6 +2309,8 @@ pub const Set = struct {
             switch (entry.value_ptr.*) {
                 .leader => |next| try cListWalk(next, alloc, path, depth + 1, list),
                 .leaf => |leaf| try cListEmit(alloc, path, depth, leaf.action, leaf.flags, list),
+                // A chained trigger emits one entry per action, all sharing the
+                // same trigger path and flags. Consumers see repeated triggers.
                 .leaf_chained => |chain| for (chain.actions.items) |action| {
                     try cListEmit(alloc, path, depth, action, chain.flags, list);
                 },
@@ -2324,6 +2326,9 @@ pub const Set = struct {
         flags: Flags,
         list: *std.ArrayListUnmanaged(CEntry),
     ) !void {
+        // Sequences deeper than the cap are truncated to the first
+        // keybind_max_steps triggers. Two such sequences sharing a prefix
+        // collapse to the same entry, so (steps, step_count) is not a unique key.
         const count = @min(depth + 1, keybind_max_steps);
         if (depth + 1 > keybind_max_steps) {
             log.warn("keybind sequence exceeds {d} steps; clamping", .{keybind_max_steps});

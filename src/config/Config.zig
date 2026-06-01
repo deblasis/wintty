@@ -3912,6 +3912,9 @@ pub fn deinit(self: *Config) void {
 
 /// Returns the flattened keybind list, building + caching it on first call.
 /// Slice + strings live in _arena (freed at deinit). Empty on alloc failure.
+/// The cache assumes a finalized, immutable config; it is not rebuilt if the
+/// keybind set changes after the first call (callers re-enumerate via a fresh
+/// config on reload, matching the cached-diagnostics lifetime model).
 pub fn keybindsCList(self: *Config) []const inputpkg.Binding.Set.CEntry {
     if (self._keybinds_c) |list| return list;
     const alloc = self._arena.?.allocator();
