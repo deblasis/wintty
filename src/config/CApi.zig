@@ -132,6 +132,16 @@ export fn ghostty_config_get_diagnostic(self: *Config, idx: u32) Diagnostic {
     return .{ .message = message.ptr };
 }
 
+export fn ghostty_config_keybinds_count(self: *Config) u32 {
+    return @intCast(self.keybindsCList().len);
+}
+
+export fn ghostty_config_get_keybind(self: *Config, idx: u32) inputpkg.Binding.Set.CEntry {
+    const list = self.keybindsCList();
+    if (idx >= list.len) return .{};
+    return list[idx];
+}
+
 export fn ghostty_config_open_path() String {
     const path = edit.openPath(global.alloc()) catch |err| {
         log.err("error opening config in editor err={}", .{err});
@@ -242,6 +252,23 @@ test "ghostty_config_get: struct cval conversion" {
     try testing.expectEqual(@as(u8, 12), out.r);
     try testing.expectEqual(@as(u8, 34), out.g);
     try testing.expectEqual(@as(u8, 56), out.b);
+}
+
+test "ghostty_config_keybinds: count and get" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const count = ghostty_config_keybinds_count(&cfg);
+    try testing.expect(count > 0);
+
+    const kb = ghostty_config_get_keybind(&cfg, 0);
+    try testing.expect(kb.step_count >= 1);
+    try testing.expect(kb.action[0] != 0);
+
+    const oob = ghostty_config_get_keybind(&cfg, count);
+    try testing.expectEqual(@as(u32, 0), oob.step_count);
 }
 
 test "ghostty_config_trigger: default keybind" {
