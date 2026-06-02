@@ -1,9 +1,11 @@
 using System;
+using System.Linq;
 using Ghostty.Core.Input;
 using Ghostty.Interop;
 using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 
 namespace Ghostty.Settings.Pages;
 
@@ -27,11 +29,20 @@ internal sealed partial class KeybindingsPage : Page
     // only exposed on the concrete type; the interface only carries
     // ConfigChanged.
     private readonly ConfigService _configService;
+    private readonly Ghostty.Core.Config.IConfigFileEditor _editor;
     private KeybindCatalog _catalog;
 
-    public KeybindingsPage(ConfigService configService)
+    // The row whose context menu is currently open. WinUI doesn't reliably
+    // populate MenuFlyout.Target for a ContextFlyout, so we capture the
+    // right-tapped row's item here (the row Grid's Tag) instead of walking
+    // the flyout's target chain. Each container's RightTapped handler reads
+    // grid.Tag, which OnContainerContentChanging refreshes on every realize.
+    private KeybindListItem? _contextRowItem;
+
+    public KeybindingsPage(ConfigService configService, Ghostty.Core.Config.IConfigFileEditor editor)
     {
         _configService = configService;
+        _editor = editor;
         InitializeComponent();
 
         _catalog = KeybindCatalog.Build(Array.Empty<EnumeratedKeybind>());
@@ -63,7 +74,8 @@ internal sealed partial class KeybindingsPage : Page
     private void Rebuild()
     {
         var binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
-        _catalog = KeybindCatalog.Build(binds);
+        var defaults = _configService.EnumerateDefaultKeybinds();
+        _catalog = KeybindCatalog.Build(binds, defaults);
         ApplyFilter();
     }
 
@@ -92,8 +104,55 @@ internal sealed partial class KeybindingsPage : Page
                         ToolTipService.SetToolTip(icon, null);
                     }
                 }
+                if (grid.FindName("UserTag") is FrameworkElement tag)
+                    tag.Visibility = item.Source == KeybindSource.User
+                        ? Visibility.Visible
+                        : Visibility.Collapsed;
+
+                // Stash the item on the container so the context-menu handlers
+                // can resolve the right-clicked row. Containers are recycled,
+                // so refresh the Tag every realize. RightTapped is wired with
+                // -=/+= so the recycled container never accumulates handlers.
+                grid.Tag = item;
+                grid.RightTapped -= Row_RightTapped;
+                grid.RightTapped += Row_RightTapped;
                 break;
         }
+    }
+
+    private void Row_RightTapped(object sender, RightTappedRoutedEventArgs e)
+        => _contextRowItem = (sender as FrameworkElement)?.Tag as KeybindListItem;
+
+    private void UnbindItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_contextRowItem is not { } item) return;
+        ApplyUserEdit(item, UserKeybindEditor.Unbind);
+    }
+
+    private void ResetItem_Click(object sender, RoutedEventArgs e)
+    {
+        // Reset only makes sense for a user customization; a pure default row
+        // has nothing in the file to remove.
+        if (_contextRowItem is not { } item || item.Source != KeybindSource.User) return;
+        ApplyUserEdit(item, UserKeybindEditor.Reset);
+    }
+
+    private void ApplyUserEdit(
+        KeybindListItem item,
+        Func<string[], EnumeratedKeybind, string[]> op)
+    {
+        // The list item carries only the friendly label, not the trigger
+        // steps the editor needs. Re-find the live EnumeratedKeybind by
+        // matching its action + the same label the row was built from.
+        var binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
+        var match = binds.FirstOrDefault(b =>
+            b.Action == item.RawAction && TriggerLabeler.Describe(b) == item.Label);
+        if (match is null) return;
+
+        var current = _editor.GetRepeatableValues("keybind");
+        var updated = op(current, match);
+        _editor.SetRepeatableValues("keybind", updated);
+        _configService.Reload(); // raises ConfigChanged -> Rebuild
     }
 
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
