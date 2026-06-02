@@ -5,7 +5,7 @@ using System.Linq;
 namespace Ghostty.Core.Input;
 
 /// <summary>One displayed keybind row.</summary>
-public sealed record KeybindListItem(string Friendly, string RawAction, string Label, Interop.GhosttyBindingFlags Flags, KeybindConflict Conflict);
+public sealed record KeybindListItem(string Friendly, string RawAction, string Label, Interop.GhosttyBindingFlags Flags, KeybindConflict Conflict, KeybindSource Source);
 
 /// <summary>A category header row in the flattened list.</summary>
 public sealed record KeybindCategoryHeader(string Name);
@@ -23,15 +23,24 @@ public sealed class KeybindCatalog
 
     private KeybindCatalog(IReadOnlyList<KeybindCategory> categories) => Categories = categories;
 
-    public static KeybindCatalog Build(IReadOnlyList<EnumeratedKeybind> binds)
+    public static KeybindCatalog Build(
+        IReadOnlyList<EnumeratedKeybind> binds,
+        IReadOnlyList<EnumeratedKeybind>? defaults = null)
     {
+        var defaultKeys = defaults is null
+            ? null
+            : KeybindSourceClassifier.BuildDefaultKeys(defaults);
+
         var byCategory = new Dictionary<string, List<KeybindListItem>>(StringComparer.Ordinal);
         foreach (var kb in binds)
         {
             var desc = KeybindActionCatalog.Describe(kb.Action);
+            var source = defaultKeys is null
+                ? KeybindSource.Default
+                : KeybindSourceClassifier.Classify(kb, defaultKeys);
             var item = new KeybindListItem(
                 desc.Friendly, kb.Action, TriggerLabeler.Describe(kb), kb.Flags,
-                KeybindConflictAnalyzer.Analyze(kb));
+                KeybindConflictAnalyzer.Analyze(kb), source);
             if (!byCategory.TryGetValue(desc.Category, out var list))
                 byCategory[desc.Category] = list = new List<KeybindListItem>();
             list.Add(item);

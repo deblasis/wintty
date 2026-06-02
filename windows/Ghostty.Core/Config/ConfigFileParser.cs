@@ -72,6 +72,25 @@ public static class ConfigFileParser
     }
 
     /// <summary>
+    /// Returns the value (RHS of the first '=') of every uncommented line for
+    /// the given key, in file order. Mirrors <see cref="SetRepeatableValues"/>'s
+    /// view of which lines count for a key (uses <see cref="ConfigLine.Parse"/>).
+    /// </summary>
+    public static string[] GetRepeatableValues(string[] lines, string key)
+    {
+        var values = new List<string>();
+        foreach (var line in lines)
+        {
+            var parsed = ConfigLine.Parse(line);
+            if (parsed.IsComment || parsed.IsEmpty || parsed.Key != key)
+                continue;
+            values.Add((parsed.Value ?? string.Empty).TrimEnd());
+        }
+
+        return values.ToArray();
+    }
+
+    /// <summary>
     /// Replace all occurrences of a repeatable key with new values.
     /// Comments out existing lines and appends new ones.
     /// </summary>
