@@ -39,6 +39,7 @@ public class ConfigWriteSchedulerLoggingTests
         public void RemoveValue(string key) { }
         public void WriteRaw(string content) { }
         public void SetRepeatableValues(string key, string[] values) { }
+        public string[] GetRepeatableValues(string key) => System.Array.Empty<string>();
     }
 
     private sealed class ManualTimer : ISchedulerTimer

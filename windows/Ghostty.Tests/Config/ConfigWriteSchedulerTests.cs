@@ -31,6 +31,7 @@ public class ConfigWriteSchedulerTests
         public void RemoveValue(string key) => Removes.Add(key);
         public void WriteRaw(string content) { }
         public void SetRepeatableValues(string key, string[] values) { }
+        public string[] GetRepeatableValues(string key) => System.Array.Empty<string>();
     }
 
     [Fact]
@@ -148,6 +149,7 @@ public class ConfigWriteSchedulerTests
         public void RemoveValue(string key) { }
         public void WriteRaw(string content) { }
         public void SetRepeatableValues(string key, string[] values) { }
+        public string[] GetRepeatableValues(string key) => System.Array.Empty<string>();
     }
 
     [Fact]
