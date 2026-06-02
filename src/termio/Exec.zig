@@ -2535,7 +2535,9 @@ fn maybeInjectUtf8Preamble(
     // because prepending demotes those constructs silently.
     switch (findPreambleConflict(args, preamble)) {
         .none => return appendSuffix(alloc, args, preamble),
-        .cmd_script => |idx| return wrapScript(alloc, args, idx, preamble.prefix()),
+        // cmd re-parses its `/C`/`/K` command line, so the tail must be
+        // re-serialized with MS-C-runtime argv quoting to round-trip.
+        .cmd_script => |idx| return wrapScript(alloc, args, idx, preamble.prefix(), true),
         .pwsh_command => |idx| {
             if (pwshTailRequiresFirstStatement(args[idx + 1 ..])) |reason| {
                 log.debug(
@@ -2545,7 +2547,14 @@ fn maybeInjectUtf8Preamble(
                 );
                 return args;
             }
-            return wrapScript(alloc, args, idx, preamble.prefix());
+            // pwsh `-Command` takes a SCRIPT string, not an argv array.
+            // Re-quoting the tail with argv rules would turn a dot-source
+            // like `. 'C:/x/ghostty.ps1'` into the string literal
+            // `". 'C:/x/ghostty.ps1'"`, which pwsh prints instead of
+            // executing (the integration script then never loads). Join
+            // the tail verbatim, matching how pwsh itself concatenates
+            // post-`-Command` args into the script.
+            return wrapScript(alloc, args, idx, preamble.prefix(), false);
         },
         .pwsh_file, .pwsh_encoded_command => |idx| {
             log.debug(
@@ -2611,19 +2620,25 @@ fn appendSuffix(
 /// prepending `prefix_text` and collapsing the tail into a single argv
 /// element. Produces `args[0..flag_idx+1] ++ [prefix_text ++ tail]`.
 ///
-/// The tail is re-serialized with MS-C-runtime quoting rules (matching
-/// `windowsCreateCommandLine` in Command.zig) so args that originally
-/// contained spaces or quotes round-trip correctly: tokens like
-/// `C:\Program Files` are re-wrapped in quotes when joined back.
+/// `quote_tail` selects how the tail is serialized (see
+/// `buildWrappedScript` for the full rationale): `true` re-quotes each
+/// arg with MS-C-runtime rules for cmd `/C`/`/K`; `false` writes the
+/// tail verbatim for pwsh `-Command` (whose value is script text, not
+/// an argv array). The cmd `/C` interaction described below applies
+/// only to the quoted (`true`) path.
 ///
-/// The resulting command line survives cmd's two-rule `/C` interaction
-/// documented in `cmd /?`: when our wrapped arg contains any embedded
-/// quotes (because we re-quoted a path with spaces), `lpCommandLine`
-/// has inner `"` characters and cmd falls into rule 1 ("preserve
-/// quoting as seen"). When it contains none, the outermost quoting
-/// `windowsCreateCommandLine` adds is trivially symmetric and rule 2
-/// ("strip outer quotes") is safe to apply. Either way cmd sees the
-/// same tokens the user originally wrote.
+/// Quoted path: the tail is re-serialized with MS-C-runtime quoting
+/// rules (matching `windowsCreateCommandLine` in Command.zig) so args
+/// that originally contained spaces or quotes round-trip correctly:
+/// tokens like `C:\Program Files` are re-wrapped in quotes when joined
+/// back. The resulting command line survives cmd's two-rule `/C`
+/// interaction documented in `cmd /?`: when our wrapped arg contains
+/// any embedded quotes (because we re-quoted a path with spaces),
+/// `lpCommandLine` has inner `"` characters and cmd falls into rule 1
+/// ("preserve quoting as seen"). When it contains none, the outermost
+/// quoting `windowsCreateCommandLine` adds is trivially symmetric and
+/// rule 2 ("strip outer quotes") is safe to apply. Either way cmd sees
+/// the same tokens the user originally wrote.
 ///
 /// When `flag_idx+1 == args.len` (flag is the last arg, so there is
 /// nothing to wrap) we leave argv alone rather than fabricate a bare
@@ -2633,6 +2648,7 @@ fn wrapScript(
     args: []const [:0]const u8,
     flag_idx: usize,
     prefix_text: []const u8,
+    quote_tail: bool,
 ) Allocator.Error![]const [:0]const u8 {
     const head = args[0 .. flag_idx + 1];
     const tail = args[flag_idx + 1 ..];
@@ -2642,7 +2658,7 @@ fn wrapScript(
     // `error.WriteFailed`, and the backing is our own allocator, so
     // the only realistic cause is OOM. Fold the single inner function
     // into one `catch` to keep the hot path readable.
-    const wrapped = buildWrappedScript(alloc, prefix_text, tail) catch
+    const wrapped = buildWrappedScript(alloc, prefix_text, tail, quote_tail) catch
         return error.OutOfMemory;
 
     const out = try alloc.alloc([:0]const u8, head.len + 1);
@@ -2651,10 +2667,22 @@ fn wrapScript(
     return out;
 }
 
+/// Join `tail` after `prefix_text` into a single script element.
+///
+/// `quote_tail` selects how the tail is serialized:
+/// - `true` (cmd `/C`/`/K`): re-quote each arg with MS-C-runtime rules
+///   so cmd, which re-parses its command line, sees the same tokens.
+/// - `false` (pwsh `-Command`): write each arg verbatim, space-joined.
+///   A pwsh `-Command` value is SCRIPT text, not an argv array; quoting
+///   a token that contains spaces (e.g. `. 'C:/x/ghostty.ps1'`) would
+///   turn it into a string literal that pwsh prints instead of running.
+///   Verbatim space-join matches how pwsh concatenates post-`-Command`
+///   args into the script.
 fn buildWrappedScript(
     alloc: Allocator,
     prefix_text: []const u8,
     tail: []const [:0]const u8,
+    quote_tail: bool,
 ) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(alloc);
     errdefer buf.deinit();
@@ -2663,7 +2691,7 @@ fn buildWrappedScript(
     try writer.writeAll(prefix_text);
     for (tail, 0..) |arg, i| {
         if (i > 0) try writer.writeByte(' ');
-        try writeQuotedArg(writer, arg);
+        if (quote_tail) try writeQuotedArg(writer, arg) else try writer.writeAll(arg);
     }
     return try buf.toOwnedSliceSentinel(0);
 }
@@ -3546,6 +3574,53 @@ test "execCommand windows: pwsh with multi-token -Command script is joined" {
     try testing.expectEqualStrings("pwsh.exe", result[0]);
     try testing.expectEqualStrings("-Command", result[1]);
     try testing.expect(std.mem.endsWith(u8, result[2], "; Write-Host hello world"));
+}
+
+test "execCommand windows: pwsh -Command script with spaces stays executable" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // A quoted -Command script collapses to a single tail token that
+    // contains spaces (here a dot-source, the shape the PowerShell
+    // shell-integration auto-inject produces). The wrap must keep it as
+    // executable script text, NOT re-quote it into a string literal that
+    // pwsh would print instead of run.
+    const result = try testExecWindowsShell(
+        arena.allocator(),
+        "pwsh.exe -Command \". 'C:/x/ghostty.ps1'\"",
+    );
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("pwsh.exe", result[0]);
+    try testing.expectEqualStrings("-Command", result[1]);
+    // Tail kept verbatim after the UTF-8 setup; no wrapping double quotes.
+    try testing.expect(std.mem.endsWith(u8, result[2], "; . 'C:/x/ghostty.ps1'"));
+    try testing.expect(std.mem.indexOf(u8, result[2], "\". '") == null);
+}
+
+test "execCommand windows: pwsh -Command quoted path among tokens is not re-quoted" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // A quoted path among positional -Command tokens: the tokenizer strips
+    // the quotes (as CommandLineToArgvW would before pwsh concatenates), so
+    // the verbatim join must reproduce the unquoted form pwsh sees natively.
+    // This is the one shape where pwsh (no re-quote) deliberately diverges
+    // from the cmd /c path (which DOES re-quote).
+    const result = try testExecWindowsShell(
+        arena.allocator(),
+        "pwsh.exe -Command Get-ChildItem \"C:\\Program Files\"",
+    );
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("-Command", result[1]);
+    try testing.expect(std.mem.endsWith(u8, result[2], "; Get-ChildItem C:\\Program Files"));
+    // No re-introduced double quotes anywhere in the pwsh script.
+    try testing.expect(std.mem.indexOfScalar(u8, result[2], '"') == null);
 }
 
 test "execCommand windows: cmd /c with quoted path preserves quoting on wrap" {
