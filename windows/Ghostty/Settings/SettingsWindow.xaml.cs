@@ -236,7 +236,7 @@ internal sealed partial class SettingsWindow : Window
                 // The keybindings page reads the libghostty config handle via
                 // the enumerate ABI, which only the concrete ConfigService
                 // exposes. The injected instance is always a ConfigService.
-                "keybindings" => new Pages.KeybindingsPage((ConfigService)_configService),
+                "keybindings" => new Pages.KeybindingsPage((ConfigService)_configService, _editor),
                 "advanced" => new Pages.AdvancedPage(_configService, _editor),
                 "raw" => new Pages.RawEditorPage(_configService, _editor),
                 _ => null,
