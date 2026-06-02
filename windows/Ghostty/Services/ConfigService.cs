@@ -380,6 +380,26 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         return true;
     }
 
+    /// <summary>
+    /// Enumerate the compiled default keybinds only (no user config files),
+    /// for the default-vs-user source diff in the keybindings settings page.
+    /// Deliberately skips <c>ConfigLoadDefaultFiles</c> so the user's file
+    /// doesn't taint the baseline. The throwaway config is freed immediately.
+    /// </summary>
+    public IReadOnlyList<Ghostty.Core.Input.EnumeratedKeybind> EnumerateDefaultKeybinds()
+    {
+        var def = NativeMethods.ConfigNew();
+        try
+        {
+            NativeMethods.ConfigFinalize(def);
+            return KeybindEnumerator.Enumerate(def);
+        }
+        finally
+        {
+            NativeMethods.ConfigFree(def);
+        }
+    }
+
     public string GetDiagnostic(int index)
     {
         if (index < 0 || index >= _diagnosticMessages.Count) return string.Empty;

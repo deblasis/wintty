@@ -104,4 +104,29 @@ public class KeybindCatalogTests
         var rows = KeybindCatalog.Build(Sample()).Filter(null, conflictsOnly: false);
         Assert.Equal(3, rows.OfType<KeybindListItem>().Count());
     }
+
+    [Fact]
+    public void Build_NoDefaults_AllSourceDefault()
+    {
+        var cat = KeybindCatalog.Build(Sample());
+        Assert.All(cat.Categories.SelectMany(c => c.Items), i => Assert.Equal(KeybindSource.Default, i.Source));
+    }
+
+    [Fact]
+    public void Build_WithDefaults_ClassifiesUserVsDefault()
+    {
+        var current = new System.Collections.Generic.List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 39, 1u << 1),       // Ctrl+key_t  -> matches a default below
+            Kb("new_window", 22, 1u << 1),    // Ctrl+key_c  -> NOT in defaults => User
+        };
+        var defaults = new System.Collections.Generic.List<EnumeratedKeybind>
+        {
+            Kb("new_tab", 39, 1u << 1),
+        };
+        var cat = KeybindCatalog.Build(current, defaults);
+        var items = cat.Categories.SelectMany(c => c.Items).ToList();
+        Assert.Equal(KeybindSource.Default, items.Single(i => i.RawAction == "new_tab").Source);
+        Assert.Equal(KeybindSource.User, items.Single(i => i.RawAction == "new_window").Source);
+    }
 }
