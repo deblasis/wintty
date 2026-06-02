@@ -68,3 +68,21 @@ public class ConfigFileParserTests
         Assert.Equal(-1, ConfigFileParser.FindLastUncommented(lines, "font-size"));
     }
 }
+
+public class ConfigFileParserGetRepeatableTests
+{
+    [Fact]
+    public void GetRepeatableValues_ReturnsUncommentedValuesForKey()
+    {
+        var lines = new[]
+        {
+            "# comment",
+            "keybind = ctrl+key_t=new_tab",
+            "font-size = 12",
+            "keybind=ctrl+key_w=close_tab",
+            "# keybind = ctrl+key_x=ignore",
+        };
+        var values = ConfigFileParser.GetRepeatableValues(lines, "keybind");
+        Assert.Equal(new[] { "ctrl+key_t=new_tab", "ctrl+key_w=close_tab" }, values);
+    }
+}

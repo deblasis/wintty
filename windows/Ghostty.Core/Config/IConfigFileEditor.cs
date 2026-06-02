@@ -32,4 +32,7 @@ public interface IConfigFileEditor
     /// entries and appends new ones.
     /// </summary>
     void SetRepeatableValues(string key, string[] values);
+
+    /// <summary>Read all values for a repeatable key (e.g. "keybind"), in file order.</summary>
+    string[] GetRepeatableValues(string key);
 }
