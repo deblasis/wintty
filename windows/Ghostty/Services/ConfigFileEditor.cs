@@ -67,6 +67,12 @@ internal sealed class ConfigFileEditor : IConfigFileEditor
         }
     }
 
+    public string[] GetRepeatableValues(string key)
+    {
+        lock (_lock)
+            return ConfigFileParser.GetRepeatableValues(ReadLines(), key);
+    }
+
     private string[] ReadLines()
     {
         return File.Exists(FilePath) ? File.ReadAllLines(FilePath) : Array.Empty<string>();

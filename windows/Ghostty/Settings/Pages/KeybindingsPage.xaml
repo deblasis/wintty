@@ -11,7 +11,13 @@
                        Margin="0,12,0,4" />
         </DataTemplate>
         <DataTemplate x:Key="KeybindEntryTemplate">
-            <Grid ColumnDefinitions="*,Auto,Auto" Padding="8,4">
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto" Padding="8,4">
+                <Grid.ContextFlyout>
+                    <MenuFlyout>
+                        <MenuFlyoutItem x:Name="UnbindItem" Text="Unbind" Click="UnbindItem_Click" />
+                        <MenuFlyoutItem x:Name="ResetItem" Text="Reset to default" Click="ResetItem_Click" />
+                    </MenuFlyout>
+                </Grid.ContextFlyout>
                 <TextBlock x:Name="FriendlyText" VerticalAlignment="Center" />
                 <FontIcon x:Name="ConflictIcon"
                           Grid.Column="1"
@@ -22,7 +28,17 @@
                           Margin="0,0,8,0"
                           VerticalAlignment="Center"
                           Visibility="Collapsed" />
-                <Border Grid.Column="2"
+                <Border x:Name="UserTag"
+                        Grid.Column="2"
+                        Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                        CornerRadius="4" Padding="6,1"
+                        Margin="0,0,8,0"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                    <TextBlock Text="User" FontSize="11"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Border>
+                <Border Grid.Column="3"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
                         CornerRadius="4" Padding="8,2">
                     <TextBlock x:Name="LabelText"

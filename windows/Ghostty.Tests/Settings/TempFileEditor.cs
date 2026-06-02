@@ -48,6 +48,9 @@ internal sealed class TempFileEditor : IConfigFileEditor
         Write(updated);
     }
 
+    public string[] GetRepeatableValues(string key)
+        => ConfigFileParser.GetRepeatableValues(ReadLines(), key);
+
     private string[] ReadLines()
         => File.Exists(FilePath) ? File.ReadAllLines(FilePath) : Array.Empty<string>();
 
