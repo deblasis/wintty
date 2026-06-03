@@ -137,6 +137,27 @@ internal sealed partial class KeybindingsPage : Page
         ApplyUserEdit(item, UserKeybindEditor.Reset);
     }
 
+    private async void RebindItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_contextRowItem is not { } item) return;
+
+        // Pass the live finalized bind set so the dialog can warn about
+        // assign-time conflicts against what is actually in effect.
+        var current = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
+        var dialog = new Ghostty.Settings.RebindDialog(current, item.RawAction, item.Friendly)
+        {
+            XamlRoot = XamlRoot,
+        };
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary || dialog.CapturedTrigger is not { } token) return;
+
+        // Add/override: write the new trigger=action line (dropping any user
+        // line already at that chord). The action's other triggers stay intact.
+        var updated = UserKeybindEditor.Assign(_editor.GetRepeatableValues("keybind"), token, item.RawAction);
+        _editor.SetRepeatableValues("keybind", updated);
+        _configService.Reload(); // raises ConfigChanged -> Rebuild
+    }
+
     private void ApplyUserEdit(
         KeybindListItem item,
         Func<string[], EnumeratedKeybind, string[]> op)
