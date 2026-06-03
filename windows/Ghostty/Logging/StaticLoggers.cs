@@ -37,6 +37,8 @@ namespace Ghostty.Logging;
 ///     WinUI 3 Frame via a parameterless ctor; ctor injection
 ///     requires a DI-enabled <c>Frame</c> which is a larger
 ///     refactor than this slot is worth.
+///   - <see cref="KeybindingsPage"/>: same XAML-page constraint as
+///     <see cref="GeneralPage"/>; logs keybind config write failures.
 ///
 /// Tests should use <see cref="Install"/> which returns an
 /// <see cref="IDisposable"/> scope that restores the pre-install
@@ -59,6 +61,7 @@ internal static class StaticLoggers
     private static ILogger? _windowStateMigration;
     private static ILogger<Ghostty.Settings.WindowState>? _windowState;
     private static ILogger<Ghostty.Settings.Pages.GeneralPage>? _generalPage;
+    private static ILogger<Ghostty.Settings.Pages.KeybindingsPage>? _keybindingsPage;
     private static ILogger<App>? _app;
 
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
@@ -69,6 +72,8 @@ internal static class StaticLoggers
         => _windowState ?? NullLogger<Ghostty.Settings.WindowState>.Instance;
     internal static ILogger<Ghostty.Settings.Pages.GeneralPage> GeneralPage
         => _generalPage ?? NullLogger<Ghostty.Settings.Pages.GeneralPage>.Instance;
+    internal static ILogger<Ghostty.Settings.Pages.KeybindingsPage> KeybindingsPage
+        => _keybindingsPage ?? NullLogger<Ghostty.Settings.Pages.KeybindingsPage>.Instance;
     internal static ILogger<App> App
         => _app ?? NullLogger<App>.Instance;
 
@@ -78,6 +83,7 @@ internal static class StaticLoggers
         _windowStateMigration = factory.CreateLogger(WindowStateMigrationCategory);
         _windowState = factory.CreateLogger<Ghostty.Settings.WindowState>();
         _generalPage = factory.CreateLogger<Ghostty.Settings.Pages.GeneralPage>();
+        _keybindingsPage = factory.CreateLogger<Ghostty.Settings.Pages.KeybindingsPage>();
         _app = factory.CreateLogger<App>();
     }
 
@@ -89,13 +95,14 @@ internal static class StaticLoggers
     }
 
     private static Snapshot CaptureSnapshot() => new(
-        _configService, _windowStateMigration, _windowState, _generalPage, _app);
+        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage, _app);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
         ILogger? WindowStateMigration,
         ILogger<Ghostty.Settings.WindowState>? WindowState,
         ILogger<Ghostty.Settings.Pages.GeneralPage>? GeneralPage,
+        ILogger<Ghostty.Settings.Pages.KeybindingsPage>? KeybindingsPage,
         ILogger<App>? App);
 
     private sealed class Scope : IDisposable
@@ -109,6 +116,7 @@ internal static class StaticLoggers
             _windowStateMigration = _prior.WindowStateMigration;
             _windowState = _prior.WindowState;
             _generalPage = _prior.GeneralPage;
+            _keybindingsPage = _prior.KeybindingsPage;
             _app = _prior.App;
         }
     }
