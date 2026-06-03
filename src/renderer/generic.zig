@@ -154,6 +154,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// Latched copy of `renderer.State.first_content`, captured under
+        /// the render state mutex in `updateFrame`. Lets `drawFrame` tell
+        /// whether the terminal has produced content without re-taking the
+        /// mutex. Named distinctly from the `State` flag so the call sites
+        /// read as a render-thread-local snapshot, not the shared source.
+        first_content_latched: bool = false,
+
+        /// Set once we have pushed the one-shot `.first_render` surface
+        /// message, so it is emitted at most once per surface. We emit it
+        /// only after a frame that actually paints content is presented.
+        first_render_sent: bool = false,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -1247,6 +1259,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
+                first_content: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1390,6 +1403,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
+                    .first_content = state.first_content,
                 };
             };
 
@@ -1397,6 +1411,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // within it. This must be done before anything reads the
             // render state (e.g. rebuildCells).
             self.terminal_state.endUpdate();
+
+            // Latch whether the terminal has produced its first content yet.
+            // `drawFrame` reads this to emit the one-shot first-render signal
+            // only after that content has actually been painted and presented.
+            self.first_content_latched = critical.first_content;
 
             // Outside the critical area we can update our links to contain
             // our regex results.
@@ -1563,6 +1582,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.surface_mailbox.push(.{
                     .scrollbar = self.scrollbar,
                 }, .instant) > 0) self.scrollbar_dirty = false;
+            };
+
+            // Capture whether the cells were rebuilt this frame before the
+            // draw path resets the flag below, so the first-render emit can
+            // tell that this frame actually paints terminal content.
+            const cells_rebuilt = self.cells_rebuilt;
+
+            // Set on the real draw path below, once we've committed to
+            // presenting a frame that paints the surface's first content.
+            // Read by the deferred first-render emit after that frame is
+            // presented (this defer runs after `frame_ctx.complete` below
+            // because it is registered earlier). We use the same instant
+            // push path as the scrollbar above; if the mailbox is momentarily
+            // full we leave it un-sent and retry on the next frame that
+            // rebuilds cells (cursor blink alone drives that), so the signal
+            // is delayed at worst, never dropped.
+            var first_content_painted = false;
+            defer if (first_content_painted and !self.first_render_sent) {
+                if (self.surface_mailbox.push(.first_render, .instant) > 0)
+                    self.first_render_sent = true;
             };
 
             // Let our graphics API do any bookkeeping, etc.
@@ -1889,6 +1928,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     });
                 }
             }
+
+            // We have finished encoding a frame that is about to be presented
+            // (the deferred `frame_ctx.complete` runs at scope exit). If it
+            // rebuilt the surface's first content, arm the one-shot first-render
+            // emit; the deferred push above then fires it after the present.
+            // Gating on `cells_rebuilt` keeps us from firing on frames drawn for
+            // a resize, animation, or forced sync that paint no new content.
+            if (cells_rebuilt and self.first_content_latched) first_content_painted = true;
         }
 
         // Callback from the graphics API when a frame is completed.
