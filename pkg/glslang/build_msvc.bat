@@ -73,7 +73,11 @@ if not defined GLSLANG_SRC (
 
 echo Using glslang source: %GLSLANG_SRC%
 
-set CL=!MSVC_DIR!\bin\Hostx64\x64\cl.exe
+REM Do NOT name this variable CL: cl.exe treats the CL environment variable as
+REM an extra command line and prepends its contents to its own args. Our path
+REM contains "Program Files" (a space), so cl.exe would split it into phantom
+REM source files ('C:\Program', 'Files\Microsoft', ...) and emit D9024/D9027.
+set CLEXE=!MSVC_DIR!\bin\Hostx64\x64\cl.exe
 set LIB=!MSVC_DIR!\lib\x64;%WINSDK_LIB%\um\x64;%WINSDK_LIB%\ucrt\x64
 REM Include paths must mirror what build.zig wires up for the zig-driven build:
 REM   - MSVC + Windows SDK for libc/libc++
@@ -143,11 +147,11 @@ for %%f in (
 )
 
 echo Compiling with MSVC...
-REM Quote %CL%: the expanded path contains "Program Files" (with a space) on
+REM Quote %CLEXE%: the expanded path contains "Program Files" (with a space) on
 REM stock Windows, so an unquoted invocation has cmd parse 'C:\Program' as the
 REM command and the rest as args. Breaks on windows-latest runners and any
 REM default VS install.
-"%CL%" %CFLAGS% %FILES%
+"%CLEXE%" %CFLAGS% %FILES%
 
 if errorlevel 1 (
     echo ERROR: Compilation failed
