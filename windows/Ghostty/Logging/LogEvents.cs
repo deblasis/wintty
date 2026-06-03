@@ -64,6 +64,7 @@ internal static class LogEvents
     // 2600-2699: Settings UI
     internal static class SettingsUi
     {
-        public const int ConfigOpenFailed = 2600;
+        public const int ConfigOpenFailed   = 2600;
+        public const int KeybindWriteFailed = 2601;
     }
 }

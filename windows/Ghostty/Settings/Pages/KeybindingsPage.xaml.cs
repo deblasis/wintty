@@ -2,7 +2,9 @@ using System;
 using System.Linq;
 using Ghostty.Core.Input;
 using Ghostty.Interop;
+using Ghostty.Logging;
 using Ghostty.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -137,6 +139,26 @@ internal sealed partial class KeybindingsPage : Page
         ApplyUserEdit(item, UserKeybindEditor.Reset);
     }
 
+    private async void RebindItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_contextRowItem is not { } item) return;
+
+        // Pass the live finalized bind set so the dialog can warn about
+        // assign-time conflicts against what is actually in effect.
+        var current = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
+        var dialog = new Ghostty.Settings.RebindDialog(current, item.RawAction, item.Friendly)
+        {
+            XamlRoot = XamlRoot,
+        };
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary || dialog.CapturedTrigger is not { } token) return;
+
+        // Add/override: write the new trigger=action line (dropping any user
+        // line already at that chord). The action's other triggers stay intact.
+        TryWriteKeybinds(current =>
+            UserKeybindEditor.Assign(current, token, item.RawAction));
+    }
+
     private void ApplyUserEdit(
         KeybindListItem item,
         Func<string[], EnumeratedKeybind, string[]> op)
@@ -145,14 +167,33 @@ internal sealed partial class KeybindingsPage : Page
         // steps the editor needs. Re-find the live EnumeratedKeybind by
         // matching its action + the same label the row was built from.
         var binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
-        var match = binds.FirstOrDefault(b =>
-            b.Action == item.RawAction && TriggerLabeler.Describe(b) == item.Label);
-        if (match is null) return;
+        if (binds.FirstOrDefault(b =>
+                b.Action == item.RawAction && TriggerLabeler.Describe(b) == item.Label)
+            is not { } match) return;
 
-        var current = _editor.GetRepeatableValues("keybind");
-        var updated = op(current, match);
-        _editor.SetRepeatableValues("keybind", updated);
-        _configService.Reload(); // raises ConfigChanged -> Rebuild
+        TryWriteKeybinds(current => op(current, match));
+    }
+
+    /// <summary>
+    /// Read the user's keybind lines, apply <paramref name="transform"/>, write
+    /// them back, and reload. The read/write/reload touch disk, so the whole
+    /// sequence is guarded: an IOException/UnauthorizedAccessException here would
+    /// otherwise fail-fast the process (this runs from an async-void handler).
+    /// On failure the edit is logged and dropped, leaving the file unchanged.
+    /// </summary>
+    private void TryWriteKeybinds(Func<string[], string[]> transform)
+    {
+        try
+        {
+            var current = _editor.GetRepeatableValues("keybind");
+            var updated = transform(current);
+            _editor.SetRepeatableValues("keybind", updated);
+            _configService.Reload(); // raises ConfigChanged -> Rebuild
+        }
+        catch (System.Exception ex)
+        {
+            StaticLoggers.KeybindingsPage.LogKeybindWriteFailed(ex);
+        }
     }
 
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
@@ -165,4 +206,13 @@ internal sealed partial class KeybindingsPage : Page
 
     private void ApplyFilter()
         => BindingsList.ItemsSource = _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true);
+}
+
+internal static partial class KeybindingsPageLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SettingsUi.KeybindWriteFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to write keybind config")]
+    internal static partial void LogKeybindWriteFailed(
+        this ILogger<KeybindingsPage> logger, System.Exception ex);
 }
