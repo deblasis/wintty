@@ -60,6 +60,15 @@ public class UserKeybindEditorTests
     }
 
     [Fact]
+    public void Reset_RemovesFlagPrefixedUserLine()
+    {
+        // user line carries a performable: flag prefix; reset of ctrl+key_t must still match.
+        var lines = new[] { "performable:ctrl+key_t=new_split:right", "ctrl+key_a=new_tab" };
+        var result = UserKeybindEditor.Reset(lines, Kb(39, 1u << 1)); // ctrl+key_t
+        Assert.Equal(new[] { "ctrl+key_a=new_tab" }, result);
+    }
+
+    [Fact]
     public void Assign_AppendsTriggerActionAndOverridesSameTrigger()
     {
         var lines = new[] { "ctrl+key_t=old_action", "ctrl+key_a=copy_to_clipboard" };
