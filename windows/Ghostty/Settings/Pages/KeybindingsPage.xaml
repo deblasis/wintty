@@ -14,6 +14,8 @@
             <Grid ColumnDefinitions="*,Auto,Auto,Auto" Padding="8,4">
                 <Grid.ContextFlyout>
                     <MenuFlyout>
+                        <MenuFlyoutItem x:Name="RebindItem" Text="Rebind..." Click="RebindItem_Click" />
+                        <MenuFlyoutSeparator />
                         <MenuFlyoutItem x:Name="UnbindItem" Text="Unbind" Click="UnbindItem_Click" />
                         <MenuFlyoutItem x:Name="ResetItem" Text="Reset to default" Click="ResetItem_Click" />
                     </MenuFlyout>

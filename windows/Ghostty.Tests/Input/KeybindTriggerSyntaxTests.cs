@@ -41,8 +41,19 @@ public class KeybindTriggerSyntaxTests
     [InlineData("control+key_a", "ctrl+key_a")]            // alias control->ctrl
     [InlineData("cmd+key_a", "super+key_a")]               // alias cmd->super
     [InlineData("ctrl+key_k>ctrl+key_s", "ctrl+key_k>ctrl+key_s")] // sequence
+    [InlineData("performable:ctrl+key_a", "ctrl+key_a")]            // flag prefix stripped
+    [InlineData("global:unconsumed:shift+ctrl+key_t", "ctrl+shift+key_t")] // chained flags stripped
     public void Canonicalize_NormalizesModsAndAliases(string input, string expected)
     {
         Assert.Equal(expected, KeybindTriggerSyntax.Canonicalize(input));
+    }
+
+    [Fact]
+    public void Canonicalize_FlagPrefixedTrigger_EqualsUnflagged()
+    {
+        Assert.Equal(
+            KeybindTriggerSyntax.Canonicalize("ctrl+key_a"),
+            KeybindTriggerSyntax.Canonicalize("performable:ctrl+key_a"));
+        Assert.Equal("ctrl+key_a", KeybindTriggerSyntax.Canonicalize("performable:ctrl+key_a"));
     }
 }
