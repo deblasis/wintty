@@ -35,4 +35,21 @@ public class KeyNamesTests
     {
         Assert.Null(KeyNames.NameOf(ordinal));
     }
+
+    [Theory]
+    [InlineData("key_t", 39)]
+    [InlineData("backquote", 1)]
+    [InlineData("arrow_up", 78)]
+    [InlineData("f11", 131)]
+    public void OrdinalOf_IsInverseOfNameOf(string name, int expected)
+    {
+        Assert.Equal(expected, KeyNames.OrdinalOf(name));
+        Assert.Equal(name, KeyNames.NameOf(expected));
+    }
+
+    [Fact]
+    public void OrdinalOf_UnknownName_ReturnsNull()
+    {
+        Assert.Null(KeyNames.OrdinalOf("not_a_key"));
+    }
 }
