@@ -147,10 +147,8 @@ for %%f in (
 )
 
 echo Compiling with MSVC...
-REM Quote %CLEXE%: the expanded path contains "Program Files" (with a space) on
-REM stock Windows, so an unquoted invocation has cmd parse 'C:\Program' as the
-REM command and the rest as args. Breaks on windows-latest runners and any
-REM default VS install.
+REM Quote %CLEXE%: the path has a space (see above), so unquoted cmd would parse
+REM 'C:\Program' as the command and the rest as args.
 "%CLEXE%" %CFLAGS% %FILES%
 
 if errorlevel 1 (
