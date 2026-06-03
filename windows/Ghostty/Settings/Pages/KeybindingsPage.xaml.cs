@@ -2,7 +2,9 @@ using System;
 using System.Linq;
 using Ghostty.Core.Input;
 using Ghostty.Interop;
+using Ghostty.Logging;
 using Ghostty.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -153,9 +155,8 @@ internal sealed partial class KeybindingsPage : Page
 
         // Add/override: write the new trigger=action line (dropping any user
         // line already at that chord). The action's other triggers stay intact.
-        var updated = UserKeybindEditor.Assign(_editor.GetRepeatableValues("keybind"), token, item.RawAction);
-        _editor.SetRepeatableValues("keybind", updated);
-        _configService.Reload(); // raises ConfigChanged -> Rebuild
+        TryWriteKeybinds(current =>
+            UserKeybindEditor.Assign(current, token, item.RawAction));
     }
 
     private void ApplyUserEdit(
@@ -166,14 +167,33 @@ internal sealed partial class KeybindingsPage : Page
         // steps the editor needs. Re-find the live EnumeratedKeybind by
         // matching its action + the same label the row was built from.
         var binds = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
-        var match = binds.FirstOrDefault(b =>
-            b.Action == item.RawAction && TriggerLabeler.Describe(b) == item.Label);
-        if (match is null) return;
+        if (binds.FirstOrDefault(b =>
+                b.Action == item.RawAction && TriggerLabeler.Describe(b) == item.Label)
+            is not { } match) return;
 
-        var current = _editor.GetRepeatableValues("keybind");
-        var updated = op(current, match);
-        _editor.SetRepeatableValues("keybind", updated);
-        _configService.Reload(); // raises ConfigChanged -> Rebuild
+        TryWriteKeybinds(current => op(current, match));
+    }
+
+    /// <summary>
+    /// Read the user's keybind lines, apply <paramref name="transform"/>, write
+    /// them back, and reload. The read/write/reload touch disk, so the whole
+    /// sequence is guarded: an IOException/UnauthorizedAccessException here would
+    /// otherwise fail-fast the process (this runs from an async-void handler).
+    /// On failure the edit is logged and dropped, leaving the file unchanged.
+    /// </summary>
+    private void TryWriteKeybinds(Func<string[], string[]> transform)
+    {
+        try
+        {
+            var current = _editor.GetRepeatableValues("keybind");
+            var updated = transform(current);
+            _editor.SetRepeatableValues("keybind", updated);
+            _configService.Reload(); // raises ConfigChanged -> Rebuild
+        }
+        catch (System.Exception ex)
+        {
+            StaticLoggers.KeybindingsPage.LogKeybindWriteFailed(ex);
+        }
     }
 
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
@@ -186,4 +206,13 @@ internal sealed partial class KeybindingsPage : Page
 
     private void ApplyFilter()
         => BindingsList.ItemsSource = _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true);
+}
+
+internal static partial class KeybindingsPageLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SettingsUi.KeybindWriteFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to write keybind config")]
+    internal static partial void LogKeybindWriteFailed(
+        this ILogger<KeybindingsPage> logger, System.Exception ex);
 }
