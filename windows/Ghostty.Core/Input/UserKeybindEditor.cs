@@ -37,6 +37,18 @@ public static class UserKeybindEditor
         return lines.Where(l => !string.Equals(TriggerOf(l), canonical, StringComparison.Ordinal)).ToArray();
     }
 
+    /// <summary>
+    /// Bind <paramref name="action"/> to <paramref name="triggerToken"/>: drop any
+    /// user line already at that trigger (override / last-wins) and append the new
+    /// line. The action's other triggers are left intact (add/override, not move).
+    /// </summary>
+    public static string[] Assign(IReadOnlyList<string> lines, string triggerToken, string action)
+    {
+        var canonical = KeybindTriggerSyntax.Canonicalize(triggerToken);
+        var kept = lines.Where(l => !string.Equals(TriggerOf(l), canonical, System.StringComparison.Ordinal));
+        return kept.Append($"{triggerToken}={action}").ToArray();
+    }
+
     private static string TriggerOf(string line)
     {
         var eq = line.IndexOf('=');
