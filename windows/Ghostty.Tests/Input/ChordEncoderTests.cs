@@ -1,4 +1,5 @@
 using Ghostty.Core.Input;
+using Ghostty.Core.Interop;
 using Xunit;
 
 namespace Ghostty.Tests.Input;
@@ -20,7 +21,7 @@ public class ChordEncoderTests
         Assert.Equal((uint)KeyNames.OrdinalOf("key_t")!, t.Value.Key);
         Assert.Equal(ModCtrl | ModShift, t.Value.Mods);
         // round-trips to ghostty syntax + a friendly label
-        var kb = new EnumeratedKeybind(new[] { t.Value }, "x", Interop.GhosttyBindingFlags.Consumed);
+        var kb = new EnumeratedKeybind(new[] { t.Value }, "x", GhosttyBindingFlags.Consumed);
         Assert.Equal("ctrl+shift+key_t", KeybindTriggerSyntax.Encode(kb));
         Assert.Equal("Ctrl+Shift+T", TriggerLabeler.Describe(kb));
     }
