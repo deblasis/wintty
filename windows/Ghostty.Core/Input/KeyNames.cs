@@ -37,7 +37,20 @@ public static class KeyNames
 
     public static int Count => Names.Length;
 
+    private static readonly System.Collections.Generic.Dictionary<string, int> Ordinals = BuildOrdinals();
+
+    private static System.Collections.Generic.Dictionary<string, int> BuildOrdinals()
+    {
+        var map = new System.Collections.Generic.Dictionary<string, int>(Names.Length, System.StringComparer.Ordinal);
+        for (var i = 0; i < Names.Length; i++) map[Names[i]] = i;
+        return map;
+    }
+
     /// <summary>Name for an ordinal, or null if out of range.</summary>
     public static string? NameOf(int ordinal)
         => ordinal >= 0 && ordinal < Names.Length ? Names[ordinal] : null;
+
+    /// <summary>Ordinal for an input.Key name, or null if unknown. Inverse of NameOf.</summary>
+    public static int? OrdinalOf(string name)
+        => Ordinals.TryGetValue(name, out var ordinal) ? ordinal : null;
 }

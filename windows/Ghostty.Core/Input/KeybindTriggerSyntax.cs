@@ -37,6 +37,11 @@ public static class KeybindTriggerSyntax
         ["super"] = "super", ["cmd"] = "super", ["command"] = "super", ["win"] = "super",
     };
 
+    // ghostty keybind values may carry chained leading flag prefixes before the
+    // trigger (e.g. "global:unconsumed:ctrl+a=..."). They are not modifiers or keys,
+    // so strip them before parsing or they get mistaken for a key/mod token.
+    private static readonly string[] FlagPrefixes = { "all:", "global:", "unconsumed:", "performable:" };
+
     public static string Encode(EnumeratedKeybind kb)
         => string.Join(">", kb.Steps.Select(EncodeStep));
 
@@ -60,7 +65,31 @@ public static class KeybindTriggerSyntax
 
     /// <summary>Normalize a raw trigger token (possibly a sequence) for equality compare.</summary>
     public static string Canonicalize(string token)
-        => string.Join(">", token.Split('>').Select(CanonicalizeStep));
+    {
+        token = StripFlags(token);
+        return string.Join(">", token.Split('>').Select(CanonicalizeStep));
+    }
+
+    /// <summary>Strip chained leading flag prefixes (all:/global:/unconsumed:/performable:).</summary>
+    private static string StripFlags(string token)
+    {
+        var t = token.TrimStart();
+        bool stripped = true;
+        while (stripped)
+        {
+            stripped = false;
+            foreach (var f in FlagPrefixes)
+            {
+                if (t.StartsWith(f, StringComparison.OrdinalIgnoreCase))
+                {
+                    t = t[f.Length..].TrimStart();
+                    stripped = true;
+                    break;
+                }
+            }
+        }
+        return t;
+    }
 
     private static string CanonicalizeStep(string step)
     {
