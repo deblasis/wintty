@@ -32,9 +32,11 @@ pub const StreamHandler = struct {
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
 
-    /// Set once we have emitted the first_render signal for this surface,
-    /// so we emit it at most once. Surface-scoped: never reset.
-    first_render_sent: bool = false,
+    /// Set once we have flagged the render state that this surface has
+    /// produced its first cell of content, so we flag it at most once.
+    /// The renderer emits the actual `.first_render` signal after that
+    /// content is painted. Surface-scoped: never reset.
+    first_content_flagged: bool = false,
 
     /// The shared render state
     renderer_state: *renderer.State,
@@ -230,9 +232,16 @@ pub const StreamHandler = struct {
             .print => {
                 @branchHint(.likely);
                 try self.terminal.print(value.cp);
-                if (!self.first_render_sent) {
-                    self.first_render_sent = true;
-                    self.surfaceMessageWriter(.first_render);
+                if (!self.first_content_flagged) {
+                    self.first_content_flagged = true;
+                    // We hold `renderer_state.mutex` for the duration of
+                    // action dispatch (see `surfaceMessageWriter`), so we can
+                    // flag the shared render state directly. The renderer then
+                    // emits the one-shot `.first_render` signal once this
+                    // content is actually painted, rather than us emitting it
+                    // here on first parse (which can race ahead of the paint
+                    // when several surfaces start at once).
+                    self.renderer_state.first_content = true;
                 }
             },
             .print_repeat => try self.terminal.printRepeat(value),

@@ -30,6 +30,14 @@ preedit: ?Preedit = null,
 /// need about the mouse.
 mouse: Mouse = .{},
 
+/// Set (under `mutex`) by the IO/parser thread once the terminal has
+/// printed its first cell of content. The renderer latches this in
+/// `updateFrame` and emits the one-shot `.first_render` surface message
+/// after the first frame that actually paints that content, so consumers
+/// learn when a surface comes alive on screen rather than when the parser
+/// first saw a printable byte. Set once and never reset.
+first_content: bool = false,
+
 pub const Mouse = struct {
     /// The point on the viewport where the mouse currently is. We use
     /// viewport points to avoid the complexity of mapping the mouse to
