@@ -33,6 +33,8 @@ public class ChordEncoderTests
     [InlineData(0xBD, "minus")]   // VK_OEM_MINUS
     [InlineData(0x0D, "enter")]   // VK_RETURN
     [InlineData(0x30, "digit_0")] // VK '0'
+    [InlineData(0x60, "numpad_0")]// VK_NUMPAD0
+    [InlineData(0x69, "numpad_9")]// VK_NUMPAD9
     public void MapsNamedAndOemKeys(int vk, string expectedName)
     {
         var t = ChordEncoder.TryEncode(vk, ctrl: false, shift: false, alt: false, win: false);

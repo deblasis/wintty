@@ -73,6 +73,7 @@ internal sealed partial class RebindDialog : ContentDialog
         var existing = KeybindConflicts.FindByTrigger(_current, CapturedTrigger);
         if (existing is not null && existing.Action != _action)
         {
+            ConflictBar.Title = "Already bound";
             ConflictBar.Message =
                 $"Already bound to {KeybindActionCatalog.Describe(existing.Action).Friendly}. Assign will override it.";
             ConflictBar.IsOpen = true;
