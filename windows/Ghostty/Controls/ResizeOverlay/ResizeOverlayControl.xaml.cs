@@ -27,7 +27,7 @@ public sealed partial class ResizeOverlayControl : UserControl
         InitializeComponent();
 
         // DispatcherQueueTimer fires on the UI thread, so the Tick handler
-        // can touch Visibility with no marshalling. Non-repeating: each
+        // can update the bound state with no marshalling. Non-repeating: each
         // pulse restarts it, so it only fires once the resizing settles.
         //
         // The timer and its Tick handler live for the lifetime of the
@@ -80,15 +80,17 @@ public sealed partial class ResizeOverlayControl : UserControl
         bool allowShow)
     {
         State.Mode = mode;
-        var pulse = State.ShouldPulse(cols, rows);
-        if (!allowShow || !pulse) return;
+
+        // The state owns the show/hide decision and flips IsVisible, which the
+        // pill's Visibility is bound to. We only handle the view concerns:
+        // position and the wall-clock auto-hide timer.
+        if (!State.NotifyResize(cols, rows, allowShow)) return;
 
         ApplyPosition(position);
 
         // Clamp to a sane floor: a zero/negative duration would make the
         // timer never fire, leaving the pill stuck on screen.
         _hideTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, durationMs));
-        Visibility = Visibility.Visible;
         _hideTimer.Stop();
         _hideTimer.Start();
     }
@@ -96,8 +98,21 @@ public sealed partial class ResizeOverlayControl : UserControl
     private void OnHideTick(DispatcherQueueTimer sender, object args)
     {
         sender.Stop();
-        Visibility = Visibility.Collapsed;
+        State.Hide();
     }
+
+    /// <summary>
+    /// x:Bind helper that maps the observable
+    /// <see cref="ResizeOverlayState.IsVisible"/> flag to a XAML
+    /// <see cref="Visibility"/>. The conversion lives here, in the view layer,
+    /// so the Core state stays free of any WinUI types.
+    ///
+    /// Instance, not static: x:Bind function codegen emits
+    /// <c>this.ToVisibility(...)</c>, so a static method fails to compile
+    /// (CS0176). Do not "tidy" it to static.
+    /// </summary>
+    private Visibility ToVisibility(bool visible) =>
+        visible ? Visibility.Visible : Visibility.Collapsed;
 
     private void ApplyPosition(ResizeOverlayPosition position)
     {
