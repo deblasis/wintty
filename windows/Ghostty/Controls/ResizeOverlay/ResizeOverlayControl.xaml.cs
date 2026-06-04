@@ -29,14 +29,23 @@ public sealed partial class ResizeOverlayControl : UserControl
         // DispatcherQueueTimer fires on the UI thread, so the Tick handler
         // can touch Visibility with no marshalling. Non-repeating: each
         // pulse restarts it, so it only fires once the resizing settles.
+        //
+        // The timer and its Tick handler live for the lifetime of the
+        // control on purpose: we do NOT unwire them on Unloaded. WinUI 3
+        // raises Unloaded whenever the visual tree reparents a pane (every
+        // split / rebuild), not only on real teardown -- the same gotcha
+        // TerminalControl.OnUnloaded documents. Dropping the handler there
+        // permanently broke auto-hide for every pre-existing pane after a
+        // split: the restarted timer would fire into a detached delegate
+        // and the pill stayed stuck on screen. Keeping the wiring is safe:
+        // control -> timer -> Tick -> control is a self-contained cycle the
+        // GC collects together, a stopped non-repeating timer is not
+        // retained by the dispatcher, and a hide still pending when a pane
+        // is truly closed simply ticks once (harmlessly setting Visibility
+        // on the dead control) and releases.
         _hideTimer = DispatcherQueue.CreateTimer();
         _hideTimer.IsRepeating = false;
         _hideTimer.Tick += OnHideTick;
-
-        // Drop the Tick handler when the control leaves the tree so a
-        // reparented or torn-down pane does not accumulate handler links
-        // on the dispatcher's timer list.
-        Unloaded += OnControlUnloaded;
     }
 
     /// <summary>
@@ -111,12 +120,5 @@ public sealed partial class ResizeOverlayControl : UserControl
             ResizeOverlayPosition.BottomRight => VerticalAlignment.Bottom,
             _ => VerticalAlignment.Center,
         };
-    }
-
-    private void OnControlUnloaded(object sender, RoutedEventArgs e)
-    {
-        _hideTimer.Stop();
-        _hideTimer.Tick -= OnHideTick;
-        Unloaded -= OnControlUnloaded;
     }
 }
