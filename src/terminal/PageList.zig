@@ -1045,6 +1045,17 @@ fn resizeCols(
         // so that we can offset any additional wraps to avoid pushing the
         // original row contents in to the scrollback.
         const wrapped = wrapped: {
+            // The `.lt` resize path shrinks rows before this runs, so the
+            // captured cursor pin can end up above the new active top-left
+            // (pushed into the scrollback). The `.left_up` iterator requires
+            // its limit to be at or before the start; an inverted range trips
+            // a safety assert in pageIterator (and would walk out of bounds in
+            // release). A cursor already above the active area has no active
+            // rows above it to count, so the wrap offset is zero.
+            if (active_pin) |limit| {
+                if (p.before(limit)) break :wrapped 0;
+            }
+
             var wrapped: usize = 0;
 
             var row_it = p.rowIterator(.left_up, active_pin);
@@ -10302,6 +10313,53 @@ test "PageList resize reflow shrink cols and rows with wrapped rows below cursor
     const cursor_pt = s.pointFromPin(.active, p.*);
     try testing.expect(cursor_pt != null);
     try testing.expect(cursor_pt.?.active.y < s.rows);
+    try testing.expect(s.totalRows() >= s.rows);
+}
+
+test "PageList resize reflow shrink cols and rows with cursor above new active area" {
+    // Regression: the reflow `.lt` path applies the row shrink *before*
+    // resizeCols. A cursor captured near the top of the old (taller) active
+    // area can land above the new (smaller) active top-left -- i.e. in
+    // scrollback. resizeCols' preserved-cursor wrap count walks `.left_up`
+    // from the cursor pin to the active top-left; when the cursor is already
+    // above that top-left the iterator range inverts and trips the
+    // `pageIterator` order assertion (reached-unreachable panic), taking down
+    // the IO thread and the whole app. This must not panic.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 10, 10, 1000);
+    defer s.deinit();
+
+    // Fill every row so the column shrink has content to reflow.
+    {
+        const page = &s.pages.first.?.data;
+        for (0..s.rows) |y| {
+            for (0..s.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                rac.cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = 'A' },
+                };
+            }
+        }
+    }
+
+    // Cursor pin at the TOP of the active area. Rows 10 -> 2 push the active
+    // area down to the bottom two rows, leaving this pin above the new active
+    // top-left.
+    const p = try s.trackPin(s.pin(.{ .active = .{ .x = 0, .y = 0 } }).?);
+    defer s.untrackPin(p);
+
+    try s.resize(.{
+        .cols = 5,
+        .rows = 2,
+        .reflow = true,
+        .cursor = .{ .x = 0, .y = 0, .pin = p },
+    });
+
+    try testing.expectEqual(@as(size.CellCountInt, 5), s.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 2), s.rows);
     try testing.expect(s.totalRows() >= s.rows);
 }
 
