@@ -6,8 +6,9 @@
     SurfaceResizeOverlay.
 
     The UserControl fills the pane (Stretch) and aligns the inner Border
-    per the resolved resize-overlay-position; the parent toggles nothing,
-    the control flips its own Visibility and runs its own auto-hide timer.
+    per the resolved resize-overlay-position. The pill's Visibility is bound
+    (OneWay) to ResizeOverlayState.IsVisible; the control's only imperative
+    job is the wall-clock auto-hide timer, which flips that state off.
 
     IsHitTestVisible=False so the pill never steals pointer events from the
     SwapChainPanel underneath - a terminal app running mouse=a keeps seeing
@@ -27,6 +28,7 @@
     <Border x:Name="Pill"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
+            Visibility="{x:Bind ToVisibility(State.IsVisible), Mode=OneWay}"
             Margin="8"
             Padding="12,6"
             Background="{ThemeResource LayerFillColorDefaultBrush}"

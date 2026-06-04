@@ -88,6 +88,121 @@ public class ResizeOverlayStateTests
         Assert.Contains(nameof(ResizeOverlayState.SizeText), raised);
     }
 
+    // --- Declarative visibility (IsVisible / NotifyResize / Hide) ----------
+
+    [Fact]
+    public void IsVisible_defaults_false()
+    {
+        Assert.False(new ResizeOverlayState().IsVisible);
+    }
+
+    [Fact]
+    public void NotifyResize_shows_and_returns_true_on_a_real_resize()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+
+        var shown = state.NotifyResize(80, 24, allowShow: true);
+
+        Assert.True(shown);
+        Assert.True(state.IsVisible);
+        Assert.Equal("80 " + (char)0x00D7 + " 24", state.SizeText);
+    }
+
+    [Fact]
+    public void NotifyResize_tracks_size_but_stays_hidden_when_not_allowed()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+
+        var shown = state.NotifyResize(100, 30, allowShow: false);
+
+        Assert.False(shown);
+        Assert.False(state.IsVisible);
+        // Size still tracked so the label is correct the next time it shows.
+        Assert.Equal(100, state.Columns);
+        Assert.Equal(30, state.Rows);
+    }
+
+    [Fact]
+    public void NotifyResize_does_not_show_when_grid_is_unchanged()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+
+        Assert.True(state.NotifyResize(80, 24, allowShow: true));
+        state.Hide();
+
+        Assert.False(state.NotifyResize(80, 24, allowShow: true));
+        Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void NotifyResize_never_mode_never_shows()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Never };
+
+        Assert.False(state.NotifyResize(80, 24, allowShow: true));
+        Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void NotifyResize_after_first_suppresses_initial_then_shows()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.AfterFirst };
+
+        Assert.False(state.NotifyResize(80, 24, allowShow: true)); // baseline
+        Assert.False(state.IsVisible);
+        Assert.True(state.NotifyResize(100, 30, allowShow: true));  // real resize
+        Assert.True(state.IsVisible);
+    }
+
+    [Fact]
+    public void Hide_clears_IsVisible()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+        state.NotifyResize(80, 24, allowShow: true);
+
+        state.Hide();
+
+        Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void NotifyResize_with_unchanged_grid_does_not_hide_a_visible_pill()
+    {
+        // A duplicate size event (common during a drag) must not flip the pill
+        // off; only Hide (the auto-hide timer) clears it.
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+        state.NotifyResize(80, 24, allowShow: true);
+
+        var shown = state.NotifyResize(80, 24, allowShow: true);
+
+        Assert.False(shown);          // nothing new to pulse
+        Assert.True(state.IsVisible); // but still visible until Hide
+    }
+
+    [Fact]
+    public void NotifyResize_raises_PropertyChanged_for_IsVisible()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+        var raised = Subscribe(state);
+
+        state.NotifyResize(80, 24, allowShow: true);
+
+        Assert.Contains(nameof(ResizeOverlayState.IsVisible), raised);
+    }
+
+    [Fact]
+    public void Hide_raises_PropertyChanged_for_IsVisible_only_when_changing()
+    {
+        var state = new ResizeOverlayState { Mode = ResizeOverlayMode.Always };
+        state.NotifyResize(80, 24, allowShow: true);
+        var raised = Subscribe(state);
+
+        state.Hide();
+        state.Hide(); // idempotent: no second notification
+
+        Assert.Single(raised, nameof(ResizeOverlayState.IsVisible));
+    }
+
     private static List<string?> Subscribe(ResizeOverlayState state)
     {
         var raised = new List<string?>();

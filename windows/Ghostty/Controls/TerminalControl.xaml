@@ -153,12 +153,13 @@
 
         <!--
             Transient cols x rows pill shown while the pane is resized.
-            Fills the cell and self-positions per resize-overlay-position;
-            starts Collapsed and flips its own Visibility. Last child so it
-            layers above the SwapChainPanel and the other overlays.
+            Fills the cell and self-positions per resize-overlay-position.
+            The control stays visible (hit-test-false); its inner pill binds
+            its own Visibility to ResizeOverlayState.IsVisible and starts
+            hidden. Last child so it layers above the SwapChainPanel and the
+            other overlays.
         -->
         <resize:ResizeOverlayControl
-            x:Name="ResizeOverlay"
-            Visibility="Collapsed" />
+            x:Name="ResizeOverlay" />
     </Grid>
 </UserControl>
