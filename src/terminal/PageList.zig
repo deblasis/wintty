@@ -10248,6 +10248,63 @@ test "PageList resize reflow shrink cols and rows with cursor below new active a
     try testing.expect(s.totalRows() >= s.rows);
 }
 
+test "PageList resize reflow shrink cols and rows with wrapped rows below cursor" {
+    // Regression: a plain window resize that shrinks BOTH cols and rows while
+    // the active area is full of wrapped rows. The reflow `.lt` path runs the
+    // row shrink first, then resizeCols reflows the wrapped content (growing
+    // the row count) and runs the preserved-cursor block, whose arithmetic
+    // must not overflow when the pre-shrink cursor y exceeds the new rows and
+    // there are wrapped rows both above and below it.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 10, 10, 1000);
+    defer s.deinit();
+
+    // Make the whole active area one wrapped logical line (every row wraps
+    // into the next) and fill every cell so the col shrink forces a heavy
+    // reflow that multiplies the row count.
+    {
+        const page = &s.pages.first.?.data;
+        for (0..s.rows) |y| {
+            const rac = page.getRowAndCell(0, y);
+            if (y != s.rows - 1) rac.row.wrap = true;
+            if (y != 0) rac.row.wrap_continuation = true;
+            for (0..s.cols) |x| {
+                const cell = page.getRowAndCell(x, y).cell;
+                cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = 'A' },
+                };
+            }
+        }
+    }
+
+    // A cursor pin at the bottom of the old (taller) active area mirrors the
+    // cursor pin Screen.resize passes through.
+    const p = try s.trackPin(s.pin(.{ .active = .{ .x = 0, .y = 9 } }).?);
+    defer s.untrackPin(p);
+
+    // cols 10 -> 4 forces the reflow `.lt` path and multiplies the wrapped
+    // rows; rows 10 -> 3 shrinks the active area below the cursor's old y.
+    try s.resize(.{
+        .cols = 4,
+        .rows = 3,
+        .reflow = true,
+        .cursor = .{ .x = 0, .y = 9, .pin = p },
+    });
+
+    try testing.expectEqual(@as(size.CellCountInt, 4), s.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.rows);
+
+    // The preserved cursor must stay inside the new active area and the
+    // active-area invariant must hold.
+    const cursor_pt = s.pointFromPin(.active, p.*);
+    try testing.expect(cursor_pt != null);
+    try testing.expect(cursor_pt.?.active.y < s.rows);
+    try testing.expect(s.totalRows() >= s.rows);
+}
+
 test "PageList resize (no reflow) less rows cursor in scrollback" {
     const testing = std.testing;
     const alloc = testing.allocator;
