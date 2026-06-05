@@ -56,4 +56,19 @@ public class KeybindTriggerSyntaxTests
             KeybindTriggerSyntax.Canonicalize("performable:ctrl+key_a"));
         Assert.Equal("ctrl+key_a", KeybindTriggerSyntax.Canonicalize("performable:ctrl+key_a"));
     }
+
+    [Fact]
+    public void EncodePhysical_BuildsTriggerTokenFromMaskAndOrdinal()
+    {
+        uint mask = (1u << 1) | (1u << 0); // ctrl + shift
+        var ord = KeyNames.OrdinalOf("key_t")!.Value;
+        Assert.Equal("ctrl+shift+key_t", KeybindTriggerSyntax.EncodePhysical(mask, ord));
+    }
+
+    [Fact]
+    public void EncodePhysical_NoMods_IsBareKey()
+    {
+        var ord = KeyNames.OrdinalOf("f11")!.Value;
+        Assert.Equal("f11", KeybindTriggerSyntax.EncodePhysical(0, ord));
+    }
 }
