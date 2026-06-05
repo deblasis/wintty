@@ -2,7 +2,8 @@
     x:Class="Ghostty.Settings.Pages.KeybindingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:Ghostty.Settings.Pages">
+    xmlns:local="using:Ghostty.Settings.Pages"
+    xmlns:settings="using:Ghostty.Settings">
 
     <Page.Resources>
         <DataTemplate x:Key="KeybindHeaderTemplate">
@@ -58,24 +59,26 @@
     <Grid Padding="24" RowDefinitions="Auto,Auto,*">
         <TextBlock Text="Keybindings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
 
-        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
-            <AutoSuggestBox
-                x:Name="SearchBox"
-                PlaceholderText="Search by action or key..."
-                QueryIcon="Find"
-                TextChanged="SearchBox_TextChanged" />
-            <ToggleButton
-                x:Name="ConflictsToggle"
-                Grid.Column="1"
-                Content="Conflicts"
-                Margin="8,0,0,0"
-                Checked="ConflictsToggle_Toggled"
-                Unchecked="ConflictsToggle_Toggled" />
+        <SelectorBar x:Name="ViewBar" Grid.Row="0" HorizontalAlignment="Right"
+                     SelectionChanged="ViewBar_SelectionChanged">
+            <SelectorBarItem x:Name="ListBarItem" Text="List" IsSelected="True" />
+            <SelectorBarItem x:Name="KeyboardBarItem" Text="Keyboard" />
+        </SelectorBar>
+
+        <Grid x:Name="ListPanel" Grid.Row="1" Grid.RowSpan="2" RowDefinitions="Auto,*">
+            <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,16">
+                <AutoSuggestBox x:Name="SearchBox" PlaceholderText="Search by action or key..."
+                                QueryIcon="Find" TextChanged="SearchBox_TextChanged" />
+                <ToggleButton x:Name="ConflictsToggle" Grid.Column="1" Content="Conflicts"
+                              Margin="8,0,0,0" Checked="ConflictsToggle_Toggled"
+                              Unchecked="ConflictsToggle_Toggled" />
+            </Grid>
+            <ListView x:Name="BindingsList" Grid.Row="1" SelectionMode="None"
+                      ItemTemplateSelector="{StaticResource RowSelector}" />
         </Grid>
 
-        <ListView x:Name="BindingsList"
-                  Grid.Row="2"
-                  SelectionMode="None"
-                  ItemTemplateSelector="{StaticResource RowSelector}" />
+        <ScrollViewer x:Name="KeyboardPanel" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed">
+            <settings:KeyboardMapView x:Name="Map" Margin="0,8,0,0" />
+        </ScrollViewer>
     </Grid>
 </Page>

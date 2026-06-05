@@ -74,7 +74,7 @@ public static class TriggerLabeler
         }
     }
 
-    private static string LabelForName(string name)
+    public static string LabelForName(string name)
     {
         if (Special.TryGetValue(name, out var s)) return s;
         if (name.StartsWith("key_", StringComparison.Ordinal)) return name[4..].ToUpperInvariant();

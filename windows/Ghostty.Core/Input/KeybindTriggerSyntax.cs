@@ -45,6 +45,17 @@ public static class KeybindTriggerSyntax
     public static string Encode(EnumeratedKeybind kb)
         => string.Join(">", kb.Steps.Select(EncodeStep));
 
+    /// <summary>
+    /// Build a single-step trigger token from a canonical modifier mask and a
+    /// physical key ordinal (e.g. mask ctrl+shift, ordinal of key_t -> "ctrl+shift+key_t").
+    /// Reuses Encode so emission order/spelling stay identical to enumerated binds.
+    /// </summary>
+    public static string EncodePhysical(uint mods, int keyOrdinal)
+        => Encode(new EnumeratedKeybind(
+            new[] { new KeybindTrigger(TagPhysical, (uint)keyOrdinal, mods) },
+            string.Empty,
+            default));
+
     private static string EncodeStep(KeybindTrigger step)
     {
         var sb = new StringBuilder();
