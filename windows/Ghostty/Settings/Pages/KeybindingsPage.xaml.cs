@@ -257,16 +257,20 @@ internal sealed partial class KeybindingsPage : Page
         flyout.Items.Add(new MenuFlyoutItem { Text = state.ActionLabel, IsEnabled = false });
         flyout.Items.Add(new MenuFlyoutSeparator());
 
-        var reassign = new MenuFlyoutItem { Text = "Rebind..." };
-        reassign.Click += async (_, _) =>
+        var changeAction = new MenuFlyoutItem { Text = "Change action..." };
+        changeAction.Click += async (_, _) =>
         {
             var action = await PickActionAsync(preselect: state.RawAction);
             if (action is null) return;
             var token = KeybindTriggerSyntax.EncodePhysical(mask, cell.Ordinal);
             TryWriteKeybinds(cur => UserKeybindEditor.Assign(cur, token, action));
         };
-        flyout.Items.Add(reassign);
+        flyout.Items.Add(changeAction);
 
+        // Unbind/Reset act on the EnumeratedKeybind captured at paint time. The map
+        // is rebuilt on every ConfigChanged, so state.Bind is only stale if the config
+        // changes while this flyout is open — a narrow window, and TryWriteKeybinds is
+        // exception-guarded so a stale bind degrades to a no-op rather than a crash.
         var unbind = new MenuFlyoutItem { Text = "Unbind" };
         unbind.Click += (_, _) => TryWriteKeybinds(cur => UserKeybindEditor.Unbind(cur, state.Bind));
         flyout.Items.Add(unbind);
