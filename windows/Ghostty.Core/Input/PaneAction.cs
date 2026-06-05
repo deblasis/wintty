@@ -86,4 +86,8 @@ public enum PaneAction
     // App-level singleton rather than the active leaf because the
     // quake window may not even be open when the action fires.
     ToggleQuickTerminal = 48,
+
+    // Open the read-only keyboard-shortcuts cheat sheet. Routed via event to
+    // MainWindow, which shows the cheat sheet dialog (needs an XamlRoot/HWND).
+    ShowKeybindCheatsheet = 49,
 }
