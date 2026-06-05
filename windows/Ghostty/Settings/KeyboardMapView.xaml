@@ -1,0 +1,24 @@
+<UserControl
+    x:Class="Ghostty.Settings.KeyboardMapView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Spacing="12">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <ToggleButton x:Name="CtrlChip" Content="Ctrl" Click="Chip_Click" />
+            <ToggleButton x:Name="ShiftChip" Content="Shift" Click="Chip_Click" />
+            <ToggleButton x:Name="AltChip" Content="Alt" Click="Chip_Click" />
+            <ToggleButton x:Name="WinChip" Content="Win" Click="Chip_Click" />
+            <TextBlock x:Name="HintText" VerticalAlignment="Center" Margin="12,0,0,0"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Pick a modifier combo, then click a key to assign or edit." />
+        </StackPanel>
+        <ScrollViewer HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollMode="Disabled">
+            <StackPanel Orientation="Horizontal" Spacing="20" VerticalAlignment="Top">
+                <StackPanel x:Name="MainBlock" Spacing="4" />
+                <StackPanel x:Name="NavBlock" Spacing="4" />
+                <StackPanel x:Name="NumpadBlock" Spacing="4" />
+            </StackPanel>
+        </ScrollViewer>
+    </StackPanel>
+</UserControl>
