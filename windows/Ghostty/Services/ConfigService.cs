@@ -448,6 +448,16 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
                     // them via WindowsOnlyKeysUsed either.
                     continue;
                 }
+                if (WindowsOnlyKeys.IsAgentDetectKey(key))
+                {
+                    // agent-detect.<name> keys are custom tab-icon
+                    // process detectors read directly from the raw
+                    // config file (Pro TabIconsConfig); like internal.*
+                    // they aren't public Windows-only config, so we
+                    // suppress the diagnostic silently rather than
+                    // surface it.
+                    continue;
+                }
                 if (WindowsOnlyKeys.Contains(key))
                 {
                     if (_windowsOnlyKeysSeen.Add(key))
