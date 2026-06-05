@@ -224,6 +224,16 @@ internal sealed partial class KeybindingsPage : Page
         if (keyboard) ApplyMap();
     }
 
+    private void CheatSheetButton_Click(object sender, RoutedEventArgs e)
+        => _ = Ghostty.Settings.CheatSheetLauncher.ShowAsync(
+            _configService, XamlRoot, GetActiveWindowHandle());
+
+    // The Settings window is the foreground window when its own button is
+    // clicked, so the foreground HWND is the owner the dialog's FileSavePicker
+    // needs. GetForegroundWindow is already in NativeMethods.txt.
+    private static IntPtr GetActiveWindowHandle()
+        => Windows.Win32.PInvoke.GetForegroundWindow();
+
     private async void Map_KeyClicked(object? sender, Ghostty.Settings.KeyboardKeyClickedEventArgs e)
     {
         var mask = Map.ModifierMask;

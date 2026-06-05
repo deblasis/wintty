@@ -39,6 +39,9 @@ namespace Ghostty.Logging;
 ///     refactor than this slot is worth.
 ///   - <see cref="KeybindingsPage"/>: same XAML-page constraint as
 ///     <see cref="GeneralPage"/>; logs keybind config write failures.
+///   - <see cref="CheatSheet"/>: read-only keybind cheat-sheet
+///     <c>ContentDialog</c>, constructed directly (no DI-enabled
+///     <c>Frame</c>); logs show / export failures.
 ///
 /// Tests should use <see cref="Install"/> which returns an
 /// <see cref="IDisposable"/> scope that restores the pre-install
@@ -62,6 +65,7 @@ internal static class StaticLoggers
     private static ILogger<Ghostty.Settings.WindowState>? _windowState;
     private static ILogger<Ghostty.Settings.Pages.GeneralPage>? _generalPage;
     private static ILogger<Ghostty.Settings.Pages.KeybindingsPage>? _keybindingsPage;
+    private static ILogger<Ghostty.Settings.CheatSheetDialog>? _cheatSheet;
     private static ILogger<App>? _app;
 
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
@@ -74,6 +78,8 @@ internal static class StaticLoggers
         => _generalPage ?? NullLogger<Ghostty.Settings.Pages.GeneralPage>.Instance;
     internal static ILogger<Ghostty.Settings.Pages.KeybindingsPage> KeybindingsPage
         => _keybindingsPage ?? NullLogger<Ghostty.Settings.Pages.KeybindingsPage>.Instance;
+    internal static ILogger<Ghostty.Settings.CheatSheetDialog> CheatSheet
+        => _cheatSheet ?? NullLogger<Ghostty.Settings.CheatSheetDialog>.Instance;
     internal static ILogger<App> App
         => _app ?? NullLogger<App>.Instance;
 
@@ -84,6 +90,7 @@ internal static class StaticLoggers
         _windowState = factory.CreateLogger<Ghostty.Settings.WindowState>();
         _generalPage = factory.CreateLogger<Ghostty.Settings.Pages.GeneralPage>();
         _keybindingsPage = factory.CreateLogger<Ghostty.Settings.Pages.KeybindingsPage>();
+        _cheatSheet = factory.CreateLogger<Ghostty.Settings.CheatSheetDialog>();
         _app = factory.CreateLogger<App>();
     }
 
@@ -95,7 +102,7 @@ internal static class StaticLoggers
     }
 
     private static Snapshot CaptureSnapshot() => new(
-        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage, _app);
+        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage, _cheatSheet, _app);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
@@ -103,6 +110,7 @@ internal static class StaticLoggers
         ILogger<Ghostty.Settings.WindowState>? WindowState,
         ILogger<Ghostty.Settings.Pages.GeneralPage>? GeneralPage,
         ILogger<Ghostty.Settings.Pages.KeybindingsPage>? KeybindingsPage,
+        ILogger<Ghostty.Settings.CheatSheetDialog>? CheatSheet,
         ILogger<App>? App);
 
     private sealed class Scope : IDisposable
@@ -117,7 +125,21 @@ internal static class StaticLoggers
             _windowState = _prior.WindowState;
             _generalPage = _prior.GeneralPage;
             _keybindingsPage = _prior.KeybindingsPage;
+            _cheatSheet = _prior.CheatSheet;
             _app = _prior.App;
         }
     }
+}
+
+internal static partial class CheatSheetLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SettingsUi.CheatSheetShowFailed,
+                   Level = LogLevel.Warning, Message = "Failed to show keybind cheat sheet")]
+    internal static partial void LogCheatSheetShowFailed(
+        this ILogger<Ghostty.Settings.CheatSheetDialog> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SettingsUi.CheatSheetExportFailed,
+                   Level = LogLevel.Warning, Message = "Failed to export keybind cheat sheet")]
+    internal static partial void LogCheatSheetExportFailed(
+        this ILogger<Ghostty.Settings.CheatSheetDialog> logger, System.Exception ex);
 }
