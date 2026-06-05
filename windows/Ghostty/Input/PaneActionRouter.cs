@@ -99,6 +99,12 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? QuickTerminalToggleRequested;
 
+    /// <summary>
+    /// Raised when the cheat-sheet chord or palette entry fires. MainWindow
+    /// listens and shows the keyboard-shortcuts cheat sheet dialog.
+    /// </summary>
+    public event EventHandler? ShowKeybindCheatsheetRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -122,6 +128,9 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ToggleQuickTerminal:
                 QuickTerminalToggleRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ShowKeybindCheatsheet:
+                ShowKeybindCheatsheetRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding
