@@ -1273,6 +1273,12 @@ public sealed partial class MainWindow : Window
         // hotkey, so any MainWindow can be the chord source.
         _router.QuickTerminalToggleRequested += (_, _) =>
             ((App)Application.Current).ToggleQuickTerminal();
+
+        _router.ShowKeybindCheatsheetRequested += (_, _) =>
+            _ = Ghostty.Settings.CheatSheetLauncher.ShowAsync(
+                _configService,
+                Content?.XamlRoot,
+                WinRT.Interop.WindowNative.GetWindowHandle(this));
     }
 
     /// <summary>

@@ -59,11 +59,13 @@
     <Grid Padding="24" RowDefinitions="Auto,Auto,*">
         <TextBlock Text="Keybindings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
 
-        <SelectorBar x:Name="ViewBar" Grid.Row="0" HorizontalAlignment="Right"
-                     SelectionChanged="ViewBar_SelectionChanged">
-            <SelectorBarItem x:Name="ListBarItem" Text="List" IsSelected="True" />
-            <SelectorBarItem x:Name="KeyboardBarItem" Text="Keyboard" />
-        </SelectorBar>
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <SelectorBar x:Name="ViewBar" SelectionChanged="ViewBar_SelectionChanged">
+                <SelectorBarItem x:Name="ListBarItem" Text="List" IsSelected="True" />
+                <SelectorBarItem x:Name="KeyboardBarItem" Text="Keyboard" />
+            </SelectorBar>
+            <Button x:Name="CheatSheetButton" Content="Cheat sheet" Click="CheatSheetButton_Click" />
+        </StackPanel>
 
         <Grid x:Name="ListPanel" Grid.Row="1" Grid.RowSpan="2" RowDefinitions="Auto,*">
             <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,16">
