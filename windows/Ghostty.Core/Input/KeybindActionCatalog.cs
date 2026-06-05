@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Ghostty.Core.Input;
 
@@ -81,5 +82,31 @@ public static class KeybindActionCatalog
         }
 
         return new ActionDescription(hit.Category, friendly);
+    }
+
+    /// <summary>An action the user can assign from the keyboard map / picker.</summary>
+    public readonly record struct AssignableAction(string RawAction, string Category, string Friendly);
+
+    /// <summary>
+    /// Distinct assignable actions taken from the finalized bind set, described
+    /// and ordered (category, then friendly name). Using the enumerated actions
+    /// keeps every offered action a valid libghostty string with no new ABI.
+    /// </summary>
+    public static IReadOnlyList<AssignableAction> AllActions(IReadOnlyList<EnumeratedKeybind> binds)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<AssignableAction>();
+        foreach (var kb in binds)
+        {
+            if (string.IsNullOrEmpty(kb.Action) || !seen.Add(kb.Action)) continue;
+            var d = Describe(kb.Action);
+            list.Add(new AssignableAction(kb.Action, d.Category, d.Friendly));
+        }
+
+        return list
+            .OrderBy(a => a.Category == "Other" ? 1 : 0)
+            .ThenBy(a => a.Category, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(a => a.Friendly, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 }
