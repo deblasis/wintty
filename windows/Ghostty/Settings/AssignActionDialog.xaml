@@ -1,0 +1,26 @@
+<ContentDialog
+    x:Class="Ghostty.Settings.AssignActionDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Assign action"
+    PrimaryButtonText="Assign"
+    CloseButtonText="Cancel"
+    IsPrimaryButtonEnabled="False"
+    DefaultButton="Primary">
+    <Grid RowDefinitions="Auto,*" Width="360" Height="420">
+        <AutoSuggestBox x:Name="FilterBox" PlaceholderText="Search actions..."
+                        QueryIcon="Find" TextChanged="FilterBox_TextChanged" Margin="0,0,0,8" />
+        <ListView x:Name="ActionList" Grid.Row="1" SelectionMode="Single"
+                  SelectionChanged="ActionList_SelectionChanged">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Padding="4,6">
+                        <TextBlock x:Name="FriendlyText" />
+                        <TextBlock x:Name="CategoryText" FontSize="11"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+    </Grid>
+</ContentDialog>
