@@ -66,5 +66,7 @@ internal static class LogEvents
     {
         public const int ConfigOpenFailed   = 2600;
         public const int KeybindWriteFailed = 2601;
+        public const int CheatSheetShowFailed = 2602;
+        public const int CheatSheetExportFailed = 2603;
     }
 }
