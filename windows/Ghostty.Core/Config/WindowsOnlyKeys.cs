@@ -153,13 +153,12 @@ public static class WindowsOnlyKeys
     /// Returns true when <paramref name="key"/> is an agent-detector key
     /// of the shape <c>agent-detect.&lt;name&gt;</c>. These are a
     /// Windows-fork-only feature (custom tab-icon process detectors) read
-    /// entirely on the C# side from the raw config file; libghostty has no
-    /// such field and flags each line as an "unknown field". Suppressing
-    /// them here keeps that diagnostic out of the settings UI notice list.
-    /// Like <see cref="IsInternalKey"/> and <see cref="IsProfileSubkey"/>,
-    /// these are absorbed silently rather than surfaced via
-    /// <c>WindowsOnlyKeysUsed</c>, since the keys are per-detector
-    /// repeatable and would otherwise flood the list one entry per row.
+    /// directly from the raw config file by the Pro tab-icon layer and are
+    /// not surfaced as Windows-only public config; suppressing them here
+    /// keeps libghostty's "unknown field" diagnostic out of the settings
+    /// UI notice list, exactly like <see cref="IsInternalKey"/>. The
+    /// matcher mirrors that reader's prefix test, so a name that itself
+    /// contains dots (<c>agent-detect.my.bot</c>) still matches.
     /// </summary>
     public static bool IsAgentDetectKey(string key)
     {

@@ -141,6 +141,7 @@ public class WindowsOnlyKeysTests
     [InlineData("agent-detect.mybot", true)]
     [InlineData("agent-detect.claude", true)]
     [InlineData("agent-detect.a", true)]                // minimal valid (single char name)
+    [InlineData("agent-detect.my.bot", true)]           // dotted name: reader takes key[prefix..] verbatim
     [InlineData("AGENT-DETECT.MYBOT", true)]            // case-insensitive prefix
     [InlineData("agent-detect.", false)]                // bare prefix, no name
     [InlineData("agent-detect", false)]                 // exact scalar
