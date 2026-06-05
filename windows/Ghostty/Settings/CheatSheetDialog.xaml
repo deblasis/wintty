@@ -1,0 +1,37 @@
+<ContentDialog
+    x:Class="Ghostty.Settings.CheatSheetDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Ghostty.Settings"
+    Title="Keyboard Shortcuts"
+    CloseButtonText="Close"
+    DefaultButton="Close">
+    <ContentDialog.Resources>
+        <DataTemplate x:Key="CheatHeaderTemplate">
+            <TextBlock x:Name="HeaderText" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,12,0,4" />
+        </DataTemplate>
+        <DataTemplate x:Key="CheatEntryTemplate">
+            <Grid ColumnDefinitions="*,Auto" Padding="4,4">
+                <TextBlock x:Name="FriendlyText" VerticalAlignment="Center" />
+                <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="4" Padding="8,2">
+                    <TextBlock x:Name="LabelText" FontFamily="Cascadia Code, Consolas, monospace" />
+                </Border>
+            </Grid>
+        </DataTemplate>
+        <local:CheatRowTemplateSelector x:Key="CheatRowSelector"
+            HeaderTemplate="{StaticResource CheatHeaderTemplate}"
+            EntryTemplate="{StaticResource CheatEntryTemplate}" />
+    </ContentDialog.Resources>
+
+    <Grid RowDefinitions="Auto,*,Auto" Width="460" Height="520">
+        <AutoSuggestBox x:Name="SearchBox" PlaceholderText="Search shortcuts..."
+                        QueryIcon="Find" TextChanged="SearchBox_TextChanged" Margin="0,0,0,8" />
+        <ListView x:Name="RowsList" Grid.Row="1" SelectionMode="None"
+                  ItemTemplateSelector="{StaticResource CheatRowSelector}" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+            <Button x:Name="CopyButton" Content="Copy as Markdown" Click="CopyButton_Click" />
+            <Button x:Name="SaveButton" Content="Save..." Click="SaveButton_Click" />
+        </StackPanel>
+    </Grid>
+</ContentDialog>

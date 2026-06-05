@@ -141,6 +141,10 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number7, PaneAction.OpenProfile7),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number8, PaneAction.OpenProfile8),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Number9, PaneAction.OpenProfile9),
+
+        // Ctrl+Shift+/ ("Ctrl+?") opens the keyboard-shortcuts cheat sheet.
+        // VK 191 = VK_OEM_2 ('/') on US-ANSI.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)191, PaneAction.ShowKeybindCheatsheet),
     });
 
     /// <summary>
