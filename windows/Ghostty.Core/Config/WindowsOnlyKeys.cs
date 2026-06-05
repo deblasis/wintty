@@ -148,4 +148,26 @@ public static class WindowsOnlyKeys
         return key.Length > Prefix.Length
             && key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Returns true when <paramref name="key"/> is an agent-detector key
+    /// of the shape <c>agent-detect.&lt;name&gt;</c>. These are a
+    /// Windows-fork-only feature (custom tab-icon process detectors) read
+    /// directly from the raw config file by the Pro tab-icon layer and are
+    /// not surfaced as Windows-only public config; suppressing them here
+    /// keeps libghostty's "unknown field" diagnostic out of the settings
+    /// UI notice list, exactly like <see cref="IsInternalKey"/>. The
+    /// matcher mirrors that reader's prefix test, so a name that itself
+    /// contains dots (<c>agent-detect.my.bot</c>) still matches.
+    /// </summary>
+    public static bool IsAgentDetectKey(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+
+        const string Prefix = "agent-detect.";
+        // Need the full prefix plus at least one character of <name>;
+        // bare "agent-detect." or "agent-detect" alone shouldn't match.
+        return key.Length > Prefix.Length
+            && key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase);
+    }
 }
