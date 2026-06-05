@@ -78,4 +78,20 @@ public class KeyboardMapModelTests
         var model = KeyboardMapModel.Build(new[] { uni }, null, Ctrl);
         Assert.Null(model.ForKey("key_a"));
     }
+
+    [Fact]
+    public void BareKeyLayer_LightsUnmodifiedKeysOnly()
+    {
+        var binds = new[]
+        {
+            Bind("f11", 0, "toggle_fullscreen"),   // bare key -> layer 0
+            Bind("key_t", Ctrl, "new_tab"),        // modified -> must NOT leak onto layer 0
+        };
+        var model = KeyboardMapModel.Build(binds, defaults: null, modifierMask: 0);
+
+        var f11 = model.ForKey("f11");
+        Assert.NotNull(f11);
+        Assert.Equal("toggle_fullscreen", f11!.RawAction);
+        Assert.Null(model.ForKey("key_t"));        // modified bind absent from bare layer
+    }
 }

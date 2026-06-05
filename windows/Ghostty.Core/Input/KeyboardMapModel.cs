@@ -75,6 +75,7 @@ public sealed class KeyboardMapModel
 
     private static uint Canonical(uint mods)
     {
+        // caps_lock(bit 4) / num_lock(bit 5) intentionally dropped — not modifier-layer bits.
         uint m = 0;
         if ((mods & (Shift | ShiftR)) != 0) m |= Shift;
         if ((mods & (Ctrl | CtrlR)) != 0) m |= Ctrl;
