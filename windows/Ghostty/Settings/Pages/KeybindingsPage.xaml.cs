@@ -45,6 +45,10 @@ internal sealed partial class KeybindingsPage : Page
     // grid.Tag, which OnContainerContentChanging refreshes on every realize.
     private KeybindListItem? _contextRowItem;
 
+    // Guards against opening a second ContentDialog (WinUI allows only one at a
+    // time; a concurrent ShowAsync throws on the async-void stack -> crash).
+    private bool _dialogOpen;
+
     public KeybindingsPage(ConfigService configService, Ghostty.Core.Config.IConfigFileEditor editor)
     {
         _configService = configService;
@@ -54,6 +58,9 @@ internal sealed partial class KeybindingsPage : Page
         _catalog = KeybindCatalog.Build(Array.Empty<EnumeratedKeybind>());
         BindingsList.ContainerContentChanging += OnContainerContentChanging;
 
+        // Map is a page-owned child control (its lifetime == the page's), so these
+        // ctor subscriptions need no Unloaded pairing — unlike ConfigChanged on the
+        // external _configService.
         Map.ModifierChanged += (_, _) => ApplyMap();
         Map.KeyClicked += Map_KeyClicked;
 
@@ -153,21 +160,11 @@ internal sealed partial class KeybindingsPage : Page
     private async void RebindItem_Click(object sender, RoutedEventArgs e)
     {
         if (_contextRowItem is not { } item) return;
-
-        // Pass the live finalized bind set so the dialog can warn about
-        // assign-time conflicts against what is actually in effect.
-        var current = KeybindEnumerator.Enumerate(_configService.ConfigHandle);
-        var dialog = new Ghostty.Settings.RebindDialog(current, item.RawAction, item.Friendly)
-        {
-            XamlRoot = XamlRoot,
-        };
-        var result = await dialog.ShowAsync();
-        if (result != ContentDialogResult.Primary || dialog.CapturedTrigger is not { } token) return;
+        if (await ShowRebindDialogAsync(item.RawAction, item.Friendly) is not { } token) return;
 
         // Add/override: write the new trigger=action line (dropping any user
         // line already at that chord). The action's other triggers stay intact.
-        TryWriteKeybinds(current =>
-            UserKeybindEditor.Assign(current, token, item.RawAction));
+        TryWriteKeybinds(cur => UserKeybindEditor.Assign(cur, token, item.RawAction));
     }
 
     private void ApplyUserEdit(
@@ -221,6 +218,7 @@ internal sealed partial class KeybindingsPage : Page
     private void ViewBar_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {
         var keyboard = sender.SelectedItem == KeyboardBarItem;
+        // ListPanel and KeyboardPanel deliberately overlap (both Row 1, RowSpan 2); exactly one is Visible.
         KeyboardPanel.Visibility = keyboard ? Visibility.Visible : Visibility.Collapsed;
         ListPanel.Visibility = keyboard ? Visibility.Collapsed : Visibility.Visible;
         if (keyboard) ApplyMap();
@@ -259,7 +257,7 @@ internal sealed partial class KeybindingsPage : Page
         flyout.Items.Add(new MenuFlyoutItem { Text = state.ActionLabel, IsEnabled = false });
         flyout.Items.Add(new MenuFlyoutSeparator());
 
-        var reassign = new MenuFlyoutItem { Text = "Reassign..." };
+        var reassign = new MenuFlyoutItem { Text = "Rebind..." };
         reassign.Click += async (_, _) =>
         {
             var action = await PickActionAsync(preselect: state.RawAction);
@@ -285,16 +283,35 @@ internal sealed partial class KeybindingsPage : Page
 
     private async Task<string?> PickActionAsync(string? preselect)
     {
-        var dialog = new Ghostty.Settings.AssignActionDialog(_binds, preselect) { XamlRoot = XamlRoot };
-        var result = await dialog.ShowAsync();
-        return result == ContentDialogResult.Primary ? dialog.SelectedAction : null;
+        if (_dialogOpen || XamlRoot is null) return null;
+        _dialogOpen = true;
+        try
+        {
+            var dialog = new Ghostty.Settings.AssignActionDialog(_binds, preselect) { XamlRoot = XamlRoot };
+            var result = await dialog.ShowAsync();
+            return result == ContentDialogResult.Primary ? dialog.SelectedAction : null;
+        }
+        finally { _dialogOpen = false; }
+    }
+
+    // Single guarded entry point for the Rebind capture dialog. Returns the
+    // captured trigger token, or null if cancelled / a dialog is already open.
+    private async Task<string?> ShowRebindDialogAsync(string rawAction, string friendly)
+    {
+        if (_dialogOpen || XamlRoot is null) return null;
+        _dialogOpen = true;
+        try
+        {
+            var dialog = new Ghostty.Settings.RebindDialog(_binds, rawAction, friendly) { XamlRoot = XamlRoot };
+            var result = await dialog.ShowAsync();
+            return result == ContentDialogResult.Primary ? dialog.CapturedTrigger : null;
+        }
+        finally { _dialogOpen = false; }
     }
 
     private async Task RebindActionAsync(string rawAction, string friendly)
     {
-        var dialog = new Ghostty.Settings.RebindDialog(_binds, rawAction, friendly) { XamlRoot = XamlRoot };
-        var dr = await dialog.ShowAsync();
-        if (dr != ContentDialogResult.Primary || dialog.CapturedTrigger is not { } token) return;
+        if (await ShowRebindDialogAsync(rawAction, friendly) is not { } token) return;
         TryWriteKeybinds(cur => UserKeybindEditor.Assign(cur, token, rawAction));
     }
 }
