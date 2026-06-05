@@ -136,4 +136,37 @@ public class WindowsOnlyKeysTests
     {
         Assert.Equal(expected, Ghostty.Core.Config.WindowsOnlyKeys.IsInternalKey(key));
     }
+
+    [Theory]
+    [InlineData("agent-detect.mybot", true)]
+    [InlineData("agent-detect.claude", true)]
+    [InlineData("agent-detect.a", true)]                // minimal valid (single char name)
+    [InlineData("AGENT-DETECT.MYBOT", true)]            // case-insensitive prefix
+    [InlineData("agent-detect.", false)]                // bare prefix, no name
+    [InlineData("agent-detect", false)]                 // exact scalar
+    [InlineData("agent-detectish", false)]              // prefix-without-dot, different key
+    [InlineData("profile.x.agent-detect", false)]       // different namespace
+    [InlineData("background-style", false)]             // unrelated public key
+    public void IsAgentDetectKey_Expected(string key, bool expected)
+    {
+        Assert.Equal(expected, Ghostty.Core.Config.WindowsOnlyKeys.IsAgentDetectKey(key));
+    }
+
+    [Fact]
+    public void AgentDetectDiagnostic_ExtractsKey_AndClassifiesForSilentSuppression()
+    {
+        // A saved agent detector (agent-detect.mybot = process=mybot) is an
+        // unknown field to libghostty's parser, which emits this diagnostic.
+        // The filter must recognize the extracted key as an agent-detect key
+        // so ConfigService can suppress it -- and it must NOT be a first-class
+        // Windows-only key (those surface via WindowsOnlyKeysUsed; agent
+        // detectors are per-row repeatable and stay silent like internal.*).
+        const string message =
+            "C:\\Users\\alex\\AppData\\Roaming\\com.mitchellh.ghostty\\config:5:agent-detect.mybot: unknown field";
+
+        Assert.True(WindowsOnlyKeys.TryExtractUnknownFieldKey(message, out var key));
+        Assert.Equal("agent-detect.mybot", key);
+        Assert.True(WindowsOnlyKeys.IsAgentDetectKey(key));
+        Assert.False(WindowsOnlyKeys.Contains(key));
+    }
 }
