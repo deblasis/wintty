@@ -43,6 +43,14 @@ public sealed class SearchState : INotifyPropertyChanged
     }
 
     /// <summary>Current search query. Empty cancels the active search.</summary>
+    /// <remarks>
+    /// Must stay a verbatim passthrough (only null-coalescing): the
+    /// SearchBar needle TextBox binds here TwoWay with
+    /// UpdateSourceTrigger=PropertyChanged, so any transform (trim,
+    /// case-fold, normalize) would write a different string back into the
+    /// focused box mid-edit and corrupt the caret. The Ordinal dedupe below
+    /// is also what keeps the libghostty needle echo from looping.
+    /// </remarks>
     public string Needle
     {
         get => _needle;
