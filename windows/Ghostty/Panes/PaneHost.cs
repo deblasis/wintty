@@ -1059,6 +1059,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             splitter.HorizontalAlignment = HorizontalAlignment.Right;
             splitter.VerticalAlignment = VerticalAlignment.Stretch;
             splitter.Width = 1;
+            // Keep the splitter above the panes regardless of later child
+            // order. Operations that re-add a leaf via Children.Add -- unzoom
+            // (ToggleSplitZoom) splicing the floated leaf back, and an in-place
+            // Split of a cell-0 leaf -- would otherwise append the leaf on top
+            // of this splitter, occluding the 1px divider line and stealing its
+            // drag hit-testing. A high z-index pins it on top by intent, not by
+            // add-order luck.
+            Canvas.SetZIndex(splitter, 1);
             grid.Children.Add(splitter);
         }
         else
@@ -1083,6 +1091,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             splitter.VerticalAlignment = VerticalAlignment.Bottom;
             splitter.HorizontalAlignment = HorizontalAlignment.Stretch;
             splitter.Height = 1;
+            // Pin above the panes so a later Children.Add (unzoom / cell-0
+            // split) can't occlude the divider. See the vertical case above.
+            Canvas.SetZIndex(splitter, 1);
             grid.Children.Add(splitter);
         }
 
