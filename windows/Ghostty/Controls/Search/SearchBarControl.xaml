@@ -34,15 +34,20 @@
             <!--
                 Needle box. Two-way bound to State.Needle so external
                 resets (e.g. Reset()) flow back into the TextBox without
-                code-behind plumbing. Enter / Shift+Enter / Esc are
-                handled in code-behind via KeyDown.
+                code-behind plumbing. UpdateSourceTrigger=PropertyChanged is
+                REQUIRED: TextBox.Text two-way bindings update the source only
+                on LostFocus by default, but State.CounterText short-circuits
+                to blank while the needle is empty, so without per-keystroke
+                source updates the match counter stays blank until the box
+                loses focus. Enter / Shift+Enter / Esc are handled in
+                code-behind via KeyDown.
             -->
             <TextBox x:Name="NeedleBox"
                      Grid.Column="0"
                      PlaceholderText="Search scrollback"
                      AcceptsReturn="False"
                      VerticalAlignment="Center"
-                     Text="{x:Bind State.Needle, Mode=TwoWay}"
+                     Text="{x:Bind State.Needle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      TextChanged="OnNeedleTextChanged"
                      KeyDown="OnNeedleKeyDown"/>
 
