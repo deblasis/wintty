@@ -151,8 +151,10 @@ internal sealed class KeyBindings
     /// Human-readable name for a <see cref="VirtualKey"/>. Named enum
     /// members use ToString(); OEM keys that have no named member fall
     /// back to a lookup table so tooltips show "," instead of "188".
+    /// Also reused by the command palette's shortcut subtitles so chord
+    /// text is rendered from one OEM-aware table.
     /// </summary>
-    private static string KeyDisplayName(VirtualKey key) => (int)key switch
+    internal static string KeyDisplayName(VirtualKey key) => (int)key switch
     {
         // Top-row digits Number0..Number9 (VirtualKey values 0x30..0x39).
         // Default ToString() prints "Number1"; we want "1" for chord labels.

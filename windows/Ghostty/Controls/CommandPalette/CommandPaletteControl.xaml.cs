@@ -501,14 +501,10 @@ internal sealed partial class CommandPaletteControl : UserControl
         if (kb.Modifiers.HasFlag(VirtualKeyModifiers.Shift))   parts.Add("Shift");
         if (kb.Modifiers.HasFlag(VirtualKeyModifiers.Windows)) parts.Add("Win");
 
-        // Convert VirtualKey to a display name.
-        var key = kb.Key.ToString();
-
-        // Trim "Number" prefix from digit keys (VirtualKey.Number0 → "0")
-        if (key.StartsWith("Number", StringComparison.Ordinal))
-            key = key["Number".Length..];
-
-        parts.Add(key);
+        // Render the key via the shared OEM-aware table so punctuation keys
+        // (VK 188 → ",", 191 → "/") and digits (Number1 → "1") show their
+        // symbol instead of the raw VirtualKey name or numeric code.
+        parts.Add(Input.KeyBindings.KeyDisplayName(kb.Key));
         return string.Join("+", parts);
     }
 }
