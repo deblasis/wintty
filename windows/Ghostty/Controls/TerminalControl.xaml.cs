@@ -433,11 +433,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // OnLoaded re-subscribes when the control re-enters a tree.
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
 
-        // Stop the grace timer so its Tick cannot flip _resizeOverlayReady
-        // while the control is detached. The timer (and its single Tick
-        // subscription) is kept for reuse when the control re-enters a tree;
-        // ArmResizeOverlayGrace restarts it.
-        _resizeOverlayGraceTimer?.Stop();
+        // Deliberately do NOT stop the resize-overlay grace timer here. WinUI 3
+        // raises Unloaded on every reparent (split / rebuild), not just on real
+        // teardown, and the matching Loaded does not guarantee a fresh settled-
+        // layout pass -- so the one-shot OnFirstLayoutUpdated may never re-fire
+        // to re-arm the grace. Stopping a grace armed just before this reparent
+        // would latch _resizeOverlayReady false forever, so the pane would never
+        // pulse the resize pill again and only the never-reparented active pane
+        // would show it during a multi-pane resize. Letting the armed grace run
+        // to completion guarantees readiness recovers across reparents (a tick
+        // landing while detached only sets the flag true, which is harmless).
+        //
+        // Re-arming in OnLoaded instead is wrong: ArmResizeOverlayGrace resets
+        // _resizeOverlayReady to false and restarts the window on every
+        // reparent, re-blanking the pill on each split. This mirrors
+        // ResizeOverlayControl._hideTimer (PR #463), which likewise keeps its
+        // non-repeating timer wired across Unloaded for the same reparent reason.
     }
 
     /// <summary>
