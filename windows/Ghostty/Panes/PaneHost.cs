@@ -676,6 +676,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // A ratio change while zoomed (EqualizeSplits) only touched
             // the model; sync the live Grids now that they are shown.
             ApplyAllRatios();
+            // Force a synchronous measure+arrange so the just-respliced leaf
+            // has valid layout slots (and a measured size) before we position
+            // the chrome below. Without it the leaf is unmeasured here and the
+            // border/dim only settle on a coalesced layout pass up to ~750ms
+            // later -- the visible unzoom delay. (The unpark Translation
+            // itself commits lazily on the idle compositor, but
+            // PositionOverlayOverLeaf reads layout slots, not that transform,
+            // so the chrome no longer waits on the compositor.)
+            UpdateLayout();
             _highlightOverlay.Visibility = Visibility.Visible;
             UpdateHighlightPosition();
             DispatcherQueue.TryEnqueue(() => _activeLeaf.Terminal().Focus(FocusState.Programmatic));
@@ -965,17 +974,34 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             rect.Visibility = Visibility.Collapsed;
             return;
         }
-        Rect bounds;
-        try
+        // Position from the LAYOUT-slot chain rather than TransformToVisual.
+        // TransformToVisual reflects the render-thread transform, which the
+        // (idle) compositor does not commit until ~750ms after an unzoom
+        // unparks the tree -- stranding this chrome at the parked offset (the
+        // "borders/dimming apply late" delay). Layout slots are resolved
+        // synchronously by the arrange pass, so the rect tracks the pane's
+        // true position immediately. The only transform a pane ever carries is
+        // the zoom park, and the chrome is hidden while parked, so ignoring
+        // transforms here is correct. In steady state this exactly matches
+        // TransformToVisual.
+        //
+        // INVARIANT: every element from the leaf up to the host Grid -- the
+        // leaf root (TerminalControl), each split Grid and _treeRoot built by
+        // BuildVisual, and the host Grid -- must keep Margin=0 and Stretch
+        // alignment, so each arrange slot equals the rendered rect and the
+        // summed offsets equal the position relative to PaneHost. Adding a
+        // Margin/Padding, a non-Stretch alignment, or a (non-park)
+        // RenderTransform to any of them would offset this chrome; keep panes
+        // wrapper-free at the build site (BuildVisual).
+        double bx = 0, by = 0;
+        for (FrameworkElement? fe = ctl; fe is not null && !ReferenceEquals(fe, this);
+             fe = VisualTreeHelper.GetParent(fe) as FrameworkElement)
         {
-            var transform = ctl.TransformToVisual(this);
-            bounds = transform.TransformBounds(new Rect(0, 0, ctl.ActualWidth, ctl.ActualHeight));
+            var slot = Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(fe);
+            bx += slot.X;
+            by += slot.Y;
         }
-        catch
-        {
-            rect.Visibility = Visibility.Collapsed;
-            return;
-        }
+        var bounds = new Rect(bx, by, ctl.ActualWidth, ctl.ActualHeight);
         // For the stroked active border, inset by half the stroke
         // thickness so the 1.5px stroke draws entirely INSIDE the
         // leaf bounds. For dim fills, use the full rect.
