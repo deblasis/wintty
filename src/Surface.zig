@@ -663,9 +663,6 @@ pub fn init(
             .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
             .resources_dir = global.resourcesDir().host(),
             .term = config.term,
-            .conpty_mode = if (comptime builtin.os.tag == .windows)
-                config.@"conpty-mode"
-            else {},
             .utf8_console = if (comptime builtin.os.tag == .windows)
                 config.@"utf8-console"
             else {},

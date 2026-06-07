@@ -146,9 +146,11 @@ pub const StreamHandler = struct {
     }
 
     /// Mutate a `Message` produced by `Message.writeReq` so its write
-    /// variant is tagged as a parser-driven response. This lets the
-    /// termio thread suppress the write under shells that can't consume
-    /// CSI bytes on stdin (see `WriteKind`).
+    /// variant is tagged as a parser-driven response. The tag is
+    /// currently advisory: no backend acts on it today (it was once
+    /// used to suppress responses under the raw-pipe transport, which
+    /// no longer exists). Kept for diagnostics and future per-shell
+    /// quirk gating (see `WriteKind`).
     inline fn tagResponse(msg: *termio.Message) void {
         switch (msg.*) {
             .write_small => |*v| v.kind = .response,
