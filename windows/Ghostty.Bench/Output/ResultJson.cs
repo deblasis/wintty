@@ -72,9 +72,9 @@ public sealed record ResultJson(
     // Throughput now reports paired ingest / emit rates. Ingest = "how fast
     // did N payload bytes reach the other side of the transport." Emit =
     // "how many bytes did the transport produce on the return path during
-    // that same window." Under DirectPipe they are approximately equal;
-    // under ConPTY they diverge because conhost VT-renders screen state
-    // rather than byte-echoing, and the divergence is informative signal.
+    // that same window." Under ConPTY they diverge because conhost
+    // VT-renders screen state rather than byte-echoing, and the
+    // divergence is informative signal.
     public static ResultJson Throughput(
         string probe,
         string transport,

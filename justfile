@@ -112,18 +112,6 @@ build-win:
 run-win: build-dll build-win
     ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
 
-# === ConPTY-mode validation ===
-
-# Run one smoke row. ROW = pwsh-auto | pwsh-always | pwsh-never | cmd-auto.
-[windows]
-validate-transport-smoke ROW: build-dll build-win
-    pwsh -NoProfile -File scripts/validate-transport-run.ps1 -Row {{ROW}}
-
-# Run all four smoke rows; summarize, non-zero exit if any fail.
-[windows]
-validate-transport-smoke-all: build-dll build-win
-    pwsh -NoProfile -File scripts/validate-transport-run-all.ps1
-
 # === Shader Wrapper DLL (MSVC-compiled glslang + SPIRV-Cross) ===
 
 # Build shader_wrapper.dll with MSVC (isolates C++ ABI from ghostty.dll).
