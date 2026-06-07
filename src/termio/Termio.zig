@@ -410,9 +410,10 @@ pub fn queueMessage(
 ///
 /// If you're not using termio.Thread, this is not threadsafe.
 ///
-/// `kind` classifies the write so the backend can suppress it under
-/// shells that can't consume CSI bytes on stdin (see
-/// `termio.Message.WriteKind`). Pass `.input` for user-driven writes
+/// `kind` classifies the write (see `termio.Message.WriteKind`). The
+/// classification is currently advisory — no backend acts on it today
+/// (it once drove response suppression under the raw-pipe transport,
+/// which no longer exists). Pass `.input` for user-driven writes
 /// (keystrokes, paste, focus events, scripted inputs) and `.response`
 /// for parser-driven replies to child queries.
 pub inline fn queueWrite(
