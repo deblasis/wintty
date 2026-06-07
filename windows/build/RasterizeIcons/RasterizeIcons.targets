@@ -7,8 +7,8 @@
     incrementally rebuilds only when sources change.
   -->
   <PropertyGroup>
-    <IconAssetsSourceDir>$(MSBuildThisFileDirectory)..\..\windows\Ghostty.Core\Profiles\IconAssets.Source</IconAssetsSourceDir>
-    <IconAssetsOutputDir>$(MSBuildThisFileDirectory)..\..\windows\Ghostty.Core\Profiles\IconAssets</IconAssetsOutputDir>
+    <IconAssetsSourceDir>$(MSBuildThisFileDirectory)..\..\Ghostty.Core\Profiles\IconAssets.Source</IconAssetsSourceDir>
+    <IconAssetsOutputDir>$(MSBuildThisFileDirectory)..\..\Ghostty.Core\Profiles\IconAssets</IconAssetsOutputDir>
     <RasterizeIconsProj>$(MSBuildThisFileDirectory)RasterizeIcons.csproj</RasterizeIconsProj>
   </PropertyGroup>
 

@@ -12,7 +12,7 @@ evidence is available when a click misbehaves.
 
 ```pwsh
 just build-dll build-win
-pwsh -NoProfile -File scripts/mouse-smoke-run.ps1 -Cell 01-wsl2-mc
+pwsh -NoProfile -File windows/scripts/mouse-smoke-run.ps1 -Cell 01-wsl2-mc
 ```
 
 The runner copies the fixture into an isolated `XDG_CONFIG_HOME` and launches
