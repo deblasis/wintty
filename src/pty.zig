@@ -37,8 +37,10 @@ pub const TerminalMode = packed struct {
 };
 
 /// Transport mode. Only meaningful on Windows - POSIX always uses
-/// the kernel PTY. See `Options.mode`.
-pub const Mode = enum { conpty, bypass };
+/// the kernel PTY. See `Options.mode`. ConPTY is the sole Windows
+/// transport; the enum is kept as a single-variant type to preserve
+/// source-shape parity across platforms.
+pub const Mode = enum { conpty };
 
 /// Arguments to `Pty.open`.
 pub const Options = struct {
@@ -367,8 +369,9 @@ const WindowsPty = struct {
     in_pipe: windows.HANDLE,
     out_pipe_pty: windows.HANDLE,
     in_pipe_pty: windows.HANDLE,
-    /// null when mode == .bypass. In ConPTY mode this holds the HPCON
-    /// that owns the pipe pair internally.
+    /// Always set on Windows: holds the HPCON that owns the pipe pair
+    /// internally. Optional only because it is populated after the pipe
+    /// pair is created in `open`.
     pseudo_console: ?windows.exp.HPCON,
     size: winsize,
     mode: Mode,
@@ -544,37 +547,19 @@ const WindowsPty = struct {
         pty.mode = opts.mode;
         pty.pseudo_console = null;
 
-        switch (opts.mode) {
-            .conpty => {
-                var hpcon: windows.exp.HPCON = undefined;
-                const result = pseudoConsoleApi().create(
-                    .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                    pty.in_pipe_pty,
-                    pty.out_pipe_pty,
-                    0,
-                    &hpcon,
-                );
-                if (result != windows.S_OK) return error.Unexpected;
-                pty.pseudo_console = hpcon;
-            },
-            .bypass => {
-                // Bypass: no pseudoconsole. The child inherits in_pipe_pty as
-                // stdin and out_pipe_pty as stdout/stderr via
-                // STARTF_USESTDHANDLES. To make that inheritance work, the
-                // _pty ends must be HANDLE_FLAG_INHERIT. Parent ends stay
-                // non-inheritable so they don't leak.
-                try windows.SetHandleInformation(
-                    pty.in_pipe_pty,
-                    windows.HANDLE_FLAG_INHERIT,
-                    windows.HANDLE_FLAG_INHERIT,
-                );
-                try windows.SetHandleInformation(
-                    pty.out_pipe_pty,
-                    windows.HANDLE_FLAG_INHERIT,
-                    windows.HANDLE_FLAG_INHERIT,
-                );
-            },
-        }
+        // ConPTY is the sole Windows transport. Create the pseudoconsole
+        // over the freshly created pipe pair; it owns those handles
+        // internally for the rest of the PTY's life.
+        var hpcon: windows.exp.HPCON = undefined;
+        const result = pseudoConsoleApi().create(
+            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+            pty.in_pipe_pty,
+            pty.out_pipe_pty,
+            0,
+            &hpcon,
+        );
+        if (result != windows.S_OK) return error.Unexpected;
+        pty.pseudo_console = hpcon;
 
         return pty;
     }
@@ -590,65 +575,6 @@ const WindowsPty = struct {
         self.* = undefined;
     }
 
-    /// Bypass-mode resize signal: write `CSI 8 ; rows ; cols t` (XTWINOPS)
-    /// to the parent-side input pipe so that a VT-aware child parses it
-    /// as a size change.
-    ///
-    /// Best-effort by design: if the child isn't reading we don't want
-    /// to stall the UI thread, so the overlapped WriteFile is bounded
-    /// by a 100 ms wait and any failure is logged, not returned. Full
-    /// resize parity (SIGWINCH via WSL interop, per-shell signalling)
-    /// is a deferred follow-up.
-    fn writeResizeSequence(self: *Pty, size: winsize) void {
-        var buf: [32]u8 = undefined;
-        // 32 bytes fits any "\x1b[8;rows;cols t" for u16 dimensions,
-        // so bufPrint cannot actually fail. Treat as unreachable.
-        const seq = std.fmt.bufPrint(
-            &buf,
-            "\x1b[8;{d};{d}t",
-            .{ size.ws_row, size.ws_col },
-        ) catch unreachable;
-
-        var overlapped = std.mem.zeroes(windows.OVERLAPPED);
-        overlapped.hEvent = windows.exp.kernel32.CreateEventW(
-            null,
-            windows.TRUE,
-            windows.FALSE,
-            null,
-        );
-        if (overlapped.hEvent == null) {
-            log.warn("bypass resize signal: CreateEventW failed", .{});
-            return;
-        }
-        defer _ = windows.CloseHandle(overlapped.hEvent.?);
-
-        var written: windows.DWORD = 0;
-        const write_ok = windows.kernel32.WriteFile(
-            self.in_pipe,
-            seq.ptr,
-            @intCast(seq.len),
-            &written,
-            &overlapped,
-        );
-        if (write_ok == 0) {
-            const err = windows.kernel32.GetLastError();
-            if (err == .IO_PENDING) {
-                // Wait up to 100 ms. Best-effort: if the child isn't
-                // reading we don't want to block the UI thread.
-                const wait = windows.kernel32.WaitForSingleObject(
-                    overlapped.hEvent.?,
-                    100,
-                );
-                if (wait != windows.WAIT_OBJECT_0) {
-                    _ = windows.kernel32.CancelIoEx(self.in_pipe, &overlapped);
-                    log.warn("bypass resize signal timed out", .{});
-                }
-            } else {
-                log.warn("bypass resize signal write failed: {}", .{err});
-            }
-        }
-    }
-
     pub const GetSizeError = error{};
 
     /// Return the size of the pty.
@@ -660,19 +586,12 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        switch (self.mode) {
-            .conpty => {
-                const hpcon = self.pseudo_console orelse return error.ResizeFailed;
-                const result = pseudoConsoleApi().resize(
-                    hpcon,
-                    .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                );
-                if (result != windows.S_OK) return error.ResizeFailed;
-            },
-            // Best-effort: any transport failure is logged inside
-            // writeResizeSequence; we still record `self.size` below.
-            .bypass => self.writeResizeSequence(size),
-        }
+        const hpcon = self.pseudo_console orelse return error.ResizeFailed;
+        const result = pseudoConsoleApi().resize(
+            hpcon,
+            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+        );
+        if (result != windows.S_OK) return error.ResizeFailed;
         self.size = size;
     }
 
@@ -757,110 +676,4 @@ test "WindowsPty: conpty mode populates pseudo_console" {
     defer pty.deinit();
     try std.testing.expect(pty.pseudo_console != null);
     try std.testing.expectEqual(Mode.conpty, pty.mode);
-}
-
-test "WindowsPty: bypass mode skips pseudo_console and flips _pty handles inheritable" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var pty = try Pty.open(.{
-        .size = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 },
-        .mode = .bypass,
-    });
-    defer pty.deinit();
-    try std.testing.expect(pty.pseudo_console == null);
-    try std.testing.expectEqual(Mode.bypass, pty.mode);
-    try std.testing.expect(pty.in_pipe != windows.INVALID_HANDLE_VALUE);
-    try std.testing.expect(pty.out_pipe != windows.INVALID_HANDLE_VALUE);
-
-    // _pty ends must be inheritable so CreateProcessW with
-    // bInheritHandles = TRUE + HANDLE_LIST attribute passes them to
-    // the child's stdio.
-    var flags: windows.DWORD = 0;
-    try windows.GetHandleInformation(pty.in_pipe_pty, &flags);
-    try std.testing.expect((flags & windows.HANDLE_FLAG_INHERIT) != 0);
-    try windows.GetHandleInformation(pty.out_pipe_pty, &flags);
-    try std.testing.expect((flags & windows.HANDLE_FLAG_INHERIT) != 0);
-}
-
-test "WindowsPty: bypass setSize writes CSI 8;r;c;t to in_pipe" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var pty = try Pty.open(.{
-        .size = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 },
-        .mode = .bypass,
-    });
-    defer pty.deinit();
-
-    try pty.setSize(.{ .ws_row = 40, .ws_col = 120, .ws_xpixel = 0, .ws_ypixel = 0 });
-
-    // Read from the child-side pipe end. The resize escape was
-    // written to in_pipe (parent) and must be readable from
-    // in_pipe_pty (child).
-    var buf: [32]u8 = undefined;
-    var read: windows.DWORD = 0;
-    const ok = windows.kernel32.ReadFile(
-        pty.in_pipe_pty,
-        &buf,
-        @intCast(buf.len),
-        &read,
-        null,
-    );
-    try std.testing.expect(ok != 0);
-    try std.testing.expectEqualStrings("\x1b[8;40;120t", buf[0..read]);
-
-    // Size accounting still correct.
-    try std.testing.expectEqual(@as(u16, 40), pty.size.ws_row);
-    try std.testing.expectEqual(@as(u16, 120), pty.size.ws_col);
-}
-
-test "WindowsPty: bypass end-to-end with cmd.exe /c echo" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const Command = @import("Command.zig");
-    const testing = std.testing;
-
-    var pty = try Pty.open(.{
-        .size = .{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 },
-        .mode = .bypass,
-    });
-    defer pty.deinit();
-
-    var cmd: Command = .{
-        .path = "C:\\Windows\\System32\\cmd.exe",
-        .args = &.{ "cmd.exe", "/c", "echo hi" },
-        .stdin = .{ .handle = pty.in_pipe_pty },
-        .stdout = .{ .handle = pty.out_pipe_pty },
-        .stderr = .{ .handle = pty.out_pipe_pty },
-        .pseudo_console = null,
-        .os_pre_exec = null,
-        .rt_pre_exec = null,
-        .rt_post_fork = null,
-        .rt_pre_exec_info = undefined,
-        .rt_post_fork_info = undefined,
-    };
-    try cmd.testingStart();
-    defer _ = cmd.wait(true) catch {};
-
-    // Close our parent copies of _pty ends so EOF reaches us when
-    // the child exits. Matches the termio/Exec.zig post-spawn
-    // cleanup for bypass mode.
-    _ = windows.CloseHandle(pty.in_pipe_pty);
-    _ = windows.CloseHandle(pty.out_pipe_pty);
-    pty.in_pipe_pty = windows.INVALID_HANDLE_VALUE;
-    pty.out_pipe_pty = windows.INVALID_HANDLE_VALUE;
-
-    // Drain stdout until EOF or buffer full.
-    var buf: [256]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        var read: windows.DWORD = 0;
-        const ok = windows.kernel32.ReadFile(
-            pty.out_pipe,
-            buf[total..].ptr,
-            @intCast(buf.len - total),
-            &read,
-            null,
-        );
-        if (ok == 0 or read == 0) break;
-        total += read;
-    }
-
-    try testing.expect(std.mem.indexOf(u8, buf[0..total], "hi") != null);
 }
