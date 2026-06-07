@@ -6,9 +6,6 @@
 //! `Kind` here identifies the shell for preamble selection. A shell
 //! can be recognized here without being recognized there (e.g.
 //! `wsl.exe`) and vice versa.
-//!
-//! The C# port at windows/Ghostty.Core/Shell/ShellDetector.cs keeps
-//! the same table; edit both together until the C# side is retired.
 
 const std = @import("std");
 const builtin = @import("builtin");
