@@ -96,18 +96,28 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.269" PrivateAssets="all" />
     <!--
-      Bundle the OpenConsole-derived ConPTY DLL alongside Wintty.exe.
-      Loaded at runtime by the Zig pty layer in preference to the
-      OS-shipped conhost so we get newer VT pass-through behavior
-      (the in-box conhost strips unknown APC/DCS sequences such as
-      the Kitty graphics protocol). Package contents are Microsoft-
-      signed; signature is verified at install time by the MSIX
-      runtime.
+      Bundle the OpenConsole-derived ConPTY pair (conpty.dll +
+      OpenConsole.exe) alongside Wintty.exe. Loaded at runtime by the
+      Zig pty layer (resolvePseudoConsoleApi) in preference to the
+      OS in-box conhost. This is REQUIRED, not just preferred: the
+      in-box conhost strips the APC/DCS sequences carrying Kitty
+      graphics and Sixel, so without the bundled pair those image
+      protocols silently stop working. ConPTY is now the sole Windows
+      transport (the raw-pipe bypass was removed), so this dependency
+      is load-bearing. The pty resolver logs at `warn` if it has to
+      fall back to in-box conhost. Package binaries are Microsoft-
+      signed; this app is unpackaged (WindowsPackageType=None), so
+      there is no MSIX install-time signature check — we rely on
+      shipping the binaries unmodified.
 
-      Pinned to 1.25.260427001-preview because that's the first
-      release whose conpty.dll forwards Kitty graphics APCs without
-      mangling; bumping requires re-validating the protocol-smoke
-      matrix in wintty-smoke.
+      Pinned to 1.25.260427001-preview: the transport spike on
+      2026-06-02 empirically confirmed this build's conpty.dll
+      forwards both Kitty graphics (APC) and Sixel (DCS), while the
+      in-box conhost strips them (proven by a bundled-vs-inbox
+      differential with an iTerm2 OSC-1337 control). See
+      docs/superpowers/plans/2026-06-02-conpty-bypass-stabilization.md.
+      Bumping the pin REQUIRES re-running the protocol-smoke matrix in
+      wintty-smoke (probe-all.ps1) to confirm passthrough survives.
 
       ExcludeAssets="all" stops the package's auto-applied build
       targets from injecting a C++-style link step into this managed
@@ -175,6 +185,29 @@
       <Visible>false</Visible>
     </None>
   </ItemGroup>
+
+  <!--
+    Fail the build if the bundled ConPTY pair is missing for the target
+    platform. ConPTY is the sole Windows transport and the in-box
+    conhost strips Kitty graphics + Sixel, so a missing conpty.dll /
+    OpenConsole.exe is a silent loss of image support at runtime, not a
+    cosmetic warning. Catch it at build time instead. One Error per
+    file per platform (the project Platforms are x86;x64;ARM64).
+  -->
+  <Target Name="ErrorIfConPtyPairIncomplete" BeforeTargets="Build">
+    <Error Condition="'$(Platform)' == 'x64' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll')"
+           Text="Bundled conpty.dll missing for x64 from the Microsoft.Windows.Console.ConPTY package. ConPTY is the sole Windows transport; without it Kitty graphics and Sixel break. Restore the package or fix the version pin." />
+    <Error Condition="'$(Platform)' == 'x64' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe')"
+           Text="Bundled OpenConsole.exe missing for x64; conpty.dll would silently fall back to in-box conhost (no Kitty graphics / Sixel)." />
+    <Error Condition="'$(Platform)' == 'ARM64' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-arm64\native\conpty.dll')"
+           Text="Bundled conpty.dll missing for ARM64 from the Microsoft.Windows.Console.ConPTY package." />
+    <Error Condition="'$(Platform)' == 'ARM64' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\arm64\OpenConsole.exe')"
+           Text="Bundled OpenConsole.exe missing for ARM64; conpty.dll would silently fall back to in-box conhost." />
+    <Error Condition="'$(Platform)' == 'x86' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x86\native\conpty.dll')"
+           Text="Bundled conpty.dll missing for x86 from the Microsoft.Windows.Console.ConPTY package." />
+    <Error Condition="'$(Platform)' == 'x86' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe')"
+           Text="Bundled OpenConsole.exe missing for x86; conpty.dll would silently fall back to in-box conhost." />
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\Ghostty.Core\Ghostty.Core.csproj" />

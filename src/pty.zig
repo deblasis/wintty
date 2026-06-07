@@ -408,6 +408,11 @@ const WindowsPty = struct {
     /// On success the bundled DLL is in use; on any failure we leave
     /// `pseudo_console_api` set to the kernel32 fallback so the
     /// caller never has to revisit the resolution decision.
+    ///
+    /// Falling back to the OS in-box conhost is a degraded mode: it
+    /// strips the Kitty graphics (APC) and Sixel (DCS) sequences that
+    /// only the bundled conpty.dll forwards. The fallback paths log at
+    /// `warn` so this loss of capability is visible in diagnostics.
     fn resolvePseudoConsoleApi() void {
         const fallback: PseudoConsoleApi = .{
             .create = windows.exp.kernel32.CreatePseudoConsole,
@@ -417,13 +422,13 @@ const WindowsPty = struct {
 
         var path_buf: [std.fs.max_path_bytes]u16 = undefined;
         const path_w = adjacentConptyPathW(&path_buf) orelse {
-            log.debug("pty: no bundled conpty.dll alongside executable; using OS conhost", .{});
+            log.warn("pty: no bundled conpty.dll alongside executable; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
             return;
         };
 
         const module = std.os.windows.LoadLibraryW(path_w) catch {
-            log.debug("pty: bundled conpty.dll present but LoadLibraryW failed; using OS conhost", .{});
+            log.warn("pty: bundled conpty.dll present but LoadLibraryW failed; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
             return;
         };
@@ -432,7 +437,7 @@ const WindowsPty = struct {
         const resize_ptr = std.os.windows.kernel32.GetProcAddress(module, "ResizePseudoConsole");
         const close_ptr = std.os.windows.kernel32.GetProcAddress(module, "ClosePseudoConsole");
         if (create_ptr == null or resize_ptr == null or close_ptr == null) {
-            log.warn("pty: bundled conpty.dll missing required exports; using OS conhost", .{});
+            log.warn("pty: bundled conpty.dll missing required exports; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
             return;
         }
