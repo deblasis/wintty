@@ -174,8 +174,8 @@ public class TabManagerTests
     // the shell auto-exits (cmd /c exit under quit-after-last-window-
     // closed), libghostty's close-surface callback raises this event
     // and TabManager owns the bridge into CloseTab. Without the bridge
-    // the tab leaks, the window stays open, and validate-transport-
-    // smoke times out instead of exiting cleanly.
+    // the tab leaks and the window stays open instead of exiting
+    // cleanly.
     [Fact]
     public void PaneHost_LastLeafClosed_closes_the_owning_tab()
     {

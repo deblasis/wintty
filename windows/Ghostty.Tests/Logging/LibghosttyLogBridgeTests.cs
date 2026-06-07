@@ -115,14 +115,14 @@ public class LibghosttyLogBridgeTests
             installer.LastCallback,
             level: 1,
             scope: "termio",
-            message: "conpty-mode=raw verdict={d}");
+            message: "sample log message arg={d}");
 
         var entry = Assert.Single(capture.Entries);
         Assert.Equal("Ghostty.Zig.termio", entry.Category);
         Assert.Equal(LogLevel.Information, entry.Level);
         // The bridge passes the message through verbatim; no format
         // placeholder substitution happens here (Zig already rendered it).
-        Assert.Equal("conpty-mode=raw verdict={d}", entry.Message);
+        Assert.Equal("sample log message arg={d}", entry.Message);
     }
 
     [Fact]
