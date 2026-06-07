@@ -16,8 +16,8 @@ pwsh -NoProfile -File scripts/mouse-smoke-run.ps1 -Cell 01-wsl2-mc
 ```
 
 The runner copies the fixture into an isolated `XDG_CONFIG_HOME` and launches
-`Wintty.exe`. It restores any pre-existing `XDG_CONFIG_HOME` on exit. This
-mirrors `validate-transport-run.ps1` because the WinUI shell does not honor
+`Wintty.exe`. It restores any pre-existing `XDG_CONFIG_HOME` on exit. Env-based
+isolation is necessary because the WinUI shell does not honor
 `--config-file` on the CLI.
 
 Exit codes: `0` = Wintty exited normally, `2` = setup error (fixture or exe

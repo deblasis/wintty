@@ -26,8 +26,8 @@ public static class Payloads
     // payload produces ~1.14 MB of hOutput traffic over ~8 s. Scaling to
     // the spec's aspirational 100 MB would cost ~20 minutes per iteration,
     // exceeding the harness budget. 1 MB keeps each probe iteration under
-    // 10 s end-to-end while still producing a useful ConPTY vs DirectPipe
-    // throughput comparison.
+    // 10 s end-to-end while still producing a useful ConPTY throughput
+    // measurement.
     public const int TargetBytes = 1 * 1024 * 1024;
 
     // 1 MB of uppercase 'A' (0x41). ConPTY's parser sees printables
