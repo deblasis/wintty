@@ -168,7 +168,7 @@
     </ItemGroup>
   </Target>
 
-  <Import Project="$(MSBuildThisFileDirectory)..\..\build\RasterizeIcons\RasterizeIcons.targets" />
+  <Import Project="$(MSBuildThisFileDirectory)..\build\RasterizeIcons\RasterizeIcons.targets" />
 
   <ItemGroup>
     <EmbeddedResource Include="Profiles\IconAssets\*@*.png">
