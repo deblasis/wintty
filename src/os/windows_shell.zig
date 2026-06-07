@@ -1,13 +1,11 @@
-//! VT-awareness classification for Windows shell executables.
+//! Shell-identity classification for Windows shell executables, used
+//! to select a UTF-8 preamble under ConPTY.
 //!
 //! This is orthogonal to src/termio/shell_integration.zig's `Shell`
 //! enum: `Shell` identifies bash/zsh/etc for RC-file injection;
-//! `Awareness` says whether the shell speaks VT natively or uses the
-//! Win32 Console API. A shell can be recognized here without being
-//! recognized there (e.g. `wsl.exe`) and vice versa.
-//!
-//! The C# port at windows/Ghostty.Core/Shell/ShellDetector.cs keeps
-//! the same table; edit both together until the C# side is retired.
+//! `Kind` here identifies the shell for preamble selection. A shell
+//! can be recognized here without being recognized there (e.g.
+//! `wsl.exe`) and vice versa.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,18 +13,10 @@ const windows = @import("windows.zig");
 const testing = std.testing;
 const log = std.log.scoped(.windows_shell);
 
-pub const Awareness = enum {
-    unknown,
-    vt_aware,
-    console_api,
-};
-
 /// UTF-8 preamble kind needed to make a shell's *initial* output land
-/// as UTF-8 when it runs under ConPTY. Separate from `Awareness`
-/// because we need to distinguish cmd from powershell (same awareness,
-/// different preamble) and pwsh from the other vt_aware shells
-/// (same awareness, but only powershell-family benefits from the
-/// setup under forced conpty-mode=never).
+/// as UTF-8 when it runs under ConPTY. We distinguish cmd from
+/// powershell (different preamble) and pwsh/powershell-family from the
+/// other shells (only powershell-family benefits from the setup).
 ///
 /// The setup runs once at shell startup inside ConPTY's conhost.exe,
 /// which does not inherit the caller's console codepage.
@@ -117,9 +107,7 @@ pub const Preamble = enum {
 };
 
 /// Fine-grained shell identity used to select a UTF-8 preamble under
-/// ConPTY and to gate per-shell quirks (e.g. PSReadLine under raw-pipe
-/// stdin treats CSI response bytes as user keystrokes, so termio
-/// suppresses VT response writes for `.pwsh` in bypass mode).
+/// ConPTY (the sole Windows transport).
 pub const Kind = enum {
     unknown,
     cmd,
@@ -149,46 +137,6 @@ const kinds = std.StaticStringMap(Kind).initComptime(.{
     .{ "powershell", .powershell },
 });
 
-pub fn awarenessOf(kind: Kind) Awareness {
-    return switch (kind) {
-        .unknown => .unknown,
-        .cmd, .powershell => .console_api,
-        .pwsh, .wsl, .ssh, .bash, .nu, .zsh, .fish, .elvish, .xonsh => .vt_aware,
-    };
-}
-
-/// Returns true if this shell relies on a real console handle on
-/// Windows and breaks under raw pipe stdio. Used to force ConPTY
-/// transport for these shells regardless of the user's
-/// `conpty-mode = auto` preference.
-///
-/// pwsh.exe (PowerShell 7+) qualifies because PSReadLine throws
-/// InvalidOperationException when stdin is not a console handle,
-/// and pwsh falls back to Console.ReadLine which has no backspace,
-/// no arrow-key history, no tab completion.
-///
-/// wsl.exe qualifies because the launcher inspects its standard
-/// handles to decide whether to allocate a Linux PTY for the inner
-/// session: console attached -> pty allocated, raw pipes -> pipes
-/// forwarded straight through with no controlling terminal. The
-/// pipe path makes any TUI inside WSL (btop, htop, mc, vim,
-/// neovim, ...) see `isatty(STDOUT) = false` and exit immediately,
-/// which under `quit-after-last-window-closed = true` looks like
-/// Wintty exiting on its own. Bare `wsl.exe` is in the same boat:
-/// the user's login shell starts without a tty and editing /
-/// prompt rendering silently degrade.
-///
-/// powershell.exe (5.1) is .console_api in `awarenessOf` so it
-/// already routes to ConPTY without needing this gate.
-pub fn requiresConsoleInput(kind: Kind) bool {
-    return switch (kind) {
-        .pwsh, .wsl => true,
-        // else explicit so adding a new Kind doesn't silently flip
-        // its console-input requirement.
-        else => false,
-    };
-}
-
 fn preambleOf(kind: Kind) Preamble {
     return switch (kind) {
         .cmd => .cmd,
@@ -199,22 +147,10 @@ fn preambleOf(kind: Kind) Preamble {
     };
 }
 
-/// Classify an executable path or single-token command string. Strips
-/// surrounding quotes, directory prefix, and a trailing `.exe`
-/// suffix, then matches case-insensitively against the known table.
-/// Returns `.unknown` for anything unrecognized.
-///
-/// This function does not parse argv flags. Callers with a full
-/// command line should split off the first token before calling.
-pub fn classify(exe_path: []const u8) Awareness {
-    return awarenessOf(identify(exe_path));
-}
-
 /// Return the UTF-8 preamble needed to make this shell emit UTF-8 on
-/// startup. Callers invoke this regardless of transport; the actual
-/// emission gate lives in `Exec.maybeInjectUtf8Preamble` and is
-/// driven by the resolved `utf8-console` policy, not by ConPTY vs
-/// bypass routing.
+/// startup. The actual emission gate lives in
+/// `Exec.maybeInjectUtf8Preamble` and is driven by the resolved
+/// `utf8-console` policy.
 pub fn utf8Preamble(exe_path: []const u8) Preamble {
     return preambleOf(identify(exe_path));
 }
@@ -283,92 +219,71 @@ pub fn isCjkAnsiCodePageFor(acp: std.os.windows.UINT) bool {
     };
 }
 
-test "classify: pwsh variants" {
-    try testing.expectEqual(Awareness.vt_aware, classify("pwsh"));
-    try testing.expectEqual(Awareness.vt_aware, classify("pwsh.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("PWSH.EXE"));
-    try testing.expectEqual(Awareness.vt_aware, classify("C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+test "identify: pwsh variants" {
+    try testing.expectEqual(Kind.pwsh, identify("pwsh"));
+    try testing.expectEqual(Kind.pwsh, identify("pwsh.exe"));
+    try testing.expectEqual(Kind.pwsh, identify("PWSH.EXE"));
+    try testing.expectEqual(Kind.pwsh, identify("C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
 }
 
-test "classify: wsl, ssh, bash" {
-    try testing.expectEqual(Awareness.vt_aware, classify("wsl.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("ssh.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("bash.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("C:\\Windows\\System32\\wsl.exe"));
+test "identify: wsl, ssh, bash" {
+    try testing.expectEqual(Kind.wsl, identify("wsl.exe"));
+    try testing.expectEqual(Kind.ssh, identify("ssh.exe"));
+    try testing.expectEqual(Kind.bash, identify("bash.exe"));
+    try testing.expectEqual(Kind.wsl, identify("C:\\Windows\\System32\\wsl.exe"));
 }
 
-test "classify: nu, zsh, fish" {
-    try testing.expectEqual(Awareness.vt_aware, classify("nu.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("zsh"));
-    try testing.expectEqual(Awareness.vt_aware, classify("fish"));
+test "identify: nu, zsh, fish" {
+    try testing.expectEqual(Kind.nu, identify("nu.exe"));
+    try testing.expectEqual(Kind.zsh, identify("zsh"));
+    try testing.expectEqual(Kind.fish, identify("fish"));
 }
 
-test "classify: elvish, xonsh" {
-    try testing.expectEqual(Awareness.vt_aware, classify("elvish.exe"));
-    try testing.expectEqual(Awareness.vt_aware, classify("xonsh"));
+test "identify: elvish, xonsh" {
+    try testing.expectEqual(Kind.elvish, identify("elvish.exe"));
+    try testing.expectEqual(Kind.xonsh, identify("xonsh"));
 }
 
-test "classify: cmd.exe is console_api" {
-    try testing.expectEqual(Awareness.console_api, classify("cmd"));
-    try testing.expectEqual(Awareness.console_api, classify("cmd.exe"));
-    try testing.expectEqual(Awareness.console_api, classify("CMD.EXE"));
-    try testing.expectEqual(Awareness.console_api, classify("C:\\Windows\\System32\\cmd.exe"));
+test "identify: cmd.exe" {
+    try testing.expectEqual(Kind.cmd, identify("cmd"));
+    try testing.expectEqual(Kind.cmd, identify("cmd.exe"));
+    try testing.expectEqual(Kind.cmd, identify("CMD.EXE"));
+    try testing.expectEqual(Kind.cmd, identify("C:\\Windows\\System32\\cmd.exe"));
 }
 
-test "classify: powershell 5.1 is console_api" {
-    try testing.expectEqual(Awareness.console_api, classify("powershell"));
-    try testing.expectEqual(Awareness.console_api, classify("powershell.exe"));
-    try testing.expectEqual(Awareness.console_api, classify("PowerShell.exe"));
+test "identify: powershell 5.1" {
+    try testing.expectEqual(Kind.powershell, identify("powershell"));
+    try testing.expectEqual(Kind.powershell, identify("powershell.exe"));
+    try testing.expectEqual(Kind.powershell, identify("PowerShell.exe"));
 }
 
-test "classify: unknown returns unknown" {
-    try testing.expectEqual(Awareness.unknown, classify("my-custom-repl.exe"));
-    try testing.expectEqual(Awareness.unknown, classify("python.exe"));
-    try testing.expectEqual(Awareness.unknown, classify("notepad.exe"));
+test "identify: unknown returns unknown" {
+    try testing.expectEqual(Kind.unknown, identify("my-custom-repl.exe"));
+    try testing.expectEqual(Kind.unknown, identify("python.exe"));
+    try testing.expectEqual(Kind.unknown, identify("notepad.exe"));
 }
 
-test "classify: strips surrounding quotes" {
-    try testing.expectEqual(Awareness.vt_aware, classify("\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\""));
-    try testing.expectEqual(Awareness.console_api, classify("'cmd.exe'"));
+test "identify: strips surrounding quotes" {
+    try testing.expectEqual(Kind.pwsh, identify("\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\""));
+    try testing.expectEqual(Kind.cmd, identify("'cmd.exe'"));
 }
 
-test "classify: handles forward slashes" {
-    try testing.expectEqual(Awareness.vt_aware, classify("C:/Program Files/PowerShell/7/pwsh.exe"));
+test "identify: handles forward slashes" {
+    try testing.expectEqual(Kind.pwsh, identify("C:/Program Files/PowerShell/7/pwsh.exe"));
 }
 
-test "classify: empty and whitespace" {
-    try testing.expectEqual(Awareness.unknown, classify(""));
-    try testing.expectEqual(Awareness.unknown, classify("   "));
-    try testing.expectEqual(Awareness.unknown, classify("\t\n"));
+test "identify: empty and whitespace" {
+    try testing.expectEqual(Kind.unknown, identify(""));
+    try testing.expectEqual(Kind.unknown, identify("   "));
+    try testing.expectEqual(Kind.unknown, identify("\t\n"));
 }
 
-test "classify: handles very long path safely" {
+test "identify: handles very long path safely" {
     // Longer than the 64-byte lowercase buffer. Must return .unknown
     // instead of crashing or false-matching.
     var long_path: [128]u8 = undefined;
     @memset(&long_path, 'a');
-    try testing.expectEqual(Awareness.unknown, classify(&long_path));
-}
-
-test "requiresConsoleInput: pwsh and wsl require console" {
-    try testing.expect(requiresConsoleInput(.pwsh));
-    try testing.expect(requiresConsoleInput(.wsl));
-}
-
-test "requiresConsoleInput: other VT-aware shells stay on bypass" {
-    try testing.expect(!requiresConsoleInput(.ssh));
-    try testing.expect(!requiresConsoleInput(.bash));
-    try testing.expect(!requiresConsoleInput(.nu));
-    try testing.expect(!requiresConsoleInput(.zsh));
-    try testing.expect(!requiresConsoleInput(.fish));
-    try testing.expect(!requiresConsoleInput(.elvish));
-    try testing.expect(!requiresConsoleInput(.xonsh));
-}
-
-test "requiresConsoleInput: console-API and unknown stay false (routed via awareness)" {
-    try testing.expect(!requiresConsoleInput(.cmd));
-    try testing.expect(!requiresConsoleInput(.powershell));
-    try testing.expect(!requiresConsoleInput(.unknown));
+    try testing.expectEqual(Kind.unknown, identify(&long_path));
 }
 
 test "utf8Preamble: cmd.exe returns .cmd" {

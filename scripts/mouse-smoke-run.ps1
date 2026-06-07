@@ -9,9 +9,9 @@
     cell's click checklist and quit the TUI. Exit code reflects clean
     process teardown only; click pass/fail is recorded by the operator.
 
-    Mirrors scripts/validate-transport-run.ps1 - WinUI shell does NOT
-    honor --config-file; isolation must go through env. The caller's
-    pre-existing XDG_CONFIG_HOME is restored on exit.
+    The WinUI shell does NOT honor --config-file; isolation must go
+    through env. The caller's pre-existing XDG_CONFIG_HOME is restored
+    on exit.
 
 .PARAMETER Cell
     Cell stem (no extension), e.g. "01-wsl2-mc". Must match a file in
