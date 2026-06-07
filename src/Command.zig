@@ -332,10 +332,11 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         try windows.SetHandleInformation(stdout, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT);
         try windows.SetHandleInformation(stderr, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT);
 
-        // Bypass path: restrict inheritance to just these three handles
-        // via PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Without this,
-        // bInheritHandles = TRUE leaks every inheritable parent handle
-        // to the child - a real security bug.
+        // Non-pseudoconsole spawn (no HPCON given, e.g. helper/test
+        // processes with explicit std handles): restrict inheritance to
+        // just these three handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+        // Without this, bInheritHandles = TRUE leaks every inheritable
+        // parent handle to the child - a real security bug.
         var attribute_list_size: usize = undefined;
         _ = windows.exp.kernel32.InitializeProcThreadAttributeList(
             null,
@@ -355,9 +356,9 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         // Allocate the handle list from the arena so its lifetime
         // outlives the attribute list until after CreateProcessW.
         // PROC_THREAD_ATTRIBUTE_HANDLE_LIST rejects duplicate handles,
-        // which is easy to hit: tests use null_fd for both stdin and
-        // stderr, and PTY bypass uses out_pipe_pty for both stdout and
-        // stderr. Build a list of unique handles only.
+        // which is easy to hit: a caller (or a test) can point multiple
+        // std handles at the same file (e.g. null_fd for both stdin and
+        // stderr). Build a list of unique handles only.
         var unique: [3]windows.HANDLE = .{ stdin, stdout, stderr };
         var unique_len: usize = 1;
         for (unique[1..]) |h| {
@@ -419,17 +420,10 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
     flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
 
-    // Suppress console window for raw-pipe sessions. ConPTY attaches a
-    // pseudo-console which automatically suppresses the window; raw pipes
-    // need the flag explicitly.
-    //
-    // Note: pre-#341 the gate also checked `utf8_console_owned` (an
-    // AllocConsole-based hack) to let raw-pipe children inherit a hidden
-    // UTF-8 parent console. That mechanism turned out not to actually
-    // reach the spawned shell on the user's repro path; the new
-    // utf8-console knob + bypass-path preamble injection (in
-    // `termio/Exec.zig`) is the real fix. The gate is now just the
-    // pseudo-console check.
+    // Suppress the console window for non-pseudoconsole spawns (helper /
+    // test processes spawned with explicit std handles). ConPTY attaches
+    // a pseudo-console which already suppresses the window; handle-list
+    // spawns need the flag explicitly.
     if (self.pseudo_console == null) {
         flags |= windows.exp.CREATE_NO_WINDOW;
     }
