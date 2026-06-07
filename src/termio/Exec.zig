@@ -190,9 +190,6 @@ pub fn threadEnter(
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
-        .pty_mode = if (comptime builtin.os.tag == .windows)
-            self.subprocess.resolved_mode orelse .conpty
-        else {},
         .shell_kind = if (comptime builtin.os.tag == .windows)
             self.subprocess.resolved_shell_kind
         else {},
@@ -486,35 +483,14 @@ pub fn queueWrite(
     kind: termio.Message.WriteKind,
 ) !void {
     _ = self;
+    // ConPTY is the sole Windows transport now, so VT responses always
+    // reach a real console handle and never need suppression. The
+    // write classification is therefore unused on the write path.
+    _ = kind;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
-
-    // Windows-only: under raw-pipe (bypass) transport, pwsh disables
-    // PSReadLine because there is no console handle for VT input. It
-    // falls back to Console.ReadLine, which treats CSI bytes on stdin
-    // as literal command text. Suppress writes tagged as parser-driven
-    // responses (cursor position, device attributes, color queries,
-    // etc.) so we don't pollute the prompt buffer.
-    //
-    // Note: under default `conpty-mode = auto`, pwsh now routes to
-    // .conpty (see resolveConptyMode), so this gate is reached only
-    // when the user explicitly sets `conpty-mode = always`. It remains
-    // in place as defense-in-depth and to keep output clean for that
-    // (unusual) configuration.
-    if (comptime builtin.os.tag == .windows) {
-        if (kind == .response and exec.pty_mode == .bypass) {
-            const sk = exec.shell_kind orelse .unknown;
-            if (sk == .pwsh) {
-                log.debug(
-                    "suppressing CSI response under bypass+pwsh ({d} bytes)",
-                    .{data.len},
-                );
-                return;
-            }
-        }
-    }
 
     // We go through and chunk the data if necessary to fit into
     // our cached buffers that we can queue to the stream.
@@ -655,20 +631,10 @@ pub const ThreadData = struct {
     /// to prevent unnecessary locking of expensive mutexes.
     termios_mode: ptypkg.TerminalMode = .{},
 
-    /// Resolved Windows pty transport for the running child. Captured
-    /// from `Subprocess.start` so the write path can gate per-shell
-    /// quirks without re-running shell classification. POSIX has no
-    /// transport selection, so this is always `.conpty` there (the
-    /// enum still has a `.conpty` variant on POSIX for source-shape
-    /// compatibility).
-    pty_mode: if (builtin.os.tag == .windows) ptypkg.Mode else void =
-        if (builtin.os.tag == .windows) .conpty else {},
-
     /// Resolved Windows shell identity for the running child. Captured
-    /// from `Subprocess.start` so the write path can gate per-shell
-    /// quirks (currently: pwsh + bypass suppresses CSI responses).
-    /// `null` on Windows when classification did not match a known
-    /// shell. Not meaningful on POSIX.
+    /// from `Subprocess.start` for diagnostics and any future per-shell
+    /// quirk gating. `null` on Windows when classification did not match
+    /// a known shell. Not meaningful on POSIX.
     shell_kind: if (builtin.os.tag == .windows) ?internal_os.windows_shell.Kind else void =
         if (builtin.os.tag == .windows) null else {},
 
@@ -702,13 +668,6 @@ pub const Config = struct {
     resources_dir: ?[]const u8,
     term: []const u8,
 
-    /// Windows ConPTY transport mode. Resolved at spawn time against the
-    /// shell classifier (see `resolveConptyMode`). Ignored on POSIX.
-    conpty_mode: if (builtin.os.tag == .windows)
-        configpkg.Config.ConptyMode
-    else
-        void = if (builtin.os.tag == .windows) .auto else {},
-
     /// Windows UTF-8 console preamble policy. Resolved at spawn time
     /// against the system ANSI codepage (see `resolveUtf8Console`).
     /// Ignored on POSIX.
@@ -737,25 +696,12 @@ const Subprocess = struct {
     pty: ?Pty = null,
     process: ?Process = null,
 
-    /// Captured from Config.conpty_mode at init time; resolved against
-    /// the shell classifier at spawn time. Ignored on POSIX.
-    conpty_mode: if (builtin.os.tag == .windows)
-        configpkg.Config.ConptyMode
-    else
-        void = if (builtin.os.tag == .windows) .auto else {},
-
     /// Captured from Config.utf8_console at init time; resolved against
     /// the system ACP per-spawn inside maybeInjectUtf8Preamble.
     utf8_console: if (builtin.os.tag == .windows)
         configpkg.Config.Utf8Console
     else
         void = if (builtin.os.tag == .windows) .auto else {},
-
-    /// Resolved transport mode set by `start` once the shell has been
-    /// classified. `null` until `start` runs. Read by `Exec.threadEnter`
-    /// to populate `Exec.ThreadData.pty_mode`. Windows-only.
-    resolved_mode: if (builtin.os.tag == .windows) ?ptypkg.Mode else void =
-        if (builtin.os.tag == .windows) null else {},
 
     /// Resolved shell identity set by `start`. `null` until `start`
     /// runs OR if classification did not match a known shell. Read by
@@ -1052,7 +998,6 @@ const Subprocess = struct {
             .cwd = cwd,
             .args = args,
 
-            .conpty_mode = cfg.conpty_mode,
             .utf8_console = cfg.utf8_console,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
@@ -1087,24 +1032,16 @@ const Subprocess = struct {
         // process).
         var in_child: bool = false;
 
-        // Resolve the transport mode from config + shell classification.
-        // Windows-only; POSIX ignores opts.mode.
-        // args[0] is the shell executable path (bare basename or full path),
-        // never a joined command line. resolveConptyMode relies on this -
-        // windows_shell.classify does not split tokens on spaces.
-        const mode: ptypkg.Mode = if (comptime builtin.os.tag == .windows)
-            resolveConptyMode(self.conpty_mode, self.args[0])
-        else
-            .conpty;
+        // ConPTY is the sole Windows transport; POSIX ignores opts.mode.
+        const mode: ptypkg.Mode = .conpty;
 
-        // Cache the resolved mode and shell identity so the termio
-        // thread can read them from Exec.ThreadData without re-running
-        // classification (and without holding the renderer lock). The
-        // write path needs both to gate per-shell quirks - currently:
-        // pwsh under bypass cannot consume CSI response bytes on stdin
-        // because PSReadLine is disabled.
+        // Cache the resolved shell identity so the termio thread can read
+        // it from Exec.ThreadData without re-running classification (and
+        // without holding the renderer lock). args[0] is the shell
+        // executable path (bare basename or full path), never a joined
+        // command line; windows_shell.identify does not split tokens on
+        // spaces.
         if (comptime builtin.os.tag == .windows) {
-            self.resolved_mode = mode;
             self.resolved_shell_kind = internal_os.windows_shell.identify(self.args[0]);
         }
 
@@ -1136,25 +1073,9 @@ const Subprocess = struct {
                 // side. This prevents the slave fd from being leaked to
                 // future children.
                 _ = posix.system.close(pty.slave);
-            } else {
-                // In bypass mode the child holds its own inherited dup of
-                // `in_pipe_pty` / `out_pipe_pty`. Close our parent copies
-                // so EOF propagates on `out_pipe` when the child exits.
-                // In ConPTY mode the pseudoconsole owns those handles
-                // internally and we keep them alive until `Pty.deinit`.
-                if (mode == .bypass) {
-                    _ = windows.exp.kernel32.CloseHandle(pty.in_pipe_pty);
-                    _ = windows.exp.kernel32.CloseHandle(pty.out_pipe_pty);
-                    pty.in_pipe_pty = windows.INVALID_HANDLE_VALUE;
-                    pty.out_pipe_pty = windows.INVALID_HANDLE_VALUE;
-                    // Keep `self.pty` in sync; `Pty.deinit` tolerates
-                    // `INVALID_HANDLE_VALUE` via `CloseHandle` returning 0.
-                    if (self.pty) |*sp| {
-                        sp.in_pipe_pty = windows.INVALID_HANDLE_VALUE;
-                        sp.out_pipe_pty = windows.INVALID_HANDLE_VALUE;
-                    }
-                }
             }
+            // On Windows ConPTY owns the pipe pair internally; we keep
+            // those handles alive until `Pty.deinit` and do nothing here.
 
             // Successful start we can clear out some memory.
             if (self.env) |*env| {
@@ -1241,50 +1162,37 @@ const Subprocess = struct {
             };
         }
 
-        // Build our subcommand. On Windows, stdio and `pseudo_console` are
-        // wired differently per transport mode: ConPTY owns stdio via the
-        // pseudoconsole handle; bypass mode feeds the child our raw pipe
-        // ends and leaves `pseudo_console` null.
+        // Build our subcommand. On Windows ConPTY owns stdio via the
+        // pseudoconsole handle, so the std handles passed to Command are
+        // null and the pseudoconsole is attached instead.
         var cmd: Command = .{
             .path = self.args[0],
             .args = self.args,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
             .stdin = if (comptime builtin.os.tag == .windows)
-                switch (mode) {
-                    .bypass => .{ .handle = pty.in_pipe_pty },
-                    .conpty => null,
-                }
+                null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
             .stdout = if (comptime builtin.os.tag == .windows)
-                switch (mode) {
-                    .bypass => .{ .handle = pty.out_pipe_pty },
-                    .conpty => null,
-                }
+                null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
             .stderr = if (comptime builtin.os.tag == .windows)
-                switch (mode) {
-                    .bypass => .{ .handle = pty.out_pipe_pty },
-                    .conpty => null,
-                }
+                null
             else
                 .{
                     .handle = pty.slave,
                     .flags = .{ .nonblocking = false },
                 },
             .pseudo_console = if (comptime builtin.os.tag == .windows)
-                switch (mode) {
-                    .conpty => pty.pseudo_console,
-                    .bypass => null,
-                }
+                pty.pseudo_console
             else {},
             .os_pre_exec = switch (comptime builtin.os.tag) {
                 .windows => null,
@@ -2177,8 +2085,8 @@ fn execCommand(
     command: configpkg.Command,
     comptime passwdpkg: type,
     /// Configured UTF-8 console preamble policy; used only on Windows
-    /// to gate UTF-8 preamble injection across both ConPTY and bypass
-    /// transports. Ignored on other platforms. We keep the parameter
+    /// to gate UTF-8 preamble injection under ConPTY (the sole Windows
+    /// transport). Ignored on other platforms. We keep the parameter
     /// concrete (rather than `void` off-Windows) so darwin/posix unit
     /// tests can keep passing `.auto` literally as a "don't care"
     /// argument; the function never reads it outside Windows-gated
@@ -2334,8 +2242,8 @@ fn execCommand(
                 // and the parent of the user's shell. That means
                 // `command = pwsh.exe` ends up with args[0] = cmd.exe,
                 // ConPTY attaches to cmd.exe, and any process
-                // classification that looks at args[0] (e.g. the
-                // ConPTY-bypass detector for # 112) sees the wrapper
+                // classification that looks at args[0] (e.g. the shell
+                // identity used to pick a UTF-8 preamble) sees the wrapper
                 // instead of the configured shell. Spawning directly
                 // fixes all three.
                 if (!windowsShellNeedsCmdWrapping(v)) windows_direct: {
@@ -2404,11 +2312,8 @@ fn execCommand(
                 });
 
                 // Gate on the encoding policy directly. The chcp
-                // prepend works under both ConPTY (the dominant case
-                // for cmd) and bypass (under conpty-mode = always);
-                // decoupling from transport means utf8-console = never
-                // is a real kill switch regardless of how the user has
-                // configured conpty-mode, and `auto` (resolved to
+                // prepend runs the cmd under ConPTY; utf8-console = never
+                // is a real kill switch, and `auto` (resolved to
                 // `.always` on non-CJK Windows) still forces UTF-8
                 // across the whole pipeline.
                 const script: [:0]const u8 = if (resolveUtf8Console(utf8_console) == .always)
@@ -2490,20 +2395,13 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
 /// resolved utf8-console policy is `always`. Skips when the user
 /// configured `never` or when `auto` resolved to `never` (CJK ACP).
 ///
-/// Why this fires on BOTH .conpty and .bypass transports for pwsh:
-/// - .conpty: CreatePseudoConsole spawns conhost at the system OEM
-///   CP regardless of parent state, so the child needs an explicit
-///   `[Console]::OutputEncoding = ...` to talk UTF-8.
-/// - .bypass: raw-pipe pwsh (the dominant case under conpty-mode=auto)
-///   inherits stdio pipes, not a console handle. .NET's
-///   ConsoleEncodingHelper falls back to GetACP() on a non-console
-///   handle, which is the system ANSI CP (e.g. 1252 on Italian
-///   Windows) - still not UTF-8. Same fix works.
+/// Why pwsh needs this under ConPTY (the sole Windows transport):
+/// CreatePseudoConsole spawns conhost at the system OEM CP regardless
+/// of parent state, so the child needs an explicit
+/// `[Console]::OutputEncoding = ...` to talk UTF-8.
 ///
-/// `Preamble.cmd` only ever fires under .conpty by construction
-/// (cmd is .console_api -> resolveConptyMode picks .conpty). Other
-/// VT-aware shells (bash, wsl, ssh, nu, fish, zsh, elvish, xonsh)
-/// short-circuit on the Preamble.none guard.
+/// Other VT-aware shells (bash, wsl, ssh, nu, fish, zsh, elvish,
+/// xonsh) short-circuit on the Preamble.none guard.
 ///
 /// Callers own both the input `args` and the returned slice; when no
 /// injection is needed the returned slice aliases `args` (no copy).
@@ -2829,47 +2727,6 @@ pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type
     return self.subprocess.getProcessInfo(info);
 }
 
-/// Resolve the requested transport mode at spawn time. Windows-only
-/// in effect; POSIX callers should pass `.conpty` and the value is
-/// ignored by PosixPty.
-///
-/// - `.never` always picks ConPTY (classic behavior).
-/// - `.always` always picks the raw-pipe bypass.
-/// - `.auto` defers to the shell classifier: VT-aware shells use the
-///   bypass, console-API shells and anything unrecognized fall back
-///   to ConPTY so unknown programs keep the safe default.
-///
-/// `exe_path` must be a single executable path (basename or full path),
-/// not a joined argv string. Callers holding argv should pass argv[0].
-fn resolveConptyMode(
-    cfg: configpkg.Config.ConptyMode,
-    exe_path: []const u8,
-) ptypkg.Mode {
-    const resolved: ptypkg.Mode = switch (cfg) {
-        .never => .conpty,
-        .always => .bypass,
-        .auto => blk: {
-            const kind = internal_os.windows_shell.identify(exe_path);
-            // Force ConPTY for shells that need a real console handle:
-            // pwsh for PSReadLine's input layer, wsl because its
-            // launcher uses the parent handle type to decide whether
-            // to allocate a Linux PTY.
-            if (internal_os.windows_shell.requiresConsoleInput(kind)) {
-                break :blk .conpty;
-            }
-            break :blk switch (internal_os.windows_shell.awarenessOf(kind)) {
-                .vt_aware => .bypass,
-                .console_api, .unknown => .conpty,
-            };
-        },
-    };
-    log_validate.info(
-        "transport resolved: shell=\"{s}\" config_mode={s} resolved={s}",
-        .{ exe_path, @tagName(cfg), @tagName(resolved) },
-    );
-    return resolved;
-}
-
 /// Binary resolution of `Config.Utf8Console`. `auto` collapses to
 /// `.never` on default-locale CJK Windows (Shift-JIS, GB2312, EUC-KR,
 /// Big5, Johab) and to `.always` everywhere else. The runtime never
@@ -3101,9 +2958,9 @@ test "execCommand windows: shell command, single token spawns directly" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // utf8-console=never disables the bypass-path preamble injection
-    // (# 341) so this test stays focused on what it's actually checking:
-    // shell-string parsing.
+    // utf8-console=never disables the preamble injection (# 341) so this
+    // test stays focused on what it's actually checking: shell-string
+    // parsing.
     const result = try execCommand(
         alloc,
         .{ .shell = "pwsh.exe" },
@@ -3274,59 +3131,6 @@ test "windowsShellNeedsCmdWrapping" {
     try testing.expect(windowsShellNeedsCmdWrapping("echo %USERNAME%"));
     try testing.expect(windowsShellNeedsCmdWrapping("echo !var!"));
     try testing.expect(windowsShellNeedsCmdWrapping("a^b"));
-}
-
-test "resolveConptyMode: never forces conpty" {
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "pwsh.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "cmd.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.never, "unknown.exe"));
-}
-
-test "resolveConptyMode: always forces bypass" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "pwsh.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "cmd.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.always, "unknown.exe"));
-}
-
-test "resolveConptyMode: auto picks bypass for vt_aware" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "bash"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "ssh.exe"));
-}
-
-test "resolveConptyMode: auto picks conpty for pwsh (requires console for PSReadLine)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "pwsh"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
-}
-
-test "resolveConptyMode: auto picks conpty for wsl (requires console for Linux PTY)" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "wsl.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "wsl"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Windows\\System32\\wsl.exe"));
-}
-
-test "resolveConptyMode: auto picks conpty for console_api" {
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "cmd.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "powershell.exe"));
-}
-
-test "resolveConptyMode: auto picks conpty for unknown (safe default)" {
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "my-custom.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, ""));
-}
-
-test "resolveConptyMode: auto handles path-prefixed shell" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:\\Program Files\\Git\\bin\\bash.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "C:\\Windows\\System32\\cmd.exe"));
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "C:/Program Files/Git/bin/bash.exe"));
-}
-
-test "resolveConptyMode: auto handles quoted shell" {
-    try std.testing.expectEqual(ptypkg.Mode.bypass, resolveConptyMode(.auto, "\"bash.exe\""));
-    try std.testing.expectEqual(ptypkg.Mode.conpty, resolveConptyMode(.auto, "'cmd.exe'"));
 }
 
 test "resolveUtf8Console: always returns always" {
@@ -3968,10 +3772,10 @@ test "execCommand windows: pwsh.exe under auto/auto gets pwsh preamble (regressi
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // The preamble fires regardless of transport (see
-    // maybeInjectUtf8Preamble), so the user sees `chcp 65001` +
-    // `[Console]::OutputEncoding = UTF8` applied at startup even when
-    // pwsh routes to .bypass.
+    // Under ConPTY (the sole Windows transport) pwsh still needs the
+    // preamble (see maybeInjectUtf8Preamble), so the user sees
+    // `chcp 65001` + `[Console]::OutputEncoding = UTF8` applied at
+    // startup.
     const result = try execCommand(
         alloc,
         .{ .shell = "pwsh.exe" },

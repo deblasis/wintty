@@ -2983,24 +2983,6 @@ keybind: Keybinds = .{},
 /// `xterm-256color` with environment variables if terminfo installation fails.
 @"shell-integration-features": ShellIntegrationFeatures = .{},
 
-/// Controls how Windows terminal sessions communicate with the child
-/// shell. `auto` picks the bypass path (raw stdin/stdout/stderr
-/// pipes, no CreatePseudoConsole) for VT-aware shells like ssh,
-/// bash, and nu, and keeps ConPTY for cmd.exe, PowerShell 5.1,
-/// pwsh.exe (PSReadLine needs a real console handle for input),
-/// and wsl.exe (the WSL launcher inspects stdio handle types to
-/// decide whether to allocate a Linux PTY, and pipes get no PTY).
-/// `always` forces the bypass path; `never` forces ConPTY. Has no
-/// effect on non-Windows platforms.
-///
-/// Bypass enables Kitty graphics and avoids conhost's VT mangling,
-/// at the cost of losing ConPTY's compatibility shims for Win32
-/// Console API programs. Resize signalling under bypass is
-/// best-effort via CSI 8;rows;cols t; use `conpty-mode = never` if
-/// precise resize behavior matters.
-@"conpty-mode": if (builtin.os.tag == .windows) ConptyMode else void =
-    if (builtin.os.tag == .windows) .auto else {},
-
 /// Controls whether Ghostty injects a UTF-8 codepage setup into
 /// spawned cmd / PowerShell shells on Windows. See the `Utf8Console`
 /// enum for the full description of `auto`, `always`, and `never`.
@@ -5217,7 +5199,7 @@ fn cloneValue(
     switch (t) {
         // Trivially copyable: numeric, boolean, enum, union, and the
         // void slot used for platform-gated Config fields (e.g.
-        // @"conpty-mode" / @"utf8-console" off Windows).
+        // @"utf8-console" off Windows).
         inline .bool,
         .int,
         .float,
@@ -9043,8 +9025,6 @@ pub const ShellIntegrationFeatures = packed struct {
     @"ssh-terminfo": bool = false,
     path: bool = true,
 };
-
-pub const ConptyMode = enum { auto, always, never };
 
 /// Controls whether Ghostty injects a UTF-8 codepage setup into spawned
 /// cmd / PowerShell shells on Windows.

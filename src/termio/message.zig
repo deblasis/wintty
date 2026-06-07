@@ -17,11 +17,10 @@ pub const Message = union(enum) {
     pub const WriteReq = MessageData(u8, 38);
 
     /// Classification of a pty write so the termio thread can decide
-    /// whether to deliver it to the child. Used by Windows to suppress
-    /// VT response bytes when the child is pwsh under raw-pipe (bypass)
-    /// stdin: in that configuration PSReadLine is disabled and
-    /// Console.ReadLine treats the response bytes as command text,
-    /// polluting the prompt buffer.
+    /// whether to deliver it to the child. Historically used on Windows
+    /// to suppress VT response bytes under the raw-pipe transport; with
+    /// ConPTY as the sole Windows transport, responses always reach a
+    /// real console handle, so the classification is currently advisory.
     ///
     /// The default is `.input` so writes that aren't explicitly tagged
     /// (keystrokes, paste, mouse events, focus events, anything user-
@@ -31,9 +30,7 @@ pub const Message = union(enum) {
         /// events, anything that should always reach the child.
         input,
         /// Reply to a parser-driven query from the child (cursor
-        /// position, device attributes, color queries, etc.). May be
-        /// suppressed on Windows when the child cannot consume CSI
-        /// bytes on stdin.
+        /// position, device attributes, color queries, etc.).
         response,
     };
 
