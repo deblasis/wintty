@@ -3,7 +3,7 @@
     Run one mouse-smoke cell.
 
 .DESCRIPTION
-    Copies dev-configs/mouse-smoke/<Cell>.conf into an isolated
+    Copies windows/dev-configs/mouse-smoke/<Cell>.conf into an isolated
     XDG_CONFIG_HOME (as ghostty/config.ghostty), launches Wintty.exe
     pointed at it, and waits for the operator to manually exercise the
     cell's click checklist and quit the TUI. Exit code reflects clean
@@ -15,7 +15,7 @@
 
 .PARAMETER Cell
     Cell stem (no extension), e.g. "01-wsl2-mc". Must match a file in
-    dev-configs/mouse-smoke/.
+    windows/dev-configs/mouse-smoke/.
 
 .PARAMETER TimeoutMs
     Safety timeout. Default 900000 (15 minutes) - generous because the
@@ -37,12 +37,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 if (-not $ExePath) {
     $ExePath = Join-Path $repoRoot 'windows\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'
 }
 
-$fixturePath = Join-Path $repoRoot "dev-configs\mouse-smoke\$Cell.conf"
+$fixturePath = Join-Path $repoRoot "windows\dev-configs\mouse-smoke\$Cell.conf"
 if (-not (Test-Path -LiteralPath $fixturePath)) {
     Write-Error "fixture not found: $fixturePath"
     exit 2
@@ -64,7 +64,7 @@ $originalXdg = if ($originalXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
     Write-Host "Launching cell '$Cell' with XDG_CONFIG_HOME=$tempXdg"
-    Write-Host "Click checklist for this cell is in dev-configs/mouse-smoke/$Cell.conf header."
+    Write-Host "Click checklist for this cell is in windows/dev-configs/mouse-smoke/$Cell.conf header."
     Write-Host "Quit the TUI when done; the runner returns when Wintty exits."
 
     $proc = Start-Process -FilePath $ExePath -PassThru
