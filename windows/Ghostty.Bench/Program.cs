@@ -11,13 +11,9 @@ public static class Program
     private static readonly string[] AllProbeNames =
     [
         "conpty-roundtrip",
-        "direct-pipe-roundtrip",
         "conpty-throughput-ascii",
         "conpty-throughput-sgr",
         "conpty-throughput-stress",
-        "direct-pipe-throughput-ascii",
-        "direct-pipe-throughput-sgr",
-        "direct-pipe-throughput-stress",
     ];
 
     public static int Main(string[] args)
@@ -51,7 +47,7 @@ public static class Program
         //                     usefully exceed 3x per-iteration budget, but
         //                     we leave slack for cold start + 60Hz conhost
         //                     refresh settling after burst completion)
-        //   all:        10 minutes (8 probes in sequence)
+        //   all:        10 minutes (4 conpty probes in sequence)
         TimeSpan budget =
             probeName == "all"                 ? TimeSpan.FromMinutes(10) :
             probeName.Contains("roundtrip")    ? TimeSpan.FromSeconds(30) :
@@ -125,31 +121,21 @@ public static class Program
         HostInfo host = HostInfo.Capture();
         DateTime ts = DateTime.UtcNow;
 
-        string transportLabel = probeName.StartsWith("conpty", StringComparison.Ordinal) ? "conpty" : "direct_pipe";
+        // ConPTY is the sole Windows transport, so the bench measures it
+        // directly (the raw-pipe DirectPipe transport was removed).
+        using ITransport t = new ConPtyTransport(childExe);
 
-        using ITransport t = transportLabel switch
-        {
-            "conpty" => new ConPtyTransport(childExe),
-            "direct_pipe" => new DirectPipeTransport(childExe),
-            _ => throw new TransportException($"unknown transport label: {transportLabel}"),
-        };
-
-        // Drain any startup preamble (conhost VT preamble on ConPTY, no-op
-        // on direct pipe) before the probe starts timing iterations. 2s is
-        // ~10x a warm-machine conhost startup; longer means a broken spawn
-        // or raw-mode activation, which deserves a fast distinct error.
+        // Drain the conhost VT preamble before the probe starts timing
+        // iterations. 2s is ~10x a warm-machine conhost startup; longer
+        // means a broken spawn, which deserves a fast distinct error.
         t.WaitReady(TimeSpan.FromSeconds(2));
 
         return probeName switch
         {
             "conpty-roundtrip" => new RoundTripProbe("conpty_roundtrip", "conpty").Run(t, host, ts),
-            "direct-pipe-roundtrip" => new RoundTripProbe("direct_pipe_roundtrip", "direct_pipe").Run(t, host, ts),
             "conpty-throughput-ascii" => new ThroughputProbe("conpty_throughput_ascii", "conpty", "ascii", Payloads.Ascii1Mb()).Run(t, host, ts),
             "conpty-throughput-sgr" => new ThroughputProbe("conpty_throughput_sgr", "conpty", "sgr", Payloads.Sgr1Mb()).Run(t, host, ts),
             "conpty-throughput-stress" => new ThroughputProbe("conpty_throughput_stress", "conpty", "stress", Payloads.Stress1Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-ascii" => new ThroughputProbe("direct_pipe_throughput_ascii", "direct_pipe", "ascii", Payloads.Ascii1Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-sgr" => new ThroughputProbe("direct_pipe_throughput_sgr", "direct_pipe", "sgr", Payloads.Sgr1Mb()).Run(t, host, ts),
-            "direct-pipe-throughput-stress" => new ThroughputProbe("direct_pipe_throughput_stress", "direct_pipe", "stress", Payloads.Stress1Mb()).Run(t, host, ts),
             _ => null,
         };
     }
