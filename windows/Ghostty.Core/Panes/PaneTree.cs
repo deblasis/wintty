@@ -38,6 +38,28 @@ internal static class PaneTree
     }
 
     /// <summary>
+    /// Deep-clone the structure of <paramref name="root"/>: every
+    /// <see cref="SplitPane"/> becomes a NEW node copying orientation and
+    /// ratio, but every <see cref="LeafPane"/> is returned by the SAME
+    /// reference. Used to snapshot the tree for undo/redo without aliasing
+    /// the live tree's mutable split nodes, while keeping leaf identity so
+    /// the visual rebuild reuses the live TerminalControl/surface.
+    /// </summary>
+    public static PaneNode Clone(PaneNode root)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        return root switch
+        {
+            SplitPane s => new SplitPane(
+                s.Orientation,
+                Clone(s.Child1),
+                Clone(s.Child2),
+                s.Ratio),
+            _ => root, // LeafPane: shared by reference
+        };
+    }
+
+    /// <summary>
     /// Return the leftmost (Child1-first) leaf reachable from
     /// <paramref name="root"/>. Used to pick the focus target after a
     /// pane closes.
