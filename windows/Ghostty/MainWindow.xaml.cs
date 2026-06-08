@@ -366,7 +366,7 @@ public sealed partial class MainWindow : Window
             loggerFactory.CreateLogger<ThemePreviewService>());
         _themePreview.ListThemesRequested += OnListThemesRequested;
 
-        _factory = new PaneHostFactory(_host);
+        _factory = new PaneHostFactory(_host, configService);
         _tabManager = new TabManager(
             snapshot => _factory.Create(snapshot),
             seed: seedTab);
