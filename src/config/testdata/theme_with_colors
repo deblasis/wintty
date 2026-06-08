@@ -1,0 +1,6 @@
+# Theme that sets various color fields for empty-value override testing
+foreground = #AABBCC
+background = #112233
+selection-background = #445566
+cursor-color = #778899
+palette = 0=#ABCDEF
