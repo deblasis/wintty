@@ -1,4 +1,5 @@
 using Ghostty.Controls;
+using Ghostty.Core.Config;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
 using Ghostty.Hosting;
@@ -19,12 +20,21 @@ namespace Ghostty.Tabs;
 internal sealed class PaneHostFactory
 {
     private readonly GhosttyHost _host;
+    private readonly IConfigService _config;
 
-    public PaneHostFactory(GhosttyHost host) { _host = host; }
+    public PaneHostFactory(GhosttyHost host, IConfigService config)
+    {
+        _host = host;
+        _config = config;
+    }
 
     public IPaneHost Create(ProfileSnapshot? snapshot = null) =>
         new PaneHost(
             _host,
             terminalFactory: snap => new TerminalControl { Snapshot = snap },
-            initialSnapshot: snapshot);
+            initialSnapshot: snapshot,
+            // Read the undo-timeout live per tab so a config reload takes
+            // effect on newly created tabs. Resolved through the pure Core
+            // helper so a degenerate (<=0) value falls back to the 5s default.
+            undoTimeout: UndoTimeout.FromMilliseconds(_config.UndoTimeoutMs));
 }
