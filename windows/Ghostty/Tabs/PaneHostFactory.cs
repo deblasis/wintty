@@ -35,6 +35,7 @@ internal sealed class PaneHostFactory
             initialSnapshot: snapshot,
             // Read the undo-timeout live per tab so a config reload takes
             // effect on newly created tabs. Resolved through the pure Core
-            // helper so a degenerate (<=0) value falls back to the 5s default.
-            undoTimeout: UndoTimeout.FromMilliseconds(_config.UndoTimeoutMs));
+            // helper, which maps 0 to a disabled policy (upstream fidelity)
+            // and a negative/corrupt value to the safe 5s default.
+            undoPolicy: UndoPolicy.FromConfigMilliseconds(_config.UndoTimeoutMs));
 }
