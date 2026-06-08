@@ -134,15 +134,17 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         GetDurationMs("resize-overlay-duration", 750);
 
     /// <summary>
-    /// Eviction window for pane undo/redo, in milliseconds. Read live from
-    /// the libghostty <c>undo-timeout</c> <c>Duration</c> config handle (not
-    /// the file cache, which can be stale outside ReadFlags). Falls back to
-    /// <see cref="Ghostty.Core.Panes.UndoTimeout.Default"/> (upstream
-    /// Ghostty's 5s default) when the key isn't set, keeping a single source
-    /// of truth for the default with the Core helper.
+    /// Raw pane undo/redo <c>undo-timeout</c> value, in milliseconds. Read
+    /// live from the libghostty <c>Duration</c> config handle (not the file
+    /// cache, which can be stale outside ReadFlags). Returned verbatim,
+    /// including <c>0</c> (upstream's "disable undo" sentinel) — the policy
+    /// interpretation lives in
+    /// <see cref="Ghostty.Core.Panes.UndoPolicy.FromConfigMilliseconds"/>.
+    /// Falls back to upstream Ghostty's 5s default window when the key isn't
+    /// set, sharing the constant with the Core helper.
     /// </summary>
     public int UndoTimeoutMs =>
-        GetDurationMs("undo-timeout", (int)Ghostty.Core.Panes.UndoTimeout.Default.TotalMilliseconds);
+        GetDurationMs("undo-timeout", (int)Ghostty.Core.Panes.UndoPolicy.Default.Window.TotalMilliseconds);
 
     /// <summary>
     /// Size of the quake window on each axis. Either axis can be
