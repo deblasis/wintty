@@ -11580,3 +11580,46 @@ test "issue 228: empty foreground with no theme stays compile-time default" {
         .b = 0xFF,
     }, cfg.foreground);
 }
+
+test "issue 228: empty foreground via real config file defers to theme" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Exercise the real file-loading path (loadFile -> LineIterator) the app
+    // uses, rather than synthesizing CLI args. The user config sets a theme
+    // and an empty `foreground =`, which must defer to the theme color.
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var theme_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const theme_path = try td.dir.realpath("theme_with_colors", &theme_buf);
+
+    {
+        var file = try td.dir.createFile("config", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.print("theme = {s}\n", .{theme_path});
+        try writer.interface.writeAll("foreground =\n");
+        try writer.end();
+    }
+    var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cfg_path = try td.dir.realpath("config", &cfg_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, cfg_path);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0xAA,
+        .g = 0xBB,
+        .b = 0xCC,
+    }, cfg.foreground);
+}
