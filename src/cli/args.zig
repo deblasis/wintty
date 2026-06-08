@@ -471,6 +471,69 @@ pub fn parseIntoField(
     return error.InvalidField;
 }
 
+/// Returns true if applying `arg` (in `--key=value` form) would reset a
+/// non-optional scalar field of `T` to its compile-time default purely
+/// because the value is the empty string.
+///
+/// This mirrors the empty-value branch of `parseIntoField`: only fields that
+/// take the `default_value_ptr` reset path qualify. Optional fields (which
+/// reset to `null`, their natural "unset") and `init`-clearing list types
+/// (e.g. font-family) are excluded so their existing semantics are preserved.
+///
+/// Callers use this to let an empty value defer to a lower configuration layer
+/// (such as a theme) instead of clobbering it with the compile-time default.
+/// See Config.loadTheme for the motivating case.
+pub fn isEmptyScalarReset(comptime T: type, arg: []const u8) bool {
+    const info = @typeInfo(T);
+    if (info != .@"struct") return false;
+
+    // Args from the CLI and from the file LineIterator both arrive in
+    // "--key=value" form. Anything else can't be an empty reset.
+    if (!mem.startsWith(u8, arg, "--")) return false;
+
+    var key: []const u8 = arg[2..];
+    const value: ?[]const u8 = value: {
+        if (mem.indexOf(u8, key, "=")) |idx| {
+            defer key = key[0..idx];
+            break :value key[idx + 1 ..];
+        }
+
+        break :value null;
+    };
+
+    // Only a present-but-empty value is a reset. A missing value (no "=")
+    // is "value required", not a reset.
+    const v = value orelse return false;
+    if (v.len != 0) return false;
+
+    inline for (info.@"struct".fields) |field| {
+        if (comptime field.type == void) continue;
+        if (field.name[0] != '_' and mem.eql(u8, field.name, key)) {
+            // Optional fields reset to null, which is their correct "unset"
+            // value, so they are intentionally left alone.
+            if (@typeInfo(field.type) == .optional) return false;
+
+            // Optionals already returned above, so field.type is the
+            // unwrapped type that parseIntoField's empty-value branch keys on.
+            const fieldInfo = @typeInfo(field.type);
+            const canHaveDecls = fieldInfo == .@"struct" or
+                fieldInfo == .@"union" or
+                fieldInfo == .@"enum";
+
+            // init-clearing types keep their documented "empty means clear"
+            // semantics rather than deferring.
+            if (canHaveDecls and @hasDecl(field.type, "init")) return false;
+
+            // Only fields with a compile-time default actually take the reset
+            // path; without one the empty value falls through to normal
+            // parsing (typically an error), which is not a reset.
+            return field.default_value_ptr != null;
+        }
+    }
+
+    return false;
+}
+
 pub fn parseTaggedUnion(comptime T: type, alloc: Allocator, v: []const u8) !T {
     const info = @typeInfo(T).@"union";
     assert(@typeInfo(info.tag_type.?) == .@"enum");
@@ -913,6 +976,53 @@ test "parseIntoField: ignore underscore-prefixed fields" {
         parseIntoField(@TypeOf(data), alloc, &data, "_a", "42"),
     );
     try testing.expectEqualStrings("12", data._a);
+}
+
+test "isEmptyScalarReset" {
+    const testing = std.testing;
+
+    const S = struct {
+        foo: u8 = 5,
+        nodefault: u8,
+        bar: ?u8 = null,
+        list: struct {
+            const Self = @This();
+            v: []const u8 = "",
+            pub fn init(self: *Self, _: Allocator) !void {
+                self.* = .{};
+            }
+        } = .{},
+        vd: void = {},
+        _hidden: u8 = 0,
+    };
+
+    // Non-optional scalar with empty value is a reset.
+    try testing.expect(isEmptyScalarReset(S, "--foo="));
+
+    // Non-empty value is not a reset.
+    try testing.expect(!isEmptyScalarReset(S, "--foo=3"));
+
+    // A non-optional field without a compile-time default has no reset path.
+    try testing.expect(!isEmptyScalarReset(S, "--nodefault="));
+
+    // Optional fields reset to null and are intentionally excluded.
+    try testing.expect(!isEmptyScalarReset(S, "--bar="));
+
+    // init-clearing list types are excluded.
+    try testing.expect(!isEmptyScalarReset(S, "--list="));
+
+    // void fields carry no value and are skipped.
+    try testing.expect(!isEmptyScalarReset(S, "--vd="));
+
+    // Missing value (no "=") is not a reset.
+    try testing.expect(!isEmptyScalarReset(S, "--foo"));
+
+    // Underscore-prefixed fields are not addressable.
+    try testing.expect(!isEmptyScalarReset(S, "--_hidden="));
+
+    // Unknown field and non "--" forms are not resets.
+    try testing.expect(!isEmptyScalarReset(S, "--nope="));
+    try testing.expect(!isEmptyScalarReset(S, "foo="));
 }
 
 test "parseIntoField: struct with init func" {
