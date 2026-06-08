@@ -11307,3 +11307,259 @@ test "compatibility: window new-window" {
         );
     }
 }
+
+// Issue #228: an empty config value (e.g. "foreground =") for a non-optional
+// field should defer to the active theme, not reset to the compile-time
+// default. Config loading is `defaults -> theme -> user-config replay`; the
+// fix skips re-applying empty scalar resets during the theme overlay replay so
+// the theme value survives. Optional fields (reset to null) and list/clear
+// fields keep their existing semantics.
+
+test "issue 228: empty foreground after theme defers to theme value" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // User config: set the theme, then write "foreground =" (empty value).
+    // The empty value must defer to the theme's foreground (#AABBCC) rather
+    // than resetting to the compile-time default (#FFFFFF).
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+        "--foreground=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0xAA,
+        .g = 0xBB,
+        .b = 0xCC,
+    }, cfg.foreground);
+}
+
+test "issue 228: empty selection-background after theme resets optional to null" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Optional fields use null as their "unset" sentinel, so an empty value
+    // resetting to null is the correct existing behavior and is out of scope
+    // for the #228 fix. This documents that the fix does NOT change them.
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+        "--selection-background=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(@as(?TerminalColor, null), cfg.@"selection-background");
+}
+
+test "issue 228: empty cursor-color after theme resets optional to null" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Same as selection-background: optional, so null is correct and unchanged.
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+        "--cursor-color=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(@as(?TerminalColor, null), cfg.@"cursor-color");
+}
+
+test "issue 228: empty palette after theme defers to theme palette" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Palette is a non-optional struct without an `init` clear decl, so an
+    // empty "palette =" takes the compile-time-default reset path just like a
+    // scalar. With the #228 fix it therefore defers to the theme's palette
+    // (index 0 = #ABCDEF) instead of discarding the theme.
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+        "--palette=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(
+        terminal.color.RGB{ .r = 0xAB, .g = 0xCD, .b = 0xEF },
+        cfg.palette.value[0],
+    );
+    try testing.expect(cfg.palette.mask.isSet(0));
+}
+
+test "issue 228: theme foreground preserved when no empty foreground written" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // Control: with no "foreground =" line the theme's foreground is preserved.
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0xAA,
+        .g = 0xBB,
+        .b = 0xCC,
+    }, cfg.foreground);
+}
+
+test "issue 228: non-empty foreground still overrides theme" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile("theme_with_colors", .{});
+        defer file.close();
+        var writer = file.writer(&buf);
+        try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // A real (non-empty) user value must still win over the theme.
+    var it: TestIterator = .{ .data = &.{
+        try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path}),
+        "--foreground=#123456",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0x12,
+        .g = 0x34,
+        .b = 0x56,
+    }, cfg.foreground);
+}
+
+test "issue 228: empty foreground with no theme stays compile-time default" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    // With no theme there is no lower layer to defer to, so an empty value
+    // keeps the compile-time default (#FFFFFF). This guards against the skip
+    // logic leaking into the non-theme path.
+    var it: TestIterator = .{ .data = &.{
+        "--foreground=",
+    } };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
+    try testing.expectEqual(Color{
+        .r = 0xFF,
+        .g = 0xFF,
+        .b = 0xFF,
+    }, cfg.foreground);
+}
