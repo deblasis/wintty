@@ -2164,7 +2164,9 @@ public sealed partial class MainWindow : Window
         var builtIn = new BuiltInCommandSource(
             paneActionFactory: action => _ => DispatcherQueue.TryEnqueue(() => _router.Invoke(action)),
             bindingActionFactory: actionKey => _ => DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)),
-            opacityAction: direction => DispatcherQueue.TryEnqueue(() => AdjustOpacity(direction)));
+            opacityAction: direction => DispatcherQueue.TryEnqueue(() => AdjustOpacity(direction)),
+            canUndo: () => (_tabManager.ActiveTab?.PaneHost as Panes.PaneHost)?.CanUndo ?? false,
+            canRedo: () => (_tabManager.ActiveTab?.PaneHost as Panes.PaneHost)?.CanRedo ?? false);
 
         var jump = new JumpCommandSource(
             _tabManager,
