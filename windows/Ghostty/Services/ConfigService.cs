@@ -34,6 +34,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     private readonly DispatcherQueue _dispatcher;
     private volatile bool _suppressWatcher;
 
+    // Set by BeginShutdown when the app is tearing down so a queued or
+    // debounced reload can't call into a libghostty app that is about to
+    // be (or has been) freed. volatile because the watcher / debounce-timer
+    // callbacks read it from the thread pool. Issue #208: a window-theme
+    // switch immediately followed by close left a debounced Reload to run
+    // AppUpdateConfig on the freed app -> native access violation.
+    private volatile bool _shuttingDown;
+
     public event Action<IConfigService>? ConfigChanged;
     public string ConfigFilePath { get; }
     public bool AutoReloadEnabled { get; private set; }
@@ -350,6 +358,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
     public bool Reload()
     {
+        // No reloads once teardown has begun: the libghostty app (and the
+        // DX12 renderer it drives) may already be freed, so AppUpdateConfig
+        // would dereference freed state and crash natively. This is the
+        // switch-then-close use-after-free in issue #208.
+        if (_shuttingDown) return false;
+
         // Don't reload before the app is created -- the initial config
         // is the one passed to ghostty_app_new and must stay alive.
         if (_app.Handle == IntPtr.Zero) return false;
@@ -1146,7 +1160,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
     private void OnFileChanged(object? sender, FileSystemEventArgs e)
     {
-        if (_suppressWatcher) return;
+        if (_suppressWatcher || _shuttingDown) return;
         lock (_timerLock)
         {
             _debounceTimer?.Dispose();
@@ -1157,13 +1171,28 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         }
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Stop applying config reloads ahead of app teardown. After this,
+    /// queued or debounced <see cref="Reload"/> calls no-op instead of
+    /// calling <c>AppUpdateConfig</c> on a libghostty app that is about to
+    /// be (or has been) freed by the bootstrap host's AppFree. Called from
+    /// <c>App.OnAnyWindowClosedInternal</c> before that teardown. Idempotent;
+    /// safe to call before <see cref="Dispose"/>. Issue #208.
+    /// </summary>
+    public void BeginShutdown()
     {
+        _shuttingDown = true;
         StopWatcher();
         lock (_timerLock)
         {
             _debounceTimer?.Dispose();
+            _debounceTimer = null;
         }
+    }
+
+    public void Dispose()
+    {
+        BeginShutdown();
         if (_config.Handle != IntPtr.Zero)
             NativeMethods.ConfigFree(_config);
     }
