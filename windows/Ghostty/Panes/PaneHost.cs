@@ -112,6 +112,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // are captured before each op; closed leaves are retained alive here
     // until their entry is evicted (default ~5s, configurable via the
     // libghostty `undo-timeout` config), so undo resurrects the shell.
+    //
+    // _undoEnabled is false when `undo-timeout = 0` (upstream's "disable
+    // undo" sentinel). It gates every capture/restore path: no op is
+    // recorded, closes hard-tear-down their shell immediately (no soft-close
+    // retention), the prune timer is never armed, and CanUndo/CanRedo report
+    // false so the command palette hides the dead entries.
+    private readonly bool _undoEnabled;
     private readonly TimeProvider _time = TimeProvider.System;
     private readonly Core.Panes.PaneHistory _history;
     // Set while Undo()/Redo() restore state, so the capture helper does
@@ -210,20 +217,23 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <see cref="TerminalControl.Snapshot"/> before the control loads.</param>
     /// <param name="initialSnapshot">Profile snapshot for the first leaf,
     /// or null for cold-start / legacy paths.</param>
-    /// <param name="undoTimeout">Eviction window for the undo/redo history.
-    /// Read from the libghostty <c>undo-timeout</c> config at construction
-    /// by <see cref="Ghostty.Tabs.PaneHostFactory"/>; null falls back to
-    /// <see cref="Core.Panes.UndoTimeout.Default"/> (5s). The window is
-    /// captured once here, so a config reload only affects PaneHosts created
-    /// afterward (new tabs) — existing tabs keep their construction-time
-    /// value since <see cref="Core.Panes.PaneHistory"/> holds it immutably.</param>
+    /// <param name="undoPolicy">Whether undo/redo is enabled and, if so, its
+    /// per-operation eviction window — resolved from the libghostty
+    /// <c>undo-timeout</c> config by <see cref="Ghostty.Tabs.PaneHostFactory"/>.
+    /// Null falls back to <see cref="Core.Panes.UndoPolicy.Default"/> (enabled,
+    /// 5s). A disabled policy (upstream's <c>undo-timeout = 0</c>) turns off
+    /// every capture/restore path for this tab. The policy is captured once
+    /// here, so a config reload only affects PaneHosts created afterward (new
+    /// tabs) — existing tabs keep their construction-time policy since
+    /// <see cref="Core.Panes.PaneHistory"/> holds its window immutably.</param>
     public PaneHost(GhosttyHost host, Func<ProfileSnapshot?, TerminalControl> terminalFactory,
-        ProfileSnapshot? initialSnapshot = null, TimeSpan? undoTimeout = null)
+        ProfileSnapshot? initialSnapshot = null, Core.Panes.UndoPolicy? undoPolicy = null)
     {
         _host = host;
         _terminalFactory = terminalFactory;
-        _history = new Core.Panes.PaneHistory(
-            _time, undoTimeout ?? Core.Panes.UndoTimeout.Default);
+        var policy = undoPolicy ?? Core.Panes.UndoPolicy.Default;
+        _undoEnabled = policy.Enabled;
+        _history = new Core.Panes.PaneHistory(_time, policy.Window);
 
         _activeBorderRect = new Rectangle
         {
@@ -308,11 +318,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             LeafFocused?.Invoke(this, _activeLeaf);
             // Evict expired undo entries ~once a second; dispose any shell
             // that is no longer reachable from the live tree or history.
-            _pruneTimer ??= _time.CreateTimer(
-                _ => DispatcherQueue.TryEnqueue(PruneHistory),
-                null,
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(1));
+            // Skip entirely when undo is disabled — nothing is ever captured,
+            // so there is nothing to prune and no need to run a timer.
+            if (_undoEnabled)
+                _pruneTimer ??= _time.CreateTimer(
+                    _ => DispatcherQueue.TryEnqueue(PruneHistory),
+                    null,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(1));
         };
         // Rebind progress whenever the active leaf changes later.
         LeafFocused += (_, _) => BindActiveLeafProgress();
@@ -527,7 +540,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // PaneTree.Close is a pure model op (no visual side effects), so
         // computing it up front to drive the teardown decision is safe.
         var newRoot = PaneTree.Close(_root, leaf);
-        var softClose = undoable && newRoot is not null;
+        // Soft-close (retain the live shell for undo) only when undo is
+        // enabled. With undo off, a surviving-pane close hard-tears-down the
+        // shell immediately, matching upstream: a disabled undo timeout means
+        // closed surfaces don't linger in the background.
+        var softClose = undoable && newRoot is not null && _undoEnabled;
         if (softClose)
         {
             // Snapshot the tree WITH the leaf still present (and its shell
@@ -807,21 +824,31 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <summary>True when there is at least one undoable op on the stack.
     /// Lets the command palette omit a dead "Undo" entry. Mirrors the
     /// concrete-only surfacing of <see cref="Undo"/> (the router casts to
-    /// <see cref="PaneHost"/> rather than going through IPaneHost).</summary>
-    public bool CanUndo => _history.CanUndo;
+    /// <see cref="PaneHost"/> rather than going through IPaneHost).
+    /// Always false when undo is disabled (the history is never populated,
+    /// but the explicit guard keeps the intent obvious).</summary>
+    public bool CanUndo => _undoEnabled && _history.CanUndo;
 
     /// <summary>Mirror of <see cref="CanUndo"/> for the redo stack.</summary>
-    public bool CanRedo => _history.CanRedo;
+    public bool CanRedo => _undoEnabled && _history.CanRedo;
 
     /// <summary>
     /// Restore the model to the state before the most recent undoable
     /// op. No-op if the history is empty. Resurrects a soft-closed pane's
     /// live shell. Mirrors upstream's time-bounded undo.
     /// </summary>
-    public void Undo() => RestoreFrom(_history.Undo(Snapshot(Core.Panes.PaneOpKind.Split)));
+    public void Undo()
+    {
+        if (!_undoEnabled) return;
+        RestoreFrom(_history.Undo(Snapshot(Core.Panes.PaneOpKind.Split)));
+    }
 
     /// <summary>Re-apply the most recently undone op.</summary>
-    public void Redo() => RestoreFrom(_history.Redo(Snapshot(Core.Panes.PaneOpKind.Split)));
+    public void Redo()
+    {
+        if (!_undoEnabled) return;
+        RestoreFrom(_history.Redo(Snapshot(Core.Panes.PaneOpKind.Split)));
+    }
 
     // Common restore path for Undo/Redo. The OpKind on the snapshot we
     // hand the history is irrelevant (it is only used for coalescing on
@@ -1015,7 +1042,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // so a no-op resize (no matching-orientation ancestor) adds no
         // undo entry. Push goes through PaneHistory directly so coalescing
         // still collapses a held-chord burst into one undo step.
-        var pre = _restoring ? null : Snapshot(Core.Panes.PaneOpKind.Resize);
+        var pre = (_restoring || !_undoEnabled) ? null : Snapshot(Core.Panes.PaneOpKind.Resize);
         if (!PaneTree.ResizeSplit(_root, _activeLeaf, direction, ResizeSplitDelta)) return;
         if (pre is not null) DisposeOrphans(_history.Push(pre));
         // Ratio-only change: apply in place (see EqualizeSplits) rather
@@ -1178,7 +1205,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // not leak.
     private void CaptureForUndo(Core.Panes.PaneOpKind kind)
     {
-        if (_restoring) return;
+        if (_restoring || !_undoEnabled) return;
         DisposeOrphans(_history.Push(Snapshot(kind)));
     }
 
