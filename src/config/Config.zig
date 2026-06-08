@@ -4576,8 +4576,11 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     }
 
     // Replay our previous inputs so that we can override values
-    // from the theme.
+    // from the theme. Empty scalar resets (`key =`) are skipped here so they
+    // defer to the theme rather than resetting to the compile-time default;
+    // this only applies to the theme overlay, not the initial load.
     var slice_it = Replay.iterator(self._replay_steps.items, &new_config);
+    slice_it.skip_empty_resets = true;
     try new_config.loadIter(alloc_gpa, &slice_it);
 
     // Success, swap our new config in and free the old.
@@ -5268,6 +5271,12 @@ const Replay = struct {
         slice: []const Replay.Step,
         idx: usize = 0,
 
+        /// When set, replay steps that would reset a non-optional scalar
+        /// field to its compile-time default via an empty value are skipped.
+        /// This lets `key =` defer to a lower configuration layer (the theme)
+        /// instead of clobbering it. See loadTheme.
+        skip_empty_resets: bool = false,
+
         pub fn next(self: *Self) ?[]const u8 {
             while (true) {
                 if (self.idx >= self.slice.len) return null;
@@ -5304,10 +5313,18 @@ const Replay = struct {
                             }
                         }
 
+                        if (self.skip_empty_resets and
+                            cli.args.isEmptyScalarReset(Config, v.arg)) continue;
+
                         return v.arg;
                     },
 
-                    .arg => |arg| return arg,
+                    .arg => |arg| {
+                        if (self.skip_empty_resets and
+                            cli.args.isEmptyScalarReset(Config, arg)) continue;
+
+                        return arg;
+                    },
                     .@"-e" => return "-e",
                 }
             }
