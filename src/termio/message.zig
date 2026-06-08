@@ -16,45 +16,6 @@ pub const Message = union(enum) {
     /// in the future.
     pub const WriteReq = MessageData(u8, 38);
 
-    /// Classification of a pty write so the termio thread can decide
-    /// whether to deliver it to the child. Historically used on Windows
-    /// to suppress VT response bytes under the raw-pipe transport; with
-    /// ConPTY as the sole Windows transport, responses always reach a
-    /// real console handle, so the classification is currently advisory.
-    ///
-    /// The default is `.input` so writes that aren't explicitly tagged
-    /// (keystrokes, paste, mouse events, focus events, anything user-
-    /// driven) pass through unchanged.
-    pub const WriteKind = enum {
-        /// User-driven write: keystrokes, paste, mouse events, focus
-        /// events, anything that should always reach the child.
-        input,
-        /// Reply to a parser-driven query from the child (cursor
-        /// position, device attributes, color queries, etc.).
-        response,
-    };
-
-    /// Wrappers around the three `WriteReq` variants that carry an
-    /// extra `kind` tag (see `WriteKind`). Field names match
-    /// `WriteReq.Small`/`WriteReq.Alloc` so call sites that don't care
-    /// about `kind` keep working unchanged via the default.
-    pub const WriteSmallReq = struct {
-        data: WriteReq.Small.Array = undefined,
-        len: WriteReq.Small.Len = 0,
-        kind: WriteKind = .input,
-    };
-
-    pub const WriteStableReq = struct {
-        data: []const u8,
-        kind: WriteKind = .input,
-    };
-
-    pub const WriteAllocReq = struct {
-        alloc: Allocator,
-        data: []u8,
-        kind: WriteKind = .input,
-    };
-
     /// Request a color scheme report is sent to the pty.
     color_scheme_report: struct {
         /// Force write the current color scheme
@@ -122,26 +83,22 @@ pub const Message = union(enum) {
     focused: bool,
 
     /// Write where the data fits in the union.
-    write_small: WriteSmallReq,
+    write_small: WriteReq.Small,
 
     /// Write where the data pointer is stable.
-    write_stable: WriteStableReq,
+    write_stable: WriteReq.Stable,
 
     /// Write where the data is allocated and must be freed.
-    write_alloc: WriteAllocReq,
+    write_alloc: WriteReq.Alloc,
 
     /// Return a write request for the given data. This will use
     /// write_small if it fits or write_alloc otherwise. This should NOT
     /// be used for stable pointers which can be manually set to write_stable.
-    ///
-    /// The resulting message is tagged as `.input`. Callers that want to
-    /// tag the write as a parser-driven response should set
-    /// `.kind = .response` on the resulting variant before sending.
     pub fn writeReq(alloc: Allocator, data: anytype) !Message {
         return switch (try WriteReq.init(alloc, data)) {
             .stable => unreachable,
-            .small => |v| Message{ .write_small = .{ .data = v.data, .len = v.len } },
-            .alloc => |v| Message{ .write_alloc = .{ .alloc = v.alloc, .data = v.data } },
+            .small => |v| Message{ .write_small = v },
+            .alloc => |v| Message{ .write_alloc = v },
         };
     }
 
@@ -155,11 +112,6 @@ test {
 
 test {
     // Ensure we don't grow our IO message size without explicitly wanting to.
-    // Layout on 64-bit:
-    //   - payload max = WriteAllocReq = Allocator(16) + []u8(16) + WriteKind(1)
-    //     padded to 40 bytes
-    //   - union tag = 1 byte, padded to 8 for natural alignment
-    //   => total = 48 bytes
     const testing = std.testing;
-    try testing.expectEqual(@as(usize, 48), @sizeOf(Message));
+    try testing.expectEqual(@as(usize, 40), @sizeOf(Message));
 }
