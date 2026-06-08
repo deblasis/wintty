@@ -10,16 +10,22 @@ internal sealed class BuiltInCommandSource : ICommandSource
     private readonly Func<PaneAction, Action<CommandItem>> _paneActionFactory;
     private readonly Func<string, Action<CommandItem>> _bindingActionFactory;
     private readonly Action<int>? _opacityAction;
+    private readonly Func<bool>? _canUndo;
+    private readonly Func<bool>? _canRedo;
     private List<CommandItem>? _cache;
 
     public BuiltInCommandSource(
         Func<PaneAction, Action<CommandItem>> paneActionFactory,
         Func<string, Action<CommandItem>> bindingActionFactory,
-        Action<int>? opacityAction = null)
+        Action<int>? opacityAction = null,
+        Func<bool>? canUndo = null,
+        Func<bool>? canRedo = null)
     {
         _paneActionFactory = paneActionFactory;
         _bindingActionFactory = bindingActionFactory;
         _opacityAction = opacityAction;
+        _canUndo = canUndo;
+        _canRedo = canRedo;
     }
 
     public IReadOnlyList<CommandItem> GetCommands()
@@ -57,8 +63,15 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.ToggleTabLayout, "Toggle Tab Layout", "Switch between horizontal and vertical tab layout", CommandCategory.Tab, "\uE8AB");
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal);
         AddPaneCommand(commands, PaneAction.ShowKeybindCheatsheet, "Keyboard Shortcuts", "Show the keyboard shortcuts cheat sheet", CommandCategory.Terminal, "");
-        AddPaneCommand(commands, PaneAction.Undo, "Undo", "Undo the last pane split, close, resize, equalize, or zoom", CommandCategory.Pane);
-        AddPaneCommand(commands, PaneAction.Redo, "Redo", "Redo the last undone pane operation", CommandCategory.Pane);
+        // Undo/Redo are omitted when their stack is empty so the palette
+        // never offers a dead no-op. The palette rebuilds this list on every
+        // open (CommandPaletteViewModel.Open -> Refresh + GetCommands), so a
+        // build-time check reflects the active pane's current history; a null
+        // predicate (no host wired) keeps the legacy always-shown behavior.
+        if (_canUndo?.Invoke() ?? true)
+            AddPaneCommand(commands, PaneAction.Undo, "Undo", "Undo the last pane split, close, resize, equalize, or zoom", CommandCategory.Pane);
+        if (_canRedo?.Invoke() ?? true)
+            AddPaneCommand(commands, PaneAction.Redo, "Redo", "Redo the last undone pane operation", CommandCategory.Pane);
 
         // Binding-action-backed commands
         AddBindingCommand(commands, "reset", "Reset Terminal", "Reset the terminal to a clean state", CommandCategory.Terminal, "\uE777");
