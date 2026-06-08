@@ -102,16 +102,26 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
 
     public void Open()
     {
-        foreach (var source in _sources)
-            source.Refresh();
-
-        _allCommands = _sources.SelectMany(s => s.GetCommands()).ToList();
+        RebuildCommands();
 
         IsOpen = true;
         SearchText = "";
         IsPinned = false;
         Mode = PaletteMode.Search;
         ApplyFilter();
+    }
+
+    // Refresh every source and re-collect the command list. Sources can
+    // emit context-dependent commands (e.g. BuiltInCommandSource omits
+    // Undo/Redo when the active pane's stack is empty), so this must run
+    // any time the list could have gone stale -- on open AND after a
+    // command executes while the palette stays pinned open.
+    private void RebuildCommands()
+    {
+        foreach (var source in _sources)
+            source.Refresh();
+
+        _allCommands = _sources.SelectMany(s => s.GetCommands()).ToList();
     }
 
     public void Close()
@@ -139,6 +149,12 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
 
         if (IsPinned)
         {
+            // Rebuild so context commands (e.g. Undo/Redo visibility) don't
+            // freeze at their open-time state while the palette stays pinned.
+            // Pane actions dispatch on a later tick, so a history op fired
+            // from here is reflected on the next execute/reopen, not this one
+            // -- acceptable for a cosmetic availability hint.
+            RebuildCommands();
             SearchText = "";
             ApplyFilter();
         }
