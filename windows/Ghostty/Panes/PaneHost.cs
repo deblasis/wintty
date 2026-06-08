@@ -110,8 +110,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     // Undo/redo of structural pane ops. Per-PaneHost (per-tab). Snapshots
     // are captured before each op; closed leaves are retained alive here
-    // until their entry is evicted (~5s), so undo resurrects the shell.
-    private const double UndoTimeoutSeconds = 5.0;
+    // until their entry is evicted (default ~5s, configurable via the
+    // libghostty `undo-timeout` config), so undo resurrects the shell.
     private readonly TimeProvider _time = TimeProvider.System;
     private readonly Core.Panes.PaneHistory _history;
     // Set while Undo()/Redo() restore state, so the capture helper does
@@ -210,12 +210,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <see cref="TerminalControl.Snapshot"/> before the control loads.</param>
     /// <param name="initialSnapshot">Profile snapshot for the first leaf,
     /// or null for cold-start / legacy paths.</param>
+    /// <param name="undoTimeout">Eviction window for the undo/redo history.
+    /// Read from the libghostty <c>undo-timeout</c> config at construction
+    /// by <see cref="Ghostty.Tabs.PaneHostFactory"/>; null falls back to
+    /// <see cref="Core.Panes.UndoTimeout.Default"/> (5s). The window is
+    /// captured once here, so a config reload only affects PaneHosts created
+    /// afterward (new tabs) — existing tabs keep their construction-time
+    /// value since <see cref="Core.Panes.PaneHistory"/> holds it immutably.</param>
     public PaneHost(GhosttyHost host, Func<ProfileSnapshot?, TerminalControl> terminalFactory,
-        ProfileSnapshot? initialSnapshot = null)
+        ProfileSnapshot? initialSnapshot = null, TimeSpan? undoTimeout = null)
     {
         _host = host;
         _terminalFactory = terminalFactory;
-        _history = new Core.Panes.PaneHistory(_time, TimeSpan.FromSeconds(UndoTimeoutSeconds));
+        _history = new Core.Panes.PaneHistory(
+            _time, undoTimeout ?? Core.Panes.UndoTimeout.Default);
 
         _activeBorderRect = new Rectangle
         {
