@@ -796,6 +796,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
     }
 
+    /// <summary>True when there is at least one undoable op on the stack.
+    /// Lets the command palette omit a dead "Undo" entry. Mirrors the
+    /// concrete-only surfacing of <see cref="Undo"/> (the router casts to
+    /// <see cref="PaneHost"/> rather than going through IPaneHost).</summary>
+    public bool CanUndo => _history.CanUndo;
+
+    /// <summary>Mirror of <see cref="CanUndo"/> for the redo stack.</summary>
+    public bool CanRedo => _history.CanRedo;
+
     /// <summary>
     /// Restore the model to the state before the most recent undoable
     /// op. No-op if the history is empty. Resurrects a soft-closed pane's
