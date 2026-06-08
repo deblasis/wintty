@@ -2216,7 +2216,12 @@ public sealed partial class MainWindow : Window
             sources,
             frecency,
             autoCompleter,
-            groupByCategory: _configService.CommandPaletteGroupCommands);
+            groupByCategory: _configService.CommandPaletteGroupCommands,
+            // Route '>' command-mode actions through the same libghostty
+            // binding-action path BuiltInCommandSource uses, deferred to the
+            // next tick so the palette closes before the action runs.
+            commandLineDispatch: actionKey =>
+                DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)));
     }
 
     private void ExecuteBindingAction(string actionKey)
