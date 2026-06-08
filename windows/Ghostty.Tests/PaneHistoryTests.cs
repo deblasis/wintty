@@ -92,6 +92,49 @@ public sealed class PaneHistoryTests
     }
 
     [Fact]
+    public void Push_ResizesFarApartInTime_NotCoalesced()
+    {
+        var time = new FakeTimeProvider();
+        var h = New(time);
+        h.Push(Snap(PaneOpKind.Resize));
+        time.Now = time.Now.AddSeconds(2); // beyond the coalesce window
+        h.Push(Snap(PaneOpKind.Resize));
+
+        h.Undo(Snap(PaneOpKind.Resize));
+        Assert.True(h.CanUndo); // two distinct gestures -> two undo steps
+    }
+
+    [Fact]
+    public void Push_ReturnsLeavesOrphanedByClearedRedo()
+    {
+        var h = New();
+        var a = new LeafPane();
+        var b = new LeafPane();
+
+        // Pre-split state references only A.
+        h.Push(new PaneSnapshot(a, a, null, PaneOpKind.Split));
+        // Undo pushes the post-split tree (A + B) onto redo; B is now
+        // reachable ONLY from the redo entry.
+        h.Undo(new PaneSnapshot(new SplitPane(PaneOrientation.Vertical, a, b), a, null, PaneOpKind.Split));
+
+        // A new op clears redo and must report B as orphaned (its surface
+        // would otherwise leak), but NOT A (still referenced by the new
+        // undo entry).
+        var orphans = h.Push(new PaneSnapshot(a, a, null, PaneOpKind.Close));
+
+        Assert.Contains(b, orphans);
+        Assert.DoesNotContain(a, orphans);
+    }
+
+    [Fact]
+    public void Push_NoRedoToClear_ReturnsEmpty()
+    {
+        var h = New();
+        var orphans = h.Push(Snap(PaneOpKind.Split));
+        Assert.Empty(orphans);
+    }
+
+    [Fact]
     public void Prune_RemovesEntriesOlderThanTimeout()
     {
         var time = new FakeTimeProvider();

@@ -693,7 +693,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void EqualizeSplits()
     {
-        CaptureForUndo(Core.Panes.PaneOpKind.Equalize);
+        // Only record undo when there is a split to equalize; on a single
+        // leaf Equalize is a no-op, so capturing would push a useless entry
+        // (and needlessly clear redo).
+        if (_root is SplitPane) CaptureForUndo(Core.Panes.PaneOpKind.Equalize);
         PaneTree.Equalize(_root);
         // When zoomed, only update the model - unzoom re-applies every
         // ratio to the live tree when the user toggles back.
@@ -997,7 +1000,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // still collapses a held-chord burst into one undo step.
         var pre = _restoring ? null : Snapshot(Core.Panes.PaneOpKind.Resize);
         if (!PaneTree.ResizeSplit(_root, _activeLeaf, direction, ResizeSplitDelta)) return;
-        if (pre is not null) _history.Push(pre);
+        if (pre is not null) DisposeOrphans(_history.Push(pre));
         // Ratio-only change: apply in place (see EqualizeSplits) rather
         // than Rebuild(), which ghosts dividers on deep trees.
         ApplyAllRatios();
@@ -1152,21 +1155,37 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         => new(Core.Panes.PaneTree.Clone(_root), _activeLeaf, _zoomedLeaf, kind);
 
     // Record the pre-op state for undo. No-op while restoring (so Undo's
-    // own re-zoom/rebuild does not push history).
+    // own re-zoom/rebuild does not push history). Pushing clears the redo
+    // stack, which can orphan a pane whose surface is still alive (its
+    // only reference was a redo entry); tear those down so the shell does
+    // not leak.
     private void CaptureForUndo(Core.Panes.PaneOpKind kind)
     {
         if (_restoring) return;
-        _history.Push(Snapshot(kind));
+        DisposeOrphans(_history.Push(Snapshot(kind)));
     }
 
     // Drop expired entries and dispose any leaf they orphaned that is no
     // longer in the live tree. Runs on the UI thread (timer marshals).
     private void PruneHistory()
     {
-        var candidates = _history.Prune(_time.GetUtcNow());
-        if (candidates.Count == 0) return;
+        // A prune may already be queued on the dispatcher when the host
+        // tears down (DisposeAllLeaves disposes the timer + clears history).
+        // It is harmless post-Clear, but bail explicitly so a future change
+        // to Prune/Clear semantics can't turn this into a use-after-teardown.
+        if (_allLeavesClosed) return;
+        DisposeOrphans(_history.Prune(_time.GetUtcNow()));
+    }
+
+    // Tear down the libghostty surface of each orphaned leaf that is not
+    // still in the live tree. Shared by the capture (redo-clear orphans),
+    // prune (time-eviction orphans), and teardown paths so the
+    // "never dispose a leaf still on screen" guard lives in one place.
+    private void DisposeOrphans(IReadOnlyList<LeafPane> orphans)
+    {
+        if (orphans.Count == 0) return;
         var live = Core.Panes.PaneTree.Leaves(_root).ToHashSet();
-        foreach (var leaf in candidates)
+        foreach (var leaf in orphans)
         {
             if (live.Contains(leaf)) continue; // still on screen — keep alive
             TeardownLeaf(leaf);

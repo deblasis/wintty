@@ -22,6 +22,11 @@ internal sealed class PaneHistory
 {
     private readonly record struct Entry(PaneSnapshot Snapshot, DateTimeOffset Stamp);
 
+    // Only consecutive resizes WITHIN this window coalesce, so a held-chord
+    // burst collapses to one undo step while two deliberate, seconds-apart
+    // resizes stay independently undoable.
+    private static readonly TimeSpan ResizeCoalesceWindow = TimeSpan.FromMilliseconds(750);
+
     private readonly TimeProvider _time;
     private readonly TimeSpan _timeout;
     private readonly List<Entry> _undo = new(); // top == last
@@ -36,23 +41,40 @@ internal sealed class PaneHistory
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
-    /// <summary>Record the pre-op state. Clears redo. Coalesces a
-    /// resize that immediately follows another resize.</summary>
-    public void Push(PaneSnapshot pre)
+    /// <summary>
+    /// Record the pre-op state and clear the redo stack (a new op
+    /// invalidates redo). Consecutive resizes within
+    /// <see cref="ResizeCoalesceWindow"/> coalesce into the earliest
+    /// pre-burst snapshot.
+    ///
+    /// Returns the leaves orphaned by clearing redo: a redo entry can be
+    /// the SOLE reference keeping a closed/split-away pane's surface alive
+    /// (e.g. Split then Undo leaves the new pane reachable only via redo).
+    /// Dropping it here without disposal would leak the libghostty surface
+    /// and its shell forever, so the caller must tear those leaves down
+    /// (excluding any still in the live tree).
+    /// </summary>
+    public IReadOnlyList<LeafPane> Push(PaneSnapshot pre)
     {
+        var now = _time.GetUtcNow();
+        var clearedRedo = _redo.Count > 0 ? new List<Entry>(_redo) : null;
+
         if (pre.Kind == PaneOpKind.Resize
             && _undo.Count > 0
-            && _undo[^1].Snapshot.Kind == PaneOpKind.Resize)
+            && _undo[^1].Snapshot.Kind == PaneOpKind.Resize
+            && now - _undo[^1].Stamp < ResizeCoalesceWindow)
         {
             // Keep the earlier (pre-burst) snapshot; just refresh its
             // timestamp so the whole burst expires from the last nudge.
-            _undo[^1] = _undo[^1] with { Stamp = _time.GetUtcNow() };
-            _redo.Clear();
-            return;
+            _undo[^1] = _undo[^1] with { Stamp = now };
+        }
+        else
+        {
+            _undo.Add(new Entry(pre, now));
         }
 
-        _undo.Add(new Entry(pre, _time.GetUtcNow()));
         _redo.Clear();
+        return clearedRedo is null ? Array.Empty<LeafPane>() : OrphansOf(clearedRedo);
     }
 
     /// <summary>Pop the last undo entry; push <paramref name="current"/>
