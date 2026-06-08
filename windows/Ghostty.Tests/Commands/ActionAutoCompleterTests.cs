@@ -138,4 +138,51 @@ public class ActionAutoCompleterTests
         var c = CreateCompleter();
         Assert.False(c.IsValid("does_not_exist"));
     }
+
+    [Fact]
+    public void Complete_NoParamAction_ActionKeyIsActionName()
+    {
+        var c = CreateCompleter();
+        var result = c.Complete("reset");
+        Assert.Single(result.Suggestions);
+        Assert.Equal("reset", result.Suggestions[0].ActionKey);
+    }
+
+    [Fact]
+    public void Complete_Prefix_ActionKeyEqualsName()
+    {
+        var c = CreateCompleter();
+        var result = c.Complete("new");
+        Assert.All(result.Suggestions, s => Assert.Equal(s.Name, s.ActionKey));
+    }
+
+    [Fact]
+    public void Complete_ColonParam_ActionKeyIsFullActionColonParam()
+    {
+        var c = CreateCompleter();
+        var result = c.Complete("new_split:r");
+        Assert.Single(result.Suggestions);
+        // Name is just the parameter; ActionKey is the dispatchable full string.
+        Assert.Equal("right", result.Suggestions[0].Name);
+        Assert.Equal("new_split:right", result.Suggestions[0].ActionKey);
+    }
+
+    [Fact]
+    public void Complete_ColonAllParams_ActionKeyPrefixedWithAction()
+    {
+        var c = CreateCompleter();
+        var result = c.Complete("goto_tab:");
+        Assert.NotEmpty(result.Suggestions);
+        Assert.All(result.Suggestions, s => Assert.StartsWith("goto_tab:", s.ActionKey));
+    }
+
+    [Fact]
+    public void Complete_ColonUnknownParam_ReturnsNoSuggestions()
+    {
+        // A known action with an unmatched parameter must yield no suggestions,
+        // so no dangling ActionKey can be dispatched.
+        var c = CreateCompleter();
+        var result = c.Complete("new_split:zzz");
+        Assert.Empty(result.Suggestions);
+    }
 }
