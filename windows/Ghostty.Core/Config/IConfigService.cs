@@ -80,6 +80,17 @@ public interface IConfigService : IDisposable
     uint BackgroundColor { get; }
 
     /// <summary>
+    /// Eviction window for pane undo/redo, in milliseconds, read from the
+    /// libghostty <c>undo-timeout</c> <c>Duration</c> config. Defaults to
+    /// upstream Ghostty's 5s default when the key can't be read.
+    /// <c>PaneHost</c> converts this via
+    /// <see cref="Ghostty.Core.Panes.UndoTimeout.FromMilliseconds"/>, which
+    /// also handles the non-positive case (see its docs for the divergence
+    /// from upstream's <c>0 = disable</c> semantic).
+    /// </summary>
+    int UndoTimeoutMs { get; }
+
+    /// <summary>
     /// Re-read config from disk and apply it. Returns true on
     /// success, false if the reload failed (old config stays active).
     /// </summary>
