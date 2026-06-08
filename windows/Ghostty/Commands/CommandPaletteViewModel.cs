@@ -24,6 +24,7 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
     private readonly FrecencyStore _frecency;
     private readonly ActionAutoCompleter? _autoCompleter;
     private readonly bool _groupByCategory;
+    private readonly Action<string>? _commandLineDispatch;
     private List<CommandItem> _allCommands = [];
 
     public bool IsOpen
@@ -92,12 +93,14 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
         IReadOnlyList<ICommandSource> sources,
         FrecencyStore frecency,
         ActionAutoCompleter? autoCompleter,
-        bool groupByCategory = false)
+        bool groupByCategory = false,
+        Action<string>? commandLineDispatch = null)
     {
         _sources = sources;
         _frecency = frecency;
         _autoCompleter = autoCompleter;
         _groupByCategory = groupByCategory;
+        _commandLineDispatch = commandLineDispatch;
     }
 
     public void Open()
@@ -230,14 +233,26 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
         var result = _autoCompleter.Complete(input);
 
         FilteredCommands = result.Suggestions
-            .Select(s => new CommandItem
+            .Select(s =>
             {
-                Id = $"cmdline:{s.Name}",
-                Title = s.Name,
-                Description = s.Description,
-                ActionKey = s.Name,
-                Category = CommandCategory.Custom,
-                Execute = _ => { },
+                // Capture the resolved full action string (e.g.
+                // "increase_font_size:1", not just the parameter "1") so the
+                // command-mode entry dispatches the same way regular binding
+                // commands do via BuiltInCommandSource.
+                var actionKey = s.ActionKey;
+                return new CommandItem
+                {
+                    // Key frecency off the resolved action, not s.Name: for a
+                    // parameterized action s.Name is only the parameter (e.g.
+                    // "1"), so distinct actions sharing a param value would
+                    // otherwise collide in the frecency store.
+                    Id = $"cmdline:{actionKey}",
+                    Title = s.Name,
+                    Description = s.Description,
+                    ActionKey = actionKey,
+                    Category = CommandCategory.Custom,
+                    Execute = _ => _commandLineDispatch?.Invoke(actionKey),
+                };
             })
             .ToList();
 

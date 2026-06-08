@@ -23,7 +23,7 @@ internal sealed class ActionAutoCompleter
         {
             var matches = _sortedNames
                 .Where(n => n.StartsWith(input, StringComparison.OrdinalIgnoreCase))
-                .Select(n => new AutocompleteSuggestion(n, _actions[n].Description))
+                .Select(n => new AutocompleteSuggestion(n, _actions[n].Description, n))
                 .ToList();
 
             var ghost = matches.Count > 0 ? matches[0].Name[input.Length..] : null;
@@ -41,7 +41,7 @@ internal sealed class ActionAutoCompleter
 
         var paramMatches = schema.Parameters
             .Where(p => p.StartsWith(paramPart, StringComparison.OrdinalIgnoreCase))
-            .Select(p => new AutocompleteSuggestion(p, $"{schema.Name}:{p}"))
+            .Select(p => new AutocompleteSuggestion(p, $"{schema.Name}:{p}", $"{schema.Name}:{p}"))
             .ToList();
 
         var paramGhost = paramMatches.Count > 0 ? paramMatches[0].Name[paramPart.Length..] : null;
@@ -76,7 +76,7 @@ internal sealed record ActionSchema
     public required bool RequiresParameter { get; init; }
 }
 
-internal sealed record AutocompleteSuggestion(string Name, string Description);
+internal sealed record AutocompleteSuggestion(string Name, string Description, string ActionKey);
 
 internal sealed record AutocompleteResult(
     IReadOnlyList<AutocompleteSuggestion> Suggestions,
