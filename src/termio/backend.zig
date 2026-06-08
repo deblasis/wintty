@@ -79,10 +79,9 @@ pub const Backend = union(Kind) {
         td: *termio.Termio.ThreadData,
         data: []const u8,
         linefeed: bool,
-        kind: termio.Message.WriteKind,
     ) !void {
         switch (self.*) {
-            .exec => |*exec| try exec.queueWrite(alloc, td, data, linefeed, kind),
+            .exec => |*exec| try exec.queueWrite(alloc, td, data, linefeed),
         }
     }
 

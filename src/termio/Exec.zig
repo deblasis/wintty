@@ -190,9 +190,6 @@ pub fn threadEnter(
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
-        .shell_kind = if (comptime builtin.os.tag == .windows)
-            self.subprocess.resolved_shell_kind
-        else {},
     } };
 
     // On Windows, spawn a dedicated thread that blocks on WaitForSingleObject
@@ -480,13 +477,8 @@ pub fn queueWrite(
     td: *termio.Termio.ThreadData,
     data: []const u8,
     linefeed: bool,
-    kind: termio.Message.WriteKind,
 ) !void {
     _ = self;
-    // ConPTY is the sole Windows transport now, so VT responses always
-    // reach a real console handle and never need suppression. The
-    // write classification is therefore unused on the write path.
-    _ = kind;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
@@ -631,13 +623,6 @@ pub const ThreadData = struct {
     /// to prevent unnecessary locking of expensive mutexes.
     termios_mode: ptypkg.TerminalMode = .{},
 
-    /// Resolved Windows shell identity for the running child. Captured
-    /// from `Subprocess.start` for diagnostics and any future per-shell
-    /// quirk gating. `null` on Windows when classification did not match
-    /// a known shell. Not meaningful on POSIX.
-    shell_kind: if (builtin.os.tag == .windows) ?internal_os.windows_shell.Kind else void =
-        if (builtin.os.tag == .windows) null else {},
-
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         _ = posix.system.close(self.read_thread_pipe);
 
@@ -702,15 +687,6 @@ const Subprocess = struct {
         configpkg.Config.Utf8Console
     else
         void = if (builtin.os.tag == .windows) .auto else {},
-
-    /// Resolved shell identity set by `start`. `null` until `start`
-    /// runs OR if classification did not match a known shell. Read by
-    /// `Exec.threadEnter` to populate `Exec.ThreadData.shell_kind`.
-    /// Windows-only.
-    resolved_shell_kind: if (builtin.os.tag == .windows)
-        ?internal_os.windows_shell.Kind
-    else
-        void = if (builtin.os.tag == .windows) null else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
@@ -1034,16 +1010,6 @@ const Subprocess = struct {
 
         // ConPTY is the sole Windows transport; POSIX ignores opts.mode.
         const mode: ptypkg.Mode = .conpty;
-
-        // Cache the resolved shell identity so the termio thread can read
-        // it from Exec.ThreadData without re-running classification (and
-        // without holding the renderer lock). args[0] is the shell
-        // executable path (bare basename or full path), never a joined
-        // command line; windows_shell.identify does not split tokens on
-        // spaces.
-        if (comptime builtin.os.tag == .windows) {
-            self.resolved_shell_kind = internal_os.windows_shell.identify(self.args[0]);
-        }
 
         // Create our pty
         var pty = try Pty.open(.{
