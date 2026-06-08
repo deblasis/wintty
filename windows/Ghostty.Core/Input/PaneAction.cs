@@ -90,4 +90,10 @@ public enum PaneAction
     // Open the read-only keyboard-shortcuts cheat sheet. Routed via event to
     // MainWindow, which shows the cheat sheet dialog (needs an XamlRoot/HWND).
     ShowKeybindCheatsheet = 49,
+
+    // Pane undo/redo (#166). Apprt-only: libghostty has no Windows undo
+    // implementation, so these are matched in KeyBindings.WindowsOnly and
+    // dispatched to PaneHost.Undo/Redo. Time-bounded (~5s) snapshot stack.
+    Undo = 50,
+    Redo = 51,
 }
