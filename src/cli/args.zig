@@ -513,6 +513,8 @@ pub fn isEmptyScalarReset(comptime T: type, arg: []const u8) bool {
             // value, so they are intentionally left alone.
             if (@typeInfo(field.type) == .optional) return false;
 
+            // Optionals already returned above, so field.type is the
+            // unwrapped type that parseIntoField's empty-value branch keys on.
             const fieldInfo = @typeInfo(field.type);
             const canHaveDecls = fieldInfo == .@"struct" or
                 fieldInfo == .@"union" or
@@ -981,6 +983,7 @@ test "isEmptyScalarReset" {
 
     const S = struct {
         foo: u8 = 5,
+        nodefault: u8,
         bar: ?u8 = null,
         list: struct {
             const Self = @This();
@@ -989,6 +992,7 @@ test "isEmptyScalarReset" {
                 self.* = .{};
             }
         } = .{},
+        vd: void = {},
         _hidden: u8 = 0,
     };
 
@@ -998,11 +1002,17 @@ test "isEmptyScalarReset" {
     // Non-empty value is not a reset.
     try testing.expect(!isEmptyScalarReset(S, "--foo=3"));
 
+    // A non-optional field without a compile-time default has no reset path.
+    try testing.expect(!isEmptyScalarReset(S, "--nodefault="));
+
     // Optional fields reset to null and are intentionally excluded.
     try testing.expect(!isEmptyScalarReset(S, "--bar="));
 
     // init-clearing list types are excluded.
     try testing.expect(!isEmptyScalarReset(S, "--list="));
+
+    // void fields carry no value and are skipped.
+    try testing.expect(!isEmptyScalarReset(S, "--vd="));
 
     // Missing value (no "=") is not a reset.
     try testing.expect(!isEmptyScalarReset(S, "--foo"));
