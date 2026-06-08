@@ -90,4 +90,81 @@ public sealed class PaneHistoryTests
         h.Undo(Snap(PaneOpKind.Resize));
         Assert.True(h.CanUndo); // resize entry consumed, split remains
     }
+
+    [Fact]
+    public void Prune_RemovesEntriesOlderThanTimeout()
+    {
+        var time = new FakeTimeProvider();
+        var h = New(time, timeoutSeconds: 5);
+        h.Push(Snap(PaneOpKind.Split));
+
+        time.Now = time.Now.AddSeconds(6); // past the 5s window
+        h.Prune(time.Now);
+
+        Assert.False(h.CanUndo);
+    }
+
+    [Fact]
+    public void Prune_KeepsFreshEntries()
+    {
+        var time = new FakeTimeProvider();
+        var h = New(time, timeoutSeconds: 5);
+        h.Push(Snap(PaneOpKind.Split));
+
+        time.Now = time.Now.AddSeconds(2);
+        h.Prune(time.Now);
+
+        Assert.True(h.CanUndo);
+    }
+
+    [Fact]
+    public void Prune_ReturnsLeavesUniqueToEvictedEntries()
+    {
+        var time = new FakeTimeProvider();
+        var h = New(time, timeoutSeconds: 5);
+
+        // A close snapshot whose tree still references the closed leaf.
+        var closed = new LeafPane();
+        var snap = new PaneSnapshot(closed, closed, null, PaneOpKind.Close);
+        h.Push(snap);
+
+        time.Now = time.Now.AddSeconds(6);
+        var orphans = h.Prune(time.Now);
+
+        Assert.Contains(closed, orphans);
+    }
+
+    [Fact]
+    public void Prune_DoesNotReturnLeavesStillReferencedByOtherEntries()
+    {
+        var time = new FakeTimeProvider();
+        var h = New(time, timeoutSeconds: 5);
+
+        var shared = new LeafPane();
+        h.Push(new PaneSnapshot(shared, shared, null, PaneOpKind.Close)); // entry A (old)
+        time.Now = time.Now.AddSeconds(3);
+        h.Push(new PaneSnapshot(shared, shared, null, PaneOpKind.Equalize)); // entry B (newer)
+
+        time.Now = time.Now.AddSeconds(3); // A is 6s old, B is 3s old
+        var orphans = h.Prune(time.Now);
+
+        Assert.DoesNotContain(shared, orphans); // still referenced by B
+    }
+
+    [Fact]
+    public void Clear_ReturnsAllReferencedLeaves()
+    {
+        var h = New();
+        var a = new LeafPane();
+        var b = new LeafPane();
+        h.Push(new PaneSnapshot(a, a, null, PaneOpKind.Close));
+        h.Push(new PaneSnapshot(b, b, null, PaneOpKind.Close));
+
+        var all = h.Clear();
+
+        Assert.Contains(a, all);
+        Assert.Contains(b, all);
+        Assert.False(h.CanUndo);
+        Assert.False(h.CanRedo);
+    }
 }

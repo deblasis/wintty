@@ -76,5 +76,51 @@ internal sealed class PaneHistory
         return entry.Snapshot;
     }
 
-    // Eviction added in Task 4.
+    /// <summary>
+    /// Drop entries (from either stack) whose age exceeds the timeout.
+    /// Returns the leaves that were referenced ONLY by evicted entries
+    /// (candidates for surface disposal). The caller must still exclude
+    /// any leaf present in the live tree before tearing it down.
+    /// </summary>
+    public IReadOnlyList<LeafPane> Prune(DateTimeOffset now)
+    {
+        var evicted = new List<Entry>();
+        RemoveExpired(_undo, now, evicted);
+        RemoveExpired(_redo, now, evicted);
+        if (evicted.Count == 0) return Array.Empty<LeafPane>();
+        return OrphansOf(evicted);
+    }
+
+    /// <summary>Drop everything; return every leaf any entry referenced.</summary>
+    public IReadOnlyList<LeafPane> Clear()
+    {
+        var all = _undo.Concat(_redo).ToList();
+        _undo.Clear();
+        _redo.Clear();
+        if (all.Count == 0) return Array.Empty<LeafPane>();
+        return LeavesOf(all).Distinct().ToList();
+    }
+
+    private void RemoveExpired(List<Entry> stack, DateTimeOffset now, List<Entry> evicted)
+    {
+        for (var i = stack.Count - 1; i >= 0; i--)
+        {
+            if (now - stack[i].Stamp < _timeout) continue;
+            evicted.Add(stack[i]);
+            stack.RemoveAt(i);
+        }
+    }
+
+    // Leaves in evicted entries that no surviving entry still references.
+    private IReadOnlyList<LeafPane> OrphansOf(List<Entry> evicted)
+    {
+        var survivors = LeavesOf(_undo.Concat(_redo)).ToHashSet();
+        return LeavesOf(evicted)
+            .Where(l => !survivors.Contains(l))
+            .Distinct()
+            .ToList();
+    }
+
+    private static IEnumerable<LeafPane> LeavesOf(IEnumerable<Entry> entries)
+        => entries.SelectMany(e => PaneTree.Leaves(e.Snapshot.Root));
 }
