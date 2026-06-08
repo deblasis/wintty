@@ -45,7 +45,9 @@ pub const Mode = enum { conpty };
 /// Arguments to `Pty.open`.
 pub const Options = struct {
     size: winsize,
-    /// Windows-only. Ignored on POSIX.
+    /// Transport mode. ConPTY is the only transport today, so this field
+    /// has a single value and is ignored on every platform; retained for
+    /// cross-platform call-shape parity (see `Mode`).
     mode: Mode = .conpty,
 };
 
@@ -374,7 +376,6 @@ const WindowsPty = struct {
     /// pair is created in `open`.
     pseudo_console: ?windows.exp.HPCON,
     size: winsize,
-    mode: Mode,
 
     /// Build a UTF-16 path string for `<exe-dir>\conpty.dll`. Returns
     /// null if the executable path can't be queried, has no parent
@@ -549,7 +550,6 @@ const WindowsPty = struct {
         try windows.SetHandleInformation(pty.out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
 
         pty.size = size;
-        pty.mode = opts.mode;
         pty.pseudo_console = null;
 
         // ConPTY is the sole Windows transport. Create the pseudoconsole
@@ -680,5 +680,4 @@ test "WindowsPty: conpty mode populates pseudo_console" {
     });
     defer pty.deinit();
     try std.testing.expect(pty.pseudo_console != null);
-    try std.testing.expectEqual(Mode.conpty, pty.mode);
 }
