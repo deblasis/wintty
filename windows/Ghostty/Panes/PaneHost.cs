@@ -108,6 +108,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // has already been disposed leaf-by-leaf in CloseLeaf.
     private bool _allLeavesClosed;
 
+    // Undo/redo of structural pane ops. Per-PaneHost (per-tab). Snapshots
+    // are captured before each op; closed leaves are retained alive here
+    // until their entry is evicted (~5s), so undo resurrects the shell.
+    private const double UndoTimeoutSeconds = 5.0;
+    private readonly TimeProvider _time = TimeProvider.System;
+    private readonly Core.Panes.PaneHistory _history;
+    // Set while Undo()/Redo() restore state, so the capture helper does
+    // not record the restore itself as a new undoable op.
+    private bool _restoring;
+    private System.Threading.ITimer? _pruneTimer;
+
     /// <summary>
     /// Raised when the active leaf changes (initially and on every focus
     /// change between leaves). Subscribers receive the new active leaf.
@@ -204,6 +215,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     {
         _host = host;
         _terminalFactory = terminalFactory;
+        _history = new Core.Panes.PaneHistory(_time, TimeSpan.FromSeconds(UndoTimeoutSeconds));
 
         _activeBorderRect = new Rectangle
         {
@@ -286,6 +298,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         {
             BindActiveLeafProgress();
             LeafFocused?.Invoke(this, _activeLeaf);
+            // Evict expired undo entries ~once a second; dispose any shell
+            // that is no longer reachable from the live tree or history.
+            _pruneTimer ??= _time.CreateTimer(
+                _ => DispatcherQueue.TryEnqueue(PruneHistory),
+                null,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1));
         };
         // Rebind progress whenever the active leaf changes later.
         LeafFocused += (_, _) => BindActiveLeafProgress();
@@ -308,6 +327,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void Split(PaneOrientation orientation, ProfileSnapshot? snapshot)
     {
+        // Capture BEFORE the implicit unzoom below so undo restores the
+        // pre-split zoom state too.
+        CaptureForUndo(Core.Panes.PaneOpKind.Split);
+
         // Unzoom before splitting so the new sub-Grid is inserted into
         // the full tree, not into the zoomed single-leaf visual.
         if (_zoomedLeaf is not null)
@@ -393,7 +416,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void CloseActive()
     {
-        CloseLeaf(_activeLeaf);
+        CloseLeaf(_activeLeaf, undoable: true);
     }
 
     /// <summary>
@@ -446,6 +469,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             }
         }
 
+        // Tear down any shell still retained ONLY by the undo history
+        // (soft-closed panes that were never evicted). Stop the timer
+        // first so no prune races this teardown. Guard on the live tree
+        // so we never double-dispose a leaf the walk above already freed.
+        _pruneTimer?.Dispose();
+        _pruneTimer = null;
+        var liveLeaves = Core.Panes.PaneTree.Leaves(_root).ToHashSet();
+        foreach (var leaf in _history.Clear())
+        {
+            if (!liveLeaves.Contains(leaf)) TeardownLeaf(leaf);
+        }
+
         // Event-nulling intentionally runs unconditionally: the gate
         // above only controls whether we re-walk the tree, not whether
         // this PaneHost is going away. Both code paths (tree-collapsed
@@ -461,21 +496,42 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// <see cref="ActiveLeaf"/>) and by <see cref="TerminalControl.CloseRequested"/>
     /// from libghostty's close-surface callback.
     /// </summary>
-    public void CloseLeaf(LeafPane leaf)
+    public void CloseLeaf(LeafPane leaf) => CloseLeaf(leaf, undoable: false);
+
+    /// <param name="undoable">When true and at least one pane survives,
+    /// the close is recorded for undo and the leaf's surface is NOT torn
+    /// down — it lingers (running) until the undo entry is evicted, so
+    /// undo can resurrect the live shell. Shell-initiated closes pass
+    /// false (a dead shell is not worth resurrecting).</param>
+    public void CloseLeaf(LeafPane leaf, bool undoable)
     {
+        // A retained (already soft-closed) leaf is no longer in the live
+        // tree; if its lingering shell exits and fires CloseRequested,
+        // ignore it — eviction will dispose it.
+        if (!Core.Panes.PaneTree.Leaves(_root).Contains(leaf)) return;
+
         // Which leaf (if any) was zoomed before this close. Used at the
         // end to keep an unrelated background close (e.g. a pane's shell
         // exiting on its own) from yanking the user out of zoom.
         var zoomedBefore = _zoomedLeaf;
 
-        // Detach the terminal from focus tracking BEFORE we drop it.
-        leaf.Terminal().GotFocus -= OnTerminalGotFocus;
-
-        // Tear down the libghostty surface for the leaf being removed.
-        // The surface lifetime is decoupled from OnLoaded/OnUnloaded
-        // (see TerminalControl.DisposeSurface comment), so we have to
-        // do it explicitly here.
-        leaf.Terminal().DisposeSurface();
+        // Decide undoability now: only meaningful if a pane survives.
+        // PaneTree.Close is a pure model op (no visual side effects), so
+        // computing it up front to drive the teardown decision is safe.
+        var newRoot = PaneTree.Close(_root, leaf);
+        var softClose = undoable && newRoot is not null;
+        if (softClose)
+        {
+            // Snapshot the tree WITH the leaf still present (and its shell
+            // alive) so undo can resurrect it. The history entry retains
+            // the leaf; teardown is deferred to eviction.
+            CaptureForUndo(Core.Panes.PaneOpKind.Close);
+        }
+        else
+        {
+            // Hard close: free the shell now (last pane, or shell-exit).
+            TeardownLeaf(leaf);
+        }
 
         // Capture the leaf's visual parent BEFORE detaching. This is
         // the Grid that visualizes the PaneTree split about to collapse;
@@ -486,13 +542,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         // Detach the closed terminal from its visual parent Grid so the
         // old split Grid does not hold a reference that keeps the WinUI
-        // compositor rendering a ghost DXGI swap chain surface. Without
-        // this, the disposed TerminalControl stays in the old Grid's
-        // Children and can remain visually rendered even after the Grid
-        // itself is removed from the host.
+        // compositor rendering a ghost DXGI swap chain surface. A
+        // soft-closed leaf must leave the visual tree too; its surface
+        // keeps compositing into nothing until restored or evicted.
         DetachFromParent(leaf.Terminal());
 
-        var newRoot = PaneTree.Close(_root, leaf);
         if (newRoot is null)
         {
             // Last leaf - flag the host so DisposeAllLeaves on window
@@ -550,6 +604,21 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             _activeLeaf = zoomedBefore;
             ToggleSplitZoom();
         }
+    }
+
+    /// <summary>
+    /// Final teardown of a leaf: unsubscribe its TerminalControl from
+    /// focus/close tracking and free its libghostty surface. Idempotent
+    /// (DisposeSurface is). Split out so an undoable (soft) close can
+    /// DEFER this until the undo entry is evicted, keeping the shell
+    /// alive so undo can resurrect it.
+    /// </summary>
+    private void TeardownLeaf(LeafPane leaf)
+    {
+        var t = leaf.Terminal();
+        t.GotFocus -= OnTerminalGotFocus;
+        t.CloseRequested -= OnTerminalCloseRequested;
+        t.DisposeSurface();
     }
 
     /// <summary>
@@ -624,6 +693,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void EqualizeSplits()
     {
+        // Only record undo when there is a split to equalize; on a single
+        // leaf Equalize is a no-op, so capturing would push a useless entry
+        // (and needlessly clear redo).
+        if (_root is SplitPane) CaptureForUndo(Core.Panes.PaneOpKind.Equalize);
         PaneTree.Equalize(_root);
         // When zoomed, only update the model - unzoom re-applies every
         // ratio to the live tree when the user toggles back.
@@ -648,6 +721,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (PaneCount <= 1) return;
 
         if (Content is not Grid hostGrid) return;
+
+        // Record the pre-toggle zoom state. No-op while restoring so the
+        // re-zoom that RestoreFrom performs is not itself recorded.
+        CaptureForUndo(Core.Panes.PaneOpKind.Zoom);
 
         if (_zoomedLeaf is not null)
         {
@@ -716,6 +793,49 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
             _restoreZoomButton.Visibility = Visibility.Visible;
             DispatcherQueue.TryEnqueue(() => leafCtl.Focus(FocusState.Programmatic));
+        }
+    }
+
+    /// <summary>
+    /// Restore the model to the state before the most recent undoable
+    /// op. No-op if the history is empty. Resurrects a soft-closed pane's
+    /// live shell. Mirrors upstream's time-bounded undo.
+    /// </summary>
+    public void Undo() => RestoreFrom(_history.Undo(Snapshot(Core.Panes.PaneOpKind.Split)));
+
+    /// <summary>Re-apply the most recently undone op.</summary>
+    public void Redo() => RestoreFrom(_history.Redo(Snapshot(Core.Panes.PaneOpKind.Split)));
+
+    // Common restore path for Undo/Redo. The OpKind on the snapshot we
+    // hand the history is irrelevant (it is only used for coalescing on
+    // Push), so Split is passed as a harmless placeholder above.
+    private void RestoreFrom(Core.Panes.PaneSnapshot? snapshot)
+    {
+        if (snapshot is null) return;
+
+        _restoring = true;
+        try
+        {
+            _root = snapshot.Root;
+            _activeLeaf = snapshot.Active;
+            _zoomedLeaf = null;        // Rebuild() clears zoom; re-enter below
+            Rebuild();                 // full visual rebuild from the restored tree
+
+            if (snapshot.Zoomed is not null
+                && Core.Panes.PaneTree.Leaves(_root).Contains(snapshot.Zoomed))
+            {
+                _activeLeaf = snapshot.Zoomed;
+                ToggleSplitZoom();     // re-enter zoom via the existing enter-path
+            }
+
+            UpdateHighlightPosition();
+            LeafFocused?.Invoke(this, _activeLeaf);
+            var target = _activeLeaf;
+            DispatcherQueue.TryEnqueue(() => target.Terminal().Focus(FocusState.Programmatic));
+        }
+        finally
+        {
+            _restoring = false;
         }
     }
 
@@ -873,7 +993,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_zoomedLeaf is not null) return;
         if (PaneTree.Leaves(_root).Take(2).Count() <= 1) return;
 
+        // Snapshot the pre-resize ratios (clone is independent of the live
+        // tree) but only RECORD it if the resize actually moves a divider,
+        // so a no-op resize (no matching-orientation ancestor) adds no
+        // undo entry. Push goes through PaneHistory directly so coalescing
+        // still collapses a held-chord burst into one undo step.
+        var pre = _restoring ? null : Snapshot(Core.Panes.PaneOpKind.Resize);
         if (!PaneTree.ResizeSplit(_root, _activeLeaf, direction, ResizeSplitDelta)) return;
+        if (pre is not null) DisposeOrphans(_history.Push(pre));
         // Ratio-only change: apply in place (see EqualizeSplits) rather
         // than Rebuild(), which ghosts dividers on deep trees.
         ApplyAllRatios();
@@ -1019,6 +1146,50 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), tc));
         if (leaf is null) return;
         CloseLeaf(leaf);
+    }
+
+    // Build a snapshot of the CURRENT model. Root is a structural clone
+    // (shared leaf identities) so later in-place ratio edits cannot
+    // corrupt it. Caller supplies the op kind.
+    private Core.Panes.PaneSnapshot Snapshot(Core.Panes.PaneOpKind kind)
+        => new(Core.Panes.PaneTree.Clone(_root), _activeLeaf, _zoomedLeaf, kind);
+
+    // Record the pre-op state for undo. No-op while restoring (so Undo's
+    // own re-zoom/rebuild does not push history). Pushing clears the redo
+    // stack, which can orphan a pane whose surface is still alive (its
+    // only reference was a redo entry); tear those down so the shell does
+    // not leak.
+    private void CaptureForUndo(Core.Panes.PaneOpKind kind)
+    {
+        if (_restoring) return;
+        DisposeOrphans(_history.Push(Snapshot(kind)));
+    }
+
+    // Drop expired entries and dispose any leaf they orphaned that is no
+    // longer in the live tree. Runs on the UI thread (timer marshals).
+    private void PruneHistory()
+    {
+        // A prune may already be queued on the dispatcher when the host
+        // tears down (DisposeAllLeaves disposes the timer + clears history).
+        // It is harmless post-Clear, but bail explicitly so a future change
+        // to Prune/Clear semantics can't turn this into a use-after-teardown.
+        if (_allLeavesClosed) return;
+        DisposeOrphans(_history.Prune(_time.GetUtcNow()));
+    }
+
+    // Tear down the libghostty surface of each orphaned leaf that is not
+    // still in the live tree. Shared by the capture (redo-clear orphans),
+    // prune (time-eviction orphans), and teardown paths so the
+    // "never dispose a leaf still on screen" guard lives in one place.
+    private void DisposeOrphans(IReadOnlyList<LeafPane> orphans)
+    {
+        if (orphans.Count == 0) return;
+        var live = Core.Panes.PaneTree.Leaves(_root).ToHashSet();
+        foreach (var leaf in orphans)
+        {
+            if (live.Contains(leaf)) continue; // still on screen — keep alive
+            TeardownLeaf(leaf);
+        }
     }
 
     private void Rebuild()

@@ -183,6 +183,8 @@ internal sealed class PaneActionRouter
             case PaneAction.ResizeSplitDown:   concrete.ResizeSplit(ResizeDirection.Down); break;
             case PaneAction.ResizeSplitLeft:   concrete.ResizeSplit(ResizeDirection.Left); break;
             case PaneAction.ResizeSplitRight:  concrete.ResizeSplit(ResizeDirection.Right); break;
+            case PaneAction.Undo:            concrete.Undo(); break;
+            case PaneAction.Redo:            concrete.Redo(); break;
 
             // Tabs
             case PaneAction.NewTab: _tabs.NewTab(); break;
