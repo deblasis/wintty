@@ -242,7 +242,11 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
                 var actionKey = s.ActionKey;
                 return new CommandItem
                 {
-                    Id = $"cmdline:{s.Name}",
+                    // Key frecency off the resolved action, not s.Name: for a
+                    // parameterized action s.Name is only the parameter (e.g.
+                    // "1"), so distinct actions sharing a param value would
+                    // otherwise collide in the frecency store.
+                    Id = $"cmdline:{actionKey}",
                     Title = s.Name,
                     Description = s.Description,
                     ActionKey = actionKey,

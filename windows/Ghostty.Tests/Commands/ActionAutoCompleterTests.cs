@@ -175,4 +175,14 @@ public class ActionAutoCompleterTests
         Assert.NotEmpty(result.Suggestions);
         Assert.All(result.Suggestions, s => Assert.StartsWith("goto_tab:", s.ActionKey));
     }
+
+    [Fact]
+    public void Complete_ColonUnknownParam_ReturnsNoSuggestions()
+    {
+        // A known action with an unmatched parameter must yield no suggestions,
+        // so no dangling ActionKey can be dispatched.
+        var c = CreateCompleter();
+        var result = c.Complete("new_split:zzz");
+        Assert.Empty(result.Suggestions);
+    }
 }
