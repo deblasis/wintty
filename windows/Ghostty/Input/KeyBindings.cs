@@ -145,6 +145,12 @@ internal sealed class KeyBindings
         // Ctrl+Shift+/ ("Ctrl+?") opens the keyboard-shortcuts cheat sheet.
         // VK 191 = VK_OEM_2 ('/') on US-ANSI.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, (VirtualKey)191, PaneAction.ShowKeybindCheatsheet),
+
+        // Pane undo/redo. Ctrl+Z is SIGTSTP in the shell and Ctrl+Y is
+        // readline yank, so undo/redo use the shift-chords. Apprt-matched
+        // because libghostty has no Windows undo implementation.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Z, PaneAction.Undo),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Y, PaneAction.Redo),
     });
 
     /// <summary>
