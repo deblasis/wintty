@@ -205,4 +205,23 @@ public sealed class ThemeResolutionTests
         Assert.True(ThemeResolution.ResolveIsDark(
             "ghostty", BlackBg, ThemeFallbackStyle.Palette, isSystemDark: false));
     }
+
+    [Fact]
+    public void SystemAndAuto_AreNotRedundant_DivergeOnDarkBgLightOs()
+    {
+        // Issue #208 claimed "system" and "auto" are redundant. They are
+        // not: "system" follows the OS dark-mode flag, while "auto" (the
+        // Palette fallback) follows the terminal background luminance.
+        // With a dark background on a light OS they MUST disagree — this
+        // pins the two values as genuinely distinct so neither is
+        // "simplified away" later.
+        var system = ThemeResolution.ResolveIsDark(
+            "system", BlackBg, ThemeFallbackStyle.Palette, isSystemDark: false);
+        var auto = ThemeResolution.ResolveIsDark(
+            "auto", BlackBg, ThemeFallbackStyle.Palette, isSystemDark: false);
+
+        Assert.False(system); // OS is light → light frame
+        Assert.True(auto);    // background is dark → dark frame
+        Assert.NotEqual(system, auto);
+    }
 }

@@ -118,6 +118,11 @@ public sealed partial class MainWindow : Window
     private readonly ShellThemeService _shellTheme;
     private readonly ThemePreviewService _themePreview;
 
+    // Set at the top of OnClosedAsync. Theme callbacks route through the
+    // dispatcher, so a switch-then-close can leave an ApplyTheme queued to
+    // run mid-teardown; this gate makes it a no-op (issue #208).
+    private bool _isClosed;
+
     // Tracks the currently applied backdrop style so we can skip
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
@@ -960,6 +965,16 @@ public sealed partial class MainWindow : Window
 
     private async void OnClosedAsync(object sender, WindowEventArgs args)
     {
+        // Stop theme application before any teardown or await.
+        // WindowThemeManager routes ConfigChanged/ColorValuesChanged
+        // through the dispatcher, so a switch-then-close can leave an
+        // ApplyTheme queued to run mid-teardown against a dead XamlRoot/HWND
+        // (issue #208). Set the gate and dispose the manager synchronously,
+        // before the first await below, so no theme callback fires after
+        // teardown begins.
+        _isClosed = true;
+        _themeManager.Dispose();
+
         // Detach from process-global event sources before we tear
         // down the dispatcher-bound state below. The ConfigService
         // outlives individual MainWindows, so a lingering subscription
@@ -1040,7 +1055,8 @@ public sealed partial class MainWindow : Window
         _gradientVisual = null;
         _slideAnimator?.Dispose();
         _taskbar.Dispose();
-        _themeManager.Dispose();
+        // _themeManager was disposed at the top of this method, before the
+        // first await, so no theme callback can fire mid-teardown (#208).
 
         // Surface lifetime is decoupled from Loaded/Unloaded
         // (see TerminalControl.DisposeSurface), so we have to
@@ -1297,6 +1313,15 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyTheme()
     {
+        // A ConfigChanged / ColorValuesChanged callback may already be
+        // queued on the dispatcher when the window starts closing. By then
+        // XamlRoot is null and the HWND is dying (see the RegisteredRoot
+        // capture in the ctor), so touching RequestedTheme/DWM throws. We
+        // cannot gate on XamlRoot == null — it is also null during the
+        // ctor's first ApplyTheme(), which must still apply the initial
+        // theme — so _isClosed is the startup-safe teardown signal (#208).
+        if (_isClosed) return;
+
         if (Content is FrameworkElement root)
             root.RequestedTheme = _themeManager.ElementTheme;
         _themeManager.ApplyToWindow(this);
