@@ -337,13 +337,11 @@ fn drainMailbox(
                 data,
                 v.data[0..v.len],
                 self.flags.linefeed_mode,
-                v.kind,
             ),
             .write_stable => |v| try io.queueWrite(
                 data,
-                v.data,
+                v,
                 self.flags.linefeed_mode,
-                v.kind,
             ),
             .write_alloc => |v| {
                 defer v.alloc.free(v.data);
@@ -351,7 +349,6 @@ fn drainMailbox(
                     data,
                     v.data,
                     self.flags.linefeed_mode,
-                    v.kind,
                 );
             },
         }
