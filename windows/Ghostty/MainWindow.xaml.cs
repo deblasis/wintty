@@ -624,15 +624,7 @@ public sealed partial class MainWindow : Window
         //   - ApplyRootGridBackground: RootGrid.Background
         // Keeping these disjoint prevents any step from piggybacking
         // on another's side effects (the original cause of # 239).
-        _configService.ConfigChanged += _ =>
-        {
-            ApplyBackdropStyle();
-            UpdateAcrylicTuning();
-            ApplyGradientTint();
-            UpdateCursorAccentColors();
-            ApplyShellTheme();
-            ApplyRootGridBackground();
-        };
+        _configService.ConfigChanged += OnConfigReloadedChrome;
 
         // Re-evaluate the gradient and other power-gated effects whenever
         // low-power mode toggles. MainWindow runs on the UI thread so we
@@ -985,6 +977,8 @@ public sealed partial class MainWindow : Window
         Ghostty.Settings.Pages.GeneralPage.VerticalTabsToggled
             -= OnVerticalTabsToggledFromSettings;
         _configService.ConfigChanged -= OnConfigReloaded;
+        _configService.ConfigChanged -= OnConfigReloadedChrome;
+        _shellTheme.ThemeChanged -= OnShellThemeChanged;
         if (Ghostty.App.PowerStateMonitor is { } powerMonitor)
         {
             powerMonitor.LowPowerChanged -= OnLowPowerChanged;
@@ -1718,6 +1712,33 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnShellThemeChanged()
     {
+        // Same teardown race as ApplyTheme: ShellThemeService routes its
+        // ConfigChanged through the dispatcher, so a window-theme switch
+        // immediately followed by close can queue this against a dead
+        // XamlRoot / AppWindow.TitleBar (issue #208). OnClosedAsync also
+        // unsubscribes this handler; the gate covers the in-flight call.
+        if (_isClosed) return;
+        ApplyShellTheme();
+        ApplyRootGridBackground();
+    }
+
+    /// <summary>
+    /// ConfigService.ConfigChanged handler that re-applies window chrome
+    /// (backdrop, acrylic, gradient, accent colors, shell theme, root
+    /// background) after a live config reload. Each call owns exactly one
+    /// disjoint piece of chrome state (see ctor note / issue # 239).
+    /// </summary>
+    private void OnConfigReloadedChrome(IConfigService _)
+    {
+        // ConfigService outlives the window and dispatches ConfigChanged,
+        // so a switch-then-close can queue this against dying XAML /
+        // AppWindow. Gated by _isClosed and unsubscribed in OnClosedAsync
+        // (which also stops the per-window handler leak). Issue #208.
+        if (_isClosed) return;
+        ApplyBackdropStyle();
+        UpdateAcrylicTuning();
+        ApplyGradientTint();
+        UpdateCursorAccentColors();
         ApplyShellTheme();
         ApplyRootGridBackground();
     }
