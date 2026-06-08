@@ -57,6 +57,8 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.ToggleTabLayout, "Toggle Tab Layout", "Switch between horizontal and vertical tab layout", CommandCategory.Tab, "\uE8AB");
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal);
         AddPaneCommand(commands, PaneAction.ShowKeybindCheatsheet, "Keyboard Shortcuts", "Show the keyboard shortcuts cheat sheet", CommandCategory.Terminal, "");
+        AddPaneCommand(commands, PaneAction.Undo, "Undo", "Undo the last pane split, close, resize, equalize, or zoom", CommandCategory.Pane);
+        AddPaneCommand(commands, PaneAction.Redo, "Redo", "Redo the last undone pane operation", CommandCategory.Pane);
 
         // Binding-action-backed commands
         AddBindingCommand(commands, "reset", "Reset Terminal", "Reset the terminal to a clean state", CommandCategory.Terminal, "\uE777");
