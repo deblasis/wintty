@@ -2860,7 +2860,7 @@ pub fn keyCallback(
         errdefer write_req.deinit();
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = .{ .data = v.data, .len = v.len } },
-            .stable => |v| .{ .write_stable = .{ .data = v } },
+            .stable => |v| .{ .write_stable = v },
             .alloc => |v| .{ .write_alloc = .{ .alloc = v.alloc, .data = v.data } },
         }, .unlocked);
     } else {
@@ -3211,7 +3211,7 @@ fn endKeySequence(
         .flush => for (self.keyboard.sequence_queued.items) |write_req| {
             self.queueIo(switch (write_req) {
                 .small => |v| .{ .write_small = .{ .data = v.data, .len = v.len } },
-                .stable => |v| .{ .write_stable = .{ .data = v } },
+                .stable => |v| .{ .write_stable = v },
                 .alloc => |v| .{ .write_alloc = .{ .alloc = v.alloc, .data = v.data } },
             }, .unlocked);
         },
@@ -3604,7 +3604,7 @@ pub fn scrollCallback(
                     };
                 };
                 for (0..y.magnitude()) |_| {
-                    self.queueIo(.{ .write_stable = .{ .data = seq } }, .locked);
+                    self.queueIo(.{ .write_stable = seq }, .locked);
                 }
             }
 
@@ -4303,13 +4303,13 @@ fn maybePromptClick(self: *Surface) !bool {
             const move = screen.promptClickMove(click_pin);
             for (0..move.left) |_| {
                 self.queueIo(
-                    .{ .write_stable = .{ .data = left_arrow } },
+                    .{ .write_stable = left_arrow },
                     .locked,
                 );
             }
             for (0..move.right) |_| {
                 self.queueIo(
-                    .{ .write_stable = .{ .data = right_arrow } },
+                    .{ .write_stable = right_arrow },
                     .locked,
                 );
             }
@@ -4928,9 +4928,9 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             };
 
             if (normal) {
-                self.queueIo(.{ .write_stable = .{ .data = ck.normal } }, .unlocked);
+                self.queueIo(.{ .write_stable = ck.normal }, .unlocked);
             } else {
-                self.queueIo(.{ .write_stable = .{ .data = ck.application } }, .unlocked);
+                self.queueIo(.{ .write_stable = ck.application }, .unlocked);
             }
         },
 
