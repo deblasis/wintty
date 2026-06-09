@@ -15,6 +15,7 @@ internal static class LogEvents
         public const int WriteSchedulerErr = 1001;
         public const int TimerDisposeSlow  = 1002;
         public const int SeedFailed        = 1003;
+        public const int SettingsWriteErr  = 1004;
     }
 
     // 1100-1199: Frecency / command history
