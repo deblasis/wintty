@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Ghostty.Core.Input;
 using Ghostty.Core.ResizeOverlay;
+using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
 using Ghostty.Hosting;
 using Ghostty.Input;
@@ -388,11 +389,48 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void DisableAncestorScrollViewerTabStop()
     {
-        DependencyObject? node = this;
-        while (node is not null)
+        // Only the framework-injected ScrollViewer ABOVE the app content
+        // root is parasitic; legitimate ScrollViewers (settings panes,
+        // tab strips) are descendants of the app root and must keep their
+        // tab stop so Tab navigation through them works (#160). Walk
+        // nearest-first, find the app content root, and neuter only
+        // ScrollViewers at or above it. If the root isn't reachable,
+        // fall back to the original neuter-all behaviour.
+        var appRoot = XamlRoot?.Content as DependencyObject;
+
+        // First pass: record the index of the app content root.
+        int rootIndex = -1;
         {
-            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
-            if (node is ScrollViewer sv) sv.IsTabStop = false;
+            int i = 0;
+            DependencyObject? node = this;
+            while (node is not null)
+            {
+                node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+                if (node is null) break;
+                if (appRoot is not null && ReferenceEquals(node, appRoot))
+                {
+                    rootIndex = i;
+                    break;
+                }
+                i++;
+            }
+        }
+
+        // Second pass: neuter only the in-scope ScrollViewers.
+        {
+            int i = 0;
+            DependencyObject? node = this;
+            while (node is not null)
+            {
+                node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+                if (node is null) break;
+                if (node is ScrollViewer sv &&
+                    AncestorScrollViewerScope.InScope(i, rootIndex))
+                {
+                    sv.IsTabStop = false;
+                }
+                i++;
+            }
         }
     }
 
