@@ -84,4 +84,14 @@ public static class ThemeResolution
         var luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
         return luminance < 0.5;
     }
+
+    /// <summary>
+    /// Whether a light (white) foreground reads better than a dark
+    /// (black) one over the given backdrop. Thin intent-revealing alias
+    /// over <see cref="IsBackgroundDark"/> so caption-button and tab-text
+    /// call sites read as "pick a readable foreground for this backdrop"
+    /// while the luminance math stays in one place. (#235, #342)
+    /// </summary>
+    public static bool PreferLightForeground(uint backgroundColor) =>
+        IsBackgroundDark(backgroundColor);
 }

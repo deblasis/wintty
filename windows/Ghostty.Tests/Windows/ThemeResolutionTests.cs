@@ -224,4 +224,22 @@ public sealed class ThemeResolutionTests
         Assert.True(auto);    // background is dark → dark frame
         Assert.NotEqual(system, auto);
     }
+
+    // ── PreferLightForeground: readable caption/label foreground ─────────
+
+    [Fact]
+    public void PreferLightForeground_DarkBackground_PrefersLight() =>
+        Assert.True(ThemeResolution.PreferLightForeground(0x000000));
+
+    [Fact]
+    public void PreferLightForeground_LightBackground_PrefersDark() =>
+        Assert.False(ThemeResolution.PreferLightForeground(0xFFFFFF));
+
+    [Fact]
+    public void PreferLightForeground_MatchesIsBackgroundDark()
+    {
+        // Intent alias: PreferLightForeground is exactly IsBackgroundDark.
+        foreach (uint c in new uint[] { 0x000000, 0xFFFFFF, 0x808080, 0x7F7F7F, 0x00FF00, 0x0000FF })
+            Assert.Equal(ThemeResolution.IsBackgroundDark(c), ThemeResolution.PreferLightForeground(c));
+    }
 }
