@@ -44,8 +44,8 @@ internal sealed partial class GeneralPage : Page
     {
         if (_loading) return;
         _configService.SuppressWatcher(true);
-        _editor.SetValue("auto-reload-config", AutoReloadToggle.IsOn ? "true" : "false");
-        _configService.SuppressWatcher(false);
+        try { _editor.SetValue("auto-reload-config", AutoReloadToggle.IsOn ? "true" : "false"); }
+        finally { _configService.SuppressWatcher(false); }
         _configService.Reload();
     }
 
