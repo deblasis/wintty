@@ -247,9 +247,12 @@ internal sealed partial class RawEditorPage : Page
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         _configService.SuppressWatcher(true);
-        _editor.WriteRaw(GetEditorText());
-        _lastLoadedText = GetEditorText();
-        _configService.SuppressWatcher(false);
+        try
+        {
+            _editor.WriteRaw(GetEditorText());
+            _lastLoadedText = GetEditorText();
+        }
+        finally { _configService.SuppressWatcher(false); }
 
         var success = _configService.Reload();
         var count = _configService.DiagnosticsCount;

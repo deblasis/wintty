@@ -36,8 +36,8 @@ internal sealed partial class TerminalPage : Page
     {
         if (_loading) return;
         _configService.SuppressWatcher(true);
-        _editor.SetValue(key, value);
-        _configService.SuppressWatcher(false);
+        try { _editor.SetValue(key, value); }
+        finally { _configService.SuppressWatcher(false); }
         _configService.Reload();
     }
 
