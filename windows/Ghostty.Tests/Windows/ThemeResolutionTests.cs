@@ -181,10 +181,12 @@ public sealed class ThemeResolutionTests
     [Fact]
     public void Regression_DarkPaletteOnLightOs_SystemFallback_IsLight()
     {
-        // The bug this PR fixes: command palette was rendering dark
-        // because it tracked the terminal palette luminance directly.
-        // Under the new System fallback, a dark terminal background on
-        // a light OS must resolve to light.
+        // Pure-function contract for the System fallback: a dark terminal
+        // background on a light OS resolves to LIGHT (the fallback ignores
+        // the palette and tracks the OS). SettingsWindow still uses System
+        // fallback. NOTE: the command palette no longer uses System
+        // fallback — as of #236 it uses Palette fallback to match the
+        // window chrome (see Regression_DarkPaletteOnLightOs_PaletteFallback_IsDark).
         Assert.False(ThemeResolution.ResolveIsDark(
             "ghostty", BlackBg, ThemeFallbackStyle.System, isSystemDark: false));
     }
