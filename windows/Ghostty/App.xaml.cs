@@ -789,6 +789,14 @@ public partial class App : Application
         {
             try
             {
+                // Stop config reloads FIRST, before anything below frees the
+                // libghostty app or the DX12 renderer. A debounced reload
+                // from a last-moment config change (e.g. a window-theme
+                // switch right before close) would otherwise run
+                // AppUpdateConfig on freed state and crash the process with
+                // a native access violation (issue #208 switch-then-close).
+                _configService.BeginShutdown();
+
                 // Stop the process tracker before any tab teardown could
                 // race its Timer callback. Dispose unsubscribes the
                 // Changed handler in addition to cancelling the timer,
