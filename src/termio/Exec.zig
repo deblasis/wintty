@@ -1765,11 +1765,12 @@ fn execCommand(
         .direct => |_| direct: {
             const cloned = (try command.clone(alloc)).direct;
             if (comptime builtin.os.tag == .windows) {
-                break :direct try maybeInjectUtf8Preamble(
+                const with_preamble = try maybeInjectUtf8Preamble(
                     alloc,
                     cloned,
                     utf8_console,
                 );
+                break :direct try maybeWrapGitBashWithWinpty(alloc, with_preamble);
             }
             break :direct cloned;
         },
@@ -1830,11 +1831,12 @@ fn execCommand(
                     }
 
                     const direct_args = try args.toOwnedSlice(alloc);
-                    break :shell try maybeInjectUtf8Preamble(
+                    const with_preamble = try maybeInjectUtf8Preamble(
                         alloc,
                         direct_args,
                         utf8_console,
                     );
+                    break :shell try maybeWrapGitBashWithWinpty(alloc, with_preamble);
                 }
 
                 // Command contains cmd.exe metacharacters (or parsing
@@ -1904,6 +1906,58 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
         else => {},
     };
     return false;
+}
+
+/// Prepend winpty to a manually-configured Git-for-Windows / MSYS2
+/// `bash.exe` so its job-control init sees a MinTTY-compatible PTY under
+/// ConPTY instead of emitting "cannot set terminal process group (-1):
+/// Inappropriate ioctl for device" + "no job control in this shell".
+///
+/// This mirrors what the profile-discovery probes (GitBashProbe,
+/// Msys2Probe) already build into their command strings, so a manual
+/// `command = "C:\Program Files\Git\bin\bash.exe"` behaves like the
+/// discovered profile.
+///
+/// Gated narrowly so we never wrap the wrong bash:
+///   - args[0] must identify as bash (basename `bash`/`bash.exe`).
+///   - args[0] must be path-qualified (contain a separator). Bare `bash`
+///     is left alone: on a normal PATH it resolves to
+///     C:\Windows\System32\bash.exe (the WSL launcher, which must NOT be
+///     winpty-wrapped), and PATH-resolving here would duplicate
+///     Command.startWindows. A bare-`bash`-via-Git-on-PATH user keeps the
+///     pre-existing warnings (graceful degradation).
+///   - a winpty.exe must exist adjacent to the bash (see
+///     windows_shell.winptyCandidatePaths). System32 has none, so WSL is
+///     excluded; a discovered profile's args[0] is winpty (not bash), so
+///     there is no double-wrap.
+///
+/// When no wrap applies the input `args` slice is returned unchanged.
+/// Both input and output are owned by the caller's arena.
+fn maybeWrapGitBashWithWinpty(
+    alloc: Allocator,
+    args: []const [:0]const u8,
+) Allocator.Error![]const [:0]const u8 {
+    if (comptime builtin.os.tag != .windows) return args;
+    if (args.len == 0) return args;
+    if (internal_os.windows_shell.identify(args[0]) != .bash) return args;
+
+    // Path-qualified only (see doc comment).
+    if (std.mem.indexOfAny(u8, args[0], "\\/") == null) return args;
+
+    const candidates = try internal_os.windows_shell.winptyCandidatePaths(alloc, args[0]);
+
+    const winpty: []const u8 = found: {
+        for (candidates) |c| {
+            std.fs.accessAbsolute(c, .{}) catch continue;
+            break :found c;
+        }
+        return args;
+    };
+
+    const out = try alloc.alloc([:0]const u8, args.len + 1);
+    out[0] = try alloc.dupeZ(u8, winpty);
+    @memcpy(out[1..], args);
+    return out;
 }
 
 /// Inject a shell-specific UTF-8 codepage setup into argv when the
