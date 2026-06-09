@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using Ghostty.Core.Config;
+using Ghostty.Logging;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -17,6 +18,7 @@ internal sealed partial class RawEditorPage : Page
 {
     private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
     private readonly ObservableCollection<string> _diagnostics = new();
     private int _lastDiagnosticCount = -1;
 
@@ -53,6 +55,7 @@ internal sealed partial class RawEditorPage : Page
     {
         _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
 
         // Theme flips while the page is live must force a recompute of
@@ -246,17 +249,24 @@ internal sealed partial class RawEditorPage : Page
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
-        _configService.SuppressWatcher(true);
-        try
+        // _lastLoadedText is updated inside the edit so it only advances
+        // if WriteRaw actually succeeded; on a disk failure it stays at the
+        // prior on-disk content, keeping RefreshFromDiskIfPristine honest.
+        var result = _writer.Write(() =>
         {
             _editor.WriteRaw(GetEditorText());
             _lastLoadedText = GetEditorText();
-        }
-        finally { _configService.SuppressWatcher(false); }
+        }, "raw editor save");
 
-        var success = _configService.Reload();
+        if (!result.WriteSucceeded)
+        {
+            // The save never hit disk; tell the user instead of fail-fasting.
+            StatusText.Text = $"Save failed: {result.Error?.Message}";
+            return;
+        }
+
         var count = _configService.DiagnosticsCount;
-        StatusText.Text = success
+        StatusText.Text = result.Reloaded
             ? $"Saved and reloaded ({count} diagnostic{(count == 1 ? "" : "s")})"
             : "Reload failed -- check diagnostics";
     }

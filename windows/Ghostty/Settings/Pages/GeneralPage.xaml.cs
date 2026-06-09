@@ -11,6 +11,7 @@ internal sealed partial class GeneralPage : Page
 {
     private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
     private bool _loading = true;
 
     /// <summary>
@@ -25,6 +26,7 @@ internal sealed partial class GeneralPage : Page
     {
         _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
         LoadValues();
         _loading = false;
@@ -43,10 +45,9 @@ internal sealed partial class GeneralPage : Page
     private void AutoReloadToggle_Toggled(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.SetValue("auto-reload-config", AutoReloadToggle.IsOn ? "true" : "false"); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.SetValue(
+            "auto-reload-config", AutoReloadToggle.IsOn ? "true" : "false"),
+            "auto-reload-config");
     }
 
     private void VerticalTabsToggle_Toggled(object sender, RoutedEventArgs e)
