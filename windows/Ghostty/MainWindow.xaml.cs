@@ -370,7 +370,7 @@ public sealed partial class MainWindow : Window
         // ExtendsContentIntoTitleBar is true).
         _themeManager = new WindowThemeManager(configService, DispatcherQueue);
         ApplyTheme();
-        _themeManager.ThemeChanged += _ => ApplyTheme();
+        _themeManager.ThemeChanged += OnWindowThemeChanged;
 
         _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
@@ -1725,6 +1725,14 @@ public sealed partial class MainWindow : Window
     /// theme (caption buttons, tab hosts, title text) and refreshes
     /// the single RootGrid.Background source of truth.
     /// </summary>
+    /// <summary>
+    /// WindowThemeManager.ThemeChanged handler. Named (not an anonymous
+    /// lambda) so it reads consistently with the other config-driven
+    /// handlers; ApplyTheme is itself _isClosed-gated and the manager nulls
+    /// the event on dispose, so no teardown guard is needed here.
+    /// </summary>
+    private void OnWindowThemeChanged(bool isDark) => ApplyTheme();
+
     private void OnShellThemeChanged()
     {
         // Same teardown race as ApplyTheme: ShellThemeService routes its

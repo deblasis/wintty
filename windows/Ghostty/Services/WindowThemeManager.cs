@@ -95,8 +95,10 @@ internal sealed class WindowThemeManager : IDisposable
                                       or ObjectDisposedException)
         {
             // The window was torn down between a queued theme update and
-            // its dispatch, so its HWND is already gone. Mirrors the
-            // teardown-race guard in MainWindow.OnLowPowerChanged (#208).
+            // its dispatch, so GetWindowHandle hits a closed/disposed Window
+            // (RO_E_CLOSED COMException / ObjectDisposedException). Same
+            // teardown-race class as MainWindow.OnLowPowerChanged, though the
+            // exact exception set differs by call site (#208).
             return;
         }
 
