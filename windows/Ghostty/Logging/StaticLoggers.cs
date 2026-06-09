@@ -42,6 +42,10 @@ namespace Ghostty.Logging;
 ///   - <see cref="CheatSheet"/>: read-only keybind cheat-sheet
 ///     <c>ContentDialog</c>, constructed directly (no DI-enabled
 ///     <c>Frame</c>); logs show / export failures.
+///   - <see cref="SettingsConfigWriter"/>: shared Core helper
+///     constructed by the XAML Settings pages (same no-DI-Frame
+///     constraint as <see cref="GeneralPage"/>); logs config-file
+///     write failures from immediate-write handlers.
 ///
 /// Tests should use <see cref="Install"/> which returns an
 /// <see cref="IDisposable"/> scope that restores the pre-install
@@ -66,6 +70,7 @@ internal static class StaticLoggers
     private static ILogger<Ghostty.Settings.Pages.GeneralPage>? _generalPage;
     private static ILogger<Ghostty.Settings.Pages.KeybindingsPage>? _keybindingsPage;
     private static ILogger<Ghostty.Settings.CheatSheetDialog>? _cheatSheet;
+    private static ILogger<Ghostty.Core.Config.SettingsConfigWriter>? _settingsConfigWriter;
     private static ILogger<App>? _app;
 
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
@@ -80,6 +85,8 @@ internal static class StaticLoggers
         => _keybindingsPage ?? NullLogger<Ghostty.Settings.Pages.KeybindingsPage>.Instance;
     internal static ILogger<Ghostty.Settings.CheatSheetDialog> CheatSheet
         => _cheatSheet ?? NullLogger<Ghostty.Settings.CheatSheetDialog>.Instance;
+    internal static ILogger<Ghostty.Core.Config.SettingsConfigWriter> SettingsConfigWriter
+        => _settingsConfigWriter ?? NullLogger<Ghostty.Core.Config.SettingsConfigWriter>.Instance;
     internal static ILogger<App> App
         => _app ?? NullLogger<App>.Instance;
 
@@ -91,6 +98,7 @@ internal static class StaticLoggers
         _generalPage = factory.CreateLogger<Ghostty.Settings.Pages.GeneralPage>();
         _keybindingsPage = factory.CreateLogger<Ghostty.Settings.Pages.KeybindingsPage>();
         _cheatSheet = factory.CreateLogger<Ghostty.Settings.CheatSheetDialog>();
+        _settingsConfigWriter = factory.CreateLogger<Ghostty.Core.Config.SettingsConfigWriter>();
         _app = factory.CreateLogger<App>();
     }
 
@@ -102,7 +110,8 @@ internal static class StaticLoggers
     }
 
     private static Snapshot CaptureSnapshot() => new(
-        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage, _cheatSheet, _app);
+        _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage,
+        _cheatSheet, _settingsConfigWriter, _app);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
@@ -111,6 +120,7 @@ internal static class StaticLoggers
         ILogger<Ghostty.Settings.Pages.GeneralPage>? GeneralPage,
         ILogger<Ghostty.Settings.Pages.KeybindingsPage>? KeybindingsPage,
         ILogger<Ghostty.Settings.CheatSheetDialog>? CheatSheet,
+        ILogger<Ghostty.Core.Config.SettingsConfigWriter>? SettingsConfigWriter,
         ILogger<App>? App);
 
     private sealed class Scope : IDisposable
@@ -126,6 +136,7 @@ internal static class StaticLoggers
             _generalPage = _prior.GeneralPage;
             _keybindingsPage = _prior.KeybindingsPage;
             _cheatSheet = _prior.CheatSheet;
+            _settingsConfigWriter = _prior.SettingsConfigWriter;
             _app = _prior.App;
         }
     }
