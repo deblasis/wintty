@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using Ghostty.Core.Config;
 using Ghostty.Core.Windows;
 using Microsoft.UI.Dispatching;
@@ -30,6 +31,10 @@ internal sealed class WindowThemeManager : IDisposable
     // System theme tracking for "system" mode (and any non-explicit
     // mode when the fallback is System).
     private readonly Windows.UI.ViewManagement.UISettings _uiSettings;
+
+    // Set in Dispose so a callback already queued on the dispatcher before
+    // teardown becomes inert instead of touching a dying window (issue #208).
+    private bool _isDisposed;
 
     /// <summary>
     /// Fired on the UI thread whenever the resolved theme changes.
@@ -63,6 +68,9 @@ internal sealed class WindowThemeManager : IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
         _configService.ConfigChanged -= OnConfigChanged;
         _uiSettings.ColorValuesChanged -= OnSystemThemeChanged;
 
@@ -77,7 +85,25 @@ internal sealed class WindowThemeManager : IDisposable
     /// </summary>
     public unsafe void ApplyToWindow(Window window)
     {
-        var hwnd = new HWND(WindowNative.GetWindowHandle(window));
+        HWND hwnd;
+        try
+        {
+            hwnd = new HWND(WindowNative.GetWindowHandle(window));
+        }
+        catch (Exception ex) when (ex is COMException
+                                      or InvalidOperationException
+                                      or ObjectDisposedException)
+        {
+            // The window was torn down between a queued theme update and
+            // its dispatch, so GetWindowHandle hits a closed/disposed Window
+            // (RO_E_CLOSED COMException / ObjectDisposedException). Same
+            // teardown-race class as MainWindow.OnLowPowerChanged, though the
+            // exact exception set differs by call site (#208).
+            return;
+        }
+
+        if (hwnd == HWND.Null) return;
+
         BOOL useDarkMode = IsDarkMode;
         PInvoke.DwmSetWindowAttribute(
             hwnd,
@@ -107,6 +133,10 @@ internal sealed class WindowThemeManager : IDisposable
 
     private void ResolveAndNotifyIfChanged()
     {
+        // A switch-then-close can leave this queued on the dispatcher; once
+        // disposed there are no subscribers and the window is gone (#208).
+        if (_isDisposed) return;
+
         var previous = IsDarkMode;
         Resolve();
         if (IsDarkMode != previous)
