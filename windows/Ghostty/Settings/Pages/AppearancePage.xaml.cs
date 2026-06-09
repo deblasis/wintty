@@ -6,6 +6,7 @@ using Ghostty.Controls.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.DirectWrite;
 using Ghostty.Core.Settings;
+using Ghostty.Logging;
 using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -17,6 +18,7 @@ internal sealed partial class AppearancePage : Page
 {
     private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
     private readonly SearchableList _fontList;
     private bool _loading = true;
     // Counts Reload() invocations we initiated ourselves. Each one will
@@ -30,6 +32,7 @@ internal sealed partial class AppearancePage : Page
     {
         _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
         _fontList = new SearchableList(FontFamilySearch, chosen => OnValueChanged("font-family", chosen));
         OpacitySlider.Value = configService.BackgroundOpacity;
@@ -218,10 +221,7 @@ internal sealed partial class AppearancePage : Page
     private void OnValueChanged(string key, string value)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.SetValue(key, value); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.SetValue(key, value), key);
     }
 
     private void FontSize_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -272,10 +272,7 @@ internal sealed partial class AppearancePage : Page
     private void TintColor_Reset(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.RemoveValue("background-tint-color"); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.RemoveValue("background-tint-color"), "background-tint-color");
 
         _loading = true;
         try { TintColorPicker.Color = ""; }
@@ -318,10 +315,8 @@ internal sealed partial class AppearancePage : Page
 
         if (!enabled)
         {
-            _configService.SuppressWatcher(true);
-            try { _editor.RemoveValue("background-gradient-point"); }
-            finally { _configService.SuppressWatcher(false); }
-            _configService.Reload();
+            _writer.Write(
+                () => _editor.RemoveValue("background-gradient-point"), "background-gradient-point");
             GradientEditor.SetPoints(System.Array.Empty<GradientPointModel>());
         }
         else if (GradientEditor.Points.Count == 0)
@@ -339,20 +334,21 @@ internal sealed partial class AppearancePage : Page
     private void WriteAllPoints()
     {
         if (_loading) return;
-        // Reload() fires ConfigChanged synchronously; OnConfigChanged
-        // decrements _expectingOwnReloads and skips the re-seed so an
-        // in-progress picker flyout isn't torn down. Inner try/finally
-        // on SuppressWatcher keeps the watcher flag balanced if
-        // SetRepeatableValues throws.
+        // The writer reloads after the (watcher-suppressed, IO-guarded)
+        // write; that reload re-enters OnConfigChanged via the dispatcher,
+        // where _expectingOwnReloads is decremented to skip the re-seed so
+        // an in-progress picker flyout isn't torn down. The increment must
+        // happen after the synchronous reload returns but before the
+        // dispatched echo runs -- which is exactly here.
         var values = GradientEditor.Points
             .Select(p => string.Create(
                 System.Globalization.CultureInfo.InvariantCulture,
                 $"{p.X:0.###},{p.Y:0.###},#{p.Color.R:X2}{p.Color.G:X2}{p.Color.B:X2},{p.Radius:0.###}"))
             .ToArray();
-        _configService.SuppressWatcher(true);
-        try { _editor.SetRepeatableValues("background-gradient-point", values); }
-        finally { _configService.SuppressWatcher(false); }
-        if (_configService.Reload())
+        var result = _writer.Write(
+            () => _editor.SetRepeatableValues("background-gradient-point", values),
+            "background-gradient-point");
+        if (result.Reloaded)
         {
             _expectingOwnReloads++;
         }
