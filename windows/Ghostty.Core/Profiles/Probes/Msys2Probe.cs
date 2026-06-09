@@ -42,6 +42,9 @@ internal sealed class Msys2Probe(IFileSystem fs) : IInstalledShellProbe
 
     // Modern toolchain subsystems, in display order. Each is detected by
     // its root launcher "<key>.exe" and selected at runtime via MSYSTEM.
+    // Msystem values must be argv-safe (no spaces/quotes): they are emitted
+    // unquoted into the command string as `MSYSTEM=<value>` and must survive
+    // libghostty's ArgIteratorGeneral as a single token.
     private static readonly (string Msystem, string Suffix)[] Subsystems =
     {
         ("UCRT64", "ucrt64"),

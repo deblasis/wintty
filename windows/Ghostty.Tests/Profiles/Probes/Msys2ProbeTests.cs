@@ -130,7 +130,7 @@ public sealed class Msys2ProbeTests
     }
 
     [Fact]
-    public async System.Threading.Tasks.Task Discover_VariantNoWinpty_StartsWithEnv()
+    public async System.Threading.Tasks.Task Discover_VariantNoWinpty_ExactCommand()
     {
         var fs = new FakeFileSystem();
         fs.AddFile(@"C:\msys64\usr\bin\bash.exe");
@@ -138,8 +138,26 @@ public sealed class Msys2ProbeTests
         fs.AddFile(@"C:\msys64\ucrt64.exe");
 
         var v = (await new Msys2Probe(fs).DiscoverAsync(CancellationToken.None)).First(p => p.Id == "msys2-ucrt64");
-        Assert.DoesNotContain("winpty", v.Command);
-        Assert.Contains("env.exe", v.Command);
+        // Pin the exact token sequence + quoting: env precedes the unquoted
+        // MSYSTEM assignment precedes bash; no winpty when absent.
+        Assert.Equal(
+            @"C:\msys64\usr\bin\env.exe MSYSTEM=UCRT64 C:\msys64\usr\bin\bash.exe --login -i",
+            v.Command);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task Discover_Msys32Root_EmitsVariant()
+    {
+        // Subsystem detection is root-relative; confirm it works under the
+        // legacy 32-bit fallback root too.
+        var fs = new FakeFileSystem();
+        fs.AddFile(@"C:\msys32\usr\bin\bash.exe");
+        fs.AddFile(@"C:\msys32\usr\bin\env.exe");
+        fs.AddFile(@"C:\msys32\ucrt64.exe");
+
+        var v = (await new Msys2Probe(fs).DiscoverAsync(CancellationToken.None)).First(p => p.Id == "msys2-ucrt64");
+        Assert.Contains(@"C:\msys32\usr\bin\env.exe", v.Command);
+        Assert.Contains("MSYSTEM=UCRT64", v.Command);
     }
 
     [Fact]
