@@ -25,6 +25,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
     [InlineData((int)GhosttyActionTag.MouseVisibility, 37)]
     [InlineData((int)GhosttyActionTag.MouseOverLink, 38)]
+    [InlineData((int)GhosttyActionTag.ConfigChange, 48)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 56)]
