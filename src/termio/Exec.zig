@@ -2384,12 +2384,13 @@ fn maybeInjectUtf8Preamble(
     // If the user passed a flag that already consumes "the rest of the
     // command line" (cmd `/C`/`/K`, pwsh `-Command`), we can still get
     // UTF-8 by *wrapping* their script instead of appending to argv.
-    // For `-File` and `-EncodedCommand` that's not feasible (modifying
-    // a script file or re-encoding base64 is too brittle); we bail and
-    // log so users can see why their preamble was skipped. For pwsh
-    // scripts whose first non-whitespace token must stay first-
-    // statement (`param(...)`, `#requires`, `{ ... }`) we also bail,
-    // because prepending demotes those constructs silently.
+    // `-EncodedCommand` is handled similarly by decoding the base64
+    // UTF-16LE, prepending the setup, and re-encoding (see
+    // `wrapEncodedCommand`). `-File` is the one case we still bail on:
+    // its script lives in a file we must not modify. For pwsh scripts
+    // whose first non-whitespace token must stay first-statement
+    // (`param(...)`, `#requires`, `{ ... }`) we also bail, because
+    // prepending demotes those constructs silently.
     switch (findPreambleConflict(args, preamble)) {
         .none => return appendSuffix(alloc, args, preamble),
         // cmd re-parses its `/C`/`/K` command line, so the tail must be
@@ -2413,9 +2414,15 @@ fn maybeInjectUtf8Preamble(
             // post-`-Command` args into the script.
             return wrapScript(alloc, args, idx, preamble.prefix(), false);
         },
-        .pwsh_file, .pwsh_encoded_command => |idx| {
+        .pwsh_encoded_command => |idx| {
+            if (try wrapEncodedCommand(alloc, args, idx, preamble)) |new_args|
+                return new_args;
+            // wrapEncodedCommand logs the specific skip reason.
+            return args;
+        },
+        .pwsh_file => |idx| {
             log.debug(
-                "UTF-8 preamble skipped: arg[{d}]=\"{s}\" consumes the user script opaquely",
+                "UTF-8 preamble skipped: arg[{d}]=\"{s}\" is a -File path we must not modify",
                 .{ idx, args[idx] },
             );
             return args;
@@ -2423,10 +2430,18 @@ fn maybeInjectUtf8Preamble(
     }
 }
 
-/// If the first tail arg's leading token is a pwsh construct that must
-/// sit at the top of the script (`param(...)`, `#requires`, or a bare
-/// `{ ... }` scriptblock literal), return a short description for the
-/// skip log. Returns null when prepending our setup is safe.
+/// `firstStatementReason` applied to the first `-Command` tail arg.
+/// Returns null when the tail is empty or prepending our setup is safe.
+fn pwshTailRequiresFirstStatement(tail: []const [:0]const u8) ?[]const u8 {
+    if (tail.len == 0) return null;
+    return firstStatementReason(tail[0]);
+}
+
+/// If `script`'s leading token is a pwsh construct that must sit at the
+/// top of the script (`param(...)`, `#requires`, or a bare `{ ... }`
+/// scriptblock literal), return a short description for the skip log.
+/// Returns null when prepending our setup is safe. Shared by the
+/// `-Command` (tail) and `-EncodedCommand` (decoded script) paths.
 ///
 /// Rationale:
 /// - `param(...)` must be the first statement in a script; moving it
@@ -2440,9 +2455,8 @@ fn maybeInjectUtf8Preamble(
 ///   produced and discarded). Our prepend would not change the meaning
 ///   here but would suppress whatever the user was hoping to observe;
 ///   the safer choice is to leave their argv as-is.
-fn pwshTailRequiresFirstStatement(tail: []const [:0]const u8) ?[]const u8 {
-    if (tail.len == 0) return null;
-    const first = std.mem.trimLeft(u8, tail[0], " \t\r\n");
+fn firstStatementReason(script: []const u8) ?[]const u8 {
+    const first = std.mem.trimLeft(u8, script, " \t\r\n");
     if (first.len == 0) return null;
     if (first[0] == '{') return "a scriptblock literal";
     if (asciiStartsWithIgnoreCase(first, "#requires")) return "a #requires directive";
@@ -2521,6 +2535,102 @@ fn wrapScript(
     const out = try alloc.alloc([:0]const u8, head.len + 1);
     @memcpy(out[0..head.len], head);
     out[head.len] = wrapped;
+    return out;
+}
+
+/// Inject the pwsh UTF-8 preamble into a `-EncodedCommand` value
+/// (`args[idx+1]`), which is base64 of a UTF-16LE script. Returns a
+/// fresh argv whose value is re-encoded as `prefix ++ original`, or
+/// `null` to fall back to the original argv (each path logs its reason)
+/// when the value is missing, not padded/valid base64, not even-length
+/// UTF-16LE, not valid UTF-16, or begins with a construct that must
+/// remain the first statement (`param(`, `#requires`, `{`).
+///
+/// A leading UTF-16 BOM (U+FEFF) is preserved at the very front of the
+/// re-encoded script (ahead of the preamble) and skipped when locating
+/// the first statement, so a BOM-prefixed script is neither corrupted
+/// nor able to hide a `param(`/`#requires`/`{` from the guard.
+///
+/// The base64 must be canonically padded (as produced by PowerShell's
+/// `[Convert]::ToBase64String(...)`). Unpadded values that PowerShell
+/// would still accept fall back rather than risk a mis-decode.
+///
+/// SECURITY: the prepended text is `preamble.prefix()`, a compile-time
+/// constant. The user's decoded script bytes are preserved verbatim
+/// after it (same model as `wrapScript`); no user input is interpolated
+/// into a new shell string.
+fn wrapEncodedCommand(
+    alloc: Allocator,
+    args: []const [:0]const u8,
+    idx: usize,
+    preamble: internal_os.windows_shell.Preamble,
+) Allocator.Error!?[]const [:0]const u8 {
+    if (idx + 1 >= args.len) return null;
+    const encoded = args[idx + 1];
+
+    const dec = std.base64.standard.Decoder;
+    const decoded_len = dec.calcSizeForSlice(encoded) catch {
+        log.debug("UTF-8 preamble skipped: -EncodedCommand value is not valid base64", .{});
+        return null;
+    };
+    const raw = try alloc.alloc(u8, decoded_len);
+    defer alloc.free(raw);
+    dec.decode(raw, encoded) catch {
+        log.debug("UTF-8 preamble skipped: -EncodedCommand value failed base64 decode", .{});
+        return null;
+    };
+    if (raw.len % 2 != 0) {
+        log.debug("UTF-8 preamble skipped: -EncodedCommand decoded to odd byte length (not UTF-16LE)", .{});
+        return null;
+    }
+
+    const u16s = try alloc.alloc(u16, raw.len / 2);
+    defer alloc.free(u16s);
+    for (u16s, 0..) |*u, i| u.* = std.mem.readInt(u16, raw[i * 2 ..][0..2], .little);
+
+    // A leading UTF-16 BOM (U+FEFF) is kept verbatim at the front of the
+    // output (ahead of the preamble) and excluded from the first-statement
+    // scan, so it neither lands mid-script nor masks a leading `param(`.
+    const has_bom = u16s.len > 0 and u16s[0] == 0xFEFF;
+    const script_units = if (has_bom) u16s[1..] else u16s;
+
+    const script_utf8 = std.unicode.utf16LeToUtf8Alloc(alloc, script_units) catch {
+        log.debug("UTF-8 preamble skipped: -EncodedCommand is not valid UTF-16LE", .{});
+        return null;
+    };
+    defer alloc.free(script_utf8);
+
+    if (firstStatementReason(script_utf8)) |reason| {
+        log.debug(
+            "UTF-8 preamble skipped: -EncodedCommand script starts with {s} " ++
+                "which must remain the first statement",
+            .{reason},
+        );
+        return null;
+    }
+
+    // Build [BOM?] ++ prefix ++ script as UTF-16LE bytes, then
+    // base64-encode. preamble.prefix() is ASCII, so each byte maps to
+    // exactly one UTF-16 code unit; the user's script units are appended
+    // verbatim. Building UTF-16 directly avoids a UTF-8 round-trip (and
+    // its InvalidUtf8 error) on text we already hold as UTF-16.
+    const prefix = preamble.prefix();
+    const bom_len: usize = @intFromBool(has_bom);
+    const new_bytes = try alloc.alloc(u8, (bom_len + prefix.len + script_units.len) * 2);
+    defer alloc.free(new_bytes);
+    if (has_bom) std.mem.writeInt(u16, new_bytes[0..2], 0xFEFF, .little);
+    for (prefix, 0..) |c, i|
+        std.mem.writeInt(u16, new_bytes[(bom_len + i) * 2 ..][0..2], c, .little);
+    for (script_units, 0..) |u, i|
+        std.mem.writeInt(u16, new_bytes[(bom_len + prefix.len + i) * 2 ..][0..2], u, .little);
+
+    const enc = std.base64.standard.Encoder;
+    const new_b64 = try alloc.allocSentinel(u8, enc.calcSize(new_bytes.len), 0);
+    _ = enc.encode(new_b64, new_bytes);
+
+    const out = try alloc.alloc([:0]const u8, args.len);
+    @memcpy(out, args);
+    out[idx + 1] = new_b64;
     return out;
 }
 
@@ -2603,9 +2713,10 @@ const PreambleConflict = union(enum) {
     /// pwsh `-File`: the tail is a path to a script we must not
     /// modify. Skip and log.
     pwsh_file: usize,
-    /// pwsh `-EncodedCommand`: the tail is base64-encoded UTF-16LE.
-    /// Rewriting would need a decode/encode round-trip that's out of
-    /// scope here; skip and log.
+    /// pwsh `-EncodedCommand`: the value is base64-encoded UTF-16LE.
+    /// We decode it, prepend the UTF-8 setup, and re-encode (see
+    /// `wrapEncodedCommand`), falling back to a skip on decode failure
+    /// or a leading first-statement construct.
     pwsh_encoded_command: usize,
 };
 
@@ -3451,23 +3562,38 @@ test "execCommand windows: pwsh with -File leaves args untouched" {
     try testing.expectEqualStrings("C:\\scripts\\my.ps1", result[2]);
 }
 
-test "execCommand windows: pwsh with -EncodedCommand leaves args untouched" {
+test "execCommand windows: pwsh -EncodedCommand gets preamble injected end-to-end" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const result = try testExecWindowsShell(
-        arena.allocator(),
-        "pwsh.exe -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgAGgAaQA=",
+    const alloc = arena.allocator();
+
+    // The value is base64 UTF-16LE of "Write-Host hi" (no first-statement
+    // construct). Use an explicit .always policy so this is deterministic
+    // regardless of the test host's ANSI codepage.
+    const result = try execCommand(
+        alloc,
+        .{ .shell = "pwsh.exe -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgAGgAaQA=" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{};
+            }
+        },
+        .always,
     );
 
-    // -EncodedCommand takes base64-encoded UTF-16LE. Rewriting would
-    // require a decode/re-encode round-trip; we skip to stay
-    // conservative.
+    // The .shell path tokenizes, spawns pwsh directly, and routes through
+    // maybeInjectUtf8Preamble -> wrapEncodedCommand: the encoded value is
+    // re-encoded as prefix ++ original script.
     try testing.expectEqual(@as(usize, 3), result.len);
     try testing.expectEqualStrings("pwsh.exe", result[0]);
     try testing.expectEqualStrings("-EncodedCommand", result[1]);
+    const decoded = try utf8FromUtf16LeBase64(alloc, result[2]);
+    const prefix = internal_os.windows_shell.Preamble.pwsh.prefix();
+    try testing.expect(std.mem.startsWith(u8, decoded, prefix));
+    try testing.expect(std.mem.endsWith(u8, decoded, "Write-Host hi"));
 }
 
 test "execCommand windows: pwsh with trailing -Command (no script) leaves args untouched" {
@@ -3803,4 +3929,144 @@ test "execCommand windows: bash.exe never gets a preamble (Preamble.none guard)"
 
     try testing.expectEqual(@as(usize, 1), result.len);
     try testing.expectEqualStrings(result[0], "bash.exe");
+}
+
+// --- test helpers: UTF-16LE <-> base64, mirroring PowerShell's
+// [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(...)) ---
+
+fn utf16LeBase64FromUtf8(alloc: Allocator, s: []const u8) ![:0]u8 {
+    const u16s = try std.unicode.utf8ToUtf16LeAlloc(alloc, s);
+    defer alloc.free(u16s);
+    const bytes = try alloc.alloc(u8, u16s.len * 2);
+    defer alloc.free(bytes);
+    for (u16s, 0..) |u, i| std.mem.writeInt(u16, bytes[i * 2 ..][0..2], u, .little);
+    const enc = std.base64.standard.Encoder;
+    const out = try alloc.allocSentinel(u8, enc.calcSize(bytes.len), 0);
+    _ = enc.encode(out, bytes);
+    return out;
+}
+
+fn utf8FromUtf16LeBase64(alloc: Allocator, b64: []const u8) ![]u8 {
+    const dec = std.base64.standard.Decoder;
+    const n = try dec.calcSizeForSlice(b64);
+    const bytes = try alloc.alloc(u8, n);
+    defer alloc.free(bytes);
+    try dec.decode(bytes, b64);
+    const u16s = try alloc.alloc(u16, bytes.len / 2);
+    defer alloc.free(u16s);
+    for (u16s, 0..) |*u, i| u.* = std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little);
+    return std.unicode.utf16LeToUtf8Alloc(alloc, u16s);
+}
+
+test "maybeInjectUtf8Preamble windows: -EncodedCommand gets preamble injected" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const script_utf8 = "Write-Output 'hi'";
+    const b64 = try utf16LeBase64FromUtf8(alloc, script_utf8);
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("-EncodedCommand", out[1]);
+
+    // The re-encoded value must decode to prefix ++ original script.
+    const decoded = try utf8FromUtf16LeBase64(alloc, out[2]);
+    const prefix = internal_os.windows_shell.Preamble.pwsh.prefix();
+    try testing.expect(std.mem.startsWith(u8, decoded, prefix));
+    try testing.expect(std.mem.endsWith(u8, decoded, script_utf8));
+}
+
+test "maybeInjectUtf8Preamble windows: -EncodedCommand with param() is skipped" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const b64 = try utf16LeBase64FromUtf8(alloc, "param($x)\nWrite-Output $x");
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    // First-statement construct: skipped, value unchanged.
+    try testing.expectEqualStrings(b64, out[2]);
+}
+
+test "maybeInjectUtf8Preamble windows: invalid base64 -EncodedCommand is skipped" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", "not valid base64!!!" };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+    try testing.expectEqualStrings("not valid base64!!!", out[2]);
+}
+
+test "maybeInjectUtf8Preamble windows: -EncodedCommand skipped when policy never" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const b64 = try utf16LeBase64FromUtf8(alloc, "Write-Output 'hi'");
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .never);
+    try testing.expectEqualStrings(b64, out[2]);
+}
+
+/// Like `utf16LeBase64FromUtf8` but emits a leading UTF-16 BOM (U+FEFF),
+/// matching encoders that prepend one to `-EncodedCommand` scripts.
+fn utf16LeBase64FromUtf8WithBom(alloc: Allocator, s: []const u8) ![:0]u8 {
+    const u16s = try std.unicode.utf8ToUtf16LeAlloc(alloc, s);
+    defer alloc.free(u16s);
+    const bytes = try alloc.alloc(u8, (1 + u16s.len) * 2);
+    defer alloc.free(bytes);
+    std.mem.writeInt(u16, bytes[0..2], 0xFEFF, .little);
+    for (u16s, 0..) |u, i| std.mem.writeInt(u16, bytes[(1 + i) * 2 ..][0..2], u, .little);
+    const enc = std.base64.standard.Encoder;
+    const out = try alloc.allocSentinel(u8, enc.calcSize(bytes.len), 0);
+    _ = enc.encode(out, bytes);
+    return out;
+}
+
+test "maybeInjectUtf8Preamble windows: -EncodedCommand with leading BOM preserves BOM and injects" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const b64 = try utf16LeBase64FromUtf8WithBom(alloc, "Write-Output 'hi'");
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+
+    // Result keeps exactly one leading BOM, then the preamble, then the
+    // original script (the script's own BOM is not duplicated mid-stream).
+    const decoded = try utf8FromUtf16LeBase64(alloc, out[2]);
+    const prefix = internal_os.windows_shell.Preamble.pwsh.prefix();
+    const expected_head = try std.fmt.allocPrint(alloc, "\u{FEFF}{s}", .{prefix});
+    try testing.expect(std.mem.startsWith(u8, decoded, expected_head));
+    try testing.expect(std.mem.endsWith(u8, decoded, "Write-Output 'hi'"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, decoded, "\u{FEFF}"));
+}
+
+test "maybeInjectUtf8Preamble windows: -EncodedCommand with BOM + param() is skipped" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The BOM must not hide the leading param() from the first-statement
+    // guard, so this is skipped (value unchanged) rather than demoted.
+    const b64 = try utf16LeBase64FromUtf8WithBom(alloc, "param($x)\nWrite-Output $x");
+    const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
+    const out = try maybeInjectUtf8Preamble(alloc, args, .always);
+    try testing.expectEqualStrings(b64, out[2]);
 }
