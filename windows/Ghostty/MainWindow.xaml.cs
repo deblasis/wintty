@@ -17,6 +17,7 @@ using Ghostty.Interop;
 using Ghostty.Input;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Shell;
+using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Ghostty.Logging;
 using Ghostty.Panes;
@@ -1338,16 +1339,24 @@ public sealed partial class MainWindow : Window
         // Caption button colors must be set explicitly when
         // ExtendsContentIntoTitleBar is true, otherwise WinUI 3
         // fills them with the system accent color.
-        var fg = _themeManager.IsDarkMode
+        //
+        // Contrast against the backdrop the buttons actually sit on (the
+        // terminal background, blended through Mica/acrylic), NOT the
+        // abstract element theme. window-theme=dark forces IsDarkMode=true
+        // even over a light terminal palette, which painted white buttons
+        // onto a near-white chrome → invisible (#235). Luminance of the
+        // terminal background tracks what the user sees behind the buttons.
+        bool backdropDark = ThemeResolution.PreferLightForeground(_configService.BackgroundColor);
+        var fg = backdropDark
             ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
-        var fgInactive = _themeManager.IsDarkMode
+        var fgInactive = backdropDark
             ? Windows.UI.Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x66, 0x00, 0x00, 0x00);
-        var hoverBg = _themeManager.IsDarkMode
+        var hoverBg = backdropDark
             ? Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x33, 0x00, 0x00, 0x00);
-        var pressedBg = _themeManager.IsDarkMode
+        var pressedBg = backdropDark
             ? Windows.UI.Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)
             : Windows.UI.Color.FromArgb(0x22, 0x00, 0x00, 0x00);
 
