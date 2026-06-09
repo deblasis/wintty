@@ -504,6 +504,7 @@ public partial class App : Application
             new Ghostty.Core.Profiles.Probes.PowerShellProbe(fileSystem, processRunner),
             new Ghostty.Core.Profiles.Probes.WslProbe(processRunner),
             new Ghostty.Core.Profiles.Probes.GitBashProbe(registryReader, fileSystem),
+            new Ghostty.Core.Profiles.Probes.Msys2Probe(fileSystem),
             new Ghostty.Core.Profiles.Probes.AzureCloudShellProbe(processRunner),
         };
 
