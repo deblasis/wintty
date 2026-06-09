@@ -38,6 +38,7 @@ internal enum GhosttyActionTag
     MouseOverLink = 38,
     OpenConfig = 40,
     ReloadConfig = 47,
+    ConfigChange = 48,
     CloseWindow = 49,
     RingBell = 50,
     ProgressReport = 56,
