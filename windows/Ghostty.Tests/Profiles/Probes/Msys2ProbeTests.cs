@@ -44,7 +44,7 @@ public sealed class Msys2ProbeTests
         fs.AddFile(@"C:\msys32\usr\bin\bash.exe");
 
         var p = Assert.Single(await new Msys2Probe(fs).DiscoverAsync(CancellationToken.None));
-        Assert.Contains(@"msys32", p.Command);
+        Assert.Contains("msys32", p.Command);
     }
 
     [Fact]
@@ -61,6 +61,6 @@ public sealed class Msys2ProbeTests
         fs.AddFile(@"C:\msys32\usr\bin\bash.exe");
 
         var p = Assert.Single(await new Msys2Probe(fs).DiscoverAsync(CancellationToken.None));
-        Assert.Contains(@"msys64", p.Command);
+        Assert.Contains("msys64", p.Command);
     }
 }

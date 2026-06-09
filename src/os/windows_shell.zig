@@ -189,8 +189,10 @@ pub fn identify(exe_path: []const u8) Kind {
 
 /// Candidate winpty.exe locations relative to a Cygwin-family bash.exe.
 /// Two layouts cover Git for Windows and MSYS2:
-///   - same dir as bash:   <dir>\winpty.exe         (Git/MSYS2 usr\bin)
-///   - sibling usr\bin:    <parent>\usr\bin\winpty.exe  (Git bin\bash.exe)
+///   - same dir as bash:  <dir>\winpty.exe
+///       matches MSYS2 (usr\bin\bash.exe) and Git's usr\bin\bash.exe
+///   - parent's usr\bin:  <parent>\usr\bin\winpty.exe
+///       matches Git's bin\bash.exe (winpty lives one level up in usr\bin)
 ///
 /// Pure path math; existence is checked by the caller. Caller frees each
 /// returned slice. Surrounding quotes/whitespace are stripped so a config
