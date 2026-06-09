@@ -34,6 +34,10 @@ internal sealed partial class GeneralPage : Page
     {
         AutoReloadToggle.IsOn = _configService.AutoReloadEnabled;
         VerticalTabsToggle.IsOn = _configService.VerticalTabs;
+        // undo-timeout is a Duration stored as milliseconds; present it
+        // directly in ms (its native granularity) so a sub-second value is
+        // never lost to a seconds round-trip.
+        UndoTimeoutBox.Value = _configService.UndoTimeoutMs;
     }
 
     private void AutoReloadToggle_Toggled(object sender, RoutedEventArgs e)
@@ -57,6 +61,23 @@ internal sealed partial class GeneralPage : Page
         Ghostty.App.ConfigWriteScheduler?.Schedule(
             "vertical-tabs", on ? "true" : "false");
         VerticalTabsToggled?.Invoke(on);
+    }
+
+    private void UndoTimeout_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_loading) return;
+        // A cleared/invalid NumberBox yields NaN; ignore it rather than
+        // casting NaN to 0 and silently writing "0ms" (which disables undo).
+        if (double.IsNaN(sender.Value)) return;
+
+        var ms = Math.Max(0, (int)Math.Round(sender.Value));
+        // Debounce through the scheduler rather than writing + Reload() on
+        // every spinner tick (a held spin button fires many ValueChanged in a
+        // row). The scheduler coalesces last-write-wins, try/catches the
+        // SetValue, and owns the post-write reload — mirroring the
+        // vertical-tabs toggle. "<n>ms" is a valid Duration unit; "0ms"
+        // round-trips to a disabled undo policy.
+        Ghostty.App.ConfigWriteScheduler?.Schedule("undo-timeout", ms + "ms");
     }
 
     private void ReloadButton_Click(object sender, RoutedEventArgs e)
