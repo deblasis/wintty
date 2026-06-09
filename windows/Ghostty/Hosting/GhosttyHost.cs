@@ -441,6 +441,16 @@ internal sealed class GhosttyHost : IDisposable
                             ReloadConfigRequested?.Invoke(this, EventArgs.Empty));
                         return 1;
 
+                    case GhosttyActionTag.ConfigChange:
+                        // App-level config_change fires once per reload after
+                        // libghostty has pushed the new config to every surface.
+                        // The per-surface config_change dispatches (handled in
+                        // the surface-target switch below) already force each
+                        // surface to repaint, so there is nothing extra to do at
+                        // the app level -- just acknowledge so libghostty stops
+                        // logging it as unhandled (issue #193).
+                        return 1;
+
                     case GhosttyActionTag.ToggleQuickTerminal:
                         // Routed to App rather than a per-window event because
                         // the quake window is a singleton owned by App; any
@@ -704,6 +714,23 @@ internal sealed class GhosttyHost : IDisposable
                     {
                         if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                             c.RaiseFirstRender();
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.ConfigChange:
+                {
+                    // A live config/theme reload pushed new config into this
+                    // surface. libghostty re-resolves default-colored cells,
+                    // cursor style, font metrics, etc. on the next rebuild, but
+                    // on Windows nothing otherwise forces that frame to be drawn
+                    // after a reload -- so existing terminal content stays stale
+                    // until the next keystroke. Force an immediate repaint so the
+                    // re-resolved frame is presented (issues #193, #244).
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RequestRepaint();
                     });
                     return 1;
                 }
