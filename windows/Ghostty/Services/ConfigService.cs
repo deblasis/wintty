@@ -360,12 +360,19 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         // No reloads once teardown has begun: the libghostty app (and the
         // DX12 renderer it drives) may already be freed, so AppUpdateConfig
-        // would dereference freed state and crash natively. This is the
-        // switch-then-close use-after-free in issue #208.
+        // would dereference freed state and crash natively (issue #208,
+        // switch-then-close use-after-free). The actual safety guarantee is
+        // that BeginShutdown runs to completion on the UI thread before
+        // AppFree, and Reload (also UI thread) re-checks this flag below
+        // just before the native call -- so a reload enqueued before
+        // shutdown but pumped after it is fenced off. The flag, not the
+        // timer cancellation, is what closes the race.
         if (_shuttingDown) return false;
 
         // Don't reload before the app is created -- the initial config
-        // is the one passed to ghostty_app_new and must stay alive.
+        // is the one passed to ghostty_app_new and must stay alive. Note
+        // this does NOT cover the post-AppFree case: nothing zeroes _app on
+        // teardown, so _shuttingDown is the only guard against the freed app.
         if (_app.Handle == IntPtr.Zero) return false;
 
         GhosttyConfig newConfig;
@@ -387,6 +394,18 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // own config swap doesn't trigger a redundant file-change reload.
         var wasSuppressed = _suppressWatcher;
         _suppressWatcher = true;
+
+        // Final fence right before the native call: if teardown began while
+        // we were building newConfig, bail rather than push into a freed
+        // app. Keeps the freed-pointer guard local to AppUpdateConfig so a
+        // future refactor (await mid-method, AppFree off the UI thread)
+        // can't silently reopen the #208 race. Free the config we created.
+        if (_shuttingDown)
+        {
+            NativeMethods.ConfigFree(newConfig);
+            _suppressWatcher = wasSuppressed;
+            return false;
+        }
 
         NativeMethods.AppUpdateConfig(_app, newConfig);
 
@@ -1163,6 +1182,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         if (_suppressWatcher || _shuttingDown) return;
         lock (_timerLock)
         {
+            // Re-check under the lock: BeginShutdown may have run between the
+            // unguarded check above and here, and we must not re-arm a
+            // debounce timer after shutdown disposed it (issue #208).
+            if (_shuttingDown) return;
             _debounceTimer?.Dispose();
             _debounceTimer = new Timer(_ =>
             {

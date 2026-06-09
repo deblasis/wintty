@@ -967,6 +967,21 @@ public sealed partial class MainWindow : Window
         _isClosed = true;
         _themeManager.Dispose();
 
+        // If this is the last regular window the app is exiting: the
+        // bootstrap libghostty app and the DX12 renderer are about to be
+        // freed (here via _host.Dispose below, and in
+        // App.OnAnyWindowClosedInternal via the bootstrap host). Stop config
+        // reloads NOW, before any of that, so a debounced reload from a
+        // last-moment window-theme switch can't run AppUpdateConfig into
+        // freed surfaces/app (issue #208). OnClosedAsync runs before
+        // OnAnyWindowClosedInternal, so suppressing here closes the window
+        // that the later call would miss. The last-window guard keeps
+        // auto-reload working for other windows in a multi-window session;
+        // App.OnAnyWindowClosedInternal still calls BeginShutdown as the
+        // definitive backstop (it is idempotent).
+        if (!IsQuickTerminal && Ghostty.App.WindowsByRoot.Count <= 1)
+            _configService.BeginShutdown();
+
         // Detach from process-global event sources before we tear
         // down the dispatcher-bound state below. The ConfigService
         // outlives individual MainWindows, so a lingering subscription
