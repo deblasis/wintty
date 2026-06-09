@@ -924,19 +924,35 @@ pub const Surface = struct {
             .height = height,
         };
 
-        // Call the primary callback.
+        // When an in-process feature owns the screen (Windows-only
+        // resize_redirect, e.g. the inline theme picker), wrap the
+        // reflow + redraw in a synchronized update (DEC mode 2026) so the
+        // renderer never presents the intermediate alt-screen reflow frame
+        // before the feature clears and redraws. Mode 2026 is begun BEFORE
+        // sizeCallback so the reflow happens under the hold, and ended only
+        // after the feature has redrawn, yielding a single clean present.
+        // ?2026l is emitted on every exit path of this (non-re-entrant)
+        // call so the hold is always released. (#219)
+        if (comptime builtin.os.tag == .windows) {
+            if (self.resize_redirect) |redirect| {
+                self.core_surface.writeVt("\x1b[?2026h");
+                self.core_surface.sizeCallback(self.size) catch |err| {
+                    log.err("error in size callback err={}", .{err});
+                    self.core_surface.writeVt("\x1b[?2026l");
+                    return;
+                };
+                const grid = self.core_surface.size.grid();
+                redirect.callback(redirect.userdata, @intCast(grid.columns), @intCast(grid.rows));
+                self.core_surface.writeVt("\x1b[?2026l");
+                return;
+            }
+        }
+
+        // Default path: no in-process feature owns the screen.
         self.core_surface.sizeCallback(self.size) catch |err| {
             log.err("error in size callback err={}", .{err});
             return;
         };
-
-        // Notify in-process features after the grid has been recalculated.
-        if (comptime builtin.os.tag == .windows) {
-            if (self.resize_redirect) |redirect| {
-                const grid = self.core_surface.size.grid();
-                redirect.callback(redirect.userdata, @intCast(grid.columns), @intCast(grid.rows));
-            }
-        }
     }
 
     pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) void {
