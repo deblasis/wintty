@@ -124,6 +124,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal IntPtr SurfaceHandle => _surface.Handle;
 
     /// <summary>
+    /// Schedule an immediate repaint of this surface. Used by the
+    /// <c>config_change</c> action handler so a live config/theme reload
+    /// presents a fresh frame: libghostty re-resolves default-colored cells,
+    /// cursor style, font metrics, etc. against the new config on the next
+    /// rebuild, but on Windows nothing otherwise forces that frame to be
+    /// drawn after a reload (issues #193, #244). Must be called on the UI
+    /// thread. No-op once the surface is gone so a reload racing teardown
+    /// can't draw into freed native state.
+    /// </summary>
+    internal void RequestRepaint()
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;
+        NativeMethods.SurfaceDraw(_surface);
+    }
+
+    /// <summary>
     /// Returns the pid of the shell process attached to this surface, or
     /// null when libghostty cannot report one (surface not yet created,
     /// already disposed, or the platform's pty layer is a stub). The
