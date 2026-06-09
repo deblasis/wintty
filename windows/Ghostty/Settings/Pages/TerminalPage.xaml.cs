@@ -1,4 +1,5 @@
 using Ghostty.Core.Config;
+using Ghostty.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -6,14 +7,14 @@ namespace Ghostty.Settings.Pages;
 
 internal sealed partial class TerminalPage : Page
 {
-    private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
     private bool _loading = true;
 
     public TerminalPage(IConfigService configService, IConfigFileEditor editor)
     {
-        _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
         CursorStyleBox.ItemsSource = new[] { "block", "bar", "underline" };
 
@@ -35,10 +36,7 @@ internal sealed partial class TerminalPage : Page
     private void OnValueChanged(string key, string value)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.SetValue(key, value); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.SetValue(key, value), key);
     }
 
     private void Scrollback_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)

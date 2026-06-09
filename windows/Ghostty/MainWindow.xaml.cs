@@ -72,6 +72,13 @@ public sealed partial class MainWindow : Window
     // so anything in this window that needs to mutate the config file
     // goes through App.ConfigFileEditor rather than building its own.
     private readonly IConfigFileEditor _configEditor;
+    // Synchronous immediate-write helper for the window's own config
+    // mutations (e.g. the opacity-adjust keybindings). Catches disk
+    // failures and keeps the watcher flag balanced so an IOException
+    // can't fail-fast the process or leave the watcher suppressed --
+    // the same guarantee the Settings pages get. Debounced writes
+    // (e.g. vertical-tabs) still go through App.ConfigWriteScheduler.
+    private readonly SettingsConfigWriter _configWriter;
     // Narrower than holding ILoggerFactory: AcrylicBackdrop is rebuilt
     // per backdrop-style change in ApplyBackdropStyle(), and that is
     // the ONLY reason this window needed a way to mint loggers after
@@ -259,6 +266,8 @@ public sealed partial class MainWindow : Window
             ?? throw new InvalidOperationException(
                 "MainWindow: App.ConfigFileEditor is null. " +
                 "App.OnLaunched must initialize it before constructing a window.");
+        _configWriter = new SettingsConfigWriter(
+            _configService, StaticLoggers.SettingsConfigWriter);
         _newAcrylicLogger = loggerFactory.CreateLogger<AcrylicBackdrop>;
         _logger = loggerFactory.CreateLogger<MainWindow>();
 
@@ -2101,10 +2110,9 @@ public sealed partial class MainWindow : Window
         // Skip the write+reload round-trip when nothing changed.
         if (Math.Abs(next - current) < 0.001) return;
 
-        _configService.SuppressWatcher(true);
-        _configEditor.SetValue("background-opacity", next.ToString("F2"));
-        _configService.SuppressWatcher(false);
-        _configService.Reload();
+        _configWriter.Write(
+            () => _configEditor.SetValue("background-opacity", next.ToString("F2")),
+            "background-opacity");
     }
 
     private void ToggleCommandPalette()
