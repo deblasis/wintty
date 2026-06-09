@@ -2185,11 +2185,12 @@ fn execCommand(
         .direct => direct: {
             const cloned = (try command.clone(alloc)).direct;
             if (comptime builtin.os.tag == .windows) {
-                break :direct try maybeInjectUtf8Preamble(
+                const with_preamble = try maybeInjectUtf8Preamble(
                     alloc,
                     cloned,
                     utf8_console,
                 );
+                break :direct try maybeWrapGitBashWithWinpty(alloc, with_preamble);
             }
             break :direct cloned;
         },
@@ -2250,11 +2251,12 @@ fn execCommand(
                     }
 
                     const direct_args = try args.toOwnedSlice(alloc);
-                    break :shell try maybeInjectUtf8Preamble(
+                    const with_preamble = try maybeInjectUtf8Preamble(
                         alloc,
                         direct_args,
                         utf8_console,
                     );
+                    break :shell try maybeWrapGitBashWithWinpty(alloc, with_preamble);
                 }
 
                 // Command contains cmd.exe metacharacters (or parsing
@@ -2355,6 +2357,64 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
         else => {},
     };
     return false;
+}
+
+/// Prepend winpty to a manually-configured Git-for-Windows / MSYS2
+/// `bash.exe` so its job-control init sees a MinTTY-compatible PTY under
+/// ConPTY instead of emitting "cannot set terminal process group (-1):
+/// Inappropriate ioctl for device" + "no job control in this shell".
+///
+/// This gives a manual `command = "C:\Program Files\Git\bin\bash.exe"`
+/// the same winpty/ConPTY job-control bridge that the profile-discovery
+/// probes (GitBashProbe, Msys2Probe) build into their command strings.
+/// (The probes additionally append `--login -i`; here the user owns
+/// their own flags, so we only prepend winpty.)
+///
+/// Gated narrowly so we never wrap the wrong bash:
+///   - args[0] must identify as bash (basename `bash`/`bash.exe`).
+///   - args[0] must be an absolute path. Bare `bash` is left alone: on a
+///     normal PATH it resolves to C:\Windows\System32\bash.exe (the WSL
+///     launcher, which must NOT be winpty-wrapped), and PATH-resolving
+///     here would duplicate Command.startWindows. A relative path is also
+///     left alone: it can't be validated by accessAbsolute below (which
+///     requires an absolute path). Both degrade gracefully to the
+///     pre-existing behavior.
+///   - a winpty.exe must exist adjacent to the bash (see
+///     windows_shell.winptyCandidatePaths). System32 has none, so WSL is
+///     excluded; a discovered profile's args[0] is winpty (not bash), so
+///     there is no double-wrap.
+///
+/// When no wrap applies the input `args` slice is returned unchanged.
+/// Both input and output are owned by the caller's arena.
+fn maybeWrapGitBashWithWinpty(
+    alloc: Allocator,
+    args: []const [:0]const u8,
+) Allocator.Error![]const [:0]const u8 {
+    if (comptime builtin.os.tag != .windows) return args;
+    if (args.len == 0) return args;
+    if (internal_os.windows_shell.identify(args[0]) != .bash) return args;
+
+    // Absolute path only (see doc comment): bare/relative bash is skipped,
+    // and an absolute path satisfies accessAbsolute's precondition below.
+    if (!std.fs.path.isAbsoluteWindows(std.mem.trim(u8, args[0], "\"' \t\r\n")))
+        return args;
+
+    // Best effort: an allocation failure here just skips the wrap rather
+    // than failing the spawn.
+    const candidates = internal_os.windows_shell.winptyCandidatePaths(alloc, args[0]) catch return args;
+
+    const winpty: []const u8 = found: {
+        for (candidates) |c| {
+            std.fs.accessAbsolute(c, .{}) catch continue;
+            break :found c;
+        }
+        return args;
+    };
+
+    const out = try alloc.alloc([:0]const u8, args.len + 1);
+    out[0] = try alloc.dupeZ(u8, winpty);
+    @memcpy(out[1..], args);
+    return out;
 }
 
 /// Inject a shell-specific UTF-8 codepage setup into argv when the
@@ -4076,4 +4136,58 @@ test "maybeInjectUtf8Preamble windows: -EncodedCommand with BOM + param() is ski
     const args: []const [:0]const u8 = &.{ "pwsh", "-EncodedCommand", b64 };
     const out = try maybeInjectUtf8Preamble(alloc, args, .always);
     try testing.expectEqualStrings(b64, out[2]);
+}
+
+test "maybeWrapGitBashWithWinpty windows: non-bash is left untouched" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const args: []const [:0]const u8 = &.{"C:\\Windows\\System32\\cmd.exe"};
+    const out = try maybeWrapGitBashWithWinpty(alloc, args);
+    try testing.expectEqual(args.ptr, out.ptr); // unchanged slice
+}
+
+test "maybeWrapGitBashWithWinpty windows: relative bash is skipped (no accessAbsolute panic)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A relative path-qualified bash passes the basename check but is not
+    // absolute; it must short-circuit BEFORE accessAbsolute (which asserts
+    // an absolute path) and return the args unchanged.
+    for ([_][:0]const u8{ "bin\\bash.exe", ".\\bash.exe", "bash.exe" }) |arg| {
+        const args: []const [:0]const u8 = &.{arg};
+        const out = try maybeWrapGitBashWithWinpty(alloc, args);
+        try testing.expectEqual(args.ptr, out.ptr);
+    }
+}
+
+test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is wrapped" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build a real bash.exe + adjacent winpty.exe under a tmp dir so the
+    // accessAbsolute existence check passes, then assert winpty is prepended.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "bash.exe", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "winpty.exe", .data = "" });
+    const real = try tmp.dir.realpathAlloc(alloc, ".");
+    const bash = try std.fmt.allocPrintSentinel(alloc, "{s}\\bash.exe", .{real}, 0);
+    const winpty = try std.fmt.allocPrint(alloc, "{s}\\winpty.exe", .{real});
+
+    const args: []const [:0]const u8 = &.{ bash, "--login" };
+    const out = try maybeWrapGitBashWithWinpty(alloc, args);
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings(winpty, out[0]);
+    try testing.expectEqualStrings(bash, out[1]);
+    try testing.expectEqualStrings("--login", out[2]);
 }
