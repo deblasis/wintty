@@ -2,6 +2,7 @@ using System;
 using Ghostty.Controls.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.Settings;
+using Ghostty.Logging;
 using Ghostty.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -12,6 +13,7 @@ internal sealed partial class ColorsPage : Page
 {
     private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
     private readonly SearchableList _themeList;
     private readonly SearchableList _lightThemeList;
     private readonly SearchableList _darkThemeList;
@@ -21,6 +23,7 @@ internal sealed partial class ColorsPage : Page
     {
         _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
 
         _themeList = new SearchableList(ThemeSearch, chosen => OnThemeChosen(chosen));
@@ -155,10 +158,7 @@ internal sealed partial class ColorsPage : Page
     private void OnValueChanged(string key, string value)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.SetValue(key, value); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.SetValue(key, value), key);
     }
 
     private void Foreground_ColorChanged(object? sender, string hex)
@@ -215,10 +215,7 @@ internal sealed partial class ColorsPage : Page
     private void ResetColorOverride(string key, ColorPickerControl picker, Button resetButton)
     {
         if (_loading) return;
-        _configService.SuppressWatcher(true);
-        try { _editor.RemoveValue(key); }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        _writer.Write(() => _editor.RemoveValue(key), key);
 
         _loading = true;
         try { picker.Color = ""; }

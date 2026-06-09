@@ -5,6 +5,7 @@ using System.Linq;
 using Ghostty.Controls.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.Profiles;
+using Ghostty.Logging;
 using Ghostty.Settings;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -23,6 +24,7 @@ internal sealed partial class ProfilesPage : Page
     private readonly IProfileRegistry _registry;
     private readonly IConfigService _configService;
     private readonly IConfigFileEditor _editor;
+    private readonly SettingsConfigWriter _writer;
 
     // Per-id row cache so a Rebind triggered by a background event
     // (e.g. discovery completion) updates existing SettingsCard instances
@@ -48,6 +50,7 @@ internal sealed partial class ProfilesPage : Page
         _registry = registry;
         _configService = configService;
         _editor = editor;
+        _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
 
         // Subscribe at Loaded / unsubscribe at Unloaded so a cached
@@ -271,14 +274,11 @@ internal sealed partial class ProfilesPage : Page
         // defaults to false, so a stray "false" line is just noise that
         // also confuses the warnings filter for hidden-only blocks.
         var key = ProfileHiddenKey.For(id);
-        _configService.SuppressWatcher(true);
-        try
+        _writer.Write(() =>
         {
             if (toggle.IsOn) _editor.SetValue(key, "true");
             else _editor.RemoveValue(key);
-        }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        }, key);
     }
 
     private void OnProfileIconChanged(object? sender, IconSpec? newSpec)
@@ -304,14 +304,11 @@ internal sealed partial class ProfilesPage : Page
             _ => null,
         };
 
-        _configService.SuppressWatcher(true);
-        try
+        _writer.Write(() =>
         {
             if (value is null) _editor.RemoveValue(key);
             else _editor.SetValue(key, value);
-        }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        }, key);
     }
 
     private void OnTracksForegroundToggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
@@ -332,13 +329,10 @@ internal sealed partial class ProfilesPage : Page
         // to true removes the override instead of writing an explicit
         // "true" line and cluttering the config file.
         var key = $"profile.{id}.tab-icon-tracks-foreground";
-        _configService.SuppressWatcher(true);
-        try
+        _writer.Write(() =>
         {
             if (toggle.IsOn) _editor.RemoveValue(key);
             else _editor.SetValue(key, "false");
-        }
-        finally { _configService.SuppressWatcher(false); }
-        _configService.Reload();
+        }, key);
     }
 }
