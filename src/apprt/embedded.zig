@@ -911,8 +911,9 @@ pub const Surface = struct {
         // renderer never presents the intermediate alt-screen reflow frame
         // before the feature clears and redraws. Mode 2026 is begun BEFORE
         // sizeCallback so the reflow happens under the hold, and ended only
-        // after the feature has redrawn — yielding a single clean present.
-        // ?2026l is emitted on every exit path so the hold can't get stuck. (#219)
+        // after the feature has redrawn, yielding a single clean present.
+        // ?2026l is emitted on every exit path of this (non-re-entrant)
+        // call so the hold is always released. (#219)
         if (comptime builtin.os.tag == .windows) {
             if (self.resize_redirect) |redirect| {
                 self.core_surface.writeVt("\x1b[?2026h");

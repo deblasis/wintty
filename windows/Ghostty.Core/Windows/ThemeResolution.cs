@@ -4,9 +4,9 @@ namespace Ghostty.Core.Windows;
 /// How the resolver interprets <c>window-theme</c> values that are not
 /// explicitly <c>light</c>, <c>dark</c>, or <c>system</c> (i.e.
 /// <c>auto</c>, <c>ghostty</c>, and unknown values). The terminal
-/// chrome uses Palette so it tracks the active colour palette; the
-/// Settings and command-palette surfaces use System so they feel
-/// OS-native regardless of the terminal's colours.
+/// chrome and the command palette use Palette so they track the active
+/// colour palette and match each other (#236); the Settings surface uses
+/// System so it feels OS-native regardless of the terminal's colours.
 /// </summary>
 public enum ThemeFallbackStyle
 {

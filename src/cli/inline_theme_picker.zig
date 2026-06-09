@@ -553,6 +553,9 @@ pub const InlineThemePicker = struct {
             config.deinit();
             return null;
         };
+        // `config` is moved into the cache; do NOT deinit it here. The
+        // cache (and deinit) own it now. The only deinit of a successfully
+        // loaded config happens on the next miss or in InlineThemePicker.deinit.
         self.cached_config = config;
         self.cached_config_idx = theme_idx;
         return &self.cached_config.?;

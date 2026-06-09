@@ -90,11 +90,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // A tab opened while a shell theme is active starts inactive
         // (the new tab becomes active via TabAdded→SelectActive, which
         // then promotes it). Default to the inactive brush so it never
-        // flashes the active-on-inactive-bg invisible state (#342).
+        // flashes the active-on-inactive-bg invisible state (#342). The
+        // active/inactive brushes are a coupled pair (both set in
+        // ApplyShellTheme, both nulled in ClearShellTheme), so a non-null
+        // inactive brush is sufficient to know a shell theme is active.
         if (_shellInactiveTextBrush is not null)
             headerText.Foreground = _shellInactiveTextBrush;
-        else if (_shellActiveTextBrush is not null)
-            headerText.Foreground = _shellActiveTextBrush;
         var headerBar = new ProgressBar
         {
             Height = 2,

@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Ghostty.Core.Input;
 using Ghostty.Core.ResizeOverlay;
+using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
 using Ghostty.Hosting;
 using Ghostty.Input;
@@ -424,7 +425,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
                 if (node is null) break;
                 if (node is ScrollViewer sv &&
-                    Ghostty.Core.Windows.AncestorScrollViewerScope.InScope(i, rootIndex))
+                    AncestorScrollViewerScope.InScope(i, rootIndex))
                 {
                     sv.IsTabStop = false;
                 }
