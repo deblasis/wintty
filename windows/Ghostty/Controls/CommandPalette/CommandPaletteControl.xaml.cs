@@ -39,12 +39,12 @@ internal sealed partial class CommandPaletteControl : UserControl
     // theme flipped otherwise.
     private string _backgroundSetting = string.Empty;
 
-    // Config+OS-driven theme resolver. The palette uses System fallback
-    // (same as SettingsWindow) so it feels OS-native regardless of the
-    // terminal's palette: a dark palette on a light OS leaves the
-    // palette light, matching every other system UI surface. Created
-    // in Configure() and disposed on Unloaded. Null until Configure
-    // runs, which happens once during MainWindow init.
+    // Config+OS-driven theme resolver. The palette uses Palette fallback
+    // (same as MainWindow) so it matches the window chrome: window-theme=
+    // ghostty + a dark terminal renders a dark window AND a dark palette,
+    // instead of the palette tracking the OS theme and mismatching the
+    // chrome (#236). Created in Configure() and disposed on Unloaded.
+    // Null until Configure runs, which happens once during MainWindow init.
     private WindowThemeManager? _themeManager;
 
     public CommandPaletteControl()
@@ -64,10 +64,11 @@ internal sealed partial class CommandPaletteControl : UserControl
 
     /// <summary>
     /// Wires theme resolution to the live config + OS theme. Matches
-    /// the SettingsWindow pattern: explicit <c>window-theme</c> wins,
+    /// the MainWindow chrome: explicit <c>window-theme</c> wins,
     /// "system" follows the OS, and any other value (auto/ghostty)
-    /// falls back to the OS too — the palette is a system-native
-    /// surface, not a palette-coloured one.
+    /// falls back to the terminal background luminance — so the palette
+    /// renders in the same light/dark variant as the window it floats
+    /// over (#236).
     ///
     /// Idempotent re-wiring is supported: a subsequent call tears
     /// down the previous subscription before creating a new one. In
@@ -84,7 +85,7 @@ internal sealed partial class CommandPaletteControl : UserControl
         }
 
         _themeManager = new WindowThemeManager(
-            configService, DispatcherQueue, ThemeFallbackStyle.System);
+            configService, DispatcherQueue, ThemeFallbackStyle.Palette);
         _themeManager.ThemeChanged += OnThemeChanged;
         ApplyTheme();
     }

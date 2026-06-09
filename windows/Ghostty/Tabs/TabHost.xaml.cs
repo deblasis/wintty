@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Ghostty.Core.Windows;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 
@@ -86,8 +87,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // If the shell theme is already active, paint the new tab's
         // title in the cached active-text brush so tabs opened after
         // ApplyShellTheme match the ones that were present at the time.
-        if (_shellActiveTextBrush is not null)
-            headerText.Foreground = _shellActiveTextBrush;
+        // A tab opened while a shell theme is active starts inactive
+        // (the new tab becomes active via TabAdded→SelectActive, which
+        // then promotes it). Default to the inactive brush so it never
+        // flashes the active-on-inactive-bg invisible state (#342). The
+        // active/inactive brushes are a coupled pair (both set in
+        // ApplyShellTheme, both nulled in ClearShellTheme), so a non-null
+        // inactive brush is sufficient to know a shell theme is active.
+        if (_shellInactiveTextBrush is not null)
+            headerText.Foreground = _shellInactiveTextBrush;
         var headerBar = new ProgressBar
         {
             Height = 2,
@@ -203,6 +211,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 ApplyTabColor(headerPanel, model.Color, isSelected);
             }
         }
+
+        // Active/inactive foreground must follow selection too, else the
+        // newly-deselected tab keeps the active brush and goes invisible
+        // against its inactive background (#342).
+        RecolorTabText();
 
         if (ReferenceEquals(TabViewControl.SelectedItem, item)) return;
         _suppressSelectionEvent = true;
@@ -419,12 +432,39 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // resolved to the TabViewItem DataContext (the TabModel), so
         // every tab rendered its type name "Ghostty.Core.Tabs.TabModel"
         // instead of the title.
+        //
+        // Inactive tabs sit on the near-bg tab-bar background, not the
+        // accent background, so the active brush gives them zero contrast
+        // (#342). Pick a luminance-readable foreground over the tab-bar
+        // background and mute it to ~70% so inactive reads as inactive.
         _shellActiveTextBrush = activeTextBrush;
-        foreach (var tb in _headerTextByModel.Values)
-            tb.Foreground = activeTextBrush;
+        uint tabBgPacked = (uint)((theme.TabBarBackground.R << 16)
+            | (theme.TabBarBackground.G << 8)
+            | theme.TabBarBackground.B);
+        var inactiveColor = ThemeResolution.PreferLightForeground(tabBgPacked)
+            ? Windows.UI.Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)  // white @ ~70%
+            : Windows.UI.Color.FromArgb(0xB3, 0x00, 0x00, 0x00); // black @ ~70%
+        _shellInactiveTextBrush = new SolidColorBrush(inactiveColor);
+        RecolorTabText();
     }
 
     private SolidColorBrush? _shellActiveTextBrush;
+    private SolidColorBrush? _shellInactiveTextBrush;
+
+    // Recolor every tab title to its active/inactive shell-theme brush.
+    // No-op unless a shell theme is active (brushes non-null). The active
+    // brush is calibrated against the accent background; the inactive
+    // brush is a muted, luminance-readable foreground over the near-bg
+    // tab-bar background — without this, inactive titles inherited the
+    // active brush and vanished (#342).
+    private void RecolorTabText()
+    {
+        if (_shellActiveTextBrush is null || _shellInactiveTextBrush is null) return;
+        foreach (var (model, tb) in _headerTextByModel)
+            tb.Foreground = ReferenceEquals(model, _manager.ActiveTab)
+                ? _shellActiveTextBrush
+                : _shellInactiveTextBrush;
+    }
 
     private ElementTheme _cachedTheme = ElementTheme.Default;
 
@@ -438,6 +478,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         TabViewControl.Resources.Remove("TabViewBackground");
         TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
         _shellActiveTextBrush = null;
+        _shellInactiveTextBrush = null;
 
         // Revert each tab title's Foreground to its inherited theme
         // brush so the default WinUI text color returns.
