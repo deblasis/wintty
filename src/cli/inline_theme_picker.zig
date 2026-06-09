@@ -78,8 +78,6 @@ pub fn discoverThemes(arena: Allocator) ![]ThemeEntry {
 /// the write callback (no Vaxis).
 pub const InlineThemePicker = struct {
     allocator: Allocator,
-    /// Arena for per-frame allocations, reset each draw call.
-    frame_arena: std.heap.ArenaAllocator,
     /// Arena that owns the theme name/path strings. Freed on deinit.
     theme_arena: ?std.heap.ArenaAllocator,
     themes: []ThemeEntry,
@@ -102,6 +100,13 @@ pub const InlineThemePicker = struct {
     // Track previous theme index for change detection
     prev_theme_idx: ?usize,
 
+    // Cached parsed config for the previewed theme, so a resize storm
+    // (selection unchanged) doesn't re-read + re-parse the theme file
+    // from disk on every frame. Keyed by the absolute theme index. Owned
+    // by the picker's allocator; freed on invalidation and in deinit. (#219)
+    cached_config: ?Config,
+    cached_config_idx: ?usize,
+
     const Mode = enum { normal, search, help };
 
     // Layout constants
@@ -122,7 +127,6 @@ pub const InlineThemePicker = struct {
         const self = try allocator.create(InlineThemePicker);
         self.* = .{
             .allocator = allocator,
-            .frame_arena = std.heap.ArenaAllocator.init(allocator),
             .theme_arena = theme_arena,
             .themes = themes,
             .filtered = try .initCapacity(allocator, themes.len),
@@ -139,6 +143,8 @@ pub const InlineThemePicker = struct {
             .write_ud = write_ud,
             .theme_cb = theme_cb,
             .prev_theme_idx = null,
+            .cached_config = null,
+            .cached_config_idx = null,
         };
 
         // Initialize filtered list with all themes
@@ -151,7 +157,7 @@ pub const InlineThemePicker = struct {
 
     pub fn deinit(self: *InlineThemePicker) void {
         const allocator = self.allocator;
-        self.frame_arena.deinit();
+        if (self.cached_config) |*c| c.deinit();
         self.filtered.deinit(allocator);
         self.search_buf.deinit(allocator);
         if (self.theme_arena) |*arena| arena.deinit();
@@ -440,17 +446,14 @@ pub const InlineThemePicker = struct {
         if (self.should_quit) return;
         self.cols = cols;
         self.rows = rows;
-        // Clear immediately to avoid showing stale content from the
-        // alt screen reflow during the resize.
-        self.write("\x1b[2J\x1b[H");
+        // draw() already clears the screen as its first action; a second
+        // clear here only adds a frame of flicker. The synchronized-update
+        // wrap in apprt updateSize hides the reflow frame instead. (#219)
         self.draw();
     }
 
     /// Render the current state via VT escape sequences.
     pub fn draw(self: *InlineThemePicker) void {
-        _ = self.frame_arena.reset(.retain_capacity);
-        const alloc = self.frame_arena.allocator();
-
         // Clear screen and home cursor
         self.write("\x1b[2J\x1b[H");
 
@@ -473,7 +476,7 @@ pub const InlineThemePicker = struct {
         self.drawThemeList();
 
         // Draw the preview panel (right side)
-        self.drawPreview(alloc);
+        self.drawPreview();
 
         // Draw overlays based on mode
         switch (self.mode) {
@@ -530,7 +533,35 @@ pub const InlineThemePicker = struct {
         }
     }
 
-    fn drawPreview(self: *InlineThemePicker, alloc: Allocator) void {
+    /// Return the parsed config for the given absolute theme index,
+    /// loading + caching it on a miss. Owned by self.allocator (NOT the
+    /// frame arena) so it survives across draws. Returns null if the
+    /// theme file can't be opened/parsed. (#219)
+    fn previewConfig(self: *InlineThemePicker, theme_idx: usize) ?*Config {
+        if (self.cached_config_idx) |idx| {
+            if (idx == theme_idx) {
+                if (self.cached_config) |*c| return c;
+            }
+        }
+        // Miss: drop the stale entry, load fresh.
+        if (self.cached_config) |*c| c.deinit();
+        self.cached_config = null;
+        self.cached_config_idx = null;
+
+        var config = Config.default(self.allocator) catch return null;
+        config.loadFile(config._arena.?.allocator(), self.themes[theme_idx].path) catch {
+            config.deinit();
+            return null;
+        };
+        // `config` is moved into the cache; do NOT deinit it here. The
+        // cache (and deinit) own it now. The only deinit of a successfully
+        // loaded config happens on the next miss or in InlineThemePicker.deinit.
+        self.cached_config = config;
+        self.cached_config_idx = theme_idx;
+        return &self.cached_config.?;
+    }
+
+    fn drawPreview(self: *InlineThemePicker) void {
         const x_off = list_width;
         if (x_off >= self.cols) return;
         const width = self.cols - x_off;
@@ -546,12 +577,11 @@ pub const InlineThemePicker = struct {
             return;
         }
 
-        const theme = self.themes[self.filtered.items[self.current]];
+        const theme_idx = self.filtered.items[self.current];
+        const theme = self.themes[theme_idx];
 
-        // Load theme config to get colors
-        var config = Config.default(alloc) catch return;
-        defer config.deinit();
-        config.loadFile(config._arena.?.allocator(), theme.path) catch {
+        // Load (cached) theme config to get colors.
+        const config_ptr = self.previewConfig(theme_idx) orelse {
             // Show error
             const center_row = self.rows / 2;
             self.moveTo(center_row, x_off + 2);
@@ -560,6 +590,7 @@ pub const InlineThemePicker = struct {
             self.print("Unable to open {s}", .{theme.name});
             return;
         };
+        const config = config_ptr.*;
 
         // Set the terminal's default fg/bg via OSC 10/11 so the
         // entire terminal background matches the theme, not just
