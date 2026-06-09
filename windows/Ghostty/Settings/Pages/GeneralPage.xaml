@@ -30,6 +30,27 @@
                         Toggled="VerticalTabsToggle_Toggled" />
                 </ctrl:SettingsCard>
 
+                <ctrl:SettingsCard
+                    Header="Undo timeout (ms)"
+                    Description="How long a pane split, close, resize, or zoom can be undone (Ctrl+Shift+Z), in milliseconds. Set to 0 to disable undo. Ghostty default is 5000 (5 seconds)."
+                    ctrl:SettingsCard.ConfigKey="undo-timeout">
+                    <!-- Milliseconds (the config's native Duration granularity)
+                         so no value is lost in a seconds round-trip. Maximum
+                         mirrors ConfigService's int clamp (~24.8 days), so the
+                         box never clamps a value the config can represent.
+                         Value here is a placeholder; LoadValues sets the real one. -->
+                    <NumberBox
+                        x:Name="UndoTimeoutBox"
+                        Value="5000"
+                        Minimum="0"
+                        Maximum="2147483647"
+                        SmallChange="100"
+                        LargeChange="1000"
+                        SpinButtonPlacementMode="Compact"
+                        MinWidth="160"
+                        ValueChanged="UndoTimeout_ValueChanged" />
+                </ctrl:SettingsCard>
+
                 <ctrl:SettingsCard Header="Configuration"
                                    Description="Reload from disk or open the config file in your default editor.">
                     <StackPanel Orientation="Horizontal" Spacing="8">
