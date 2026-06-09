@@ -187,6 +187,30 @@ pub fn identify(exe_path: []const u8) Kind {
     return kinds.get(lower) orelse .unknown;
 }
 
+/// Candidate winpty.exe locations relative to a Cygwin-family bash.exe.
+/// Two layouts cover Git for Windows and MSYS2:
+///   - same dir as bash:   <dir>\winpty.exe         (Git/MSYS2 usr\bin)
+///   - sibling usr\bin:    <parent>\usr\bin\winpty.exe  (Git bin\bash.exe)
+///
+/// Pure path math; existence is checked by the caller. Caller frees each
+/// returned slice. Surrounding quotes/whitespace are stripped so a config
+/// value like `"C:\Git\bin\bash.exe"` resolves correctly. We use the
+/// Windows-specific dirname and an explicit `\` separator (rather than
+/// std.fs.path.join/dirname, which follow the *host* OS) so the result is
+/// deterministic when these tests run on a non-Windows CI host.
+pub fn winptyCandidatePaths(
+    alloc: std.mem.Allocator,
+    bash_exe_path: []const u8,
+) std.mem.Allocator.Error![2][]const u8 {
+    const trimmed = std.mem.trim(u8, bash_exe_path, "\"' \t\r\n");
+    const dir = std.fs.path.dirnameWindows(trimmed) orelse ".";
+    const parent = std.fs.path.dirnameWindows(dir) orelse dir;
+    return .{
+        try std.fmt.allocPrint(alloc, "{s}\\winpty.exe", .{dir}),
+        try std.fmt.allocPrint(alloc, "{s}\\usr\\bin\\winpty.exe", .{parent}),
+    };
+}
+
 /// Returns true if the system ANSI codepage (`GetACP()`) is one of the
 /// legacy double-byte CJK codepages where forcing UTF-8 on a spawned
 /// shell would mojibake legacy `.bat` scripts whose script text is
@@ -367,6 +391,25 @@ test "utf8Preamble: prefix ends with shell-appropriate separator" {
 
     // none: empty.
     try testing.expectEqualStrings("", Preamble.none.prefix());
+}
+
+test "winptyCandidatePaths: git bin layout" {
+    const c = try winptyCandidatePaths(testing.allocator, "C:\\Program Files\\Git\\bin\\bash.exe");
+    defer for (c) |p| testing.allocator.free(p);
+    try testing.expectEqualStrings("C:\\Program Files\\Git\\bin\\winpty.exe", c[0]);
+    try testing.expectEqualStrings("C:\\Program Files\\Git\\usr\\bin\\winpty.exe", c[1]);
+}
+
+test "winptyCandidatePaths: msys2 usr/bin layout" {
+    const c = try winptyCandidatePaths(testing.allocator, "C:\\msys64\\usr\\bin\\bash.exe");
+    defer for (c) |p| testing.allocator.free(p);
+    try testing.expectEqualStrings("C:\\msys64\\usr\\bin\\winpty.exe", c[0]);
+}
+
+test "winptyCandidatePaths: strips surrounding quotes" {
+    const c = try winptyCandidatePaths(testing.allocator, "\"C:\\Git\\bin\\bash.exe\"");
+    defer for (c) |p| testing.allocator.free(p);
+    try testing.expectEqualStrings("C:\\Git\\bin\\winpty.exe", c[0]);
 }
 
 test "isCjkAnsiCodePage: links GetACP and agrees with the pure-logic helper" {
