@@ -8,6 +8,7 @@
 pub const ghostty = @import("ghostty.zig").ghostty;
 pub const version = @import("ghostty.zig").version;
 pub const Source = @import("Source.zig");
+pub const install = @import("install.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
