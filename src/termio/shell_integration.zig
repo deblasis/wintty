@@ -1545,10 +1545,12 @@ test "zsh: missing resources" {
 /// On Windows, fish is always MSYS2/Cygwin (there is no native Windows fish
 /// build), and its $__fish_vendor_confdirs is a fixed set that ignores the
 /// runtime XDG_DATA_DIRS — so the vendor conf is never auto-loaded there.
-/// We deliver it explicitly with `-C 'source <file>'`. `-C` (--init-command)
-/// runs after fish reads its config and vendor dirs but before interactive
-/// input, so sourcing the file registers its `--on-event fish_prompt`
-/// handler normally — the same end state as Linux's auto-load.
+/// We deliver it explicitly by appending `-C "source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/.../ghostty-shell-integration.fish"`
+/// (see the inline comment below for why the path is referenced via the env
+/// var rather than embedded). `-C` (--init-command) runs after fish reads its
+/// configuration but before interactive input, so sourcing the file registers
+/// its `--on-event fish_prompt` handler normally — the same end state as
+/// Linux's auto-load.
 fn setupFish(
     alloc: Allocator,
     command: config.Command,
