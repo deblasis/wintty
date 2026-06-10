@@ -444,18 +444,23 @@ test "isCjkAnsiCodePageFor: non-CJK codepages return false" {
     try std.testing.expect(!isCjkAnsiCodePageFor(1258)); // Vietnamese (single-byte)
 }
 
-/// If `argv` invokes the WSL launcher (`wsl`/`wsl.exe`, case-insensitive,
-/// any path), return the target distro from `-d <distro>` /
-/// `--distribution <distro>`, or `""` for the default distro. Returns null
-/// for non-WSL commands. Pure; safe to call on any platform.
-pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
-    if (argv.len == 0) return null;
-    const exe = std.fs.path.basename(argv[0]);
+/// True if `arg0` is the WSL launcher (`wsl`/`wsl.exe`, case-insensitive,
+/// any path). Cheap pre-check so callers can skip work for non-WSL commands.
+pub fn isWslExe(arg0: []const u8) bool {
+    const exe = std.fs.path.basename(arg0);
     const name = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
         exe[0 .. exe.len - 4]
     else
         exe;
-    if (!std.ascii.eqlIgnoreCase("wsl", name)) return null;
+    return std.ascii.eqlIgnoreCase("wsl", name);
+}
+
+/// If `argv` invokes the WSL launcher, return the target distro from
+/// `-d <distro>` / `--distribution <distro>` (and the `=`-joined forms), or
+/// `""` for the default distro. Returns null for non-WSL commands. Pure; safe
+/// to call on any platform.
+pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
+    if (argv.len == 0 or !isWslExe(argv[0])) return null;
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -464,6 +469,11 @@ pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
             if (i + 1 < argv.len) return argv[i + 1];
             return "";
         }
+        // `=`-joined forms. WSL profiles emit the space-separated form, but a
+        // hand-written command may use these; recognize them so we don't
+        // mis-target the default distro.
+        if (std.mem.startsWith(u8, a, "-d=")) return a["-d=".len..];
+        if (std.mem.startsWith(u8, a, "--distribution=")) return a["--distribution=".len..];
         // `--` ends WSL options; everything after is the in-distro command.
         if (std.mem.eql(u8, a, "--")) break;
     }
@@ -478,6 +488,14 @@ test "wslDistro: detects distro and default, ignores non-WSL" {
     {
         const argv = [_][]const u8{ "C:\\Windows\\System32\\wsl.exe", "--distribution", "Ubuntu-24.04" };
         try testing.expectEqualStrings("Ubuntu-24.04", wslDistro(&argv).?);
+    }
+    {
+        const argv = [_][]const u8{ "wsl.exe", "--distribution=Debian" };
+        try testing.expectEqualStrings("Debian", wslDistro(&argv).?);
+    }
+    {
+        const argv = [_][]const u8{ "wsl.exe", "-d=Arch" };
+        try testing.expectEqualStrings("Arch", wslDistro(&argv).?);
     }
     {
         // bare wsl: default distro -> empty-string sentinel.
