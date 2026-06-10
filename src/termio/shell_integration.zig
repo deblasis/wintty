@@ -83,16 +83,12 @@ pub fn setup(
 
         .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
-        // fish under Windows is always MSYS2/Cygwin (no native build), so
-        // it needs POSIX-form paths; elvish has a native Windows build and
-        // keeps the Windows path conventions.
-        .fish => xdg: {
-            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, true)) return null;
-            break :xdg try command.clone(alloc_arena);
-        },
-
-        .elvish => xdg: {
-            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, false)) return null;
+        .elvish, .fish => |s| xdg: {
+            // fish under Windows is always MSYS2/Cygwin (no native build), so
+            // it needs POSIX-form paths; elvish has a native Windows build and
+            // keeps the Windows path conventions.
+            const cygwin = s == .fish;
+            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, cygwin)) return null;
             break :xdg try command.clone(alloc_arena);
         },
     } orelse return null;
@@ -352,8 +348,23 @@ test "setup features" {
 /// differ. Non-drive-rooted paths just get backslashes normalized.
 /// Pure string transform; callers gate on the platform/shell.
 fn winToCygwinPath(alloc: Allocator, path: []const u8) ![]u8 {
-    // Strip an extended-length prefix (`\\?\`) that Win32 APIs and
+    // Extended-length UNC (`\\?\UNC\server\share`) maps to Cygwin's
+    // `//server/share`. Handle it before the generic `\\?\` strip below,
+    // which would otherwise leave a bogus literal `UNC` segment.
+    const unc_prefix = "\\\\?\\UNC\\";
+    if (std.mem.startsWith(u8, path, unc_prefix)) {
+        const rest = path[unc_prefix.len..];
+        const out = try alloc.alloc(u8, 2 + rest.len);
+        out[0] = '/';
+        out[1] = '/';
+        for (rest, 0..) |c, i| out[2 + i] = if (c == '\\') '/' else c;
+        return out;
+    }
+
+    // Strip a plain extended-length prefix (`\\?\`) that Win32 APIs and
     // std.fs.realpath can produce, so the drive letter is detectable.
+    // Callers pass absolute, separator-rooted paths (a realpath of the
+    // resources dir); drive-relative forms like `C:foo` are not expected.
     const p = if (std.mem.startsWith(u8, path, "\\\\?\\")) path[4..] else path;
 
     if (p.len >= 2 and p[1] == ':' and std.ascii.isAlphabetic(p[0])) {
@@ -372,9 +383,12 @@ fn winToCygwinPath(alloc: Allocator, path: []const u8) ![]u8 {
 }
 
 /// Returns the form of `win_path` that a shell-integration env var should
-/// carry: on Windows, the Cygwin POSIX form (for MSYS2/Cygwin-family
-/// shells, which are the only bash/zsh/fish that run natively under
-/// ConPTY); on other platforms, the path unchanged.
+/// carry: on Windows, the Cygwin POSIX form (the bash/zsh/fish Ghostty
+/// integrates under ConPTY are Cygwin-family — MSYS2/Git/Cygwin); on other
+/// platforms, the path unchanged. WSL bash (a `bash.exe`/`wsl.exe` stub) is
+/// out of scope (see maybeWrapGitBashWithWinpty in Exec.zig); if a user
+/// points `command` at it, the POSIX path simply won't resolve in the
+/// distro and integration silently no-ops, exactly as before this change.
 fn shellEnvPath(alloc: Allocator, win_path: []const u8) ![]const u8 {
     if (comptime builtin.os.tag != .windows) return win_path;
     return try winToCygwinPath(alloc, win_path);
@@ -871,6 +885,17 @@ test "winToCygwinPath: strips extended-length prefix" {
     const out = try winToCygwinPath(testing.allocator, "\\\\?\\C:\\Users\\x");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("/c/Users/x", out);
+}
+
+test "winToCygwinPath: UNC paths map to //server/share" {
+    const testing = std.testing;
+    const ext = try winToCygwinPath(testing.allocator, "\\\\?\\UNC\\server\\share\\x");
+    defer testing.allocator.free(ext);
+    try testing.expectEqualStrings("//server/share/x", ext);
+
+    const plain = try winToCygwinPath(testing.allocator, "\\\\server\\share");
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings("//server/share", plain);
 }
 
 test "bash: ENV is a POSIX path on Windows" {
