@@ -18,6 +18,8 @@ const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
+const terminfo_install = @import("../terminfo/install.zig");
+const DiskCache = @import("../cli/ssh-cache/DiskCache.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
@@ -993,6 +995,15 @@ const Subprocess = struct {
         write: Pty.Fd,
     } {
         assert(self.pty == null and self.process == null);
+
+        // Windows: provision Ghostty's xterm-ghostty terminfo into a target
+        // WSL distro before we spawn the shell, so the first session resolves
+        // it. Best-effort and self-gating to `wsl` commands; never fails the
+        // spawn. Runs here (the IO-thread spawn site) rather than at argv-build
+        // time, which is on the UI thread.
+        if (comptime builtin.os.tag == .windows) {
+            maybeProvisionWslTerminfo(alloc, self.args);
+        }
 
         // This function is funny because on POSIX systems it can
         // fail in the forked process. This is flipped to true if
@@ -2218,6 +2229,173 @@ fn windowsShellNeedsCmdWrapping(s: []const u8) bool {
 ///     excluded; a discovered profile's args[0] is winpty (not bash), so
 ///     there is no double-wrap.
 ///
+/// Build the WSL launcher prefix that runs the terminfo-install script in the
+/// target distro: `wsl.exe [-d <distro>] -- sh -c`. terminfo_install.install
+/// appends the script as the final arg.
+fn wslTerminfoLauncherPrefix(
+    alloc: Allocator,
+    distro: []const u8,
+) Allocator.Error![]const []const u8 {
+    if (distro.len == 0) {
+        return try alloc.dupe([]const u8, &.{ "wsl.exe", "--", "sh", "-c" });
+    }
+    return try alloc.dupe([]const u8, &.{ "wsl.exe", "-d", distro, "--", "sh", "-c" });
+}
+
+/// Turn a WSL distro name into a single hostname label that always passes
+/// `DiskCache.isValidCacheKey` (which validates keys as RFC-1123 hostnames).
+/// Keeps `[A-Za-z0-9]`, collapses every other run to a single `-`, never
+/// produces a leading/trailing `-`, caps the label at 63 bytes, and falls back
+/// to `"wsl"` if nothing valid remains. A non-readable but bulletproof hash
+/// would also work; a readable slug keeps the cache file inspectable.
+fn wslDistroSlug(buf: []u8, name: []const u8) []const u8 {
+    const max_label = 63;
+    var n: usize = 0;
+    var prev_dash = false;
+    for (name) |c| {
+        if (n >= buf.len or n >= max_label) break;
+        switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9' => {
+                buf[n] = c;
+                n += 1;
+                prev_dash = false;
+            },
+            // Collapse runs of non-alnum to one `-`, and never lead with one.
+            else => if (!prev_dash and n > 0) {
+                buf[n] = '-';
+                n += 1;
+                prev_dash = true;
+            },
+        }
+    }
+    // Strip a trailing `-` (a label may not end with one).
+    while (n > 0 and buf[n - 1] == '-') n -= 1;
+    if (n == 0) {
+        const fallback = "wsl";
+        @memcpy(buf[0..fallback.len], fallback);
+        return buf[0..fallback.len];
+    }
+    return buf[0..n];
+}
+
+/// Windows-only: if `argv` launches WSL, ensure Ghostty's `xterm-ghostty`
+/// terminfo is installed in the target distro before the shell spawns, so the
+/// first session resolves it. Installs the real terminfo the same way the
+/// `ssh-terminfo` feature provisions remote hosts (pipe the encoded source to
+/// `tic` over the launcher). Cached per distro so steady-state launches skip
+/// the extra `wsl` spawn. Side-effecting and entirely best-effort: any failure
+/// degrades to a warning, and the install script itself skips when terminfo is
+/// already present and bails without `tic`. Never affects the spawned argv.
+fn maybeProvisionWslTerminfo(
+    alloc: Allocator,
+    argv: []const [:0]const u8,
+) void {
+    if (comptime builtin.os.tag != .windows) return;
+
+    // Cheap gate first: most spawns are not WSL, so avoid the view alloc below.
+    if (argv.len == 0 or !internal_os.windows_shell.isWslExe(argv[0])) return;
+
+    // wslDistro takes []const []const u8; build a thin non-sentinel view.
+    const view = alloc.alloc([]const u8, argv.len) catch return;
+    defer alloc.free(view);
+    for (argv, 0..) |a, i| view[i] = a;
+
+    const distro = internal_os.windows_shell.wslDistro(view) orelse return;
+
+    // The default distro (empty) is keyed "default". A real distro literally
+    // named "default" would share that marker, which is harmless (both want
+    // the same terminfo).
+    var slug_buf: [256]u8 = undefined;
+    const key = wslDistroSlug(&slug_buf, if (distro.len == 0) "default" else distro);
+
+    // Per-distro cache (reuses the ssh terminfo DiskCache mechanism, separate
+    // file). Optional: any lookup failure just means we run the (idempotent,
+    // self-skipping) install script.
+    const cache: ?DiskCache = cache: {
+        const state_dir = internal_os.xdg.state(
+            alloc,
+            .{ .subdir = "ghostty" },
+        ) catch break :cache null;
+        defer alloc.free(state_dir);
+        const path = std.fs.path.join(
+            alloc,
+            &.{ state_dir, "wsl_terminfo_cache" },
+        ) catch break :cache null;
+        break :cache .{ .path = path };
+    };
+    defer if (cache) |c| alloc.free(c.path);
+
+    if (cache) |c| {
+        if (c.contains(alloc, key) catch false) return;
+    }
+
+    const prefix = wslTerminfoLauncherPrefix(alloc, distro) catch return;
+    defer alloc.free(prefix);
+    terminfo_install.install(alloc, prefix, false) catch |err| {
+        log.warn("wsl terminfo install failed (distro={s}): {}", .{ key, err });
+        return;
+    };
+
+    // Best-effort record; a write failure just re-runs the self-skipping
+    // script next launch.
+    if (cache) |c| c.add(alloc, key, std.time.timestamp()) catch {};
+}
+
+test "wslTerminfoLauncherPrefix builds wsl sh -c prefix" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const prefix = try wslTerminfoLauncherPrefix(alloc, "Ubuntu");
+    try testing.expectEqual(@as(usize, 6), prefix.len);
+    try testing.expectEqualStrings("wsl.exe", prefix[0]);
+    try testing.expectEqualStrings("-d", prefix[1]);
+    try testing.expectEqualStrings("Ubuntu", prefix[2]);
+    try testing.expectEqualStrings("--", prefix[3]);
+    try testing.expectEqualStrings("sh", prefix[4]);
+    try testing.expectEqualStrings("-c", prefix[5]);
+
+    // Default distro (empty) omits -d.
+    const prefix_def = try wslTerminfoLauncherPrefix(alloc, "");
+    try testing.expectEqual(@as(usize, 4), prefix_def.len);
+    try testing.expectEqualStrings("wsl.exe", prefix_def[0]);
+    try testing.expectEqualStrings("--", prefix_def[1]);
+    try testing.expectEqualStrings("sh", prefix_def[2]);
+    try testing.expectEqualStrings("-c", prefix_def[3]);
+}
+
+test "wslDistroSlug always yields a valid DiskCache key" {
+    const testing = std.testing;
+    var buf: [256]u8 = undefined;
+
+    // Adversarial names that previously slugged to invalid hostname keys
+    // (leading/trailing '-', empty labels, over-long) and silently disabled
+    // the cache. All must now pass DiskCache.isValidCacheKey.
+    const names = [_][]const u8{
+        "Ubuntu",
+        "Ubuntu-24.04",
+        "Ubuntu 22.04 LTS",
+        "default",
+        "Ubuntu ", // trailing space -> would have been "Ubuntu-"
+        " -weird- ", // leading/trailing junk
+        "My_Distro_",
+        "....", // all non-alnum
+        "" ++ ("x" ** 100), // over-long label
+        "",
+    };
+    inline for (names) |name| {
+        const slug = wslDistroSlug(&buf, name);
+        try testing.expect(DiskCache.isValidCacheKey(slug));
+    }
+
+    // Concrete spot-checks.
+    try testing.expectEqualStrings("Ubuntu-24-04", wslDistroSlug(&buf, "Ubuntu-24.04"));
+    try testing.expectEqualStrings("Ubuntu", wslDistroSlug(&buf, "Ubuntu "));
+    try testing.expectEqualStrings("wsl", wslDistroSlug(&buf, "...."));
+    try testing.expect(wslDistroSlug(&buf, "" ++ ("x" ** 100)).len == 63);
+}
+
 /// When no wrap applies the input `args` slice is returned unchanged.
 /// Both input and output are owned by the caller's arena.
 fn maybeWrapGitBashWithWinpty(
