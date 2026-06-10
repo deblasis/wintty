@@ -443,3 +443,62 @@ test "isCjkAnsiCodePageFor: non-CJK codepages return false" {
     try std.testing.expect(!isCjkAnsiCodePageFor(1255)); // Hebrew (single-byte)
     try std.testing.expect(!isCjkAnsiCodePageFor(1258)); // Vietnamese (single-byte)
 }
+
+/// If `argv` invokes the WSL launcher (`wsl`/`wsl.exe`, case-insensitive,
+/// any path), return the target distro from `-d <distro>` /
+/// `--distribution <distro>`, or `""` for the default distro. Returns null
+/// for non-WSL commands. Pure; safe to call on any platform.
+pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
+    if (argv.len == 0) return null;
+    const exe = std.fs.path.basename(argv[0]);
+    const name = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
+        exe[0 .. exe.len - 4]
+    else
+        exe;
+    if (!std.ascii.eqlIgnoreCase("wsl", name)) return null;
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const a = argv[i];
+        if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "--distribution")) {
+            if (i + 1 < argv.len) return argv[i + 1];
+            return "";
+        }
+        // `--` ends WSL options; everything after is the in-distro command.
+        if (std.mem.eql(u8, a, "--")) break;
+    }
+    return ""; // wsl with no explicit distro -> default
+}
+
+test "wslDistro: detects distro and default, ignores non-WSL" {
+    {
+        const argv = [_][]const u8{ "wsl.exe", "-d", "Ubuntu" };
+        try testing.expectEqualStrings("Ubuntu", wslDistro(&argv).?);
+    }
+    {
+        const argv = [_][]const u8{ "C:\\Windows\\System32\\wsl.exe", "--distribution", "Ubuntu-24.04" };
+        try testing.expectEqualStrings("Ubuntu-24.04", wslDistro(&argv).?);
+    }
+    {
+        // bare wsl: default distro -> empty-string sentinel.
+        const argv = [_][]const u8{"wsl.exe"};
+        try testing.expectEqualStrings("", wslDistro(&argv).?);
+    }
+    {
+        // `--` ends WSL options; no -d before it -> default.
+        const argv = [_][]const u8{ "wsl.exe", "--", "htop" };
+        try testing.expectEqualStrings("", wslDistro(&argv).?);
+    }
+    {
+        const argv = [_][]const u8{ "pwsh.exe", "-NoLogo" };
+        try testing.expect(wslDistro(&argv) == null);
+    }
+    {
+        const argv = [_][]const u8{ "C:\\msys64\\usr\\bin\\bash.exe", "-i" };
+        try testing.expect(wslDistro(&argv) == null);
+    }
+    {
+        const argv = [_][]const u8{};
+        try testing.expect(wslDistro(&argv) == null);
+    }
+}
