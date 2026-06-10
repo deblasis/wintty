@@ -155,7 +155,18 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     const arg0 = arg_iter.next() orelse return null;
     const exe = std.fs.path.basename(arg0);
 
-    if (std.mem.eql(u8, "bash", exe)) {
+    // Windows shells are spelled with a `.exe` suffix and case-insensitively
+    // (e.g. `C:\msys64\usr\bin\zsh.exe`, or a Start Menu `PWSH.EXE`); POSIX
+    // shells are bare lowercase names. Strip the suffix case-insensitively
+    // and match case-insensitively so both forms detect. Without this, the
+    // MSYS2/Cygwin `bash.exe`/`zsh.exe`/`fish.exe` would go undetected and
+    // never get shell integration.
+    const name = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
+        exe[0 .. exe.len - 4]
+    else
+        exe;
+
+    if (std.ascii.eqlIgnoreCase("bash", name)) {
         // Apple distributes their own patched version of Bash 3.2
         // on macOS that disables the ENV-based POSIX startup path.
         // This means we're unable to perform our automatic shell
@@ -172,24 +183,13 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
         return .bash;
     }
 
-    if (std.mem.eql(u8, "elvish", exe)) return .elvish;
-    if (std.mem.eql(u8, "fish", exe)) return .fish;
-    if (std.mem.eql(u8, "nu", exe)) return .nushell;
-    if (std.mem.eql(u8, "zsh", exe)) return .zsh;
-
-    // PowerShell exes on Windows literally end in `.exe`; the other
-    // shells we detect don't. Match both forms for robustness so users
-    // can spell their shell as either `pwsh` or `pwsh.exe` (likewise
-    // `powershell` for Windows PowerShell 5.1). Windows filesystems
-    // are case-insensitive, so a Start Menu shortcut spelled
-    // `PWSH.EXE` or `Pwsh.Exe` still needs to detect.
-    const exe_no_ext = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
-        exe[0 .. exe.len - 4]
-    else
-        exe;
-    if (std.ascii.eqlIgnoreCase("pwsh", exe_no_ext)) return .powershell;
-    if (std.ascii.eqlIgnoreCase("powershell", exe_no_ext)) return .powershell;
-    if (std.ascii.eqlIgnoreCase("cmd", exe_no_ext)) return .cmd;
+    if (std.ascii.eqlIgnoreCase("elvish", name)) return .elvish;
+    if (std.ascii.eqlIgnoreCase("fish", name)) return .fish;
+    if (std.ascii.eqlIgnoreCase("nu", name)) return .nushell;
+    if (std.ascii.eqlIgnoreCase("zsh", name)) return .zsh;
+    if (std.ascii.eqlIgnoreCase("pwsh", name)) return .powershell;
+    if (std.ascii.eqlIgnoreCase("powershell", name)) return .powershell;
+    if (std.ascii.eqlIgnoreCase("cmd", name)) return .cmd;
 
     return null;
 }
@@ -219,6 +219,14 @@ test detectShell {
     try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd" }));
     try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd.exe" }));
     try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "CMD.EXE" }));
+
+    // MSYS2/Cygwin shells are spelled with a `.exe` suffix; they must
+    // detect the same as their bare POSIX names so integration applies.
+    try testing.expectEqual(.zsh, try detectShell(alloc, .{ .shell = "zsh.exe" }));
+    try testing.expectEqual(.fish, try detectShell(alloc, .{ .shell = "fish.exe" }));
+    try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "bash.exe" }));
+    // Forward slashes so basename splits on POSIX CI hosts too (see note below).
+    try testing.expectEqual(.zsh, try detectShell(alloc, .{ .shell = "C:/msys64/usr/bin/zsh.exe -i" }));
 
     // std.fs.path.basename uses POSIX semantics on non-Windows hosts,
     // so a backslash-only path is treated as a single component. Only
