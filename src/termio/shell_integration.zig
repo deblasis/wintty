@@ -83,12 +83,17 @@ pub fn setup(
 
         .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
-        .elvish, .fish => |s| xdg: {
-            // fish under Windows is always MSYS2/Cygwin (no native build), so
-            // it needs POSIX-form paths; elvish has a native Windows build and
-            // keeps the Windows path conventions.
-            const cygwin = s == .fish;
-            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, cygwin)) return null;
+        .fish => try setupFish(
+            alloc_arena,
+            command,
+            resource_dir,
+            env,
+        ),
+
+        .elvish => xdg: {
+            // elvish has a native Windows build and keeps the Windows path
+            // conventions (cygwin = false).
+            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, false)) return null;
             break :xdg try command.clone(alloc_arena);
         },
     } orelse return null;
@@ -1527,6 +1532,124 @@ test "zsh: missing resources" {
     defer env.deinit();
 
     try testing.expect(try setupZsh(alloc, .{ .shell = "zsh" }, resources_dir, &env) == null);
+    try testing.expectEqual(0, env.count());
+}
+
+/// Setup automatic shell integration for fish.
+///
+/// On every platform we export the shell-integration dir via XDG_DATA_DIRS
+/// (Linux fish derives $__fish_vendor_confdirs from it, and the integration
+/// script's own ghostty_restore_xdg_data_dir cleanup needs
+/// GHOSTTY_SHELL_INTEGRATION_XDG_DIR + XDG_DATA_DIRS).
+///
+/// On Windows, fish is always MSYS2/Cygwin (there is no native Windows fish
+/// build), and its $__fish_vendor_confdirs is a fixed set that ignores the
+/// runtime XDG_DATA_DIRS — so the vendor conf is never auto-loaded there.
+/// We deliver it explicitly with `-C 'source <file>'`. `-C` (--init-command)
+/// runs after fish reads its config and vendor dirs but before interactive
+/// input, so sourcing the file registers its `--on-event fish_prompt`
+/// handler normally — the same end state as Linux's auto-load.
+fn setupFish(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+) !?config.Command {
+    if (!try setupXdgDataDirs(alloc, resource_dir, env, true)) return null;
+
+    if (comptime builtin.os.tag == .windows) {
+        // POSIX path to the vendor conf file for the Cygwin/MSYS2 fish.
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const integ_file = try std.fmt.bufPrint(
+            &path_buf,
+            "{s}/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish",
+            .{resource_dir},
+        );
+        const posix_file = try winToCygwinPath(alloc, integ_file);
+
+        var stack_fallback = std.heap.stackFallback(4096, alloc);
+        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+        defer cmd.deinit();
+
+        // Preserve the original command line.
+        var iter = try command.argIterator(alloc);
+        defer iter.deinit();
+        while (iter.next()) |arg| try cmd.appendArg(arg);
+
+        // Append `-C "source '<posix-file>'"`. The outer double quotes make
+        // ArgIteratorGeneral (single_quotes = false) re-parse the value as one
+        // argument; the inner single quotes protect spaces for fish. POSIX
+        // paths contain no `"` or `\`, so no further escaping is needed.
+        try cmd.appendArg("-C");
+        try cmd.appendArg(try std.fmt.allocPrint(
+            alloc,
+            "\"source '{s}'\"",
+            .{posix_file},
+        ));
+
+        return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+    }
+
+    // Non-Windows: the XDG export above is sufficient (Linux/macOS fish).
+    return try command.clone(alloc);
+}
+
+test "fish" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(testing.allocator, .fish);
+    defer res.deinit();
+
+    var env = EnvMap.init(testing.allocator);
+    defer env.deinit();
+
+    const command = try setupFish(alloc, .{ .shell = "fish -i" }, res.path, &env);
+
+    // The XDG dir is exported on every platform; the integration script's own
+    // ghostty_restore_xdg_data_dir cleanup relies on it.
+    try testing.expect(env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
+
+    if (comptime builtin.os.tag == .windows) {
+        // Windows fish is always MSYS2/Cygwin, whose $__fish_vendor_confdirs
+        // ignores runtime XDG_DATA_DIRS, so the vendor conf is delivered
+        // explicitly via `-C 'source <posix-file>'`.
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const integ_file = try std.fmt.bufPrint(
+            &path_buf,
+            "{s}/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish",
+            .{res.path},
+        );
+        const expected = try std.fmt.allocPrint(
+            alloc,
+            "fish -i -C \"source '{s}'\"",
+            .{try winToCygwinPath(alloc, integ_file)},
+        );
+        try testing.expectEqualStrings(expected, command.?.shell);
+    } else {
+        // Other platforms: command unchanged; the XDG export does the work.
+        try testing.expectEqualStrings("fish -i", command.?.shell);
+    }
+}
+
+test "fish: missing resources" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(resources_dir);
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    try testing.expect(try setupFish(alloc, .{ .shell = "fish" }, resources_dir, &env) == null);
     try testing.expectEqual(0, env.count());
 }
 
