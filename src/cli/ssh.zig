@@ -7,8 +7,8 @@ const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
 const internal_os = @import("../os/main.zig");
-const ghostty_terminfo = @import("../terminfo/main.zig").ghostty;
 const global = @import("../global.zig");
+const terminfo_install = @import("../terminfo/install.zig");
 
 const log = std.log.scoped(.ssh);
 
@@ -449,11 +449,6 @@ fn installRemoteTerminfo(
     opts: *const Options,
     stderr: *std.Io.Writer,
 ) !void {
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try ghostty_terminfo.encode(&buf.writer);
-    const terminfo = buf.written();
-
     // ControlPath is in TMPDIR with a short, random basename. ssh uses
     // ControlPath as the bind address for a Unix domain socket; macOS
     // limits sockaddr_un.sun_path to ~104 bytes, so keeping the path
@@ -465,27 +460,12 @@ fn installRemoteTerminfo(
         .{control_path},
     );
 
-    // Under --verbose, let remote stderr through (the `tic` step is
-    // the most common failure source) and inherit ssh's stderr so it
-    // reaches the user's terminal. Other steps stay quiet either way.
-    const remote_script = if (opts.verbose)
-        \\infocmp xterm-ghostty >/dev/null 2>&1 && exit 0
-        \\command -v tic >/dev/null 2>&1 || exit 1
-        \\mkdir -p ~/.terminfo 2>/dev/null && tic -x - && exit 0
-        \\exit 1
-    else
-        \\infocmp xterm-ghostty >/dev/null 2>&1 && exit 0
-        \\command -v tic >/dev/null 2>&1 || exit 1
-        \\mkdir -p ~/.terminfo 2>/dev/null && tic -x - 2>/dev/null && exit 0
-        \\exit 1
-    ;
-
-    // Set up an SSH ControlMaster scoped to this single install:
-    //   - ControlMaster=yes makes our client also act as the master,
-    //     so `infocmp | ssh tic` runs over a single connection.
-    //   - ControlPersist=no tears the master down when our client
-    //     exits; no socket lingers on the remote side.
-    const argv = try std.mem.concat(alloc, []const u8, &.{
+    // The ssh launcher prefix: an SSH ControlMaster scoped to this single
+    // install (ControlMaster=yes makes our client also act as the master so
+    // the install runs over a single connection; ControlPersist=no tears it
+    // down when we exit). terminfo_install.install appends the install script
+    // and pipes the encoded terminfo to the remote's stdin.
+    const prefix = try std.mem.concat(alloc, []const u8, &.{
         &.{opts.ssh},
         &.{
             "-o", "ControlMaster=yes",
@@ -493,31 +473,10 @@ fn installRemoteTerminfo(
             "-o", control_path_opt,
         },
         opts._ssh_args.items,
-        &.{remote_script},
     });
-    verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
+    verbosePrint(opts, stderr, "exec: {f} <terminfo-install>", .{Joined{ .items = prefix }});
 
-    var child = std.process.spawn(global.io(), .{
-        .argv = argv,
-        .stdin = .pipe,
-        .stdout = .ignore,
-        .stderr = if (opts.verbose) .inherit else .ignore,
-    }) catch |err| {
-        log.warn("terminfo install spawn failed: {}", .{err});
-        return error.InstallFailed;
-    };
-
-    if (child.stdin) |stdin| {
-        stdin.writeStreamingAll(global.io(), terminfo) catch {};
-        stdin.close(global.io());
-        child.stdin = null;
-    }
-
-    const term = child.wait(global.io()) catch |err| {
-        log.warn("terminfo install wait failed: {}", .{err});
-        return error.InstallFailed;
-    };
-    checkExit(term, "terminfo install") catch return error.InstallFailed;
+    terminfo_install.install(alloc, prefix, opts.verbose) catch return error.InstallFailed;
 }
 
 /// Returns `128 + signum` for signal-killed children, matching shell convention.
