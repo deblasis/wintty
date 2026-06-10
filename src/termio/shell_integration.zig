@@ -1558,15 +1558,6 @@ fn setupFish(
     if (!try setupXdgDataDirs(alloc, resource_dir, env, true)) return null;
 
     if (comptime builtin.os.tag == .windows) {
-        // POSIX path to the vendor conf file for the Cygwin/MSYS2 fish.
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const integ_file = try std.fmt.bufPrint(
-            &path_buf,
-            "{s}/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish",
-            .{resource_dir},
-        );
-        const posix_file = try winToCygwinPath(alloc, integ_file);
-
         var stack_fallback = std.heap.stackFallback(4096, alloc);
         var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
         defer cmd.deinit();
@@ -1576,16 +1567,28 @@ fn setupFish(
         defer iter.deinit();
         while (iter.next()) |arg| try cmd.appendArg(arg);
 
-        // Append `-C "source '<posix-file>'"`. The outer double quotes make
-        // ArgIteratorGeneral (single_quotes = false) re-parse the value as one
-        // argument; the inner single quotes protect spaces for fish. POSIX
-        // paths contain no `"` or `\`, so no further escaping is needed.
+        // Append `-C "source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/.../ghostty-shell-integration.fish"`.
+        // The outer double quotes make ArgIteratorGeneral (single_quotes =
+        // false) re-parse the value as a single argument.
+        //
+        // We reference the vendor conf through the
+        // GHOSTTY_SHELL_INTEGRATION_XDG_DIR env var (set above by
+        // setupXdgDataDirs, in POSIX form) instead of embedding the literal
+        // path, for two reasons:
+        //   1. The spawned `.shell` command line then carries no filesystem
+        //      path. Embedding one risks cmd.exe metacharacters (`( )` from
+        //      `Program Files (x86)`, `%`, `!`) tripping
+        //      windowsShellNeedsCmdWrapping in Exec.zig, which would route the
+        //      whole command through `cmd.exe /C` — making cmd.exe (not fish)
+        //      the spawned process. `$VAR` is expanded by fish at runtime, not
+        //      on the spawn-side command line, so no path metacharacter ever
+        //      reaches that check.
+        //   2. fish does not word-split variable expansions, so a path with
+        //      spaces resolves as a single token natively.
         try cmd.appendArg("-C");
-        try cmd.appendArg(try std.fmt.allocPrint(
-            alloc,
-            "\"source '{s}'\"",
-            .{posix_file},
-        ));
+        try cmd.appendArg(
+            "\"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
+        );
 
         return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
     }
@@ -1615,19 +1618,18 @@ test "fish" {
     if (comptime builtin.os.tag == .windows) {
         // Windows fish is always MSYS2/Cygwin, whose $__fish_vendor_confdirs
         // ignores runtime XDG_DATA_DIRS, so the vendor conf is delivered
-        // explicitly via `-C 'source <posix-file>'`.
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const integ_file = try std.fmt.bufPrint(
-            &path_buf,
-            "{s}/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish",
-            .{res.path},
+        // explicitly via `-C source`. The path is referenced through the
+        // GHOSTTY_SHELL_INTEGRATION_XDG_DIR env var rather than embedded, so
+        // the command line carries no filesystem path that could trip the
+        // cmd.exe metacharacter check in Exec.zig (e.g. `Program Files (x86)`).
+        try testing.expectEqualStrings(
+            "fish -i -C \"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
+            command.?.shell,
         );
-        const expected = try std.fmt.allocPrint(
-            alloc,
-            "fish -i -C \"source '{s}'\"",
-            .{try winToCygwinPath(alloc, integ_file)},
-        );
-        try testing.expectEqualStrings(expected, command.?.shell);
+        // Regression guard: no resource path is embedded in the command, so
+        // a metacharacter in the install path can never reach windowsShell-
+        // NeedsCmdWrapping (which would force a cmd.exe wrapper).
+        try testing.expect(std.mem.indexOfScalar(u8, command.?.shell, '(') == null);
     } else {
         // Other platforms: command unchanged; the XDG export does the work.
         try testing.expectEqualStrings("fish -i", command.?.shell);
