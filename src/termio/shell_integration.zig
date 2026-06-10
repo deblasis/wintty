@@ -83,8 +83,16 @@ pub fn setup(
 
         .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
-        .elvish, .fish => xdg: {
-            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
+        // fish under Windows is always MSYS2/Cygwin (no native build), so
+        // it needs POSIX-form paths; elvish has a native Windows build and
+        // keeps the Windows path conventions.
+        .fish => xdg: {
+            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, true)) return null;
+            break :xdg try command.clone(alloc_arena);
+        },
+
+        .elvish => xdg: {
+            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, false)) return null;
             break :xdg try command.clone(alloc_arena);
         },
     } orelse return null;
@@ -335,6 +343,43 @@ test "setup features" {
 ///
 /// This returns a new (allocated) shell command string that
 /// enables the integration or null if integration failed.
+/// Convert a Windows path to its Cygwin/MSYS2 POSIX form, e.g.
+/// `C:\Users\x` -> `/c/Users/x`. MSYS2/Git-bash/Cygwin shells interpret
+/// the integration env paths (ENV, ZDOTDIR, XDG_DATA_DIRS) as POSIX, so
+/// the Windows paths Ghostty builds must be translated for them to
+/// resolve. Assumes the default mount (drive `C:` -> `/c`), which is what
+/// MSYS2 and Git for Windows use; a custom mount prefix (rare) would
+/// differ. Non-drive-rooted paths just get backslashes normalized.
+/// Pure string transform; callers gate on the platform/shell.
+fn winToCygwinPath(alloc: Allocator, path: []const u8) ![]u8 {
+    // Strip an extended-length prefix (`\\?\`) that Win32 APIs and
+    // std.fs.realpath can produce, so the drive letter is detectable.
+    const p = if (std.mem.startsWith(u8, path, "\\\\?\\")) path[4..] else path;
+
+    if (p.len >= 2 and p[1] == ':' and std.ascii.isAlphabetic(p[0])) {
+        const rest = p[2..]; // keeps the leading separator
+        const out = try alloc.alloc(u8, 2 + rest.len);
+        out[0] = '/';
+        out[1] = std.ascii.toLower(p[0]);
+        for (rest, 0..) |c, i| out[2 + i] = if (c == '\\') '/' else c;
+        return out;
+    }
+    const out = try alloc.dupe(u8, p);
+    for (out) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+    return out;
+}
+
+/// Returns the form of `win_path` that a shell-integration env var should
+/// carry: on Windows, the Cygwin POSIX form (for MSYS2/Cygwin-family
+/// shells, which are the only bash/zsh/fish that run natively under
+/// ConPTY); on other platforms, the path unchanged.
+fn shellEnvPath(alloc: Allocator, win_path: []const u8) ![]const u8 {
+    if (comptime builtin.os.tag != .windows) return win_path;
+    return try winToCygwinPath(alloc, win_path);
+}
+
 fn setupBash(
     alloc: Allocator,
     command: config.Command,
@@ -415,7 +460,9 @@ fn setupBash(
     );
     if (std.fs.openFileAbsolute(script_path, .{})) |file| {
         file.close();
-        try env.put("ENV", script_path);
+        // The existence check above uses the Windows path; the env var
+        // must carry the POSIX form so MSYS2/Cygwin bash can source it.
+        try env.put("ENV", try shellEnvPath(alloc, script_path));
     } else |err| {
         log.warn("unable to open {s}: {}", .{ script_path, err });
         env.remove("GHOSTTY_BASH_ENV");
@@ -465,7 +512,8 @@ test "bash" {
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
+        // On Windows the ENV value is the Cygwin POSIX form; identity elsewhere.
+        try shellEnvPath(alloc, try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
         env.get("ENV").?,
     );
 }
@@ -604,7 +652,8 @@ test "bash: ENV" {
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
-        try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path}),
+        // On Windows the ENV value is the Cygwin POSIX form; identity elsewhere.
+        try shellEnvPath(alloc, try std.fmt.bufPrint(&path_buf, "{s}/ghostty.bash", .{res.shell_path})),
         env.get("ENV").?,
     );
 }
@@ -660,10 +709,17 @@ test "bash: missing resources" {
 /// It is also saved in the `GHOSTTY_SHELL_INTEGRATION_XDG_DIR` variable
 /// so that the shell can refer to it and safely remove this directory
 /// from `XDG_DATA_DIRS` when integration is complete.
+/// `cygwin` selects the path conventions of the target shell on Windows:
+/// when true (MSYS2/Cygwin fish), the integration path is emitted in POSIX
+/// form (`/c/...`) and joined with the POSIX `:` separator; when false
+/// (native-capable elvish), the Windows path and native separator are kept.
+/// On non-Windows platforms `cygwin` is irrelevant (paths are already
+/// POSIX and the native separator is `:`).
 fn setupXdgDataDirs(
     alloc: Allocator,
     resource_dir: []const u8,
     env: *EnvMap,
+    cygwin: bool,
 ) !bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -679,32 +735,32 @@ fn setupXdgDataDirs(
     };
     integ_dir.close();
 
+    // The existence check above used the Windows path; the env vars must
+    // carry the POSIX form for a Cygwin/MSYS2 shell (e.g. fish under MSYS2),
+    // and that shell joins XDG_DATA_DIRS with `:`, not the Windows `;`.
+    const win_cygwin = builtin.os.tag == .windows and cygwin;
+    const env_path: []const u8 = if (win_cygwin)
+        try winToCygwinPath(alloc, integ_path)
+    else
+        integ_path;
+    const delimiter: u8 = if (win_cygwin) ':' else std.fs.path.delimiter;
+
     // Set an env var so we can remove this from XDG_DATA_DIRS later.
     // This happens in the shell integration config itself. We do this
     // so that our modifications don't interfere with other commands.
-    try env.put("GHOSTTY_SHELL_INTEGRATION_XDG_DIR", integ_path);
-
-    // We attempt to avoid allocating by using the stack up to 4K.
-    // Max stack size is considerably larger on mac
-    // 4K is a reasonable size for this for most cases. However, env
-    // vars can be significantly larger so if we have to we fall
-    // back to a heap allocated value.
-    var stack_alloc_state = std.heap.stackFallback(4096, alloc);
-    const stack_alloc = stack_alloc_state.get();
+    try env.put("GHOSTTY_SHELL_INTEGRATION_XDG_DIR", env_path);
 
     // If no XDG_DATA_DIRS set use the default value as specified.
     // This ensures that the default directories aren't lost by setting
     // our desired integration dir directly. See #2711.
     // <https://specifications.freedesktop.org/basedir-spec/0.6/#variables>
     const xdg_data_dirs_key = "XDG_DATA_DIRS";
-    try env.put(
-        xdg_data_dirs_key,
-        try internal_os.prependEnv(
-            stack_alloc,
-            env.get(xdg_data_dirs_key) orelse "/usr/local/share:/usr/share",
-            integ_path,
-        ),
-    );
+    const current = env.get(xdg_data_dirs_key) orelse "/usr/local/share:/usr/share";
+    const joined = if (current.len == 0)
+        try alloc.dupe(u8, env_path)
+    else
+        try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{ env_path, delimiter, current });
+    try env.put(xdg_data_dirs_key, joined);
 
     return true;
 }
@@ -724,7 +780,7 @@ test "xdg: empty XDG_DATA_DIRS" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env));
+    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env, true));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
@@ -754,7 +810,7 @@ test "xdg: existing XDG_DATA_DIRS" {
 
     try env.put("XDG_DATA_DIRS", "/opt/share");
 
-    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env));
+    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env, true));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
@@ -782,8 +838,128 @@ test "xdg: missing resources" {
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    try testing.expect(!try setupXdgDataDirs(alloc, resources_dir, &env));
+    try testing.expect(!try setupXdgDataDirs(alloc, resources_dir, &env, false));
     try testing.expectEqual(0, env.count());
+}
+
+test "winToCygwinPath: drive-rooted path" {
+    const testing = std.testing;
+    const out = try winToCygwinPath(testing.allocator, "C:\\Users\\x\\share\\ghostty");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("/c/Users/x/share/ghostty", out);
+}
+
+test "winToCygwinPath: lowercases drive and handles forward slashes" {
+    const testing = std.testing;
+    const a = try winToCygwinPath(testing.allocator, "D:\\Foo");
+    defer testing.allocator.free(a);
+    try testing.expectEqualStrings("/d/Foo", a);
+    const b = try winToCygwinPath(testing.allocator, "C:/a/b");
+    defer testing.allocator.free(b);
+    try testing.expectEqualStrings("/c/a/b", b);
+}
+
+test "winToCygwinPath: non-drive path just normalizes slashes" {
+    const testing = std.testing;
+    const out = try winToCygwinPath(testing.allocator, "relative\\path");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("relative/path", out);
+}
+
+test "winToCygwinPath: strips extended-length prefix" {
+    const testing = std.testing;
+    const out = try winToCygwinPath(testing.allocator, "\\\\?\\C:\\Users\\x");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("/c/Users/x", out);
+}
+
+test "bash: ENV is a POSIX path on Windows" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupBash(alloc, .{ .shell = "bash" }, res.path, &env);
+
+    const v = env.get("ENV") orelse return error.NoEnv;
+    try testing.expect(std.mem.startsWith(u8, v, "/"));
+    try testing.expect(std.mem.indexOfScalar(u8, v, '\\') == null);
+    try testing.expect(std.mem.indexOfScalar(u8, v, ':') == null);
+    try testing.expect(std.mem.endsWith(u8, v, "/shell-integration/bash/ghostty.bash"));
+}
+
+test "zsh: ZDOTDIR is a POSIX path on Windows" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .zsh);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupZsh(alloc, .{ .shell = "zsh" }, res.path, &env);
+
+    const v = env.get("ZDOTDIR") orelse return error.NoZdotdir;
+    try testing.expect(std.mem.startsWith(u8, v, "/"));
+    try testing.expect(std.mem.indexOfScalar(u8, v, '\\') == null);
+    try testing.expect(std.mem.endsWith(u8, v, "/shell-integration/zsh"));
+}
+
+test "xdg fish: POSIX path and ':' delimiter on Windows" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .fish);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("XDG_DATA_DIRS", "/usr/share");
+
+    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env, true));
+
+    const dir = env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") orelse return error.NoXdgDir;
+    try testing.expect(std.mem.startsWith(u8, dir, "/"));
+    try testing.expect(std.mem.indexOfScalar(u8, dir, '\\') == null);
+
+    const dirs = env.get("XDG_DATA_DIRS") orelse return error.NoXdgDirs;
+    try testing.expect(std.mem.startsWith(u8, dirs, "/"));
+    // POSIX join, and the prior value is preserved after a ':'.
+    try testing.expect(std.mem.endsWith(u8, dirs, ":/usr/share"));
+}
+
+test "xdg elvish: keeps the Windows path on Windows" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .elvish);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    try testing.expect(try setupXdgDataDirs(alloc, res.path, &env, false));
+
+    // Native elvish keeps the Windows path (drive-letter ':' present).
+    const dir = env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") orelse return error.NoXdgDir;
+    try testing.expect(std.mem.indexOfScalar(u8, dir, ':') != null);
 }
 
 /// Set up automatic Nushell shell integration. This works by adding our
@@ -801,7 +977,7 @@ fn setupNushell(
     // Add our XDG_DATA_DIRS entry (for nushell/vendor/autoload/). This
     // makes our 'ghostty' module automatically available, even if any
     // of the later checks abort the rest of our automatic integration.
-    if (!try setupXdgDataDirs(alloc, resource_dir, env)) return null;
+    if (!try setupXdgDataDirs(alloc, resource_dir, env, false)) return null;
 
     var stack_fallback = std.heap.stackFallback(4096, alloc);
     var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
@@ -1255,7 +1431,9 @@ fn setupZsh(
         return null;
     };
     integ_dir.close();
-    try env.put("ZDOTDIR", integ_path);
+    // Existence check uses the Windows path; the env var carries the POSIX
+    // form so MSYS2/Cygwin zsh resolves ZDOTDIR.
+    try env.put("ZDOTDIR", try shellEnvPath(alloc, integ_path));
 
     return try command.clone(alloc);
 }
@@ -1275,7 +1453,7 @@ test "zsh" {
 
     const command = try setupZsh(alloc, .{ .shell = "zsh" }, res.path, &env);
     try testing.expectEqualStrings("zsh", command.?.shell);
-    try testing.expectEqualStrings(res.shell_path, env.get("ZDOTDIR").?);
+    try testing.expectEqualStrings(try shellEnvPath(alloc, res.shell_path), env.get("ZDOTDIR").?);
     try testing.expect(env.get("GHOSTTY_ZSH_ZDOTDIR") == null);
 }
 
@@ -1296,7 +1474,7 @@ test "zsh: ZDOTDIR" {
 
     const command = try setupZsh(alloc, .{ .shell = "zsh" }, res.path, &env);
     try testing.expectEqualStrings("zsh", command.?.shell);
-    try testing.expectEqualStrings(res.shell_path, env.get("ZDOTDIR").?);
+    try testing.expectEqualStrings(try shellEnvPath(alloc, res.shell_path), env.get("ZDOTDIR").?);
     try testing.expectEqualStrings("$HOME/.config/zsh", env.get("GHOSTTY_ZSH_ZDOTDIR").?);
 }
 
