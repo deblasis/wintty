@@ -81,7 +81,7 @@ pub fn setup(
             env,
         ),
 
-        .cmd => try setupCmd(alloc_arena, command, env),
+        .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
         .elvish, .fish => xdg: {
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
@@ -1064,13 +1064,22 @@ test "powershell: user-supplied args are left untouched" {
 /// Setup cmd.exe shell integration. cmd has no rc file or pre/post-exec
 /// hooks, but it re-expands the PROMPT env var on every prompt and supports
 /// `$e` (ESC) on Windows 10+. We wrap the prompt body in OSC 133;A / 133;B
-/// (prompt-start / input-start) and report cwd via OSC 9;9. No command
-/// start/end (C/D) marks are possible. Unlike the script-based shells, cmd
+/// (prompt-start / input-start) and report cwd via OSC 9;9. PROMPT cannot
+/// emit command start/end (C/D) marks. Unlike the script-based shells, cmd
 /// has no way to read GHOSTTY_SHELL_FEATURES at runtime, so these marks are
 /// always emitted (the gated features do not apply to cmd anyway).
+///
+/// For the missing C/D marks we additionally prepend our shell-integration
+/// "cmd" directory to CLINK_PATH. When the user runs Clink, it autoloads
+/// `ghostty.lua` from there and emits OSC 133;C / 133;D;<code> to complement
+/// the PROMPT-based A/B marks. CLINK_PATH is a native Windows path list
+/// (`;`-separated), so no POSIX path conversion is involved, and it is a
+/// harmless no-op when Clink is not installed. We skip it when the
+/// integration directory is missing (e.g. a build without resources).
 fn setupCmd(
     alloc_arena: Allocator,
     command: config.Command,
+    resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
     // Preserve the user's prompt body if set, else cmd's default `$p$g`.
@@ -1082,6 +1091,35 @@ fn setupCmd(
         .{body},
     );
     try env.put("PROMPT", wrapped);
+
+    // Forward slashes are fine for Clink on Windows, matching the other
+    // setup functions' path style.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const clink_dir = try std.fmt.bufPrint(
+        &path_buf,
+        "{s}/shell-integration/cmd",
+        .{resource_dir},
+    );
+    if (std.fs.openDirAbsolute(clink_dir, .{})) |dir_| {
+        var dir = dir_;
+        dir.close();
+        try env.put(
+            "CLINK_PATH",
+            try internal_os.prependEnv(
+                alloc_arena,
+                env.get("CLINK_PATH") orelse "",
+                clink_dir,
+            ),
+        );
+    } else |err| switch (err) {
+        // No integration dir is the expected case for a build without
+        // resources (e.g. lib-only): base PROMPT marks still apply and
+        // Clink users just won't get the C/D marks. Don't warn on every
+        // cmd launch for it; reserve warn for genuine failures.
+        error.FileNotFound => log.debug("cmd: no clink integration dir at {s}", .{clink_dir}),
+        else => log.warn("cmd: clink integration dir unavailable {s}: {}", .{ clink_dir, err }),
+    }
+
     return try command.clone(alloc_arena);
 }
 
@@ -1091,10 +1129,13 @@ test "cmd: PROMPT carries OSC 133 marks" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
-    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env);
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
 
     const prompt = env.get("PROMPT") orelse return error.NoPrompt;
     try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
@@ -1108,17 +1149,84 @@ test "cmd: preserves existing PROMPT body" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
     var env = EnvMap.init(alloc);
     defer env.deinit();
 
     try env.put("PROMPT", "$p$g$s");
 
-    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, &env);
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
 
     const prompt = env.get("PROMPT") orelse return error.NoPrompt;
     try testing.expect(std.mem.indexOf(u8, prompt, "$p$g$s") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "133;A") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "133;B") != null);
+}
+
+test "cmd: CLINK_PATH includes the shell-integration cmd dir" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    // Exact match: with no prior CLINK_PATH, ours is the sole entry.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&path_buf, "{s}/shell-integration/cmd", .{res.path}),
+        env.get("CLINK_PATH") orelse return error.NoClinkPath,
+    );
+}
+
+test "cmd: CLINK_PATH prepends ours and preserves existing entries" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    try env.put("CLINK_PATH", "C:\\my\\scripts");
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    const clink = env.get("CLINK_PATH") orelse return error.NoClinkPath;
+    // Windows path-list delimiter is ';'. Ours is prepended.
+    try testing.expect(std.mem.endsWith(u8, clink, "C:\\my\\scripts"));
+    try testing.expect(std.mem.indexOf(u8, clink, ";") != null);
+    try testing.expect(std.mem.indexOf(u8, clink, "shell-integration") != null);
+}
+
+test "cmd: CLINK_PATH is left unset when the cmd integration dir is absent" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A resources dir whose shell-integration has bash but no cmd/.
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    _ = try setupCmd(alloc, .{ .shell = "cmd.exe" }, res.path, &env);
+
+    try testing.expect(env.get("PROMPT") != null);
+    try testing.expect(env.get("CLINK_PATH") == null);
 }
 
 /// Setup the zsh automatic shell integration. This works by setting
