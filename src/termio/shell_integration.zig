@@ -84,12 +84,17 @@ pub fn setup(
 
         .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
 
-        .elvish, .fish => |s| xdg: {
-            // fish under Windows is always MSYS2/Cygwin (no native build), so
-            // it needs POSIX-form paths; elvish has a native Windows build and
-            // keeps the Windows path conventions.
-            const cygwin = s == .fish;
-            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, cygwin)) return null;
+        .fish => try setupFish(
+            alloc_arena,
+            command,
+            resource_dir,
+            env,
+        ),
+
+        .elvish => xdg: {
+            // elvish has a native Windows build and keeps the Windows path
+            // conventions (cygwin = false).
+            if (!try setupXdgDataDirs(alloc_arena, resource_dir, env, false)) return null;
             break :xdg try command.clone(alloc_arena);
         },
     } orelse return null;
@@ -1557,6 +1562,128 @@ test "zsh: missing resources" {
     defer env.deinit();
 
     try testing.expect(try setupZsh(alloc, .{ .shell = "zsh" }, resources_dir, &env) == null);
+    try testing.expectEqual(0, env.count());
+}
+
+/// Setup automatic shell integration for fish.
+///
+/// On every platform we export the shell-integration dir via XDG_DATA_DIRS
+/// (Linux fish derives $__fish_vendor_confdirs from it, and the integration
+/// script's own ghostty_restore_xdg_data_dir cleanup needs
+/// GHOSTTY_SHELL_INTEGRATION_XDG_DIR + XDG_DATA_DIRS).
+///
+/// On Windows, fish is always MSYS2/Cygwin (there is no native Windows fish
+/// build), and its $__fish_vendor_confdirs is a fixed set that ignores the
+/// runtime XDG_DATA_DIRS — so the vendor conf is never auto-loaded there.
+/// We deliver it explicitly by appending `-C "source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/.../ghostty-shell-integration.fish"`
+/// (see the inline comment below for why the path is referenced via the env
+/// var rather than embedded). `-C` (--init-command) runs after fish reads its
+/// configuration but before interactive input, so sourcing the file registers
+/// its `--on-event fish_prompt` handler normally — the same end state as
+/// Linux's auto-load.
+fn setupFish(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+) !?config.Command {
+    if (!try setupXdgDataDirs(alloc, resource_dir, env, true)) return null;
+
+    if (comptime builtin.os.tag == .windows) {
+        var stack_fallback = std.heap.stackFallback(4096, alloc);
+        var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+        defer cmd.deinit();
+
+        // Preserve the original command line.
+        var iter = try command.argIterator(alloc);
+        defer iter.deinit();
+        while (iter.next()) |arg| try cmd.appendArg(arg);
+
+        // Append `-C "source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/.../ghostty-shell-integration.fish"`.
+        // The outer double quotes make ArgIteratorGeneral (single_quotes =
+        // false) re-parse the value as a single argument.
+        //
+        // We reference the vendor conf through the
+        // GHOSTTY_SHELL_INTEGRATION_XDG_DIR env var (set above by
+        // setupXdgDataDirs, in POSIX form) instead of embedding the literal
+        // path, for two reasons:
+        //   1. The spawned `.shell` command line then carries no filesystem
+        //      path. Embedding one risks cmd.exe metacharacters (`( )` from
+        //      `Program Files (x86)`, `%`, `!`) tripping
+        //      windowsShellNeedsCmdWrapping in Exec.zig, which would route the
+        //      whole command through `cmd.exe /C` — making cmd.exe (not fish)
+        //      the spawned process. `$VAR` is expanded by fish at runtime, not
+        //      on the spawn-side command line, so no path metacharacter ever
+        //      reaches that check.
+        //   2. fish does not word-split variable expansions, so a path with
+        //      spaces resolves as a single token natively.
+        try cmd.appendArg("-C");
+        try cmd.appendArg(
+            "\"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
+        );
+
+        return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+    }
+
+    // Non-Windows: the XDG export above is sufficient (Linux/macOS fish).
+    return try command.clone(alloc);
+}
+
+test "fish" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(testing.allocator, .fish);
+    defer res.deinit();
+
+    var env = EnvMap.init(testing.allocator);
+    defer env.deinit();
+
+    const command = try setupFish(alloc, .{ .shell = "fish -i" }, res.path, &env);
+
+    // The XDG dir is exported on every platform; the integration script's own
+    // ghostty_restore_xdg_data_dir cleanup relies on it.
+    try testing.expect(env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
+
+    if (comptime builtin.os.tag == .windows) {
+        // Windows fish is always MSYS2/Cygwin, whose $__fish_vendor_confdirs
+        // ignores runtime XDG_DATA_DIRS, so the vendor conf is delivered
+        // explicitly via `-C source`. The path is referenced through the
+        // GHOSTTY_SHELL_INTEGRATION_XDG_DIR env var rather than embedded, so
+        // the command line carries no filesystem path that could trip the
+        // cmd.exe metacharacter check in Exec.zig (e.g. `Program Files (x86)`).
+        try testing.expectEqualStrings(
+            "fish -i -C \"source $GHOSTTY_SHELL_INTEGRATION_XDG_DIR/fish/vendor_conf.d/ghostty-shell-integration.fish\"",
+            command.?.shell,
+        );
+        // Regression guard: no resource path is embedded in the command, so
+        // a metacharacter in the install path can never reach windowsShell-
+        // NeedsCmdWrapping (which would force a cmd.exe wrapper).
+        try testing.expect(std.mem.indexOfScalar(u8, command.?.shell, '(') == null);
+    } else {
+        // Other platforms: command unchanged; the XDG export does the work.
+        try testing.expectEqualStrings("fish -i", command.?.shell);
+    }
+}
+
+test "fish: missing resources" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(resources_dir);
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    try testing.expect(try setupFish(alloc, .{ .shell = "fish" }, resources_dir, &env) == null);
     try testing.expectEqual(0, env.count());
 }
 
