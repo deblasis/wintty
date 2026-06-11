@@ -58,6 +58,10 @@ pub const StreamHandler = struct {
     /// whoever owns StreamHandler.
     enquiry_response: []const u8,
 
+    /// WSL launch context for OSC 7 path translation. null for non-WSL (and
+    /// non-Windows) surfaces. Owns `distro` (freed in deinit).
+    wsl: ?internal_os.windows_shell.WslContext = null,
+
     /// The color reporting format for OSC requests.
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
 
@@ -105,6 +109,7 @@ pub const StreamHandler = struct {
         self.apc.deinit();
         self.dcs.deinit();
         self.multipart_iterm2.deinit(self.alloc);
+        if (self.wsl) |w| if (w.distro) |d| self.alloc.free(d);
         if (comptime tmux_enabled) tmux: {
             const viewer = self.tmux_viewer orelse break :tmux;
             viewer.deinit();

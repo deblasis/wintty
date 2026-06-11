@@ -272,10 +272,20 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     var backend = opts.backend;
     backend.initTerminal(&term);
 
+    // Derive WSL launch context (for OSC 7 path translation). Returns null on
+    // non-Windows and for non-WSL surfaces.
+    const wsl_ctx = internal_os.windows_shell.WslContext.fromArgs(
+        alloc,
+        switch (backend) {
+            .exec => |*exec| exec.subprocess.args,
+        },
+    );
+
     // Create our stream handler. This points to memory in self so it
     // isn't safe to use until self.* is set.
     const handler: StreamHandler = .{
         .alloc = alloc,
+        .wsl = wsl_ctx,
         .termio_mailbox = &self.mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
