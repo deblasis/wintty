@@ -8,6 +8,14 @@ const windows = std.os.windows;
 // information (mostly coming from stdlib) and manually-defined constants and
 // external functions.
 
+// Registry access, used to resolve the default WSL distro name.
+pub const kernel32 = windows.kernel32;
+pub const advapi32 = windows.advapi32;
+pub const HKEY = windows.HKEY;
+pub const HKEY_CURRENT_USER = windows.HKEY_CURRENT_USER;
+pub const OpenFile = windows.OpenFile;
+pub const CloseHandle = windows.CloseHandle;
+
 // Utility functions
 pub const GetCurrentProcessId = windows.GetCurrentProcessId;
 pub const GetLastError = windows.GetLastError;
