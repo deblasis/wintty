@@ -60,6 +60,9 @@ pub fn rootedToWindows(
     // otherwise be mis-read as a root-relative `/cygdrive` directory).
     if (driveAfter(posix_path, "/cygdrive/")) |m| return driveForm(alloc, m);
     // MSYS2/Git default automount: a single-letter top-level segment is a drive.
+    // This shadows a hypothetical single-letter root-relative directory (e.g. a
+    // literal `/c` dir), but stock MSYS2/Git/Cygwin layouts have none, so the
+    // automount reading is correct in practice.
     if (driveAfter(posix_path, "/")) |m| return driveForm(alloc, m);
 
     // Everything else lives under the install root.
@@ -134,7 +137,7 @@ fn expectRooted(
     try std.testing.expectEqualStrings(expected, got);
 }
 
-test "wsl_path: /mnt drive forms" {
+test "posix_path: wsl /mnt drive forms" {
     try expectTranslate("C:\\Users\\alex", "/mnt/c/Users/alex", "Ubuntu");
     try expectTranslate("C:\\", "/mnt/c", "Ubuntu");
     try expectTranslate("C:\\", "/mnt/c/", "Ubuntu");
@@ -143,7 +146,7 @@ test "wsl_path: /mnt drive forms" {
     try expectTranslate("C:\\src", "/mnt/c/src", "Ubuntu");
 }
 
-test "wsl_path: UNC distro forms" {
+test "posix_path: wsl UNC distro forms" {
     try expectTranslate(
         "\\\\wsl.localhost\\Ubuntu-24.04\\home\\alex",
         "/home/alex",
@@ -164,14 +167,14 @@ test "wsl_path: UNC distro forms" {
     );
 }
 
-test "wsl_path: unknown distro on non-/mnt path errors" {
+test "posix_path: wsl unknown distro on non-/mnt path errors" {
     try std.testing.expectError(
         error.UnknownDistro,
         wslToWindows(std.testing.allocator, "/home/alex", null),
     );
 }
 
-test "wsl_path: non-absolute or empty is invalid" {
+test "posix_path: wsl non-absolute or empty is invalid" {
     try std.testing.expectError(
         error.InvalidPath,
         wslToWindows(std.testing.allocator, "", "Ubuntu"),
@@ -185,7 +188,7 @@ test "wsl_path: non-absolute or empty is invalid" {
 // Exercises the exact OSC 7 parse -> path-extract -> translate chain that
 // stream_handler.reportPwd runs, for both shell-emitted URL forms. This guards
 // the one seam the unit tests above don't reach (URL parsing + fish escaping).
-test "wsl_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
+test "posix_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
     const builtin = @import("builtin");
     const uri = @import("uri.zig");
 

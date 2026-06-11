@@ -240,8 +240,12 @@ pub fn installRootFromExe(alloc: std.mem.Allocator, arg0: []const u8) ?[]u8 {
         (std.fs.path.dirnameWindows(up1) orelse return null)
     else
         up1;
-    if (root.len == 0) return null;
-    return alloc.dupe(u8, root) catch null;
+    // A drive-root install (`C:\bin\bash.exe`) leaves a trailing separator
+    // (`C:\`); strip it so the result honors rootedToWindows's "no trailing
+    // separator" contract (otherwise root-relative paths get a doubled `\`).
+    const normalized = std.mem.trimRight(u8, root, "\\/");
+    if (normalized.len == 0) return null;
+    return alloc.dupe(u8, normalized) catch null;
 }
 
 /// Returns true if the system ANSI codepage (`GetACP()`) is one of the
@@ -653,6 +657,8 @@ pub fn osc7ContextFromArgs(
 ) ?Osc7Context {
     if (comptime builtin.os.tag != .windows) return null;
     if (args.len == 0) return null;
+    // wsl.exe is handled here and is not a rooted kind, so it can never reach
+    // the rooted gate below (keep that true if isRootedPosixShell changes).
     if (WslContext.fromArgs(alloc, args)) |w| return .{ .wsl = w };
     if (isRootedPosixShell(identify(args[0]))) {
         return .{ .rooted = .{ .install_root = installRootFromExe(alloc, args[0]) } };
@@ -841,6 +847,15 @@ test "installRootFromExe: unknown layout or bare name -> null" {
     try testing.expect(installRootFromExe(alloc, "bash.exe") == null);
     try testing.expect(installRootFromExe(alloc, "C:\\Windows\\System32\\bash.exe") == null);
     try testing.expect(installRootFromExe(alloc, "C:\\tools\\bash.exe") == null);
+}
+
+test "installRootFromExe: drive-root install strips trailing separator" {
+    const alloc = testing.allocator;
+    // <drive>\bin\bash.exe would yield root "C:\" -> normalized to "C:" so
+    // rootedToWindows doesn't produce a doubled separator.
+    const r = installRootFromExe(alloc, "C:\\bin\\bash.exe").?;
+    defer alloc.free(r);
+    try testing.expectEqualStrings("C:", r);
 }
 
 test "isRootedPosixShell: bash/zsh/fish only" {
