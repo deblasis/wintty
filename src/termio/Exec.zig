@@ -895,6 +895,10 @@ const Subprocess = struct {
                 defer it.deinit();
                 const arg0 = it.next() orelse break :wsl;
                 if (!internal_os.windows_shell.isWslExe(arg0)) break :wsl;
+                // WSL integration is best-effort, so unlike the native
+                // shell_integration.setup below (which `try`s and treats OOM as
+                // fatal) we catch and downgrade to a warning: a failed WSL
+                // injection should never abort the spawn.
                 wsl_shell_integration.setup(alloc, dir, &env) catch |err| {
                     log.warn("WSL shell integration failed: {}", .{err});
                 };

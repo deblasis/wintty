@@ -346,3 +346,8 @@ test "posix_path: windowsToWsl rejects UNC" {
 test "posix_path: windowsToWsl rejects relative" {
     try expectWinToWsl(null, "relative\\path");
 }
+
+test "posix_path: windowsToWsl bare drive" {
+    // A drive root with no remainder maps to `/mnt/<d>` (no trailing slash).
+    try expectWinToWsl("/mnt/c", "C:");
+}

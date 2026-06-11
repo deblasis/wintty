@@ -26,6 +26,13 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
 
     // zsh: ZDOTDIR -> <resource_dir>/shell-integration/zsh (holds our .zshenv,
     // which restores the user's real zsh config).
+    //
+    // Unlike native setupZsh, we do NOT preserve a pre-existing ZDOTDIR into
+    // GHOSTTY_ZSH_ZDOTDIR. Any inbound ZDOTDIR here is a Windows-side value,
+    // meaningless inside the distro; forwarding it would make our .zshenv
+    // "restore" ZDOTDIR to a bogus Windows path in the distro. The distro's
+    // own default (unset -> $HOME) is the correct chain target, which leaving
+    // GHOSTTY_ZSH_ZDOTDIR unset yields.
     {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const win = try std.fmt.bufPrint(&buf, "{s}/shell-integration/zsh", .{resource_dir});
