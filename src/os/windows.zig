@@ -4,6 +4,9 @@ const windows = std.os.windows;
 // Export any constants or functions we need from the Windows API so
 // we can just import one file.
 pub const kernel32 = windows.kernel32;
+pub const advapi32 = windows.advapi32;
+pub const HKEY = windows.HKEY;
+pub const HKEY_CURRENT_USER = windows.HKEY_CURRENT_USER;
 pub const unexpectedError = windows.unexpectedError;
 pub const OpenFile = windows.OpenFile;
 pub const CloseHandle = windows.CloseHandle;
