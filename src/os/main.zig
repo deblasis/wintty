@@ -27,6 +27,7 @@ pub const passwd = @import("passwd.zig");
 pub const xdg = @import("xdg.zig");
 pub const windows = @import("windows.zig");
 pub const windows_shell = @import("windows_shell.zig");
+pub const wsl_path = @import("wsl_path.zig");
 pub const macos = @import("macos.zig");
 pub const shell = @import("shell.zig");
 pub const stderr = @import("stderr.zig");
@@ -65,6 +66,7 @@ test {
     _ = uri;
     _ = shell;
     _ = windows_shell;
+    _ = wsl_path;
 
     if (comptime builtin.os.tag == .linux) {
         _ = kernel_info;
