@@ -214,6 +214,40 @@ pub fn winptyCandidatePaths(
     };
 }
 
+/// True for the POSIX-emulation shells (MSYS2/Git-Bash/Cygwin) that report
+/// `/`-rooted POSIX cwd paths via OSC 7. Excludes nu/elvish/xonsh, whose native
+/// Windows builds report `C:\...` already (translating those would corrupt a
+/// correct path).
+fn isRootedPosixShell(kind: Kind) bool {
+    return switch (kind) {
+        .bash, .zsh, .fish => true,
+        else => false,
+    };
+}
+
+/// Derive the install root from a POSIX-shell exe path by stripping the known
+/// layout suffix: `<root>\usr\bin\<sh>.exe` (MSYS2, Git's usr layout) or
+/// `<root>\bin\<sh>.exe` (Git, Cygwin). Owned dupe; null if neither layout
+/// matches (the caller then no-ops root-relative paths rather than guessing).
+/// Pure Windows path math (dirnameWindows/basenameWindows) so it is
+/// deterministic when these tests run on a non-Windows CI host.
+pub fn installRootFromExe(alloc: std.mem.Allocator, arg0: []const u8) ?[]u8 {
+    const trimmed = std.mem.trim(u8, arg0, "\"' \t\r\n");
+    const bin = std.fs.path.dirnameWindows(trimmed) orelse return null;
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.basenameWindows(bin), "bin")) return null;
+    const up1 = std.fs.path.dirnameWindows(bin) orelse return null;
+    const root = if (std.ascii.eqlIgnoreCase(std.fs.path.basenameWindows(up1), "usr"))
+        (std.fs.path.dirnameWindows(up1) orelse return null)
+    else
+        up1;
+    // A drive-root install (`C:\bin\bash.exe`) leaves a trailing separator
+    // (`C:\`); strip it so the result honors rootedToWindows's "no trailing
+    // separator" contract (otherwise root-relative paths get a doubled `\`).
+    const normalized = std.mem.trimRight(u8, root, "\\/");
+    if (normalized.len == 0) return null;
+    return alloc.dupe(u8, normalized) catch null;
+}
+
 /// Returns true if the system ANSI codepage (`GetACP()`) is one of the
 /// legacy double-byte CJK codepages where forcing UTF-8 on a spawned
 /// shell would mojibake legacy `.bat` scripts whose script text is
@@ -600,6 +634,38 @@ pub const WslContext = struct {
     }
 };
 
+/// OSC 7 context for a MSYS2/Git-Bash/Cygwin surface: the install root used to
+/// resolve root-relative POSIX paths. null when it could not be derived from
+/// argv[0] (root-relative paths then no-op; drive-form paths still translate).
+pub const RootedContext = struct { install_root: ?[]const u8 = null };
+
+/// What a Windows POSIX-emulation surface needs to translate OSC 7 paths: a WSL
+/// distro (UNC form) or a MSYS2/Cygwin install root (rooted form).
+pub const Osc7Context = union(enum) {
+    wsl: WslContext,
+    rooted: RootedContext,
+};
+
+/// Detect the OSC 7 path-translation context from a spawn argv. Pure and
+/// deterministic (the wsl arm's default-distro registry resolution happens
+/// later, in Termio). Returns null for non-Windows, non-POSIX shells
+/// (cmd/pwsh/nu/...), and empty argv. When present, owned strings inside must
+/// be freed by the caller (Termio errdefer + StreamHandler.deinit).
+pub fn osc7ContextFromArgs(
+    alloc: std.mem.Allocator,
+    args: []const [:0]const u8,
+) ?Osc7Context {
+    if (comptime builtin.os.tag != .windows) return null;
+    if (args.len == 0) return null;
+    // wsl.exe is handled here and is not a rooted kind, so it can never reach
+    // the rooted gate below (keep that true if isRootedPosixShell changes).
+    if (WslContext.fromArgs(alloc, args)) |w| return .{ .wsl = w };
+    if (isRootedPosixShell(identify(args[0]))) {
+        return .{ .rooted = .{ .install_root = installRootFromExe(alloc, args[0]) } };
+    }
+    return null;
+}
+
 test "wslDistro: detects distro and default, ignores non-WSL" {
     {
         const argv = [_][]const u8{ "wsl.exe", "-d", "Ubuntu" };
@@ -739,7 +805,7 @@ test "defaultDistroName: links, never crashes, returns null-or-nonempty" {
 test "integration: resolved default distro feeds OSC 7 UNC translation" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
-    const wsl_path = @import("wsl_path.zig");
+    const posix_path = @import("posix_path.zig");
 
     // No default distro on this host (e.g. CI without WSL) -> nothing to prove.
     const distro = defaultDistroName(alloc) orelse return;
@@ -748,9 +814,95 @@ test "integration: resolved default distro feeds OSC 7 UNC translation" {
     // The gap this slice closes: an in-distro path (which yielded
     // error.UnknownDistro for a bare-wsl surface before resolution) must now
     // translate to the UNC form using the resolved name.
-    const win = try wsl_path.posixToWindows(alloc, "/home/alex", distro);
+    const win = try posix_path.wslToWindows(alloc, "/home/alex", distro);
     defer alloc.free(win);
     try testing.expect(std.mem.startsWith(u8, win, "\\\\wsl.localhost\\"));
     try testing.expect(std.mem.indexOf(u8, win, distro) != null);
     try testing.expect(std.mem.endsWith(u8, win, "\\home\\alex"));
+}
+
+test "installRootFromExe: MSYS2 usr\\bin layout" {
+    const alloc = testing.allocator;
+    const r = installRootFromExe(alloc, "C:\\msys64\\usr\\bin\\bash.exe").?;
+    defer alloc.free(r);
+    try testing.expectEqualStrings("C:\\msys64", r);
+}
+
+test "installRootFromExe: Git/Cygwin bin layout" {
+    const alloc = testing.allocator;
+    {
+        const r = installRootFromExe(alloc, "C:\\Program Files\\Git\\bin\\bash.exe").?;
+        defer alloc.free(r);
+        try testing.expectEqualStrings("C:\\Program Files\\Git", r);
+    }
+    {
+        const r = installRootFromExe(alloc, "C:\\cygwin64\\bin\\zsh.exe").?;
+        defer alloc.free(r);
+        try testing.expectEqualStrings("C:\\cygwin64", r);
+    }
+}
+
+test "installRootFromExe: unknown layout or bare name -> null" {
+    const alloc = testing.allocator;
+    try testing.expect(installRootFromExe(alloc, "bash.exe") == null);
+    try testing.expect(installRootFromExe(alloc, "C:\\Windows\\System32\\bash.exe") == null);
+    try testing.expect(installRootFromExe(alloc, "C:\\tools\\bash.exe") == null);
+}
+
+test "installRootFromExe: drive-root install strips trailing separator" {
+    const alloc = testing.allocator;
+    // <drive>\bin\bash.exe would yield root "C:\" -> normalized to "C:" so
+    // rootedToWindows doesn't produce a doubled separator.
+    const r = installRootFromExe(alloc, "C:\\bin\\bash.exe").?;
+    defer alloc.free(r);
+    try testing.expectEqualStrings("C:", r);
+}
+
+test "isRootedPosixShell: bash/zsh/fish only" {
+    try testing.expect(isRootedPosixShell(.bash));
+    try testing.expect(isRootedPosixShell(.zsh));
+    try testing.expect(isRootedPosixShell(.fish));
+    try testing.expect(!isRootedPosixShell(.nu));
+    try testing.expect(!isRootedPosixShell(.pwsh));
+    try testing.expect(!isRootedPosixShell(.wsl));
+    try testing.expect(!isRootedPosixShell(.unknown));
+}
+
+test "osc7ContextFromArgs: wsl arm" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const args = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
+    const ctx = osc7ContextFromArgs(alloc, &args).?;
+    defer switch (ctx) {
+        .wsl => |w| if (w.distro) |d| alloc.free(d),
+        .rooted => |r| if (r.install_root) |s| alloc.free(s),
+    };
+    try testing.expect(ctx == .wsl);
+    try testing.expectEqualStrings("Ubuntu", ctx.wsl.distro.?);
+}
+
+test "osc7ContextFromArgs: rooted arm (MSYS2 bash)" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const args = [_][:0]const u8{ "C:\\msys64\\usr\\bin\\bash.exe", "-i" };
+    const ctx = osc7ContextFromArgs(alloc, &args).?;
+    defer switch (ctx) {
+        .wsl => |w| if (w.distro) |d| alloc.free(d),
+        .rooted => |r| if (r.install_root) |s| alloc.free(s),
+    };
+    try testing.expect(ctx == .rooted);
+    try testing.expectEqualStrings("C:\\msys64", ctx.rooted.install_root.?);
+}
+
+test "osc7ContextFromArgs: non-posix shells -> null" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const pwsh = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    try testing.expect(osc7ContextFromArgs(alloc, &pwsh) == null);
+    const cmd = [_][:0]const u8{"cmd.exe"};
+    try testing.expect(osc7ContextFromArgs(alloc, &cmd) == null);
+    const nu = [_][:0]const u8{ "C:\\msys64\\usr\\bin\\nu.exe", "-i" };
+    try testing.expect(osc7ContextFromArgs(alloc, &nu) == null);
+    const empty = [_][:0]const u8{};
+    try testing.expect(osc7ContextFromArgs(alloc, &empty) == null);
 }
