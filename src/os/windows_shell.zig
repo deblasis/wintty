@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const windows = @import("windows.zig");
 const testing = std.testing;
 const log = std.log.scoped(.windows_shell);
+const Allocator = std.mem.Allocator;
 
 /// UTF-8 preamble kind needed to make a shell's *initial* output land
 /// as UTF-8 when it runs under ConPTY. We distinguish cmd from
@@ -480,11 +481,100 @@ pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
     return ""; // wsl with no explicit distro -> default
 }
 
+/// Trim trailing NUL code units from a REG_SZ value read via `RegGetValueW`.
+/// `RegGetValueW` guarantees NUL-termination and reports a byte count that
+/// includes the terminator; some values report extra padding NULs. Returns
+/// null if nothing remains.
+fn trimRegSz(raw: []const u16) ?[]const u16 {
+    var end = raw.len;
+    while (end > 0 and raw[end - 1] == 0) end -= 1;
+    if (end == 0) return null;
+    return raw[0..end];
+}
+
+/// Build the per-distro registry subkey path `<base>\<guid>` into `buf`,
+/// NUL-terminated. Returns a sentinel-terminated UTF-16 slice (suitable for an
+/// `LPCWSTR` via `.ptr`) or null if `buf` is too small.
+fn lxssSubkeyFor(buf: []u16, base: []const u16, guid: []const u16) ?[:0]const u16 {
+    const needed = base.len + 1 + guid.len + 1; // base + '\' + guid + NUL
+    if (needed > buf.len) return null;
+    var i: usize = 0;
+    @memcpy(buf[i..][0..base.len], base);
+    i += base.len;
+    buf[i] = '\\';
+    i += 1;
+    @memcpy(buf[i..][0..guid.len], guid);
+    i += guid.len;
+    buf[i] = 0;
+    return buf[0..i :0];
+}
+
+/// Read a REG_SZ value into `buf` via a single `RegGetValueW` call (which
+/// opens, queries, and closes the key with type enforcement). Returns the
+/// value as a UTF-16 slice with trailing NUL(s) trimmed, or null on any
+/// non-success status (including `ERROR_MORE_DATA` for an over-long value).
+/// `subkey` and `value` must be NUL-terminated (`LPCWSTR`).
+fn regGetSzW(
+    buf: []u16,
+    subkey: [*:0]const u16,
+    value: [*:0]const u16,
+) ?[]const u16 {
+    var size_bytes: windows.DWORD = @intCast(buf.len * @sizeOf(u16));
+    const status = windows.advapi32.RegGetValueW(
+        windows.HKEY_CURRENT_USER,
+        subkey,
+        value,
+        windows.advapi32.RRF.RT_REG_SZ,
+        null,
+        @ptrCast(buf.ptr),
+        &size_bytes,
+    );
+    if (status != 0) return null; // anything but ERROR_SUCCESS (0)
+    const len_u16 = size_bytes / @sizeOf(u16);
+    if (len_u16 == 0 or len_u16 > buf.len) return null;
+    return trimRegSz(buf[0..len_u16]);
+}
+
+/// Resolve the default WSL distribution's real name from the registry. WSL
+/// stores it under `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`: the
+/// `DefaultDistribution` GUID names a subkey whose `DistributionName` value is
+/// the human name (e.g. "Ubuntu-24.04"). Caller owns the returned slice.
+/// Returns null on any failure (no WSL, no default distro, registry or
+/// conversion error) — best-effort, matching the OSC 7 no-op fallback.
+/// Windows-only; returns null elsewhere.
+pub fn defaultDistroName(alloc: Allocator) ?[]u8 {
+    if (comptime builtin.os.tag != .windows) return null;
+
+    const lxss = std.unicode.utf8ToUtf16LeStringLiteral(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss",
+    );
+    const default_distribution =
+        std.unicode.utf8ToUtf16LeStringLiteral("DefaultDistribution");
+    const distribution_name =
+        std.unicode.utf8ToUtf16LeStringLiteral("DistributionName");
+
+    // 1) Default-distro GUID under Lxss. A GUID is "{8-4-4-4-12}" = 38 chars.
+    var guid_buf: [64]u16 = undefined;
+    const guid = regGetSzW(&guid_buf, lxss, default_distribution) orelse return null;
+
+    // 2) Per-GUID subkey: Lxss\{guid}.
+    var subkey_buf: [128]u16 = undefined;
+    const subkey = lxssSubkeyFor(&subkey_buf, lxss, guid) orelse return null;
+
+    // 3) DistributionName under that subkey.
+    var name_buf: [256]u16 = undefined;
+    const name_w = regGetSzW(&name_buf, subkey.ptr, distribution_name) orelse return null;
+
+    // 4) UTF-16 -> owned UTF-8.
+    return std.unicode.utf16LeToUtf8Alloc(alloc, name_w) catch null;
+}
+
 /// Launch context describing a WSL surface, derived from its spawn argv.
 pub const WslContext = struct {
     /// Real WSL distribution name (e.g. "Ubuntu-24.04"), or null when this is a
-    /// WSL surface whose distro name is unknown (a bare `wsl.exe` default-distro
-    /// session — resolving its real name from the registry is a deferred follow-up).
+    /// WSL surface whose distro name is unknown. A bare `wsl.exe` default-distro
+    /// session starts null here; `Termio` then fills it via `defaultDistroName`
+    /// (registry lookup), falling back to null if that fails.
     distro: ?[]const u8 = null,
 
     /// Detect WSL launch context from the spawn argv. Returns null for non-WSL
@@ -583,4 +673,64 @@ test "WslContext.fromArgs: non-WSL and empty are null" {
     try std.testing.expect(WslContext.fromArgs(alloc, &pwsh) == null);
     const empty = [_][:0]const u8{};
     try std.testing.expect(WslContext.fromArgs(alloc, &empty) == null);
+}
+
+test "trimRegSz: trims trailing NULs, preserves interior, rejects empty" {
+    // Single trailing NUL (the common RegGetValueW case).
+    {
+        const v = [_]u16{ 'U', 'b', 'u', 0 };
+        try testing.expectEqualSlices(u16, &[_]u16{ 'U', 'b', 'u' }, trimRegSz(&v).?);
+    }
+    // Multiple trailing NULs.
+    {
+        const v = [_]u16{ 'X', 0, 0, 0 };
+        try testing.expectEqualSlices(u16, &[_]u16{'X'}, trimRegSz(&v).?);
+    }
+    // No trailing NUL at all.
+    {
+        const v = [_]u16{ 'a', 'b' };
+        try testing.expectEqualSlices(u16, &[_]u16{ 'a', 'b' }, trimRegSz(&v).?);
+    }
+    // Interior NUL is preserved; only trailing trimmed.
+    {
+        const v = [_]u16{ 'a', 0, 'b', 0 };
+        try testing.expectEqualSlices(u16, &[_]u16{ 'a', 0, 'b' }, trimRegSz(&v).?);
+    }
+    // All-NUL and empty -> null.
+    {
+        const v = [_]u16{ 0, 0 };
+        try testing.expect(trimRegSz(&v) == null);
+        const empty = [_]u16{};
+        try testing.expect(trimRegSz(&empty) == null);
+    }
+}
+
+test "lxssSubkeyFor: builds base\\{guid}, NUL-terminated, bounds-checked" {
+    const base = std.unicode.utf8ToUtf16LeStringLiteral("Lxss");
+    const guid = std.unicode.utf8ToUtf16LeStringLiteral("{abc}");
+
+    var buf: [32]u16 = undefined;
+    const out = lxssSubkeyFor(&buf, base, guid).?;
+
+    var u8buf: [32]u8 = undefined;
+    const n = try std.unicode.utf16LeToUtf8(&u8buf, out);
+    try testing.expectEqualStrings("Lxss\\{abc}", u8buf[0..n]);
+
+    // Sentinel-terminated at out.len.
+    try testing.expectEqual(@as(u16, 0), buf[out.len]);
+
+    // Too-small buffer -> null, no overflow.
+    var tiny: [4]u16 = undefined;
+    try testing.expect(lxssSubkeyFor(&tiny, base, guid) == null);
+}
+
+test "defaultDistroName: links, never crashes, returns null-or-nonempty" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    // Host-dependent: a name on a machine with a default distro, null otherwise.
+    // We only assert it links, runs, and frees cleanly.
+    if (defaultDistroName(alloc)) |name| {
+        defer alloc.free(name);
+        try testing.expect(name.len > 0);
+    }
 }
