@@ -58,9 +58,10 @@ pub const StreamHandler = struct {
     /// whoever owns StreamHandler.
     enquiry_response: []const u8,
 
-    /// WSL launch context for OSC 7 path translation. null for non-WSL (and
-    /// non-Windows) surfaces. Owns `distro` (freed in deinit).
-    wsl: ?internal_os.windows_shell.WslContext = null,
+    /// OSC 7 path-translation context (WSL UNC, or MSYS2/Git/Cygwin install
+    /// root). null for non-POSIX (and non-Windows) surfaces. Owns the duped
+    /// distro/install_root string (freed in deinit).
+    osc7: ?internal_os.windows_shell.Osc7Context = null,
 
     /// The color reporting format for OSC requests.
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
@@ -109,7 +110,10 @@ pub const StreamHandler = struct {
         self.apc.deinit();
         self.dcs.deinit();
         self.multipart_iterm2.deinit(self.alloc);
-        if (self.wsl) |w| if (w.distro) |d| self.alloc.free(d);
+        if (self.osc7) |c| switch (c) {
+            .wsl => |w| if (w.distro) |d| self.alloc.free(d),
+            .rooted => |r| if (r.install_root) |s| self.alloc.free(s),
+        };
         if (comptime tmux_enabled) tmux: {
             const viewer = self.tmux_viewer orelse break :tmux;
             viewer.deinit();
@@ -1242,12 +1246,13 @@ pub const StreamHandler = struct {
         }
 
         if (comptime builtin.os.tag == .windows) {
-            // WSL-only: non-WSL Windows surfaces keep the historical no-op.
-            // A WSL surface means we spawned wsl.exe ourselves, so the host is
-            // as local as it gets — skip the isLocal check (same trust basis
-            // ghostty applies to its own ssh sessions).
-            if (self.wsl == null) {
-                log.warn("OSC 7 ignored: non-WSL windows surface", .{});
+            // POSIX-emulation surfaces only (WSL / MSYS2 / Git-Bash / Cygwin);
+            // other Windows surfaces keep the historical no-op. Such a surface
+            // means we spawned the shell ourselves, so the host is as local as
+            // it gets — skip the isLocal check (same trust basis ghostty
+            // applies to its own ssh sessions).
+            if (self.osc7 == null) {
+                log.warn("OSC 7 ignored: non-POSIX windows surface", .{});
                 return;
             }
         } else {
@@ -1287,17 +1292,18 @@ pub const StreamHandler = struct {
         defer arena_alloc.deinit();
         const path = try uri.path.toRawMaybeAlloc(stack_alloc.get());
 
-        // On Windows the path comes from a WSL shell as a POSIX path; translate
-        // it to its Windows form so the title and inherited cwd are usable.
-        // `reported` shares `path`'s stack-fallback arena, and setPwd/WriteReq
-        // copy synchronously, so the lifetime matches the untranslated path.
+        // On Windows the path comes from a POSIX-emulation shell; translate it
+        // to its Windows form so the title and inherited cwd are usable. Which
+        // translator depends on the surface kind (WSL UNC vs MSYS2/Cygwin
+        // install root). `reported` shares `path`'s stack-fallback arena, and
+        // setPwd/WriteReq copy synchronously, so the lifetime matches the
+        // untranslated path.
         const reported = if (comptime builtin.os.tag == .windows)
-            internal_os.wsl_path.posixToWindows(
-                stack_alloc.get(),
-                path,
-                self.wsl.?.distro,
-            ) catch |err| {
-                log.warn("OSC 7 WSL path translation failed: {}", .{err});
+            (switch (self.osc7.?) {
+                .wsl => |w| internal_os.posix_path.wslToWindows(stack_alloc.get(), path, w.distro),
+                .rooted => |r| internal_os.posix_path.rootedToWindows(stack_alloc.get(), path, r.install_root),
+            }) catch |err| {
+                log.warn("OSC 7 path translation failed: {}", .{err});
                 return;
             }
         else
