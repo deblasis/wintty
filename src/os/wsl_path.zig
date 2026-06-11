@@ -61,6 +61,11 @@ fn mountDrive(path: []const u8) ?Mount {
 }
 
 /// Append `s` (a `/`-separated POSIX remainder) translating `/` -> `\`.
+///
+/// A literal backslash in a Linux path (legal but exotic, e.g. `/home/a\b`) is
+/// passed through verbatim and so reads as a Windows path separator in the
+/// result. We accept this: such paths are vanishingly rare and the only
+/// consequence is a slightly-wrong title/cwd, never a crash.
 fn appendBackslashed(
     alloc: Allocator,
     buf: *std.ArrayListUnmanaged(u8),
