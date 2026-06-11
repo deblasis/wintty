@@ -76,6 +76,38 @@ pub fn rootedToWindows(
     return buf.toOwnedSlice(alloc);
 }
 
+/// Translate a Windows path into its WSL automount form (the inverse direction
+/// of `wslToWindows`'s `/mnt/` case):
+///
+///   C:\Users\x[\rest]  -> /mnt/c/Users/x/rest
+///
+/// Lowercases the drive letter, converts `\` -> `/`, and strips a leading
+/// `\\?\` extended-length prefix. Returns null for any path that is not
+/// drive-rooted (UNC such as `\\server\share` or `\\wsl.localhost\...`, or a
+/// relative path): such a path has no `/mnt` automount equivalent reachable
+/// from inside the distro, so the caller skips integration rather than emit a
+/// confidently-wrong path. Caller owns the returned slice.
+pub fn windowsToWsl(alloc: Allocator, win_path: []const u8) Allocator.Error!?[]u8 {
+    // Strip an extended-length prefix (`\\?\C:\...`) so the drive is detectable.
+    // `\\?\UNC\...` becomes `UNC\...` which fails the drive check below (correct:
+    // UNC has no /mnt form).
+    const p = if (std.mem.startsWith(u8, win_path, "\\\\?\\"))
+        win_path["\\\\?\\".len..]
+    else
+        win_path;
+
+    // Require a `<letter>:` drive root; UNC and relative paths have no /mnt form.
+    if (p.len < 2 or p[1] != ':' or !std.ascii.isAlphabetic(p[0])) return null;
+
+    const rest = p[2..]; // keeps the leading separator if any
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    errdefer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "/mnt/");
+    try buf.append(alloc, std.ascii.toLower(p[0]));
+    for (rest) |c| try buf.append(alloc, if (c == '\\') '/' else c);
+    return try buf.toOwnedSlice(alloc);
+}
+
 const Mount = struct { drive: u8, rest: []const u8 };
 
 /// Match `<prefix><drive>(/...)?` where `<drive>` is a single ASCII letter and
@@ -277,4 +309,45 @@ test "posix_path: rooted non-absolute or empty is invalid" {
         error.InvalidPath,
         rootedToWindows(std.testing.allocator, "rel/path", "C:\\msys64"),
     );
+}
+
+fn expectWinToWsl(expected: ?[]const u8, win_path: []const u8) !void {
+    const got = try windowsToWsl(std.testing.allocator, win_path);
+    defer if (got) |g| std.testing.allocator.free(g);
+    if (expected) |e| {
+        try std.testing.expectEqualStrings(e, got orelse return error.UnexpectedNull);
+    } else {
+        try std.testing.expect(got == null);
+    }
+}
+
+test "posix_path: windowsToWsl drive-rooted" {
+    try expectWinToWsl("/mnt/c/Users/x/share/ghostty", "C:\\Users\\x\\share\\ghostty");
+}
+
+test "posix_path: windowsToWsl lowercases drive" {
+    try expectWinToWsl("/mnt/d/Foo", "D:\\Foo");
+}
+
+test "posix_path: windowsToWsl accepts forward slashes" {
+    try expectWinToWsl("/mnt/c/a/b", "C:/a/b");
+}
+
+test "posix_path: windowsToWsl strips extended-length prefix" {
+    try expectWinToWsl("/mnt/c/Users/x", "\\\\?\\C:\\Users\\x");
+}
+
+test "posix_path: windowsToWsl rejects UNC" {
+    try expectWinToWsl(null, "\\\\server\\share");
+    try expectWinToWsl(null, "\\\\wsl.localhost\\Ubuntu\\home\\a");
+    try expectWinToWsl(null, "\\\\?\\UNC\\server\\share");
+}
+
+test "posix_path: windowsToWsl rejects relative" {
+    try expectWinToWsl(null, "relative\\path");
+}
+
+test "posix_path: windowsToWsl bare drive" {
+    // A drive root with no remainder maps to `/mnt/<d>` (no trailing slash).
+    try expectWinToWsl("/mnt/c", "C:");
 }
