@@ -1206,11 +1206,6 @@ pub const StreamHandler = struct {
             return;
         }
 
-        if (builtin.os.tag == .windows) {
-            log.warn("reportPwd unimplemented on windows", .{});
-            return;
-        }
-
         // Attempt to parse this file-style URI using options appropriate
         // for this OSC 7 context (e.g. kitty-shell-cwd expects the full,
         // unencoded path).
@@ -1229,32 +1224,43 @@ pub const StreamHandler = struct {
             return;
         }
 
-        var host_buffer: [std.Uri.host_name_max]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch |err| switch (err) {
-            error.UriMissingHost => {
-                log.warn("OSC 7 uri must contain a hostname: {}", .{err});
+        if (comptime builtin.os.tag == .windows) {
+            // WSL-only: non-WSL Windows surfaces keep the historical no-op.
+            // A WSL surface means we spawned wsl.exe ourselves, so the host is
+            // as local as it gets — skip the isLocal check (same trust basis
+            // ghostty applies to its own ssh sessions).
+            if (self.wsl == null) {
+                log.warn("OSC 7 ignored: non-WSL windows surface", .{});
                 return;
-            },
-            error.UriHostTooLong => {
-                log.warn("failed to get full hostname for OSC 7 validation: {}", .{err});
-                return;
-            },
-        };
+            }
+        } else {
+            var host_buffer: [std.Uri.host_name_max]u8 = undefined;
+            const host = uri.getHost(&host_buffer) catch |err| switch (err) {
+                error.UriMissingHost => {
+                    log.warn("OSC 7 uri must contain a hostname: {}", .{err});
+                    return;
+                },
+                error.UriHostTooLong => {
+                    log.warn("failed to get full hostname for OSC 7 validation: {}", .{err});
+                    return;
+                },
+            };
 
-        // OSC 7 is a little sketchy because anyone can send any value from
-        // any host (such an SSH session). The best practice terminals follow
-        // is to valid the hostname to be local.
-        const host_valid = internal_os.hostname.isLocal(host) catch |err| switch (err) {
-            error.PermissionDenied,
-            error.Unexpected,
-            => {
-                log.warn("failed to get hostname for OSC 7 validation: {}", .{err});
+            // OSC 7 is a little sketchy because anyone can send any value from
+            // any host (such an SSH session). The best practice terminals follow
+            // is to valid the hostname to be local.
+            const host_valid = internal_os.hostname.isLocal(host) catch |err| switch (err) {
+                error.PermissionDenied,
+                error.Unexpected,
+                => {
+                    log.warn("failed to get hostname for OSC 7 validation: {}", .{err});
+                    return;
+                },
+            };
+            if (!host_valid) {
+                log.warn("OSC 7 host ({s}) must be local", .{host});
                 return;
-            },
-        };
-        if (!host_valid) {
-            log.warn("OSC 7 host ({s}) must be local", .{host});
-            return;
+            }
         }
 
         // We need the raw path, which might require unescaping. We try to
@@ -1264,12 +1270,28 @@ pub const StreamHandler = struct {
         defer arena_alloc.deinit();
         const path = try uri.path.toRawMaybeAlloc(stack_alloc.get());
 
-        log.debug("terminal pwd: {s}", .{path});
-        try self.terminal.setPwd(path);
+        // On Windows the path comes from a WSL shell as a POSIX path; translate
+        // it to its Windows form so the title and inherited cwd are usable.
+        // `reported` shares `path`'s stack-fallback arena, and setPwd/WriteReq
+        // copy synchronously, so the lifetime matches the untranslated path.
+        const reported = if (comptime builtin.os.tag == .windows)
+            internal_os.wsl_path.posixToWindows(
+                stack_alloc.get(),
+                path,
+                self.wsl.?.distro,
+            ) catch |err| {
+                log.warn("OSC 7 WSL path translation failed: {}", .{err});
+                return;
+            }
+        else
+            path;
+
+        log.debug("terminal pwd: {s}", .{reported});
+        try self.terminal.setPwd(reported);
 
         // Report it to the surface. If creating our write request fails
         // then we just ignore it.
-        if (apprt.surface.Message.WriteReq.init(self.alloc, path)) |req| {
+        if (apprt.surface.Message.WriteReq.init(self.alloc, reported)) |req| {
             self.surfaceMessageWriter(.{ .pwd_change = req });
         } else |err| {
             log.warn("error notifying surface of pwd change err={}", .{err});
@@ -1277,7 +1299,7 @@ pub const StreamHandler = struct {
 
         // If we haven't seen a title, use our pwd as the title.
         if (!self.seen_title) {
-            try self.windowTitle(path);
+            try self.windowTitle(reported);
             self.seen_title = false;
         }
     }
