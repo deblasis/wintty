@@ -126,3 +126,46 @@ test "wsl_path: non-absolute or empty is invalid" {
         posixToWindows(std.testing.allocator, "relative/path", "Ubuntu"),
     );
 }
+
+// Exercises the exact OSC 7 parse -> path-extract -> translate chain that
+// stream_handler.reportPwd runs, for both shell-emitted URL forms. This guards
+// the one seam the unit tests above don't reach (URL parsing + fish escaping).
+test "wsl_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
+    const builtin = @import("builtin");
+    const uri = @import("uri.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const Case = struct { url: []const u8, distro: ?[]const u8, want: []const u8 };
+    const cases = [_]Case{
+        // bash/zsh: \e]7;kitty-shell-cwd://<host><PWD>\a (raw, unescaped path)
+        .{
+            .url = "kitty-shell-cwd://wsl/home/alex",
+            .distro = "Ubuntu-24.04",
+            .want = "\\\\wsl.localhost\\Ubuntu-24.04\\home\\alex",
+        },
+        .{
+            .url = "kitty-shell-cwd://wsl/mnt/c/Users/alex",
+            .distro = "Ubuntu",
+            .want = "C:\\Users\\alex",
+        },
+        // fish: \e]7;file://<host><url-escaped PWD>\a (percent-decoded path)
+        .{
+            .url = "file://wsl/home/alex%20space",
+            .distro = "Ubuntu",
+            .want = "\\\\wsl.localhost\\Ubuntu\\home\\alex space",
+        },
+    };
+
+    for (cases) |c| {
+        const u = try uri.parse(c.url, .{
+            .mac_address = comptime builtin.os.tag != .macos,
+            .raw_path = std.mem.startsWith(u8, c.url, "kitty-shell-cwd://"),
+        });
+        const path = try u.path.toRawMaybeAlloc(aa);
+        const got = try posixToWindows(aa, path, c.distro);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+}
