@@ -480,6 +480,35 @@ pub fn wslDistro(argv: []const []const u8) ?[]const u8 {
     return ""; // wsl with no explicit distro -> default
 }
 
+/// Launch context describing a WSL surface, derived from its spawn argv.
+pub const WslContext = struct {
+    /// Real WSL distribution name (e.g. "Ubuntu-24.04"), or null when this is a
+    /// WSL surface whose distro name is unknown (a bare `wsl.exe` default-distro
+    /// session — resolving its real name from the registry is a deferred follow-up).
+    distro: ?[]const u8 = null,
+
+    /// Detect WSL launch context from the spawn argv. Returns null for non-WSL
+    /// (or non-Windows) surfaces. When `distro` is present it is duped from
+    /// `alloc` and the owner must free it.
+    pub fn fromArgs(
+        alloc: std.mem.Allocator,
+        args: []const [:0]const u8,
+    ) ?WslContext {
+        if (comptime builtin.os.tag != .windows) return null;
+        if (args.len == 0 or !isWslExe(args[0])) return null;
+
+        // wslDistro takes []const []const u8; build a thin non-sentinel view.
+        const view = alloc.alloc([]const u8, args.len) catch return null;
+        defer alloc.free(view);
+        for (args, 0..) |a, i| view[i] = a;
+
+        const distro = wslDistro(view) orelse return null;
+        if (distro.len == 0) return .{ .distro = null }; // default distro, name deferred
+        const owned = alloc.dupe(u8, distro) catch return .{ .distro = null };
+        return .{ .distro = owned };
+    }
+};
+
 test "wslDistro: detects distro and default, ignores non-WSL" {
     {
         const argv = [_][]const u8{ "wsl.exe", "-d", "Ubuntu" };
@@ -519,4 +548,39 @@ test "wslDistro: detects distro and default, ignores non-WSL" {
         const argv = [_][]const u8{};
         try testing.expect(wslDistro(&argv) == null);
     }
+}
+
+test "WslContext.fromArgs: explicit distro" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const args = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu-24.04" };
+    const ctx = WslContext.fromArgs(alloc, &args).?;
+    defer if (ctx.distro) |d| alloc.free(d);
+    try std.testing.expectEqualStrings("Ubuntu-24.04", ctx.distro.?);
+}
+
+test "WslContext.fromArgs: =-joined distro" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const args = [_][:0]const u8{ "wsl.exe", "-d=Ubuntu" };
+    const ctx = WslContext.fromArgs(alloc, &args).?;
+    defer if (ctx.distro) |d| alloc.free(d);
+    try std.testing.expectEqualStrings("Ubuntu", ctx.distro.?);
+}
+
+test "WslContext.fromArgs: bare wsl is WSL with unknown distro" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const args = [_][:0]const u8{"wsl.exe"};
+    const ctx = WslContext.fromArgs(alloc, &args).?;
+    try std.testing.expect(ctx.distro == null);
+}
+
+test "WslContext.fromArgs: non-WSL and empty are null" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const pwsh = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    try std.testing.expect(WslContext.fromArgs(alloc, &pwsh) == null);
+    const empty = [_][:0]const u8{};
+    try std.testing.expect(WslContext.fromArgs(alloc, &empty) == null);
 }
