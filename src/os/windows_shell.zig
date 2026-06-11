@@ -553,7 +553,8 @@ pub fn defaultDistroName(alloc: Allocator) ?[]u8 {
     const distribution_name =
         std.unicode.utf8ToUtf16LeStringLiteral("DistributionName");
 
-    // 1) Default-distro GUID under Lxss. A GUID is "{8-4-4-4-12}" = 38 chars.
+    // 1) Default-distro GUID under Lxss. A GUID is "{8-4-4-4-12}" = 38 chars;
+    //    [64] leaves margin (an over-long value just yields ERROR_MORE_DATA -> null).
     var guid_buf: [64]u16 = undefined;
     const guid = regGetSzW(&guid_buf, lxss, default_distribution) orelse return null;
 
@@ -733,4 +734,23 @@ test "defaultDistroName: links, never crashes, returns null-or-nonempty" {
         defer alloc.free(name);
         try testing.expect(name.len > 0);
     }
+}
+
+test "integration: resolved default distro feeds OSC 7 UNC translation" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = testing.allocator;
+    const wsl_path = @import("wsl_path.zig");
+
+    // No default distro on this host (e.g. CI without WSL) -> nothing to prove.
+    const distro = defaultDistroName(alloc) orelse return;
+    defer alloc.free(distro);
+
+    // The gap this slice closes: an in-distro path (which yielded
+    // error.UnknownDistro for a bare-wsl surface before resolution) must now
+    // translate to the UNC form using the resolved name.
+    const win = try wsl_path.posixToWindows(alloc, "/home/alex", distro);
+    defer alloc.free(win);
+    try testing.expect(std.mem.startsWith(u8, win, "\\\\wsl.localhost\\"));
+    try testing.expect(std.mem.indexOf(u8, win, distro) != null);
+    try testing.expect(std.mem.endsWith(u8, win, "\\home\\alex"));
 }
