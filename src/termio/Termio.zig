@@ -272,32 +272,38 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     var backend = opts.backend;
     backend.initTerminal(&term);
 
-    // Derive WSL launch context (for OSC 7 path translation). Returns null on
-    // non-Windows and for non-WSL surfaces. Note: keys on argv[0] being the
-    // (unwrapped) wsl.exe; if WSL spawns are ever shell-wrapped this silently
-    // disables WSL OSC 7 translation (falls back to the historical no-op).
-    var wsl_ctx = internal_os.windows_shell.WslContext.fromArgs(
+    // Derive the OSC 7 path-translation context (WSL UNC, or MSYS2/Git/Cygwin
+    // install root). Returns null on non-Windows and for non-POSIX surfaces.
+    // Keys on argv[0]; a shell-wrapped spawn silently disables translation
+    // (falls back to the historical no-op).
+    var osc7 = internal_os.windows_shell.osc7ContextFromArgs(
         alloc,
         switch (backend) {
             .exec => |*exec| exec.subprocess.args,
         },
     );
-    // Bare `wsl.exe` (no -d) leaves the distro name unknown; resolve the
-    // default distro's real name from the registry so in-distro OSC 7 paths
-    // (e.g. /home/<user>) translate to \\wsl.localhost\<distro>\... rather than
-    // being dropped. Best-effort: null on any failure (then /mnt still works).
-    if (wsl_ctx) |*w| {
-        if (w.distro == null) w.distro = internal_os.windows_shell.defaultDistroName(alloc);
-    }
+    // Bare `wsl.exe` (no -d) leaves the distro name unknown; resolve the default
+    // distro's real name from the registry so in-distro OSC 7 paths (e.g.
+    // /home/<user>) translate to \\wsl.localhost\<distro>\... rather than being
+    // dropped. Best-effort: null on failure (then /mnt still works).
+    if (osc7) |*c| switch (c.*) {
+        .wsl => |*w| if (w.distro == null) {
+            w.distro = internal_os.windows_shell.defaultDistroName(alloc);
+        },
+        .rooted => {},
+    };
     // Until ownership transfers to the StreamHandler (via terminal_stream
-    // below), we own the duped distro string; free it if init fails first.
-    errdefer if (wsl_ctx) |w| if (w.distro) |d| alloc.free(d);
+    // below), we own the duped string; free it if init fails first.
+    errdefer if (osc7) |c| switch (c) {
+        .wsl => |w| if (w.distro) |d| alloc.free(d),
+        .rooted => |r| if (r.install_root) |s| alloc.free(s),
+    };
 
     // Create our stream handler. This points to memory in self so it
     // isn't safe to use until self.* is set.
     const handler: StreamHandler = .{
         .alloc = alloc,
-        .wsl = wsl_ctx,
+        .osc7 = osc7,
         .termio_mailbox = &self.mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
