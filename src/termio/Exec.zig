@@ -18,6 +18,7 @@ const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
+const wsl_shell_integration = @import("wsl_shell_integration.zig");
 const terminfo_install = @import("../terminfo/install.zig");
 const DiskCache = @import("../cli/ssh-cache/DiskCache.zig");
 const terminal = @import("../terminal/main.zig");
@@ -884,6 +885,22 @@ const Subprocess = struct {
                 log.warn("no resources dir set, shell integration disabled", .{});
                 break :shell default_shell_command;
             };
+
+            // On Windows, a `wsl.exe` launch can't be integrated through
+            // detectShell (it sees the launcher, not the distro's shell).
+            // Inject zsh/fish integration into the distro via WSLENV instead.
+            // Login bash is unreachable (documented no-op).
+            if (comptime builtin.os.tag == .windows) wsl: {
+                var it = default_shell_command.argIterator(alloc) catch break :wsl;
+                defer it.deinit();
+                const arg0 = it.next() orelse break :wsl;
+                if (!internal_os.windows_shell.isWslExe(arg0)) break :wsl;
+                wsl_shell_integration.setup(alloc, dir, &env) catch |err| {
+                    log.warn("WSL shell integration failed: {}", .{err});
+                };
+                log.info("WSL shell integration injected via WSLENV", .{});
+                break :shell default_shell_command;
+            }
 
             const integration = try shell_integration.setup(
                 alloc,
