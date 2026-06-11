@@ -276,12 +276,19 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     // non-Windows and for non-WSL surfaces. Note: keys on argv[0] being the
     // (unwrapped) wsl.exe; if WSL spawns are ever shell-wrapped this silently
     // disables WSL OSC 7 translation (falls back to the historical no-op).
-    const wsl_ctx = internal_os.windows_shell.WslContext.fromArgs(
+    var wsl_ctx = internal_os.windows_shell.WslContext.fromArgs(
         alloc,
         switch (backend) {
             .exec => |*exec| exec.subprocess.args,
         },
     );
+    // Bare `wsl.exe` (no -d) leaves the distro name unknown; resolve the
+    // default distro's real name from the registry so in-distro OSC 7 paths
+    // (e.g. /home/<user>) translate to \\wsl.localhost\<distro>\... rather than
+    // being dropped. Best-effort: null on any failure (then /mnt still works).
+    if (wsl_ctx) |*w| {
+        if (w.distro == null) w.distro = internal_os.windows_shell.defaultDistroName(alloc);
+    }
     // Until ownership transfers to the StreamHandler (via terminal_stream
     // below), we own the duped distro string; free it if init fails first.
     errdefer if (wsl_ctx) |w| if (w.distro) |d| alloc.free(d);
