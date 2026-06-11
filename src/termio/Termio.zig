@@ -272,10 +272,25 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     var backend = opts.backend;
     backend.initTerminal(&term);
 
+    // Derive WSL launch context (for OSC 7 path translation). Returns null on
+    // non-Windows and for non-WSL surfaces. Note: keys on argv[0] being the
+    // (unwrapped) wsl.exe; if WSL spawns are ever shell-wrapped this silently
+    // disables WSL OSC 7 translation (falls back to the historical no-op).
+    const wsl_ctx = internal_os.windows_shell.WslContext.fromArgs(
+        alloc,
+        switch (backend) {
+            .exec => |*exec| exec.subprocess.args,
+        },
+    );
+    // Until ownership transfers to the StreamHandler (via terminal_stream
+    // below), we own the duped distro string; free it if init fails first.
+    errdefer if (wsl_ctx) |w| if (w.distro) |d| alloc.free(d);
+
     // Create our stream handler. This points to memory in self so it
     // isn't safe to use until self.* is set.
     const handler: StreamHandler = .{
         .alloc = alloc,
+        .wsl = wsl_ctx,
         .termio_mailbox = &self.mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
