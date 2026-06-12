@@ -91,7 +91,7 @@ Representative sample against `windows`-HEAD. Remaining sections are pending.
 | 1 | Cursor movements | inconclusive | border + centered E-frame render, but size-dependent -- redo size-matched |
 | 2 | Screen features | inconclusive | autowrap layout artifact from the pty-size mismatch, not a VT bug -- redo size-matched |
 | 3 | Character sets | pass | US-ASCII, British (`#`->`£`), DEC special graphics (line drawing), DEC alternate ROM, and SI/SO G0/G1 switching all correct. The configured font ligates `<=>` (cosmetic, not a VT issue) |
-| 4 | Double-sized characters | partial | double-width (DECDWL) correct; double-height (DECDHL) renders as double-width single-height (the two halves appear as duplicate full lines), likely a shared Ghostty-core limitation -- confirm vs upstream |
+| 4 | Double-sized characters | not implemented | The DEC line-size attributes are not implemented in libghostty, so double-width and double-height lines render as normal single-size text. `src/terminal/stream.zig` dispatches only `ESC #8` (DECALN); `ESC #6` (DECDWL), `ESC #3`/`#4` (DECDHL top/bottom) and `ESC #5` (DECSWL) fall through unhandled. This is in the shared terminal core (no Windows override), so it is a base-Ghostty limitation, not ConPTY/Windows-specific |
 | 5 | Keyboard | pending | needs real key input (the auto-feed driver cannot exercise it) |
 | 6 | Terminal reports | pending | overlaps the esctest query findings |
 | 7 | VT52 mode | pending | |
@@ -102,5 +102,7 @@ Representative sample against `windows`-HEAD. Remaining sections are pending.
 
 Classify each failure as a ConPTY limitation (cross-check
 [`conpty-reference.md`](conpty-reference.md)) or a Ghostty bug, consistent with
-how the esctest baseline attributes its results. The one open item so far --
-DECDHL double-height -- is a libghostty/core rendering question, not ConPTY.
+how the esctest baseline attributes its results. Nothing found so far is a ConPTY
+or Windows-specific defect: the only non-pass (section 4 DEC line-size attributes)
+is a base-Ghostty terminal-core limitation, confirmed by reading
+`src/terminal/stream.zig`.
