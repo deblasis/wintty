@@ -40,4 +40,10 @@ Assert-Equal $true ($md -match 'Mismatch-review:\s*1') 'summary counts mismatch-
 Assert-Equal $true ($md -match 'ConPTY-timeout:\s*1')  'summary counts conpty-timeout'
 Assert-Equal $true ($md -match 'CR\.test_CR_MovesToLeftMargin') 'lists a mismatch-review test'
 
+# A Fail-other / Unknown outcome must be listed by NAME, not hidden in a count.
+$synthetic = @([pscustomobject]@{ Name='Foo.test_bar'; Section='Foo'; Status='FAIL'; Reason='Other'; Bucket='Fail-other'; Detail='*** TEST Foo.test_bar FAILED:' })
+$md2 = Format-EsctestReport -Classified $synthetic -Title 'T'
+Assert-Equal $true ($md2 -match '(?m)^\#\# Fail-other \(1\)') 'Fail-other section header with count'
+Assert-Equal $true ($md2 -match 'Foo\.test_bar')              'Fail-other test listed by name'
+
 if ($script:fails -gt 0) { Write-Host "`n$script:fails assertion(s) failed"; exit 1 } else { Write-Host "`nAll assertions passed"; exit 0 }

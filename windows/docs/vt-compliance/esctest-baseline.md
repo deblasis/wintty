@@ -56,6 +56,10 @@ ConPTY -> libghostty` and back).
     wrong-state CPR (e.g. `expected Point(9,3), got Point(1,6)`) reads as a mismatch. Not
     separable from channel noise without the Linux baseline.
 
+- **Fail-other (1):** `DECRQMTests.test_DECRQM_DEC_DECARM` -- a DECRQM auto-repeat-mode
+  query that failed with neither a read-timeout nor a value mismatch (an esctest
+  "should have failed" internal error); same DECRQM mode-query family as above.
+
 **No follow-up Ghostty bug issues are filed from this run:** every failure maps to the
 ConPTY response-channel limit, a documented ConPTY OSC/DCS interception, or an
 xterm-specific expectation. Ghostty's actual VT-core correctness is covered by the Zig

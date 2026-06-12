@@ -91,11 +91,17 @@ function Format-EsctestReport {
     [void]$sb.AppendLine('## Summary')
     foreach ($b in $buckets) { [void]$sb.AppendLine("- ${b}: $($counts[$b])") }
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine('## Mismatch-review (readback returned but differed)')
-    [void]$sb.AppendLine('Each is one of: ConPTY-mangled response, an xterm-specific expectation Ghostty does not meet, or a genuine Ghostty bug. Review before filing.')
+    [void]$sb.AppendLine('A Mismatch-review fail is one of: ConPTY-mangled response, an xterm-specific expectation Ghostty does not meet, or a genuine Ghostty bug. Review before filing.')
     [void]$sb.AppendLine('')
-    foreach ($c in ($Classified | Where-Object Bucket -eq 'Mismatch-review' | Sort-Object Name)) {
-        [void]$sb.AppendLine("- ``$($c.Name)``")
+    # List the test NAMES for every bucket that needs human eyes (not just a
+    # count) -- a new or unexpected esctest outcome must never vanish into a
+    # number, which is the whole point of a characterization run.
+    foreach ($b in 'Mismatch-review', 'Fail-other', 'Unknown') {
+        $names = @($Classified | Where-Object Bucket -eq $b | Sort-Object Name)
+        if ($names.Count -eq 0) { continue }
+        [void]$sb.AppendLine("## $b ($($names.Count))")
+        foreach ($c in $names) { [void]$sb.AppendLine("- ``$($c.Name)``") }
+        [void]$sb.AppendLine('')
     }
     return $sb.ToString()
 }

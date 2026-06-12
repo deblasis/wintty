@@ -59,7 +59,13 @@ try {
     $env:XDG_CONFIG_HOME = $cfgDir
     $proc = Start-Process -FilePath $WinttyExe -PassThru
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while (-not (Test-Path $doneWin) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+    while (-not (Test-Path $doneWin) -and (Get-Date) -lt $deadline) {
+        # If Wintty exited without producing the log, the run never started
+        # (bad config, distro down) -- stop waiting instead of burning the full
+        # timeout for a marker that can no longer appear.
+        if ($proc.HasExited -and -not (Test-Path $logWin)) { break }
+        Start-Sleep -Seconds 3
+    }
 }
 finally {
     $env:XDG_CONFIG_HOME = $prevXdg
