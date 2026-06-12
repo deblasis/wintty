@@ -125,6 +125,43 @@ test-only, security-sensitive feature, so it is not the right conformance instru
 for this port. The valuable output of this slice is this corrected characterization
 and the reusable probe that produced it.
 
+## Residual timeout triage (#79 phase 1)
+
+Classifying every non-DECRQCRA timeout class by direct evidence (the extended
+`latency-probe.py` for query responses; esctest source for the verify mechanism). The
+probe control queries (CPR/DSR/DA) answer in ~1 ms; the table records what each residual
+query actually does.
+
+| Class / query | Result | Bucket |
+|---|---|---|
+| DECRQM ANSI form (`CSI Ps $ p`) | silent (0/10) | **genuine gap -> fix** |
+| DECXCPR (`CSI ? 6 n`) | silent (0/10) | **genuine gap -> fix** |
+| DECRQM DEC form (`CSI ? Ps $ p`) | answers | already correct |
+| XTWINOPS 14/16/18 t (text-area / cell size) | answers | already correct |
+| XTWINOPS 11/13/15/19 t (window state / position / screen geometry) | silent (0/10) | deliberate omission (won't fix) |
+| XTWINOPS manipulate (1/2/3/4/8/9/10/24/30) | n/a | security-sensitive (won't fix) |
+| DECDSR `?15n`/`?25n`/`?26n` (printer / UDK / keyboard) | silent (0/10) | legacy, no consumer (defer) |
+| DECDSR `?62n`/`?55n`/`?75n`/`?85n` | n/a | legacy/niche (defer) |
+| DECDSR `?63n` (DECCKSR memory checksum) | n/a | test-only, exfil class (won't fix) |
+| DECSET / SM / RM / DECSTR | n/a | DECRQCRA-blocked (verify via checksum: decset 23, sm 6, rm 2, decstr 7 calls; decrqm 0) |
+| ChangeColor / ChangeSpecialColor / ResetColor (OSC 4/5) | n/a | ConPTY-intercepted, not Ghostty-fixable (OSC 10/11/12 finding) |
+
+Two deliberate boundaries are worth stating, because they are stances rather than gaps:
+
+- **XTWINOPS geometry (11/13/15/19) is intentionally omitted.** The handler implements
+  the terminal's own area (text-area / cell size, needed for image protocols) but not the
+  user's window position or display geometry, which is a fingerprinting surface. The
+  explicit per-op list in `src/terminal/stream.zig` (with a "we only support window title"
+  comment) shows the subset is curated, not unfinished. Not implemented.
+- **DECRQCRA / DECCKSR (screen + memory checksum) is not implemented** (decided in #504):
+  a screen-content exfiltration primitive whose only consumers are conformance harnesses.
+
+**Phase 2 (separate work):** the two genuine, safe, real-world-relevant gaps -- DECRQM in
+its ANSI form (apps querying IRM/LNM/KAM hang on no reply; the handler already intends to
+support it) and DECXCPR (completes the CPR pair, exposes nothing CPR does not). The legacy
+DECDSR status reports are deferred (no modern consumer); the geometry and checksum classes
+are not implemented by design.
+
 ## Reproduce
 
 ```powershell
