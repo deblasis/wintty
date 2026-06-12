@@ -7,8 +7,8 @@ function Assert-Equal($expected, $actual, $msg) {
     else { Write-Host "ok: $msg" }
 }
 
-# --- Parse-EsctestLog ---
-$recs = Parse-EsctestLog -Path "$PSScriptRoot/fixtures/sample.esctestlog"
+# --- ConvertFrom-EsctestLog ---
+$recs = ConvertFrom-EsctestLog -Path "$PSScriptRoot/fixtures/sample.esctestlog"
 Assert-Equal 5 $recs.Count 'parses 5 test records (ignores framing/summary)'
 
 $byName = @{}; foreach ($r in $recs) { $byName[$r.Name] = $r }

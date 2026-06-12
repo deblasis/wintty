@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-function Parse-EsctestLog {
+function ConvertFrom-EsctestLog {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
     $records = [System.Collections.Generic.List[object]]::new()
     $current = $null
@@ -73,4 +73,4 @@ function Format-EsctestReport {
     return $sb.ToString()
 }
 
-Export-ModuleMember -Function Parse-EsctestLog, ConvertTo-EsctestClassification, Format-EsctestReport
+Export-ModuleMember -Function ConvertFrom-EsctestLog, ConvertTo-EsctestClassification, Format-EsctestReport

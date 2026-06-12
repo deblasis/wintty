@@ -41,7 +41,7 @@ try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
 if (-not (Test-Path $logWin)) { throw "No esctest log produced at $logWin (run did not start)" }
 if (-not $complete) { Write-Warning "esctest did not finish within ${TimeoutSec}s; parsing partial log." }
 
-$recs = Parse-EsctestLog -Path $logWin
+$recs = ConvertFrom-EsctestLog -Path $logWin
 $cls  = ConvertTo-EsctestClassification -Records $recs
 $report = Format-EsctestReport -Classified $cls -Title ("Wintty/ConPTY via WSL $Distro" + ($(if(-not $complete){' (INCOMPLETE)'}else{''})))
 $reportPath = Join-Path $OutDir 'esctest-baseline.md'
