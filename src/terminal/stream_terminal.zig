@@ -1379,6 +1379,33 @@ test "request mode DECRQM with write_pty callback" {
     }
 }
 
+test "request mode DECRQM ANSI form with write_pty callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer if (S.last_response) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // ANSI-form DECRQM (CSI Ps $ p, no '?') must reply like the DEC form, not be
+    // silently dropped. Insert mode (IRM, 4) is reset by default -> Pm=2.
+    s.nextSlice("\x1B[4$p");
+    try testing.expect(S.last_response != null);
+    try testing.expectEqualStrings("\x1B[4;2$y", S.last_response.?);
+}
+
 test "stream: CSI W with intermediate but no params" {
     // Regression test from AFL++ crash. CSI ? W without
     // parameters caused an out-of-bounds access on input.params[0].
