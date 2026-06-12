@@ -8,7 +8,7 @@ function Assert-Equal($expected, $actual, $msg) {
 }
 
 # --- Parse-EsctestLog ---
-$recs = Parse-EsctestLog -Path "$PSScriptRoot/fixtures/sample.log"
+$recs = Parse-EsctestLog -Path "$PSScriptRoot/fixtures/sample.esctestlog"
 Assert-Equal 5 $recs.Count 'parses 5 test records (ignores framing/summary)'
 
 $byName = @{}; foreach ($r in $recs) { $byName[$r.Name] = $r }
@@ -20,8 +20,8 @@ Assert-Equal 'DECRQSS' $byName['DECRQSS.test_DECRQSS_SGR'].Section     'DECRQSS 
 Assert-Equal 'KNOWN_BUG' $byName['SM.test_SM_IRM'].Status              'fails-as-expected = KNOWN_BUG'
 Assert-Equal 'SKIPPED' $byName['DECSET.test_DECSET_AltScreen'].Status  'skipped = SKIPPED'
 
-# --- Classify-EsctestResults ---
-$cls = Classify-EsctestResults -Records $recs
+# --- ConvertTo-EsctestClassification ---
+$cls = ConvertTo-EsctestClassification -Records $recs
 $cByName = @{}; foreach ($c in $cls) { $cByName[$c.Name] = $c }
 # Only FAIL records are classified; PASS/KNOWN_BUG/SKIPPED are pass-through buckets.
 Assert-Equal 'ConPTY-limit'   $cByName['DECRQSS.test_DECRQSS_SGR'].Bucket      'DCS-family fail = ConPTY-limit'

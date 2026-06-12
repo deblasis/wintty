@@ -29,7 +29,7 @@ function Parse-EsctestLog {
 # DCS/string-family sections ConPTY is known to strip/mangle (see #474 findings).
 $script:ConPtyLimitSections = @('DCS','DECRQSS','APC','SOS','PM')
 
-function Classify-EsctestResults {
+function ConvertTo-EsctestClassification {
     [CmdletBinding()] param([Parameter(Mandatory)][object[]]$Records)
     foreach ($r in $Records) {
         $bucket = switch ($r.Status) {
@@ -73,4 +73,4 @@ function Format-EsctestReport {
     return $sb.ToString()
 }
 
-Export-ModuleMember -Function Parse-EsctestLog, Classify-EsctestResults, Format-EsctestReport
+Export-ModuleMember -Function Parse-EsctestLog, ConvertTo-EsctestClassification, Format-EsctestReport
