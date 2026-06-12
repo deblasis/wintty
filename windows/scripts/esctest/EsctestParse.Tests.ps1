@@ -30,4 +30,12 @@ Assert-Equal 'Pass'           $cByName['CR.test_CR_Basic'].Bucket              '
 Assert-Equal 'Known-bug'      $cByName['SM.test_SM_IRM'].Bucket                'KNOWN_BUG bucket'
 Assert-Equal 'Skipped'        $cByName['DECSET.test_DECSET_AltScreen'].Bucket  'SKIPPED bucket'
 
+# --- Format-EsctestReport ---
+$md = Format-EsctestReport -Classified $cls -Title 'Smoke'
+Assert-Equal $true ($md -match '(?m)^\# VT-compliance baseline: Smoke') 'has title heading'
+Assert-Equal $true ($md -match 'Pass:\s*1')          'summary counts passes'
+Assert-Equal $true ($md -match 'Candidate-bug:\s*1') 'summary counts candidate bugs'
+Assert-Equal $true ($md -match 'ConPTY-limit:\s*1')  'summary counts conpty-limit'
+Assert-Equal $true ($md -match 'CR\.test_CR_MovesToLeftMargin') 'lists a candidate-bug test'
+
 if ($script:fails -gt 0) { Write-Host "`n$script:fails assertion(s) failed"; exit 1 } else { Write-Host "`nAll assertions passed"; exit 0 }

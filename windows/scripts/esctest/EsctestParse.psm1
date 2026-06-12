@@ -46,4 +46,31 @@ function Classify-EsctestResults {
     }
 }
 
-Export-ModuleMember -Function Parse-EsctestLog, Classify-EsctestResults
+function Format-EsctestReport {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][object[]]$Classified,
+        [Parameter(Mandatory)][string]$Title
+    )
+    $buckets = 'Pass','Known-bug','Skipped','ConPTY-limit','Candidate-bug','Unknown'
+    $counts = @{}; foreach ($b in $buckets) { $counts[$b] = 0 }
+    foreach ($c in $Classified) { $counts[$c.Bucket]++ }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("# VT-compliance baseline: $Title")
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('## Summary')
+    foreach ($b in $buckets) { [void]$sb.AppendLine("- ${b}: $($counts[$b])") }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('## Candidate-Ghostty-bugs (review before filing)')
+    foreach ($c in ($Classified | Where-Object Bucket -eq 'Candidate-bug' | Sort-Object Name)) {
+        [void]$sb.AppendLine("- ``$($c.Name)`` -- $($c.Detail)")
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('## ConPTY-limit failures (expected, DCS/string-family)')
+    foreach ($c in ($Classified | Where-Object Bucket -eq 'ConPTY-limit' | Sort-Object Name)) {
+        [void]$sb.AppendLine("- ``$($c.Name)``")
+    }
+    return $sb.ToString()
+}
+
+Export-ModuleMember -Function Parse-EsctestLog, Classify-EsctestResults, Format-EsctestReport
