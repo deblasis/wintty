@@ -4,7 +4,8 @@
     [string]$Distro = 'Ubuntu-24.04',
     [string]$EsctestDir = '~/esctest2/esctest',     # path inside the distro
     [string]$OutDir = "$env:TEMP\esctest-run",       # Windows-side output dir
-    [int]$TimeoutSec = 900
+    [int]$ReadTimeoutSec = 1,                         # esctest per-read --timeout
+    [int]$TimeoutSec = 900                            # overall wall-clock deadline
 )
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSScriptRoot/EsctestParse.psm1" -Force
@@ -32,7 +33,7 @@ $scriptMnt = "$mnt/run.sh"
 $bash = @(
     '#!/usr/bin/env bash'
     "cd $EsctestDir || exit 3"
-    "python3 esctest.py --expected-terminal=xterm --max-vt-level=5 --timeout=1 --logfile='$logMnt'"
+    "python3 esctest.py --expected-terminal=xterm --max-vt-level=5 --timeout=$ReadTimeoutSec --logfile='$logMnt'"
     "echo `$? > '$rcMnt'"
     "touch '$doneMnt'"
 ) -join "`n"
@@ -84,7 +85,7 @@ if (-not $complete) { Write-Warning "esctest did not finish within ${TimeoutSec}
 $recs = @(ConvertFrom-EsctestLog -Path $logWin)
 if ($recs.Count -eq 0) { Write-Warning "No test records parsed from $logWin (esctest may have crashed before running tests)." }
 $cls  = ConvertTo-EsctestClassification -Records $recs
-$title = "Wintty/ConPTY via WSL $Distro" + ($(if (-not $complete) { ' (INCOMPLETE)' } else { '' }))
+$title = "Wintty/ConPTY via WSL $Distro (read-timeout ${ReadTimeoutSec}s)" + ($(if (-not $complete) { ' (INCOMPLETE)' } else { '' }))
 $report = Format-EsctestReport -Classified $cls -Title $title
 $reportPath = Join-Path $OutDir 'esctest-baseline.md'
 $report | Set-Content -LiteralPath $reportPath -Encoding utf8
