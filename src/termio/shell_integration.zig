@@ -1179,7 +1179,7 @@ test "nushell: missing resources" {
 /// arguments of their own) we go further and rewrite the launch command to
 /// auto-source the script:
 ///
-///     <pwsh> -NoExit -Command ". '<resource_dir>/.../ghostty.ps1'"
+///     <pwsh> -NoExit -ExecutionPolicy Bypass -Command ". '<resource_dir>/.../ghostty.ps1'"
 ///
 /// PowerShell still loads the user's `$PROFILE` first, then runs the
 /// `-Command`, which dot-sources our script. The script wraps the
@@ -1229,11 +1229,21 @@ fn setupPowerShell(
         0,
     );
 
-    const argv = try alloc_arena.alloc([:0]const u8, 4);
+    // `-ExecutionPolicy Bypass` is process-scoped (it only affects the pwsh we
+    // spawn, never the user's persisted machine/user policy) and is required
+    // for correctness: Windows PowerShell 5.1 defaults to `Restricted` on
+    // client Windows, under which dot-sourcing our `.ps1` fails with
+    // "running scripts is disabled on this system", breaking integration and
+    // printing a security error on every launch. The script we source is
+    // Ghostty's own local file (no Mark-of-the-Web), so the bypass only
+    // unblocks our trusted script.
+    const argv = try alloc_arena.alloc([:0]const u8, 6);
     argv[0] = try alloc_arena.dupeZ(u8, exe);
     argv[1] = try alloc_arena.dupeZ(u8, "-NoExit");
-    argv[2] = try alloc_arena.dupeZ(u8, "-Command");
-    argv[3] = dot_source;
+    argv[2] = try alloc_arena.dupeZ(u8, "-ExecutionPolicy");
+    argv[3] = try alloc_arena.dupeZ(u8, "Bypass");
+    argv[4] = try alloc_arena.dupeZ(u8, "-Command");
+    argv[5] = dot_source;
 
     return .{ .direct = argv };
 }
@@ -1255,13 +1265,17 @@ test "powershell" {
     const command = try setupPowerShell(alloc, .{ .shell = "pwsh" }, res.path, &env);
     try testing.expect(command.? == .direct);
     const argv = command.?.direct;
-    try testing.expectEqual(@as(usize, 4), argv.len);
+    try testing.expectEqual(@as(usize, 6), argv.len);
     try testing.expectEqualStrings("pwsh", argv[0]);
     try testing.expectEqualStrings("-NoExit", argv[1]);
-    try testing.expectEqualStrings("-Command", argv[2]);
+    // Process-scoped policy bypass so a default-Restricted Windows
+    // PowerShell 5.1 can still dot-source our integration script.
+    try testing.expectEqualStrings("-ExecutionPolicy", argv[2]);
+    try testing.expectEqualStrings("Bypass", argv[3]);
+    try testing.expectEqualStrings("-Command", argv[4]);
     // The dot-source argument references our integration script.
-    try testing.expect(std.mem.indexOf(u8, argv[3], "ghostty.ps1") != null);
-    try testing.expect(std.mem.startsWith(u8, argv[3], ". '"));
+    try testing.expect(std.mem.indexOf(u8, argv[5], "ghostty.ps1") != null);
+    try testing.expect(std.mem.startsWith(u8, argv[5], ". '"));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
