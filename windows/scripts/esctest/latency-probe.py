@@ -29,7 +29,18 @@ QUERIES = [
     ("DECRQCRA", b"\x1b[1;0;1;1;1;1*y", b"\\"), # rect checksum       -> DCS Pid!~hhhh ST  (esctest screen readback)
     ("XTWINOPS_18", b"\x1b[18t", b"t"),         # text area size chars-> ESC[8;h;wt  (esctest reset() uses this)
     ("XTWINOPS_14", b"\x1b[14t", b"t"),         # text area size px   -> ESC[4;h;wt
-    ("DECRQM_25", b"\x1b[?25$p", b"y"),         # request mode DECTCEM-> ESC[?25;Ps$y
+    ("DECRQM_25", b"\x1b[?25$p", b"y"),         # request mode DECTCEM (DEC form) -> ESC[?25;Ps$y
+    ("DECRQM_ANSI_4", b"\x1b[4$p", b"y"),       # request mode IRM (ANSI form) -> ESC[4;Ps$y (suspected silent)
+    # --- residual report-query triage (#79 phase 1) ---
+    ("WINOP_11_state",   b"\x1b[11t", b"t"),    # report window state (normal/iconified)
+    ("WINOP_13_pos",     b"\x1b[13t", b"t"),    # report window position
+    ("WINOP_15_scrpx",   b"\x1b[15t", b"t"),    # report screen size in pixels
+    ("WINOP_16_charpx",  b"\x1b[16t", b"t"),    # report char cell size in pixels
+    ("WINOP_19_scrchars",b"\x1b[19t", b"t"),    # report screen size in chars
+    ("DECXCPR_6",        b"\x1b[?6n", b"R"),    # extended cursor position (DEC ?6n -> ...R)
+    ("DECDSR_printer_15",b"\x1b[?15n",b"n"),    # printer status
+    ("DECDSR_udk_25",    b"\x1b[?25n",b"n"),    # UDK status
+    ("DECDSR_kbd_26",    b"\x1b[?26n",b"n"),    # keyboard status
 ]
 
 REPS = int(os.environ.get("PROBE_REPS", "30"))
