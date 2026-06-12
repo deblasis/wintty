@@ -1,0 +1,2 @@
+# Allow .log fixture files in this directory (root .gitignore excludes *.log globally)
+!*.log

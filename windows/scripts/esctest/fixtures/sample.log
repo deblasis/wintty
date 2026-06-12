@@ -1,0 +1,25 @@
+Reading X window info for 0x0
+Run test: CR.test_CR_Basic
+Passed.
+
+Run test: CR.test_CR_MovesToLeftMargin
+*** TEST CR.test_CR_MovesToLeftMargin FAILED:
+Traceback (most recent call last):
+  File "/home/x/esctest2/esctest/escutil.py", line 1, in AssertEQ
+AssertionError: Expected 1, got 2
+
+Run test: DECRQSS.test_DECRQSS_SGR
+*** TEST DECRQSS.test_DECRQSS_SGR FAILED:
+Traceback (most recent call last):
+AssertionError: Timeout reading response
+
+Run test: SM.test_SM_IRM
+Fails as expected: known xterm bug
+
+Run test: DECSET.test_DECSET_AltScreen
+Skipped because terminal lacks requisite capability: alt screen
+
+*** 1 passed, 1 known bug, 2 FAILED ***
+Failing tests:
+CR.test_CR_MovesToLeftMargin
+DECRQSS.test_DECRQSS_SGR
