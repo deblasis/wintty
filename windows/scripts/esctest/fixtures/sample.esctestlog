@@ -5,13 +5,16 @@ Passed.
 Run test: CR.test_CR_MovesToLeftMargin
 *** TEST CR.test_CR_MovesToLeftMargin FAILED:
 Traceback (most recent call last):
-  File "/home/x/esctest2/esctest/escutil.py", line 1, in AssertEQ
-AssertionError: Expected 1, got 2
+  File "/home/x/esctest2/esctest/escutil.py", line 39, in AssertEQ
+    Raise(esctypes.TestFailure(actual, expected))
+esctypes.TestFailure: Test failed: expected 'Point(x=9, y=3)' but got 'Point(x=1, y=6)'
 
 Run test: DECRQSS.test_DECRQSS_SGR
 *** TEST DECRQSS.test_DECRQSS_SGR FAILED:
 Traceback (most recent call last):
-AssertionError: Timeout reading response
+  File "/home/x/esctest2/esctest/escio.py", line 245, in read
+    raise esctypes.InternalError("Timeout waiting to read.")
+esctypes.InternalError: Timeout waiting to read.
 
 Run test: SM.test_SM_IRM
 Fails as expected: known xterm bug
