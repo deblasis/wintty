@@ -327,24 +327,38 @@ pub const Handler = struct {
         self.writePty(written);
     }
 
+    /// The cursor position for a CPR/DECXCPR report, honoring origin mode
+    /// (relative to the scrolling region when DECOM is set).
+    fn cursorReportPos(self: *Handler) struct { x: usize, y: usize } {
+        return if (self.terminal.modes.get(.origin)) .{
+            .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
+            .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
+        } else .{
+            .x = self.terminal.screens.active.cursor.x,
+            .y = self.terminal.screens.active.cursor.y,
+        };
+    }
+
     fn deviceStatus(self: *Handler, req: device_status.Request) void {
         switch (req) {
             .operating_status => self.writePty("\x1B[0n"),
 
             .cursor_position => {
-                const pos: struct {
-                    x: usize,
-                    y: usize,
-                } = if (self.terminal.modes.get(.origin)) .{
-                    .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
-                    .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
-                } else .{
-                    .x = self.terminal.screens.active.cursor.x,
-                    .y = self.terminal.screens.active.cursor.y,
-                };
-
+                const pos = self.cursorReportPos();
                 var buf: [64]u8 = undefined;
                 const resp = std.fmt.bufPrintZ(&buf, "\x1B[{};{}R", .{
+                    pos.y + 1,
+                    pos.x + 1,
+                }) catch return;
+                self.writePty(resp);
+            },
+
+            // DECXCPR: extended cursor position adds a page number. Ghostty has
+            // no page memory, so the page is always 1.
+            .cursor_position_extended => {
+                const pos = self.cursorReportPos();
+                var buf: [64]u8 = undefined;
+                const resp = std.fmt.bufPrintZ(&buf, "\x1B[?{};{};1R", .{
                     pos.y + 1,
                     pos.x + 1,
                 }) catch return;
@@ -1475,6 +1489,61 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?9999$p");
         try testing.expectEqualStrings("\x1B[?9999;0$y", S.last_response.?);
     }
+}
+
+test "request mode DECRQM ANSI form with write_pty callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer if (S.last_response) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // ANSI-form DECRQM (CSI Ps $ p, no '?') must reply like the DEC form, not be
+    // silently dropped. Insert mode (IRM, 4) is reset by default -> Pm=2.
+    s.nextSlice("\x1B[4$p");
+    try testing.expect(S.last_response != null);
+    try testing.expectEqualStrings("\x1B[4;2$y", S.last_response.?);
+}
+
+test "device status DECXCPR extended cursor position with write_pty callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var last_response: ?[:0]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            if (last_response) |old| testing.allocator.free(old);
+            last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
+        }
+    };
+    S.last_response = null;
+    defer if (S.last_response) |old| testing.allocator.free(old);
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // DECXCPR (CSI ? 6 n) reports the extended cursor position:
+    // CSI ? row ; col ; page R. Ghostty has no page memory, so page is 1.
+    s.nextSlice("\x1B[5;3H");
+    s.nextSlice("\x1B[?6n");
+    try testing.expect(S.last_response != null);
+    try testing.expectEqualStrings("\x1B[?5;3;1R", S.last_response.?);
 }
 
 test "stream: CSI W with intermediate but no params" {

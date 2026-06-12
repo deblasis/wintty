@@ -1761,9 +1761,12 @@ pub fn Stream(comptime H: type) type {
                     }
                 },
 
-                // DECRQM - Request Mode
+                // DECRQM - Request Mode. Accepts both the ANSI form (CSI Ps $ p,
+                // one intermediate) and the DEC form (CSI ? Ps $ p, two); the inner
+                // switch tells them apart. Non-`$` single intermediates fall through
+                // to the same unimplemented warning as before.
                 'p' => switch (input.intermediates.len) {
-                    2 => decrqm: {
+                    1, 2 => decrqm: {
                         const ansi_mode = ansi: {
                             switch (input.intermediates.len) {
                                 1 => if (input.intermediates[0] == '$') break :ansi true,
