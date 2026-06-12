@@ -20,4 +20,14 @@ Assert-Equal 'DECRQSS' $byName['DECRQSS.test_DECRQSS_SGR'].Section     'DECRQSS 
 Assert-Equal 'KNOWN_BUG' $byName['SM.test_SM_IRM'].Status              'fails-as-expected = KNOWN_BUG'
 Assert-Equal 'SKIPPED' $byName['DECSET.test_DECSET_AltScreen'].Status  'skipped = SKIPPED'
 
+# --- Classify-EsctestResults ---
+$cls = Classify-EsctestResults -Records $recs
+$cByName = @{}; foreach ($c in $cls) { $cByName[$c.Name] = $c }
+# Only FAIL records are classified; PASS/KNOWN_BUG/SKIPPED are pass-through buckets.
+Assert-Equal 'ConPTY-limit'   $cByName['DECRQSS.test_DECRQSS_SGR'].Bucket      'DCS-family fail = ConPTY-limit'
+Assert-Equal 'Candidate-bug'  $cByName['CR.test_CR_MovesToLeftMargin'].Bucket  'non-DCS fail = Candidate-bug'
+Assert-Equal 'Pass'           $cByName['CR.test_CR_Basic'].Bucket              'PASS bucket'
+Assert-Equal 'Known-bug'      $cByName['SM.test_SM_IRM'].Bucket                'KNOWN_BUG bucket'
+Assert-Equal 'Skipped'        $cByName['DECSET.test_DECSET_AltScreen'].Bucket  'SKIPPED bucket'
+
 if ($script:fails -gt 0) { Write-Host "`n$script:fails assertion(s) failed"; exit 1 } else { Write-Host "`nAll assertions passed"; exit 0 }
