@@ -347,5 +347,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </Content>
+    <!--
+      Bundled default bell sound. Original synthesis (see scripts/gen-bell.ps1);
+      played when bell-features includes `audio` but bell-audio-path is unset.
+      A committed source asset, not a build output, so no generation target.
+    -->
+    <Content Include="Assets\bell.wav">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

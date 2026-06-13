@@ -128,6 +128,18 @@ internal sealed class TabModel : INotifyPropertyChanged
         set { if (field != value) { field = value; Raise(); } }
     } = TabColor.None;
 
+    /// <summary>
+    /// True while this tab has an unacknowledged bell. Set by the bell
+    /// handler when <c>bell-features</c> includes <c>title</c>; cleared
+    /// when the tab's active surface gains focus or takes a keystroke.
+    /// The tab strip renders a bell glyph while true. In-memory only.
+    /// </summary>
+    public bool BellRinging
+    {
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    }
+
     // Title precedence: explicit user override beats anything; then
     // the shell's OSC 0/2 reported title (which knows what the user
     // is actually running, e.g. "vim file.txt"); then the profile's
