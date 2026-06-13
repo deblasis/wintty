@@ -139,20 +139,32 @@ internal sealed partial class VerticalTabStrip : UserControl
             // Tooltip on the outermost grid (both templates).
             ToolTipService.SetToolTip(refreshRoot, t.EffectiveTitle);
 
+            // Bell indicator: present in both templates, looked up by name
+            // so we don't depend on child ordering.
+            if (refreshRoot.FindName("BellBadge") is FontIcon bellBadge)
+                bellBadge.Visibility = t.BellRinging
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
             // Expanded template: title TextBlock in column 1, close button in column 2.
             if (refreshRoot is Grid grid && grid.Children.Count >= 3)
             {
-                // Children are ordered: [TabIconPresenter, TextBlock, Button].
+                // Children are ordered: [TabIconPresenter, TextBlock, Button, ...].
                 if (grid.Children[1] is TextBlock titleBlock)
                     titleBlock.Text = t.EffectiveTitle;
                 // Close button Tag -> TabModel for OnRowCloseClick.
-                if (grid.Children[2] is Button closeBtn)
-                    closeBtn.Tag = t;
+                foreach (var child in grid.Children)
+                    if (child is Button closeBtn)
+                    {
+                        closeBtn.Tag = t;
+                        break;
+                    }
             }
         },
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
-        nameof(TabModel.UserOverrideTitle));
+        nameof(TabModel.UserOverrideTitle),
+        nameof(TabModel.BellRinging));
     }
 
     private static T? FindFirstChild<T>(Panel panel) where T : class
