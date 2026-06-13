@@ -43,8 +43,17 @@ internal interface IPaneHost
     /// <summary>Raised when the active leaf rings the bell (libghostty
     /// ring-bell action). Only the active leaf is forwarded, matching
     /// <see cref="ProgressChanged"/>; background panes ring audibly but
-    /// do not drive the window-level attention badge.</summary>
-    event EventHandler? BellRang;
+    /// do not drive the window/tab indicators. Carries the decoded
+    /// <c>bell-features</c> so each consumer gates itself: the taskbar
+    /// attention badge on <c>attention</c>, the tab title glyph on
+    /// <c>title</c>.</summary>
+    event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
+
+    /// <summary>Raised when the active leaf's surface acknowledges the
+    /// bell (gained focus or took a keystroke). Clears the tab title
+    /// indicator. The window attention badge clears separately on window
+    /// activation.</summary>
+    event EventHandler? BellAcknowledged;
 
     /// <summary>
     /// Raised after any structural change to the tree (split, close,

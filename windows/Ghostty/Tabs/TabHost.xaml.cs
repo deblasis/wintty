@@ -122,6 +122,27 @@ internal sealed partial class TabHost : UserControl, ITabHost
         iconRow.Children.Add(iconHost);
         iconRow.Children.Add(headerText);
 
+        // Bell indicator: a Ringer glyph shown after the title while the
+        // tab has an unacknowledged bell (bell-features `title`). Collapsed
+        // by default; toggled from TabModel.BellRinging below.
+        var bellGlyph = new FontIcon
+        {
+            Glyph = "\uEA8F", // Segoe Fluent / MDL2 "Ringer"
+            // FontIcon's default FontFamily is not guaranteed to be the symbol
+            // font, so pin it explicitly (as the strip's close button does) or
+            // the glyph can render as nothing.
+            FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)
+                Application.Current.Resources["SymbolThemeFontFamily"],
+            FontSize = 12,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            // Tint with the system accent, matching the vertical strip badge
+            // and the macOS/GTK accent-colored bell.
+            Foreground = BellAccentBrush(),
+            Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
+        };
+        iconRow.Children.Add(bellGlyph);
+
         headerPanel.Children.Add(iconRow);
         headerPanel.Children.Add(headerBar);
 
@@ -168,6 +189,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
             {
                 var selected = ReferenceEquals(_manager.ActiveTab, tab);
                 ApplyTabColor(headerPanel, tab.Color, selected);
+            }
+            else if (e.PropertyName == nameof(TabModel.BellRinging))
+            {
+                bellGlyph.Visibility = tab.BellRinging
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
             }
         };
         _itemByModel[tab] = item;
@@ -246,6 +273,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         var alpha = selected ? SelectedTabAlpha : UnselectedTabAlpha;
         headerPanel.Background = new SolidColorBrush(
             Windows.UI.Color.FromArgb(alpha, drawing.R, drawing.G, drawing.B));
+    }
+
+    /// <summary>
+    /// Accent brush for the per-tab bell indicator glyph. Resolved against
+    /// the live resources each call so it tracks runtime theme changes.
+    /// </summary>
+    private static Brush BellAccentBrush()
+    {
+        if (Application.Current.Resources.TryGetValue("SystemAccentColor", out var c)
+            && c is Windows.UI.Color color)
+            return new SolidColorBrush(color);
+        return new SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
     }
 
     /// <summary>
