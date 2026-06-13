@@ -117,6 +117,12 @@ internal sealed class GhosttyHost : IDisposable
     private readonly ConcurrentDictionary<IntPtr, TerminalControl> _surfaces = new();
     private readonly DispatcherQueue _dispatcher;
 
+    // Process-wide toast sink. Constructed in both ctors (stateless;
+    // AppNotificationManager.Default is itself a singleton). The bootstrap
+    // host uses it from OnAction (Show); per-window hosts use it from the
+    // focus-regain clear forwarded by their controls.
+    private readonly Ghostty.Core.Notifications.IToastNotifier _toasts;
+
     public GhosttyApp App => _app;
 
     /// <summary>
@@ -138,6 +144,8 @@ internal sealed class GhosttyHost : IDisposable
             supervisor);
         _config = config;
         _logger = loggerFactory.CreateLogger<GhosttyHost>();
+        _toasts = new Ghostty.Notifications.AppNotificationToastNotifier(
+            loggerFactory.CreateLogger<Ghostty.Notifications.AppNotificationToastNotifier>());
 
         _wakeupCb = OnWakeup;
         _actionCb = OnAction;
@@ -202,6 +210,8 @@ internal sealed class GhosttyHost : IDisposable
             supervisor.RegisterPerWindow(),
             supervisor);
         _logger = loggerFactory.CreateLogger<GhosttyHost>();
+        _toasts = new Ghostty.Notifications.AppNotificationToastNotifier(
+            loggerFactory.CreateLogger<Ghostty.Notifications.AppNotificationToastNotifier>());
         _app = new GhosttyApp(sharedApp);
         // Per-window hosts do not own or read _config; the bootstrap host
         // manages the single GhosttyConfig. Left as default intentionally.
@@ -757,6 +767,54 @@ internal sealed class GhosttyHost : IDisposable
                     return 1;
                 }
 
+                case GhosttyActionTag.DesktopNotification:
+                {
+                    // ghostty_action_desktop_notification_s:
+                    //   { const char* title; const char* body; }
+                    // title@+8, body@+16. The core already gated this on the
+                    // `desktop-notifications` config before dispatching, so no
+                    // config check here. Copy the strings on the libghostty
+                    // thread before the buffer frees, then decide + show on the
+                    // UI thread where focus state is valid.
+                    var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
+                    var bodyPtr = Marshal.ReadIntPtr(actionPtr, 16);
+                    var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
+                    var body = Marshal.PtrToStringUTF8(bodyPtr) ?? string.Empty;
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
+                        var req = Ghostty.Core.Notifications.NotificationPolicy.DesktopNotification(
+                            title, body, c.ToastSurfaceKey, c.IsFocused);
+                        if (req is not null) _toasts.Show(req);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.ShowChildExited:
+                {
+                    // ghostty_surface_message_childexited_s:
+                    //   { uint32 exit_code; uint64 runtime_ms; }
+                    // The union sits at +8; within it exit_code@+0 and the
+                    // 8-byte-aligned runtime_ms@+8, so read the struct at +8.
+                    GhosttyChildExited info;
+                    unsafe
+                    {
+                        info = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyChildExited>(
+                            (void*)(actionPtr + 8));
+                    }
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
+                        var req = Ghostty.Core.Notifications.NotificationPolicy.ChildExited(
+                            info.ExitCode, info.RuntimeMs, c.ToastSurfaceKey, c.IsFocused);
+                        if (req is not null) _toasts.Show(req);
+                    });
+                    // Return 0 ("not handled") so the core keeps its in-terminal
+                    // "Process exited. Press any key to close" fallback. The
+                    // toast is additive, not a replacement for that affordance.
+                    return 0;
+                }
+
                 default:
                     return 0;
             }
@@ -785,6 +843,12 @@ internal sealed class GhosttyHost : IDisposable
             owner.PaneActionRequested?.Invoke(paneAction));
         return 1;
     }
+
+    /// <summary>
+    /// Forwarded from a TerminalControl when its surface regains focus:
+    /// remove any background toast we raised for that surface.
+    /// </summary>
+    internal void ClearSurfaceToasts(string surfaceKey) => _toasts.ClearForSurface(surfaceKey);
 
     /// <summary>
     /// Raise <see cref="PaneActionRequested"/> for a chord that the

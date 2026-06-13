@@ -699,6 +699,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private bool _focused;
 
+    /// <summary>
+    /// Whether this surface currently holds focus. True implies the owning
+    /// window is foreground AND this surface is the active element (WinUI
+    /// only raises GotFocus then). Used by the toast policy to suppress
+    /// notifications the user is already looking at.
+    /// </summary>
+    internal bool IsFocused => _focused;
+
+    /// <summary>
+    /// Stable per-surface key used to group/clear toast notifications. Both
+    /// GhosttyHost (when showing) and the focus-regain clear below resolve
+    /// the same control, so the key is consistent for a surface's lifetime.
+    /// </summary>
+    internal string ToastSurfaceKey => _surface.Handle.ToString();
+
     private void OnGotFocus(object sender, RoutedEventArgs e)
     {
         // Stamp the focus instant so a focus-driven relayout in the next
@@ -727,6 +742,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // move the pointer, so without this the banner would stay frozen
         // on screen until the user returned and moved the mouse.
         if (!focused) UpdateUrlHoverBanner(null);
+
+        // On focus regain, drop any toast we raised for this surface while it
+        // was in the background so a stale notification does not linger.
+        if (focused) Host?.ClearSurfaceToasts(ToastSurfaceKey);
     }
 
     // Mouse --------------------------------------------------------------
