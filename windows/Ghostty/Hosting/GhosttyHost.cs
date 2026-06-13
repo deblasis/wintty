@@ -625,16 +625,61 @@ internal sealed class GhosttyHost : IDisposable
 
                 case GhosttyActionTag.RingBell:
                 {
-                    // Audible system bell rings immediately on the
-                    // libghostty thread; the attention badge is a UI
-                    // concern, so hop to the UI thread to resolve the
-                    // owning surface and raise BellRang.
-                    PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
-                    _dispatcher.TryEnqueue(() =>
+                    // Core already debounces the bell (100ms in Surface.zig)
+                    // before this action arrives, so no debounce here. Honor
+                    // bell-features: with no config (early startup) nothing
+                    // fires, matching the strict-parity default where the
+                    // stock config has system/audio/border off.
+                    var cfg = Ghostty.App.ConfigService;
+                    var features = cfg?.BellFeatures ?? default;
+
+                    // System beep is low-latency and thread-safe; fire it now.
+                    if (features.System)
+                        PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
+
+                    if (features.Audio || features.Attention
+                        || features.Border || features.Title)
                     {
-                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
-                            c.RaiseBellRang();
-                    });
+                        _dispatcher.TryEnqueue(() =>
+                        {
+                            // The control may be mid-teardown by the time this
+                            // dispatched callback runs; XAML/HWND access can then
+                            // throw COM/InvalidOperation. A failed bell must never
+                            // crash the app, so swallow and log at debug.
+                            try
+                            {
+                                if (!TryResolveControl(surfaceHandle, out var c) || c is null)
+                                    return;
+
+                                if (features.Audio)
+                                {
+                                    // User-configured path wins; otherwise fall
+                                    // back to the bundled default bell so `audio`
+                                    // works out of the box.
+                                    var audioPath = cfg?.BellAudioPath
+                                        ?? BellAudioPlayer.BundledDefaultPath;
+                                    if (audioPath is not null)
+                                        c.PlayBellAudio(audioPath, cfg?.BellAudioVolume ?? 0.5);
+                                }
+
+                                if (features.Attention
+                                    && Ghostty.Branding.WindowHelper.GetWindow(c) is { } window)
+                                {
+                                    Ghostty.Hosting.BellAttention.Flash(
+                                        WinRT.Interop.WindowNative.GetWindowHandle(window));
+                                }
+
+                                // Border (per-surface) shows here; title glyph
+                                // and attention badge ride BellRang(features),
+                                // gating on title / attention downstream.
+                                c.RaiseBellRang(features);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogDebug(ex, "bell dispatch failed (surface tearing down?)");
+                            }
+                        });
+                    }
                     return 1;
                 }
 

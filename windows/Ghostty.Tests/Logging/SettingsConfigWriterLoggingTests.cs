@@ -65,6 +65,9 @@ public class SettingsConfigWriterLoggingTests
         public string WindowTheme => "auto";
         public uint BackgroundColor => 0;
         public int UndoTimeoutMs => 5000;
+        public Ghostty.Core.Bell.BellFeatures BellFeatures => default;
+        public string? BellAudioPath => null;
+        public double BellAudioVolume => 0.5;
         public int DiagnosticsCount => 0;
         public string GetDiagnostic(int index) => string.Empty;
         public IReadOnlyList<string> WindowsOnlyKeysUsed => Array.Empty<string>();

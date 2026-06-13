@@ -89,6 +89,17 @@ public interface IConfigService : IDisposable
     /// </summary>
     int UndoTimeoutMs { get; }
 
+    /// <summary>Decoded <c>bell-features</c> packed struct from config.</summary>
+    Ghostty.Core.Bell.BellFeatures BellFeatures { get; }
+
+    /// <summary>Absolute path to the configured bell audio file, or null
+    /// when <c>bell-audio-path</c> is unset.</summary>
+    string? BellAudioPath { get; }
+
+    /// <summary>Bell audio volume in [0,1] (<c>bell-audio-volume</c>),
+    /// default 0.5.</summary>
+    double BellAudioVolume { get; }
+
     /// <summary>
     /// Re-read config from disk and apply it. Returns true on
     /// success, false if the reload failed (old config stays active).
