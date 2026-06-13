@@ -10,6 +10,9 @@
 ClientToScreen
 CreateCursor
 DestroyCursor
+FlashWindowEx
+FLASHWINFO
+FLASHWINFO_FLAGS
 GetCursorPos
 GetForegroundWindow
 GetKeyState

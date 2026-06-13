@@ -25,7 +25,7 @@ public class TabManagerBellTests
         int count = 0;
         mgr.BellRang += (_, _) => count++;
 
-        hosts[0].RaiseBellRang();
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
 
         Assert.Equal(1, count);
     }
@@ -39,7 +39,7 @@ public class TabManagerBellTests
         mgr.BellRang += (_, _) => count++;
 
         mgr.CloseTab(mgr.Tabs[1]); // unwires hosts[1]
-        hosts[1].RaiseBellRang();
+        hosts[1].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
 
         Assert.Equal(0, count);
     }

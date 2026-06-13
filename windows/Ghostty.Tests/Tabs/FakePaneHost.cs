@@ -44,8 +44,12 @@ internal sealed class FakePaneHost : IPaneHost
     public void RaiseProgressChanged(TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
-    public event EventHandler? BellRang;
-    public void RaiseBellRang() => BellRang?.Invoke(this, EventArgs.Empty);
+    public event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
+    public event EventHandler? BellAcknowledged;
+
+    public void RaiseBellRang(Ghostty.Core.Bell.BellFeatures features)
+        => BellRang?.Invoke(this, features);
+    public void RaiseBellAcknowledged() => BellAcknowledged?.Invoke(this, EventArgs.Empty);
 
     public void CloseActive()
     {

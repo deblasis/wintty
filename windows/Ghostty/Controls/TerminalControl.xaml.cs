@@ -183,7 +183,91 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
     internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
     internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
-    internal void RaiseBellRang() => BellRang?.Invoke(this, EventArgs.Empty);
+
+    private bool _bellBorderActive;
+    private bool _bellTitlePending;
+    private BellAudioPlayer? _bellAudio;
+
+    // Fade-out duration for the visual bell border once acknowledged.
+    // Matches the macOS easeInOut(duration: 0.3) bell border animation.
+    private const int BellBorderFadeMs = 300;
+
+    /// <summary>
+    /// Raise the bell for this surface with the decoded bell-features.
+    /// Called on the UI thread by <c>GhosttyHost.RingBell</c>. The visual
+    /// border is per-surface and shown here when <c>border</c> is enabled;
+    /// the BellRang event carries the features up to the tab/window
+    /// consumers, which gate the title glyph on <c>title</c> and the
+    /// taskbar attention badge on <c>attention</c>.
+    /// </summary>
+    internal void RaiseBellRang(Ghostty.Core.Bell.BellFeatures features)
+    {
+        if (features.Border) ShowBellBorder();
+        if (features.Title) _bellTitlePending = true;
+        BellRang?.Invoke(this, features);
+    }
+
+    /// <summary>Play the configured bell audio for this surface.</summary>
+    internal void PlayBellAudio(string path, double volume)
+    {
+        _bellAudio ??= new BellAudioPlayer(Ghostty.Logging.StaticLoggers.BellAudio);
+        _bellAudio.Play(path, volume);
+    }
+
+    private void ShowBellBorder()
+    {
+        BellOverlay.BorderBrush = ResolveBellBrush();
+        BellOverlay.Visibility = Visibility.Visible;
+        BellOverlay.Opacity = 1.0; // persistent; no auto-fade
+        _bellBorderActive = true;
+    }
+
+    private void DismissBellBorder()
+    {
+        if (!_bellBorderActive) return;
+        _bellBorderActive = false;
+
+        var fade = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            To = 0.0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(BellBorderFadeMs)),
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fade, BellOverlay);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fade, "Opacity");
+        var sb = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+        sb.Children.Add(fade);
+        sb.Completed += (_, _) =>
+        {
+            // Only collapse if no new bell re-armed the border mid-fade.
+            if (!_bellBorderActive) BellOverlay.Visibility = Visibility.Collapsed;
+        };
+        sb.Begin();
+    }
+
+    /// <summary>
+    /// Acknowledge any pending bell on this surface: fade the border and
+    /// tell the tab to clear its indicator. Invoked on focus gain and on
+    /// keystroke, matching macOS/GTK dismissal.
+    /// </summary>
+    private void AcknowledgeBell()
+    {
+        DismissBellBorder();
+        if (_bellTitlePending)
+        {
+            _bellTitlePending = false;
+            BellAcknowledged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private Microsoft.UI.Xaml.Media.Brush ResolveBellBrush()
+    {
+        // Tint with the system accent, matching macOS/GTK which use the
+        // accent color for the bell border.
+        if (Application.Current.Resources.TryGetValue("SystemAccentColor", out var c)
+            && c is Windows.UI.Color color)
+            return new Microsoft.UI.Xaml.Media.SolidColorBrush(color);
+        return new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
+    }
 
     // Called on the libghostty thread. Stashes the latest state and
     // enqueues a single UI-thread flush. Coalescing: if libghostty
@@ -308,10 +392,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public event EventHandler? CloseRequested;
     internal event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
 
-    /// <summary>Raised when libghostty rings the bell for this surface
-    /// (ring-bell action). PaneHost forwards the active leaf's bell up
-    /// to the window-level taskbar attention badge.</summary>
-    internal event EventHandler? BellRang;
+    /// <summary>Raised when libghostty rings the bell for this surface,
+    /// carrying the decoded bell-features. PaneHost forwards the active
+    /// leaf's bell up; the tab title glyph and taskbar attention badge
+    /// each gate on the carried features.</summary>
+    internal event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
+
+    /// <summary>Raised when the user acknowledges the bell on this surface
+    /// (focus gained or keystroke), so the tab title indicator can clear.</summary>
+    internal event EventHandler? BellAcknowledged;
+
 
     /// <summary>Raised when the shell prompt becomes interactive (OSC 133;B).
     /// The first such event per surface marks the shell as responsive.</summary>
@@ -523,6 +613,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_surfaceDisposed) return;
         _surfaceDisposed = true;
 
+        _bellAudio?.Dispose();
+        _bellAudio = null;
+
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
 
         if (_surface.Handle != IntPtr.Zero)
@@ -552,6 +645,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         PromptReady = null;
         FirstRender = null;
         BellRang = null;
+        BellAcknowledged = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
@@ -746,6 +840,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // ~500 ms does not flash the resize overlay (matches macOS).
         _lastFocusGainedTick = Environment.TickCount64;
         SetFocusState(true);
+        AcknowledgeBell();
     }
 
     private void OnLostFocus(object sender, RoutedEventArgs e) => SetFocusState(false);
@@ -1076,6 +1171,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // the sidebar pop-open. Unconditional: we want every key
         // (including chords and IME composition keys) to count.
         Host?.NoteKeystroke();
+
+        // Any key reaching the surface acknowledges a pending bell, fading
+        // the visual border and clearing the tab indicator (matches macOS).
+        AcknowledgeBell();
 
         // Windows-only residual match: a handful of chords have no
         // libghostty action (search-bar widget, vertical-tabs pin,

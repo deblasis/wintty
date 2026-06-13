@@ -72,6 +72,7 @@ internal static class StaticLoggers
     private static ILogger<Ghostty.Settings.CheatSheetDialog>? _cheatSheet;
     private static ILogger<Ghostty.Core.Config.SettingsConfigWriter>? _settingsConfigWriter;
     private static ILogger<App>? _app;
+    private static ILogger<Ghostty.Hosting.BellAudioPlayer>? _bellAudio;
 
     internal static ILogger<Ghostty.Services.ConfigService> ConfigService
         => _configService ?? NullLogger<Ghostty.Services.ConfigService>.Instance;
@@ -89,6 +90,8 @@ internal static class StaticLoggers
         => _settingsConfigWriter ?? NullLogger<Ghostty.Core.Config.SettingsConfigWriter>.Instance;
     internal static ILogger<App> App
         => _app ?? NullLogger<App>.Instance;
+    internal static ILogger<Ghostty.Hosting.BellAudioPlayer> BellAudio
+        => _bellAudio ?? NullLogger<Ghostty.Hosting.BellAudioPlayer>.Instance;
 
     internal static void Initialize(ILoggerFactory factory)
     {
@@ -100,6 +103,7 @@ internal static class StaticLoggers
         _cheatSheet = factory.CreateLogger<Ghostty.Settings.CheatSheetDialog>();
         _settingsConfigWriter = factory.CreateLogger<Ghostty.Core.Config.SettingsConfigWriter>();
         _app = factory.CreateLogger<App>();
+        _bellAudio = factory.CreateLogger<Ghostty.Hosting.BellAudioPlayer>();
     }
 
     internal static IDisposable Install(ILoggerFactory factory)
@@ -111,7 +115,7 @@ internal static class StaticLoggers
 
     private static Snapshot CaptureSnapshot() => new(
         _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage,
-        _cheatSheet, _settingsConfigWriter, _app);
+        _cheatSheet, _settingsConfigWriter, _app, _bellAudio);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
@@ -121,7 +125,8 @@ internal static class StaticLoggers
         ILogger<Ghostty.Settings.Pages.KeybindingsPage>? KeybindingsPage,
         ILogger<Ghostty.Settings.CheatSheetDialog>? CheatSheet,
         ILogger<Ghostty.Core.Config.SettingsConfigWriter>? SettingsConfigWriter,
-        ILogger<App>? App);
+        ILogger<App>? App,
+        ILogger<Ghostty.Hosting.BellAudioPlayer>? BellAudio);
 
     private sealed class Scope : IDisposable
     {
@@ -138,6 +143,7 @@ internal static class StaticLoggers
             _cheatSheet = _prior.CheatSheet;
             _settingsConfigWriter = _prior.SettingsConfigWriter;
             _app = _prior.App;
+            _bellAudio = _prior.BellAudio;
         }
     }
 }

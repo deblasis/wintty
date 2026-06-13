@@ -104,6 +104,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public string FontFamily { get; private set; } = "";
     public double FontSize { get; private set; } = 13.0;
 
+    // Bell settings, read from config each reload. See ReadFlagsCore.
+    public Ghostty.Core.Bell.BellFeatures BellFeatures { get; private set; }
+        = Ghostty.Core.Bell.BellFeatures.FromBits(0);
+    public string? BellAudioPath { get; private set; }
+    public double BellAudioVolume { get; private set; } = 0.5;
+
     /// <summary>
     /// Where the quake window docks on the chosen monitor.
     /// Default `top` matches upstream Ghostty.
@@ -576,6 +582,18 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         LogLevel = GetFileValue("log-level", "info");
         LogFilter = GetFileValue("log-filter", string.Empty);
 
+        // Bell. bell-features is a packed struct returned as a c_uint
+        // bitfield; decode via BellFeatures.FromBits. bell-audio-path is a
+        // ?Path union that does not round-trip through ghostty_config_get,
+        // so read the raw string from the file cache and resolve it like the
+        // Zig Path semantics. bell-audio-volume clamps to [0,1].
+        BellFeatures = Ghostty.Core.Bell.BellFeatures.FromBits(GetUInt("bell-features", 0));
+        BellAudioPath = Ghostty.Core.Bell.BellAudioPath.Resolve(
+            GetFileValue("bell-audio-path", ""),
+            Path.GetDirectoryName(ConfigFilePath),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        BellAudioVolume = Math.Clamp(GetDouble("bell-audio-volume", 0.5), 0.0, 1.0);
+
         // background-style is a Windows-only key not in the Zig config
         // schema, so we read it directly from the config file.
         BackgroundStyle = GetFileValue("background-style", "frosted");
@@ -755,6 +773,26 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
                 (IntPtr)keyPtr,
                 (UIntPtr)keyBytes.Length);
             return found && result != 0;
+        }
+    }
+
+    /// <summary>
+    /// Read a config key that <c>ghostty_config_get</c> serializes as a
+    /// <c>c_uint</c> (a packed-struct bitfield such as <c>bell-features</c>)
+    /// into a 4-byte <see cref="uint"/> buffer.
+    /// </summary>
+    private unsafe uint GetUInt(string key, uint defaultValue)
+    {
+        uint result = 0;
+        var keyBytes = System.Text.Encoding.UTF8.GetBytes(key);
+        fixed (byte* keyPtr = keyBytes)
+        {
+            var found = NativeMethods.ConfigGet(
+                _config,
+                (IntPtr)(&result),
+                (IntPtr)keyPtr,
+                (UIntPtr)keyBytes.Length);
+            return found ? result : defaultValue;
         }
     }
 

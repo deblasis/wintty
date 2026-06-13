@@ -161,5 +161,21 @@
         -->
         <resize:ResizeOverlayControl
             x:Name="ResizeOverlay" />
+
+        <!--
+            Visual bell border. Non-interactive overlay shown on a BEL when
+            bell-features includes `border`. It persists at full opacity
+            until the surface gains focus or takes a keystroke, then fades
+            out (~0.3s) and collapses, matching macOS/GTK. IsHitTestVisible
+            is false so it never steals pointer events from the surface.
+        -->
+        <Border
+            x:Name="BellOverlay"
+            IsHitTestVisible="False"
+            BorderThickness="2"
+            Opacity="0"
+            Visibility="Collapsed"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch" />
     </Grid>
 </UserControl>
