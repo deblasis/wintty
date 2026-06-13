@@ -70,6 +70,15 @@ public partial class App : Application
     // repeat press would otherwise stack a second menu on top.
     private bool _systemMenuOpen;
 
+    // Single-instance mode (opt-in via windows-single-instance). When this
+    // process is the primary it holds the mutex for the whole process
+    // lifetime, so the GC must not collect it -- hence the field. Null when
+    // single-instance is off, or when mutex acquisition threw (we then fall
+    // back to launching as a normal independent process). The server runs
+    // the forwarding pipe and only exists on the primary.
+    private System.Threading.Mutex? _singleInstanceMutex;
+    private Ghostty.Hosting.SingleInstanceServer? _singleInstanceServer;
+
     // The quake chord comes from the quick-terminal-key config value
     // (read via ConfigService.QuickTerminalKeyChord). QuickTerminalKeyChord.Default
     // is Ctrl+backtick (MOD_CONTROL|MOD_NOREPEAT, VK_OEM_3) when the
@@ -399,6 +408,18 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
+        // Single-instance gate. Decided here -- after ConfigService gives
+        // us the value and the config path, but before the bootstrap host,
+        // window, and DX12 renderer are created -- so a secondary process
+        // forwards its launch and exits without ever creating a window or
+        // paying for the renderer. Off by default: the call is a no-op and
+        // this stays a normal independent process. Returns normally when
+        // this process should keep launching (primary, or a forward that
+        // failed and falls back); calls Environment.Exit(0) itself when it
+        // was a secondary that handed its launch to the primary.
+        if (_configService.WindowsSingleInstance)
+            HandleSingleInstanceGate();
+
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Ghostty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
@@ -681,6 +702,139 @@ public partial class App : Application
         // Re-claim the chord whenever the config changes so an edited
         // quick-terminal-key takes effect without a restart.
         _configService.ConfigChanged += OnConfigReloaded_ReRegisterHotKey;
+
+        // Start the single-instance forwarding server last, once the UI
+        // dispatcher and logger factory exist. No-op unless this process is
+        // the single-instance primary (it holds the mutex).
+        StartSingleInstanceServer();
+    }
+
+    /// <summary>
+    /// Acquire the single-instance mutex. If we win it, keep it (this
+    /// process is the primary) and let OnLaunched continue. If another
+    /// process already holds it, forward our launch over the named pipe
+    /// and exit. Any failure on the secondary path falls back to a normal
+    /// independent launch so the user never loses a window.
+    /// </summary>
+    private void HandleSingleInstanceGate()
+    {
+        var exePath = Environment.ProcessPath ?? string.Empty;
+        var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(exePath);
+
+        bool createdNew;
+        try
+        {
+            _singleInstanceMutex = new System.Threading.Mutex(
+                initiallyOwned: true, name: names.Mutex, out createdNew);
+        }
+        catch (Exception ex)
+        {
+            // Could not create the coordination primitive at all. Do not
+            // block the launch: behave as a normal single window.
+            System.Diagnostics.Debug.WriteLine(
+                $"[single-instance] mutex create failed; launching normally. {ex.Message}");
+            _singleInstanceMutex = null;
+            return;
+        }
+
+        if (createdNew)
+        {
+            // Primary. The server is started later in OnLaunched once the
+            // UI dispatcher exists (see StartSingleInstanceServer()).
+            return;
+        }
+
+        // Secondary: a primary is already running. Forward and exit.
+        var request = new Ghostty.Core.SingleInstance.LaunchRequest(
+            Environment.CurrentDirectory,
+            Environment.GetCommandLineArgs());
+
+        try
+        {
+            using var client = new System.IO.Pipes.NamedPipeClientStream(
+                ".", names.Pipe, System.IO.Pipes.PipeDirection.Out);
+            client.Connect(2000); // 2s: primary should answer promptly
+            using var writer = new System.IO.StreamWriter(client) { AutoFlush = true };
+            writer.Write(request.Serialize());
+            writer.Flush();
+            client.WaitForPipeDrain();
+
+            // Release our mutex handle (we never owned it) and exit. The
+            // primary owns the launch now.
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+            Environment.Exit(0);
+        }
+        catch (Exception ex)
+        {
+            // Primary may be mid-shutdown or the pipe is wedged. Fall back
+            // to launching normally rather than dropping the user's launch.
+            // Drop the mutex handle first: we did not create it, and a new
+            // primary election is irrelevant now that we are becoming a
+            // standalone window.
+            System.Diagnostics.Debug.WriteLine(
+                $"[single-instance] forward failed; launching normally. {ex.Message}");
+            try { _singleInstanceMutex?.Dispose(); } catch { /* ignore */ }
+            _singleInstanceMutex = null;
+        }
+    }
+
+    /// <summary>
+    /// Start the forwarding pipe server. Called near the end of OnLaunched
+    /// (after _uiDispatcher is set) only when this process is the
+    /// single-instance primary (it holds the mutex).
+    /// </summary>
+    private void StartSingleInstanceServer()
+    {
+        if (_singleInstanceMutex is null || _loggerFactory is null) return;
+
+        var exePath = Environment.ProcessPath ?? string.Empty;
+        var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(exePath);
+        try
+        {
+            _singleInstanceServer = new Ghostty.Hosting.SingleInstanceServer(
+                names.Pipe,
+                req => _uiDispatcher?.TryEnqueue(() => OpenWindowFromLaunch(req)),
+                _loggerFactory.CreateLogger<Ghostty.Hosting.SingleInstanceServer>());
+            _singleInstanceServer.Start();
+        }
+        catch (Exception ex)
+        {
+            // A primary that cannot serve simply behaves like a normal
+            // window; secondaries will fail to connect and fall back to
+            // independent launches.
+            System.Diagnostics.Debug.WriteLine(
+                $"[single-instance] server start failed. {ex.Message}");
+            _singleInstanceServer = null;
+        }
+    }
+
+    /// <summary>
+    /// Open a new top-level window for a launch forwarded from a secondary
+    /// instance, seeded with the forwarded working directory. Runs on the
+    /// UI thread. Mirrors MainWindow.OpenInNewWindow's wiring.
+    /// </summary>
+    internal void OpenWindowFromLaunch(Ghostty.Core.SingleInstance.LaunchRequest req)
+    {
+        if (_configService is null || _bootstrapHost is null
+            || _lifetimeSupervisor is null || _loggerFactory is null)
+            return;
+
+        Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
+        var registry = ProfileRegistry;
+        if (registry?.DefaultProfileId is { } defaultId
+            && registry.Resolve(defaultId) is { } resolved)
+        {
+            snapshot = Ghostty.Core.Profiles.ProfileSnapshotStore.From(
+                resolved, registry.Version);
+            if (!string.IsNullOrEmpty(req.WorkingDirectory))
+                snapshot = snapshot with { WorkingDirectory = req.WorkingDirectory };
+        }
+
+        var window = MainWindow.CreateForNewTab(
+            _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, snapshot);
+        window.Closed += OnAnyWindowClosedInternal;
+        window.Activate();
     }
 
     /// <summary>
@@ -913,6 +1067,12 @@ public partial class App : Application
                     quake.Close();
                 }
 
+                // Stop the single-instance forwarding server before the
+                // host tears down so no inbound forwarded launch races a
+                // half-disposed app (the callback enqueues OpenWindowFromLaunch
+                // onto the UI thread).
+                _singleInstanceServer?.Dispose();
+
                 // Bootstrap host is the LAST host. Its Dispose drains
                 // _hostBySurface (asserts empty), notifies the
                 // supervisor (which throws if anything is still live),
@@ -992,6 +1152,12 @@ public partial class App : Application
                 _fileLogSink = null;
                 _loggerFactory = null;
                 LoggerFactory = null;
+
+                _singleInstanceServer = null;
+                // Release the single-instance mutex last so a relaunch can
+                // become the new primary immediately after we exit.
+                try { _singleInstanceMutex?.Dispose(); } catch { /* ignore */ }
+                _singleInstanceMutex = null;
 
                 Exit();
             }
