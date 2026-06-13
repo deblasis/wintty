@@ -163,24 +163,40 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnActiveLeafProgressChanged(object? sender, Ghostty.Core.Tabs.TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
-    /// <summary>Raised when the active leaf's terminal rings the bell.
-    /// Rewired across leaf-focus changes, mirroring
-    /// <see cref="ProgressChanged"/>.</summary>
-    public event EventHandler? BellRang;
+    /// <summary>Raised when the active leaf's terminal rings the bell,
+    /// carrying the decoded bell-features. Rewired across leaf-focus
+    /// changes, mirroring <see cref="ProgressChanged"/>.</summary>
+    public event EventHandler<Ghostty.Core.Bell.BellFeatures>? BellRang;
 
+    /// <summary>Raised when the active leaf acknowledges the bell (focus
+    /// or keystroke), so the tab title indicator can clear.</summary>
+    public event EventHandler? BellAcknowledged;
+
+    // The leaf we are currently forwarding bell events from. Swapped in
+    // BindActiveLeafBell when the active leaf changes. Unlike progress, we
+    // do NOT re-emit on bind: a pane switch must not re-ring the tab.
     private TerminalControl? _bellBoundTerminal;
 
     private void BindActiveLeafBell()
     {
         var next = _activeLeaf.Terminal();
         if (ReferenceEquals(next, _bellBoundTerminal)) return;
-        _bellBoundTerminal?.BellRang -= OnActiveLeafBellRang;
+        if (_bellBoundTerminal is not null)
+        {
+            _bellBoundTerminal.BellRang -= OnActiveLeafBellRang;
+            _bellBoundTerminal.BellAcknowledged -= OnActiveLeafBellAcknowledged;
+        }
         _bellBoundTerminal = next;
         next.BellRang += OnActiveLeafBellRang;
+        next.BellAcknowledged += OnActiveLeafBellAcknowledged;
     }
 
-    private void OnActiveLeafBellRang(object? sender, EventArgs e)
-        => BellRang?.Invoke(this, EventArgs.Empty);
+    private void OnActiveLeafBellRang(object? sender, Ghostty.Core.Bell.BellFeatures features)
+        => BellRang?.Invoke(this, features);
+
+    private void OnActiveLeafBellAcknowledged(object? sender, EventArgs e)
+        => BellAcknowledged?.Invoke(this, EventArgs.Empty);
+
 
     /// <summary>
     /// Raised when the last leaf in the tree closes. The owning
@@ -631,6 +647,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         LeafFocused = null;
         ProgressChanged = null;
         BellRang = null;
+        BellAcknowledged = null;
         LastLeafClosed = null;
     }
 
