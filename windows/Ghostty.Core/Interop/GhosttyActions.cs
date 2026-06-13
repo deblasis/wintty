@@ -32,6 +32,7 @@ internal enum GhosttyActionTag
     EqualizeSplits = 19,
     ToggleSplitZoom = 20,
     Scrollbar = 26,
+    DesktopNotification = 31,
     SetTitle = 32,
     MouseShape = 36,
     MouseVisibility = 37,
@@ -41,6 +42,7 @@ internal enum GhosttyActionTag
     ConfigChange = 48,
     CloseWindow = 49,
     RingBell = 50,
+    ShowChildExited = 55,
     ProgressReport = 56,
     StartSearch    = 59,
     EndSearch      = 60,
@@ -130,6 +132,20 @@ internal struct GhosttyActionProgressReport
 {
     public int State;
     public sbyte Progress;
+}
+
+// ghostty_surface_message_childexited_s:
+//   { uint32 exit_code; uint64 runtime_ms; }
+// On x64: exit_code@0, 4 bytes of padding before the 8-byte-aligned u64,
+// runtime_ms@8, total 16 bytes. GhosttyHost reads this at (actionPtr + 8)
+// (the union sits at +8, and within it the u64 forces the same +0/+8
+// field layout). The C header's field is mis-typed `timetime_ms` but the
+// ABI is the u64 at +8 -- the name is irrelevant to the binary layout.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyChildExited
+{
+    public uint ExitCode;
+    public ulong RuntimeMs;
 }
 
 // ghostty_action_start_search_s:
