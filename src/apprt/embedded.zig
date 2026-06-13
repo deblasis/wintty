@@ -19,6 +19,13 @@ const terminal = @import("../terminal/main.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
+
+/// DirectX12 imgui backend for the inspector (Windows only). On other
+/// platforms this is an empty namespace so the Inspector still compiles.
+const dx12_imgui = if (builtin.os.tag == .windows)
+    @import("../renderer/directx12/imgui.zig")
+else
+    struct {};
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
@@ -1159,12 +1166,20 @@ pub const Inspector = struct {
     /// Our previous instant used to calculate delta time for animations.
     instant: ?std.Io.Timestamp = null,
 
+    /// SRV descriptor heap backing the imgui font atlas for the DirectX12
+    /// backend (Windows only). Owned here so its address stays stable for
+    /// imgui's descriptor callbacks.
+    dx12_heap: if (builtin.os.tag == .windows) ?dx12_imgui.SrvHeap else void =
+        if (builtin.os.tag == .windows) null else {},
+
     const Backend = enum {
         metal,
+        directx12,
 
         pub fn deinit(self: Backend) void {
             switch (self) {
                 .metal => if (builtin.target.os.tag.isDarwin()) cimgui.ImGui_ImplMetal_Shutdown(),
+                .directx12 => if (builtin.os.tag == .windows) dx12_imgui.shutdown(),
             }
         }
     };
@@ -1192,6 +1207,7 @@ pub const Inspector = struct {
         self.surface.core_surface.deactivateInspector();
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
         if (self.backend) |v| v.deinit();
+        self.deinitDx12Heap();
         cimgui.c.ImGui_DestroyContext(self.ig_ctx);
     }
 
@@ -1262,6 +1278,87 @@ pub const Inspector = struct {
             cimgui.c.ImGui_GetDrawData(),
             command_buffer.value,
             encoder.value,
+        );
+    }
+
+    /// Release the DirectX12 SRV heap if one is allocated. No-op off Windows.
+    fn deinitDx12Heap(self: *Inspector) void {
+        if (comptime builtin.os.tag != .windows) return;
+        if (self.dx12_heap) |*h| {
+            h.deinit();
+            self.dx12_heap = null;
+        }
+    }
+
+    /// Initialize the inspector for a DirectX12 backend. `device` and
+    /// `command_queue` are `ID3D12Device`/`ID3D12CommandQueue` pointers from
+    /// the host's inspector window; `rtv_format` is its swap chain's
+    /// DXGI_FORMAT. Returns false on non-Windows or on failure.
+    pub fn initDirectX12(
+        self: *Inspector,
+        device: *anyopaque,
+        command_queue: *anyopaque,
+        num_frames: u32,
+        rtv_format: u32,
+    ) bool {
+        if (comptime builtin.os.tag != .windows) return false;
+
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+
+        if (self.backend) |v| {
+            v.deinit();
+            self.backend = null;
+        }
+        self.deinitDx12Heap();
+
+        const d3d12 = @import("../renderer/directx12/d3d12.zig");
+        const dev: *d3d12.ID3D12Device = @ptrCast(@alignCast(device));
+        const queue: *d3d12.ID3D12CommandQueue = @ptrCast(@alignCast(command_queue));
+
+        self.dx12_heap = dx12_imgui.createHeap(dev) catch {
+            log.warn("failed to create inspector dx12 srv heap", .{});
+            return false;
+        };
+        if (!dx12_imgui.init(dev, queue, num_frames, rtv_format, &self.dx12_heap.?)) {
+            log.warn("failed to initialize directx12 backend", .{});
+            self.deinitDx12Heap();
+            return false;
+        }
+        self.backend = .directx12;
+
+        log.debug("initialized directx12 backend", .{});
+        return true;
+    }
+
+    pub fn renderDirectX12(self: *Inspector, command_list: *anyopaque) !void {
+        if (comptime builtin.os.tag != .windows) return;
+        // The host should only call this after a successful init; bail
+        // cleanly rather than unwrap a null heap if that invariant breaks.
+        if (self.backend != .directx12) return;
+
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+
+        // Render multiple frames to ensure ImGui completes its state
+        // processing, matching the Metal backend.
+        for (0..2) |_| {
+            dx12_imgui.newFrame();
+            try self.newFrame();
+            cimgui.c.ImGui_NewFrame();
+
+            render: {
+                const surface = &self.surface.core_surface;
+                const inspector = surface.inspector orelse break :render;
+                inspector.render(surface);
+            }
+
+            cimgui.c.ImGui_Render();
+        }
+
+        const d3d12 = @import("../renderer/directx12/d3d12.zig");
+        dx12_imgui.renderDrawData(
+            cimgui.c.ImGui_GetDrawData(),
+            @as(*d3d12.ID3D12GraphicsCommandList, @ptrCast(@alignCast(command_list))),
+            &self.dx12_heap.?,
         );
     }
 
@@ -1577,6 +1674,9 @@ pub const CAPI = struct {
     comptime {
         if (builtin.target.os.tag.isDarwin()) {
             _ = Darwin;
+        }
+        if (builtin.os.tag == .windows) {
+            _ = Windows;
         }
     }
 
@@ -2673,6 +2773,42 @@ pub const CAPI = struct {
                 v.deinit();
                 ptr.backend = null;
             }
+        }
+    };
+
+    // Windows-only C APIs.
+    const Windows = struct {
+        export fn ghostty_inspector_directx12_init(
+            ptr: *Inspector,
+            device: ?*anyopaque,
+            command_queue: ?*anyopaque,
+            num_frames: u32,
+            rtv_format: u32,
+        ) bool {
+            return ptr.initDirectX12(
+                device orelse return false,
+                command_queue orelse return false,
+                num_frames,
+                rtv_format,
+            );
+        }
+
+        export fn ghostty_inspector_directx12_render(
+            ptr: *Inspector,
+            command_list: ?*anyopaque,
+        ) void {
+            return ptr.renderDirectX12(command_list orelse return) catch |err| {
+                log.err("error rendering inspector err={}", .{err});
+                return;
+            };
+        }
+
+        export fn ghostty_inspector_directx12_shutdown(ptr: *Inspector) void {
+            if (ptr.backend) |v| {
+                v.deinit();
+                ptr.backend = null;
+            }
+            ptr.deinitDx12Heap();
         }
     };
 };
