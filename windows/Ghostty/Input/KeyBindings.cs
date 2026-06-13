@@ -164,6 +164,17 @@ internal sealed class KeyBindings
         // embedded apprt via the keyboard on Windows; the command palette's
         // inspector:toggle still works through ghostty_surface_binding_action.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.I, PaneAction.ToggleInspector),
+
+        // Tab switcher. Ctrl+Tab / Ctrl+Shift+Tab drive the MRU cycle popup with
+        // hold-Ctrl / release-to-commit semantics, so they are matched here
+        // (apprt) rather than by libghostty's positional next/previous tab.
+        // Ctrl+PageUp/PageDown keep the plain positional behavior.
+        new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Tab, PaneAction.MruCycleNext),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Tab, PaneAction.MruCyclePrev),
+
+        // Grid overview of all tabs ("all tabs"). Reachable from the command
+        // palette too.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.A, PaneAction.ShowTabOverview),
     });
 
     /// <summary>

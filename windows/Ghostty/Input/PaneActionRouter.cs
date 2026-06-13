@@ -153,6 +153,19 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler<int>? FloatWindowRequested;
 
+    /// <summary>
+    /// Raised when a Ctrl+Tab / Ctrl+Shift+Tab MRU-cycle chord fires.
+    /// The bool is true for Ctrl+Tab (next), false for Ctrl+Shift+Tab (prev).
+    /// MainWindow listens and drives the TabSwitcherController.
+    /// </summary>
+    public event EventHandler<bool>? MruCycleRequested;
+
+    /// <summary>
+    /// Raised when the tab-overview chord or the palette "Show all tabs" entry
+    /// fires. MainWindow listens and shows the tab overview grid.
+    /// </summary>
+    public event EventHandler? ShowTabOverviewRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -212,6 +225,15 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.FloatWindowToggle:
                 FloatWindowRequested?.Invoke(this, 2);
+                return;
+            case PaneAction.MruCycleNext:
+                MruCycleRequested?.Invoke(this, true);
+                return;
+            case PaneAction.MruCyclePrev:
+                MruCycleRequested?.Invoke(this, false);
+                return;
+            case PaneAction.ShowTabOverview:
+                ShowTabOverviewRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding
