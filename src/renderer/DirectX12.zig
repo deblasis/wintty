@@ -1096,8 +1096,9 @@ test "device_lost flag is independent of device presence" {
     try std.testing.expect(api.device_lost);
 }
 
-// Pull the directx12 integration test file into the test graph; without
-// this @import gpu_test.zig is orphaned and never compiled by `zig build test`.
+// Pull the directx12 integration test files into the test graph; without
+// these @imports the files are orphaned and never compiled by `zig build test`.
 test {
     _ = @import("directx12/gpu_test.zig");
+    _ = @import("directx12/imgui.zig");
 }
