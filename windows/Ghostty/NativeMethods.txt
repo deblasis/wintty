@@ -47,6 +47,18 @@ SYSTEM_METRICS_INDEX
 // gdi32 - CreateSolidBrush and SetClassLongPtr are not in CsWin32
 // 0.3.269 metadata for this platform target; hand-written in MainWindow.
 
+// gdi32 / shell - taskbar overlay attention icon (AttentionOverlayIcon)
+CreateDIBSection
+CreateBitmap
+CreateIconIndirect
+DeleteObject
+DestroyIcon
+GetDC
+ReleaseDC
+ICONINFO
+BITMAPV5HEADER
+DIB_USAGE
+
 // dwmapi
 DwmSetWindowAttribute
 DWMWINDOWATTRIBUTE
