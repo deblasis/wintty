@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using Ghostty.Core.Taskbar;
 using Windows.Win32;
 using Windows.Win32.Foundation;
@@ -35,16 +36,29 @@ internal sealed class TaskbarOverlayFacade : ITaskbarOverlaySink, IDisposable
 
     public void SetAttention(bool active)
     {
-        if (active)
+        // The overlay badge is a nice-to-have, like the progress
+        // indicator. SetAttention runs on the UI thread off Window.
+        // Activated and the bell path, so a COM failure here must not
+        // bubble into those callbacks and tear the window down — swallow
+        // it and leave the badge in its previous state.
+        try
         {
-            if (_icon.IsNull) _icon = AttentionOverlayIcon.Create();
-            _taskbar.SetOverlayIcon(_hwnd, _icon, OverlayDescription);
+            if (active)
+            {
+                // Create() returns a null HICON on the rare GDI failure;
+                // SetOverlayIcon then just clears, and the next bell retries.
+                if (_icon.IsNull) _icon = AttentionOverlayIcon.Create();
+                _taskbar.SetOverlayIcon(_hwnd, _icon, OverlayDescription);
+            }
+            else
+            {
+                // Null HICON clears the overlay; empty description clears
+                // the accessibility text alongside it.
+                _taskbar.SetOverlayIcon(_hwnd, default, string.Empty);
+            }
         }
-        else
+        catch (COMException)
         {
-            // Null HICON clears the overlay; empty description clears the
-            // accessibility text alongside it.
-            _taskbar.SetOverlayIcon(_hwnd, default, string.Empty);
         }
     }
 

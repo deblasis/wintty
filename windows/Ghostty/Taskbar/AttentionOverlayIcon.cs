@@ -50,7 +50,15 @@ internal static class AttentionOverlayIcon
         {
             PInvoke.ReleaseDC(default, screen);
         }
-        if (color.IsNull || bits is null) return default;
+        if (color.IsNull) return default;
+        if (bits is null)
+        {
+            // CreateDIBSection never hands back a live handle with null
+            // bits in practice, but free it rather than leak the section
+            // if it ever did.
+            PInvoke.DeleteObject(color);
+            return default;
+        }
 
         RasterizeDot((byte*)bits, w, h);
 

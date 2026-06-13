@@ -171,8 +171,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     {
         var next = _activeLeaf.Terminal();
         if (ReferenceEquals(next, _bellBoundTerminal)) return;
-        if (_bellBoundTerminal is not null)
-            _bellBoundTerminal.BellRang -= OnActiveLeafBellRang;
+        _bellBoundTerminal?.BellRang -= OnActiveLeafBellRang;
         _bellBoundTerminal = next;
         next.BellRang += OnActiveLeafBellRang;
     }
