@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Ghostty.Dialogs.AboutWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      Title + AppTitleBar.Title are set in code-behind from
+      AppIdentity.ProductName so a rebrand touches one constant. Chrome
+      mirrors SettingsWindow: Mica backdrop, TitleBar primitive, themed
+      via WindowThemeManager.
+    -->
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TitleBar x:Name="AppTitleBar" Grid.Row="0">
+            <TitleBar.IconSource>
+                <!-- E946 = Info glyph; matches the About command icon. -->
+                <FontIconSource Glyph="&#xE946;" />
+            </TitleBar.IconSource>
+        </TitleBar>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel HorizontalAlignment="Center"
+                        Padding="32,16,32,32"
+                        Spacing="20">
+
+                <Image x:Name="AppIcon" Width="72" Height="72"
+                       HorizontalAlignment="Center" />
+
+                <StackPanel Spacing="6" HorizontalAlignment="Center">
+                    <TextBlock x:Name="ProductNameText"
+                               HorizontalAlignment="Center"
+                               Style="{StaticResource TitleTextBlockStyle}" />
+                    <TextBlock x:Name="TaglineText"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               MaxWidth="320"
+                               TextWrapping="Wrap"
+                               IsTextSelectionEnabled="True"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+
+                <!-- Version / Build / Commit rows -->
+                <Grid HorizontalAlignment="Center" ColumnSpacing="12" RowSpacing="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Version"
+                               HorizontalAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="VersionValue" Grid.Row="0" Grid.Column="1"
+                               FontFamily="Cascadia Mono, Consolas"
+                               IsTextSelectionEnabled="True" />
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Build"
+                               HorizontalAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="BuildValue" Grid.Row="1" Grid.Column="1"
+                               FontFamily="Cascadia Mono, Consolas"
+                               IsTextSelectionEnabled="True" />
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Commit"
+                               x:Name="CommitLabel"
+                               HorizontalAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="CommitValue" Grid.Row="2" Grid.Column="1"
+                               FontFamily="Cascadia Mono, Consolas"
+                               IsTextSelectionEnabled="True">
+                        <Hyperlink x:Name="CommitLink">
+                            <Run x:Name="CommitText" />
+                        </Hyperlink>
+                    </TextBlock>
+                </Grid>
+
+                <!-- Link buttons -->
+                <StackPanel Orientation="Horizontal" Spacing="8"
+                            HorizontalAlignment="Center">
+                    <HyperlinkButton x:Name="GitHubButton" Content="GitHub" />
+                    <HyperlinkButton x:Name="DocsButton" Content="Docs" />
+                    <HyperlinkButton x:Name="HomepageButton" Content="Homepage" />
+                    <HyperlinkButton x:Name="SponsorButton" Content="Sponsor" />
+                </StackPanel>
+
+                <!-- License / copyright -->
+                <StackPanel Spacing="2" HorizontalAlignment="Center">
+                    <TextBlock x:Name="LicenseText"
+                               HorizontalAlignment="Center"
+                               IsTextSelectionEnabled="True"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <TextBlock x:Name="CopyrightText"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               IsTextSelectionEnabled="True"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>
