@@ -8,6 +8,9 @@ pub fn build(b: *std.Build) !void {
     const backend_opengl3 = b.option(bool, "backend-opengl3", "OpenGL3 backend") orelse false;
     const backend_metal = b.option(bool, "backend-metal", "Metal backend") orelse false;
     const backend_osx = b.option(bool, "backend-osx", "OSX backend") orelse false;
+    // Defaults off: consumers (e.g. SharedDeps.zig) opt in with -Dbackend-dx12.
+    // Exercise the bindings with `zig build test -Dbackend-dx12=true`.
+    const backend_dx12 = b.option(bool, "backend-dx12", "DirectX12 backend") orelse false;
 
     // Build options
     const options = b.addOptions();
@@ -15,6 +18,7 @@ pub fn build(b: *std.Build) !void {
     options.addOption(bool, "backend_opengl3", backend_opengl3);
     options.addOption(bool, "backend_metal", backend_metal);
     options.addOption(bool, "backend_osx", backend_osx);
+    options.addOption(bool, "backend_dx12", backend_dx12);
 
     // Main static lib
     const lib = b.addLibrary(.{
@@ -71,6 +75,9 @@ pub fn build(b: *std.Build) !void {
     });
     if (backend_opengl3) try flags.appendSlice(b.allocator, &.{
         "-DZIGPKG_IMGUI_ENABLE_OPENGL3=1",
+    });
+    if (backend_dx12) try flags.appendSlice(b.allocator, &.{
+        "-DZIGPKG_IMGUI_ENABLE_DX12=1",
     });
     if (target.result.os.tag == .windows) {
         try flags.appendSlice(b.allocator, &.{
@@ -165,6 +172,30 @@ pub fn build(b: *std.Build) !void {
                 "",
                 .{ .include_extensions = &.{"imgui_impl_opengl3.h"} },
             );
+        }
+        if (backend_dx12) {
+            lib.addCSourceFiles(.{
+                .root = upstream.path("backends"),
+                .files = &.{"imgui_impl_dx12.cpp"},
+                .flags = flags.items,
+            });
+            lib.installHeadersDirectory(
+                upstream.path("backends"),
+                "",
+                .{ .include_extensions = &.{"imgui_impl_dx12.h"} },
+            );
+            // The DX12 backend calls into DXGI (CreateDXGIFactory1) and
+            // compiles its shaders at runtime via D3DCompile, so it needs
+            // these Windows import libs. Linking them on the static lib
+            // propagates the requirement to anything that links dcimgui.
+            lib.linkSystemLibrary("dxgi");
+            // The d3dcompiler import-lib name differs by ABI: the Windows
+            // SDK ships d3dcompiler.lib (MSVC), while Zig's bundled mingw
+            // defs only provide the versioned d3dcompiler_47.
+            lib.linkSystemLibrary(if (target.result.abi == .msvc)
+                "d3dcompiler"
+            else
+                "d3dcompiler_47");
         }
     }
 
