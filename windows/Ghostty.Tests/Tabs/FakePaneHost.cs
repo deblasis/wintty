@@ -18,6 +18,8 @@ namespace Ghostty.Tests.Tabs;
 internal sealed class FakePaneHost : IPaneHost
 {
     public LeafPane ActiveLeaf { get; } = new LeafPane();
+    public PaneNode RootNode => ActiveLeaf;
+    public LeafPane? ZoomedLeaf => null;
     public int PaneCount { get; private set; } = 1;
     public int CloseActiveCalls { get; private set; }
     public int DisposeAllCalls { get; private set; }
@@ -37,6 +39,7 @@ internal sealed class FakePaneHost : IPaneHost
     public event EventHandler<LeafPane>? LeafFocused;
     public event EventHandler? LastLeafClosed;
     public event EventHandler<TabProgressState>? ProgressChanged;
+    public event EventHandler? LayoutChanged { add { } remove { } }
 
     public void RaiseProgressChanged(TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
