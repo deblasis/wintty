@@ -77,4 +77,12 @@ internal static class LogEvents
         public const int ShowFailed  = 2701;
         public const int ClearFailed = 2702;
     }
+
+    // 2800-2899: Session restoration
+    internal static class Session
+    {
+        public const int LoadFailed   = 2800;
+        public const int SaveFailed   = 2801;
+        public const int DeleteFailed = 2802;
+    }
 }
