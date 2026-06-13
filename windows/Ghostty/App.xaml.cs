@@ -816,6 +816,10 @@ public partial class App : Application
         if (closing is { RegisteredRoot: { } root })
             WindowsByRoot.Remove(root);
 
+        // Detach this window's session-persistence subscriptions.
+        if (closing is not null)
+            _sessionManager?.Untrack(closing);
+
         // A deliberately-closed (non-last) window is left in the persisted
         // set on purpose: we cannot tell a single close apart from the first
         // close of a multi-window quit, so we never shrink the set on close

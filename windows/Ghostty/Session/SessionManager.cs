@@ -68,7 +68,7 @@ internal sealed class SessionManager
 
         var tm = window.TabManager;
         tm.TabAdded += OnTabAdded;
-        tm.TabRemoved += OnLayoutSignal;
+        tm.TabRemoved += OnTabRemoved;
         tm.TabMoved += OnTabMoved;
         tm.ActiveTabChanged += OnActiveTabChanged;
         // Pane-level structural changes for the tabs present now, plus any
@@ -78,9 +78,36 @@ internal sealed class SessionManager
         window.PositionChanged += OnLayoutSignal;
     }
 
+    /// <summary>
+    /// Mirror of <see cref="Track"/>: detach every handler when a window
+    /// closes. Defensive hygiene -- the dead window would not fire these, but
+    /// leaving subscriptions on the app-lifetime manager is a smell.
+    /// </summary>
+    public void Untrack(MainWindow window)
+    {
+        if (window.IsQuickTerminal) return;
+
+        var tm = window.TabManager;
+        tm.TabAdded -= OnTabAdded;
+        tm.TabRemoved -= OnTabRemoved;
+        tm.TabMoved -= OnTabMoved;
+        tm.ActiveTabChanged -= OnActiveTabChanged;
+        foreach (var t in tm.Tabs)
+            t.PaneHost.LayoutChanged -= OnLayoutSignal;
+        window.PositionChanged -= OnLayoutSignal;
+    }
+
     private void OnTabAdded(object? sender, Ghostty.Core.Tabs.TabModel tab)
     {
         tab.PaneHost.LayoutChanged += OnLayoutSignal;
+        RequestPersist();
+    }
+
+    private void OnTabRemoved(object? sender, Ghostty.Core.Tabs.TabModel tab)
+    {
+        // Unhook the closed tab's pane host so a per-tab subscription does not
+        // outlive the tab within a still-open window.
+        tab.PaneHost.LayoutChanged -= OnLayoutSignal;
         RequestPersist();
     }
 
@@ -91,7 +118,6 @@ internal sealed class SessionManager
         => RequestPersist();
 
     private void OnLayoutSignal(object? sender, EventArgs e) => RequestPersist();
-    private void OnLayoutSignal(object? sender, Ghostty.Core.Tabs.TabModel tab) => RequestPersist();
 
     public void RequestPersist()
     {
