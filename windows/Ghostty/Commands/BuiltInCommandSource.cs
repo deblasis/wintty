@@ -63,6 +63,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.ToggleTabLayout, "Toggle Tab Layout", "Switch between horizontal and vertical tab layout", CommandCategory.Tab, "\uE8AB");
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal);
         AddPaneCommand(commands, PaneAction.ShowKeybindCheatsheet, "Keyboard Shortcuts", "Show the keyboard shortcuts cheat sheet", CommandCategory.Terminal, "");
+        AddPaneCommand(commands, PaneAction.ShowAbout, "About", "Show app version, links, and license", CommandCategory.About, "");
         // Undo/Redo are omitted when their stack is empty so the palette
         // never offers a dead no-op. The palette rebuilds this list on every
         // open (CommandPaletteViewModel.Open -> Refresh + GetCommands), so a

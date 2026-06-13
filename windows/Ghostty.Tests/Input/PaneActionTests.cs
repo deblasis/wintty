@@ -30,4 +30,11 @@ public class PaneActionTests
         // their hardcoded values intact.
         Assert.Equal((int)PaneAction.ToggleCommandPalette + 1, (int)PaneAction.OpenProfile1);
     }
+
+    [Fact]
+    public void ShowAbout_HasStableValue52()
+    {
+        // Pinned so a future enum reorder is a deliberate, visible change.
+        Assert.Equal(52, (int)PaneAction.ShowAbout);
+    }
 }
