@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Profiles;
+using Ghostty.Core.Session;
 
 namespace Ghostty.Core.Tabs;
 
@@ -29,6 +30,10 @@ namespace Ghostty.Core.Tabs;
 internal sealed class TabManager
 {
     private readonly Func<ProfileSnapshot?, IPaneHost> _paneHostFactory;
+    // Shared (app-level) store of recently-closed tabs for reopen-closed-tab.
+    // Null in tests / contexts that do not wire reopen. CloseTab pushes a
+    // snapshot here before the panes are disposed.
+    private readonly ClosedStack<TabSession>? _closedTabs;
     private readonly ObservableCollection<TabModel> _tabs = new();
     private TabModel _activeTab = null!;
 
@@ -65,12 +70,12 @@ internal sealed class TabManager
     /// </summary>
     public event EventHandler<TabModel>? TabDetaching;
 
-    public TabManager(Func<ProfileSnapshot?, IPaneHost> paneHostFactory)
-        : this(paneHostFactory, seed: null) { }
-
     /// <summary>
     /// Non-null <paramref name="seed"/> is adopted as the initial tab
     /// (factory call is skipped); null falls through to the factory.
+    /// <paramref name="closedTabs"/> is the (app-shared) bounded store that
+    /// <see cref="CloseTab"/> pushes a snapshot to before tearing a tab down;
+    /// null disables capture (tests / non-reopen contexts).
     ///
     /// Seeded construction does NOT raise <see cref="TabAdded"/> for
     /// the seed: it is the initial tab, and TabAdded is for growth.
@@ -85,9 +90,13 @@ internal sealed class TabManager
     /// assigns <see cref="ActiveTab"/> directly without events because
     /// no listener is wired at ctor time.
     /// </summary>
-    public TabManager(Func<ProfileSnapshot?, IPaneHost> paneHostFactory, TabModel? seed)
+    public TabManager(
+        Func<ProfileSnapshot?, IPaneHost> paneHostFactory,
+        TabModel? seed = null,
+        ClosedStack<TabSession>? closedTabs = null)
     {
         _paneHostFactory = paneHostFactory;
+        _closedTabs = closedTabs;
         if (seed is null)
         {
             var first = CreateTab(snapshot: null);
@@ -151,6 +160,17 @@ internal sealed class TabManager
     {
         var index = _tabs.IndexOf(tab);
         if (index < 0) return;
+
+        // Capture a reopenable snapshot before the panes are torn down. Always
+        // captures (including the window's last tab): closing a tab makes it
+        // reopenable via reopen-closed-tab. Whole-window closes do not route
+        // through CloseTab, so they are captured separately as window snapshots.
+        _closedTabs?.Push(SessionCapture.CaptureTab(
+            tab.PaneHost.RootNode,
+            tab.PaneHost.ActiveLeaf,
+            tab.PaneHost.ZoomedLeaf,
+            tab.ProfileId,
+            tab.UserOverrideTitle));
 
         tab.PaneHost.LeafFocused -= OnLeafFocused;
         tab.PropertyChanged -= OnTabPropertyChanged;
