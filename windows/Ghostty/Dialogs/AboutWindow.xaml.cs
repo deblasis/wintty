@@ -71,22 +71,28 @@ internal sealed partial class AboutWindow : Window
         var info = VersionRenderer.Build();
         VersionValue.Text = info.WinttyVersion;
 
-        // Build = edition, plus channel when libghostty reports one.
+        // The Version row already carries the semantic version, so the Build
+        // row surfaces the distribution identity instead: edition, plus the
+        // libghostty channel (tip/stable) when reported. Mirrors the split in
+        // `wintty +version`.
         var edition = EditionLabel.Format(info.Edition);
         BuildValue.Text = string.IsNullOrEmpty(info.LibGhostty.Channel)
             ? edition
             : $"{edition} ({info.LibGhostty.Channel})";
 
+        // CommitUrl is null when the commit is unknown. Guard the parse too:
+        // the commit string is build-derived, so a malformed value collapses
+        // the row rather than throwing and taking down the whole window.
         var commitUrl = VersionRenderer.CommitUrl(info);
-        if (commitUrl is null)
+        if (commitUrl is not null && Uri.TryCreate(commitUrl, UriKind.Absolute, out var commitUri))
         {
-            CommitLabel.Visibility = Visibility.Collapsed;
-            CommitValue.Visibility = Visibility.Collapsed;
+            CommitText.Text = info.WinttyCommit;
+            CommitLink.NavigateUri = commitUri;
         }
         else
         {
-            CommitText.Text = info.WinttyCommit;
-            CommitLink.NavigateUri = new Uri(commitUrl);
+            CommitLabel.Visibility = Visibility.Collapsed;
+            CommitValue.Visibility = Visibility.Collapsed;
         }
 
         GitHubButton.NavigateUri = new Uri(AboutContent.GitHubUrl);

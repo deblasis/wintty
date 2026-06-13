@@ -98,8 +98,8 @@ public enum PaneAction
     Redo = 51,
 
     // Open the branded About window (app name, version/build/commit, links,
-    // license). Apprt-only: routed via event to MainWindow, which opens the
-    // singleton AboutWindow. Mirrors ShowKeybindCheatsheet (event-only,
-    // needs a window, no libghostty action).
+    // license). Apprt-only: routed via event to MainWindow, which opens one
+    // About window per window (reused if already open). Mirrors
+    // ShowKeybindCheatsheet (event-only, needs a window, no libghostty action).
     ShowAbout = 52,
 }
