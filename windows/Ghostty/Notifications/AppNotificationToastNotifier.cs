@@ -30,10 +30,13 @@ internal sealed class AppNotificationToastNotifier : IToastNotifier
     {
         try
         {
-            var notification = new AppNotificationBuilder()
-                .AddText(request.Title)
-                .AddText(request.Body)
-                .BuildNotification();
+            // OSC 9 carries only a body (title is empty); OSC 777 and the
+            // child-exited toast set both. Skip the title line when empty so
+            // OSC 9 does not render a blank bold heading above the message.
+            var builder = new AppNotificationBuilder();
+            if (!string.IsNullOrEmpty(request.Title)) builder.AddText(request.Title);
+            builder.AddText(request.Body);
+            var notification = builder.BuildNotification();
             notification.Tag = NotificationTag;
             notification.Group = request.SurfaceKey;
             AppNotificationManager.Default.Show(notification);
