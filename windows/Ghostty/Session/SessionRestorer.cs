@@ -30,9 +30,10 @@ internal sealed class SessionRestorer
         {
             if (tabDto.Tree is null) continue;
 
-            // Rebuild the structure; each leaf re-resolves its own profile.
+            // Rebuild the structure; each leaf re-resolves its own profile
+            // (exact id, else its saved fallback command).
             var root = SessionTree.RebuildTree(tabDto.Tree,
-                leaf => new LeafPane { Snapshot = ResolveSnapshot(leaf) });
+                leaf => new LeafPane { Snapshot = SessionProfileResolver.ResolveLeaf(_registry, leaf) });
 
             var active = SessionTree.Resolve(root, tabDto.ActiveLeafPath) as LeafPane
                          ?? PaneTree.FirstLeaf(root);
@@ -43,8 +44,9 @@ internal sealed class SessionRestorer
             var host = _factory.CreateFromTree(root, active, zoomed);
             var tab = new TabModel(host) { ProfileId = tabDto.ProfileId };
 
-            // The tab's display snapshot: re-resolve the tab's own profile id.
-            var tabSnap = ResolveById(tabDto.ProfileId);
+            // The tab's display snapshot: re-resolve the tab's own profile id
+            // if it still exists (else the tab keeps its restored title).
+            var tabSnap = SessionProfileResolver.ResolveById(_registry, tabDto.ProfileId);
             if (tabSnap is not null)
                 tab.AttachProfileSnapshot(tabSnap);
             if (tabDto.UserTitle is not null)
@@ -53,29 +55,5 @@ internal sealed class SessionRestorer
             result.Add(tab);
         }
         return result;
-    }
-
-    private ProfileSnapshot? ResolveSnapshot(LeafDto leaf)
-    {
-        var byId = ResolveById(leaf.ProfileId);
-        if (byId is not null) return byId;
-        if (leaf.Fallback is { } fb)
-            return new ProfileSnapshot(
-                ProfileId: leaf.ProfileId ?? "",
-                Version: 0,
-                ResolvedCommand: fb.ResolvedCommand,
-                WorkingDirectory: fb.WorkingDirectory,
-                DisplayName: fb.DisplayName,
-                Icon: new IconSpec.BundledKey("default"),
-                Visuals: EffectiveVisualOverrides.Empty);
-        return null; // legacy no-profile leaf: host spawns the default shell
-    }
-
-    private ProfileSnapshot? ResolveById(string? profileId)
-    {
-        if (_registry is null || profileId is null) return null;
-        var resolved = _registry.Resolve(profileId)
-            ?? (_registry.DefaultProfileId is { } d ? _registry.Resolve(d) : null);
-        return resolved is null ? null : ProfileSnapshotStore.From(resolved, _registry.Version);
     }
 }
