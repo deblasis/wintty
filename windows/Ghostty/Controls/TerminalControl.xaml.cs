@@ -1174,6 +1174,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (CommandPaletteIsOpen) return;
 
+        // Esc cancels an in-progress MRU cycle without switching tabs. Checked
+        // before the residual match and SendKey because Esc is not a bound chord
+        // and would otherwise reach the shell.
+        if (Host?.IsTabCycling == true && e.Key == Windows.System.VirtualKey.Escape)
+        {
+            Host.RequestTabCycleCancel();
+            e.Handled = true;
+            return;
+        }
+
         // Suppress forwarding while the in-pane search bar owns keyboard
         // focus: its controls are children of this visual tree, so their
         // KeyDown bubbles up here and would otherwise also run in the
@@ -1219,6 +1229,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
+        // MRU cycle: releasing Ctrl commits the highlighted tab. We DON'T mark
+        // the event handled or return here -- libghostty saw the Ctrl press
+        // (the modifier key-down is not a residual match and was forwarded), so
+        // it must also see this release to keep its modifier state balanced.
+        // We just fire the commit and let the normal release path below run.
+        if (Host?.IsTabCycling == true &&
+            (e.Key == Windows.System.VirtualKey.Control ||
+             e.Key == Windows.System.VirtualKey.LeftControl ||
+             e.Key == Windows.System.VirtualKey.RightControl))
+        {
+            Host.RequestTabCycleCommit();
+        }
+
         // Mirror OnKeyDown: while the search bar owns focus, swallow the
         // key-up too so libghostty never sees a release for a press it
         // never received.

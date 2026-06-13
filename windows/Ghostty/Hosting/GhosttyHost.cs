@@ -1029,6 +1029,22 @@ internal sealed class GhosttyHost : IDisposable
     public void RequestPaneAction(Ghostty.Core.Input.PaneAction action) =>
         PaneActionRequested?.Invoke(action);
 
+    /// <summary>
+    /// True while a Ctrl+Tab MRU cycle is in progress. Set by MainWindow when
+    /// the TabSwitcherController starts/ends a cycle; read by TerminalControl's
+    /// key-up handler to decide whether a Ctrl release should commit.
+    /// </summary>
+    public bool IsTabCycling { get; set; }
+
+    /// <summary>Raised when the apprt detects Ctrl release during a cycle.</summary>
+    public event Action? TabCycleCommitRequested;
+
+    /// <summary>Raised when the apprt detects Esc during a cycle.</summary>
+    public event Action? TabCycleCancelRequested;
+
+    public void RequestTabCycleCommit() => TabCycleCommitRequested?.Invoke();
+    public void RequestTabCycleCancel() => TabCycleCancelRequested?.Invoke();
+
     // The clipboard and close-surface callbacks below are also invoked
     // directly by libghostty on its own thread (see OnAction for the
     // native-boundary rationale). Their synchronous bodies decode raw
