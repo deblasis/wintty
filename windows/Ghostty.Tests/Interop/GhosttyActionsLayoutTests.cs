@@ -25,6 +25,8 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
     [InlineData((int)GhosttyActionTag.MouseVisibility, 37)]
     [InlineData((int)GhosttyActionTag.MouseOverLink, 38)]
+    [InlineData((int)GhosttyActionTag.DesktopNotification, 31)]
+    [InlineData((int)GhosttyActionTag.ShowChildExited, 55)]
     [InlineData((int)GhosttyActionTag.ConfigChange, 48)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
@@ -208,5 +210,23 @@ public class GhosttyActionsLayoutTests
     public void MoveTabStruct_Size_Is_8_Bytes()
     {
         Assert.Equal(8, Marshal.SizeOf<GhosttyActionMoveTab>());
+    }
+
+    [Fact]
+    public void ChildExitedStruct_Size_Is_16_Bytes()
+    {
+        // ghostty_surface_message_childexited_s:
+        //   { uint32 exit_code; uint64 runtime_ms; }
+        // exit_code@0, 4 bytes pad, runtime_ms@8 -> 16 total on x64.
+        Assert.Equal(16, Marshal.SizeOf<GhosttyChildExited>());
+    }
+
+    [Fact]
+    public void ChildExitedStruct_Field_Offsets_Match_C_Layout()
+    {
+        // GhosttyHost reads this struct at (actionPtr + 8) via
+        // Unsafe.ReadUnaligned, so the fields MUST sit at +0/+8.
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyChildExited>(nameof(GhosttyChildExited.ExitCode)));
+        Assert.Equal(8, (int)Marshal.OffsetOf<GhosttyChildExited>(nameof(GhosttyChildExited.RuntimeMs)));
     }
 }
