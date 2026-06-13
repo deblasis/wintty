@@ -69,4 +69,12 @@ internal static class LogEvents
         public const int CheatSheetShowFailed = 2602;
         public const int CheatSheetExportFailed = 2603;
     }
+
+    // 2700-2799: Session restoration
+    internal static class Session
+    {
+        public const int LoadFailed   = 2700;
+        public const int SaveFailed   = 2701;
+        public const int DeleteFailed = 2702;
+    }
 }
