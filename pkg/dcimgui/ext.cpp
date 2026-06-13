@@ -50,4 +50,27 @@ CIMGUI_API void ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup()
 #endif // __has_include("backends/imgui_impl_opengl3.h")
 #endif // IMGUI_DISABLE
 
+// DX12 backend layout accessors. The Zig bindings mirror
+// ImGui_ImplDX12_InitInfo as an extern struct; these let the unit test
+// assert the Zig layout matches the compiled C++ layout (which omits the
+// obsolete LegacySingleSrv* fields because IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+// is defined).
+#ifndef IMGUI_DISABLE
+#if __has_include("backends/imgui_impl_dx12.h")
+#ifdef ZIGPKG_IMGUI_ENABLE_DX12
+#include "backends/imgui_impl_dx12.h"
+
+CIMGUI_API size_t ghostty_ImGui_ImplDX12_InitInfo_size()
+{
+    return sizeof(ImGui_ImplDX12_InitInfo);
+}
+
+CIMGUI_API size_t ghostty_ImGui_ImplDX12_InitInfo_align()
+{
+    return alignof(ImGui_ImplDX12_InitInfo);
+}
+#endif // ZIGPKG_IMGUI_ENABLE_DX12
+#endif // __has_include("backends/imgui_impl_dx12.h")
+#endif // IMGUI_DISABLE
+
 }
