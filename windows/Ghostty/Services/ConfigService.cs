@@ -57,6 +57,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     // optimization.
     public bool VerticalTabs { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
+    public bool WindowsSingleInstance { get; private set; }
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
@@ -561,6 +562,9 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             defaultValue: false);
         CommandPaletteGroupCommands = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("command-palette-group-commands", ""),
+            defaultValue: false);
+        WindowsSingleInstance = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("windows-single-instance", ""),
             defaultValue: false);
         CommandPaletteBackground = WindowsOnlyKeyParsers.ParseStringAllowed(
             GetFileValue("command-palette-background", ""),

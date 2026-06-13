@@ -53,6 +53,8 @@ public static class WindowsOnlyKeys
             "Id of the profile opened for a new tab or window when none is specified."),
         new("profile-order",
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
+        new("windows-single-instance",
+            "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process."),
     ];
 
     public static readonly FrozenSet<string> Set =
