@@ -160,6 +160,26 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnActiveLeafProgressChanged(object? sender, Ghostty.Core.Tabs.TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
+    /// <summary>Raised when the active leaf's terminal rings the bell.
+    /// Rewired across leaf-focus changes, mirroring
+    /// <see cref="ProgressChanged"/>.</summary>
+    public event EventHandler? BellRang;
+
+    private TerminalControl? _bellBoundTerminal;
+
+    private void BindActiveLeafBell()
+    {
+        var next = _activeLeaf.Terminal();
+        if (ReferenceEquals(next, _bellBoundTerminal)) return;
+        if (_bellBoundTerminal is not null)
+            _bellBoundTerminal.BellRang -= OnActiveLeafBellRang;
+        _bellBoundTerminal = next;
+        next.BellRang += OnActiveLeafBellRang;
+    }
+
+    private void OnActiveLeafBellRang(object? sender, EventArgs e)
+        => BellRang?.Invoke(this, EventArgs.Empty);
+
     /// <summary>
     /// Raised when the last leaf in the tree closes. The owning
     /// <c>TabManager</c> subscribes and routes to
@@ -315,6 +335,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         Loaded += (_, _) =>
         {
             BindActiveLeafProgress();
+            BindActiveLeafBell();
             LeafFocused?.Invoke(this, _activeLeaf);
             // Evict expired undo entries ~once a second; dispose any shell
             // that is no longer reachable from the live tree or history.
@@ -327,8 +348,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                     TimeSpan.FromSeconds(1),
                     TimeSpan.FromSeconds(1));
         };
-        // Rebind progress whenever the active leaf changes later.
-        LeafFocused += (_, _) => BindActiveLeafProgress();
+        // Rebind progress and bell whenever the active leaf changes later.
+        LeafFocused += (_, _) => { BindActiveLeafProgress(); BindActiveLeafBell(); };
     }
 
     // Public operations -------------------------------------------------
@@ -509,6 +530,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // must always be dropped. Matches TerminalControl.DisposeSurface.
         LeafFocused = null;
         ProgressChanged = null;
+        BellRang = null;
         LastLeafClosed = null;
     }
 
