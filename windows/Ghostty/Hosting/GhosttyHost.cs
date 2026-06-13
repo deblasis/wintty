@@ -625,7 +625,16 @@ internal sealed class GhosttyHost : IDisposable
 
                 case GhosttyActionTag.RingBell:
                 {
+                    // Audible system bell rings immediately on the
+                    // libghostty thread; the attention badge is a UI
+                    // concern, so hop to the UI thread to resolve the
+                    // owning surface and raise BellRang.
                     PInvoke.MessageBeep(MESSAGEBOX_STYLE.MB_OK);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaiseBellRang();
+                    });
                     return 1;
                 }
 

@@ -183,6 +183,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
     internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
     internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
+    internal void RaiseBellRang() => BellRang?.Invoke(this, EventArgs.Empty);
 
     // Called on the libghostty thread. Stashes the latest state and
     // enqueues a single UI-thread flush. Coalescing: if libghostty
@@ -306,6 +307,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public event EventHandler<string>? TitleChanged;
     public event EventHandler? CloseRequested;
     internal event EventHandler<Ghostty.Core.Tabs.TabProgressState>? ProgressChanged;
+
+    /// <summary>Raised when libghostty rings the bell for this surface
+    /// (ring-bell action). PaneHost forwards the active leaf's bell up
+    /// to the window-level taskbar attention badge.</summary>
+    internal event EventHandler? BellRang;
 
     /// <summary>Raised when the shell prompt becomes interactive (OSC 133;B).
     /// The first such event per surface marks the shell as responsive.</summary>
@@ -545,6 +551,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         ProgressChanged = null;
         PromptReady = null;
         FirstRender = null;
+        BellRang = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
