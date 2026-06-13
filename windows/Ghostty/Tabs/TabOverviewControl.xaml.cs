@@ -18,6 +18,11 @@ internal sealed partial class TabOverviewControl : UserControl
 {
     private readonly Dictionary<UIElement, TabModel> _tabByTile = new();
 
+    // Tile geometry. Width is fixed so the grid columns stay uniform; height is
+    // a minimum (not fixed) so a wrapped title still fits at high text scale.
+    private const double TileWidth = 200;
+    private const double TileMinHeight = 96;
+
     public TabOverviewControl() => InitializeComponent();
 
     public event EventHandler<TabModel>? TabChosen;
@@ -71,7 +76,7 @@ internal sealed partial class TabOverviewControl : UserControl
         {
             Text = tab.PaneHost.PaneCount > 1 ? $"{tab.PaneHost.PaneCount} panes" : "1 pane",
             Opacity = 0.7,
-            FontSize = 12,
+            FontSize = (double)Application.Current.Resources["CaptionTextBlockFontSize"],
             Margin = new Thickness(0, 4, 0, 0),
         };
 
@@ -81,8 +86,8 @@ internal sealed partial class TabOverviewControl : UserControl
 
         return new Border
         {
-            Width = 200,
-            Height = 96,
+            Width = TileWidth,
+            MinHeight = TileMinHeight,
             Margin = new Thickness(6),
             Padding = new Thickness(10),
             CornerRadius = new CornerRadius(6),

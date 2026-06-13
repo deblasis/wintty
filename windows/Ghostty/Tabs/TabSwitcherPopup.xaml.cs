@@ -15,6 +15,10 @@ internal sealed partial class TabSwitcherPopup : UserControl
 {
     private readonly Dictionary<TabModel, Border> _cellByTab = new();
 
+    // Cap each candidate title so a long title can't stretch the popup off-screen;
+    // the title ellipsizes past this width.
+    private const double TitleMaxWidth = 160;
+
     public TabSwitcherPopup() => InitializeComponent();
 
     public void Show(IReadOnlyList<TabModel> candidates)
@@ -36,7 +40,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
                 Text = tab.EffectiveTitle,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxWidth = 160,
+                MaxWidth = TitleMaxWidth,
             };
 
             var row = new StackPanel { Orientation = Orientation.Horizontal };
