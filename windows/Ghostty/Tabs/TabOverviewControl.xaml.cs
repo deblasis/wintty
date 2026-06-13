@@ -43,13 +43,22 @@ internal sealed partial class TabOverviewControl : UserControl
             TilesView.Items.Add(tile);
         }
 
-        // Select the active tab and move keyboard focus into the grid so arrow
-        // keys, Enter and Esc work immediately without a mouse click.
+        // Select the active tab. Focus is grabbed separately via
+        // <see cref="FocusGrid"/> once the hosting popup is actually open -
+        // calling Focus here (before the popup opens) silently no-ops because
+        // the GridView is not yet in the live visual tree.
         if (TilesView.Items.Count > 0)
-        {
             TilesView.SelectedIndex = activeIndex;
+    }
+
+    /// <summary>
+    /// Move keyboard focus into the grid so arrow keys, Enter and Esc work
+    /// without a mouse click. Must be called AFTER the hosting popup is open.
+    /// </summary>
+    public void FocusGrid()
+    {
+        if (TilesView.Items.Count > 0)
             TilesView.Focus(FocusState.Programmatic);
-        }
     }
 
     private UIElement BuildTile(TabModel tab, bool isActive)

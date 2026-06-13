@@ -172,9 +172,11 @@ internal sealed class KeyBindings
         new KeyBinding(VirtualKeyModifiers.Control, VirtualKey.Tab, PaneAction.MruCycleNext),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Tab, PaneAction.MruCyclePrev),
 
-        // Grid overview of all tabs ("all tabs"). Reachable from the command
-        // palette too.
-        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.A, PaneAction.ShowTabOverview),
+        // Grid overview of all tabs ("expose"). Reachable from the command
+        // palette too. Ctrl+Shift+E rather than the more obvious Ctrl+Shift+A
+        // because Ctrl+Shift+A is a common global screenshot-tool hotkey
+        // (ShareX, Snagit) that the OS swallows before it reaches the apprt.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.E, PaneAction.ShowTabOverview),
     });
 
     /// <summary>

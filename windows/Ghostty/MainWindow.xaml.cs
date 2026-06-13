@@ -1513,6 +1513,11 @@ public sealed partial class MainWindow : Window
         _host.TabCycleCancelRequested += () =>
             DispatcherQueue.TryEnqueue(() => _tabSwitcher.Cancel());
 
+        // Grab keyboard focus only once the popup is actually open, so arrow
+        // keys / Enter / Esc work. Focusing inside ShowTabOverview (before
+        // IsOpen) silently fails because the grid isn't realized yet.
+        TabOverviewHost.Opened += (_, _) => TabOverviewUI.FocusGrid();
+
         TabOverviewUI.TabChosen += (_, tab) =>
         {
             TabOverviewHost.IsOpen = false;
