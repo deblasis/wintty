@@ -85,4 +85,15 @@ internal static class LogEvents
         public const int SaveFailed   = 2801;
         public const int DeleteFailed = 2802;
     }
+
+    // 2900-2999: Single-instance mode
+    internal static class SingleInstance
+    {
+        public const int PipeUnavailable   = 2900;
+        public const int PipeError         = 2901;
+        public const int BadPayload        = 2902;
+        public const int MutexFailed       = 2903;
+        public const int ForwardFailed     = 2904;
+        public const int ServerStartFailed = 2905;
+    }
 }
