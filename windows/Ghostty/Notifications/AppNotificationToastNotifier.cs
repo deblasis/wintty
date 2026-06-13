@@ -43,6 +43,10 @@ internal sealed class AppNotificationToastNotifier : IToastNotifier
         }
         catch (Exception ex)
         {
+            // Intentional catch-all: Show is reached from the libghostty
+            // action callback, and a managed exception must never cross back
+            // into native code. COMException/InvalidOperationException are the
+            // expected failures; anything else is logged, not propagated.
             _logger.LogToastShowFailed(ex);
         }
     }
@@ -52,8 +56,11 @@ internal sealed class AppNotificationToastNotifier : IToastNotifier
         try
         {
             // Best-effort cleanup; fire-and-forget. We deliberately do not
-            // await -- ClearForSurface is called from a UI focus handler and
-            // a stale toast lingering a few ms longer is harmless.
+            // await and do not observe the returned IAsyncAction --
+            // ClearForSurface is called from a UI focus handler and a stale
+            // toast lingering a few ms longer (or a failed removal) is
+            // harmless. The try/catch covers only a synchronous throw from
+            // kicking off the call.
             _ = AppNotificationManager.Default.RemoveByGroupAsync(surfaceKey);
         }
         catch (Exception ex)

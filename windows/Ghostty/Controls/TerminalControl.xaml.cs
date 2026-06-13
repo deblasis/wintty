@@ -700,19 +700,38 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private bool _focused;
 
     /// <summary>
-    /// Whether this surface currently holds focus. True implies the owning
-    /// window is foreground AND this surface is the active element (WinUI
-    /// only raises GotFocus then). Used by the toast policy to suppress
-    /// notifications the user is already looking at.
+    /// True only when this surface is focused AND its window is the OS
+    /// foreground window — i.e. the user is actively looking at it. Used by
+    /// the toast policy to suppress notifications for the surface in view.
+    ///
+    /// <see cref="_focused"/> alone is NOT sufficient: WinUI keeps XAML
+    /// keyboard focus across window deactivation, so a backgrounded window's
+    /// focused surface still reports <c>_focused == true</c>. Gating toasts
+    /// on <c>_focused</c> only would wrongly suppress a notification raised
+    /// while the user is in another app — exactly the case the feature
+    /// exists for — so we AND in a real foreground-window check.
     /// </summary>
-    internal bool IsFocused => _focused;
+    internal bool IsActive => _focused && IsOwningWindowForeground();
 
-    /// <summary>
-    /// Stable per-surface key used to group/clear toast notifications. Both
-    /// GhosttyHost (when showing) and the focus-regain clear below resolve
-    /// the same control, so the key is consistent for a surface's lifetime.
-    /// </summary>
-    internal string ToastSurfaceKey => _surface.Handle.ToString();
+    private bool IsOwningWindowForeground()
+    {
+        // Resolve this control's top-level window HWND via its XamlRoot and
+        // compare to the OS foreground window. If the island environment is
+        // not available yet, fail "not foreground" so we err toward showing
+        // the toast rather than silently swallowing it.
+        var env = XamlRoot?.ContentIslandEnvironment;
+        if (env is null) return false;
+        nint mine = Microsoft.UI.Win32Interop.GetWindowFromWindowId(env.AppWindowId);
+        return mine != 0 && mine == PInvoke.GetForegroundWindow();
+    }
+
+    // Stable per-surface key for the toast Group (dedupe + focus-regain
+    // clear). A fresh Guid rather than the native surface handle, so a
+    // recycled handle value can never alias another surface's toasts. The
+    // same control instance is resolved for both Show and ClearForSurface,
+    // so the key stays consistent for the surface's lifetime.
+    private readonly string _toastSurfaceKey = Guid.NewGuid().ToString();
+    internal string ToastSurfaceKey => _toastSurfaceKey;
 
     private void OnGotFocus(object sender, RoutedEventArgs e)
     {

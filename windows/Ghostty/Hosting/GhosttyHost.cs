@@ -784,7 +784,7 @@ internal sealed class GhosttyHost : IDisposable
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
                         var req = Ghostty.Core.Notifications.NotificationPolicy.DesktopNotification(
-                            title, body, c.ToastSurfaceKey, c.IsFocused);
+                            title, body, c.ToastSurfaceKey, c.IsActive);
                         if (req is not null) _toasts.Show(req);
                     });
                     return 1;
@@ -806,7 +806,7 @@ internal sealed class GhosttyHost : IDisposable
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;
                         var req = Ghostty.Core.Notifications.NotificationPolicy.ChildExited(
-                            info.ExitCode, info.RuntimeMs, c.ToastSurfaceKey, c.IsFocused);
+                            info.ExitCode, info.RuntimeMs, c.ToastSurfaceKey, c.IsActive);
                         if (req is not null) _toasts.Show(req);
                     });
                     // Return 0 ("not handled") so the core keeps its in-terminal
