@@ -94,6 +94,7 @@ public sealed partial class MainWindow : Window
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
+    private readonly Ghostty.Tabs.TabSwitcherController _tabSwitcher;
 
     /// <summary>This window's tab manager, exposed for session capture.</summary>
     internal TabManager TabManager => _tabManager;
@@ -462,6 +463,7 @@ public sealed partial class MainWindow : Window
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
             bindingAction: ExecuteBindingAction);
+        _tabSwitcher = new Ghostty.Tabs.TabSwitcherController(_tabManager);
         _windowState = WindowState.Load();
         // Apply the restored window geometry when restoring; otherwise use
         // the window-state.json fallback placement.
@@ -1452,6 +1454,8 @@ public sealed partial class MainWindow : Window
         _router.ReopenClosedTabRequested += (_, _) => ReopenClosedTab();
         _router.ReopenClosedWindowRequested += (_, _) =>
             ((App)Application.Current).ReopenClosedWindow();
+
+        WireTabSwitcher();
     }
 
     /// <summary>
@@ -1469,6 +1473,74 @@ public sealed partial class MainWindow : Window
         // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
         // tab renders and focuses just like the session-restore path.
         _tabManager.AdoptTab(tab);
+    }
+
+    /// <summary>
+    /// Wire the Ctrl+Tab MRU cycle and the Ctrl+Shift+A grid overview.
+    /// The cycle popup is shown/hidden by the controller's Started/Ended
+    /// events; the apprt (TerminalControl) drives advance via the router and
+    /// commit/cancel via the host events (Ctrl-release / Esc). The overview is
+    /// a separate, focus-grabbing overlay.
+    /// </summary>
+    private void WireTabSwitcher()
+    {
+        _tabSwitcher.Started += (_, candidates) =>
+        {
+            _host.IsTabCycling = true;
+            SizeTabSwitcherPopup();
+            TabSwitcherPopupUI.Show(candidates);
+            TabSwitcherPopupHost.IsOpen = true;
+        };
+        _tabSwitcher.HighlightChanged += (_, tab) => TabSwitcherPopupUI.Highlight(tab);
+        _tabSwitcher.Ended += (_, _) =>
+        {
+            _host.IsTabCycling = false;
+            TabSwitcherPopupHost.IsOpen = false;
+        };
+
+        _router.MruCycleRequested += (_, forward) => _tabSwitcher.StartOrAdvance(forward);
+        _router.ShowTabOverviewRequested += (_, _) => ShowTabOverview();
+
+        // Commit/cancel originate on the apprt key thread; hop to the UI
+        // dispatcher before touching XAML / the manager. After a commit the
+        // tab has switched, so focus the new active leaf.
+        _host.TabCycleCommitRequested += () =>
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _tabSwitcher.Commit();
+                FocusActiveLeaf();
+            });
+        _host.TabCycleCancelRequested += () =>
+            DispatcherQueue.TryEnqueue(() => _tabSwitcher.Cancel());
+
+        TabOverviewUI.TabChosen += (_, tab) =>
+        {
+            TabOverviewHost.IsOpen = false;
+            _tabManager.Activate(tab);
+            FocusActiveLeaf();
+        };
+        TabOverviewUI.Dismissed += (_, _) =>
+        {
+            TabOverviewHost.IsOpen = false;
+            FocusActiveLeaf();
+        };
+    }
+
+    // Stretch the full-window cycle popup to the current window size so its
+    // centered content sits in the middle of the window.
+    private void SizeTabSwitcherPopup()
+    {
+        TabSwitcherPopupUI.Width = RootGrid.ActualWidth;
+        TabSwitcherPopupUI.Height = RootGrid.ActualHeight;
+    }
+
+    private void ShowTabOverview()
+    {
+        if (_tabManager.Tabs.Count == 0) return;
+        TabOverviewUI.Width = RootGrid.ActualWidth;
+        TabOverviewUI.Height = RootGrid.ActualHeight;
+        TabOverviewUI.Show(_tabManager.MruOrder, _tabManager.ActiveTab);
+        TabOverviewHost.IsOpen = true;
     }
 
     /// <summary>
