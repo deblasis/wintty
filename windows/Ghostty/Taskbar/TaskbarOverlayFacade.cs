@@ -59,6 +59,10 @@ internal sealed class TaskbarOverlayFacade : ITaskbarOverlaySink, IDisposable
         }
         catch (COMException)
         {
+            // Deliberately not logged: this fires on every focus
+            // transition, the indicator is cosmetic, and the sibling
+            // TaskbarList3Facade is likewise logger-free. A failure here
+            // just leaves the badge unchanged until the next bell/focus.
         }
     }
 

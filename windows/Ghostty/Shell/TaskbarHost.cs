@@ -6,6 +6,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Windows.Win32;
+using Windows.Win32.Foundation;
 
 namespace Ghostty.Shell;
 
@@ -45,9 +47,13 @@ internal sealed class TaskbarHost : IDisposable
             _overlayFacade = new TaskbarOverlayFacade(hwnd);
             _attention = new TaskbarAttentionCoordinator(tabs, _overlayFacade);
             _window = window;
-            // Window focus drives the attention badge: gaining focus
-            // clears it, an unfocused bell sets it. Activated fires on
-            // every focus transition (Deactivated vs *Activated).
+            // Window focus drives the attention badge: an unfocused bell
+            // sets it, regaining focus clears it. Seed from the current
+            // foreground state so a bell that arrives before the first
+            // Activated event is judged against real focus, not the
+            // coordinator's pessimistic default; Activated then tracks
+            // every later transition.
+            _attention.SetFocused(PInvoke.GetForegroundWindow() == new HWND(hwnd));
             window.Activated += OnWindowActivated;
 
             _tickTimer = window.DispatcherQueue.CreateTimer();

@@ -13,7 +13,10 @@ namespace Ghostty.Taskbar;
 /// </summary>
 internal static class AttentionOverlayIcon
 {
-    // Opaque accent (early-sunrise amber). Written premultiplied below.
+    // A filled dot reads as a standard corner "attention" badge on the
+    // taskbar button and, unlike FlashWindowEx, stays put until focus
+    // clears it and coexists with the progress indicator on the same
+    // button. Opaque early-sunrise amber, written premultiplied below.
     private const byte ColorR = 0xFF, ColorG = 0x8A, ColorB = 0x1E;
 
     public static unsafe HICON Create()
@@ -96,10 +99,10 @@ internal static class AttentionOverlayIcon
                 double cover = radius - d;
                 double a = cover >= 1 ? 1.0 : cover <= 0 ? 0.0 : cover;
                 byte* px = p + (y * w + x) * 4;
-                px[0] = (byte)(ColorB * a);    // blue (premultiplied)
-                px[1] = (byte)(ColorG * a);    // green
-                px[2] = (byte)(ColorR * a);    // red
-                px[3] = (byte)(0xFF * a);      // alpha
+                px[0] = (byte)(ColorB * a + 0.5);    // blue (premultiplied)
+                px[1] = (byte)(ColorG * a + 0.5);    // green
+                px[2] = (byte)(ColorR * a + 0.5);    // red
+                px[3] = (byte)(0xFF * a + 0.5);      // alpha
             }
         }
     }

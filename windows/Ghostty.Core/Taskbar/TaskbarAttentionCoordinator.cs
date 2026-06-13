@@ -11,13 +11,9 @@ namespace Ghostty.Core.Taskbar;
 /// Pure-logic state machine. <see cref="OnBell"/> is wired to
 /// <see cref="TabManager.BellRang"/>; <see cref="SetFocused"/> is driven
 /// by the window's activation event. The WinUI-side facade writes to
-/// <c>ITaskbarList3::SetOverlayIcon</c>.
-///
-/// State (implicit in two flags):
-///   _focused         — window currently has focus.
-///   _attentionActive — badge currently shown. The guard in OnBell means
-///                      exactly one sink write per attention episode no
-///                      matter how many bells fire.
+/// <c>ITaskbarList3::SetOverlayIcon</c>. The <c>_attentionActive</c> guard
+/// keeps it to one sink write per attention episode regardless of how many
+/// bells fire.
 /// </summary>
 internal sealed class TaskbarAttentionCoordinator
 {
