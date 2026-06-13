@@ -1296,6 +1296,16 @@ GHOSTTY_API void ghostty_inspector_metal_render(ghostty_inspector_t, void*, void
 GHOSTTY_API bool ghostty_inspector_metal_shutdown(ghostty_inspector_t);
 #endif
 
+#ifdef _WIN32
+// device and command_queue are ID3D12Device*/ID3D12CommandQueue*; num_frames is
+// the host's frames-in-flight count; rtv_format is the host swap chain's
+// DXGI_FORMAT; command_list is an ID3D12GraphicsCommandList* with the render
+// target already bound.
+GHOSTTY_API bool ghostty_inspector_directx12_init(ghostty_inspector_t, void*, void*, uint32_t, uint32_t);
+GHOSTTY_API void ghostty_inspector_directx12_render(ghostty_inspector_t, void*);
+GHOSTTY_API void ghostty_inspector_directx12_shutdown(ghostty_inspector_t);
+#endif
+
 // APIs I'd like to get rid of eventually but are still needed for now.
 // Don't use these unless you know what you're doing.
 GHOSTTY_API void ghostty_set_window_background_blur(ghostty_app_t, void*);
