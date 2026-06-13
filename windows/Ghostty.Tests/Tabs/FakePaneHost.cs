@@ -41,6 +41,9 @@ internal sealed class FakePaneHost : IPaneHost
     public void RaiseProgressChanged(TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
+    public event EventHandler? BellRang;
+    public void RaiseBellRang() => BellRang?.Invoke(this, EventArgs.Empty);
+
     public void CloseActive()
     {
         CloseActiveCalls++;
