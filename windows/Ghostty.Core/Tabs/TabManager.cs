@@ -54,6 +54,10 @@ internal sealed class TabManager
     public event EventHandler? LastTabClosed;
     public event EventHandler? WindowTitleChanged;
 
+    /// <summary>Raised when any owned tab's active leaf rings the bell.
+    /// Window-level: the taskbar attention coordinator subscribes here.</summary>
+    public event EventHandler? BellRang;
+
     /// <summary>
     /// Raised AFTER the tab's manager subscriptions have been unwired
     /// but BEFORE the tab is removed from <see cref="Tabs"/>. Fired
@@ -230,6 +234,10 @@ internal sealed class TabManager
         // without needing a shared dictionary.
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         host.ProgressChanged += progressHandler;
+        // Forward the active-leaf bell up to the window level. Captured
+        // as a local so CloseTab can unsubscribe alongside progress.
+        EventHandler bellHandler = (_, _) => BellRang?.Invoke(this, EventArgs.Empty);
+        host.BellRang += bellHandler;
         // Bridge "the last leaf in this tab closed" (e.g. the only shell
         // in this tab exited via `exit`, or libghostty's close-surface
         // callback fired for the sole pane) into a tab-level close. The
@@ -241,6 +249,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             host.ProgressChanged -= progressHandler;
+            host.BellRang -= bellHandler;
             host.LastLeafClosed -= lastLeafHandler;
         };
         tab.PropertyChanged += OnTabPropertyChanged;
@@ -352,6 +361,8 @@ internal sealed class TabManager
         tab.PaneHost.LeafFocused += OnLeafFocused;
         EventHandler<TabProgressState> progressHandler = (_, state) => tab.Progress = state;
         tab.PaneHost.ProgressChanged += progressHandler;
+        EventHandler bellHandler = (_, _) => BellRang?.Invoke(this, EventArgs.Empty);
+        tab.PaneHost.BellRang += bellHandler;
         // Re-attach the last-leaf-closed bridge in the adopter's event
         // graph. See CreateTab for why the bridge exists; without it,
         // a tab detached to a new window would no longer close that
@@ -364,6 +375,7 @@ internal sealed class TabManager
         tab.OnClose = () =>
         {
             tab.PaneHost.ProgressChanged -= progressHandler;
+            tab.PaneHost.BellRang -= bellHandler;
             tab.PaneHost.LastLeafClosed -= lastLeafHandler;
         };
         tab.PropertyChanged += OnTabPropertyChanged;
