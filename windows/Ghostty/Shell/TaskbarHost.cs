@@ -25,6 +25,9 @@ internal sealed class TaskbarHost : IDisposable
     private readonly TaskbarList3Facade? _facade;
     private readonly TaskbarProgressCoordinator? _coordinator;
     private readonly DispatcherQueueTimer? _tickTimer;
+    private readonly TaskbarOverlayFacade? _overlayFacade;
+    private readonly TaskbarAttentionCoordinator? _attention;
+    private readonly Window? _window;
 
     public bool IsAvailable => _coordinator is not null;
 
@@ -38,6 +41,14 @@ internal sealed class TaskbarHost : IDisposable
                 tabs,
                 _facade,
                 () => DateTime.UtcNow);
+
+            _overlayFacade = new TaskbarOverlayFacade(hwnd);
+            _attention = new TaskbarAttentionCoordinator(tabs, _overlayFacade);
+            _window = window;
+            // Window focus drives the attention badge: gaining focus
+            // clears it, an unfocused bell sets it. Activated fires on
+            // every focus transition (Deactivated vs *Activated).
+            window.Activated += OnWindowActivated;
 
             _tickTimer = window.DispatcherQueue.CreateTimer();
             _tickTimer.Interval = TimeSpan.FromSeconds(2);
@@ -68,9 +79,21 @@ internal sealed class TaskbarHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Drive the attention badge from window focus. Gaining focus clears
+    /// any pending badge; an unfocused bell sets it.
+    /// </summary>
+    private void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        _attention?.SetFocused(
+            args.WindowActivationState != WindowActivationState.Deactivated);
+    }
+
     public void Dispose()
     {
         _tickTimer?.Stop();
+        if (_window is not null) _window.Activated -= OnWindowActivated;
+        _overlayFacade?.Dispose();
     }
 }
 
