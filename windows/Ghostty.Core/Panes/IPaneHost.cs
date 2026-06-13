@@ -40,6 +40,12 @@ internal interface IPaneHost
     /// tab-level indicator.</summary>
     event EventHandler<TabProgressState>? ProgressChanged;
 
+    /// <summary>Raised when the active leaf rings the bell (libghostty
+    /// ring-bell action). Only the active leaf is forwarded, matching
+    /// <see cref="ProgressChanged"/>; background panes ring audibly but
+    /// do not drive the window-level attention badge.</summary>
+    event EventHandler? BellRang;
+
     /// <summary>
     /// Raised after any structural change to the tree (split, close,
     /// zoom toggle, equalize, resize, undo/redo restore). The session

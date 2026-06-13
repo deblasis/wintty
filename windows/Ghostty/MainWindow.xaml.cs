@@ -185,6 +185,7 @@ public sealed partial class MainWindow : Window
 
     private GradientTintVisual? _gradientVisual;
     private Window? _settingsWindow;
+    private Window? _aboutWindow;
 
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
@@ -1099,6 +1100,10 @@ public sealed partial class MainWindow : Window
         _settingsWindow?.Close();
         _settingsWindow = null;
 
+        // Close About window if open.
+        _aboutWindow?.Close();
+        _aboutWindow = null;
+
         // Let any in-flight ContentDialog complete before tearing
         // down the libghostty host. files-community/Files # 17363
         // documents the COMException that fires otherwise.
@@ -1365,6 +1370,20 @@ public sealed partial class MainWindow : Window
                 _configService,
                 Content?.XamlRoot,
                 WinRT.Interop.WindowNative.GetWindowHandle(this));
+
+        _router.ShowAboutRequested += (_, _) =>
+        {
+            // Reuse the existing About window if it is still open.
+            if (_aboutWindow is not null)
+            {
+                _aboutWindow.Activate();
+                return;
+            }
+            var aboutWin = new Ghostty.Dialogs.AboutWindow(_configService);
+            aboutWin.Closed += (_, _) => _aboutWindow = null;
+            _aboutWindow = aboutWin;
+            aboutWin.Activate();
+        };
     }
 
     /// <summary>

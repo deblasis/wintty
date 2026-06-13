@@ -382,6 +382,20 @@ public partial class App : Application
             Ghostty.Logging.StaticLoggers.App.LogJumpListFailed(ex);
         }
 
+        // Register for toast notifications. Unpackaged apps must call
+        // Register() so AppNotificationManager wires up the COM activator
+        // under the AUMID before any Show(); without it Show() throws. The
+        // registration persists in the registry (we never Unregister) so the
+        // app can be toast-activated later. AUMID is already set above.
+        try
+        {
+            Microsoft.Windows.AppNotifications.AppNotificationManager.Default.Register();
+        }
+        catch (System.Exception ex)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
+        }
+
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
@@ -997,5 +1011,11 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Warning,
                    Message = "Failed to build jump list")]
     internal static partial void LogJumpListFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ToastRegisterFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to register for toast notifications")]
+    internal static partial void LogToastRegisterFailed(
         this ILogger<App> logger, System.Exception ex);
 }

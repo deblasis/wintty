@@ -11,6 +11,7 @@ internal static class LogEvents
     {
         public const int AumidFailed    = 2000;
         public const int JumpListFailed = 2001;
+        public const int ToastRegisterFailed = 2002;
     }
 
     // 2100-2199: Clipboard
@@ -70,11 +71,18 @@ internal static class LogEvents
         public const int CheatSheetExportFailed = 2603;
     }
 
-    // 2700-2799: Session restoration
+    // 2700-2799: Notifications
+    internal static class Notifications
+    {
+        public const int ShowFailed  = 2701;
+        public const int ClearFailed = 2702;
+    }
+
+    // 2800-2899: Session restoration
     internal static class Session
     {
-        public const int LoadFailed   = 2700;
-        public const int SaveFailed   = 2701;
-        public const int DeleteFailed = 2702;
+        public const int LoadFailed   = 2800;
+        public const int SaveFailed   = 2801;
+        public const int DeleteFailed = 2802;
     }
 }
