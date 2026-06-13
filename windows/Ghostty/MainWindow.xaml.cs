@@ -95,6 +95,15 @@ public sealed partial class MainWindow : Window
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
 
+    /// <summary>This window's tab manager, exposed for session capture.</summary>
+    internal TabManager TabManager => _tabManager;
+
+    /// <summary>
+    /// Raised when this (non-quake) window moves or resizes, so the
+    /// session manager can debounce-persist the new geometry.
+    /// </summary>
+    internal event EventHandler? PositionChanged;
+
     // Static cache so the router's getProfiles lambda does not allocate a
     // fresh empty array on every Ctrl+Shift+N chord when ProfileRegistry is
     // not yet wired (cold-start path) or returns an unset snapshot.
@@ -242,6 +251,22 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Restore ctor: rebuild a window from a saved <paramref name="restore"/>
+    /// session (tabs + split layout + geometry). Used at startup by
+    /// <see cref="App"/> when session restoration is enabled.
+    /// </summary>
+    internal MainWindow(
+        ConfigService configService,
+        GhosttyHost bootstrapHost,
+        HostLifetimeSupervisor supervisor,
+        ILoggerFactory loggerFactory,
+        Ghostty.Core.Session.WindowSession restore)
+        : this(configService, bootstrapHost, supervisor, loggerFactory,
+               seedTab: null, isQuickTerminal: false, restore: restore)
+    {
+    }
+
+    /// <summary>
     /// Full ctor. <paramref name="seedTab"/>, when non-null, is
     /// adopted as the sole initial tab (used by Move Tab to New
     /// Window); when null, the normal "create a fresh tab via the
@@ -260,7 +285,8 @@ public sealed partial class MainWindow : Window
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
         TabModel? seedTab,
-        bool isQuickTerminal = false)
+        bool isQuickTerminal = false,
+        Ghostty.Core.Session.WindowSession? restore = null)
     {
         InitializeComponent();
 
@@ -383,16 +409,45 @@ public sealed partial class MainWindow : Window
         _themePreview.ListThemesRequested += OnListThemesRequested;
 
         _factory = new PaneHostFactory(_host, configService);
-        _tabManager = new TabManager(
-            snapshot => _factory.Create(snapshot),
-            seed: seedTab);
+        // Restore a saved session into this window when one was passed and
+        // it rebuilds at least one tab; otherwise fall through to the normal
+        // "fresh tab (or seedTab) via the factory" path.
+        List<TabModel>? restoredTabs = null;
+        if (restore is { Tabs.Count: > 0 })
+        {
+            var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
+            var built = restorer.BuildTabs(restore);
+            if (built.Count > 0) restoredTabs = built;
+        }
+
+        if (restoredTabs is not null)
+        {
+            _tabManager = new TabManager(
+                snapshot => _factory.Create(snapshot),
+                seed: restoredTabs[0]);
+            for (int i = 1; i < restoredTabs.Count; i++)
+                _tabManager.AdoptTab(restoredTabs[i]);
+            if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
+                _tabManager.ActivateIndex(restore.ActiveTabIndex);
+        }
+        else
+        {
+            _tabManager = new TabManager(
+                snapshot => _factory.Create(snapshot),
+                seed: seedTab);
+        }
         _router = new PaneActionRouter(
             _tabManager,
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
             bindingAction: ExecuteBindingAction);
         _windowState = WindowState.Load();
-        RestoreWindowPlacement();
+        // Apply the restored window geometry when restoring; otherwise use
+        // the window-state.json fallback placement.
+        if (restoredTabs is not null)
+            ApplyGeometry(restore!.Geometry);
+        else
+            RestoreWindowPlacement();
 
         _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
         _horizontalTabHost.AttachOwner(this);
@@ -495,6 +550,8 @@ public sealed partial class MainWindow : Window
             {
                 _quakeSessionHeight = AppWindow.Size.Height;
             }
+            if (!IsQuickTerminal && (args.DidPositionChange || args.DidSizeChange))
+                PositionChanged?.Invoke(this, EventArgs.Empty);
         };
 
         WirePaneActionEvents();
@@ -830,6 +887,10 @@ public sealed partial class MainWindow : Window
         var newWindow = CreateForNewTab(
             _configService, bootstrap, supervisor, loggerFactory, snapshot);
         newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+        // Track for session persistence (mirrors App.OnLaunched) so a window
+        // opened mid-session is captured and restored.
+        App.SessionManager?.Track(newWindow);
+        App.SessionManager?.RequestPersist();
         newWindow.Activate();
     }
 
@@ -917,6 +978,10 @@ public sealed partial class MainWindow : Window
         // handler. WindowsByRoot insertion happens inside the new
         // window's own Content.Loaded handler.
         newWindow.Closed += ((App)Application.Current).OnAnyWindowClosedInternal;
+        // Track for session persistence so a detached-to-new-window tab is
+        // captured and restored.
+        App.SessionManager?.Track(newWindow);
+        App.SessionManager?.RequestPersist();
 
         newWindow.Activate();
     }
@@ -1018,30 +1083,16 @@ public sealed partial class MainWindow : Window
         }
         else if (AppWindow.Presenter.Kind != Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
         {
-            var hwnd = new HWND(WindowNative.GetWindowHandle(this));
-            var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
-            var isMaximized = (style & WINDOW_STYLE.WS_MAXIMIZE) != 0;
-            _windowState.WindowMaximized = isMaximized;
-
-            // Save the restored (non-maximized) bounds so we don't
-            // persist a maximized rect that fills the whole monitor.
-            if (isMaximized)
-            {
-                var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
-                PInvoke.GetWindowPlacement(hwnd, ref placement);
-                var rc = placement.rcNormalPosition;
-                _windowState.WindowX = rc.left;
-                _windowState.WindowY = rc.top;
-                _windowState.WindowWidth = rc.right - rc.left;
-                _windowState.WindowHeight = rc.bottom - rc.top;
-            }
-            else
-            {
-                _windowState.WindowX = AppWindow.Position.X;
-                _windowState.WindowY = AppWindow.Position.Y;
-                _windowState.WindowWidth = AppWindow.Size.Width;
-                _windowState.WindowHeight = AppWindow.Size.Height;
-            }
+            // Keep writing window-state.json for normal windows: it is the
+            // geometry fallback used by RestoreWindowPlacement when session
+            // restoration is off (window-save-state=never) or no session is
+            // restored. The session file carries geometry for the restore path.
+            var g = CaptureGeometry();
+            _windowState.WindowMaximized = g.Maximized;
+            _windowState.WindowX = g.X;
+            _windowState.WindowY = g.Y;
+            _windowState.WindowWidth = g.Width;
+            _windowState.WindowHeight = g.Height;
             _windowState.Save();
         }
 
@@ -2155,14 +2206,30 @@ public sealed partial class MainWindow : Window
     /// Validates that at least part of the window is visible on a
     /// current monitor (handles monitor disconnects, DPI changes).
     /// </summary>
-    private void RestoreWindowPlacement()
+    private void RestoreWindowPlacement() =>
+        ApplyGeometry(new Ghostty.Core.Session.WindowGeometry
+        {
+            X = _windowState.WindowX,
+            Y = _windowState.WindowY,
+            Width = _windowState.WindowWidth,
+            Height = _windowState.WindowHeight,
+            Maximized = _windowState.WindowMaximized,
+        });
+
+    /// <summary>
+    /// Apply a saved geometry to this window, validating that at least
+    /// part of it is visible on a current monitor (handles monitor
+    /// disconnects, DPI changes). Shared by the window-state.json restore
+    /// path and the session restore path.
+    /// </summary>
+    private void ApplyGeometry(Ghostty.Core.Session.WindowGeometry geometry)
     {
-        var w = _windowState.WindowWidth;
-        var h = _windowState.WindowHeight;
+        var w = geometry.Width;
+        var h = geometry.Height;
         if (w is null || h is null || w < 200 || h < 150) return;
 
-        var x = _windowState.WindowX ?? 0;
-        var y = _windowState.WindowY ?? 0;
+        var x = geometry.X ?? 0;
+        var y = geometry.Y ?? 0;
 
         // Ensure the window's top-left quadrant is on a live monitor.
         // DisplayArea.GetFromPoint returns the nearest display if the
@@ -2184,8 +2251,66 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new Windows.Graphics.SizeInt32(w.Value, h.Value));
         AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
 
-        if (_windowState.WindowMaximized)
+        if (geometry.Maximized)
             PInvoke.ShowWindow(new HWND(WindowNative.GetWindowHandle(this)), SHOW_WINDOW_CMD.SW_SHOWMAXIMIZED);
+    }
+
+    /// <summary>
+    /// Capture this window's current placement (restored bounds when
+    /// maximized, so a maximized rect never becomes the saved size).
+    /// </summary>
+    private Ghostty.Core.Session.WindowGeometry CaptureGeometry()
+    {
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        var style = (WINDOW_STYLE)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
+        var isMaximized = (style & WINDOW_STYLE.WS_MAXIMIZE) != 0;
+        var g = new Ghostty.Core.Session.WindowGeometry { Maximized = isMaximized };
+        if (isMaximized)
+        {
+            var placement = new WINDOWPLACEMENT { length = (uint)Marshal.SizeOf<WINDOWPLACEMENT>() };
+            PInvoke.GetWindowPlacement(hwnd, ref placement);
+            var rc = placement.rcNormalPosition;
+            g.X = rc.left;
+            g.Y = rc.top;
+            g.Width = rc.right - rc.left;
+            g.Height = rc.bottom - rc.top;
+        }
+        else
+        {
+            g.X = AppWindow.Position.X;
+            g.Y = AppWindow.Position.Y;
+            g.Width = AppWindow.Size.Width;
+            g.Height = AppWindow.Size.Height;
+        }
+        return g;
+    }
+
+    /// <summary>
+    /// Capture this window's geometry + ordered tabs into a serializable
+    /// record, or null for the quake window (never persisted) and
+    /// full-screen windows (no meaningful restore geometry).
+    /// </summary>
+    internal Ghostty.Core.Session.WindowSession? CaptureSession()
+    {
+        if (IsQuickTerminal) return null;
+        if (AppWindow.Presenter.Kind == Microsoft.UI.Windowing.AppWindowPresenterKind.FullScreen)
+            return null;
+
+        var win = new Ghostty.Core.Session.WindowSession
+        {
+            Geometry = CaptureGeometry(),
+            ActiveTabIndex = _tabManager.IndexOf(_tabManager.ActiveTab),
+        };
+        foreach (var tab in _tabManager.Tabs)
+        {
+            win.Tabs.Add(Ghostty.Core.Session.SessionCapture.CaptureTab(
+                tab.PaneHost.RootNode,
+                tab.PaneHost.ActiveLeaf,
+                tab.PaneHost.ZoomedLeaf,
+                tab.ProfileId,
+                tab.UserOverrideTitle));
+        }
+        return win;
     }
 
     /// <summary>
