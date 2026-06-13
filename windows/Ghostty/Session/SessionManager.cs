@@ -48,9 +48,17 @@ internal sealed class SessionManager
         }
         var state = _store.Load();
         if (state is null) return null;
-        return SessionGate.ShouldRestore(_config.WindowSaveState, state.CleanShutdown)
-            ? state
-            : null;
+        if (!SessionGate.ShouldRestore(_config.WindowSaveState, state.CleanShutdown))
+            return null;
+
+        // Arm the dirty flag: rewrite the restored set as not-clean now, so a
+        // crash later this run does not leave the previous clean snapshot on
+        // disk for `default` to wrongly restore. Uses the on-disk windows (live
+        // windows are not yet registered at startup). A normal clean exit
+        // re-marks it clean via FinalizeCleanShutdown.
+        state.CleanShutdown = false;
+        _store.Save(state);
+        return state;
     }
 
     /// <summary>Subscribe a window's change signals to the debounced persist.</summary>

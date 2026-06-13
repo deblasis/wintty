@@ -629,12 +629,6 @@ public partial class App : Application
             window.Activate();
         }
 
-        // Persist the just-created window set with CleanShutdown=false. This
-        // arms the dirty flag at startup: a stale CleanShutdown=true left by
-        // the previous clean exit would otherwise let `default` wrongly
-        // restore if this run crashes before the first layout change.
-        _sessionManager.PersistLiveWindows();
-
         // Singleton quake / drop-down window. Created hidden; summoned
         // by the global hotkey via WindowsGlobalHotKey. Same MainWindow
         // class as a regular window, just with IsQuickTerminal = true
