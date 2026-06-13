@@ -96,4 +96,10 @@ public enum PaneAction
     // dispatched to PaneHost.Undo/Redo. Time-bounded (~5s) snapshot stack.
     Undo = 50,
     Redo = 51,
+
+    // Open the branded About window (app name, version/build/commit, links,
+    // license). Apprt-only: routed via event to MainWindow, which opens the
+    // singleton AboutWindow. Mirrors ShowKeybindCheatsheet (event-only,
+    // needs a window, no libghostty action).
+    ShowAbout = 52,
 }
