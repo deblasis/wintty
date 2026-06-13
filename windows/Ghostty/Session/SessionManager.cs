@@ -14,6 +14,11 @@ namespace Ghostty.Session;
 /// </summary>
 internal sealed class SessionManager
 {
+    // Coalesce bursts of layout/tab/move signals into a single write. Long
+    // enough that a multi-window quit (windows close within this window of
+    // one another) does not refire before FinalizeCleanShutdown runs.
+    private const int DebounceMs = 750;
+
     private readonly SessionStore _store;
     private readonly ConfigService _config;
     private readonly DispatcherQueue _dispatcher;
@@ -84,7 +89,7 @@ internal sealed class SessionManager
     {
         if (!SessionGate.ShouldPersist(_config.WindowSaveState)) return;
         _debounce ??= _dispatcher.CreateTimer();
-        _debounce.Interval = TimeSpan.FromMilliseconds(750);
+        _debounce.Interval = TimeSpan.FromMilliseconds(DebounceMs);
         _debounce.IsRepeating = false;
         _debounce.Tick -= OnDebounceTick;
         _debounce.Tick += OnDebounceTick;

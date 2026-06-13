@@ -629,6 +629,12 @@ public partial class App : Application
             window.Activate();
         }
 
+        // Persist the just-created window set with CleanShutdown=false. This
+        // arms the dirty flag at startup: a stale CleanShutdown=true left by
+        // the previous clean exit would otherwise let `default` wrongly
+        // restore if this run crashes before the first layout change.
+        _sessionManager.PersistLiveWindows();
+
         // Singleton quake / drop-down window. Created hidden; summoned
         // by the global hotkey via WindowsGlobalHotKey. Same MainWindow
         // class as a regular window, just with IsQuickTerminal = true
@@ -816,10 +822,12 @@ public partial class App : Application
         if (closing is { RegisteredRoot: { } root })
             WindowsByRoot.Remove(root);
 
-        // A non-last window closed: refresh the persisted set so the closed
-        // window drops out (debounced; the app keeps running).
-        if (WindowsByRoot.Count > 0)
-            _sessionManager?.RequestPersist();
+        // A deliberately-closed (non-last) window is left in the persisted
+        // set on purpose: we cannot tell a single close apart from the first
+        // close of a multi-window quit, so we never shrink the set on close
+        // (that would lose windows on a slow quit cascade). It self-heals out
+        // on the next layout/tab/move change in a surviving window. Biasing to
+        // "never lose a window" over "never restore a closed one".
 
         if (WindowsByRoot.Count == 0)
         {

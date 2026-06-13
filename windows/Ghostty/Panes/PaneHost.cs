@@ -318,10 +318,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         // Re-enter zoom on the restored leaf via the existing enter-path,
         // mirroring RestoreFrom. Only if it is still present in the tree.
+        // _restoring guards CaptureForUndo so the re-zoom is not itself
+        // recorded as an undoable op (same as RestoreFrom).
         if (zoomedLeaf is not null && PaneTree.Leaves(_root).Contains(zoomedLeaf))
         {
-            _activeLeaf = zoomedLeaf;
-            ToggleSplitZoom();
+            _restoring = true;
+            try
+            {
+                _activeLeaf = zoomedLeaf;
+                ToggleSplitZoom();
+            }
+            finally
+            {
+                _restoring = false;
+            }
         }
 
         WireCommonHandlers();
