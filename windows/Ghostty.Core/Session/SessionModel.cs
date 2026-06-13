@@ -16,7 +16,7 @@ internal sealed class SessionState
     /// </summary>
     public bool CleanShutdown { get; set; }
 
-    public List<WindowSession> Windows { get; set; } = new();
+    public List<WindowSession> Windows { get; set; } = [];
 }
 
 /// <summary>One non-quake window: geometry + ordered tabs + active tab.</summary>
@@ -24,7 +24,7 @@ internal sealed class WindowSession
 {
     public WindowGeometry Geometry { get; set; } = new();
     public int ActiveTabIndex { get; set; }
-    public List<TabSession> Tabs { get; set; } = new();
+    public List<TabSession> Tabs { get; set; } = [];
 }
 
 /// <summary>Mirror of the geometry fields already saved by WindowState.</summary>
@@ -48,7 +48,7 @@ internal sealed class TabSession
     public PaneNodeDto Tree { get; set; } = null!;
 
     /// <summary>Path to the focused leaf (empty = root leaf).</summary>
-    public bool[] ActiveLeafPath { get; set; } = System.Array.Empty<bool>();
+    public bool[] ActiveLeafPath { get; set; } = [];
 
     /// <summary>Path to the zoomed leaf, or null if no pane was zoomed.</summary>
     public bool[]? ZoomedLeafPath { get; set; }

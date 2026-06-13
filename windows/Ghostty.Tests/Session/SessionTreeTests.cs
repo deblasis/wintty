@@ -82,4 +82,36 @@ public class SessionTreeTests
         // Path too deep for this tree.
         Assert.Null(SessionTree.Resolve(root, new[] { true, true, true }));
     }
+
+    [Fact]
+    public void Resolve_PartialPath_ReturnsInteriorSplit()
+    {
+        // A path that stops above a leaf resolves to a SplitPane, not a leaf.
+        // SessionRestorer relies on `Resolve(...) as LeafPane ?? FirstLeaf`,
+        // so this must be a non-leaf node (cast yields null -> fallback).
+        var inner = new SplitPane(PaneOrientation.Horizontal, Leaf("a"), Leaf("b"), ratio: 0.5);
+        var root = new SplitPane(PaneOrientation.Vertical, Leaf("x"), inner, ratio: 0.5);
+
+        var node = SessionTree.Resolve(root, new[] { true }); // -> inner split
+        Assert.IsType<SplitPane>(node);
+        Assert.Null(node as LeafPane);
+    }
+
+    [Theory]
+    [InlineData(1.5, SplitPane.MaxRatio)]
+    [InlineData(-0.2, SplitPane.MinRatio)]
+    [InlineData(0.99, SplitPane.MaxRatio)]
+    public void RebuildTree_ClampsOutOfRangeRatio(double persisted, double expected)
+    {
+        var dto = new SplitDto
+        {
+            Orientation = PaneOrientation.Vertical,
+            Ratio = persisted,
+            Child1 = new LeafDto { ProfileId = "a" },
+            Child2 = new LeafDto { ProfileId = "b" },
+        };
+
+        var rebuilt = (SplitPane)SessionTree.RebuildTree(dto, d => new LeafPane { Snapshot = Snap(d.ProfileId!) });
+        Assert.Equal(expected, rebuilt.Ratio, precision: 6);
+    }
 }

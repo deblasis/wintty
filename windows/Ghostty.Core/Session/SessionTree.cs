@@ -75,7 +75,7 @@ internal static class SessionTree
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(target);
         var steps = new List<bool>();
-        return Walk(root, target, steps) ? steps.ToArray() : Array.Empty<bool>();
+        return Walk(root, target, steps) ? steps.ToArray() : [];
 
         static bool Walk(PaneNode node, PaneNode target, List<bool> acc)
         {

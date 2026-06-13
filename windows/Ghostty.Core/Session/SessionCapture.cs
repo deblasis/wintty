@@ -9,6 +9,10 @@ namespace Ghostty.Core.Session;
 /// </summary>
 internal static class SessionCapture
 {
+    // Invariant: activeLeaf and zoomed (when non-null) are leaves OF root.
+    // PathOf returns the empty path both for "is root" and "not found", so
+    // passing a foreign node would serialize as the root path; callers only
+    // ever pass live leaves of this tree, so the empty path always means root.
     public static TabSession CaptureTab(
         PaneNode root,
         LeafPane activeLeaf,
