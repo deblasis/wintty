@@ -18,6 +18,12 @@ internal interface IPaneHost
     /// <summary>Currently focused leaf, never null after construction.</summary>
     LeafPane ActiveLeaf { get; }
 
+    /// <summary>Root of the split tree (a single leaf when unsplit).</summary>
+    PaneNode RootNode { get; }
+
+    /// <summary>The zoomed leaf, or null when no pane is zoomed.</summary>
+    LeafPane? ZoomedLeaf { get; }
+
     /// <summary>Total number of leaves currently in the tree.</summary>
     int PaneCount { get; }
 
@@ -39,6 +45,13 @@ internal interface IPaneHost
     /// <see cref="ProgressChanged"/>; background panes ring audibly but
     /// do not drive the window-level attention badge.</summary>
     event EventHandler? BellRang;
+
+    /// <summary>
+    /// Raised after any structural change to the tree (split, close,
+    /// zoom toggle, equalize, resize, undo/redo restore). The session
+    /// manager coalesces this into a debounced persist.
+    /// </summary>
+    event EventHandler? LayoutChanged;
 
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
