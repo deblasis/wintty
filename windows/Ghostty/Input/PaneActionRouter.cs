@@ -105,6 +105,12 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? ShowKeybindCheatsheetRequested;
 
+    /// <summary>
+    /// Raised when the About chord or palette entry fires. MainWindow
+    /// listens and opens the singleton About window.
+    /// </summary>
+    public event EventHandler? ShowAboutRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -131,6 +137,9 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ShowKeybindCheatsheet:
                 ShowKeybindCheatsheetRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ShowAbout:
+                ShowAboutRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding
