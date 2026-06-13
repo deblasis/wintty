@@ -38,4 +38,20 @@ internal sealed class PaneHostFactory
             // helper, which maps 0 to a disabled policy (upstream fidelity)
             // and a negative/corrupt value to the safe 5s default.
             undoPolicy: UndoPolicy.FromConfigMilliseconds(_config.UndoTimeoutMs));
+
+    /// <summary>
+    /// Build a host seeded from a restored tree. Leaves carry their
+    /// <see cref="LeafPane.Snapshot"/> (Tag null); the host creates the
+    /// TerminalControls. <paramref name="activeLeaf"/> must be a leaf of
+    /// <paramref name="root"/>; <paramref name="zoomedLeaf"/> re-zooms when
+    /// non-null and present.
+    /// </summary>
+    public IPaneHost CreateFromTree(PaneNode root, LeafPane activeLeaf, LeafPane? zoomedLeaf) =>
+        new PaneHost(
+            _host,
+            terminalFactory: snap => new TerminalControl { Snapshot = snap },
+            root: root,
+            activeLeaf: activeLeaf,
+            zoomedLeaf: zoomedLeaf,
+            undoPolicy: UndoPolicy.FromConfigMilliseconds(_config.UndoTimeoutMs));
 }

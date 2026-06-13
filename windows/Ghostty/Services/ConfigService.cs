@@ -75,6 +75,8 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public string GradientBlend { get; private set; } = "overlay";
     public float GradientOpacity { get; private set; } = 0.05f;
     public string WindowTheme { get; private set; } = "auto";
+    public Ghostty.Core.Hosting.WindowSaveState WindowSaveState { get; private set; }
+        = Ghostty.Core.Hosting.WindowSaveState.Default;
     public uint ForegroundColor { get; private set; } = 0x00FFFFFF;
     public uint BackgroundColor { get; private set; } = 0x001E1E2E;
     public uint? CursorColor { get; private set; }
@@ -593,6 +595,8 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         GradientBlend = GetFileValue("background-gradient-blend", "overlay");
         GradientOpacity = ParseFloat(GetFileValue("background-gradient-opacity", "")) ?? 0.05f;
         WindowTheme = GetString("window-theme", "auto");
+        WindowSaveState = Ghostty.Core.Hosting.WindowSaveStateExtensions.Parse(
+            GetString("window-save-state", "default"));
 
         // For background and foreground we go through GetThemeValue first
         // because libghostty's _config was finalized with the default

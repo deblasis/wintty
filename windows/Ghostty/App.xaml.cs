@@ -62,6 +62,7 @@ public partial class App : Application
     // works from anywhere in the process and the hidden window stays
     // alive across regular window close/reopen cycles.
     private MainWindow? _quakeWindow;
+    private Ghostty.Session.SessionManager? _sessionManager;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
     private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
     // Reentrancy guard for the Alt+Space system menu: TrackPopupMenu runs
@@ -93,6 +94,7 @@ public partial class App : Application
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
+    internal static Ghostty.Session.SessionManager? SessionManager { get; private set; }
     internal static Ghostty.Core.Input.IModifierKeyState? ModifierKeyState { get; private set; }
     internal static Ghostty.Core.Profiles.IIconResolver? IconResolver { get; private set; }
 
@@ -610,9 +612,36 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"[app] protocol activation probe failed: {ex.Message}");
         }
 
-        var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
-        window.Closed += OnAnyWindowClosedInternal;
-        window.Activate();
+        // Session manager: owns restore decision + debounced persistence.
+        // Constructed before window creation so we can decide whether to
+        // rebuild a saved session or open a single default window.
+        _sessionManager = new Ghostty.Session.SessionManager(
+            new Ghostty.Session.SessionStore(
+                factory.CreateLogger<Ghostty.Session.SessionStore>()),
+            _configService,
+            DispatcherQueue.GetForCurrentThread(),
+            () => AllWindows);
+        SessionManager = _sessionManager;
+
+        var restoreState = _sessionManager.LoadForRestore();
+        if (restoreState is { Windows.Count: > 0 })
+        {
+            foreach (var ws in restoreState.Windows)
+            {
+                var restored = new MainWindow(
+                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws);
+                restored.Closed += OnAnyWindowClosedInternal;
+                _sessionManager.Track(restored);
+                restored.Activate();
+            }
+        }
+        else
+        {
+            var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
+            window.Closed += OnAnyWindowClosedInternal;
+            _sessionManager.Track(window);
+            window.Activate();
+        }
 
         // Singleton quake / drop-down window. Created hidden; summoned
         // by the global hotkey via WindowsGlobalHotKey. Same MainWindow
@@ -797,13 +826,30 @@ public partial class App : Application
         // here. By the time Window.Closed fires in WinUI 3, Content may
         // already have a null XamlRoot, so re-reading would silently
         // skip the removal and leak the entry.
-        if (sender is MainWindow w && w.RegisteredRoot is { } root)
+        var closing = sender as MainWindow;
+        if (closing is { RegisteredRoot: { } root })
             WindowsByRoot.Remove(root);
+
+        // Detach this window's session-persistence subscriptions.
+        if (closing is not null)
+            _sessionManager?.Untrack(closing);
+
+        // A deliberately-closed (non-last) window is left in the persisted
+        // set on purpose: we cannot tell a single close apart from the first
+        // close of a multi-window quit, so we never shrink the set on close
+        // (that would lose windows on a slow quit cascade). It self-heals out
+        // on the next layout/tab/move change in a surviving window. Biasing to
+        // "never lose a window" over "never restore a closed one".
 
         if (WindowsByRoot.Count == 0)
         {
             try
             {
+                // Final clean-shutdown write while the closing window's panes
+                // are still alive (teardown happens below). Marks the session
+                // clean so window-save-state=default restores it next launch.
+                _sessionManager?.FinalizeCleanShutdown(closing);
+
                 // Stop config reloads FIRST, before anything below frees the
                 // libghostty app or the DX12 renderer. A debounced reload
                 // from a last-moment config change (e.g. a window-theme
