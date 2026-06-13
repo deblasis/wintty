@@ -248,4 +248,42 @@ public class TabManagerTests
         Assert.Same(detached, removed);
         Assert.Single(adopter.Tabs);
     }
+
+    [Fact]
+    public void BellRang_WithTitleFeature_SetsActiveTabBellRinging()
+    {
+        var mgr = NewManager(out var hosts);
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.TitleOnly);
+        Assert.True(mgr.Tabs[0].BellRinging);
+    }
+
+    [Fact]
+    public void BellRang_WithoutTitleFeature_DoesNotSetBellRinging()
+    {
+        var mgr = NewManager(out var hosts);
+        // attention only, no title: the tab indicator must stay off.
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.AttentionOnly);
+        Assert.False(mgr.Tabs[0].BellRinging);
+    }
+
+    [Fact]
+    public void BellAcknowledged_ClearsBellRinging()
+    {
+        var mgr = NewManager(out var hosts);
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        hosts[0].RaiseBellAcknowledged();
+        Assert.False(mgr.Tabs[0].BellRinging);
+    }
+
+    [Fact]
+    public void BellRang_AfterClose_DoesNotThrowOrLeak()
+    {
+        var mgr = NewManager(out var hosts);
+        mgr.NewTab(); // hosts[1] backs the second tab
+        var firstHost = hosts[0];
+        mgr.RequestCloseActive(); // closes the active (second) tab
+        // The first tab is still open; its host still drives its indicator.
+        firstHost.RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        Assert.True(mgr.Tabs[0].BellRinging);
+    }
 }
