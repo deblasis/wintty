@@ -408,18 +408,6 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
-        // Single-instance gate. Decided here -- after ConfigService gives
-        // us the value and the config path, but before the bootstrap host,
-        // window, and DX12 renderer are created -- so a secondary process
-        // forwards its launch and exits without ever creating a window or
-        // paying for the renderer. Off by default: the call is a no-op and
-        // this stays a normal independent process. Returns normally when
-        // this process should keep launching (primary, or a forward that
-        // failed and falls back); calls Environment.Exit(0) itself when it
-        // was a secondary that handed its launch to the primary.
-        if (_configService.WindowsSingleInstance)
-            HandleSingleInstanceGate();
-
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Ghostty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
@@ -454,6 +442,19 @@ public partial class App : Application
         // the factory exists, and cannot receive a logger through its ctor) and for call
         // sites inside static scopes.
         Ghostty.Logging.StaticLoggers.Initialize(factory);
+
+        // Single-instance gate. Decided here -- after ConfigService gives us
+        // the value and the logger factory exists (so failures are visible
+        // in Release), but before the bootstrap host, window, and DX12
+        // renderer are created -- so a secondary process forwards its launch
+        // and exits without ever creating a window or paying for the
+        // renderer. Off by default: the call is a no-op and this stays a
+        // normal independent process. Returns normally when this process
+        // should keep launching (primary, or a forward that failed and falls
+        // back); calls Environment.Exit(0) itself when it was a secondary
+        // that handed its launch to the primary.
+        if (_configService.WindowsSingleInstance)
+            HandleSingleInstanceGate();
 
         // Power-saving monitor. Reads power-saver-mode from config every
         // time it resolves (Func thunk decouples it from ConfigService
@@ -731,8 +732,7 @@ public partial class App : Application
         {
             // Could not create the coordination primitive at all. Do not
             // block the launch: behave as a normal single window.
-            System.Diagnostics.Debug.WriteLine(
-                $"[single-instance] mutex create failed; launching normally. {ex.Message}");
+            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceMutexFailed(ex);
             _singleInstanceMutex = null;
             return;
         }
@@ -759,8 +759,12 @@ public partial class App : Application
             writer.Flush();
             client.WaitForPipeDrain();
 
-            // Release our mutex handle (we never owned it) and exit. The
-            // primary owns the launch now.
+            // The primary owns the launch now. Release everything this
+            // throwaway process holds -- the config service (and its file
+            // watcher + native config handle) and the mutex handle (we never
+            // owned it) -- then exit deterministically rather than leaving
+            // the OS to reclaim them at teardown.
+            _configService?.Dispose();
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
             Environment.Exit(0);
@@ -772,8 +776,7 @@ public partial class App : Application
             // Drop the mutex handle first: we did not create it, and a new
             // primary election is irrelevant now that we are becoming a
             // standalone window.
-            System.Diagnostics.Debug.WriteLine(
-                $"[single-instance] forward failed; launching normally. {ex.Message}");
+            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceForwardFailed(ex);
             try { _singleInstanceMutex?.Dispose(); } catch { /* ignore */ }
             _singleInstanceMutex = null;
         }
@@ -803,8 +806,7 @@ public partial class App : Application
             // A primary that cannot serve simply behaves like a normal
             // window; secondaries will fail to connect and fall back to
             // independent launches.
-            System.Diagnostics.Debug.WriteLine(
-                $"[single-instance] server start failed. {ex.Message}");
+            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceServerStartFailed(ex);
             _singleInstanceServer = null;
         }
     }
@@ -1183,5 +1185,23 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Warning,
                    Message = "Failed to register for toast notifications")]
     internal static partial void LogToastRegisterFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.MutexFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Single-instance mutex could not be created; launching as a normal independent process.")]
+    internal static partial void LogSingleInstanceMutexFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.ForwardFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Single-instance forward to the primary failed; launching as a normal independent process.")]
+    internal static partial void LogSingleInstanceForwardFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.ServerStartFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Single-instance pipe server failed to start; secondaries will launch independently.")]
+    internal static partial void LogSingleInstanceServerStartFailed(
         this ILogger<App> logger, System.Exception ex);
 }
