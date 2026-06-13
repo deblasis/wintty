@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.TabOverviewControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch">
+
+    <Grid x:Name="Scrim"
+          Background="#99000000"
+          Tapped="OnScrimTapped"
+          KeyDown="OnKeyDown">
+        <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="16"
+                MaxWidth="900"
+                MaxHeight="640"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center">
+            <GridView x:Name="TilesView"
+                      SelectionMode="Single"
+                      IsItemClickEnabled="True"
+                      ItemClick="OnTileClick"/>
+        </Border>
+    </Grid>
+</UserControl>
