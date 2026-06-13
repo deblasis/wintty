@@ -130,6 +130,7 @@ public class SettingsConfigWriterTests
         public double BackgroundOpacity => 1.0;
         public bool VerticalTabs => false;
         public bool CommandPaletteGroupCommands => false;
+        public bool WindowsSingleInstance => false;
         public string CommandPaletteBackground => "acrylic";
         public string LogLevel => "info";
         public string LogFilter => string.Empty;

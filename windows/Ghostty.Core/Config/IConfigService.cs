@@ -42,6 +42,14 @@ public interface IConfigService : IDisposable
     bool CommandPaletteGroupCommands { get; }
 
     /// <summary>
+    /// Windows-only: true when opt-in single-instance mode is active. A
+    /// second launch forwards its working directory and argv to the
+    /// already-running instance (which opens a new window) and then exits.
+    /// Default false. Backed by the "windows-single-instance" key.
+    /// </summary>
+    bool WindowsSingleInstance { get; }
+
+    /// <summary>
     /// Windows-only: backdrop material for the command palette.
     /// One of "acrylic", "mica", "opaque". Default "acrylic".
     /// Backed by the "command-palette-background" key.
