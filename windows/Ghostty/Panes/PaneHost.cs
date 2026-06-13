@@ -64,8 +64,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // a parent Grid is not a sibling of a leaf's chrome and cannot
     // be defeated with Canvas.ZIndex. The overlay sits above
     // everything and is tracked via TransformToVisual on each layout.
-    private readonly Canvas _highlightOverlay;
-    private readonly Rectangle _activeBorderRect;
+    // Assigned once in BuildChrome() (called from every ctor), never
+    // reassigned. Not readonly because BuildChrome is a shared helper
+    // rather than the ctor body itself.
+    private Canvas _highlightOverlay = null!;
+    private Rectangle _activeBorderRect = null!;
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
@@ -75,8 +78,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // hover it swaps to the zoom-out magnifier (action hint: click to
     // restore). Lives permanently in the host Grid above the floated
     // pane, Collapsed except during zoom.
-    private readonly Button _restoreZoomButton;
-    private readonly FontIcon _restoreZoomIcon;
+    private Button _restoreZoomButton = null!;
+    private FontIcon _restoreZoomIcon = null!;
     private const string RestoreZoomGlyphRest = "";  // Zoom (magnifier)
     private const string RestoreZoomGlyphHover = ""; // ZoomOut (magnifier minus)
 
@@ -194,7 +197,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public LeafPane ActiveLeaf => _activeLeaf;
 
-    internal PaneNode RootNode => _root;
+    public PaneNode RootNode => _root;
+
+    public LeafPane? ZoomedLeaf => _zoomedLeaf;
+
+    /// <summary>
+    /// Raised after any structural change to the tree (split, close,
+    /// zoom toggle, equalize, resize, undo/redo restore). The session
+    /// manager coalesces this into a debounced persist.
+    /// </summary>
+    public event EventHandler? LayoutChanged;
+
+    private void RaiseLayoutChanged() => LayoutChanged?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
     /// Number of leaves in the tree. Implemented via a tree walk; the
@@ -254,6 +268,101 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _undoEnabled = policy.Enabled;
         _history = new Core.Panes.PaneHistory(_time, policy.Window);
 
+        BuildChrome();
+
+        // Initial single leaf. Pass the initialSnapshot so the terminal
+        // spawns with the right command/working-directory from OnLoaded.
+        var firstTerminal = CreateTerminal(initialSnapshot);
+        _activeLeaf = new LeafPane { Tag = firstTerminal, Snapshot = initialSnapshot };
+        _root = _activeLeaf;
+
+        // Two-layer host Grid: the actual split tree below, the
+        // highlight overlay above. The overlay Canvas does not
+        // capture pointer events (IsHitTestVisible=false), so the
+        // tree below receives all input normally.
+        var hostGrid = new Grid();
+        _treeRoot = BuildVisual(_root);
+        hostGrid.Children.Add(_treeRoot);
+        hostGrid.Children.Add(_highlightOverlay);
+        hostGrid.Children.Add(_restoreZoomButton);
+        Content = hostGrid;
+
+        WireCommonHandlers();
+    }
+
+    /// <summary>
+    /// Restore-seeded ctor: adopt a pre-built tree instead of a single
+    /// fresh leaf. Leaves must carry their <see cref="LeafPane.Snapshot"/>
+    /// with <see cref="LeafPane.Tag"/> null; this ctor creates each leaf's
+    /// TerminalControl via the same wiring as a live split, then rebuilds
+    /// the visual and re-applies zoom exactly like Undo's RestoreFrom.
+    /// <paramref name="activeLeaf"/> must be a leaf of <paramref name="root"/>;
+    /// <paramref name="zoomedLeaf"/>, when non-null and present in the tree,
+    /// is re-zoomed after the rebuild.
+    /// </summary>
+    public PaneHost(
+        GhosttyHost host,
+        Func<ProfileSnapshot?, TerminalControl> terminalFactory,
+        PaneNode root,
+        LeafPane activeLeaf,
+        LeafPane? zoomedLeaf,
+        Core.Panes.UndoPolicy? undoPolicy = null)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        ArgumentNullException.ThrowIfNull(activeLeaf);
+
+        _host = host;
+        _terminalFactory = terminalFactory;
+        var policy = undoPolicy ?? Core.Panes.UndoPolicy.Default;
+        _undoEnabled = policy.Enabled;
+        _history = new Core.Panes.PaneHistory(_time, policy.Window);
+
+        BuildChrome();
+
+        // Materialize a TerminalControl for every restored leaf via the
+        // same wiring a live split uses, so titles/progress/close-surface
+        // callbacks route correctly. Leaves arrive with Tag null.
+        foreach (var leaf in PaneTree.Leaves(root))
+            leaf.Tag = CreateTerminal(leaf.Snapshot);
+
+        _root = root;
+        _activeLeaf = activeLeaf;
+
+        var hostGrid = new Grid();
+        _treeRoot = BuildVisual(_root);
+        hostGrid.Children.Add(_treeRoot);
+        hostGrid.Children.Add(_highlightOverlay);
+        hostGrid.Children.Add(_restoreZoomButton);
+        Content = hostGrid;
+
+        // Re-enter zoom on the restored leaf via the existing enter-path,
+        // mirroring RestoreFrom. Only if it is still present in the tree.
+        // _restoring guards CaptureForUndo so the re-zoom is not itself
+        // recorded as an undoable op (same as RestoreFrom).
+        if (zoomedLeaf is not null && PaneTree.Leaves(_root).Contains(zoomedLeaf))
+        {
+            _restoring = true;
+            try
+            {
+                _activeLeaf = zoomedLeaf;
+                ToggleSplitZoom();
+            }
+            finally
+            {
+                _restoring = false;
+            }
+        }
+
+        WireCommonHandlers();
+    }
+
+    /// <summary>
+    /// Build the highlight overlay + restore-from-zoom button chrome.
+    /// Shared by both constructors so the chrome is identical regardless
+    /// of how the initial tree is seeded.
+    /// </summary>
+    private void BuildChrome()
+    {
         _activeBorderRect = new Rectangle
         {
             Stroke = DefaultActiveBorderBrush,
@@ -305,24 +414,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Resting glyph signals "zoomed"; hover previews the zoom-out action.
         _restoreZoomButton.PointerEntered += (_, _) => _restoreZoomIcon.Glyph = RestoreZoomGlyphHover;
         _restoreZoomButton.PointerExited += (_, _) => _restoreZoomIcon.Glyph = RestoreZoomGlyphRest;
+    }
 
-        // Initial single leaf. Pass the initialSnapshot so the terminal
-        // spawns with the right command/working-directory from OnLoaded.
-        var firstTerminal = CreateTerminal(initialSnapshot);
-        _activeLeaf = new LeafPane { Tag = firstTerminal, Snapshot = initialSnapshot };
-        _root = _activeLeaf;
-
-        // Two-layer host Grid: the actual split tree below, the
-        // highlight overlay above. The overlay Canvas does not
-        // capture pointer events (IsHitTestVisible=false), so the
-        // tree below receives all input normally.
-        var hostGrid = new Grid();
-        _treeRoot = BuildVisual(_root);
-        hostGrid.Children.Add(_treeRoot);
-        hostGrid.Children.Add(_highlightOverlay);
-        hostGrid.Children.Add(_restoreZoomButton);
-        Content = hostGrid;
-
+    /// <summary>
+    /// Wire the layout/focus/prune handlers after Content is set. Shared
+    /// by both constructors.
+    /// </summary>
+    private void WireCommonHandlers()
+    {
         // Reposition the highlight whenever layout settles. Cheap;
         // single TransformToVisual + four set-property calls. Covers
         // window resize, splitter drag, and the post-Split layout
@@ -447,6 +546,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             newTerminal.Focus(FocusState.Programmatic);
             UpdateHighlightPosition();
         });
+
+        RaiseLayoutChanged();
     }
 
     /// <summary>
@@ -650,6 +751,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             _activeLeaf = zoomedBefore;
             ToggleSplitZoom();
         }
+
+        RaiseLayoutChanged();
     }
 
     /// <summary>
@@ -744,6 +847,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // (and needlessly clear redo).
         if (_root is SplitPane) CaptureForUndo(Core.Panes.PaneOpKind.Equalize);
         PaneTree.Equalize(_root);
+        RaiseLayoutChanged();
         // When zoomed, only update the model - unzoom re-applies every
         // ratio to the live tree when the user toggles back.
         if (_zoomedLeaf is not null) return;
@@ -771,6 +875,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Record the pre-toggle zoom state. No-op while restoring so the
         // re-zoom that RestoreFrom performs is not itself recorded.
         CaptureForUndo(Core.Panes.PaneOpKind.Zoom);
+        RaiseLayoutChanged();
 
         if (_zoomedLeaf is not null)
         {
@@ -902,6 +1007,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         {
             _restoring = false;
         }
+
+        RaiseLayoutChanged();
     }
 
     // Hide the restore-from-zoom button and reset its glyph to the
@@ -1070,6 +1177,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // than Rebuild(), which ghosts dividers on deep trees.
         ApplyAllRatios();
         UpdateHighlightPosition();
+        RaiseLayoutChanged();
     }
 
     // Internals ---------------------------------------------------------
