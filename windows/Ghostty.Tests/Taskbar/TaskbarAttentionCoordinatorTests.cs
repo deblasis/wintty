@@ -35,7 +35,7 @@ public class TaskbarAttentionCoordinatorTests
         var (_, hosts, sink, coord) = New();
         coord.SetFocused(false);
 
-        hosts[0].RaiseBellRang();
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
 
         Assert.Equal(new[] { true }, sink.Writes);
     }
@@ -46,7 +46,19 @@ public class TaskbarAttentionCoordinatorTests
         var (_, hosts, sink, coord) = New();
         coord.SetFocused(true);
 
-        hosts[0].RaiseBellRang();
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+
+        Assert.Empty(sink.Writes);
+    }
+
+    [Fact]
+    public void Bell_without_attention_feature_shows_no_badge()
+    {
+        var (_, hosts, sink, coord) = New();
+        coord.SetFocused(false);
+
+        // title only, no attention: the badge must stay off even unfocused.
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.TitleOnly);
 
         Assert.Empty(sink.Writes);
     }
@@ -56,7 +68,7 @@ public class TaskbarAttentionCoordinatorTests
     {
         var (_, hosts, sink, coord) = New();
         coord.SetFocused(false);
-        hosts[0].RaiseBellRang();
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
 
         coord.SetFocused(true);
 
@@ -69,9 +81,9 @@ public class TaskbarAttentionCoordinatorTests
         var (_, hosts, sink, coord) = New();
         coord.SetFocused(false);
 
-        hosts[0].RaiseBellRang();
-        hosts[0].RaiseBellRang();
-        hosts[0].RaiseBellRang();
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);
 
         Assert.Equal(new[] { true }, sink.Writes);
     }
@@ -91,10 +103,10 @@ public class TaskbarAttentionCoordinatorTests
     {
         var (_, hosts, sink, coord) = New();
         coord.SetFocused(false);
-        hosts[0].RaiseBellRang();   // true
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);   // true
         coord.SetFocused(true);     // false
         coord.SetFocused(false);
-        hosts[0].RaiseBellRang();   // true
+        hosts[0].RaiseBellRang(Ghostty.Tests.Bell.BellFixtures.All);   // true
 
         Assert.Equal(new[] { true, false, true }, sink.Writes);
     }

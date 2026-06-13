@@ -24,7 +24,10 @@ internal sealed class TaskbarAttentionCoordinator
     public TaskbarAttentionCoordinator(TabManager manager, ITaskbarOverlaySink sink)
     {
         _sink = sink;
-        manager.BellRang += (_, _) => OnBell();
+        // The badge is the Windows `attention` feature; gate on it. A
+        // complementary taskbar flash also fires for `attention` from the
+        // host (FlashWindowEx) as the "look now" signal.
+        manager.BellRang += (_, features) => { if (features.Attention) OnBell(); };
     }
 
     /// <summary>A bell rang on the active leaf of some owned tab.</summary>
