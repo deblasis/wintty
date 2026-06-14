@@ -6,23 +6,164 @@
     HorizontalAlignment="Stretch"
     VerticalAlignment="Stretch">
 
+    <UserControl.Resources>
+        <!-- Tile container: rounded Fluent surface that owns hover/selected states.
+             The tile content (header + dark preview body) is clipped to these
+             corners; selection shows a 2px accent ring. -->
+        <Style x:Key="TabTileContainerStyle" TargetType="GridViewItem">
+            <Setter Property="Margin" Value="6"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+            <Setter Property="UseSystemFocusVisuals" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewItem">
+                        <Grid>
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal"/>
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Selected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
+                                            <Setter Target="Ring.BorderThickness" Value="2"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PointerOverSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
+                                            <Setter Target="Ring.BorderThickness" Value="2"/>
+                                            <Setter Target="Ring.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PressedSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
+                                            <Setter Target="Ring.BorderThickness" Value="2"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+
+                            <Border x:Name="Ring"
+                                    CornerRadius="8"
+                                    BorderThickness="1"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}">
+                                <ContentPresenter Content="{TemplateBinding Content}"
+                                                  HorizontalContentAlignment="Stretch"
+                                                  VerticalContentAlignment="Stretch"/>
+                            </Border>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
     <Grid x:Name="Scrim"
-          Background="#99000000"
+          Background="{ThemeResource SmokeFillColorDefaultBrush}"
           Tapped="OnScrimTapped"
           KeyDown="OnKeyDown">
-        <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
-                BorderThickness="1"
-                CornerRadius="8"
-                Padding="16"
-                MaxWidth="900"
+
+        <Border x:Name="Card"
+                MaxWidth="940"
                 MaxHeight="640"
                 HorizontalAlignment="Center"
-                VerticalAlignment="Center">
-            <GridView x:Name="TilesView"
-                      SelectionMode="Single"
-                      IsItemClickEnabled="True"
-                      ItemClick="OnTileClick"/>
+                VerticalAlignment="Center"
+                CornerRadius="8"
+                BorderThickness="1"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                Background="{ThemeResource AcrylicInAppFillColorDefaultBrush}">
+            <Border.Shadow>
+                <ThemeShadow/>
+            </Border.Shadow>
+            <Border.Transitions>
+                <TransitionCollection>
+                    <EntranceThemeTransition FromVerticalOffset="24"/>
+                </TransitionCollection>
+            </Border.Transitions>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header: brand mark + label + count chip -->
+                <Grid Grid.Row="0" Padding="14,12,14,10" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Image x:Name="BrandLogo" Grid.Column="0" Width="18" Height="18" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="All tabs" VerticalAlignment="Center"
+                               FontSize="{StaticResource BodyTextBlockFontSize}"
+                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
+                    <Border Grid.Column="3" Padding="8,2" CornerRadius="10"
+                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                            VerticalAlignment="Center">
+                        <TextBlock x:Name="CountChip"
+                                   FontSize="{StaticResource CaptionTextBlockFontSize}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    </Border>
+                </Grid>
+
+                <!-- Body: thumbnail grid + detail rail -->
+                <Grid Grid.Row="1" Padding="14,2,14,6" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="396"/>
+                    </Grid.ColumnDefinitions>
+
+                    <GridView x:Name="TilesView"
+                              Grid.Column="0"
+                              SelectionMode="Single"
+                              SingleSelectionFollowsFocus="True"
+                              IsItemClickEnabled="True"
+                              ItemContainerStyle="{StaticResource TabTileContainerStyle}"
+                              ItemClick="OnTileClick"
+                              SelectionChanged="OnSelectionChanged"/>
+
+                    <Border Grid.Column="1"
+                            CornerRadius="8"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            Padding="12">
+                        <ContentControl x:Name="DetailRail"
+                                        HorizontalContentAlignment="Stretch"
+                                        VerticalContentAlignment="Top">
+                            <ContentControl.ContentTransitions>
+                                <TransitionCollection>
+                                    <ContentThemeTransition/>
+                                </TransitionCollection>
+                            </ContentControl.ContentTransitions>
+                        </ContentControl>
+                    </Border>
+                </Grid>
+
+                <!-- Footer: keyboard hints (mirrors the command palette footer) -->
+                <Grid Grid.Row="2" Padding="14,8,14,12">
+                    <TextBlock HorizontalAlignment="Right"
+                               FontSize="{StaticResource CaptionTextBlockFontSize}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="&#x2191;&#x2193;&#x2190;&#x2192; navigate     &#x21B5; switch     Esc close"/>
+                </Grid>
+            </Grid>
         </Border>
     </Grid>
 </UserControl>
