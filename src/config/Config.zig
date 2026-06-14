@@ -7015,10 +7015,12 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .f11 } },
                 .{ .toggle_fullscreen = {} },
             );
-            // Tabs
+            // Tabs. new_tab is ctrl+t (not ctrl+shift+t) so ctrl+shift+t is
+            // free for the apprt to bind reopen-closed-tab (browser / VS Code
+            // convention).
             try self.set.put(
                 alloc,
-                .{ .key = .{ .unicode = 't' }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .key = .{ .unicode = 't' }, .mods = .{ .ctrl = true } },
                 .{ .new_tab = {} },
             );
             try self.set.put(
@@ -10668,15 +10670,21 @@ test "keybind: windows default keybinds" {
 
     const set = cfg.keybind.set;
 
-    // ctrl+shift+t -> new_tab
+    // ctrl+t -> new_tab (ctrl+shift+t is freed for apprt reopen-closed-tab)
     {
         const entry = set.get(.{
             .key = .{ .unicode = 't' },
-            .mods = .{ .ctrl = true, .shift = true },
+            .mods = .{ .ctrl = true },
         }).?.value_ptr.*;
         try testing.expect(entry == .leaf);
         try testing.expect(entry.leaf.action == .new_tab);
     }
+
+    // ctrl+shift+t is no longer a default (the apprt matches it)
+    try testing.expect(set.get(.{
+        .key = .{ .unicode = 't' },
+        .mods = .{ .ctrl = true, .shift = true },
+    }) == null);
 
     // alt+shift+'=' -> new_split right
     {
