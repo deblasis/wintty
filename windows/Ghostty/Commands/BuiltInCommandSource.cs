@@ -45,6 +45,8 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.SplitHorizontal, "Split Horizontally", "Split the current pane horizontally", CommandCategory.Pane, "\uF57E");
         AddPaneCommand(commands, PaneAction.NewTab, "New Tab", "Open a new terminal tab", CommandCategory.Tab, "\uE710");
         AddPaneCommand(commands, PaneAction.CloseActiveProgressive, "Close Pane / Tab", "Close active pane; if last pane, close tab; if last tab, close window", CommandCategory.Tab, "\uE711");
+        AddPaneCommand(commands, PaneAction.ReopenClosedTab, "Reopen Closed Tab", "Reopen the most recently closed tab", CommandCategory.Tab, "\uE7A7");
+        AddPaneCommand(commands, PaneAction.ReopenClosedWindow, "Reopen Closed Window", "Reopen the most recently closed window", CommandCategory.Tab, "\uE8A7");
         AddPaneCommand(commands, PaneAction.NextTab, "Next Tab", "Switch to the next tab", CommandCategory.Tab, "\uE76C");
         AddPaneCommand(commands, PaneAction.PrevTab, "Previous Tab", "Switch to the previous tab", CommandCategory.Tab, "\uE76B");
         AddPaneCommand(commands, PaneAction.FocusLeft, "Focus Pane Left", "Move focus to the left pane", CommandCategory.Pane);

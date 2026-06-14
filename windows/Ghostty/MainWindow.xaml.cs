@@ -99,6 +99,14 @@ public sealed partial class MainWindow : Window
     internal TabManager TabManager => _tabManager;
 
     /// <summary>
+    /// The closed-tab store this window feeds. The quake window is excluded so
+    /// its drop-down tabs never leak into the regular reopen-closed-tab history
+    /// (mirrors CaptureSession's window-level quake exclusion).
+    /// </summary>
+    private Core.Panes.ClosedStack<Core.Session.TabSession>? ClosedTabsStore
+        => IsQuickTerminal ? null : App.ClosedTabs;
+
+    /// <summary>
     /// Raised when this (non-quake) window moves or resizes, so the
     /// session manager can debounce-persist the new geometry.
     /// </summary>
@@ -424,7 +432,8 @@ public sealed partial class MainWindow : Window
         {
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
-                seed: restoredTabs[0]);
+                seed: restoredTabs[0],
+                closedTabs: ClosedTabsStore);
             for (int i = 1; i < restoredTabs.Count; i++)
                 _tabManager.AdoptTab(restoredTabs[i]);
             if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
@@ -434,7 +443,8 @@ public sealed partial class MainWindow : Window
         {
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
-                seed: seedTab);
+                seed: seedTab,
+                closedTabs: ClosedTabsStore);
         }
         _router = new PaneActionRouter(
             _tabManager,
@@ -1124,6 +1134,14 @@ public sealed partial class MainWindow : Window
         // _themeManager was disposed at the top of this method, before the
         // first await, so no theme callback can fire mid-teardown (#208).
 
+        // Capture this window for reopen-closed-window before the panes are
+        // freed. CaptureSession returns null for quake/fullscreen; skip empty
+        // windows (a window emptied by closing its tabs one-by-one has nothing
+        // to restore — those tabs were captured individually as closed tabs).
+        var closedWindow = CaptureSession();
+        if (closedWindow is { Tabs.Count: > 0 })
+            App.ClosedWindows.Push(closedWindow);
+
         // Surface lifetime is decoupled from Loaded/Unloaded
         // (see TerminalControl.DisposeSurface), so we have to
         // free every leaf in every tab explicitly before tearing
@@ -1384,6 +1402,27 @@ public sealed partial class MainWindow : Window
             _aboutWindow = aboutWin;
             aboutWin.Activate();
         };
+
+        _router.ReopenClosedTabRequested += (_, _) => ReopenClosedTab();
+        _router.ReopenClosedWindowRequested += (_, _) =>
+            ((App)Application.Current).ReopenClosedWindow();
+    }
+
+    /// <summary>
+    /// Reopen the most recently closed tab into this window. Rebuilds the tab
+    /// (fresh shells) from the saved snapshot via the same SessionRestorer the
+    /// startup restore uses, then adopts it. No-op if the store is empty.
+    /// </summary>
+    private void ReopenClosedTab()
+    {
+        if (!App.ClosedTabs.TryPop(out var tabSession)) return;
+
+        var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
+        if (restorer.BuildTab(tabSession) is not { } tab) return;
+
+        // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
+        // tab renders and focuses just like the session-restore path.
+        _tabManager.AdoptTab(tab);
     }
 
     /// <summary>
