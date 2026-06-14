@@ -111,6 +111,20 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? ShowAboutRequested;
 
+    /// <summary>
+    /// Raised when the reopen-closed-tab chord or palette entry fires.
+    /// MainWindow listens and rebuilds a tab from the most recent closed-tab
+    /// snapshot into this window (reconstruction needs the WinUI factory).
+    /// </summary>
+    public event EventHandler? ReopenClosedTabRequested;
+
+    /// <summary>
+    /// Raised when the reopen-closed-window chord or palette entry fires.
+    /// App listens and creates a window from the most recent closed-window
+    /// snapshot (TabManager cannot create windows).
+    /// </summary>
+    public event EventHandler? ReopenClosedWindowRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -140,6 +154,12 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ShowAbout:
                 ShowAboutRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ReopenClosedTab:
+                ReopenClosedTabRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ReopenClosedWindow:
+                ReopenClosedWindowRequested?.Invoke(this, EventArgs.Empty);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding
