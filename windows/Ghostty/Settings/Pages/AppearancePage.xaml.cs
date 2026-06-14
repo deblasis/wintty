@@ -282,12 +282,12 @@ internal sealed partial class AppearancePage : Page
 
     private void TintOpacity_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        OnValueChanged("background-tint-opacity", e.NewValue.ToString("F2"));
+        OnValueChanged("background-tint-opacity", e.NewValue.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void LuminosityOpacity_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        OnValueChanged("background-luminosity-opacity", e.NewValue.ToString("F2"));
+        OnValueChanged("background-luminosity-opacity", e.NewValue.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void GradientBlend_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -298,12 +298,12 @@ internal sealed partial class AppearancePage : Page
 
     private void GradientOpacity_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
-        OnValueChanged("background-gradient-opacity", e.NewValue.ToString("F2"));
+        OnValueChanged("background-gradient-opacity", e.NewValue.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void GradientSpeed_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
-        OnValueChanged("background-gradient-speed", e.NewValue.ToString("F1"));
+        OnValueChanged("background-gradient-speed", e.NewValue.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void GradientEnabled_Toggled(object sender, RoutedEventArgs e)
