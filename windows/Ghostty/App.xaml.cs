@@ -898,6 +898,75 @@ public partial class App : Application
         });
     }
 
+    /// <summary>
+    /// Close every normal terminal window (close_all_windows). The quake
+    /// window is intentionally skipped: when the last normal window closes,
+    /// the internal teardown force-closes the quake window and the bootstrap
+    /// host, so the process exits cleanly. Snapshot first because Close()
+    /// mutates WindowsByRoot during the loop.
+    /// </summary>
+    internal void CloseAllWindows()
+    {
+        foreach (var w in AllWindows.ToList())
+        {
+            if (ReferenceEquals(w, _quakeWindow)) continue;
+            w.Close();
+        }
+    }
+
+    // Whether the last toggle_visibility hid the windows, and the set it hid.
+    // The hide/show decision is driven by this flag rather than inferred from
+    // IsVisible: a window opened between a hide and the next toggle would flip
+    // an IsVisible-based check and strand the earlier-hidden windows.
+    private bool _windowsHiddenByVisibilityToggle;
+    private readonly List<MainWindow> _hiddenByVisibilityToggle = new();
+
+    /// <summary>
+    /// Hide/show all normal windows (toggle_visibility). If they are not
+    /// currently hidden by a prior toggle, hide every visible one and remember
+    /// the set; otherwise re-show exactly that set. The quake window is excluded
+    /// -- it has its own global-hotkey toggle.
+    /// </summary>
+    internal void ToggleAllWindowsVisibility()
+    {
+        var normal = AllWindows.Where(w => !ReferenceEquals(w, _quakeWindow)).ToList();
+        if (!_windowsHiddenByVisibilityToggle)
+        {
+            _hiddenByVisibilityToggle.Clear();
+            foreach (var w in normal)
+            {
+                if (!w.AppWindow.IsVisible) continue;
+                _hiddenByVisibilityToggle.Add(w);
+                w.AppWindow.Hide();
+            }
+            // Only enter the hidden state if we actually hid something, so a
+            // no-op toggle doesn't leave us unable to "restore" on the next one.
+            _windowsHiddenByVisibilityToggle = _hiddenByVisibilityToggle.Count > 0;
+        }
+        else
+        {
+            // Restore exactly the windows we hid, skipping any closed since.
+            foreach (var w in _hiddenByVisibilityToggle.Where(normal.Contains))
+                w.AppWindow.Show();
+            _hiddenByVisibilityToggle.Clear();
+            _windowsHiddenByVisibilityToggle = false;
+        }
+    }
+
+    /// <summary>
+    /// Focus the previous/next normal window relative to <paramref name="current"/>
+    /// (goto_window), wrapping at the ends. Direction: -1 previous, +1 next.
+    /// </summary>
+    internal void ActivateRelativeWindow(MainWindow current, int direction)
+    {
+        var normal = AllWindows.Where(w => !ReferenceEquals(w, _quakeWindow)).ToList();
+        if (normal.Count <= 1) return;
+        var idx = normal.IndexOf(current);
+        if (idx < 0) return;
+        var next = ((idx + direction) % normal.Count + normal.Count) % normal.Count;
+        normal[next].Activate();
+    }
+
     private void RegisterQuakeHotKey()
     {
         if (_quakeHotKey is null) return;
