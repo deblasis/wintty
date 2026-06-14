@@ -1986,27 +1986,34 @@ public sealed partial class MainWindow : Window
             WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
             unchecked((int)(ex | WINDOW_EX_STYLE.WS_EX_TOOLWINDOW)));
 
-        // Borderless: a quake terminal is positioned by config and toggled by
-        // the global hotkey, so it needs no title bar, border, caption buttons,
-        // or min/max. IsResizable=true keeps a sizing frame so the window can be
-        // resize-dragged; QuickTerminalFrame (below) reshapes that frame to drop
-        // the docked-edge band and confine resize to the edge opposite the dock.
-        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
-        {
-            presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
-            presenter.IsResizable = true;
-            presenter.IsMinimizable = false;
-            presenter.IsMaximizable = false;
-        }
-
-        // IsResizable leaves a WS_THICKFRAME sizing border that Windows paints
-        // as a dark band at the docked edge and exposes as a resize grip there.
-        // Subclass the window proc to drop that non-client frame (no band) and
-        // allow drag-resize only on the edge opposite the dock.
+        // Install the non-client frame subclass first. It reshapes the sizing
+        // frame (drops the dark band WS_THICKFRAME leaves at the docked edge and
+        // confines drag-resize to the edge opposite the dock) and, crucially,
+        // suppresses the style-change notifications the borderless transition
+        // below posts -- without that suppression, SetBorderAndTitleBar
+        // access-violates inside the WinAppSDK windowing layer while the quake
+        // window is in its early/unstable lifecycle.
         _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
             WindowNative.GetWindowHandle(this),
             () => _configService.QuickTerminalPosition,
             App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
+
+        // Borderless: a quake terminal is positioned by config and toggled by the
+        // global hotkey, so it needs no title bar, border, caption buttons, or
+        // min/max. IsResizable=true keeps a sizing frame so the window can be
+        // resize-dragged. The presenter API (not raw Win32 styles) is used so
+        // WinUI records the borderless state and does not re-add the title bar on
+        // later activations; the suppression scope keeps the call from crashing.
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        {
+            using (_quakeFrame.SuppressStyleChanges())
+            {
+                presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
+                presenter.IsResizable = true;
+                presenter.IsMinimizable = false;
+                presenter.IsMaximizable = false;
+            }
+        }
 
         // Borderless quake has no OS caption buttons; collapse the dead inset
         // and drop the vertical-mode title text.

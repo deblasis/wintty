@@ -37,6 +37,8 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 {
     private const uint WM_NCCALCSIZE = 0x0083;
     private const uint WM_NCHITTEST = 0x0084;
+    private const uint WM_STYLECHANGING = 0x007C;
+    private const uint WM_STYLECHANGED = 0x007D;
 
     // WM_NCHITTEST return codes.
     private const int HTCLIENT = 1;
@@ -79,6 +81,14 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     private readonly int _grip;
     private bool _installed;
 
+    // True while the caller is mutating the window's frame style (via
+    // OverlappedPresenter.SetBorderAndTitleBar). The window proc swallows the
+    // WM_STYLECHANGING/CHANGED notifications during that window so they never
+    // reach the host WinUI window proc, which access-violates on a frame style
+    // change while the window is in its early/unstable lifecycle. The style
+    // change still takes effect; only the framework's reaction to it is dropped.
+    private bool _suppressStyleChange;
+
     public QuickTerminalFrame(
         IntPtr hwnd,
         Func<QuickTerminalPosition> position,
@@ -120,9 +130,37 @@ internal sealed partial class QuickTerminalFrame : IDisposable
         _installed = false;
     }
 
+    /// <summary>
+    /// Arms style-change suppression for the duration of the returned scope.
+    /// Wrap the caller's <c>SetBorderAndTitleBar</c> call in it: the borderless
+    /// transition posts WM_STYLECHANGING/CHANGED into the host WinUI window proc,
+    /// which access-violates while the window is still in its early lifecycle.
+    /// The subclass eats those messages while armed, so the style change lands
+    /// without the framework's crashy reaction.
+    /// </summary>
+    public IDisposable SuppressStyleChanges() => new StyleSuppressionScope(this);
+
+    private sealed class StyleSuppressionScope : IDisposable
+    {
+        private readonly QuickTerminalFrame _owner;
+        public StyleSuppressionScope(QuickTerminalFrame owner)
+        {
+            _owner = owner;
+            _owner._suppressStyleChange = true;
+        }
+        public void Dispose() => _owner._suppressStyleChange = false;
+    }
+
     private IntPtr WndProc(
         IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
     {
+        // While the caller is shaping the borderless frame, drop the style-change
+        // notifications before they reach the host WinUI proc (which crashes on
+        // them). Returning without DefSubclassProc swallows the message; the style
+        // change itself is already applied by SetBorderAndTitleBar.
+        if (_suppressStyleChange && (msg == WM_STYLECHANGING || msg == WM_STYLECHANGED))
+            return IntPtr.Zero;
+
         var edge = QuickTerminalFrameGeometry.ResizableEdge(_position());
 
         // None == Center docking: no edge is flush to the monitor, so leave the
