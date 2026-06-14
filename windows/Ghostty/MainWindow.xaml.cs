@@ -199,6 +199,16 @@ public sealed partial class MainWindow : Window
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
 
+    // Last libghostty-computed default window size (initial_size action), in
+    // physical pixels. null until received; reset_window_size is a no-op
+    // before then (mirrors core, which only emits initial_size when
+    // window-width/window-height are configured).
+    private Windows.Graphics.SizeInt32? _defaultWindowSizePx;
+
+    // Remembered transparent opacity baseline for toggle_background_opacity.
+    // null when not in the forced-opaque state.
+    private double? _opacityToggleBaseline;
+
     /// <summary>
     /// Palette close state: prevents re-entrant close handling between
     /// ViewModel.PropertyChanged and Popup.Closed callbacks.
@@ -681,6 +691,26 @@ public sealed partial class MainWindow : Window
 
         // Ctrl+Shift+Scroll wheel opacity adjustment from any terminal surface.
         _host.OpacityAdjustRequested += (_, direction) => AdjustOpacity(direction);
+
+        // Window-level keybind actions routed through the per-window router.
+        // These are per-window events, so every window wires them.
+        _router.GotoWindowRequested += (_, dir) =>
+            ((App)Application.Current).ActivateRelativeWindow(this, dir);
+        _router.ResetWindowSizeRequested += (_, _) => ResetWindowSize();
+        _router.ToggleBackgroundOpacityRequested += (_, _) => ToggleBackgroundOpacity();
+        _router.FloatWindowRequested += (_, mode) => ApplyFloat(mode);
+
+        // Surface-targeted window actions raised on the per-window host.
+        _host.SizeLimitRequested += (_, lim) => ApplySizeLimit(lim);
+        _host.SetTabTitleRequested += (_, title) =>
+            _tabManager.ActiveTab.UserOverrideTitle = string.IsNullOrWhiteSpace(title) ? null : title;
+        // The host already raises these on the UI thread (OnAction dispatches
+        // before invoking), so no extra hop is needed here. The dialog helper
+        // is fire-and-forget and self-contains its exception handling.
+        _host.PromptTitleRequested += (isTab, control) => _ = ShowPromptTitleDialogAsync(isTab, control);
+        _host.PresentSurfaceRequested += PresentSurface;
+        _host.InitialSizeReceived += (w, h) =>
+            _defaultWindowSizePx = new Windows.Graphics.SizeInt32((int)w, (int)h);
 
         // Re-evaluate transparency state after every config reload so
         // Ctrl+Shift+Scroll and Settings UI changes take effect live.
@@ -2374,6 +2404,134 @@ public sealed partial class MainWindow : Window
         _configWriter.Write(
             () => _configEditor.SetValue("background-opacity", next.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
             "background-opacity");
+    }
+
+    /// <summary>Apply always-on-top (float_window). mode: 0 on, 1 off, 2 toggle.</summary>
+    private void ApplyFloat(int mode)
+    {
+        if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter p) return;
+        p.IsAlwaysOnTop = mode switch
+        {
+            0 => true,
+            1 => false,
+            _ => !p.IsAlwaysOnTop,
+        };
+    }
+
+    /// <summary>
+    /// Resize back to the libghostty-computed default (reset_window_size).
+    /// No-op until an initial_size has been received (window-width/height set),
+    /// matching core behaviour.
+    /// </summary>
+    private void ResetWindowSize()
+    {
+        if (_defaultWindowSizePx is not { } size) return;
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter
+            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Maximized } op)
+        {
+            op.Restore();
+        }
+        // AppWindow.Resize takes physical pixels, so the initial_size payload
+        // (already in physical pixels) is passed through as-is -- unlike the
+        // DIP-based PreferredMinimum/Maximum sizes in ApplySizeLimit.
+        AppWindow.Resize(size);
+    }
+
+    /// <summary>
+    /// Flip the configured background opacity between 1.0 and the remembered
+    /// baseline (toggle_background_opacity). Persists + reloads, consistent
+    /// with the Ctrl+Shift+scroll opacity behaviour.
+    /// </summary>
+    private void ToggleBackgroundOpacity()
+    {
+        var r = Ghostty.Core.Input.BackgroundOpacityToggle.Next(
+            _configService.BackgroundOpacity, _opacityToggleBaseline);
+        _opacityToggleBaseline = r.NewBaseline;
+        if (r.OpacityToWrite is not { } next) return; // no-op (started opaque)
+        _configWriter.Write(
+            // Invariant culture: libghostty's config parser expects a '.'
+            // decimal separator, so a comma-decimal locale would corrupt the value.
+            () => _configEditor.SetValue(
+                "background-opacity",
+                next.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
+            "background-opacity");
+    }
+
+    /// <summary>
+    /// Apply min/max window size (size_limit). Payload is physical pixels;
+    /// OverlappedPresenter wants DIPs, so scale by the window DPI. 0 means
+    /// "no limit" for that dimension.
+    /// </summary>
+    private void ApplySizeLimit(Ghostty.Hosting.SizeLimitRequest lim)
+    {
+        if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter p) return;
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        var dpi = PInvoke.GetDpiForWindow(hwnd);
+        var scale = dpi == 0 ? 1.0 : dpi / 96.0;
+        int Dip(uint px) => px == 0 ? 0 : (int)Math.Round(px / scale);
+
+        p.PreferredMinimumWidth = Dip(lim.MinWidth);
+        p.PreferredMinimumHeight = Dip(lim.MinHeight);
+        p.PreferredMaximumWidth = Dip(lim.MaxWidth);
+        p.PreferredMaximumHeight = Dip(lim.MaxHeight);
+    }
+
+    /// <summary>
+    /// Prompt to rename either the tab or the surface (prompt_title), reusing
+    /// the existing rename dialog.
+    /// </summary>
+    private async Task ShowPromptTitleDialogAsync(bool isTab, Controls.TerminalControl control)
+    {
+        var root = Content?.XamlRoot;
+        if (root is null) return;
+
+        var initial = isTab ? _tabManager.ActiveTab.UserOverrideTitle : control.CurrentTitle;
+        var dlg = new RenameTabDialog(initial) { XamlRoot = root };
+        using (_dialogs.Track(dlg))
+        {
+            ContentDialogResult outcome;
+            try
+            {
+                // ShowAsync throws if another ContentDialog is already open;
+                // a keybind can fire while one is up, and this runs as a
+                // fire-and-forget continuation, so swallow that race rather
+                // than let it crash the process.
+                outcome = await dlg.ShowAsync();
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            if (outcome != ContentDialogResult.Primary) return;
+            var result = string.IsNullOrWhiteSpace(dlg.Result) ? null : dlg.Result;
+            if (isTab)
+                _tabManager.ActiveTab.UserOverrideTitle = result;
+            else
+                control.SetUserTitleOverride(result);
+        }
+    }
+
+    /// <summary>
+    /// Bring this window to the front and focus the target surface, switching
+    /// to its tab if it lives in a background tab (present_terminal).
+    /// </summary>
+    private void PresentSurface(Controls.TerminalControl target)
+    {
+        Activate();
+        foreach (var tab in _tabManager.Tabs)
+        {
+            var ph = (Panes.PaneHost)tab.PaneHost;
+            foreach (var leaf in PaneTree.Leaves(ph.RootNode))
+            {
+                if (!ReferenceEquals(leaf.Terminal(), target)) continue;
+                var idx = _tabManager.IndexOf(tab);
+                if (idx >= 0) _tabManager.JumpTo(idx);
+                target.Focus(FocusState.Programmatic);
+                return;
+            }
+        }
+        FocusActiveLeaf();
     }
 
     private void ToggleCommandPalette()

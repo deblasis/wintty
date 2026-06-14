@@ -17,6 +17,9 @@ using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Ghostty.Hosting;
 
+internal readonly record struct SizeLimitRequest(
+    uint MinWidth, uint MinHeight, uint MaxWidth, uint MaxHeight);
+
 /// <summary>
 /// Per-window owner of the libghostty surface registry and the runtime
 /// callback surface. Each host has its OWN per-window
@@ -96,6 +99,26 @@ internal sealed class GhosttyHost : IDisposable
         _dispatcher.TryEnqueue(() =>
             OpacityAdjustRequested?.Invoke(this, direction));
     }
+
+    /// <summary>Raised for size_limit: apply min/max window dimensions
+    /// (pixels; 0 = no limit). Surface-targeted; raised on the owning host.</summary>
+    public event EventHandler<SizeLimitRequest>? SizeLimitRequested;
+
+    /// <summary>Raised for set_tab_title: set the active tab's title
+    /// override directly. Empty string clears the override.</summary>
+    public event EventHandler<string>? SetTabTitleRequested;
+
+    /// <summary>Raised for prompt_title: prompt the user to rename either
+    /// the surface (pane) or its tab. Carries (isTab, surface control).</summary>
+    public event Action<bool, TerminalControl>? PromptTitleRequested;
+
+    /// <summary>Raised for present_terminal: bring the owning window to the
+    /// front and focus this surface (switching tabs if needed).</summary>
+    public event Action<TerminalControl>? PresentSurfaceRequested;
+
+    /// <summary>Raised for initial_size (private): the libghostty-computed
+    /// default window size in pixels, used to back reset_window_size.</summary>
+    public event Action<uint, uint>? InitialSizeReceived;
 
     private ClipboardBridge? _clipboardBridge;
 
@@ -476,6 +499,16 @@ internal sealed class GhosttyHost : IDisposable
                         _logger.LogWarning("MouseVisibility action received with app target; ignoring");
                         return 1;
 
+                    case GhosttyActionTag.CloseAllWindows:
+                        _dispatcher.TryEnqueue(() =>
+                            ((Ghostty.App)Microsoft.UI.Xaml.Application.Current).CloseAllWindows());
+                        return 1;
+
+                    case GhosttyActionTag.ToggleVisibility:
+                        _dispatcher.TryEnqueue(() =>
+                            ((Ghostty.App)Microsoft.UI.Xaml.Application.Current).ToggleAllWindowsVisibility());
+                        return 1;
+
                     default:
                         return 0;
                 }
@@ -512,11 +545,15 @@ internal sealed class GhosttyHost : IDisposable
                 case GhosttyActionTag.ToggleFullscreen:
                 case GhosttyActionTag.EqualizeSplits:
                 case GhosttyActionTag.ToggleSplitZoom:
+                case GhosttyActionTag.ResetWindowSize:
+                case GhosttyActionTag.ToggleBackgroundOpacity:
                     return DispatchPaneAction(owner, tag.Value, 0);
 
                 case GhosttyActionTag.NewSplit:
                 case GhosttyActionTag.GotoSplit:
                 case GhosttyActionTag.GotoTab:
+                case GhosttyActionTag.GotoWindow:
+                case GhosttyActionTag.FloatWindow:
                     return DispatchPaneAction(owner, tag.Value, Marshal.ReadInt32(actionPtr, 8));
 
                 case GhosttyActionTag.ResizeSplit:
@@ -550,6 +587,65 @@ internal sealed class GhosttyHost : IDisposable
                         if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                             c.RaiseTitleChanged(title);
                     });
+                    return 1;
+                }
+
+                case GhosttyActionTag.SetTabTitle:
+                {
+                    // char* title at +8, same shape as SetTitle. Empty -> clear.
+                    var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
+                    var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
+                    _dispatcher.TryEnqueue(() =>
+                        owner.SetTabTitleRequested?.Invoke(owner, title));
+                    return 1;
+                }
+
+                case GhosttyActionTag.PromptTitle:
+                {
+                    // c_int mode at +8: 0 = surface, 1 = tab.
+                    var isTab = Marshal.ReadInt32(actionPtr, 8) == (int)GhosttyPromptTitle.Tab;
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            owner.PromptTitleRequested?.Invoke(isTab, c);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.PresentTerminal:
+                {
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            owner.PresentSurfaceRequested?.Invoke(c);
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.SizeLimit:
+                {
+                    GhosttyActionSizeLimit s;
+                    unsafe
+                    {
+                        s = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionSizeLimit>(
+                            (void*)(actionPtr + 8));
+                    }
+                    _dispatcher.TryEnqueue(() =>
+                        owner.SizeLimitRequested?.Invoke(owner,
+                            new SizeLimitRequest(s.MinWidth, s.MinHeight, s.MaxWidth, s.MaxHeight)));
+                    return 1;
+                }
+
+                case GhosttyActionTag.InitialSize:
+                {
+                    GhosttyActionInitialSize s;
+                    unsafe
+                    {
+                        s = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionInitialSize>(
+                            (void*)(actionPtr + 8));
+                    }
+                    _dispatcher.TryEnqueue(() =>
+                        owner.InitialSizeReceived?.Invoke(s.Width, s.Height));
                     return 1;
                 }
 
