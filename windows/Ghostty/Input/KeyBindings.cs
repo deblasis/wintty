@@ -151,6 +151,13 @@ internal sealed class KeyBindings
         // because libghostty has no Windows undo implementation.
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Z, PaneAction.Undo),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.Y, PaneAction.Redo),
+
+        // Reopen closed tab/window (browser / VS Code convention). Ctrl+Shift+T
+        // is freed from new_tab (remapped to Ctrl+T in the Windows-curated
+        // Config.zig defaults). Apprt-matched because reopen is an apprt
+        // concern (libghostty has no closed-item stack on Windows).
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.T, PaneAction.ReopenClosedTab),
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.N, PaneAction.ReopenClosedWindow),
     });
 
     /// <summary>
