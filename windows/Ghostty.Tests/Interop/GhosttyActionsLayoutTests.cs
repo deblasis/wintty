@@ -12,6 +12,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.NewTab, 2)]
     [InlineData((int)GhosttyActionTag.CloseTab, 3)]
     [InlineData((int)GhosttyActionTag.NewSplit, 4)]
+    [InlineData((int)GhosttyActionTag.CloseAllWindows, 5)]
     [InlineData((int)GhosttyActionTag.ToggleFullscreen, 7)]
     [InlineData((int)GhosttyActionTag.ToggleQuickTerminal, 10)]
     [InlineData((int)GhosttyActionTag.MoveTab, 14)]
@@ -37,6 +38,16 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.SearchSelected, 62)]
     [InlineData((int)GhosttyActionTag.PromptReady, 65)]
     [InlineData((int)GhosttyActionTag.FirstRender, 66)]
+    [InlineData((int)GhosttyActionTag.ToggleVisibility, 12)]
+    [InlineData((int)GhosttyActionTag.ToggleBackgroundOpacity, 13)]
+    [InlineData((int)GhosttyActionTag.GotoWindow, 17)]
+    [InlineData((int)GhosttyActionTag.PresentTerminal, 21)]
+    [InlineData((int)GhosttyActionTag.SizeLimit, 22)]
+    [InlineData((int)GhosttyActionTag.ResetWindowSize, 23)]
+    [InlineData((int)GhosttyActionTag.InitialSize, 24)]
+    [InlineData((int)GhosttyActionTag.SetTabTitle, 33)]
+    [InlineData((int)GhosttyActionTag.PromptTitle, 34)]
+    [InlineData((int)GhosttyActionTag.FloatWindow, 42)]
     public void ActionTag_Ordinal_Matches_Upstream(int tag, int expected)
     {
         Assert.Equal(expected, tag);
@@ -228,5 +239,45 @@ public class GhosttyActionsLayoutTests
         // Unsafe.ReadUnaligned, so the fields MUST sit at +0/+8.
         Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyChildExited>(nameof(GhosttyChildExited.ExitCode)));
         Assert.Equal(8, (int)Marshal.OffsetOf<GhosttyChildExited>(nameof(GhosttyChildExited.RuntimeMs)));
+    }
+
+    [Fact]
+    public void SizeLimitStruct_HasExpectedLayout()
+    {
+        Assert.Equal(16, Marshal.SizeOf<GhosttyActionSizeLimit>());
+        Assert.Equal(0,  (int)Marshal.OffsetOf<GhosttyActionSizeLimit>(nameof(GhosttyActionSizeLimit.MinWidth)));
+        Assert.Equal(4,  (int)Marshal.OffsetOf<GhosttyActionSizeLimit>(nameof(GhosttyActionSizeLimit.MinHeight)));
+        Assert.Equal(8,  (int)Marshal.OffsetOf<GhosttyActionSizeLimit>(nameof(GhosttyActionSizeLimit.MaxWidth)));
+        Assert.Equal(12, (int)Marshal.OffsetOf<GhosttyActionSizeLimit>(nameof(GhosttyActionSizeLimit.MaxHeight)));
+    }
+
+    [Fact]
+    public void InitialSizeStruct_HasExpectedLayout()
+    {
+        Assert.Equal(8, Marshal.SizeOf<GhosttyActionInitialSize>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<GhosttyActionInitialSize>(nameof(GhosttyActionInitialSize.Width)));
+        Assert.Equal(4, (int)Marshal.OffsetOf<GhosttyActionInitialSize>(nameof(GhosttyActionInitialSize.Height)));
+    }
+
+    [Fact]
+    public void GotoWindowEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttyGotoWindow.Previous);
+        Assert.Equal(1, (int)GhosttyGotoWindow.Next);
+    }
+
+    [Fact]
+    public void FloatWindowEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttyFloatWindow.On);
+        Assert.Equal(1, (int)GhosttyFloatWindow.Off);
+        Assert.Equal(2, (int)GhosttyFloatWindow.Toggle);
+    }
+
+    [Fact]
+    public void PromptTitleEnum_MatchesHeader()
+    {
+        Assert.Equal(0, (int)GhosttyPromptTitle.Surface);
+        Assert.Equal(1, (int)GhosttyPromptTitle.Tab);
     }
 }
