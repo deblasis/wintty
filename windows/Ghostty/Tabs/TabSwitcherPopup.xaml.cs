@@ -41,6 +41,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = TitleMaxWidth,
+                FontSize = 14,
             };
 
             var row = new StackPanel { Orientation = Orientation.Horizontal };
@@ -49,8 +50,8 @@ internal sealed partial class TabSwitcherPopup : UserControl
 
             var cell = new Border
             {
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(8, 6, 8, 6),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(12, 8, 12, 8),
                 Background = null,
                 Child = row,
             };
@@ -65,7 +66,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
         {
             cell.Background = ReferenceEquals(model, tab)
                 ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"]
-                : null;
+                : (Brush)Application.Current.Resources["SubtleFillColorTransparentBrush"];
         }
     }
 }
