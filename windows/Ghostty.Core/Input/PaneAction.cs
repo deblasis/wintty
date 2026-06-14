@@ -109,4 +109,16 @@ public enum PaneAction
     // with fresh shells; does not resurrect the live shell.
     ReopenClosedTab = 53,
     ReopenClosedWindow = 54,
+
+    // Window-level apprt actions. These act on the window owning the
+    // surface that matched the keybind; PaneActionRouter forwards each
+    // via an event to MainWindow (no pane/tab state involved), mirroring
+    // ToggleFullscreen / ToggleQuickTerminal.
+    GotoWindowPrevious = 55,
+    GotoWindowNext = 56,
+    ResetWindowSize = 57,
+    ToggleBackgroundOpacity = 58,
+    FloatWindowOn = 59,
+    FloatWindowOff = 60,
+    FloatWindowToggle = 61,
 }

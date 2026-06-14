@@ -125,6 +125,27 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? ReopenClosedWindowRequested;
 
+    /// <summary>
+    /// Raised for goto_window. The argument is the direction:
+    /// -1 = previous, +1 = next. MainWindow forwards to
+    /// App.ActivateRelativeWindow.
+    /// </summary>
+    public event EventHandler<int>? GotoWindowRequested;
+
+    /// <summary>Raised for reset_window_size. MainWindow resizes the
+    /// AppWindow back to the captured initial (config-default) size.</summary>
+    public event EventHandler? ResetWindowSizeRequested;
+
+    /// <summary>Raised for toggle_background_opacity. MainWindow flips the
+    /// configured opacity between 1.0 and the remembered baseline.</summary>
+    public event EventHandler? ToggleBackgroundOpacityRequested;
+
+    /// <summary>
+    /// Raised for float_window. The argument matches ghostty_action_float_window_e:
+    /// 0 = on, 1 = off, 2 = toggle. MainWindow applies always-on-top.
+    /// </summary>
+    public event EventHandler<int>? FloatWindowRequested;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -160,6 +181,27 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ReopenClosedWindow:
                 ReopenClosedWindowRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.GotoWindowPrevious:
+                GotoWindowRequested?.Invoke(this, -1);
+                return;
+            case PaneAction.GotoWindowNext:
+                GotoWindowRequested?.Invoke(this, +1);
+                return;
+            case PaneAction.ResetWindowSize:
+                ResetWindowSizeRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ToggleBackgroundOpacity:
+                ToggleBackgroundOpacityRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.FloatWindowOn:
+                FloatWindowRequested?.Invoke(this, 0);
+                return;
+            case PaneAction.FloatWindowOff:
+                FloatWindowRequested?.Invoke(this, 1);
+                return;
+            case PaneAction.FloatWindowToggle:
+                FloatWindowRequested?.Invoke(this, 2);
                 return;
 
             // Scrollback jumps are dispatched as libghostty binding
