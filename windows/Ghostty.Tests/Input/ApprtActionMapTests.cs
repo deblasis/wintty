@@ -57,6 +57,33 @@ public class ApprtActionMapTests
     public void MoveTab_MapsBySign(int amount, PaneAction expected) =>
         Assert.Equal(expected, ApprtActionMap.Map(GhosttyActionTag.MoveTab, amount));
 
+    [Theory]
+    [InlineData(0, PaneAction.GotoWindowPrevious)]
+    [InlineData(1, PaneAction.GotoWindowNext)]
+    public void GotoWindow_Maps_By_Direction(int value, PaneAction expected)
+        => Assert.Equal(expected, ApprtActionMap.Map(GhosttyActionTag.GotoWindow, value));
+
+    [Theory]
+    [InlineData(0, PaneAction.FloatWindowOn)]
+    [InlineData(1, PaneAction.FloatWindowOff)]
+    [InlineData(2, PaneAction.FloatWindowToggle)]
+    public void FloatWindow_Maps_By_Mode(int value, PaneAction expected)
+        => Assert.Equal(expected, ApprtActionMap.Map(GhosttyActionTag.FloatWindow, value));
+
+    [Fact]
+    public void ResetWindowSize_Maps_Ignoring_Value()
+        => Assert.Equal(PaneAction.ResetWindowSize, ApprtActionMap.Map(GhosttyActionTag.ResetWindowSize, 0));
+
+    [Fact]
+    public void ToggleBackgroundOpacity_Maps_Ignoring_Value()
+        => Assert.Equal(PaneAction.ToggleBackgroundOpacity, ApprtActionMap.Map(GhosttyActionTag.ToggleBackgroundOpacity, 0));
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(-1)]
+    public void GotoWindow_OutOfRange_ReturnsNull(int value)
+        => Assert.Null(ApprtActionMap.Map(GhosttyActionTag.GotoWindow, value));
+
     [Fact] public void UnknownTag_ReturnsNull() =>
         Assert.Null(ApprtActionMap.Map((GhosttyActionTag)9999, 0));
 

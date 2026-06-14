@@ -22,22 +22,33 @@ internal enum GhosttyActionTag
     NewTab = 2,
     CloseTab = 3,
     NewSplit = 4,
+    CloseAllWindows = 5,
     ToggleFullscreen = 7,
     ToggleQuickTerminal = 10,
     ToggleCommandPalette = 11,
+    ToggleVisibility = 12,
+    ToggleBackgroundOpacity = 13,
     MoveTab = 14,
     GotoTab = 15,
     GotoSplit = 16,
+    GotoWindow = 17,
     ResizeSplit = 18,
     EqualizeSplits = 19,
     ToggleSplitZoom = 20,
+    PresentTerminal = 21,
+    SizeLimit = 22,
+    ResetWindowSize = 23,
+    InitialSize = 24,
     Scrollbar = 26,
     DesktopNotification = 31,
     SetTitle = 32,
+    SetTabTitle = 33,
+    PromptTitle = 34,
     MouseShape = 36,
     MouseVisibility = 37,
     MouseOverLink = 38,
     OpenConfig = 40,
+    FloatWindow = 42,
     ReloadConfig = 47,
     ConfigChange = 48,
     CloseWindow = 49,
@@ -89,6 +100,42 @@ internal enum GhosttyGotoSplit { Previous = 0, Next = 1, Up = 2, Left = 3, Down 
 // ordering from GhosttySplitDirection — resize grows the split toward
 // the named edge, so the values do not line up with placement.
 internal enum GhosttyResizeSplitDirection { Up = 0, Down = 1, Left = 2, Right = 3 }
+
+// ghostty_action_goto_window_e: relative window navigation.
+internal enum GhosttyGotoWindow { Previous = 0, Next = 1 }
+
+// ghostty_action_float_window_e: always-on-top state to apply.
+internal enum GhosttyFloatWindow { On = 0, Off = 1, Toggle = 2 }
+
+// ghostty_action_prompt_title_e: whether the prompt renames the
+// individual surface (pane) or the surface's containing tab.
+internal enum GhosttyPromptTitle { Surface = 0, Tab = 1 }
+
+// ghostty_action_size_limit_s:
+//   { uint32 min_width; uint32 min_height; uint32 max_width; uint32 max_height; }
+// All values are pixels; 0 means "no limit" for that dimension. On x64
+// this is 16 bytes (4 * 4), read at actionPtr+8 via Unsafe.ReadUnaligned.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionSizeLimit
+{
+    public uint MinWidth;
+    public uint MinHeight;
+    public uint MaxWidth;
+    public uint MaxHeight;
+}
+
+// ghostty_action_initial_size_s:
+//   { uint32 width; uint32 height; }
+// Pixels. 8 bytes on x64. libghostty emits this during surface init
+// ONLY when both window-width and window-height are configured
+// (src/Surface.zig recomputeInitialSize); it is the canonical source
+// for the "return to default size" action and is not itself bindable.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionInitialSize
+{
+    public uint Width;
+    public uint Height;
+}
 
 // Sentinel tab targets carried in ghostty_action_goto_tab_s. Positive
 // values are 1-based tab indices; these negatives select relative tabs.
