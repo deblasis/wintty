@@ -41,7 +41,7 @@ internal sealed partial class TerminalPage : Page
 
     private void Scrollback_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
-        OnValueChanged("scrollback-limit", ((int)sender.Value).ToString());
+        OnValueChanged("scrollback-limit", ((int)sender.Value).ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void CursorStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
