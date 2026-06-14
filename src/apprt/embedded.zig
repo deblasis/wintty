@@ -2057,20 +2057,35 @@ pub const CAPI = struct {
         defer state.deinit(alloc);
         try state.update(alloc, core_surface.renderer_state.terminal);
 
-        const rows: usize = state.rows;
+        // Drive the iteration by the actual populated row_data, NOT state.rows:
+        // RenderState may populate fewer rows than the nominal viewport height,
+        // and indexing past row_data.len would read out of bounds.
+        const row_data = state.row_data.slice();
+        const row_cells = row_data.items(.cells);
+        const rows: usize = row_cells.len;
         const cols: usize = state.cols;
         if (rows == 0 or cols == 0) return false;
 
         const out = try alloc.alloc(CellEntry, rows * cols);
         errdefer alloc.free(out);
 
-        const row_data = state.row_data.slice();
-        const row_cells = row_data.items(.cells);
+        const default_entry: CellEntry = .{
+            .codepoint = 0,
+            .fg = Color.from(state.colors.foreground),
+            .bg = Color.from(state.colors.background),
+        };
         for (0..rows) |y| {
             const cell_slice = row_cells[y].slice();
             const raws = cell_slice.items(.raw);
             const styles = cell_slice.items(.style);
+            // Rows are guaranteed `cols` wide, but clamp defensively so a short
+            // row can never index past its cell storage.
+            const ncols = @min(cols, raws.len);
             for (0..cols) |x| {
+                if (x >= ncols) {
+                    out[y * cols + x] = default_entry;
+                    continue;
+                }
                 const raw = raws[x];
                 const style = styles[x];
                 const cp: u32 = switch (raw.content_tag) {
