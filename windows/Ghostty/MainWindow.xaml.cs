@@ -2333,7 +2333,7 @@ public sealed partial class MainWindow : Window
         if (Math.Abs(next - current) < 0.001) return;
 
         _configWriter.Write(
-            () => _configEditor.SetValue("background-opacity", next.ToString("F2")),
+            () => _configEditor.SetValue("background-opacity", next.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
             "background-opacity");
     }
 
