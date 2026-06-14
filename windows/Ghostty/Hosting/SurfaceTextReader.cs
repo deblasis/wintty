@@ -3,30 +3,29 @@ using Ghostty.Interop;
 namespace Ghostty.Hosting;
 
 /// <summary>
-/// Reads the bottom <c>rows</c> of a surface's viewport as plain text, for the
-/// tab-overview preview. Anchored at the viewport bottom (near the prompt /
-/// most recent output), not the top. Returns null for a dead/zero surface so the
-/// caller can show a placeholder. The only FFI seam for previews.
+/// Reads a surface's whole visible viewport as plain text, for the tab-overview
+/// preview. The caller's <c>PreviewTextFormatter</c> then trims trailing blank
+/// lines and keeps the LAST few - so the preview shows the most recent content
+/// (the prompt / last commands) wherever it sits in the viewport, including the
+/// common case of a short session whose prompt is near the top with blank rows
+/// below. Returns null for a dead/zero surface so the caller can show a
+/// placeholder. The only FFI seam for previews.
 /// </summary>
 internal static class SurfaceTextReader
 {
-    public static string? Read(System.IntPtr surfaceHandle, int rows)
+    public static string? Read(System.IntPtr surfaceHandle)
     {
-        if (surfaceHandle == System.IntPtr.Zero || rows <= 0) return null;
+        if (surfaceHandle == System.IntPtr.Zero) return null;
         var surface = new GhosttySurface(surfaceHandle);
-
-        var size = NativeMethods.SurfaceSize(surface);
-        if (size.Rows == 0) return null;
-        var startRow = size.Rows > rows ? (uint)(size.Rows - rows) : 0u;
 
         var selection = new GhosttySelection
         {
             TopLeft = new GhosttyPoint
             {
                 Tag = GhosttyPointTag.Viewport,
-                Coord = GhosttyPointCoord.Exact,
+                Coord = GhosttyPointCoord.TopLeft,
                 X = 0,
-                Y = startRow,
+                Y = 0,
             },
             BottomRight = new GhosttyPoint
             {

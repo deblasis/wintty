@@ -174,7 +174,7 @@ internal sealed partial class TabOverviewControl : UserControl
         if (rows < 1 || cols < 1) return new Grid();
 
         var handle = SafeSurfaceHandle(leaf);
-        var raw = handle == IntPtr.Zero ? null : SurfaceTextReader.Read(handle, rows);
+        var raw = handle == IntPtr.Zero ? null : SurfaceTextReader.Read(handle);
         var lines = PreviewTextFormatter.Format(raw, rows, cols);
 
         if (lines.Count == 0)
