@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
 using Ghostty.Hosting;
-using Ghostty.Panes;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -203,13 +202,12 @@ internal sealed partial class TabOverviewControl : UserControl
         };
     }
 
-    // leaf.Terminal() throws if Tag is null (a PaneHost bug, not expected here),
-    // so guard defensively - a preview must never crash the overview.
+    // Resolve the leaf's surface handle, or IntPtr.Zero if the leaf isn't wired
+    // to a TerminalControl yet (would be a PaneHost bug, but a preview must never
+    // crash the overview). A type-pattern check avoids both the null-Tag NRE and
+    // the wrong-type cast that leaf.Terminal() would throw.
     private static IntPtr SafeSurfaceHandle(LeafPane leaf)
-    {
-        try { return leaf.Terminal().SurfaceHandle; }
-        catch { return IntPtr.Zero; }
-    }
+        => leaf.Tag is Ghostty.Controls.TerminalControl tc ? tc.SurfaceHandle : IntPtr.Zero;
 
     private void OnTileClick(object sender, ItemClickEventArgs e)
     {
