@@ -91,6 +91,17 @@ public partial class App : Application
     /// </summary>
     internal static IEnumerable<MainWindow> AllWindows => WindowsByRoot.Values;
 
+    /// <summary>Shared, session-scoped, in-memory store of recently-closed
+    /// tabs across all windows; injected into each window's TabManager.
+    /// App-level so a tab closed in a window that later closes is still
+    /// reopenable. Independent of the disk session persistence (which keeps
+    /// one snapshot for next-launch restore).</summary>
+    internal static readonly Core.Panes.ClosedStack<Core.Session.TabSession> ClosedTabs = new(25);
+
+    /// <summary>Shared store of recently-closed windows. Pushed by
+    /// MainWindow.OnClosedAsync; drained by ReopenClosedWindow.</summary>
+    internal static readonly Core.Panes.ClosedStack<Core.Session.WindowSession> ClosedWindows = new(25);
+
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
@@ -681,6 +692,24 @@ public partial class App : Application
         // Re-claim the chord whenever the config changes so an edited
         // quick-terminal-key takes effect without a restart.
         _configService.ConfigChanged += OnConfigReloaded_ReRegisterHotKey;
+    }
+
+    /// <summary>
+    /// Reopen the most recently closed window from the shared store, or no-op
+    /// if empty. Reuses the WindowSession restore ctor and the same
+    /// registration the startup restore loop uses.
+    /// </summary>
+    internal void ReopenClosedWindow()
+    {
+        if (_configService is null || _bootstrapHost is null ||
+            _lifetimeSupervisor is null || _loggerFactory is null) return;
+        if (!ClosedWindows.TryPop(out var windowSession)) return;
+
+        var restored = new MainWindow(
+            _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
+        restored.Closed += OnAnyWindowClosedInternal;
+        _sessionManager?.Track(restored);
+        restored.Activate();
     }
 
     /// <summary>
