@@ -1544,7 +1544,7 @@ public sealed partial class MainWindow : Window
         if (_tabManager.Tabs.Count == 0) return;
         TabOverviewUI.Width = RootGrid.ActualWidth;
         TabOverviewUI.Height = RootGrid.ActualHeight;
-        TabOverviewUI.Show(_tabManager.MruOrder, _tabManager.ActiveTab);
+        TabOverviewUI.Show(_tabManager.MruOrder, _tabManager.ActiveTab, _configService.FontFamily);
         TabOverviewHost.IsOpen = true;
     }
 
