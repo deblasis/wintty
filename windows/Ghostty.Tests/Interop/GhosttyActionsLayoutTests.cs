@@ -22,6 +22,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.EqualizeSplits, 19)]
     [InlineData((int)GhosttyActionTag.ToggleSplitZoom, 20)]
     [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
+    [InlineData((int)GhosttyActionTag.Inspector, 28)]
     [InlineData((int)GhosttyActionTag.SetTitle, 32)]
     [InlineData((int)GhosttyActionTag.MouseShape, 36)]
     [InlineData((int)GhosttyActionTag.MouseVisibility, 37)]

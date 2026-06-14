@@ -17,6 +17,7 @@ namespace Ghostty.Interop;
 internal readonly record struct GhosttyApp(IntPtr Handle);
 internal readonly record struct GhosttyConfig(IntPtr Handle);
 internal readonly record struct GhosttySurface(IntPtr Handle);
+internal readonly record struct GhosttyInspector(IntPtr Handle);
 
 internal enum GhosttyPlatform
 {
@@ -597,4 +598,88 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_log_set_callback")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void LogSetCallback(IntPtr callback, IntPtr userData);
+
+    // ---- inspector -----------------------------------------------------
+    //
+    // The inspector is an ImGui overlay 1:1 with a surface. On Windows it
+    // lives in its own WinUI window whose swap chain libghostty owns: the
+    // surface_* functions create/drive/tear down that swap chain (bound to a
+    // SwapChainPanel), and the input functions forward UI events into the
+    // ImGui context. Keyboard key events (ghostty_inspector_key) are not yet
+    // wired -- text input via ghostty_inspector_text plus mouse covers v1.
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_inspector")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyInspector SurfaceInspector(GhosttySurface surface);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_directx12_surface_init")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte InspectorDirectX12SurfaceInitNative(
+        GhosttyInspector inspector,
+        IntPtr swapChainPanel,
+        uint width,
+        uint height);
+
+    internal static bool InspectorDirectX12SurfaceInit(
+        GhosttyInspector inspector,
+        IntPtr swapChainPanel,
+        uint width,
+        uint height)
+        => InspectorDirectX12SurfaceInitNative(inspector, swapChainPanel, width, height) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_directx12_surface_present")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorDirectX12SurfacePresent(GhosttyInspector inspector);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_directx12_surface_resize")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorDirectX12SurfaceResize(
+        GhosttyInspector inspector,
+        uint width,
+        uint height);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_directx12_surface_shutdown")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorDirectX12SurfaceShutdown(GhosttyInspector inspector);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_set_focus")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void InspectorSetFocusNative(
+        GhosttyInspector inspector,
+        [MarshalAs(UnmanagedType.U1)] bool focused);
+
+    internal static void InspectorSetFocus(GhosttyInspector inspector, bool focused)
+        => InspectorSetFocusNative(inspector, focused);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_set_content_scale")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorSetContentScale(GhosttyInspector inspector, double x, double y);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_set_size")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorSetSize(GhosttyInspector inspector, uint width, uint height);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_mouse_button")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorMouseButton(
+        GhosttyInspector inspector,
+        GhosttyMouseState state,
+        GhosttyMouseButton button,
+        GhosttyMods mods);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_mouse_pos")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorMousePos(GhosttyInspector inspector, double x, double y);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_mouse_scroll")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorMouseScroll(
+        GhosttyInspector inspector,
+        double x,
+        double y,
+        int scrollMods);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_text")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorText(GhosttyInspector inspector, IntPtr utf8z);
 }
