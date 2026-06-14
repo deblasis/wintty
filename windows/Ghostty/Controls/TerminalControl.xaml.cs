@@ -161,19 +161,35 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return pid > int.MaxValue ? null : (int)pid;
     }
 
+    // The raw title libghostty last pushed (shell OSC 0/2 or set_title).
+    private string? _shellTitle;
+    // The user's explicit per-surface override (prompt_title surface mode).
+    // Beats the shell title; null means "follow the shell".
+    private string? _userTitleOverride;
+
     /// <summary>
-    /// Last title pushed by libghostty for this surface, or null if no
-    /// title has been set yet. Used by MainWindow to update the window
-    /// chrome immediately on focus change without waiting for the next
-    /// TitleChanged.
+    /// Effective title for this surface: the user's per-surface override if
+    /// set, otherwise the shell-reported title. Read by MainWindow's title
+    /// coordinator to populate the tab label on focus change, so a pane with
+    /// an override shows that override when focused.
     /// </summary>
-    public string? CurrentTitle { get; private set; }
+    public string? CurrentTitle => _userTitleOverride ?? _shellTitle;
 
     // Raisers invoked by GhosttyHost after routing an action to this leaf.
     internal void RaiseTitleChanged(string title)
     {
-        CurrentTitle = title;
-        TitleChanged?.Invoke(this, title);
+        _shellTitle = title;
+        TitleChanged?.Invoke(this, CurrentTitle ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Set (or clear, with null/whitespace) the user's per-surface title
+    /// override. Fires TitleChanged with the new effective title.
+    /// </summary>
+    internal void SetUserTitleOverride(string? title)
+    {
+        _userTitleOverride = string.IsNullOrWhiteSpace(title) ? null : title;
+        TitleChanged?.Invoke(this, CurrentTitle ?? string.Empty);
     }
     internal void RaiseCloseRequested() => CloseRequested?.Invoke(this, EventArgs.Empty);
     internal void RaiseProgressChanged(Ghostty.Core.Tabs.TabProgressState state)

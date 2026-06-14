@@ -14,6 +14,7 @@ FlashWindowEx
 FLASHWINFO
 FLASHWINFO_FLAGS
 GetCursorPos
+GetDpiForWindow
 GetForegroundWindow
 GetKeyState
 GetMonitorInfo
