@@ -102,4 +102,11 @@ public enum PaneAction
     // About window per window (reused if already open). Mirrors
     // ShowKeybindCheatsheet (event-only, needs a window, no libghostty action).
     ShowAbout = 52,
+
+    // Reopen the most recently closed tab / window. Apprt-only (like
+    // Undo/Redo): matched in KeyBindings.WindowsOnly and routed via
+    // PaneActionRouter events. Restores the saved layout + per-pane profile
+    // with fresh shells; does not resurrect the live shell.
+    ReopenClosedTab = 53,
+    ReopenClosedWindow = 54,
 }

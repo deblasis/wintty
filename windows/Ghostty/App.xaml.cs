@@ -100,6 +100,20 @@ public partial class App : Application
     /// </summary>
     internal static IEnumerable<MainWindow> AllWindows => WindowsByRoot.Values;
 
+    // How many recently-closed tabs / windows the reopen stacks retain.
+    private const int ClosedItemCapacity = 25;
+
+    /// <summary>Shared, session-scoped, in-memory store of recently-closed
+    /// tabs across all windows; injected into each window's TabManager.
+    /// App-level so a tab closed in a window that later closes is still
+    /// reopenable. Independent of the disk session persistence (which keeps
+    /// one snapshot for next-launch restore).</summary>
+    internal static readonly Core.Panes.ClosedStack<Core.Session.TabSession> ClosedTabs = new(ClosedItemCapacity);
+
+    /// <summary>Shared store of recently-closed windows. Pushed by
+    /// MainWindow.OnClosedAsync; drained by ReopenClosedWindow.</summary>
+    internal static readonly Core.Panes.ClosedStack<Core.Session.WindowSession> ClosedWindows = new(ClosedItemCapacity);
+
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
@@ -837,6 +851,30 @@ public partial class App : Application
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, snapshot);
         window.Closed += OnAnyWindowClosedInternal;
         window.Activate();
+    }
+
+    /// <summary>
+    /// Reopen the most recently closed window from the shared store, or no-op
+    /// if empty. Reuses the WindowSession restore ctor and the same
+    /// registration the startup restore loop uses.
+    /// </summary>
+    internal void ReopenClosedWindow()
+    {
+        // The services are only null before OnLaunched or after the last window
+        // tears the app down; neither state has a live window to fire the chord,
+        // so this guard is defensive rather than a real runtime branch.
+        if (_configService is null || _bootstrapHost is null ||
+            _lifetimeSupervisor is null || _loggerFactory is null) return;
+        if (!ClosedWindows.TryPop(out var windowSession)) return;
+
+        var restored = new MainWindow(
+            _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
+        restored.Closed += OnAnyWindowClosedInternal;
+        // Track + persist so the reopened window is in the on-disk session
+        // snapshot immediately, matching the new-window (OpenInNewWindow) path.
+        _sessionManager?.Track(restored);
+        _sessionManager?.RequestPersist();
+        restored.Activate();
     }
 
     /// <summary>
