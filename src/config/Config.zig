@@ -7015,9 +7015,9 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .f11 } },
                 .{ .toggle_fullscreen = {} },
             );
-            // Tabs. new_tab is ctrl+t (not ctrl+shift+t) so the apprt can
-            // own ctrl+shift+t for reopen-closed-tab (browser / VS Code
-            // convention), matched in KeyBindings.WindowsOnly.
+            // Tabs. new_tab is ctrl+t (not ctrl+shift+t) so ctrl+shift+t is
+            // free for the apprt to bind reopen-closed-tab (browser / VS Code
+            // convention).
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 't' }, .mods = .{ .ctrl = true } },

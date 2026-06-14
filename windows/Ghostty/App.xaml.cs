@@ -704,6 +704,9 @@ public partial class App : Application
     /// </summary>
     internal void ReopenClosedWindow()
     {
+        // The services are only null before OnLaunched or after the last window
+        // tears the app down; neither state has a live window to fire the chord,
+        // so this guard is defensive rather than a real runtime branch.
         if (_configService is null || _bootstrapHost is null ||
             _lifetimeSupervisor is null || _loggerFactory is null) return;
         if (!ClosedWindows.TryPop(out var windowSession)) return;
@@ -711,7 +714,10 @@ public partial class App : Application
         var restored = new MainWindow(
             _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, windowSession);
         restored.Closed += OnAnyWindowClosedInternal;
+        // Track + persist so the reopened window is in the on-disk session
+        // snapshot immediately, matching the new-window (OpenInNewWindow) path.
         _sessionManager?.Track(restored);
+        _sessionManager?.RequestPersist();
         restored.Activate();
     }
 

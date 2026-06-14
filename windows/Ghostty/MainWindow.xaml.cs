@@ -99,6 +99,14 @@ public sealed partial class MainWindow : Window
     internal TabManager TabManager => _tabManager;
 
     /// <summary>
+    /// The closed-tab store this window feeds. The quake window is excluded so
+    /// its drop-down tabs never leak into the regular reopen-closed-tab history
+    /// (mirrors CaptureSession's window-level quake exclusion).
+    /// </summary>
+    private Core.Panes.ClosedStack<Core.Session.TabSession>? ClosedTabsStore
+        => IsQuickTerminal ? null : App.ClosedTabs;
+
+    /// <summary>
     /// Raised when this (non-quake) window moves or resizes, so the
     /// session manager can debounce-persist the new geometry.
     /// </summary>
@@ -425,7 +433,7 @@ public sealed partial class MainWindow : Window
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
                 seed: restoredTabs[0],
-                closedTabs: App.ClosedTabs);
+                closedTabs: ClosedTabsStore);
             for (int i = 1; i < restoredTabs.Count; i++)
                 _tabManager.AdoptTab(restoredTabs[i]);
             if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
@@ -436,7 +444,7 @@ public sealed partial class MainWindow : Window
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
                 seed: seedTab,
-                closedTabs: App.ClosedTabs);
+                closedTabs: ClosedTabsStore);
         }
         _router = new PaneActionRouter(
             _tabManager,
@@ -1409,15 +1417,12 @@ public sealed partial class MainWindow : Window
     {
         if (!App.ClosedTabs.TryPop(out var tabSession)) return;
 
-        var window = new Ghostty.Core.Session.WindowSession();
-        window.Tabs.Add(tabSession);
         var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
-        var tabs = restorer.BuildTabs(window);
-        if (tabs.Count == 0) return;
+        if (restorer.BuildTab(tabSession) is not { } tab) return;
 
         // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
         // tab renders and focuses just like the session-restore path.
-        _tabManager.AdoptTab(tabs[0]);
+        _tabManager.AdoptTab(tab);
     }
 
     /// <summary>

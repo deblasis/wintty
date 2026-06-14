@@ -36,6 +36,11 @@ internal sealed class ClosedStack<T>
             _items.RemoveFirst();
     }
 
+    /// <summary>
+    /// Remove and return the most-recently-pushed item. Returns false with
+    /// <paramref name="item"/> set to <c>default</c> when the stack is empty;
+    /// callers must check the return value before using <paramref name="item"/>.
+    /// </summary>
     public bool TryPop(out T item)
     {
         if (_items.Last is { } last)
