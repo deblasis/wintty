@@ -64,6 +64,25 @@ internal static class ApprtActionMap
             _ => null,
         },
 
+        GhosttyActionTag.GotoWindow => (GhosttyGotoWindow)value switch
+        {
+            GhosttyGotoWindow.Previous => PaneAction.GotoWindowPrevious,
+            GhosttyGotoWindow.Next => PaneAction.GotoWindowNext,
+            _ => null,
+        },
+
+        GhosttyActionTag.FloatWindow => (GhosttyFloatWindow)value switch
+        {
+            GhosttyFloatWindow.On => PaneAction.FloatWindowOn,
+            GhosttyFloatWindow.Off => PaneAction.FloatWindowOff,
+            GhosttyFloatWindow.Toggle => PaneAction.FloatWindowToggle,
+            _ => null,
+        },
+
+        // Payload-free window actions: value is unused.
+        GhosttyActionTag.ResetWindowSize => PaneAction.ResetWindowSize,
+        GhosttyActionTag.ToggleBackgroundOpacity => PaneAction.ToggleBackgroundOpacity,
+
         _ => null,
     };
 }
