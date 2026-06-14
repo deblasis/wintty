@@ -21,7 +21,12 @@ internal sealed partial class TabOverviewControl : UserControl
 {
     private readonly Dictionary<UIElement, TabModel> _tabByTile = new();
     private FontFamily _previewFont = new("Consolas");
-    private Flyout? _hoverFlyout;
+    private PanePreviewRenderer _renderer = new(new FontFamily("Consolas"));
+
+    // The tab the enlarged preview is currently showing (null when hidden).
+    // Tracked so a tile-to-tile move doesn't hide-then-show (flicker) and so a
+    // repeated PointerEntered on the same tile doesn't rebuild the card.
+    private TabModel? _previewTab;
 
     // Tile geometry. Width fixed so grid columns stay uniform; the body is a
     // fixed-size canvas so per-pane pixel rects can be computed at build time
@@ -30,11 +35,8 @@ internal sealed partial class TabOverviewControl : UserControl
     private const double TileBodyWidth = 280;
     private const double TileBodyHeight = 150;
 
-    // Preview text metrics. rows/cols a mini-pane can show are derived from its
-    // pixel size and the font size (see BuildPaneContent).
+    // Preview font size for the thumbnail mini-panes.
     private const double PreviewFontSize = 11;
-    private const double MinPaneSideForText = 30;  // below this, geometry-only
-    private const int MaxPreviewRows = 12;
 
     public TabOverviewControl() => InitializeComponent();
 
@@ -44,8 +46,14 @@ internal sealed partial class TabOverviewControl : UserControl
     public void Show(IReadOnlyList<TabModel> tabs, TabModel active, string? fontFamily)
     {
         _previewFont = PreviewFont.Resolve(fontFamily);
+        _renderer = new PanePreviewRenderer(_previewFont);
         TilesView.Items.Clear();
         _tabByTile.Clear();
+
+        // Clear any preview left over from a previous open.
+        _previewTab = null;
+        PreviewHost.Child = null;
+        PreviewHost.Visibility = Visibility.Collapsed;
 
         var activeIndex = 0;
         for (var i = 0; i < tabs.Count; i++)
@@ -117,7 +125,7 @@ internal sealed partial class TabOverviewControl : UserControl
             Height = TileBodyHeight,
             Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
         };
-        BuildPaneMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
+        _renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
 
         var stack = new StackPanel { Orientation = Orientation.Vertical };
         stack.Children.Add(header);
@@ -137,138 +145,81 @@ internal sealed partial class TabOverviewControl : UserControl
         };
 
         // Hover -> enlarged colored preview of this tab.
-        tile.PointerEntered += (_, _) => ShowHoverPreview(tile, tab);
-        tile.PointerExited += (_, _) => _hoverFlyout?.Hide();
+        tile.PointerEntered += (_, _) => ShowHoverPreview(tab);
+        tile.PointerExited += (_, _) => RequestHidePreview(tab);
         return tile;
     }
 
-    // Place one dark mini-pane per leaf on the body Canvas, positioned by the
-    // normalized rect from PanePreviewLayout. A 1px inset on each pane lets the
-    // body's near-black background read as thin dividers between splits.
-    private void BuildPaneMiniLayout(PaneNode root, Canvas body, double fontSize)
-    {
-        var bodyW = body.Width;
-        var bodyH = body.Height;
-        foreach (var (leaf, rect) in PanePreviewLayout.Compute(root))
-        {
-            var x = rect.X * bodyW + 1;
-            var y = rect.Y * bodyH + 1;
-            var w = rect.W * bodyW - 2;
-            var h = rect.H * bodyH - 2;
-            if (w <= 0 || h <= 0) continue;
+    // Enlarged preview scale relative to a tile body (280x150 -> 504x270).
+    private const double HoverScale = 1.8;
 
-            var pane = new Border
-            {
-                Width = w,
-                Height = h,
-                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x10, 0x10, 0x18)),
-                Child = BuildPaneContent(leaf, w, h, fontSize),
-            };
-            Canvas.SetLeft(pane, x);
-            Canvas.SetTop(pane, y);
-            body.Children.Add(pane);
-        }
+    // Show the enlarged colored preview for a tab, centered in the overview.
+    // The card lives in PreviewHost (hit-test-invisible), so showing it never
+    // perturbs pointer hit-testing on the tiles.
+    private void ShowHoverPreview(TabModel tab)
+    {
+        // Same tab already on screen: nothing to rebuild (avoids re-reading the
+        // surface and re-laying-out on every PointerEntered the tile emits).
+        if (ReferenceEquals(_previewTab, tab) && PreviewHost.Visibility == Visibility.Visible)
+            return;
+
+        _previewTab = tab;
+        PreviewHost.Child = BuildEnlargedPreview(tab);
+        PreviewHost.Visibility = Visibility.Visible;
     }
 
-    // The colored preview for one leaf, or a placeholder when blank/too-small/dead.
-    private UIElement BuildPaneContent(LeafPane leaf, double w, double h, double fontSize)
+    // Hide the preview, but only once the current pointer transition settles.
+    // Moving the cursor straight from tile A to tile B fires A.Exited then
+    // B.Entered synchronously; B.Entered sets _previewTab=B before this queued
+    // callback runs, so we skip the hide and the card never flickers. Leaving
+    // the grid entirely leaves _previewTab==tab, so it hides.
+    private void RequestHidePreview(TabModel tab)
     {
-        if (w < MinPaneSideForText || h < MinPaneSideForText)
-            return new Grid(); // geometry-only: just the dark fill
-
-        var lineHeight = fontSize * 1.36;
-        var charWidth = fontSize * 0.6;
-        var rows = Math.Min(MaxPreviewRows, (int)((h - 8) / lineHeight));
-        var cols = (int)((w - 12) / charWidth);
-        if (rows < 1 || cols < 1) return new Grid();
-
-        var handle = SafeSurfaceHandle(leaf);
-        var grid = handle == IntPtr.Zero ? (CellGrid?)null : SurfaceCellReader.Read(handle);
-        var lines = grid is { } g
-            ? CellGridFormatter.Format(g, rows, cols)
-            : (IReadOnlyList<PreviewLine>)Array.Empty<PreviewLine>();
-
-        if (lines.Count == 0)
+        DispatcherQueue.TryEnqueue(() =>
         {
-            return new TextBlock
-            {
-                Text = "—",  // em dash placeholder
-                FontFamily = _previewFont,
-                FontSize = fontSize,
-                Opacity = 0.4,
-                Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xAA, 0xB0, 0xC4)),
-                Margin = new Thickness(6, 4, 6, 4),
-            };
-        }
-
-        return BuildLinesView(lines, fontSize);
+            if (!ReferenceEquals(_previewTab, tab)) return;
+            PreviewHost.Visibility = Visibility.Collapsed;
+            PreviewHost.Child = null;
+            _previewTab = null;
+        });
     }
 
-    // Render colored preview lines: each line a horizontal row of "chips"
-    // (Border painted with the run bg, child TextBlock in the run fg + the
-    // configured terminal font so powerline / nerd glyphs render).
-    private UIElement BuildLinesView(IReadOnlyList<PreviewLine> lines, double fontSize)
+    // Build the floating preview card: a title strip over a scaled-up copy of
+    // the tile's pane mini-layout. Sized exactly to its content so it needs no
+    // scrollbar and is never cropped.
+    private UIElement BuildEnlargedPreview(TabModel tab)
     {
-        var col = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(4, 3, 4, 3) };
-        foreach (var line in lines)
+        var title = new TextBlock
         {
-            var rowPanel = new StackPanel { Orientation = Orientation.Horizontal };
-            foreach (var run in line.Runs)
-            {
-                var tb = new TextBlock
-                {
-                    Text = run.Text,
-                    FontFamily = _previewFont,
-                    FontSize = fontSize,
-                    Foreground = new SolidColorBrush(FromRgb(run.Fg)),
-                    TextWrapping = TextWrapping.NoWrap,
-                    IsTextSelectionEnabled = false,
-                };
-                rowPanel.Children.Add(new Border
-                {
-                    Background = new SolidColorBrush(FromRgb(run.Bg)),
-                    Child = tb,
-                });
-            }
-            col.Children.Add(rowPanel);
-        }
-        return col;
-    }
+            Text = tab.EffectiveTitle,
+            FontSize = (double)Application.Current.Resources["BodyTextBlockFontSize"],
+            Foreground = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(12, 8, 12, 8),
+        };
 
-    private static Color FromRgb(uint rgb) => Color.FromArgb(
-        0xFF, (byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF));
-
-    // Show an enlarged colored preview of a tab on hover, anchored to its tile.
-    private void ShowHoverPreview(FrameworkElement anchor, TabModel tab)
-    {
-        const double scale = 1.8;
         var bigBody = new Canvas
         {
-            Width = TileBodyWidth * scale,
-            Height = TileBodyHeight * scale,
+            Width = TileBodyWidth * HoverScale,
+            Height = TileBodyHeight * HoverScale,
             Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
         };
-        BuildPaneMiniLayout(tab.PaneHost.RootNode, bigBody, 14);
+        _renderer.BuildMiniLayout(tab.PaneHost.RootNode, bigBody, PreviewFontSize * HoverScale);
 
-        _hoverFlyout?.Hide();
-        _hoverFlyout = new Flyout
+        var stack = new StackPanel { Orientation = Orientation.Vertical };
+        stack.Children.Add(title);
+        stack.Children.Add(bigBody);
+
+        return new Border
         {
-            Content = new Border
-            {
-                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
-                Child = bigBody,
-            },
-            Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Right,
+            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
+            BorderBrush = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"],
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Child = stack,
         };
-        _hoverFlyout.ShowAt(anchor);
     }
-
-    // Resolve the leaf's surface handle, or IntPtr.Zero if the leaf isn't wired
-    // to a TerminalControl yet (would be a PaneHost bug, but a preview must never
-    // crash the overview). A type-pattern check avoids both the null-Tag NRE and
-    // the wrong-type cast that leaf.Terminal() would throw.
-    private static IntPtr SafeSurfaceHandle(LeafPane leaf)
-        => leaf.Tag is Ghostty.Controls.TerminalControl tc ? tc.SurfaceHandle : IntPtr.Zero;
 
     private void OnTileClick(object sender, ItemClickEventArgs e)
     {
