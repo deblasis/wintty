@@ -226,12 +226,12 @@ internal sealed partial class AppearancePage : Page
 
     private void FontSize_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
-        OnValueChanged("font-size", sender.Value.ToString());
+        OnValueChanged("font-size", sender.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void Opacity_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        OnValueChanged("background-opacity", e.NewValue.ToString("F2"));
+        OnValueChanged("background-opacity", e.NewValue.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private void WindowTheme_SelectionChanged(object sender, SelectionChangedEventArgs e)
