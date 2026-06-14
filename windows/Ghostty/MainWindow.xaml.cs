@@ -1990,7 +1990,7 @@ public sealed partial class MainWindow : Window
         // frame (drops the dark band WS_THICKFRAME leaves at the docked edge and
         // confines drag-resize to the edge opposite the dock) and, crucially,
         // suppresses the style-change notifications the borderless transition
-        // below posts -- without that suppression, SetBorderAndTitleBar
+        // below sends -- without that suppression, SetBorderAndTitleBar
         // access-violates inside the WinAppSDK windowing layer while the quake
         // window is in its early/unstable lifecycle.
         _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
@@ -2004,7 +2004,11 @@ public sealed partial class MainWindow : Window
         // resize-dragged. The presenter API (not raw Win32 styles) is used so
         // WinUI records the borderless state and does not re-add the title bar on
         // later activations; the suppression scope keeps the call from crashing.
-        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+        // Gated on IsInstalled: the suppression only works through the subclass,
+        // so if it failed to install we skip the transition (the window keeps its
+        // frame) rather than run SetBorderAndTitleBar unguarded and risk the crash.
+        if (_quakeFrame.IsInstalled
+            && AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
         {
             using (_quakeFrame.SuppressStyleChanges())
             {

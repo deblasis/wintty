@@ -26,6 +26,11 @@ namespace Ghostty.Hosting;
 /// can no longer be hit-tested for resize. The strip stays uncovered, which is
 /// why native OS resize (and its cursor) still works there.
 ///
+/// The subclass has a second job: while <see cref="SuppressStyleChanges"/> is
+/// armed it eats WM_STYLECHANGING/CHANGED so the caller can shape the borderless
+/// presenter without the host WinUI window proc access-violating on the frame
+/// style change.
+///
 /// The edge-direction math lives in <see cref="QuickTerminalFrameGeometry"/>
 /// (pure, unit-tested); this file is only the Win32 plumbing. Win32 surface is
 /// hand-written (matching <see cref="WindowsGlobalHotKey"/>) because the
@@ -87,6 +92,12 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     // reach the host WinUI window proc, which access-violates on a frame style
     // change while the window is in its early/unstable lifecycle. The style
     // change still takes effect; only the framework's reaction to it is dropped.
+    //
+    // A plain bool (no volatile / interlock) is correct because the field is only
+    // touched on the window's message-pump thread: the scope is armed on that
+    // thread and SetBorderAndTitleBar SENDS the style messages synchronously on
+    // the same thread, so the write happens-before the WndProc read. A single
+    // non-nesting call site keeps the flag from needing ref-counting.
     private bool _suppressStyleChange;
 
     public QuickTerminalFrame(
@@ -131,12 +142,21 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     }
 
     /// <summary>
+    /// True once the subclass is in the window-proc chain. Style-change
+    /// suppression only works when this is set, so the caller must not run the
+    /// borderless presenter transition (which would otherwise reach the crashy
+    /// WinUI proc unguarded) when it is false.
+    /// </summary>
+    public bool IsInstalled => _installed;
+
+    /// <summary>
     /// Arms style-change suppression for the duration of the returned scope.
     /// Wrap the caller's <c>SetBorderAndTitleBar</c> call in it: the borderless
-    /// transition posts WM_STYLECHANGING/CHANGED into the host WinUI window proc,
-    /// which access-violates while the window is still in its early lifecycle.
-    /// The subclass eats those messages while armed, so the style change lands
-    /// without the framework's crashy reaction.
+    /// transition sends WM_STYLECHANGING/CHANGED synchronously into the host WinUI
+    /// window proc, which access-violates while the window is still in its early
+    /// lifecycle. The subclass eats those messages while armed, so the style
+    /// change lands without the framework's crashy reaction. Single,
+    /// non-nesting call site -- the flag is not ref-counted.
     /// </summary>
     public IDisposable SuppressStyleChanges() => new StyleSuppressionScope(this);
 
