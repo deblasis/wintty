@@ -47,6 +47,4 @@ internal sealed class ClosedStack<T>
         item = default!;
         return false;
     }
-
-    public void Clear() => _items.Clear();
 }

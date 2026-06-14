@@ -44,15 +44,4 @@ public class ClosedStackTests
         Assert.True(s.TryPop(out v)); Assert.Equal(2, v);
         Assert.False(s.TryPop(out _)); // 1 was evicted
     }
-
-    [Fact]
-    public void Clear_empties_the_stack()
-    {
-        var s = new ClosedStack<int>(capacity: 3);
-        s.Push(1);
-        s.Push(2);
-        s.Clear();
-        Assert.Equal(0, s.Count);
-        Assert.False(s.TryPop(out _));
-    }
 }

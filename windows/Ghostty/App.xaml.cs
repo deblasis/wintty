@@ -91,16 +91,19 @@ public partial class App : Application
     /// </summary>
     internal static IEnumerable<MainWindow> AllWindows => WindowsByRoot.Values;
 
+    // How many recently-closed tabs / windows the reopen stacks retain.
+    private const int ClosedItemCapacity = 25;
+
     /// <summary>Shared, session-scoped, in-memory store of recently-closed
     /// tabs across all windows; injected into each window's TabManager.
     /// App-level so a tab closed in a window that later closes is still
     /// reopenable. Independent of the disk session persistence (which keeps
     /// one snapshot for next-launch restore).</summary>
-    internal static readonly Core.Panes.ClosedStack<Core.Session.TabSession> ClosedTabs = new(25);
+    internal static readonly Core.Panes.ClosedStack<Core.Session.TabSession> ClosedTabs = new(ClosedItemCapacity);
 
     /// <summary>Shared store of recently-closed windows. Pushed by
     /// MainWindow.OnClosedAsync; drained by ReopenClosedWindow.</summary>
-    internal static readonly Core.Panes.ClosedStack<Core.Session.WindowSession> ClosedWindows = new(25);
+    internal static readonly Core.Panes.ClosedStack<Core.Session.WindowSession> ClosedWindows = new(ClosedItemCapacity);
 
     internal static GhosttyHost? BootstrapHost { get; private set; }
     internal static ConfigService? ConfigService { get; private set; }
