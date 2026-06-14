@@ -208,6 +208,24 @@ internal struct GhosttyText
     public UIntPtr TextLen;  // uintptr_t
 }
 
+// Mirrors ghostty_cell_s / ghostty_cells_s (colored tab preview). fg/bg are
+// r/g/b components (ghostty_config_color_s), packed to 0x00RRGGBB on copy.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyCell
+{
+    public uint Codepoint;
+    public byte FgR, FgG, FgB;
+    public byte BgR, BgG, BgB;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyCells
+{
+    public IntPtr Cells; // ghostty_cell_s* (rows*cols)
+    public ushort Rows;
+    public ushort Cols;
+}
+
 // Runtime callback delegates. These are called from the Zig side on its
 // own thread; marshal to the UI dispatcher before touching XAML.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -498,6 +516,47 @@ internal static partial class NativeMethods
         finally
         {
             SurfaceFreeTextNative(surface, ref text);
+        }
+    }
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_cells")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceReadCellsNative(GhosttySurface surface, out GhosttyCells cells);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_free_cells")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceFreeCellsNative(GhosttySurface surface, ref GhosttyCells cells);
+
+    /// <summary>
+    /// Read the viewport cells (codepoint + resolved fg/bg) for a surface. Copies
+    /// into a managed grid and frees the native buffer. Returns null on failure.
+    /// </summary>
+    internal static Ghostty.Core.Tabs.CellGrid? SurfaceReadCells(GhosttySurface surface)
+    {
+        if (SurfaceReadCellsNative(surface, out var native) == 0) return null;
+        try
+        {
+            int rows = native.Rows, cols = native.Cols;
+            var count = rows * cols;
+            var managed = new Ghostty.Core.Tabs.Cell[count < 0 ? 0 : count];
+            if (native.Cells != IntPtr.Zero && count > 0)
+            {
+                unsafe
+                {
+                    var p = (GhosttyCell*)native.Cells;
+                    for (var i = 0; i < count; i++)
+                    {
+                        var fg = (uint)((p[i].FgR << 16) | (p[i].FgG << 8) | p[i].FgB);
+                        var bg = (uint)((p[i].BgR << 16) | (p[i].BgG << 8) | p[i].BgB);
+                        managed[i] = new Ghostty.Core.Tabs.Cell(p[i].Codepoint, fg, bg);
+                    }
+                }
+            }
+            return new Ghostty.Core.Tabs.CellGrid(managed, rows, cols);
+        }
+        finally
+        {
+            SurfaceFreeCellsNative(surface, ref native);
         }
     }
 
