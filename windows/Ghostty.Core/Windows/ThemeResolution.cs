@@ -150,6 +150,13 @@ public static class ThemeResolution
     {
         if (ContrastRatio(background, desired) >= minContrast)
             return desired;
-        return PreferLightForeground(background) ? 0xFFFFFFu : 0x000000u;
+        // Fall back to whichever pole actually contrasts more, scored with the
+        // same WCAG ratio as the threshold check rather than a separate
+        // luminance heuristic. For mid-luminance backgrounds the two disagree
+        // (e.g. 0x7F7F7F reads better on black than white), so picking by ratio
+        // guarantees the most readable of black/white for any background.
+        return ContrastRatio(background, 0xFFFFFFu) >= ContrastRatio(background, 0x000000u)
+            ? 0xFFFFFFu
+            : 0x000000u;
     }
 }

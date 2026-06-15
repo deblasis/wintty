@@ -486,9 +486,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _shellActiveTextBrush = new SolidColorBrush(UnpackColor(
             ThemeResolution.EnsureReadableForeground(accentPacked, activePacked)));
 
-        uint tabBgPacked = (uint)((theme.TabBarBackground.R << 16)
-            | (theme.TabBarBackground.G << 8)
-            | theme.TabBarBackground.B);
+        uint tabBgPacked = PackColor(theme.TabBarBackground);
         var inactiveColor = ThemeResolution.PreferLightForeground(tabBgPacked)
             ? Windows.UI.Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)  // white @ ~70%
             : Windows.UI.Color.FromArgb(0xB3, 0x00, 0x00, 0x00); // black @ ~70%

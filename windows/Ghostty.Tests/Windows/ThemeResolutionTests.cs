@@ -305,4 +305,22 @@ public sealed class ThemeResolutionTests
         Assert.Equal(0xFFFFFFu,
             ThemeResolution.EnsureReadableForeground(0x111111, 0x000000));
     }
+
+    [Theory]
+    [InlineData(0x7F7F7Fu)]
+    [InlineData(0x808080u)]
+    [InlineData(0x777777u)]
+    public void EnsureReadable_MidGray_PicksHigherContrastPole(uint background)
+    {
+        // Mid-luminance backgrounds are the band where a plain dark/light
+        // luminance split disagrees with the WCAG ratio: 0x7F7F7F reads
+        // better on black than white. The fallback must return the pole that
+        // actually contrasts more, never the lower-contrast one.
+        var fg = ThemeResolution.EnsureReadableForeground(background, background);
+        Assert.True(fg == 0xFFFFFFu || fg == 0x000000u);
+        var chosen = ThemeResolution.ContrastRatio(background, fg);
+        var other = ThemeResolution.ContrastRatio(
+            background, fg == 0xFFFFFFu ? 0x000000u : 0xFFFFFFu);
+        Assert.True(chosen >= other);
+    }
 }
