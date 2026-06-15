@@ -57,13 +57,13 @@ internal sealed partial class TabSwitcherPopup : UserControl
             header.Children.Add(icon);
             header.Children.Add(title);
 
-            // Slate fill so the 1px per-pane inset reads as dividers between
-            // splits (matches the overview); panes paint near-black over it.
+            // Shared slate fill so the 1px per-pane inset reads as dividers
+            // between splits (matches the overview); panes paint near-black over it.
             var body = new Canvas
             {
                 Width = PreviewWidth,
                 Height = PreviewHeight,
-                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3B, 0x43)),
+                Background = PanePreviewRenderer.DividerFill,
             };
             renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
 

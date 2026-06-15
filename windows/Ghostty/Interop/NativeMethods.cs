@@ -173,41 +173,6 @@ internal struct GhosttySurfaceSize
     public uint CellHeightPx;
 }
 
-// Mirrors of the read_text point/selection/text C structs. Used by the tab
-// overview preview to read the bottom of a surface's viewport. Field order and
-// sizes match include/ghostty.h exactly (ghostty_point_s / ghostty_selection_s /
-// ghostty_text_s); the enums are C ints (4 bytes).
-internal enum GhosttyPointTag : uint { Active = 0, Viewport = 1, Screen = 2, Surface = 3 }
-internal enum GhosttyPointCoord : uint { Exact = 0, TopLeft = 1, BottomRight = 2 }
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct GhosttyPoint
-{
-    public GhosttyPointTag Tag;
-    public GhosttyPointCoord Coord;
-    public uint X;
-    public uint Y;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct GhosttySelection
-{
-    public GhosttyPoint TopLeft;
-    public GhosttyPoint BottomRight;
-    public byte Rectangle;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct GhosttyText
-{
-    public double TlPxX;
-    public double TlPxY;
-    public uint OffsetStart;
-    public uint OffsetLen;
-    public IntPtr Text;      // const char* (UTF-8)
-    public UIntPtr TextLen;  // uintptr_t
-}
-
 // Mirrors ghostty_cell_s / ghostty_cells_s (colored tab preview). fg/bg are
 // r/g/b components (ghostty_config_color_s), packed to 0x00RRGGBB on copy.
 [StructLayout(LayoutKind.Sequential)]
@@ -488,36 +453,6 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_size")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttySurfaceSize SurfaceSize(GhosttySurface surface);
-
-    [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_text")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    private static partial byte SurfaceReadTextNative(
-        GhosttySurface surface, GhosttySelection selection, out GhosttyText text);
-
-    [LibraryImport(Dll, EntryPoint = "ghostty_surface_free_text")]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    private static partial void SurfaceFreeTextNative(GhosttySurface surface, ref GhosttyText text);
-
-    /// <summary>
-    /// Read text from <paramref name="surface"/> for <paramref name="selection"/>.
-    /// Returns null if the surface has no such text. The caller does NOT free;
-    /// this copies into a managed string and frees the native buffer.
-    /// </summary>
-    internal static string? SurfaceReadText(GhosttySurface surface, GhosttySelection selection)
-    {
-        if (SurfaceReadTextNative(surface, selection, out var text) == 0)
-            return null;
-        try
-        {
-            if (text.Text == IntPtr.Zero || text.TextLen == UIntPtr.Zero)
-                return string.Empty;
-            return Marshal.PtrToStringUTF8(text.Text, (int)text.TextLen);
-        }
-        finally
-        {
-            SurfaceFreeTextNative(surface, ref text);
-        }
-    }
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_cells")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]

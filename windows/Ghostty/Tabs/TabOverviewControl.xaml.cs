@@ -23,8 +23,8 @@ namespace Ghostty.Tabs;
 internal sealed partial class TabOverviewControl : UserControl
 {
     private readonly Dictionary<UIElement, TabModel> _tabByTile = new();
-    private FontFamily _previewFont = new("Consolas");
-    private PanePreviewRenderer _renderer = new(new FontFamily("Consolas"));
+    private FontFamily _previewFont = PreviewFont.Resolve(null);
+    private PanePreviewRenderer _renderer = new(PreviewFont.Resolve(null));
 
     // Thumbnail geometry. Body is a fixed-size canvas so per-pane pixel rects can
     // be computed at build time (before layout).
@@ -41,13 +41,6 @@ internal sealed partial class TabOverviewControl : UserControl
     // Tab color-dot diameters for the thumbnail and the (larger) rail header.
     private const double DotSizeThumbnail = 7;
     private const double DotSizeRail = 9;
-
-    // Fill behind the pane mini-layout. Each pane is inset 1px, so this color
-    // shows through as the thin divider between split panes (and a hairline frame
-    // around a single pane). A neutral slate that reads against the near-black
-    // panes without fighting the terminal colors; tune here to taste.
-    private static readonly Brush PreviewDividerBrush =
-        new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3B, 0x43));
 
     public TabOverviewControl() => InitializeComponent();
 
@@ -106,7 +99,7 @@ internal sealed partial class TabOverviewControl : UserControl
         {
             Width = TileBodyWidth,
             Height = TileBodyHeight,
-            Background = PreviewDividerBrush,
+            Background = PanePreviewRenderer.DividerFill,
         };
         _renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
 
@@ -132,7 +125,7 @@ internal sealed partial class TabOverviewControl : UserControl
         {
             Width = RailBodyWidth,
             Height = RailBodyHeight,
-            Background = PreviewDividerBrush,
+            Background = PanePreviewRenderer.DividerFill,
         };
         _renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, RailFontSize);
 

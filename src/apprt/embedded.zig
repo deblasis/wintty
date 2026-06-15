@@ -2091,7 +2091,7 @@ pub const CAPI = struct {
                 // (style_id == 0) - reading it would feed garbage to fg()/bg().
                 // Use the default style for those (the common case: blank cells
                 // and unstyled text).
-                const style: @TypeOf(state.cursor.style) =
+                const style: terminal.Style =
                     if (raw.style_id == 0) .{} else styles[x];
                 const cp: u32 = switch (raw.content_tag) {
                     .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)

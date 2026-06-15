@@ -20,6 +20,12 @@ internal sealed class PanePreviewRenderer
     private const double MinPaneSideForText = 30;
     private const int MaxPreviewRows = 12;
 
+    // Fill behind a pane mini-layout. Each pane is inset 1px, so this neutral
+    // slate reads through as the divider between split panes. Shared by the
+    // overview tiles and the Ctrl+Tab cycle popup so the color can't drift.
+    internal static readonly Brush DividerFill =
+        new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3B, 0x43));
+
     private readonly FontFamily _font;
 
     // Per-leaf snapshot cache. A renderer is created fresh each time the overview
