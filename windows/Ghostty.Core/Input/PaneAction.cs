@@ -121,4 +121,11 @@ public enum PaneAction
     FloatWindowOn = 59,
     FloatWindowOff = 60,
     FloatWindowToggle = 61,
+
+    // Toggle the terminal inspector window. Apprt-only on Windows: the
+    // libghostty inspector keybind is not dispatched to the embedded apprt via
+    // the keyboard, so Ctrl+Shift+I is matched in KeyBindings.WindowsOnly and
+    // routed via PaneActionRouter to MainWindow (mirrors the command palette's
+    // inspector:toggle, which goes through ghostty_surface_binding_action).
+    ToggleInspector = 62,
 }

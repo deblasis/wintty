@@ -31,16 +31,27 @@ internal static class Program
                 IcoWriter.Write(masters, Path.Combine(options.OutputDir, "wintty.ico"));
             }
 
-            // The Settings window uses a separate gear .ico so the
-            // taskbar / alt-tab distinguish it from a terminal window.
-            // The glyph matches SettingsWindow.xaml's TitleBar.IconSource;
-            // channel-independent because the gear is a UI affordance,
-            // not a brand mark.
-            using (var gearMasters = GearMasters.Render())
+            // The Settings and inspector windows get their own glyph .icos so
+            // the taskbar group / alt-tab list distinguish them from a terminal
+            // window. Each glyph matches that window's in-chrome affordance, so
+            // the OS-level slots read the same as the UI:
+            //   U+E713 "Settings" (gear) = SettingsWindow.xaml's TitleBar.IconSource
+            //   U+EBE8 "Bug"             = the command palette's "Toggle Inspector"
+            // Channel-independent because these are UI affordances, not brand
+            // marks. Both code points exist identically in Segoe Fluent Icons
+            // and Segoe MDL2 Assets.
+            using (var settingsMasters = GlyphMasters.Render("\uE713"))
             {
                 IcoWriter.Write(
-                    gearMasters,
+                    settingsMasters,
                     Path.Combine(options.OutputDir, "wintty-settings.ico"));
+            }
+
+            using (var inspectorMasters = GlyphMasters.Render("\uEBE8"))
+            {
+                IcoWriter.Write(
+                    inspectorMasters,
+                    Path.Combine(options.OutputDir, "wintty-inspector.ico"));
             }
 
             return 0;

@@ -134,7 +134,13 @@ pub const Inspector = struct {
 
         // In debug we show the ImGui demo window so we can easily view
         // available widgets and such.
-        if (comptime builtin.mode == .Debug) {
+        //
+        // Excluded on Windows: ImGui_ShowDemoWindow corrupts the heap on the
+        // Windows (Zig/clang MSVC) build of imgui after a few seconds of
+        // continuous rendering, taking down the whole app. The demo is only a
+        // development aid and the rest of the inspector is unaffected, so we
+        // skip it here rather than crash. The demo works on macOS/Linux.
+        if (comptime builtin.mode == .Debug and builtin.os.tag != .windows) {
             if (self.show_demo_window) {
                 cimgui.c.ImGui_ShowDemoWindow(&self.show_demo_window);
             }
