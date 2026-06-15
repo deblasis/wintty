@@ -1405,6 +1405,10 @@ public sealed partial class MainWindow : Window
 
         _router.CommandPaletteToggleRequested += (_, _) => ToggleCommandPalette();
 
+        // Ctrl+Shift+I toggles the terminal inspector (same handler as the
+        // command palette / libghostty inspector action).
+        _router.InspectorToggleRequested += (_, _) => ToggleInspector();
+
         // Fullscreen toggle via F11.
         _router.ToggleFullscreenRequested += (_, _) => ToggleFullscreen();
 

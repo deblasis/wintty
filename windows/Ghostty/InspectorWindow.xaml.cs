@@ -39,6 +39,11 @@ internal sealed partial class InspectorWindow : Window
 
         Title = $"{AppIdentity.ProductName} Inspector";
 
+        // Stamp the bug .ico into the OS slots (taskbar group, alt-tab,
+        // thumbnail) so the inspector is distinguishable from a terminal
+        // window, mirroring how SettingsWindow uses the gear .ico.
+        Ghostty.Branding.WindowHelper.TryApplyInspectorIcon(this);
+
         // Center at a reasonable default size.
         var hwnd = WindowNative.GetWindowHandle(this);
         var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
@@ -61,6 +66,7 @@ internal sealed partial class InspectorWindow : Window
         Panel.PointerMoved += OnPointerMoved;
         Panel.PointerWheelChanged += OnPointerWheelChanged;
         Panel.CharacterReceived += OnCharacterReceived;
+        Panel.KeyDown += OnKeyDown;
         Activated += OnActivated;
         Closed += OnClosed;
     }
@@ -205,6 +211,41 @@ internal sealed partial class InspectorWindow : Window
         finally
         {
             handle.Free();
+        }
+    }
+
+    // Ctrl++ / Ctrl+- zoom the inspector UI, Ctrl+0 resets. Handled here (not
+    // forwarded to ImGui) since we don't route key events into the context.
+    private void OnKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (!_initialized) return;
+
+        var ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(
+            Windows.System.VirtualKey.Control) &
+            Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+        if (!ctrl) return;
+
+        // OemPlus/OemMinus are the main-row '='/'-' keys; Add/Subtract are the
+        // numpad equivalents. '+' needs no Shift here (Ctrl+= zooms in).
+        const Windows.System.VirtualKey OemPlus = (Windows.System.VirtualKey)0xBB;
+        const Windows.System.VirtualKey OemMinus = (Windows.System.VirtualKey)0xBD;
+        switch (e.Key)
+        {
+            case OemPlus:
+            case Windows.System.VirtualKey.Add:
+                NativeMethods.InspectorZoomBy(_inspector, 1.1);
+                e.Handled = true;
+                break;
+            case OemMinus:
+            case Windows.System.VirtualKey.Subtract:
+                NativeMethods.InspectorZoomBy(_inspector, 1.0 / 1.1);
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Number0:
+            case Windows.System.VirtualKey.NumberPad0:
+                NativeMethods.InspectorZoomReset(_inspector);
+                e.Handled = true;
+                break;
         }
     }
 }

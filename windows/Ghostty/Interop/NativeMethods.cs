@@ -655,6 +655,14 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void InspectorSetContentScale(GhosttyInspector inspector, double x, double y);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_zoom_by")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorZoomBy(GhosttyInspector inspector, double factor);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_inspector_zoom_reset")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void InspectorZoomReset(GhosttyInspector inspector);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_inspector_set_size")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void InspectorSetSize(GhosttyInspector inspector, uint width, uint height);

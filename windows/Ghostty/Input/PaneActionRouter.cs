@@ -112,6 +112,13 @@ internal sealed class PaneActionRouter
     public event EventHandler? ShowAboutRequested;
 
     /// <summary>
+    /// Raised when the Ctrl+Shift+I inspector chord fires. MainWindow listens
+    /// and toggles the inspector window (same handler the command palette and
+    /// the libghostty inspector apprt action use).
+    /// </summary>
+    public event EventHandler? InspectorToggleRequested;
+
+    /// <summary>
     /// Raised when the reopen-closed-tab chord or palette entry fires.
     /// MainWindow listens and rebuilds a tab from the most recent closed-tab
     /// snapshot into this window (reconstruction needs the WinUI factory).
@@ -175,6 +182,9 @@ internal sealed class PaneActionRouter
                 return;
             case PaneAction.ShowAbout:
                 ShowAboutRequested?.Invoke(this, EventArgs.Empty);
+                return;
+            case PaneAction.ToggleInspector:
+                InspectorToggleRequested?.Invoke(this, EventArgs.Empty);
                 return;
             case PaneAction.ReopenClosedTab:
                 ReopenClosedTabRequested?.Invoke(this, EventArgs.Empty);

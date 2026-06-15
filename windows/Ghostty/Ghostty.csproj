@@ -294,7 +294,7 @@
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
           Inputs="..\..\dist\windows\IconGen\**\*.cs;..\..\images\icons\icon_*.png"
-          Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico">
+          Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
     <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
           WorkingDirectory="$(MSBuildThisFileDirectory)" />
@@ -344,6 +344,17 @@
     -->
     <Content Include="$(GeneratedBrandingDir)wintty-settings.ico">
       <Link>Assets\wintty-settings.ico</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <!--
+      Inspector-window variant. Generated procedurally from the Segoe
+      Fluent Icons bug glyph (U+EBE8) by IconGen so the taskbar / alt-tab
+      icon for InspectorWindow matches the command palette's "Toggle
+      Inspector" entry and is distinguishable from a terminal window.
+    -->
+    <Content Include="$(GeneratedBrandingDir)wintty-inspector.ico">
+      <Link>Assets\wintty-inspector.ico</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </Content>
