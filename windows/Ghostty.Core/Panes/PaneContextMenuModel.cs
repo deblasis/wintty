@@ -66,7 +66,7 @@ public static class PaneContextMenuModel
             Separator(),
             Action(PaneMenuCommand.SplitRight,          "Split Right",              "\uF57E"),
             Action(PaneMenuCommand.SplitDown,           "Split Down",               "\uF57E"),
-            Action(PaneMenuCommand.ZoomPane,            "Zoom Pane",                "\uE740", isChecked: isZoomed),
+            Action(PaneMenuCommand.ZoomPane,            "Zoom Pane",                isZoomed ? "\uE73F" : "\uE740", isChecked: isZoomed),
             Separator(),
             Action(PaneMenuCommand.CommandPalette,      "Command Palette",          "\uE756"),
             Action(PaneMenuCommand.ResetTerminal,       "Reset Terminal",           "\uE777"),

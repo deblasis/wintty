@@ -105,4 +105,15 @@ public class PaneContextMenuModelTests
         Assert.Equal("\uE8C8", items.Single(i => i.Command == PaneMenuCommand.Copy).Icon);
         Assert.Equal("\uE777", items.Single(i => i.Command == PaneMenuCommand.ResetTerminal).Icon);
     }
+
+    [Fact]
+    public void Build_ZoomIconReflectsZoomState()
+    {
+        var notZoomed = PaneContextMenuModel.Build(hasSelection: false, isZoomed: false)
+            .Single(i => i.Command == PaneMenuCommand.ZoomPane);
+        var zoomed = PaneContextMenuModel.Build(hasSelection: false, isZoomed: true)
+            .Single(i => i.Command == PaneMenuCommand.ZoomPane);
+        Assert.Equal("\uE740", notZoomed.Icon);
+        Assert.Equal("\uE73F", zoomed.Icon);
+    }
 }

@@ -28,7 +28,7 @@ internal static class PaneContextMenuBuilder
             hasSelection(), isZoomed(),
             promptTabTitle, promptTerminalTitle);
 
-        // Rebuild on each open so Copy's enabled state and the Zoom checkmark
+        // Rebuild on each open so Copy's enabled state and the Zoom icon
         // reflect current selection/zoom. Matches TabContextMenuBuilder's
         // Opening re-check.
         flyout.Opening += (_, _) =>
@@ -56,21 +56,6 @@ internal static class PaneContextMenuBuilder
             if (item.Kind == PaneMenuItemKind.Separator)
             {
                 flyout.Items.Add(new MenuFlyoutSeparator());
-                continue;
-            }
-
-            if (item.Command == PaneMenuCommand.ZoomPane)
-            {
-                var toggle = new ToggleMenuFlyoutItem
-                {
-                    Text = item.Label,
-                    IsChecked = item.IsChecked,
-                };
-                toggle.Click += (_, _) => Dispatch(item.Command,
-                    invokePaneAction, invokeBindingAction,
-                    promptTabTitle, promptTerminalTitle);
-                ApplyIcon(toggle, item.Icon);
-                flyout.Items.Add(toggle);
                 continue;
             }
 
