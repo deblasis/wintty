@@ -37,6 +37,27 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal bool CommandPaletteIsOpen { get; set; }
 
+    /// <summary>
+    /// Raised when the user requests the pane context menu over this surface.
+    /// The argument is the pointer position in this control's coordinates, or
+    /// null when the request came from the keyboard (Shift+F10 / Menu key).
+    /// The owner (MainWindow, via PaneHost) builds and shows the flyout.
+    /// </summary>
+    internal event EventHandler<Windows.Foundation.Point?>? ContextMenuRequested;
+
+    /// <summary>
+    /// True when the surface has a non-empty selection. Used to gate the
+    /// context-menu Copy item. False when the surface is gone.
+    /// </summary>
+    internal bool HasSelection =>
+        _surface.Handle != IntPtr.Zero && NativeMethods.SurfaceHasSelection(_surface);
+
+    // Set on a right-button press that we are NOT forwarding to libghostty
+    // (because the program has not captured the mouse, so the click opens our
+    // context menu instead). Consumed by the matching release so we never
+    // forward a half-pair (press without release, or vice versa) to libghostty.
+    private bool _rightButtonOpensMenu;
+
     // Handles ------------------------------------------------------------
 
     private GhosttySurface _surface;
@@ -949,6 +970,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
+        // Right-click: if the running program has captured the mouse (vim,
+        // tmux mouse mode), forward the button so the program handles it.
+        // Otherwise suppress forwarding and open our context menu on release.
+        if (props.PointerUpdateKind == PointerUpdateKind.RightButtonPressed
+            && _surface.Handle != IntPtr.Zero
+            && !NativeMethods.SurfaceMouseCaptured(_surface))
+        {
+            _rightButtonOpensMenu = true;
+            e.Handled = true;
+            return;
+        }
+
         SendMouseButton(e, GhosttyMouseState.Press);
     }
 
@@ -970,8 +1003,39 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
     }
 
-    private void OnPointerReleased(object sender, PointerRoutedEventArgs e) =>
+    private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        // Complete the suppressed right-click: open the context menu instead
+        // of forwarding the button. We open on release so it feels like a
+        // normal Windows right-click.
+        if (_rightButtonOpensMenu)
+        {
+            _rightButtonOpensMenu = false;
+            var props = e.GetCurrentPoint(Panel).Properties;
+            if (props.PointerUpdateKind == PointerUpdateKind.RightButtonReleased)
+            {
+                e.Handled = true;
+                var pos = e.GetCurrentPoint(this).Position;
+                ContextMenuRequested?.Invoke(this, pos);
+                return;
+            }
+        }
+
         SendMouseButton(e, GhosttyMouseState.Release);
+    }
+
+    private void OnContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        // ContextRequested fires for both right-click and keyboard. The
+        // pointer path (OnPointerPressed/Released) already handles right-click
+        // with the mouse-capture gate, so here we only act on keyboard
+        // invocation (Shift+F10 / Menu key), where TryGetPosition is false.
+        // For the mouse case we mark it handled so WinUI does not show an
+        // empty default menu, then defer to the pointer path.
+        args.Handled = true;
+        if (!args.TryGetPosition(this, out _))
+            ContextMenuRequested?.Invoke(this, null);
+    }
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
