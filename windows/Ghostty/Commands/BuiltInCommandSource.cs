@@ -64,7 +64,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.MoveTabLeft, "Move Tab Left", "Move the active tab one position left", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.ToggleVerticalTabsPinned, "Toggle Vertical Tabs Pinned", "Pin or unpin the vertical tab sidebar", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.ToggleTabLayout, "Toggle Tab Layout", "Switch between horizontal and vertical tab layout", CommandCategory.Tab, "\uE8AB");
-        AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal);
+        AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal, icon: null, pathKey: "quake");
         AddPaneCommand(commands, PaneAction.ShowKeybindCheatsheet, "Keyboard Shortcuts", "Show the keyboard shortcuts cheat sheet", CommandCategory.Terminal, "");
         AddPaneCommand(commands, PaneAction.ShowAbout, "About", "Show app version, links, and license", CommandCategory.About, "");
         // Undo/Redo are omitted when their stack is empty so the palette
@@ -81,7 +81,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddBindingCommand(commands, "reset", "Reset Terminal", "Reset the terminal to a clean state", CommandCategory.Terminal, "\uE777");
         AddBindingCommand(commands, "copy_to_clipboard", "Copy to Clipboard", "Copy the current selection to clipboard", CommandCategory.Terminal, "\uE8C8");
         AddBindingCommand(commands, "paste_from_clipboard", "Paste from Clipboard", "Paste clipboard contents into terminal", CommandCategory.Terminal, "\uE77F");
-        AddBindingCommand(commands, "select_all", "Select All", "Select all terminal content", CommandCategory.Terminal);
+        AddBindingCommand(commands, "select_all", "Select All", "Select all terminal content", CommandCategory.Terminal, "");
         AddBindingCommand(commands, "increase_font_size:1", "Increase Font Size", "Make terminal text larger", CommandCategory.Terminal, "\uE8E8");
         AddBindingCommand(commands, "decrease_font_size:1", "Decrease Font Size", "Make terminal text smaller", CommandCategory.Terminal, "\uE71F");
         AddBindingCommand(commands, "reset_font_size", "Reset Font Size", "Reset font size to default", CommandCategory.Terminal);
@@ -133,7 +133,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
     }
 
     private void AddPaneCommand(List<CommandItem> list, PaneAction action, string title,
-        string description, CommandCategory category, string? icon = null)
+        string description, CommandCategory category, string? icon = null, string? pathKey = null)
     {
         var shortcut = FindShortcut(action);
         list.Add(new CommandItem
@@ -144,6 +144,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
             ActionKey = action.ToString().ToLowerInvariant(),
             Category = category,
             LeadingIcon = icon,
+            LeadingIconPathKey = pathKey,
             Shortcut = shortcut,
             Execute = _paneActionFactory(action),
         });

@@ -25,6 +25,9 @@ internal record CommandItem
     public CommandCategory Category { get; init; }
     public Color? LeadingColor { get; init; }
     public string? LeadingIcon { get; init; }
+    // When set, the palette renders a custom PathIcon for this command instead
+    // of the LeadingIcon glyph. Only "quake" is handled today.
+    public string? LeadingIconPathKey { get; init; }
     public bool Emphasis { get; init; }
     public string? Badge { get; init; }
     public string? PreviewText { get; init; }

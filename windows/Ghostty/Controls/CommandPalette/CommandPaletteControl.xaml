@@ -99,6 +99,15 @@
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                FontFamily="Cascadia Code, Consolas, Courier New"/>
                 </Border>
+
+                <Viewbox x:Name="LeadingPathHost"
+                         Grid.Column="1"
+                         Width="16" Height="16"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center"
+                         Visibility="Collapsed">
+                    <PathIcon Data="F1 M100,190 A90,90 0 1 1 280,190 A90,90 0 1 1 100,190 Z M132,170 A58,58 0 1 0 248,170 A58,58 0 1 0 132,170 Z M186,206 L206,186 L276,276 Z"/>
+                </Viewbox>
             </Grid>
         </DataTemplate>
 

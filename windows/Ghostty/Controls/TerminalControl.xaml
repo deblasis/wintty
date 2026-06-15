@@ -68,7 +68,8 @@
             PointerPressed="OnPointerPressed"
             PointerMoved="OnPointerMoved"
             PointerReleased="OnPointerReleased"
-            PointerWheelChanged="OnPointerWheelChanged" />
+            PointerWheelChanged="OnPointerWheelChanged"
+            ContextRequested="OnContextRequested" />
 
         <primitives:ScrollBar
             x:Name="VerticalScrollBar"
