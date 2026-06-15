@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Tabs.TabSwitcherPopup"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- The control is sized to the window by MainWindow so it can center the
+         card; this outer Grid stays transparent (no full-window dim) and only
+         the centered Border paints. -->
+    <Grid Background="Transparent">
+        <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="12"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center">
+            <StackPanel x:Name="CandidateRow"
+                        Orientation="Horizontal"
+                        Spacing="8"/>
+        </Border>
+    </Grid>
+</UserControl>
