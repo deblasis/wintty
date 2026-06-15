@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Ghostty.InspectorWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      The inspector renders entirely through libghostty's DX12 swap chain
+      bound to this SwapChainPanel (same handoff the terminal uses). The
+      panel is a tab stop so it can receive pointer + character input that we
+      forward into the ImGui context.
+    -->
+    <SwapChainPanel x:Name="Panel" IsTabStop="True" />
+</Window>

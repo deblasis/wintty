@@ -158,6 +158,12 @@ internal sealed class KeyBindings
         // concern (libghostty has no closed-item stack on Windows).
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.T, PaneAction.ReopenClosedTab),
         new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.N, PaneAction.ReopenClosedWindow),
+
+        // Toggle the terminal inspector (Chromium-style Ctrl+Shift+I). Matched
+        // here because the libghostty inspector keybind is not delivered to the
+        // embedded apprt via the keyboard on Windows; the command palette's
+        // inspector:toggle still works through ghostty_surface_binding_action.
+        new KeyBinding(VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, VirtualKey.I, PaneAction.ToggleInspector),
     });
 
     /// <summary>

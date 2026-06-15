@@ -73,4 +73,21 @@ CIMGUI_API size_t ghostty_ImGui_ImplDX12_InitInfo_align()
 #endif // __has_include("backends/imgui_impl_dx12.h")
 #endif // IMGUI_DISABLE
 
+// Core struct layout accessors. The Zig cImport in main.zig translates
+// dcimgui.h with only IMGUI_USE_WCHAR32 + IMGUI_HAS_DOCK, while this library
+// is compiled with IMGUI_DISABLE_OBSOLETE_FUNCTIONS + IMGUI_ENABLE_FREETYPE
+// on top. If any of those change the layout of structs the embedded apprt
+// writes through (ImGuiIO every frame, ImGuiStyle on content-scale changes),
+// Zig would write fields at the wrong offsets and corrupt adjacent heap.
+// These let a unit test assert the Zig view matches the compiled layout.
+CIMGUI_API size_t ghostty_ImGuiIO_size()
+{
+    return sizeof(cimgui::ImGuiIO);
+}
+
+CIMGUI_API size_t ghostty_ImGuiStyle_size()
+{
+    return sizeof(cimgui::ImGuiStyle);
+}
+
 }

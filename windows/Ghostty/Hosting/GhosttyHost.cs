@@ -72,6 +72,15 @@ internal sealed class GhosttyHost : IDisposable
     public event EventHandler? ReloadConfigRequested;
 
     /// <summary>
+    /// Raised when libghostty requests the terminal inspector be toggled
+    /// (the GHOSTTY_ACTION_INSPECTOR apprt action, triggered by the
+    /// <c>inspector:toggle</c> keybind/command). <c>MainWindow</c> opens or
+    /// closes the inspector window for the active surface. Raised on the
+    /// surface's owning per-window host, like the other per-window events.
+    /// </summary>
+    public event EventHandler? InspectorToggleRequested;
+
+    /// <summary>
     /// Raised when libghostty matches a keybind that resolves to a pane/tab
     /// apprt action this window should perform (new tab/split, focus or
     /// resize a split, switch/move tabs, fullscreen, zoom, equalize). The
@@ -532,6 +541,14 @@ internal sealed class GhosttyHost : IDisposable
                 case GhosttyActionTag.ToggleCommandPalette:
                     _dispatcher.TryEnqueue(() =>
                         owner.CommandPaletteToggleRequested?.Invoke(owner, EventArgs.Empty));
+                    return 1;
+
+                // inspector:toggle keybind/command. The action payload carries
+                // a toggle/show/hide mode, but v1 treats it as a toggle: the
+                // window opens if closed and closes if open.
+                case GhosttyActionTag.Inspector:
+                    _dispatcher.TryEnqueue(() =>
+                        owner.InspectorToggleRequested?.Invoke(owner, EventArgs.Empty));
                     return 1;
 
                 // Pane/tab actions libghostty matched from a keybind. The
