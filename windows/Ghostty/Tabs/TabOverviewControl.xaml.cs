@@ -26,6 +26,19 @@ internal sealed partial class TabOverviewControl : UserControl
     private FontFamily _previewFont = PreviewFont.Resolve(null);
     private PanePreviewRenderer _renderer = new(PreviewFont.Resolve(null));
 
+    // Fluent theme resources the per-tile build helpers need, resolved once per
+    // Show() instead of re-hitting Application.Current.Resources for every element
+    // of every tile. Re-resolved on each open (not cached at ctor) so a theme
+    // switch between openings is honored.
+    private ThemeResources _theme;
+
+    private readonly record struct ThemeResources(
+        double CaptionFontSize,
+        double BodyFontSize,
+        Brush TextPrimary,
+        Brush TextSecondary,
+        Brush TextTertiary);
+
     // Thumbnail geometry. Body is a fixed-size canvas so per-pane pixel rects can
     // be computed at build time (before layout).
     private const double TileWidth = 216;
@@ -51,6 +64,7 @@ internal sealed partial class TabOverviewControl : UserControl
     {
         _previewFont = PreviewFont.Resolve(fontFamily);
         _renderer = new PanePreviewRenderer(_previewFont);
+        _theme = ResolveTheme();
 
         BrandLogo.Source = new BitmapImage(AppIconSource.Current);
         CountChip.Text = tabs.Count.ToString();
@@ -74,6 +88,17 @@ internal sealed partial class TabOverviewControl : UserControl
             TilesView.SelectedIndex = activeIndex;
     }
 
+    private static ThemeResources ResolveTheme()
+    {
+        var res = Application.Current.Resources;
+        return new ThemeResources(
+            CaptionFontSize: (double)res["CaptionTextBlockFontSize"],
+            BodyFontSize: (double)res["BodyTextBlockFontSize"],
+            TextPrimary: (Brush)res["TextFillColorPrimaryBrush"],
+            TextSecondary: (Brush)res["TextFillColorSecondaryBrush"],
+            TextTertiary: (Brush)res["TextFillColorTertiaryBrush"]);
+    }
+
     /// <summary>
     /// Move keyboard focus into the grid so arrow keys, Enter and Esc work without
     /// a mouse click. Must be called AFTER the hosting popup is open.
@@ -91,7 +116,8 @@ internal sealed partial class TabOverviewControl : UserControl
     {
         var header = BuildHeader(
             tab,
-            titleFontSize: (double)Application.Current.Resources["CaptionTextBlockFontSize"],
+            _theme,
+            titleFontSize: _theme.CaptionFontSize,
             dotSize: DotSizeThumbnail,
             includeChip: true);
 
@@ -117,7 +143,8 @@ internal sealed partial class TabOverviewControl : UserControl
     {
         var header = BuildHeader(
             tab,
-            titleFontSize: (double)Application.Current.Resources["BodyTextBlockFontSize"],
+            _theme,
+            titleFontSize: _theme.BodyFontSize,
             dotSize: DotSizeRail,
             includeChip: false);
 
@@ -139,8 +166,8 @@ internal sealed partial class TabOverviewControl : UserControl
         var paneCount = new TextBlock
         {
             Text = PaneCountLabel(tab.PaneHost.PaneCount),
-            FontSize = (double)Application.Current.Resources["CaptionTextBlockFontSize"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            FontSize = _theme.CaptionFontSize,
+            Foreground = _theme.TextTertiary,
             Margin = new Thickness(2, 8, 0, 0),
         };
 
@@ -152,7 +179,7 @@ internal sealed partial class TabOverviewControl : UserControl
     }
 
     // Shared header row used by both thumbnails (with chip) and the rail (no chip).
-    private static FrameworkElement BuildHeader(TabModel tab, double titleFontSize, double dotSize, bool includeChip)
+    private static FrameworkElement BuildHeader(TabModel tab, ThemeResources theme, double titleFontSize, double dotSize, bool includeChip)
     {
         var grid = new Grid { Padding = new Thickness(10, 7, 10, 7), ColumnSpacing = 6 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -187,7 +214,7 @@ internal sealed partial class TabOverviewControl : UserControl
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
             FontSize = titleFontSize,
-            Foreground = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
+            Foreground = theme.TextPrimary,
         };
         Grid.SetColumn(title, 2);
         grid.Children.Add(title);
@@ -198,9 +225,9 @@ internal sealed partial class TabOverviewControl : UserControl
             {
                 Text = PaneCountLabel(tab.PaneHost.PaneCount),
                 Opacity = 0.7,
-                FontSize = (double)Application.Current.Resources["CaptionTextBlockFontSize"],
+                FontSize = theme.CaptionFontSize,
                 VerticalAlignment = VerticalAlignment.Center,
-                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                Foreground = theme.TextSecondary,
             };
             Grid.SetColumn(chip, 3);
             grid.Children.Add(chip);
