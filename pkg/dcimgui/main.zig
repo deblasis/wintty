@@ -1,12 +1,16 @@
 pub const build_options = @import("build_options");
 
 pub const c = @cImport({
-    // This is set during the build so it also has to be set
-    // during import time to get the right types. Without this
-    // you get stack size mismatches on some structs.
+    // These must match the defines the library is compiled with (see
+    // build.zig); otherwise the cImport-translated structs get a different
+    // layout than the compiled code and writing their fields corrupts memory.
+    // IMGUI_DISABLE_OBSOLETE_FUNCTIONS in particular removes obsolete fields,
+    // so omitting it here made Zig's ImGuiIO 32 bytes larger than the real
+    // allocation and per-frame io writes clobbered adjacent heap.
     @cDefine("IMGUI_USE_WCHAR32", "1");
-
     @cDefine("IMGUI_HAS_DOCK", "1");
+    @cDefine("IMGUI_DISABLE_OBSOLETE_FUNCTIONS", "1");
+    if (build_options.freetype) @cDefine("IMGUI_ENABLE_FREETYPE", "1");
     @cInclude("dcimgui.h");
 });
 
@@ -76,6 +80,9 @@ pub extern fn ImGui_ImplDX12_RenderDrawData(draw_data: *c.ImDrawData, command_li
 extern fn ghostty_ImGui_ImplDX12_InitInfo_size() callconv(.c) usize;
 extern fn ghostty_ImGui_ImplDX12_InitInfo_align() callconv(.c) usize;
 
+extern fn ghostty_ImGuiIO_size() callconv(.c) usize;
+extern fn ghostty_ImGuiStyle_size() callconv(.c) usize;
+
 // Internal API types and functions from dcimgui_internal.h
 // We declare these manually because the internal header contains bitfields
 // that Zig's cImport cannot translate.
@@ -119,6 +126,16 @@ pub const ext = struct {
 
 test {
     _ = c;
+}
+
+test "core struct layouts match the compiled library" {
+    const std = @import("std");
+    // The embedded apprt writes ImGuiIO fields every frame and copies a whole
+    // ImGuiStyle on content-scale changes. The cImport above must produce the
+    // exact same layout as the compiled library or those writes land at the
+    // wrong offsets and corrupt adjacent heap allocations.
+    try std.testing.expectEqual(ghostty_ImGuiIO_size(), @sizeOf(c.ImGuiIO));
+    try std.testing.expectEqual(ghostty_ImGuiStyle_size(), @sizeOf(c.ImGuiStyle));
 }
 
 test "dx12 backend bindings" {
