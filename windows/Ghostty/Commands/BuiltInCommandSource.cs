@@ -91,6 +91,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddBindingCommand(commands, "jump_to_prompt:1", "Jump to Next Prompt", "Scroll to the next shell prompt (requires OSC 133)", CommandCategory.Terminal);
         AddBindingCommand(commands, "open_config", "Open Config", "Open the Ghostty configuration file", CommandCategory.Config, "\uE713");
         AddBindingCommand(commands, "reload_config", "Reload Config", "Reload configuration from disk", CommandCategory.Config, "\uE72C");
+        AddBindingCommand(commands, "inspector:toggle", "Toggle Inspector", "Show or hide the terminal inspector", CommandCategory.Terminal, "\uEBE8");
 
         // Opacity adjustment (Ctrl+Shift+Scroll, or from palette)
         if (_opacityAction is not null)
