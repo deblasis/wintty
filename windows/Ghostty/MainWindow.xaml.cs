@@ -1203,12 +1203,42 @@ public sealed partial class MainWindow : Window
         paneHost.VerticalAlignment = VerticalAlignment.Stretch;
         paneHost.Visibility = Visibility.Collapsed;
         PaneHostContainer.Children.Add(paneHost);
+        paneHost.ContextMenuRequested += OnPaneContextMenuRequested;
     }
 
     private void RemovePaneHost(TabModel tab)
     {
         var paneHost = (PaneHost)tab.PaneHost;
+        paneHost.ContextMenuRequested -= OnPaneContextMenuRequested;
         PaneHostContainer.Children.Remove(paneHost);
+    }
+
+    private void OnPaneContextMenuRequested(object? sender, Panes.PaneContextMenuRequest request)
+    {
+        var control = request.Control;
+
+        // Focus the right-clicked surface so the menu's binding/pane actions
+        // (which target the active surface / active pane) act on this pane.
+        control.Focus(FocusState.Programmatic);
+
+        // Use the PaneHost that raised the event (the sender) so the Zoom state
+        // reflects the right-clicked pane directly, without depending on the
+        // (async) focus change having settled ActiveTab.
+        var paneHost = sender as Panes.PaneHost
+            ?? (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
+
+        var flyout = PaneContextMenuBuilder.Build(
+            invokePaneAction: _router.Invoke,
+            invokeBindingAction: ExecuteBindingAction,
+            hasSelection: () => control.HasSelection,
+            isZoomed: () => paneHost.IsZoomed,
+            promptTabTitle: () => _ = ShowPromptTitleDialogAsync(isTab: true, control),
+            promptTerminalTitle: () => _ = ShowPromptTitleDialogAsync(isTab: false, control));
+
+        if (request.Position is { } pos)
+            flyout.ShowAt(control, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = pos });
+        else
+            flyout.ShowAt(control);
     }
 
     /// <summary>
