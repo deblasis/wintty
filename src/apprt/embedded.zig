@@ -2087,7 +2087,12 @@ pub const CAPI = struct {
                     continue;
                 }
                 const raw = raws[x];
-                const style = styles[x];
+                // RenderState.Cell.style is UNDEFINED for default-style cells
+                // (style_id == 0) - reading it would feed garbage to fg()/bg().
+                // Use the default style for those (the common case: blank cells
+                // and unstyled text).
+                const style: @TypeOf(state.cursor.style) =
+                    if (raw.style_id == 0) .{} else styles[x];
                 const cp: u32 = switch (raw.content_tag) {
                     .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)
                         0
