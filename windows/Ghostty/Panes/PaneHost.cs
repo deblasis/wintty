@@ -207,6 +207,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     public event EventHandler? LastLeafClosed;
 
     /// <summary>
+    /// Raised when a leaf requests its pane context menu. Carries the
+    /// originating <see cref="TerminalControl"/> and the pointer position in
+    /// that control's coordinates (null when requested from the keyboard).
+    /// MainWindow listens and shows the flyout (it owns the dispatch entry
+    /// points the menu commands route through).
+    /// </summary>
+    public event EventHandler<PaneContextMenuRequest>? ContextMenuRequested;
+
+    /// <summary>
     /// Currently focused leaf. Never null after construction; closing
     /// the last leaf raises <see cref="LastLeafClosed"/> instead of
     /// nulling this.
@@ -784,6 +793,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var t = leaf.Terminal();
         t.GotFocus -= OnTerminalGotFocus;
         t.CloseRequested -= OnTerminalCloseRequested;
+        t.ContextMenuRequested -= OnTerminalContextMenuRequested;
         t.DisposeSurface();
     }
 
@@ -1210,7 +1220,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // (via GhosttyHost). Route it to the leaf-level close path so
         // multi-pane closing collapses correctly.
         t.CloseRequested += OnTerminalCloseRequested;
+        t.ContextMenuRequested += OnTerminalContextMenuRequested;
         return t;
+    }
+
+    private void OnTerminalContextMenuRequested(object? sender, Windows.Foundation.Point? position)
+    {
+        if (sender is not TerminalControl tc) return;
+        ContextMenuRequested?.Invoke(this, new PaneContextMenuRequest(tc, position));
     }
 
     private void OnTerminalGotFocus(object sender, RoutedEventArgs e)
@@ -1614,3 +1631,11 @@ internal enum FocusDirection
     Up,
     Down,
 }
+
+/// <summary>
+/// Payload for <see cref="PaneHost.ContextMenuRequested"/>: which surface and
+/// where (null position = keyboard-invoked).
+/// </summary>
+public readonly record struct PaneContextMenuRequest(
+    Ghostty.Controls.TerminalControl Control,
+    Windows.Foundation.Point? Position);
