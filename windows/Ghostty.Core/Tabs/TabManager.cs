@@ -35,6 +35,7 @@ internal sealed class TabManager
     // snapshot here before the panes are disposed.
     private readonly ClosedStack<TabSession>? _closedTabs;
     private readonly ObservableCollection<TabModel> _tabs = new();
+    private readonly MruList<TabModel> _mru = new();
     private TabModel _activeTab = null!;
 
     // Exposed as the concrete ObservableCollection so WinUI can bind
@@ -43,6 +44,12 @@ internal sealed class TabManager
     // which ObservableCollection satisfies.
     public ObservableCollection<TabModel> Tabs => _tabs;
     public TabModel ActiveTab => _activeTab;
+
+    /// <summary>
+    /// Tabs in most-recently-active order (index 0 = current active). Drives
+    /// the Ctrl+Tab MRU cycle and orders the tab overview.
+    /// </summary>
+    public IReadOnlyList<TabModel> MruOrder => _mru.Order;
 
     /// <summary>
     /// Index of <paramref name="tab"/> in <see cref="Tabs"/>, or -1
@@ -103,12 +110,14 @@ internal sealed class TabManager
             var first = CreateTab(snapshot: null);
             _tabs.Add(first);
             _activeTab = first;
+            _mru.Touch(first);
         }
         else
         {
             WireAdoptedTab(seed);
             _tabs.Add(seed);
             _activeTab = seed;
+            _mru.Touch(seed);
         }
     }
 
@@ -180,6 +189,7 @@ internal sealed class TabManager
         tab.PaneHost.DisposeAllLeaves();
 
         _tabs.RemoveAt(index);
+        _mru.Remove(tab);
         TabRemoved?.Invoke(this, tab);
 
         if (_tabs.Count == 0)
@@ -192,6 +202,7 @@ internal sealed class TabManager
         {
             var next = _tabs[Math.Min(index, _tabs.Count - 1)];
             _activeTab = next;
+            _mru.Touch(next);
             ActiveTabChanged?.Invoke(this, next);
             WindowTitleChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -202,6 +213,7 @@ internal sealed class TabManager
         if (ReferenceEquals(tab, _activeTab)) return;
         if (!_tabs.Contains(tab)) return;
         _activeTab = tab;
+        _mru.Touch(tab);
         ActiveTabChanged?.Invoke(this, tab);
         WindowTitleChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -345,6 +357,7 @@ internal sealed class TabManager
         // the destination manager overwrites it as part of adoption.
 
         _tabs.RemoveAt(index);
+        _mru.Remove(tab);
         TabRemoved?.Invoke(this, tab);
 
         if (_tabs.Count == 0)
@@ -357,6 +370,7 @@ internal sealed class TabManager
         {
             var next = _tabs[Math.Min(index, _tabs.Count - 1)];
             _activeTab = next;
+            _mru.Touch(next);
             ActiveTabChanged?.Invoke(this, next);
             WindowTitleChanged?.Invoke(this, EventArgs.Empty);
         }

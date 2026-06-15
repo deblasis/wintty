@@ -128,4 +128,13 @@ public enum PaneAction
     // routed via PaneActionRouter to MainWindow (mirrors the command palette's
     // inspector:toggle, which goes through ghostty_surface_binding_action).
     ToggleInspector = 62,
+
+    // Tab switcher. Ctrl+Tab / Ctrl+Shift+Tab drive a most-recently-used cycle
+    // popup with Windows Alt+Tab hold/release semantics; a separate chord opens
+    // a grid overview of all tabs. Apprt-matched in KeyBindings.WindowsOnly so
+    // the apprt can drive the held-Ctrl popup and detect Ctrl-release for commit.
+    // libghostty keeps positional next/prev on Ctrl+PageUp/PageDown.
+    MruCycleNext = 63,
+    MruCyclePrev = 64,
+    ShowTabOverview = 65,
 }
