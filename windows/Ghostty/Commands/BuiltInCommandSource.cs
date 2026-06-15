@@ -49,6 +49,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.ReopenClosedWindow, "Reopen Closed Window", "Reopen the most recently closed window", CommandCategory.Tab, "\uE8A7");
         AddPaneCommand(commands, PaneAction.NextTab, "Next Tab", "Switch to the next tab", CommandCategory.Tab, "\uE76C");
         AddPaneCommand(commands, PaneAction.PrevTab, "Previous Tab", "Switch to the previous tab", CommandCategory.Tab, "\uE76B");
+        AddPaneCommand(commands, PaneAction.ShowTabOverview, "Show all tabs", "Open a grid overview of every tab", CommandCategory.Tab, "\uE8A9");
         AddPaneCommand(commands, PaneAction.FocusLeft, "Focus Pane Left", "Move focus to the left pane", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.FocusRight, "Focus Pane Right", "Move focus to the right pane", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.FocusUp, "Focus Pane Up", "Move focus to the pane above", CommandCategory.Pane);
