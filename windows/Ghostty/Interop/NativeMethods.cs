@@ -646,10 +646,10 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial void InspectorSetFocusNative(
         GhosttyInspector inspector,
-        [MarshalAs(UnmanagedType.U1)] bool focused);
+        byte focused);
 
     internal static void InspectorSetFocus(GhosttyInspector inspector, bool focused)
-        => InspectorSetFocusNative(inspector, focused);
+        => InspectorSetFocusNative(inspector, focused ? (byte)1 : (byte)0);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_inspector_set_content_scale")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
