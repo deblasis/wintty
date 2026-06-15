@@ -1280,6 +1280,24 @@ GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_text_s*);
 GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
 
+// One resolved cell of the viewport.
+typedef struct {
+  uint32_t codepoint; // primary codepoint, 0 = empty / wide spacer
+  ghostty_config_color_s fg;
+  ghostty_config_color_s bg;
+} ghostty_cell_s;
+
+// The viewport as row-major resolved cells. `cells` has `rows*cols` entries
+// and is owned by libghostty; free it with ghostty_surface_free_cells.
+typedef struct {
+  ghostty_cell_s* cells;
+  uint16_t rows;
+  uint16_t cols;
+} ghostty_cells_s;
+
+GHOSTTY_API bool ghostty_surface_read_cells(ghostty_surface_t, ghostty_cells_s*);
+GHOSTTY_API void ghostty_surface_free_cells(ghostty_surface_t, ghostty_cells_s*);
+
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);
 GHOSTTY_API void* ghostty_surface_quicklook_font(ghostty_surface_t);
