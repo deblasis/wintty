@@ -2069,51 +2069,14 @@ pub const CAPI = struct {
         const out = try alloc.alloc(CellEntry, rows * cols);
         errdefer alloc.free(out);
 
-        const default_entry: CellEntry = .{
-            .codepoint = 0,
-            .fg = Color.from(state.colors.foreground),
-            .bg = Color.from(state.colors.background),
-        };
+        // resolveCell does the shared, bounds-clamped per-cell resolution.
         for (0..rows) |y| {
-            const cell_slice = row_cells[y].slice();
-            const raws = cell_slice.items(.raw);
-            const styles = cell_slice.items(.style);
-            // Rows are guaranteed `cols` wide, but clamp defensively so a short
-            // row can never index past its cell storage.
-            const ncols = @min(cols, raws.len);
             for (0..cols) |x| {
-                if (x >= ncols) {
-                    out[y * cols + x] = default_entry;
-                    continue;
-                }
-                const raw = raws[x];
-                // RenderState.Cell.style is UNDEFINED for default-style cells
-                // (style_id == 0) - reading it would feed garbage to fg()/bg().
-                // Use the default style for those (the common case: blank cells
-                // and unstyled text).
-                const style: terminal.Style =
-                    if (raw.style_id == 0) .{} else styles[x];
-                const cp: u32 = switch (raw.content_tag) {
-                    .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)
-                        0
-                    else
-                        raw.content.codepoint,
-                    // bg-only cells carry no text.
-                    .bg_color_palette, .bg_color_rgb => 0,
-                };
-                const resolved_fg = style.fg(.{
-                    .default = state.colors.foreground,
-                    .palette = &state.colors.palette,
-                });
-                const resolved_bg = style.bg(&raw, &state.colors.palette) orelse
-                    state.colors.background;
-                // Inverse video swaps fg and bg.
-                const fg = if (style.flags.inverse) resolved_bg else resolved_fg;
-                const bg = if (style.flags.inverse) resolved_fg else resolved_bg;
+                const resolved = state.resolveCell(x, y);
                 out[y * cols + x] = .{
-                    .codepoint = cp,
-                    .fg = Color.from(fg),
-                    .bg = Color.from(bg),
+                    .codepoint = resolved.codepoint,
+                    .fg = Color.from(resolved.fg),
+                    .bg = Color.from(resolved.bg),
                 };
             }
         }
