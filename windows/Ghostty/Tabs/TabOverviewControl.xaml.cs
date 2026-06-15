@@ -38,6 +38,17 @@ internal sealed partial class TabOverviewControl : UserControl
     private const double RailBodyHeight = 232;
     private const double RailFontSize = 13;
 
+    // Tab color-dot diameters for the thumbnail and the (larger) rail header.
+    private const double DotSizeThumbnail = 7;
+    private const double DotSizeRail = 9;
+
+    // Fill behind the pane mini-layout. Each pane is inset 1px, so this color
+    // shows through as the thin divider between split panes (and a hairline frame
+    // around a single pane). A neutral slate that reads against the near-black
+    // panes without fighting the terminal colors; tune here to taste.
+    private static readonly Brush PreviewDividerBrush =
+        new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3B, 0x43));
+
     public TabOverviewControl() => InitializeComponent();
 
     public event EventHandler<TabModel>? TabChosen;
@@ -85,13 +96,17 @@ internal sealed partial class TabOverviewControl : UserControl
     // and the hover/selected visuals, so the tile itself carries no border state.
     private FrameworkElement BuildTile(TabModel tab)
     {
-        var header = BuildHeader(tab, titleFontSize: 13, dotSize: 7, includeChip: true);
+        var header = BuildHeader(
+            tab,
+            titleFontSize: (double)Application.Current.Resources["CaptionTextBlockFontSize"],
+            dotSize: DotSizeThumbnail,
+            includeChip: true);
 
         var body = new Canvas
         {
             Width = TileBodyWidth,
             Height = TileBodyHeight,
-            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
+            Background = PreviewDividerBrush,
         };
         _renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
 
@@ -110,14 +125,14 @@ internal sealed partial class TabOverviewControl : UserControl
         var header = BuildHeader(
             tab,
             titleFontSize: (double)Application.Current.Resources["BodyTextBlockFontSize"],
-            dotSize: 9,
+            dotSize: DotSizeRail,
             includeChip: false);
 
         var body = new Canvas
         {
             Width = RailBodyWidth,
             Height = RailBodyHeight,
-            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0C, 0x0C, 0x0C)),
+            Background = PreviewDividerBrush,
         };
         _renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, RailFontSize);
 

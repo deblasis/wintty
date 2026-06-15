@@ -22,11 +22,19 @@ internal sealed class PanePreviewRenderer
 
     private readonly FontFamily _font;
 
+    // Per-leaf snapshot cache. A renderer is created fresh each time the overview
+    // opens, so this freezes one snapshot per pane for the overview's lifetime:
+    // the thumbnail pass populates it, and every rail rebuild on hover/selection
+    // reuses it instead of re-locking and re-copying the live cell buffer. It
+    // also keeps the enlarged rail pixel-identical to the thumbnail it came from.
+    private readonly Dictionary<LeafPane, CellGrid?> _gridCache = new();
+
     public PanePreviewRenderer(FontFamily font) => _font = font;
 
     // Place one dark mini-pane per leaf on the body Canvas, positioned by the
-    // normalized rect from PanePreviewLayout. A 1px inset lets the body's
-    // near-black background read as thin dividers between splits.
+    // normalized rect from PanePreviewLayout. A 1px inset on each pane lets the
+    // body fill (a neutral slate, set by the caller) read through as the thin
+    // divider between splits.
     public void BuildMiniLayout(PaneNode root, Canvas body, double fontSize)
     {
         var bodyW = body.Width;
@@ -43,7 +51,7 @@ internal sealed class PanePreviewRenderer
             {
                 Width = w,
                 Height = h,
-                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x10, 0x10, 0x18)),
+                Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0E)),
                 Child = BuildPaneContent(leaf, w, h, fontSize),
             };
             Canvas.SetLeft(pane, x);
@@ -64,8 +72,7 @@ internal sealed class PanePreviewRenderer
         var cols = (int)((w - 12) / charWidth);
         if (rows < 1 || cols < 1) return new Grid();
 
-        var handle = SafeSurfaceHandle(leaf);
-        var grid = handle == IntPtr.Zero ? (CellGrid?)null : SurfaceCellReader.Read(handle);
+        var grid = ReadGrid(leaf);
         var lines = grid is { } g
             ? CellGridFormatter.Format(g, rows, cols)
             : (IReadOnlyList<PreviewLine>)Array.Empty<PreviewLine>();
@@ -73,6 +80,20 @@ internal sealed class PanePreviewRenderer
         if (lines.Count == 0) return new Grid(); // blank pane: just the dark fill
 
         return BuildLinesView(lines, fontSize);
+    }
+
+    // Read this leaf's full-viewport cell snapshot once, then serve it from cache.
+    // Read() returns the whole viewport regardless of display size; the per-pane
+    // row/col clamp happens later in CellGridFormatter.Format, so a single cached
+    // grid feeds both the small thumbnail and the large rail.
+    private CellGrid? ReadGrid(LeafPane leaf)
+    {
+        if (_gridCache.TryGetValue(leaf, out var cached)) return cached;
+
+        var handle = SafeSurfaceHandle(leaf);
+        var grid = handle == IntPtr.Zero ? (CellGrid?)null : SurfaceCellReader.Read(handle);
+        _gridCache[leaf] = grid;
+        return grid;
     }
 
     // Render colored preview lines: each line a horizontal row of "chips"

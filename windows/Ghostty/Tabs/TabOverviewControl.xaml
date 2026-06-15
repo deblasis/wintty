@@ -36,30 +36,30 @@
                                     <VisualState x:Name="Selected">
                                         <VisualState.Setters>
                                             <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
-                                            <Setter Target="Ring.BorderThickness" Value="2"/>
                                         </VisualState.Setters>
                                     </VisualState>
                                     <VisualState x:Name="PointerOverSelected">
                                         <VisualState.Setters>
                                             <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
-                                            <Setter Target="Ring.BorderThickness" Value="2"/>
                                             <Setter Target="Ring.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
                                         </VisualState.Setters>
                                     </VisualState>
                                     <VisualState x:Name="PressedSelected">
                                         <VisualState.Setters>
                                             <Setter Target="Ring.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}"/>
-                                            <Setter Target="Ring.BorderThickness" Value="2"/>
                                         </VisualState.Setters>
                                     </VisualState>
                                 </VisualStateGroup>
                             </VisualStateManager.VisualStateGroups>
 
+                            <!-- Border thickness stays 2 in every state so selection only
+                                 changes its COLOR; a thickness change would alter the tile's
+                                 footprint and reflow the grid, resizing the whole card. -->
                             <Border x:Name="Ring"
                                     CornerRadius="8"
-                                    BorderThickness="1"
+                                    BorderThickness="2"
                                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                    Background="{ThemeResource LayerFillColorDefaultBrush}">
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                                 <ContentPresenter Content="{TemplateBinding Content}"
                                                   HorizontalContentAlignment="Stretch"
                                                   VerticalContentAlignment="Stretch"/>
@@ -122,10 +122,11 @@
                     </Border>
                 </Grid>
 
-                <!-- Body: thumbnail grid + detail rail -->
+                <!-- Body: thumbnail grid | separator | detail rail -->
                 <Grid Grid.Row="1" Padding="14,2,14,6" ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="396"/>
                     </Grid.ColumnDefinitions>
 
@@ -138,7 +139,14 @@
                               ItemClick="OnTileClick"
                               SelectionChanged="OnSelectionChanged"/>
 
+                    <!-- Subtle vertical separator between the tabs and the preview. -->
                     <Border Grid.Column="1"
+                            Width="1"
+                            Margin="0,6"
+                            VerticalAlignment="Stretch"
+                            Background="{ThemeResource DividerStrokeColorDefaultBrush}"/>
+
+                    <Border Grid.Column="2"
                             CornerRadius="8"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
