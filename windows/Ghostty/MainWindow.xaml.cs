@@ -1452,6 +1452,8 @@ public sealed partial class MainWindow : Window
         _router.ReopenClosedTabRequested += (_, _) => ReopenClosedTab();
         _router.ReopenClosedWindowRequested += (_, _) =>
             ((App)Application.Current).ReopenClosedWindow();
+
+        WireTabSwitcher();
     }
 
     /// <summary>
@@ -1469,6 +1471,91 @@ public sealed partial class MainWindow : Window
         // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
         // tab renders and focuses just like the session-restore path.
         _tabManager.AdoptTab(tab);
+    }
+
+    // Auto-dismiss timer for the Ctrl+Tab preview popup. Restarted on every
+    // press so rapid cycling keeps the popup up, then it fades after a pause.
+    private DispatcherTimer? _cyclePopupTimer;
+
+    /// <summary>
+    /// Wire Ctrl+Tab / Ctrl+Shift+Tab (immediate next/previous tab switch with a
+    /// brief, auto-dismissing preview popup -- no hold-Ctrl semantics) and the
+    /// Ctrl+Shift+E grid overview.
+    /// </summary>
+    private void WireTabSwitcher()
+    {
+        _cyclePopupTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
+        _cyclePopupTimer.Tick += (_, _) =>
+        {
+            _cyclePopupTimer!.Stop();
+            TabSwitcherPopupHost.IsOpen = false;
+        };
+
+        _router.MruCycleRequested += (_, forward) => CycleTab(forward);
+        _router.ShowTabOverviewRequested += (_, _) => ShowTabOverview();
+
+        // Grab keyboard focus only once the popup is actually open, so arrow
+        // keys / Enter / Esc work. Focusing inside ShowTabOverview (before
+        // IsOpen) silently fails because the grid isn't realized yet.
+        TabOverviewHost.Opened += (_, _) => TabOverviewUI.FocusGrid();
+
+        TabOverviewUI.TabChosen += (_, tab) =>
+        {
+            TabOverviewHost.IsOpen = false;
+            _tabManager.Activate(tab);
+            FocusActiveLeaf();
+        };
+        TabOverviewUI.Dismissed += (_, _) =>
+        {
+            TabOverviewHost.IsOpen = false;
+            FocusActiveLeaf();
+        };
+    }
+
+    // Switch immediately to the next / previous tab in positional (tab-strip)
+    // order, wrapping at the ends, then flash the preview popup. Each press
+    // commits and restarts the popup's auto-dismiss timer, so repeated presses
+    // cycle through tabs with the preview visible and it fades after a pause.
+    private void CycleTab(bool forward)
+    {
+        var tabs = _tabManager.Tabs;
+        if (tabs.Count < 2) return;
+
+        var idx = tabs.IndexOf(_tabManager.ActiveTab);
+        if (idx < 0) idx = 0;
+        var next = forward
+            ? (idx + 1) % tabs.Count
+            : (idx - 1 + tabs.Count) % tabs.Count;
+        var target = tabs[next];
+
+        _tabManager.Activate(target);
+        FocusActiveLeaf();
+
+        SizeTabSwitcherPopup();
+        TabSwitcherPopupUI.Show(tabs, target, _configService.FontFamily);
+        TabSwitcherPopupHost.IsOpen = true;
+        _cyclePopupTimer?.Stop();
+        _cyclePopupTimer?.Start();
+    }
+
+    // Stretch the full-window cycle popup to the current window size so its
+    // centered content sits in the middle of the window.
+    private void SizeTabSwitcherPopup()
+    {
+        TabSwitcherPopupUI.Width = RootGrid.ActualWidth;
+        TabSwitcherPopupUI.Height = RootGrid.ActualHeight;
+    }
+
+    private void ShowTabOverview()
+    {
+        if (_tabManager.Tabs.Count == 0) return;
+        TabOverviewUI.Width = RootGrid.ActualWidth;
+        TabOverviewUI.Height = RootGrid.ActualHeight;
+        // Positional (tab-strip) order, not MRU: the grid is a spatial overview,
+        // so tiles should match the order tabs appear in the strip. MRU order is
+        // for the Ctrl+Tab cycle popup only.
+        TabOverviewUI.Show(_tabManager.Tabs, _tabManager.ActiveTab, _configService.FontFamily);
+        TabOverviewHost.IsOpen = true;
     }
 
     /// <summary>
