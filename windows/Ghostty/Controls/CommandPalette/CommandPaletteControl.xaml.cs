@@ -344,10 +344,13 @@ internal sealed partial class CommandPaletteControl : UserControl
             }
         }
 
-        // Leading icon glyph (column 1)
+        // Leading icon (column 1): a custom path icon (e.g. the Quake mark) wins
+        // over the glyph; otherwise fall back to the LeadingIcon glyph.
+        var usePathIcon = !string.IsNullOrEmpty(item.LeadingIconPathKey);
+
         if (root.Children[1] is FontIcon icon)
         {
-            if (!string.IsNullOrEmpty(item.LeadingIcon))
+            if (!usePathIcon && !string.IsNullOrEmpty(item.LeadingIcon))
             {
                 icon.Glyph = item.LeadingIcon;
                 icon.Visibility = Visibility.Visible;
@@ -357,6 +360,9 @@ internal sealed partial class CommandPaletteControl : UserControl
                 icon.Visibility = Visibility.Collapsed;
             }
         }
+
+        if (root.Children[^1] is Viewbox pathHost)
+            pathHost.Visibility = usePathIcon ? Visibility.Visible : Visibility.Collapsed;
 
         // Title + Description (column 2 = StackPanel with 2 TextBlocks)
         if (root.Children[2] is StackPanel stack && stack.Children.Count >= 2)
