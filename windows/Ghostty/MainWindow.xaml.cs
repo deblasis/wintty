@@ -1732,9 +1732,10 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Update all accent-colored UI from the cursor color in config:
-    /// pane border, selected tab indicator, vertical tab accent bar.
-    /// Called on every config reload so theme changes take effect.
+    /// Update config-driven chrome colors: pane border and the vertical tab
+    /// accent bar track cursor-color; the horizontal selected-tab background
+    /// blends with the terminal background so the active tab connects to the
+    /// pane below it. Called on every config reload so theme changes apply.
     /// </summary>
     private void UpdateCursorAccentColors()
     {
@@ -1748,7 +1749,14 @@ public sealed partial class MainWindow : Window
         foreach (var t in _tabManager.Tabs)
             ((PaneHost)t.PaneHost).SetActiveBorderBrush(brush);
 
-        _horizontalTabHost.SetAccentColor(wuiColor);
+        var bg = _configService.BackgroundColor;
+        var fg = _configService.ForegroundColor;
+        var bgColor = Windows.UI.Color.FromArgb(0xFF,
+            (byte)(bg >> 16), (byte)(bg >> 8), (byte)bg);
+        var fgColor = Windows.UI.Color.FromArgb(0xFF,
+            (byte)(fg >> 16), (byte)(fg >> 8), (byte)fg);
+
+        _horizontalTabHost.SetSelectedTabColors(bgColor, fgColor);
         _verticalTabHost.SetAccentColor(wuiColor);
     }
 
