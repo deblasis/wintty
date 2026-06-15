@@ -2069,10 +2069,7 @@ pub const CAPI = struct {
         const out = try alloc.alloc(CellEntry, rows * cols);
         errdefer alloc.free(out);
 
-        // RenderState.resolveCell does the per-cell color/codepoint resolution
-        // (default vs styled cells, wide-char spacers, bg-only cells, inverse
-        // video) and clamps out-of-range coordinates to a blank cell, so the
-        // logic stays shared with the renderer and is unit-testable.
+        // resolveCell does the shared, bounds-clamped per-cell resolution.
         for (0..rows) |y| {
             for (0..cols) |x| {
                 const resolved = state.resolveCell(x, y);

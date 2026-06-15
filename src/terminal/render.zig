@@ -223,9 +223,9 @@ pub const RenderState = struct {
         style: Style,
     };
 
-    /// A single cell resolved to the codepoint and colors a renderer would
-    /// actually display, with all the per-cell resolution applied: palette
-    /// and default-color lookups, reverse-video swap, wide-character spacer
+    /// A single cell resolved to its codepoint and colors, with the per-cell
+    /// resolution a renderer applies to a normal cell: palette and
+    /// default-color lookups, reverse-video swap, wide-character spacer
     /// handling, and background-only cells.
     pub const ResolvedCell = struct {
         /// The codepoint to display. This is 0 for the trailing half of a
@@ -239,9 +239,12 @@ pub const RenderState = struct {
         bg: color.RGB,
     };
 
-    /// Resolve the viewport cell at (x, y) to the codepoint and colors a
-    /// renderer would display, applying the same logic the renderer uses so
+    /// Resolve the viewport cell at (x, y) to its codepoint and colors, so
     /// callers (e.g. previews) don't have to reimplement color resolution.
+    /// This applies the palette/default lookups and the reverse-video swap
+    /// the renderer uses for a normal cell; it intentionally does NOT apply
+    /// selection, cursor, or search-highlight styling, which previews don't
+    /// need.
     ///
     /// Out-of-range coordinates and short rows resolve to a blank cell using
     /// the default fg/bg, so callers can iterate `cols`/`rows` without their
@@ -1227,6 +1230,60 @@ test "resolveCell inverse video swaps fg and bg" {
     try testing.expectEqual('C', c.codepoint);
     try testing.expectEqual(state.colors.background, c.fg);
     try testing.expectEqual(state.colors.foreground, c.bg);
+}
+
+test "resolveCell inverse video swaps resolved palette colors" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // Inverse, foreground palette 1, background palette 2.
+    s.nextSlice("\x1b[7;38;5;1;48;5;2mD");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // The swap must operate on the resolved colors, not the defaults: the
+    // displayed fg is the resolved bg (palette 2) and vice versa.
+    const d = state.resolveCell(0, 0);
+    try testing.expectEqual('D', d.codepoint);
+    try testing.expectEqual(state.colors.palette[2], d.fg);
+    try testing.expectEqual(state.colors.palette[1], d.bg);
+}
+
+test "resolveCell out of range resolves to blank" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // Out-of-range column and row both fall back to a blank default cell so
+    // callers can iterate cols/rows without their own bounds handling.
+    const wide_x = state.resolveCell(999, 0);
+    try testing.expectEqual(0, wide_x.codepoint);
+    try testing.expectEqual(state.colors.foreground, wide_x.fg);
+    try testing.expectEqual(state.colors.background, wide_x.bg);
+
+    const wide_y = state.resolveCell(0, 999);
+    try testing.expectEqual(0, wide_y.codepoint);
+    try testing.expectEqual(state.colors.foreground, wide_y.fg);
+    try testing.expectEqual(state.colors.background, wide_y.bg);
 }
 
 test "grapheme" {
