@@ -154,9 +154,9 @@ internal sealed class PaneActionRouter
     public event EventHandler<int>? FloatWindowRequested;
 
     /// <summary>
-    /// Raised when a Ctrl+Tab / Ctrl+Shift+Tab MRU-cycle chord fires.
-    /// The bool is true for Ctrl+Tab (next), false for Ctrl+Shift+Tab (prev).
-    /// MainWindow listens and drives the TabSwitcherController.
+    /// Raised when a Ctrl+Tab / Ctrl+Shift+Tab chord fires. The bool is true for
+    /// Ctrl+Tab (next), false for Ctrl+Shift+Tab (prev). MainWindow listens and
+    /// switches to the next/previous tab immediately, flashing the preview popup.
     /// </summary>
     public event EventHandler<bool>? MruCycleRequested;
 

@@ -94,7 +94,6 @@ public sealed partial class MainWindow : Window
     private readonly PaneHostFactory _factory;
     private readonly TabManager _tabManager;
     private readonly PaneActionRouter _router;
-    private readonly Ghostty.Tabs.TabSwitcherController _tabSwitcher;
 
     /// <summary>This window's tab manager, exposed for session capture.</summary>
     internal TabManager TabManager => _tabManager;
@@ -463,7 +462,6 @@ public sealed partial class MainWindow : Window
             getProfiles: () => App.ProfileRegistry?.Profiles ?? EmptyProfiles,
             openProfile: OpenProfile,
             bindingAction: ExecuteBindingAction);
-        _tabSwitcher = new Ghostty.Tabs.TabSwitcherController(_tabManager);
         _windowState = WindowState.Load();
         // Apply the restored window geometry when restoring; otherwise use
         // the window-state.json fallback placement.
@@ -1475,43 +1473,26 @@ public sealed partial class MainWindow : Window
         _tabManager.AdoptTab(tab);
     }
 
+    // Auto-dismiss timer for the Ctrl+Tab preview popup. Restarted on every
+    // press so rapid cycling keeps the popup up, then it fades after a pause.
+    private DispatcherTimer? _cyclePopupTimer;
+
     /// <summary>
-    /// Wire the Ctrl+Tab MRU cycle and the Ctrl+Shift+A grid overview.
-    /// The cycle popup is shown/hidden by the controller's Started/Ended
-    /// events; the apprt (TerminalControl) drives advance via the router and
-    /// commit/cancel via the host events (Ctrl-release / Esc). The overview is
-    /// a separate, focus-grabbing overlay.
+    /// Wire Ctrl+Tab / Ctrl+Shift+Tab (immediate next/previous tab switch with a
+    /// brief, auto-dismissing preview popup -- no hold-Ctrl semantics) and the
+    /// Ctrl+Shift+E grid overview.
     /// </summary>
     private void WireTabSwitcher()
     {
-        _tabSwitcher.Started += (_, candidates) =>
+        _cyclePopupTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
+        _cyclePopupTimer.Tick += (_, _) =>
         {
-            _host.IsTabCycling = true;
-            SizeTabSwitcherPopup();
-            TabSwitcherPopupUI.Show(candidates);
-            TabSwitcherPopupHost.IsOpen = true;
-        };
-        _tabSwitcher.HighlightChanged += (_, tab) => TabSwitcherPopupUI.Highlight(tab);
-        _tabSwitcher.Ended += (_, _) =>
-        {
-            _host.IsTabCycling = false;
+            _cyclePopupTimer!.Stop();
             TabSwitcherPopupHost.IsOpen = false;
         };
 
-        _router.MruCycleRequested += (_, forward) => _tabSwitcher.StartOrAdvance(forward);
+        _router.MruCycleRequested += (_, forward) => CycleTab(forward);
         _router.ShowTabOverviewRequested += (_, _) => ShowTabOverview();
-
-        // Commit/cancel originate on the apprt key thread; hop to the UI
-        // dispatcher before touching XAML / the manager. After a commit the
-        // tab has switched, so focus the new active leaf.
-        _host.TabCycleCommitRequested += () =>
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                _tabSwitcher.Commit();
-                FocusActiveLeaf();
-            });
-        _host.TabCycleCancelRequested += () =>
-            DispatcherQueue.TryEnqueue(() => _tabSwitcher.Cancel());
 
         // Grab keyboard focus only once the popup is actually open, so arrow
         // keys / Enter / Esc work. Focusing inside ShowTabOverview (before
@@ -1531,6 +1512,32 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    // Switch immediately to the next / previous tab in positional (tab-strip)
+    // order, wrapping at the ends, then flash the preview popup. Each press
+    // commits and restarts the popup's auto-dismiss timer, so repeated presses
+    // cycle through tabs with the preview visible and it fades after a pause.
+    private void CycleTab(bool forward)
+    {
+        var tabs = _tabManager.Tabs;
+        if (tabs.Count < 2) return;
+
+        var idx = tabs.IndexOf(_tabManager.ActiveTab);
+        if (idx < 0) idx = 0;
+        var next = forward
+            ? (idx + 1) % tabs.Count
+            : (idx - 1 + tabs.Count) % tabs.Count;
+        var target = tabs[next];
+
+        _tabManager.Activate(target);
+        FocusActiveLeaf();
+
+        SizeTabSwitcherPopup();
+        TabSwitcherPopupUI.Show(tabs, target, _configService.FontFamily);
+        TabSwitcherPopupHost.IsOpen = true;
+        _cyclePopupTimer?.Stop();
+        _cyclePopupTimer?.Start();
+    }
+
     // Stretch the full-window cycle popup to the current window size so its
     // centered content sits in the middle of the window.
     private void SizeTabSwitcherPopup()
@@ -1544,7 +1551,10 @@ public sealed partial class MainWindow : Window
         if (_tabManager.Tabs.Count == 0) return;
         TabOverviewUI.Width = RootGrid.ActualWidth;
         TabOverviewUI.Height = RootGrid.ActualHeight;
-        TabOverviewUI.Show(_tabManager.MruOrder, _tabManager.ActiveTab, _configService.FontFamily);
+        // Positional (tab-strip) order, not MRU: the grid is a spatial overview,
+        // so tiles should match the order tabs appear in the strip. MRU order is
+        // for the Ctrl+Tab cycle popup only.
+        TabOverviewUI.Show(_tabManager.Tabs, _tabManager.ActiveTab, _configService.FontFamily);
         TabOverviewHost.IsOpen = true;
     }
 
