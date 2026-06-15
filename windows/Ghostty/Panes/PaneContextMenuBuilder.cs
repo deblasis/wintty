@@ -1,7 +1,9 @@
 using System;
 using Ghostty.Core.Input;
 using Ghostty.Core.Panes;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace Ghostty.Panes;
 
@@ -67,6 +69,7 @@ internal static class PaneContextMenuBuilder
                 toggle.Click += (_, _) => Dispatch(item.Command,
                     invokePaneAction, invokeBindingAction,
                     promptTabTitle, promptTerminalTitle);
+                ApplyIcon(toggle, item.Icon);
                 flyout.Items.Add(toggle);
                 continue;
             }
@@ -79,8 +82,21 @@ internal static class PaneContextMenuBuilder
             menuItem.Click += (_, _) => Dispatch(item.Command,
                 invokePaneAction, invokeBindingAction,
                 promptTabTitle, promptTerminalTitle);
+            ApplyIcon(menuItem, item.Icon);
             flyout.Items.Add(menuItem);
         }
+    }
+
+    private static void ApplyIcon(MenuFlyoutItem item, string? glyph)
+    {
+        if (string.IsNullOrEmpty(glyph)) return;
+        var fontIcon = new FontIcon { Glyph = glyph };
+        // Pin to the symbol font the rest of the app uses; FontIcon's default
+        // family is not guaranteed to be the symbol set on every machine.
+        if (Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out var ff)
+            && ff is FontFamily family)
+            fontIcon.FontFamily = family;
+        item.Icon = fontIcon;
     }
 
     private static void Dispatch(
