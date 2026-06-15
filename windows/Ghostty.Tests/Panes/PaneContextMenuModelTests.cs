@@ -81,4 +81,28 @@ public class PaneContextMenuModelTests
         foreach (var item in items.Where(i => i.Kind == PaneMenuItemKind.Action))
             Assert.False(string.IsNullOrWhiteSpace(item.Label));
     }
+
+    [Fact]
+    public void Build_EveryActionHasIcon()
+    {
+        var items = PaneContextMenuModel.Build(hasSelection: true, isZoomed: false);
+        foreach (var item in items.Where(i => i.Kind == PaneMenuItemKind.Action))
+            Assert.False(string.IsNullOrEmpty(item.Icon), $"{item.Command} should have an icon");
+    }
+
+    [Fact]
+    public void Build_SeparatorsHaveNoIcon()
+    {
+        var items = PaneContextMenuModel.Build(hasSelection: true, isZoomed: false);
+        foreach (var item in items.Where(i => i.Kind == PaneMenuItemKind.Separator))
+            Assert.Null(item.Icon);
+    }
+
+    [Fact]
+    public void Build_MapsKnownGlyphs()
+    {
+        var items = PaneContextMenuModel.Build(hasSelection: true, isZoomed: false);
+        Assert.Equal("\uE8C8", items.Single(i => i.Command == PaneMenuCommand.Copy).Icon);
+        Assert.Equal("\uE777", items.Single(i => i.Command == PaneMenuCommand.ResetTerminal).Icon);
+    }
 }

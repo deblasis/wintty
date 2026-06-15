@@ -38,7 +38,8 @@ public readonly record struct PaneMenuItem(
     PaneMenuCommand Command,
     string Label,
     bool IsEnabled,
-    bool IsChecked);
+    bool IsChecked,
+    string? Icon);
 
 /// <summary>
 /// Builds the ordered pane context-menu model. Mirrors the macOS surface
@@ -49,29 +50,29 @@ public readonly record struct PaneMenuItem(
 /// </summary>
 public static class PaneContextMenuModel
 {
-    private static PaneMenuItem Action(PaneMenuCommand command, string label,
+    private static PaneMenuItem Action(PaneMenuCommand command, string label, string icon,
         bool isEnabled = true, bool isChecked = false)
-        => new(PaneMenuItemKind.Action, command, label, isEnabled, isChecked);
+        => new(PaneMenuItemKind.Action, command, label, isEnabled, isChecked, icon);
 
     private static PaneMenuItem Separator()
-        => new(PaneMenuItemKind.Separator, PaneMenuCommand.None, string.Empty, false, false);
+        => new(PaneMenuItemKind.Separator, PaneMenuCommand.None, string.Empty, false, false, null);
 
     public static IReadOnlyList<PaneMenuItem> Build(bool hasSelection, bool isZoomed)
         => new[]
         {
-            Action(PaneMenuCommand.Copy, "Copy", isEnabled: hasSelection),
-            Action(PaneMenuCommand.Paste, "Paste"),
-            Action(PaneMenuCommand.SelectAll, "Select All"),
+            Action(PaneMenuCommand.Copy,                "Copy",                     "\uE8C8", isEnabled: hasSelection),
+            Action(PaneMenuCommand.Paste,               "Paste",                    "\uE77F"),
+            Action(PaneMenuCommand.SelectAll,           "Select All",               "\uE8B3"),
             Separator(),
-            Action(PaneMenuCommand.SplitRight, "Split Right"),
-            Action(PaneMenuCommand.SplitDown, "Split Down"),
-            Action(PaneMenuCommand.ZoomPane, "Zoom Pane", isChecked: isZoomed),
+            Action(PaneMenuCommand.SplitRight,          "Split Right",              "\uF57E"),
+            Action(PaneMenuCommand.SplitDown,           "Split Down",               "\uF57E"),
+            Action(PaneMenuCommand.ZoomPane,            "Zoom Pane",                "\uE740", isChecked: isZoomed),
             Separator(),
-            Action(PaneMenuCommand.CommandPalette, "Command Palette"),
-            Action(PaneMenuCommand.ResetTerminal, "Reset Terminal"),
-            Action(PaneMenuCommand.ToggleInspector, "Toggle Inspector"),
+            Action(PaneMenuCommand.CommandPalette,      "Command Palette",          "\uE756"),
+            Action(PaneMenuCommand.ResetTerminal,       "Reset Terminal",           "\uE777"),
+            Action(PaneMenuCommand.ToggleInspector,     "Toggle Inspector",         "\uEBE8"),
             Separator(),
-            Action(PaneMenuCommand.ChangeTabTitle, "Change Tab Title..."),
-            Action(PaneMenuCommand.ChangeTerminalTitle, "Change Terminal Title..."),
+            Action(PaneMenuCommand.ChangeTabTitle,      "Change Tab Title...",      "\uE70F"),
+            Action(PaneMenuCommand.ChangeTerminalTitle, "Change Terminal Title...", "\uE8AC"),
         };
 }
