@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Ghostty.Controls;
 using Ghostty.Core.Tabs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -17,6 +18,18 @@ internal sealed partial class TabSwitcherPopup : UserControl
 {
     private readonly Dictionary<TabModel, Border> _cellByTab = new();
 
+    // Fluent theme resources the tile build loop and Highlight() need, resolved
+    // once per Show() instead of re-hitting the resource dictionary for every
+    // element of every tile. Re-resolved on each open (not cached at ctor) so a
+    // theme switch between openings is honored.
+    private SwitcherTheme _theme;
+
+    private readonly record struct SwitcherTheme(
+        double CaptionFontSize,
+        Brush CardBackground,
+        Brush BorderIdle,
+        Brush BorderActive);
+
     // Cap each title so a long one can't stretch a tile; it ellipsizes past this.
     private const double TitleMaxWidth = 150;
     private const double PreviewWidth = 150;
@@ -29,6 +42,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
     {
         CandidateRow.Children.Clear();
         _cellByTab.Clear();
+        _theme = ResolveTheme();
 
         var renderer = new PanePreviewRenderer(PreviewFont.Resolve(fontFamily));
         foreach (var tab in tabs)
@@ -46,7 +60,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = TitleMaxWidth,
-                FontSize = (double)Application.Current.Resources["CaptionTextBlockFontSize"],
+                FontSize = _theme.CaptionFontSize,
             };
 
             var header = new StackPanel
@@ -75,8 +89,8 @@ internal sealed partial class TabSwitcherPopup : UserControl
             {
                 CornerRadius = new CornerRadius(8),
                 BorderThickness = new Thickness(2),
-                BorderBrush = (Brush)Application.Current.Resources["SubtleFillColorTransparentBrush"],
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+                BorderBrush = _theme.BorderIdle,
+                Background = _theme.CardBackground,
                 Padding = new Thickness(6),
                 Child = content,
             };
@@ -87,13 +101,27 @@ internal sealed partial class TabSwitcherPopup : UserControl
         Highlight(active);
     }
 
+    // Fallbacks mirror the Fluent dark-theme token values; they only apply if a
+    // key is missing or mistyped (e.g. an early-init/teardown race), which the
+    // AOT-safe ThemeResources.Get swallows instead of throwing mid-open.
+    private static SwitcherTheme ResolveTheme() => new(
+        CaptionFontSize: ThemeResources.Get("CaptionTextBlockFontSize", 12.0),
+        CardBackground: ThemeResources.Get<Brush>("CardBackgroundFillColorDefaultBrush",
+            new SolidColorBrush(Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF))),
+        // SubtleFillColorTransparent is fully transparent white in both themes.
+        BorderIdle: ThemeResources.Get<Brush>("SubtleFillColorTransparentBrush",
+            new SolidColorBrush(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF))),
+        // The selection ring; defaults to the Fluent dark accent (SystemAccentColorLight2).
+        BorderActive: ThemeResources.Get<Brush>("AccentFillColorDefaultBrush",
+            new SolidColorBrush(Color.FromArgb(0xFF, 0x60, 0xCD, 0xFF))));
+
     private void Highlight(TabModel tab)
     {
         foreach (var (model, cell) in _cellByTab)
         {
             cell.BorderBrush = ReferenceEquals(model, tab)
-                ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"]
-                : (Brush)Application.Current.Resources["SubtleFillColorTransparentBrush"];
+                ? _theme.BorderActive
+                : _theme.BorderIdle;
         }
     }
 }
