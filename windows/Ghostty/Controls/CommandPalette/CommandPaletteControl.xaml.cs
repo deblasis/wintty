@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.ComponentModel;
 using Ghostty.Commands;
 using Ghostty.Core.Config;
@@ -361,7 +362,10 @@ internal sealed partial class CommandPaletteControl : UserControl
             }
         }
 
-        if (root.Children[^1] is Viewbox pathHost)
+        // Locate the custom path-icon host by type rather than by child index,
+        // so reordering the template's children can't silently break it (the
+        // template has exactly one Viewbox).
+        if (root.Children.OfType<Viewbox>().FirstOrDefault() is { } pathHost)
             pathHost.Visibility = usePathIcon ? Visibility.Visible : Visibility.Collapsed;
 
         // Title + Description (column 2 = StackPanel with 2 TextBlocks)

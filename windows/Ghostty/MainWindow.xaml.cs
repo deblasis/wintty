@@ -1221,7 +1221,11 @@ public sealed partial class MainWindow : Window
         // (which target the active surface / active pane) act on this pane.
         control.Focus(FocusState.Programmatic);
 
-        var paneHost = (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
+        // Use the PaneHost that raised the event (the sender) so the Zoom state
+        // reflects the right-clicked pane directly, without depending on the
+        // (async) focus change having settled ActiveTab.
+        var paneHost = sender as Panes.PaneHost
+            ?? (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
 
         var flyout = PaneContextMenuBuilder.Build(
             invokePaneAction: _router.Invoke,

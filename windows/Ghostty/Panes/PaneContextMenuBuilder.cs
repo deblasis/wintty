@@ -24,13 +24,11 @@ internal static class PaneContextMenuBuilder
         Action promptTerminalTitle)
     {
         var flyout = new MenuFlyout();
-        Populate(flyout, invokePaneAction, invokeBindingAction,
-            hasSelection(), isZoomed(),
-            promptTabTitle, promptTerminalTitle);
 
-        // Rebuild on each open so Copy's enabled state and the Zoom icon
-        // reflect current selection/zoom. Matches TabContextMenuBuilder's
-        // Opening re-check.
+        // Populate on each open so Copy's enabled state and the Zoom icon
+        // reflect current selection/zoom. Opening fires before the flyout is
+        // shown, so there's no need to populate eagerly here. Matches
+        // TabContextMenuBuilder's Opening re-check.
         flyout.Opening += (_, _) =>
         {
             flyout.Items.Clear();

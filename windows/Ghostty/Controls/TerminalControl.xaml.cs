@@ -1005,20 +1005,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        // Complete the suppressed right-click: open the context menu instead
-        // of forwarding the button. We open on release so it feels like a
-        // normal Windows right-click.
-        if (_rightButtonOpensMenu)
+        // Complete the suppressed right-click on its matching right-release,
+        // opening the menu so it feels like a normal Windows right-click. We
+        // consume the flag ONLY on the right-release: an unrelated release (or
+        // a right-release that never arrives because the pointer left the
+        // panel) must not clear it early and forward an orphan button to
+        // libghostty. A stale flag self-heals on the next right-press.
+        if (_rightButtonOpensMenu
+            && e.GetCurrentPoint(Panel).Properties.PointerUpdateKind
+               == PointerUpdateKind.RightButtonReleased)
         {
             _rightButtonOpensMenu = false;
-            var props = e.GetCurrentPoint(Panel).Properties;
-            if (props.PointerUpdateKind == PointerUpdateKind.RightButtonReleased)
-            {
-                e.Handled = true;
-                var pos = e.GetCurrentPoint(this).Position;
-                ContextMenuRequested?.Invoke(this, pos);
-                return;
-            }
+            e.Handled = true;
+            var pos = e.GetCurrentPoint(this).Position;
+            ContextMenuRequested?.Invoke(this, pos);
+            return;
         }
 
         SendMouseButton(e, GhosttyMouseState.Release);
