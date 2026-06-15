@@ -1636,6 +1636,40 @@ pub const CAPI = struct {
         }
     };
 
+    // Matches ghostty_config_color_s: separate r/g/b components (not a packed
+    // value) for C-friendliness, consistent with the rest of the C API.
+    const Color = extern struct {
+        r: u8,
+        g: u8,
+        b: u8,
+
+        fn from(rgb: terminal.color.RGB) Color {
+            return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
+        }
+    };
+
+    // ghostty_cell_s: one resolved cell.
+    const CellEntry = extern struct {
+        codepoint: u32,
+        fg: Color,
+        bg: Color,
+    };
+
+    // ghostty_cells_s: the viewport as row-major resolved cells.
+    const Cells = extern struct {
+        cells: ?[*]CellEntry = null,
+        rows: u16 = 0,
+        cols: u16 = 0,
+
+        pub fn deinit(self: *Cells) void {
+            if (self.cells) |ptr| {
+                const len: usize = @as(usize, self.rows) * @as(usize, self.cols);
+                global.alloc.free(ptr[0..len]);
+                self.cells = null;
+            }
+        }
+    };
+
     // ghostty_point_s
     const Point = extern struct {
         tag: Tag,
@@ -2006,6 +2040,104 @@ pub const CAPI = struct {
     }
 
     export fn ghostty_surface_free_text(_: *Surface, ptr: *Text) void {
+        ptr.deinit();
+    }
+
+    /// Read the viewport cells with resolved colors. Used by the tab overview
+    /// to render a colored preview. Expensive; callers should cache + throttle.
+    export fn ghostty_surface_read_cells(
+        surface: *Surface,
+        result: *Cells,
+    ) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lock();
+        defer core_surface.renderer_state.mutex.unlock();
+        return readCellsLocked(core_surface, result) catch |err| {
+            log.warn("error reading cells err={}", .{err});
+            return false;
+        };
+    }
+
+    fn readCellsLocked(core_surface: *CoreSurface, result: *Cells) !bool {
+        const alloc = global.alloc;
+
+        // Build a render state for the current viewport. This resolves cell
+        // colors (palette, default fg/bg, reverse mode) the same way the
+        // renderer does, so we don't reimplement color logic here.
+        var state: terminal.RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, core_surface.renderer_state.terminal);
+
+        // Iterate the populated row_data: update() resizes it to exactly the
+        // viewport height, so its length is the authoritative row count here
+        // (using it instead of state.rows keeps the loop self-evidently in bounds).
+        const row_data = state.row_data.slice();
+        const row_cells = row_data.items(.cells);
+        const rows: usize = row_cells.len;
+        const cols: usize = state.cols;
+        if (rows == 0 or cols == 0) return false;
+
+        const out = try alloc.alloc(CellEntry, rows * cols);
+        errdefer alloc.free(out);
+
+        const default_entry: CellEntry = .{
+            .codepoint = 0,
+            .fg = Color.from(state.colors.foreground),
+            .bg = Color.from(state.colors.background),
+        };
+        for (0..rows) |y| {
+            const cell_slice = row_cells[y].slice();
+            const raws = cell_slice.items(.raw);
+            const styles = cell_slice.items(.style);
+            // Rows are guaranteed `cols` wide, but clamp defensively so a short
+            // row can never index past its cell storage.
+            const ncols = @min(cols, raws.len);
+            for (0..cols) |x| {
+                if (x >= ncols) {
+                    out[y * cols + x] = default_entry;
+                    continue;
+                }
+                const raw = raws[x];
+                // RenderState.Cell.style is UNDEFINED for default-style cells
+                // (style_id == 0) - reading it would feed garbage to fg()/bg().
+                // Use the default style for those (the common case: blank cells
+                // and unstyled text).
+                const style: terminal.Style =
+                    if (raw.style_id == 0) .{} else styles[x];
+                const cp: u32 = switch (raw.content_tag) {
+                    .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)
+                        0
+                    else
+                        raw.content.codepoint,
+                    // bg-only cells carry no text.
+                    .bg_color_palette, .bg_color_rgb => 0,
+                };
+                const resolved_fg = style.fg(.{
+                    .default = state.colors.foreground,
+                    .palette = &state.colors.palette,
+                });
+                const resolved_bg = style.bg(&raw, &state.colors.palette) orelse
+                    state.colors.background;
+                // Inverse video swaps fg and bg.
+                const fg = if (style.flags.inverse) resolved_bg else resolved_fg;
+                const bg = if (style.flags.inverse) resolved_fg else resolved_bg;
+                out[y * cols + x] = .{
+                    .codepoint = cp,
+                    .fg = Color.from(fg),
+                    .bg = Color.from(bg),
+                };
+            }
+        }
+
+        result.* = .{
+            .cells = out.ptr,
+            .rows = @intCast(rows),
+            .cols = @intCast(cols),
+        };
+        return true;
+    }
+
+    export fn ghostty_surface_free_cells(_: *Surface, ptr: *Cells) void {
         ptr.deinit();
     }
 
