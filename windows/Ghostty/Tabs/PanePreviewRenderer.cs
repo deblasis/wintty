@@ -58,32 +58,38 @@ internal sealed class PanePreviewRenderer
                 Width = w,
                 Height = h,
                 Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0E)),
-                Child = BuildPaneContent(leaf, w, h, fontSize),
             };
+            // A null child means "draw nothing" (blank/too-small/dead pane): the
+            // Border's dark fill is the whole preview, so we skip allocating a
+            // throwaway placeholder element for it.
+            if (BuildPaneContent(leaf, w, h, fontSize) is { } content)
+                pane.Child = content;
             Canvas.SetLeft(pane, x);
             Canvas.SetTop(pane, y);
             body.Children.Add(pane);
         }
     }
 
-    // The colored preview for one leaf, or an empty element when blank/too-small/dead.
-    private UIElement BuildPaneContent(LeafPane leaf, double w, double h, double fontSize)
+    // The colored preview for one leaf, or null when blank/too-small/dead. Null
+    // lets the caller leave the Border childless (its dark fill is the preview)
+    // rather than allocating a throwaway placeholder element per such pane.
+    private UIElement? BuildPaneContent(LeafPane leaf, double w, double h, double fontSize)
     {
         if (w < MinPaneSideForText || h < MinPaneSideForText)
-            return new Grid(); // geometry-only: just the dark fill
+            return null; // geometry-only: just the dark fill
 
         var lineHeight = fontSize * 1.36;
         var charWidth = fontSize * 0.6;
         var rows = Math.Min(MaxPreviewRows, (int)((h - 8) / lineHeight));
         var cols = (int)((w - 12) / charWidth);
-        if (rows < 1 || cols < 1) return new Grid();
+        if (rows < 1 || cols < 1) return null;
 
         var grid = ReadGrid(leaf);
         var lines = grid is { } g
             ? CellGridFormatter.Format(g, rows, cols)
             : (IReadOnlyList<PreviewLine>)Array.Empty<PreviewLine>();
 
-        if (lines.Count == 0) return new Grid(); // blank pane: just the dark fill
+        if (lines.Count == 0) return null; // blank pane: just the dark fill
 
         return BuildLinesView(lines, fontSize);
     }
