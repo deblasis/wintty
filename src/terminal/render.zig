@@ -223,6 +223,88 @@ pub const RenderState = struct {
         style: Style,
     };
 
+    /// A single cell resolved to its codepoint and colors, with the per-cell
+    /// resolution a renderer applies to a normal cell: palette and
+    /// default-color lookups, reverse-video swap, wide-character spacer
+    /// handling, and background-only cells.
+    pub const ResolvedCell = struct {
+        /// The codepoint to display. This is 0 for the trailing half of a
+        /// wide character (`spacer_tail`) and for background-only cells,
+        /// neither of which carry text.
+        codepoint: u32,
+
+        /// The resolved foreground and background, already swapped if the
+        /// cell has the inverse (reverse-video) flag set.
+        fg: color.RGB,
+        bg: color.RGB,
+    };
+
+    /// Resolve the viewport cell at (x, y) to its codepoint and colors, so
+    /// callers (e.g. previews) don't have to reimplement color resolution.
+    /// This applies the palette/default lookups and the reverse-video swap
+    /// the renderer uses for a normal cell; it intentionally does NOT apply
+    /// selection, cursor, or search-highlight styling, which previews don't
+    /// need.
+    ///
+    /// Out-of-range coordinates and short rows resolve to a blank cell using
+    /// the default fg/bg, so callers can iterate `cols`/`rows` without their
+    /// own bounds handling.
+    ///
+    /// IMPORTANT: this must be called after `update` and while the terminal
+    /// state is unchanged, same as the other read helpers here.
+    pub fn resolveCell(
+        self: *const RenderState,
+        x: usize,
+        y: usize,
+    ) ResolvedCell {
+        const blank: ResolvedCell = .{
+            .codepoint = 0,
+            .fg = self.colors.foreground,
+            .bg = self.colors.background,
+        };
+
+        const row_cells = self.row_data.slice().items(.cells);
+        if (y >= row_cells.len) return blank;
+
+        const cell_slice = row_cells[y].slice();
+        const raws = cell_slice.items(.raw);
+        if (x >= raws.len) return blank;
+
+        const raw = raws[x];
+
+        // RenderState.Cell.style is UNDEFINED for default-style cells
+        // (style_id == 0, the common case for blank cells and unstyled text).
+        // Reading the style slice there would feed garbage to fg()/bg(), so
+        // use a default style for those instead.
+        const style: Style = if (raw.style_id == 0)
+            .{}
+        else
+            cell_slice.items(.style)[x];
+
+        const cp: u32 = switch (raw.content_tag) {
+            .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)
+                0
+            else
+                raw.content.codepoint,
+            // Background-only cells carry no text.
+            .bg_color_palette, .bg_color_rgb => 0,
+        };
+
+        const resolved_fg = style.fg(.{
+            .default = self.colors.foreground,
+            .palette = &self.colors.palette,
+        });
+        const resolved_bg = style.bg(&raw, &self.colors.palette) orelse
+            self.colors.background;
+
+        // Inverse video swaps fg and bg.
+        return .{
+            .codepoint = cp,
+            .fg = if (style.flags.inverse) resolved_bg else resolved_fg,
+            .bg = if (style.flags.inverse) resolved_fg else resolved_bg,
+        };
+    }
+
     // Dirty state.
     pub const Dirty = lib.Enum(lib.target, &.{
         // Not dirty at all. Can skip rendering if prior state was
@@ -1012,6 +1094,196 @@ test "styled text" {
     }
     try testing.expectEqual('C', cells[0].get(2).raw.codepoint());
     try testing.expectEqual(0, cells[0].get(3).raw.codepoint());
+}
+
+test "resolveCell default style" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("A");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // A default-style cell (style_id == 0) must resolve using the default
+    // style, NOT by reading the undefined per-cell style. The colors are the
+    // terminal defaults and the codepoint comes through unchanged.
+    const a = state.resolveCell(0, 0);
+    try testing.expectEqual('A', a.codepoint);
+    try testing.expectEqual(state.colors.foreground, a.fg);
+    try testing.expectEqual(state.colors.background, a.bg);
+
+    // A blank (never-written) cell is also default style with no codepoint.
+    const blank = state.resolveCell(5, 0);
+    try testing.expectEqual(0, blank.codepoint);
+    try testing.expectEqual(state.colors.foreground, blank.fg);
+    try testing.expectEqual(state.colors.background, blank.bg);
+}
+
+test "resolveCell non-default style" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // Foreground palette 1, background palette 2.
+    s.nextSlice("\x1b[38;5;1;48;5;2mB");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    const b = state.resolveCell(0, 0);
+    try testing.expectEqual('B', b.codepoint);
+    try testing.expectEqual(state.colors.palette[1], b.fg);
+    try testing.expectEqual(state.colors.palette[2], b.bg);
+}
+
+test "resolveCell wide character spacer tail" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\u{4E16}"); // A wide CJK character occupying two cells.
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // The leading cell keeps its codepoint.
+    try testing.expectEqual(0x4E16, state.resolveCell(0, 0).codepoint);
+    // The spacer_tail half carries no codepoint.
+    try testing.expectEqual(0, state.resolveCell(1, 0).codepoint);
+}
+
+test "resolveCell background-only cell" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 5,
+        .rows = 2,
+    });
+    defer t.deinit(alloc);
+
+    // Set a direct RGB background, then erase to the right so the cleared
+    // cells are stored as background-only cells (content_tag bg_color_rgb).
+    for ("ABCDE") |c| try t.print(c);
+    t.setCursorPos(1, 3); // row 1, col 3 (1-based) => x = 2
+    try t.setAttribute(.{ .direct_color_bg = .{ .r = 0x12, .g = 0x34, .b = 0x56 } });
+    t.eraseLine(.right, false);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // The erased cell has no text but resolves its background from the cell.
+    const cell = state.resolveCell(2, 0);
+    try testing.expectEqual(0, cell.codepoint);
+    try testing.expectEqual(color.RGB{ .r = 0x12, .g = 0x34, .b = 0x56 }, cell.bg);
+    // Foreground falls back to the default since the cell carries no fg.
+    try testing.expectEqual(state.colors.foreground, cell.fg);
+}
+
+test "resolveCell inverse video swaps fg and bg" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[7mC"); // Reverse video.
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // With default colors, inverse swaps the resolved fg/bg.
+    const c = state.resolveCell(0, 0);
+    try testing.expectEqual('C', c.codepoint);
+    try testing.expectEqual(state.colors.background, c.fg);
+    try testing.expectEqual(state.colors.foreground, c.bg);
+}
+
+test "resolveCell inverse video swaps resolved palette colors" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    // Inverse, foreground palette 1, background palette 2.
+    s.nextSlice("\x1b[7;38;5;1;48;5;2mD");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // The swap must operate on the resolved colors, not the defaults: the
+    // displayed fg is the resolved bg (palette 2) and vice versa.
+    const d = state.resolveCell(0, 0);
+    try testing.expectEqual('D', d.codepoint);
+    try testing.expectEqual(state.colors.palette[2], d.fg);
+    try testing.expectEqual(state.colors.palette[1], d.bg);
+}
+
+test "resolveCell out of range resolves to blank" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 10,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    // Out-of-range column and row both fall back to a blank default cell so
+    // callers can iterate cols/rows without their own bounds handling.
+    const wide_x = state.resolveCell(999, 0);
+    try testing.expectEqual(0, wide_x.codepoint);
+    try testing.expectEqual(state.colors.foreground, wide_x.fg);
+    try testing.expectEqual(state.colors.background, wide_x.bg);
+
+    const wide_y = state.resolveCell(0, 999);
+    try testing.expectEqual(0, wide_y.codepoint);
+    try testing.expectEqual(state.colors.foreground, wide_y.fg);
+    try testing.expectEqual(state.colors.background, wide_y.bg);
 }
 
 test "grapheme" {
