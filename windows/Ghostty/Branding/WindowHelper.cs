@@ -52,6 +52,14 @@ internal static class WindowHelper
         => TryApplyIcon(window, "wintty-settings.ico");
 
     /// <summary>
+    /// Inspector-window variant. Uses the bug .ico so the taskbar /
+    /// alt-tab icon matches the command palette's "Toggle Inspector"
+    /// glyph and the window is distinguishable from terminal windows.
+    /// </summary>
+    public static void TryApplyInspectorIcon(Window window)
+        => TryApplyIcon(window, "wintty-inspector.ico");
+
+    /// <summary>
     /// Swallows the file-not-found race (asset deleted between the
     /// File.Exists check and the SetIcon call) and the native HRESULT
     /// path. A missing window icon is cosmetic, not crash-worthy.
