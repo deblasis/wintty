@@ -244,4 +244,65 @@ public sealed class ThemeResolutionTests
         foreach (uint c in new uint[] { 0x000000, 0xFFFFFF, 0x808080, 0x7F7F7F, 0x00FF00, 0x0000FF })
             Assert.Equal(ThemeResolution.IsBackgroundDark(c), ThemeResolution.PreferLightForeground(c));
     }
+
+    // ── ContrastRatio: WCAG ratio ────────────────────────────────────────
+
+    [Fact]
+    public void ContrastRatio_BlackOnWhite_Is21() =>
+        Assert.Equal(21.0, ThemeResolution.ContrastRatio(0x000000, 0xFFFFFF), 3);
+
+    [Fact]
+    public void ContrastRatio_SameColor_Is1() =>
+        Assert.Equal(1.0, ThemeResolution.ContrastRatio(0x3B82F6, 0x3B82F6), 3);
+
+    [Fact]
+    public void ContrastRatio_IsOrderIndependent() =>
+        Assert.Equal(
+            ThemeResolution.ContrastRatio(0x101010, 0xEEEEEE),
+            ThemeResolution.ContrastRatio(0xEEEEEE, 0x101010), 6);
+
+    // ── EnsureReadableForeground: legible active-tab title ───────────────
+
+    [Fact]
+    public void EnsureReadable_WhiteTitleOnWhiteAccent_FallsBackToBlack()
+    {
+        // The reported bug: empty config → cursor-colour (selected-tab
+        // background) defaults to white, while the inherited title brush is
+        // also white. The active title must drop to black to stay legible.
+        Assert.Equal(0x000000u,
+            ThemeResolution.EnsureReadableForeground(0xFFFFFF, 0xFFFFFF));
+    }
+
+    [Fact]
+    public void EnsureReadable_BlackTitleOnBlackAccent_FallsBackToWhite() =>
+        Assert.Equal(0xFFFFFFu,
+            ThemeResolution.EnsureReadableForeground(0x000000, 0x000000));
+
+    [Fact]
+    public void EnsureReadable_KeepsDesired_WhenItAlreadyContrasts()
+    {
+        // Shell-theme default palette: dark cursor-text over a light accent
+        // already reads fine, so the user's chosen colour is preserved.
+        Assert.Equal(0x1E1E2Eu,
+            ThemeResolution.EnsureReadableForeground(0xFFFFFF, 0x1E1E2E));
+        Assert.Equal(0xFFFFFFu,
+            ThemeResolution.EnsureReadableForeground(0x000000, 0xFFFFFF));
+    }
+
+    [Fact]
+    public void EnsureReadable_BothLight_FallsBackToBlack()
+    {
+        // Pathological shell palette where accent and active-text both land
+        // light: contrast is too low, so fall back to a dark foreground.
+        Assert.Equal(0x000000u,
+            ThemeResolution.EnsureReadableForeground(0xEEEEEE, 0xFFFFFF));
+    }
+
+    [Fact]
+    public void EnsureReadable_BothDark_FallsBackToWhite()
+    {
+        // ...and the mirror: both dark → fall back to a light foreground.
+        Assert.Equal(0xFFFFFFu,
+            ThemeResolution.EnsureReadableForeground(0x111111, 0x000000));
+    }
 }

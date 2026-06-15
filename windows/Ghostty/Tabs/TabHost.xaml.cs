@@ -452,7 +452,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!theme.IsEnabled) return;
 
         var accentBrush = new SolidColorBrush(theme.AccentColor);
-        var activeTextBrush = new SolidColorBrush(theme.ActiveTabText);
         var tabBgBrush = new SolidColorBrush(theme.TabBarBackground);
 
         // Background resources on TabViewControl work with a theme toggle.
@@ -476,7 +475,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // accent background, so the active brush gives them zero contrast
         // (#342). Pick a luminance-readable foreground over the tab-bar
         // background and mute it to ~70% so inactive reads as inactive.
-        _shellActiveTextBrush = activeTextBrush;
+        //
+        // Calibrate the active title against the accent it sits on. The raw
+        // ActiveTabText (cursor-text, or the bg fallback) can land at the
+        // same luminance pole as the accent for some palettes (both light or
+        // both dark), which erases the title. Keep it when it contrasts;
+        // otherwise drop to a readable black/white. (#342)
+        uint accentPacked = PackColor(theme.AccentColor);
+        uint activePacked = PackColor(theme.ActiveTabText);
+        _shellActiveTextBrush = new SolidColorBrush(UnpackColor(
+            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked)));
+
         uint tabBgPacked = (uint)((theme.TabBarBackground.R << 16)
             | (theme.TabBarBackground.G << 8)
             | theme.TabBarBackground.B);
@@ -490,20 +499,47 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private SolidColorBrush? _shellActiveTextBrush;
     private SolidColorBrush? _shellInactiveTextBrush;
 
-    // Recolor every tab title to its active/inactive shell-theme brush.
-    // No-op unless a shell theme is active (brushes non-null). The active
-    // brush is calibrated against the accent background; the inactive
-    // brush is a muted, luminance-readable foreground over the near-bg
-    // tab-bar background — without this, inactive titles inherited the
-    // active brush and vanished (#342).
+    // Default-path (no shell theme) selected-tab background = the cursor
+    // accent, and the contrast-safe title brush derived from it. Cached so
+    // ClearShellTheme can restore a deterministic selected background and
+    // RecolorTabText can keep the active title legible on it.
+    private SolidColorBrush? _accentBrush;
+    private SolidColorBrush? _defaultActiveTextBrush;
+
+    // Recolor every tab title for the current selection.
+    //
+    // Shell theme on: active titles use the accent-calibrated brush and
+    // inactive titles use the muted near-bg brush — without the split,
+    // inactive titles inherited the active brush and vanished (#342).
+    //
+    // Shell theme off (default): only the active tab sits on the cursor
+    // accent (SetAccentColor paints the selected-tab background), which is
+    // light for the default palette. Give that one title a contrast-safe
+    // brush; leave the others on the inherited theme foreground (white on
+    // the default dark, unselected tab background).
     private void RecolorTabText()
     {
-        if (_shellActiveTextBrush is null || _shellInactiveTextBrush is null) return;
+        bool shell = _shellActiveTextBrush is not null && _shellInactiveTextBrush is not null;
         foreach (var (model, tb) in _headerTextByModel)
-            tb.Foreground = ReferenceEquals(model, _manager.ActiveTab)
-                ? _shellActiveTextBrush
-                : _shellInactiveTextBrush;
+        {
+            bool active = ReferenceEquals(model, _manager.ActiveTab);
+            if (shell)
+                tb.Foreground = active ? _shellActiveTextBrush! : _shellInactiveTextBrush!;
+            else if (active && _defaultActiveTextBrush is not null)
+                tb.Foreground = _defaultActiveTextBrush;
+            else
+                tb.ClearValue(TextBlock.ForegroundProperty);
+        }
     }
+
+    // Pack/unpack between WinUI's Windows.UI.Color and the 0x00RRGGBB form
+    // ThemeResolution works in.
+    private static uint PackColor(Windows.UI.Color c) =>
+        ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+    private static Windows.UI.Color UnpackColor(uint packed) =>
+        Windows.UI.Color.FromArgb(0xFF,
+            (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed);
 
     private ElementTheme _cachedTheme = ElementTheme.Default;
 
@@ -515,18 +551,27 @@ internal sealed partial class TabHost : UserControl, ITabHost
     internal void ClearShellTheme()
     {
         TabViewControl.Resources.Remove("TabViewBackground");
-        TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
         _shellActiveTextBrush = null;
         _shellInactiveTextBrush = null;
 
-        // Revert each tab title's Foreground to its inherited theme
-        // brush so the default WinUI text color returns.
-        foreach (var tb in _headerTextByModel.Values)
-            tb.ClearValue(TextBlock.ForegroundProperty);
+        // The selected-tab background resource is shared with the default
+        // (cursor-accent) path, so don't just remove it — restore the cached
+        // accent. Otherwise a config reload (which clears the shell theme
+        // after SetAccentColor has run) would drop the accent and the active
+        // title's contrast decision would be made against the wrong
+        // background. Falls back to removal only before SetAccentColor has
+        // ever run (first ClearShellTheme at startup).
+        if (_accentBrush is not null)
+            TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = _accentBrush;
+        else
+            TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
 
-        // Toggle theme to force WinUI to re-read the default
-        // background resources now that the overrides are gone.
-        // Foregrounds don't need this — ClearValue above is immediate.
+        // Recolor titles for the default path: the active tab gets the
+        // contrast-safe brush, the rest revert to the inherited theme brush.
+        RecolorTabText();
+
+        // Toggle theme to force WinUI to re-read the background resources.
+        // Foregrounds don't need this — RecolorTabText above is immediate.
         TabViewControl.RequestedTheme = ElementTheme.Light;
         TabViewControl.RequestedTheme = _cachedTheme;
     }
@@ -543,9 +588,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void SetAccentColor(Windows.UI.Color color)
     {
-        var c = Microsoft.UI.ColorHelper.FromArgb(color.A, color.R, color.G, color.B);
-        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
-            new SolidColorBrush(c);
+        // Cache the cursor-derived accent as the default-path selected-tab
+        // background, and derive a title colour that stays legible on it.
+        // cursor-color falls back to the (light) foreground for the default
+        // palette, so an inherited white title would be invisible on the
+        // selected tab — EnsureReadableForeground maps it to black.
+        _accentBrush = new SolidColorBrush(
+            Windows.UI.Color.FromArgb(0xFF, color.R, color.G, color.B));
+        _defaultActiveTextBrush = new SolidColorBrush(UnpackColor(
+            ThemeResolution.EnsureReadableForeground(PackColor(color), 0xFFFFFF)));
+
+        // When a shell theme is active it owns the selected-tab background
+        // and the active title (ApplyShellTheme). Don't fight it here; keep
+        // the cache warm for the moment the shell theme is turned off.
+        if (_shellActiveTextBrush is not null) return;
+
+        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = _accentBrush;
+        RecolorTabText();
+
         // Force re-apply by toggling selection so the TabView picks
         // up the new brush. Suppress the event to avoid side effects.
         if (TabViewControl.SelectedItem is not null)
