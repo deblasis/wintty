@@ -537,14 +537,20 @@ internal static partial class NativeMethods
         try
         {
             int rows = native.Rows, cols = native.Cols;
-            var count = rows * cols;
-            var managed = new Ghostty.Core.Tabs.Cell[count < 0 ? 0 : count];
-            if (native.Cells != IntPtr.Zero && count > 0)
+            // Rows/Cols are ushort; compute in long so a malformed native return
+            // can't overflow int and yield a CellGrid whose dimensions outrun its
+            // cell array. Cap at a sane cell budget (any real viewport is tiny).
+            long total = (long)rows * cols;
+            if (total <= 0 || total > 1_000_000) return null;
+            var n = (int)total;
+
+            var managed = new Ghostty.Core.Tabs.Cell[n];
+            if (native.Cells != IntPtr.Zero)
             {
                 unsafe
                 {
                     var p = (GhosttyCell*)native.Cells;
-                    for (var i = 0; i < count; i++)
+                    for (var i = 0; i < n; i++)
                     {
                         var fg = (uint)((p[i].FgR << 16) | (p[i].FgG << 8) | p[i].FgB);
                         var bg = (uint)((p[i].BgR << 16) | (p[i].BgG << 8) | p[i].BgB);

@@ -2057,9 +2057,9 @@ pub const CAPI = struct {
         defer state.deinit(alloc);
         try state.update(alloc, core_surface.renderer_state.terminal);
 
-        // Drive the iteration by the actual populated row_data, NOT state.rows:
-        // RenderState may populate fewer rows than the nominal viewport height,
-        // and indexing past row_data.len would read out of bounds.
+        // Iterate the populated row_data: update() resizes it to exactly the
+        // viewport height, so its length is the authoritative row count here
+        // (using it instead of state.rows keeps the loop self-evidently in bounds).
         const row_data = state.row_data.slice();
         const row_cells = row_data.items(.cells);
         const rows: usize = row_cells.len;

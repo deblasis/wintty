@@ -87,7 +87,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
         Highlight(active);
     }
 
-    public void Highlight(TabModel tab)
+    private void Highlight(TabModel tab)
     {
         foreach (var (model, cell) in _cellByTab)
         {
