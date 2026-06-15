@@ -497,8 +497,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private SolidColorBrush? _shellActiveTextBrush;
     private SolidColorBrush? _shellInactiveTextBrush;
 
-    // Default-path (no shell theme) selected-tab background = the cursor
-    // accent, and the contrast-safe title brush derived from it. Cached so
+    // Default-path (no shell theme) selected-tab background = the terminal
+    // background, and the contrast-safe title brush derived from it. Cached so
     // ClearShellTheme can restore a deterministic selected background and
     // RecolorTabText can keep the active title legible on it.
     private SolidColorBrush? _accentBrush;
@@ -510,11 +510,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // inactive titles use the muted near-bg brush — without the split,
     // inactive titles inherited the active brush and vanished (#342).
     //
-    // Shell theme off (default): only the active tab sits on the cursor
-    // accent (SetAccentColor paints the selected-tab background), which is
-    // light for the default palette. Give that one title a contrast-safe
-    // brush; leave the others on the inherited theme foreground (white on
-    // the default dark, unselected tab background).
+    // Shell theme off (default): only the active tab sits on the terminal
+    // background fill (SetSelectedTabColors paints the selected-tab
+    // background). Give that one title the contrast-safe brush; leave the
+    // others on the inherited theme foreground (white on the default dark,
+    // unselected tab background).
     private void RecolorTabText()
     {
         bool shell = _shellActiveTextBrush is not null && _shellInactiveTextBrush is not null;
@@ -553,12 +553,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _shellInactiveTextBrush = null;
 
         // The selected-tab background resource is shared with the default
-        // (cursor-accent) path, so don't just remove it — restore the cached
-        // accent. Otherwise a config reload (which clears the shell theme
-        // after SetAccentColor has run) would drop the accent and the active
-        // title's contrast decision would be made against the wrong
-        // background. Falls back to removal only before SetAccentColor has
-        // ever run (first ClearShellTheme at startup).
+        // (terminal-background) path, so don't just remove it — restore the
+        // cached background. Otherwise a config reload (which clears the shell
+        // theme after SetSelectedTabColors has run) would drop the background
+        // and the active title's contrast decision would be made against the
+        // wrong background. Falls back to removal only before
+        // SetSelectedTabColors has ever run (first ClearShellTheme at startup).
         if (_accentBrush is not null)
             TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = _accentBrush;
         else
@@ -581,20 +581,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
-    /// Set the accent color used for the selected tab indicator.
-    /// Driven by cursor-color from the terminal config.
+    /// Set the default-path selected-tab background and active-title colours.
+    /// The selected tab is painted with the terminal background so the active
+    /// tab visually connects to the pane below it; the active title uses the
+    /// terminal foreground (which is by definition readable on that
+    /// background). Driven by background-color/foreground from the config.
     /// </summary>
-    internal void SetAccentColor(Windows.UI.Color color)
+    internal void SetSelectedTabColors(
+        Windows.UI.Color background, Windows.UI.Color foreground)
     {
-        // Cache the cursor-derived accent as the default-path selected-tab
-        // background, and derive a title colour that stays legible on it.
-        // cursor-color falls back to the (light) foreground for the default
-        // palette, so an inherited white title would be invisible on the
-        // selected tab — EnsureReadableForeground maps it to black.
+        // Cache the terminal background as the default-path selected-tab fill,
+        // and a title colour that stays legible on it. Foreground over
+        // background is the terminal's own contrast pair, so it normally
+        // passes straight through; EnsureReadableForeground only steps in for
+        // a pathological fg/bg that doesn't contrast.
         _accentBrush = new SolidColorBrush(
-            Windows.UI.Color.FromArgb(0xFF, color.R, color.G, color.B));
+            Windows.UI.Color.FromArgb(0xFF, background.R, background.G, background.B));
         _defaultActiveTextBrush = new SolidColorBrush(UnpackColor(
-            ThemeResolution.EnsureReadableForeground(PackColor(color), 0xFFFFFF)));
+            ThemeResolution.EnsureReadableForeground(
+                PackColor(background), PackColor(foreground))));
 
         // When a shell theme is active it owns the selected-tab background
         // and the active title (ApplyShellTheme). Don't fight it here; keep
