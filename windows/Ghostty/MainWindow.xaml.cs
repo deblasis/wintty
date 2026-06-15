@@ -194,6 +194,7 @@ public sealed partial class MainWindow : Window
     private GradientTintVisual? _gradientVisual;
     private Window? _settingsWindow;
     private Window? _aboutWindow;
+    private InspectorWindow? _inspectorWindow;
 
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
@@ -624,6 +625,9 @@ public sealed partial class MainWindow : Window
 
         _host.CommandPaletteToggleRequested += (_, _) =>
             DispatcherQueue.TryEnqueue(ToggleCommandPalette);
+
+        _host.InspectorToggleRequested += (_, _) =>
+            DispatcherQueue.TryEnqueue(ToggleInspector);
 
         // Pane/tab keybinds libghostty matched arrive already mapped to a
         // PaneAction (and already hopped to the UI thread by the host);
@@ -1074,6 +1078,14 @@ public sealed partial class MainWindow : Window
         _isClosed = true;
         _themeManager.Dispose();
 
+        // Close the inspector window before any surface/host teardown below.
+        // Its present timer drives libghostty against the bound surface every
+        // frame; closing it now runs its shutdown (stop timer + tear down the
+        // swap chain) while the surface and DX12 device are still valid,
+        // avoiding a use-after-free.
+        _inspectorWindow?.Close();
+        _inspectorWindow = null;
+
         // If this is the last regular window the app is exiting: the
         // bootstrap libghostty app and the DX12 renderer are about to be
         // freed (here via _host.Dispose below, and in
@@ -1392,6 +1404,10 @@ public sealed partial class MainWindow : Window
         _router.ToggleTabLayoutRequested += (_, _) => ToggleTabLayout();
 
         _router.CommandPaletteToggleRequested += (_, _) => ToggleCommandPalette();
+
+        // Ctrl+Shift+I toggles the terminal inspector (same handler as the
+        // command palette / libghostty inspector action).
+        _router.InspectorToggleRequested += (_, _) => ToggleInspector();
 
         // Fullscreen toggle via F11.
         _router.ToggleFullscreenRequested += (_, _) => ToggleFullscreen();
@@ -2660,6 +2676,49 @@ public sealed partial class MainWindow : Window
             // next tick so the palette closes before the action runs.
             commandLineDispatch: actionKey =>
                 DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)));
+    }
+
+    // Toggle the inspector window for the active surface. v1: one inspector
+    // window per main window; re-toggling closes it, and it stays bound to the
+    // surface it opened for (re-open to retarget a different pane).
+    private void ToggleInspector()
+    {
+        if (_inspectorWindow is not null)
+        {
+            _inspectorWindow.Close();
+            return;
+        }
+
+        var paneHost = _tabManager.ActiveTab?.PaneHost;
+        var leaf = paneHost?.ActiveLeaf;
+        if (leaf is null) return;
+        var surfaceHandle = leaf.Terminal().SurfaceHandle;
+        if (surfaceHandle == IntPtr.Zero) return;
+
+        // ghostty_surface_inspector lazily creates the inspector and can return
+        // null; don't open a window we can't drive.
+        var inspector = NativeMethods.SurfaceInspector(new GhosttySurface(surfaceHandle));
+        if (inspector.Handle == IntPtr.Zero) return;
+
+        var window = new InspectorWindow(inspector);
+
+        // The inspector presents into the bound surface every frame. If the
+        // active surface changes (pane focus/close, tab switch) that surface
+        // may be torn down, so close the inspector first to avoid presenting
+        // into freed state. v1 retargets by reopening on the new active pane.
+        EventHandler<LeafPane> onLeafFocused = (_, _) => _inspectorWindow?.Close();
+        EventHandler<TabModel> onTabChanged = (_, _) => _inspectorWindow?.Close();
+        if (paneHost is not null) paneHost.LeafFocused += onLeafFocused;
+        _tabManager.ActiveTabChanged += onTabChanged;
+
+        window.Closed += (_, _) =>
+        {
+            if (paneHost is not null) paneHost.LeafFocused -= onLeafFocused;
+            _tabManager.ActiveTabChanged -= onTabChanged;
+            _inspectorWindow = null;
+        };
+        _inspectorWindow = window;
+        window.Activate();
     }
 
     private void ExecuteBindingAction(string actionKey)
