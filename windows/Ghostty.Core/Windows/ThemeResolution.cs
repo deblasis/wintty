@@ -1,3 +1,5 @@
+using System;
+
 namespace Ghostty.Core.Windows;
 
 /// <summary>
@@ -94,4 +96,67 @@ public static class ThemeResolution
     /// </summary>
     public static bool PreferLightForeground(uint backgroundColor) =>
         IsBackgroundDark(backgroundColor);
+
+    /// <summary>
+    /// Relative luminance of an sRGB colour per WCAG 2.x, with each channel
+    /// gamma-expanded to linear light. 0.0 for black, 1.0 for white. Kept
+    /// separate from <see cref="IsBackgroundDark"/>'s cheap BT.709 estimate
+    /// because contrast ratios need the linearised value to match what the
+    /// eye perceives across the whole range.
+    /// </summary>
+    private static double RelativeLuminance(uint color)
+    {
+        static double Linearize(uint channel)
+        {
+            var c = channel / 255.0;
+            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        var r = Linearize((color >> 16) & 0xFF);
+        var g = Linearize((color >> 8) & 0xFF);
+        var b = Linearize(color & 0xFF);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+
+    /// <summary>
+    /// WCAG contrast ratio between two sRGB colours packed as 0x00RRGGBB.
+    /// Ranges from 1.0 (identical luminance) to 21.0 (pure black against
+    /// pure white). Order-independent.
+    /// </summary>
+    public static double ContrastRatio(uint a, uint b)
+    {
+        var la = RelativeLuminance(a);
+        var lb = RelativeLuminance(b);
+        var hi = Math.Max(la, lb);
+        var lo = Math.Min(la, lb);
+        return (hi + 0.05) / (lo + 0.05);
+    }
+
+    /// <summary>
+    /// Pick a legible foreground for text drawn over
+    /// <paramref name="background"/>. Keeps <paramref name="desired"/> when it
+    /// already clears the WCAG AA contrast threshold (4.5:1); otherwise falls
+    /// back to pure white or black, whichever reads better over the backdrop.
+    /// Both arguments and the result are packed 0x00RRGGBB.
+    ///
+    /// This is what keeps the active tab title readable regardless of palette:
+    /// the selected-tab background is the accent (cursor-colour by default,
+    /// which is light), so an inherited white title would vanish — this maps
+    /// it to black. It also guards the shell-theme path, where accent and
+    /// cursor-text can both land light or both dark (#342).
+    /// </summary>
+    public static uint EnsureReadableForeground(
+        uint background, uint desired, double minContrast = 4.5)
+    {
+        if (ContrastRatio(background, desired) >= minContrast)
+            return desired;
+        // Fall back to whichever pole actually contrasts more, scored with the
+        // same WCAG ratio as the threshold check rather than a separate
+        // luminance heuristic. For mid-luminance backgrounds the two disagree
+        // (e.g. 0x7F7F7F reads better on black than white), so picking by ratio
+        // guarantees the most readable of black/white for any background.
+        return ContrastRatio(background, 0xFFFFFFu) >= ContrastRatio(background, 0x000000u)
+            ? 0xFFFFFFu
+            : 0x000000u;
+    }
 }
