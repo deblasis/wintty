@@ -490,6 +490,31 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceMousePos(GhosttySurface surface, double x, double y, GhosttyMods mods);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_captured")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceMouseCapturedNative(GhosttySurface surface);
+
+    /// <summary>
+    /// True when the running program has enabled mouse reporting and is
+    /// capturing mouse events (e.g. vim/tmux with mouse mode). The apprt
+    /// uses this to decide whether a right-click belongs to the program or
+    /// should open our context menu.
+    /// </summary>
+    internal static bool SurfaceMouseCaptured(GhosttySurface surface)
+        => SurfaceMouseCapturedNative(surface) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_has_selection")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceHasSelectionNative(GhosttySurface surface);
+
+    /// <summary>
+    /// True when the surface currently has a non-empty text selection. Used
+    /// to enable the context-menu "Copy" item only when there is something
+    /// to copy.
+    /// </summary>
+    internal static bool SurfaceHasSelection(GhosttySurface surface)
+        => SurfaceHasSelectionNative(surface) != 0;
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_mouse_scroll")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceMouseScroll(GhosttySurface surface, double x, double y, int scrollMods);
