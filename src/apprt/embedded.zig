@@ -1163,6 +1163,11 @@ pub const Inspector = struct {
     backend: ?Backend = null,
     content_scale: f64 = 1,
 
+    /// User-controlled zoom for the inspector UI (font + spacing), adjusted
+    /// with Ctrl++/Ctrl+- (and Ctrl+0 to reset). Multiplies on top of the
+    /// platform content scale.
+    ui_scale: f64 = 1,
+
     /// Our previous instant used to calculate delta time for animations.
     instant: ?std.Io.Timestamp = null,
 
@@ -1364,19 +1369,45 @@ pub const Inspector = struct {
 
     pub fn updateContentScale(self: *Inspector, x: f64, y: f64) void {
         _ = y;
-        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
 
         // Cache our scale because we use it for cursor position calculations.
         self.content_scale = x;
+        self.applyScale();
+    }
+
+    /// (Re)build the imgui style from defaults and apply the effective scale.
+    /// Spacing/padding scale with content_scale * ui_scale; the font scales
+    /// with ui_scale via FontScaleMain (the imgui 1.92 font zoom factor).
+    fn applyScale(self: *Inspector) void {
+        cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
 
         // Setup a new style and scale it appropriately. We must use the
         // ImGuiStyle constructor to get proper default values (e.g.,
         // CurveTessellationTol) rather than zero-initialized values.
         var style: cimgui.c.ImGuiStyle = undefined;
         cimgui.ext.ImGuiStyle_ImGuiStyle(&style);
-        cimgui.c.ImGuiStyle_ScaleAllSizes(&style, @floatCast(x));
+        cimgui.c.ImGuiStyle_ScaleAllSizes(
+            &style,
+            @floatCast(self.content_scale * self.ui_scale),
+        );
+        style.FontScaleMain = @floatCast(self.ui_scale);
         const active_style = cimgui.c.ImGui_GetStyle();
         active_style.* = style;
+    }
+
+    /// Multiply the user zoom by `factor` (e.g. 1.1 to zoom in, 1/1.1 to
+    /// zoom out), clamped to a sane range, and re-apply the style.
+    pub fn zoomBy(self: *Inspector, factor: f64) void {
+        self.ui_scale = std.math.clamp(self.ui_scale * factor, 0.5, 3.0);
+        self.applyScale();
+        self.queueRender();
+    }
+
+    /// Reset the user zoom to 1.0.
+    pub fn zoomReset(self: *Inspector) void {
+        self.ui_scale = 1;
+        self.applyScale();
+        self.queueRender();
     }
 
     pub fn updateSize(self: *Inspector, width: u32, height: u32) void {
@@ -2561,6 +2592,16 @@ pub const CAPI = struct {
 
     export fn ghostty_inspector_set_content_scale(ptr: *Inspector, x: f64, y: f64) void {
         ptr.updateContentScale(x, y);
+    }
+
+    /// Multiply the inspector's user zoom by `factor` (>1 zooms in, <1 out).
+    export fn ghostty_inspector_zoom_by(ptr: *Inspector, factor: f64) void {
+        ptr.zoomBy(factor);
+    }
+
+    /// Reset the inspector's user zoom to 1.0.
+    export fn ghostty_inspector_zoom_reset(ptr: *Inspector) void {
+        ptr.zoomReset();
     }
 
     export fn ghostty_inspector_mouse_button(

@@ -40,6 +40,7 @@ internal enum GhosttyActionTag
     ResetWindowSize = 23,
     InitialSize = 24,
     Scrollbar = 26,
+    Inspector = 28,
     DesktopNotification = 31,
     SetTitle = 32,
     SetTabTitle = 33,
