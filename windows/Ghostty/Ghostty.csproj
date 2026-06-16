@@ -253,7 +253,7 @@
     non-demo build, leaking the type. Exclude both from non-demo builds so
     public Release binaries carry zero demo bytes.
   -->
-  <ItemGroup Condition="!$(DefineConstants.Contains('DEMO'))">
+  <ItemGroup Condition="'$(DemoEnabled)' != 'true'">
     <Page Remove="Demo\DemoOverlay.xaml" />
     <Compile Remove="Demo\**\*.cs" />
   </ItemGroup>
@@ -263,7 +263,7 @@
     works without setting WINTTY_DEMO. The resolver looks for "demo.json", so
     rename or point WINTTY_DEMO at this sample. Public builds never copy it.
   -->
-  <ItemGroup Condition="$(DefineConstants.Contains('DEMO'))">
+  <ItemGroup Condition="'$(DemoEnabled)' == 'true'">
     <None Update="Demo\demo.sample.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

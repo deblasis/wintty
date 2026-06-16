@@ -24,5 +24,17 @@ public class DemoActionsTests
         Assert.False(DemoActions.TryParse("not_an_action", out _));
         Assert.False(DemoActions.TryParse(null, out _));
     }
+
+    [Theory]
+    [InlineData("8")]
+    [InlineData("-1")]
+    [InlineData("0")]
+    [InlineData("_")]
+    [InlineData("__")]
+    public void TryParse_NumericOrEmptyInput_ReturnsFalse(string key)
+    {
+        // Must not parse a raw enum value, and must not throw on all-underscore.
+        Assert.False(DemoActions.TryParse(key, out _));
+    }
 }
 #endif

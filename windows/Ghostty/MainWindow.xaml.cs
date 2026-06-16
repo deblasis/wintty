@@ -203,6 +203,9 @@ public sealed partial class MainWindow : Window
     private Ghostty.Demo.DemoPlayer? _demoPlayer;
     private Ghostty.Demo.DemoOverlay? _demoOverlay;
     private Windows.UI.Input.Preview.Injection.InputInjector? _demoInjector;
+    // True while a "keys" beat is injecting real keystrokes; suppresses the
+    // demo's own abort/step/pause handler so injected keys aren't consumed.
+    private volatile bool _demoInjecting;
 #endif
 
     // Last libghostty-computed default window size (initial_size action), in
@@ -325,6 +328,18 @@ public sealed partial class MainWindow : Window
                 new Microsoft.UI.Xaml.Input.KeyEventHandler(OnDemoKeyDown),
                 handledEventsToo: true);
         }
+
+        // If the window loses focus while a demo runs, abort it. The "keys" beat
+        // injects global input, so a recording that switches away should stop
+        // rather than keep puppeting (and never risk input landing elsewhere).
+        Activated += (_, args) =>
+        {
+            if (args.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated
+                && _demoPlayer is { IsRunning: true })
+            {
+                _demoPlayer.Abort();
+            }
+        };
 
         // Hands-free recording: WINTTY_DEMO_AUTOSTART=auto|stepped plays the demo
         // a few seconds after launch, so you can hit record then start the app.
@@ -2968,6 +2983,9 @@ public sealed partial class MainWindow : Window
     {
         var injector = DemoInjector;
         if (injector is null || !DemoWindowIsForeground()) return;
+        // Iterate UTF-16 code units: Unicode injection wants the surrogate pair
+        // of a non-BMP rune as two separate ScanCode events, which is exactly
+        // what enumerating chars produces.
         foreach (var ch in s)
         {
             var down = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
@@ -3019,6 +3037,7 @@ public sealed partial class MainWindow : Window
             runCommand: RunDemoCommand,
             injectRealChar: InjectRealChar,
             injectRealEnter: InjectRealEnter,
+            setInjecting: v => _demoInjecting = v,
             showCaption: (text, idx, total) => _demoOverlay!.ShowCaption(text, idx, total),
             hideOverlay: () => _demoOverlay!.Hide(),
             log: App.LoggerFactory?.CreateLogger("Demo")
@@ -3069,6 +3088,10 @@ public sealed partial class MainWindow : Window
     private void OnDemoKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         if (_demoPlayer is null || !_demoPlayer.IsRunning) return;
+
+        // Ignore keys while a "keys" beat is injecting: those events are the
+        // demo's own synthetic input, not the operator's abort/step/pause.
+        if (_demoInjecting) return;
 
         switch (e.Key)
         {

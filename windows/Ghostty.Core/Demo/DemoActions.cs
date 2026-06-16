@@ -18,6 +18,15 @@ internal static class DemoActions
             return false;
 
         var normalized = key.Replace("_", string.Empty);
+        if (normalized.Length == 0)
+            return false; // e.g. "_" / "__" -- nothing left to parse.
+
+        // Reject numeric input: Enum.TryParse("8") parses the underlying value
+        // and IsDefined accepts it, silently invoking whatever action has that
+        // value instead of warn+skip. Demo action keys are always names.
+        if (char.IsDigit(normalized[0]) || normalized[0] == '-')
+            return false;
+
         return Enum.TryParse(normalized, ignoreCase: true, out action)
             && Enum.IsDefined(action);
     }

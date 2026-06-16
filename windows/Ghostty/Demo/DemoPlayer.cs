@@ -27,6 +27,7 @@ internal sealed class DemoPlayer
     private readonly Func<string, bool> _runCommand; // palette command id -> handled
     private readonly Action<string> _injectRealChar; // real WM_CHAR (keycast-visible)
     private readonly Action _injectRealEnter; // real VK_RETURN
+    private readonly Action<bool> _setInjecting; // gate the abort/step/pause keys
     private readonly Action<string, int?, int?> _showCaption; // text, stepIndex, stepTotal
     private readonly Action _hideOverlay;
     private readonly ILogger _log;
@@ -45,6 +46,7 @@ internal sealed class DemoPlayer
         Func<string, bool> runCommand,
         Action<string> injectRealChar,
         Action injectRealEnter,
+        Action<bool> setInjecting,
         Action<string, int?, int?> showCaption,
         Action hideOverlay,
         ILogger log)
@@ -56,6 +58,7 @@ internal sealed class DemoPlayer
         _runCommand = runCommand;
         _injectRealChar = injectRealChar;
         _injectRealEnter = injectRealEnter;
+        _setInjecting = setInjecting;
         _showCaption = showCaption;
         _hideOverlay = hideOverlay;
         _log = log;
@@ -184,9 +187,23 @@ internal sealed class DemoPlayer
                 // Like "type", but injects REAL key events (WM_CHAR / VK), so
                 // features that observe the input pipeline (e.g. Pro keycast) see
                 // them. Requires the window to be focused/foreground.
-                await TypeRealAsync(beat.Text ?? "", beat.TypeDelayMs ?? script.TypeDelayMs, ct);
-                if (beat.Enter)
-                    _injectRealEnter();
+                //
+                // The injected keys are real, so the demo's own abort/step/pause
+                // handler (OnDemoKeyDown) would otherwise observe them -- an
+                // injected Space would Step and be swallowed. Gate that handler
+                // for the beat's duration plus a short drain for the last events.
+                _setInjecting(true);
+                try
+                {
+                    await TypeRealAsync(beat.Text ?? "", beat.TypeDelayMs ?? script.TypeDelayMs, ct);
+                    if (beat.Enter)
+                        _injectRealEnter();
+                    await Task.Delay(80, ct);
+                }
+                finally
+                {
+                    _setInjecting(false);
+                }
                 break;
 
             case "wait":

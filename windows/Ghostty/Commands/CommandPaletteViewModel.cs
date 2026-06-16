@@ -136,8 +136,10 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
     /// </summary>
     public bool TryExecuteById(string id)
     {
-        RebuildCommands();
-        var cmd = _allCommands.FirstOrDefault(c => c.Id == id);
+        // Query a fresh local list rather than RebuildCommands(): that would
+        // overwrite the live _allCommands out from under an open/pinned palette.
+        // Sources were already refreshed when the demo built them.
+        var cmd = _sources.SelectMany(s => s.GetCommands()).FirstOrDefault(c => c.Id == id);
         if (cmd is null) return false;
         cmd.Execute(cmd);
         return true;

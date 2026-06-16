@@ -77,27 +77,37 @@ internal sealed partial class DemoOverlay : UserControl
     // deadlocks, since the decode marshals back to the UI thread.
     private async Task LoadLogoAsync()
     {
-        var asm = typeof(Ghostty.Core.Version.KittyLogo).Assembly;
-        using var stream = asm.GetManifestResourceStream("Ghostty.Core.Branding.wintty_logo.png");
-        if (stream is null) return;
-
-        using var ms = new MemoryStream();
-        await stream.CopyToAsync(ms);
-        var bytes = ms.ToArray();
-
-        var bitmap = new BitmapImage();
-        using var ras = new InMemoryRandomAccessStream();
-        using (var writer = new DataWriter(ras))
+        // The logo is cosmetic; a decode failure must not surface as an
+        // unhandled exception on the UI thread (this runs from an async-void
+        // Loaded handler). Swallow and leave the logo blank.
+        try
         {
-            writer.WriteBytes(bytes);
-            await writer.StoreAsync();
-            await writer.FlushAsync();
-            writer.DetachStream();
-        }
-        ras.Seek(0);
-        await bitmap.SetSourceAsync(ras);
+            var asm = typeof(Ghostty.Core.Version.KittyLogo).Assembly;
+            using var stream = asm.GetManifestResourceStream("Ghostty.Core.Branding.wintty_logo.png");
+            if (stream is null) return;
 
-        LogoImage.Source = bitmap;
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            var bytes = ms.ToArray();
+
+            var bitmap = new BitmapImage();
+            using var ras = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(ras))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                await writer.FlushAsync();
+                writer.DetachStream();
+            }
+            ras.Seek(0);
+            await bitmap.SetSourceAsync(ras);
+
+            LogoImage.Source = bitmap;
+        }
+        catch
+        {
+            // Blank logo is acceptable; nothing else to do.
+        }
     }
 }
 #endif

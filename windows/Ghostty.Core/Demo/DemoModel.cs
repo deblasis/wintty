@@ -22,7 +22,7 @@ internal enum DemoMode
 /// </summary>
 internal sealed class DemoBeat
 {
-    /// <summary>caption | action | binding | type | key | wait | config</summary>
+    /// <summary>caption | action | binding | type | key | config | command | keys | wait</summary>
     public string Type { get; set; } = "";
 
     // caption / type

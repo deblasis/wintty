@@ -6,7 +6,11 @@
     wrapped in `#if DEMO` compiles to nothing and ships zero demo bytes.
   -->
   <PropertyGroup>
-    <DefineConstants Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">$(DefineConstants);DEMO</DefineConstants>
+    <!-- One source of truth for "is demo mode on?" so the DEMO constant and the
+         csproj Page/Compile/None conditions can't drift, and so a future
+         constant that merely contains the substring "DEMO" can't false-match. -->
+    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
+    <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
   </PropertyGroup>
   <!--
     'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which
