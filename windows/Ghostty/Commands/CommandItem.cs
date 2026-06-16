@@ -12,6 +12,7 @@ internal enum CommandCategory
     Config,
     Custom,
     About,
+    Demo,
 }
 
 internal record CommandItem
