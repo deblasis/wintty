@@ -71,6 +71,7 @@
                 <!-- Title + optional description -->
                 <StackPanel Grid.Column="2"
                             VerticalAlignment="Center"
+                            Margin="8,0,0,0"
                             Spacing="1">
                     <TextBlock x:Name="ItemTitle"
                                FontSize="{StaticResource BodyTextBlockFontSize}"
