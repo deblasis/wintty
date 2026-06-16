@@ -324,6 +324,22 @@ public sealed partial class MainWindow : Window
                 new Microsoft.UI.Xaml.Input.KeyEventHandler(OnDemoKeyDown),
                 handledEventsToo: true);
         }
+
+        // Hands-free recording: WINTTY_DEMO_AUTOSTART=auto|stepped plays the demo
+        // a few seconds after launch, so you can hit record then start the app.
+        // The delay lets the first pane's shell come up before the type beats.
+        var autoStart = Environment.GetEnvironmentVariable("WINTTY_DEMO_AUTOSTART");
+        if (!string.IsNullOrEmpty(autoStart))
+        {
+            var mode = autoStart.Equals("stepped", StringComparison.OrdinalIgnoreCase)
+                ? Ghostty.Core.Demo.DemoMode.Stepped
+                : Ghostty.Core.Demo.DemoMode.Auto;
+            var startTimer = DispatcherQueue.CreateTimer();
+            startTimer.Interval = TimeSpan.FromSeconds(3);
+            startTimer.IsRepeating = false;
+            startTimer.Tick += (_, _) => { startTimer.Stop(); StartDemo(mode); };
+            startTimer.Start();
+        }
 #endif
 
         IsQuickTerminal = isQuickTerminal;
@@ -2955,6 +2971,8 @@ public sealed partial class MainWindow : Window
         // otherwise start two script reads before the first sets IsRunning.
         if (_demoPlayer is { IsRunning: true }) return;
 
+        var demoLog = App.LoggerFactory?.CreateLogger("Demo");
+
         // Whole body in try: EnsureDemoPlayer mutates the visual tree, so a
         // throw must not escape as an unhandled async-void exception.
         try
@@ -2966,6 +2984,7 @@ public sealed partial class MainWindow : Window
 
             var path = Ghostty.Core.Demo.DemoScriptParser.ResolveScriptPath(
                 envValue, exeDir, configDir, System.IO.File.Exists);
+            demoLog?.LogInformation("Demo script resolved: env='{Env}' path='{Path}'", envValue, path);
 
             var player = EnsureDemoPlayer();
             if (path is null)
@@ -2980,7 +2999,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            (App.LoggerFactory?.CreateLogger("Demo"))?.LogError(ex, "Failed to start demo.");
+            demoLog?.LogError(ex, "Failed to start demo.");
             _demoOverlay?.ShowCaption("Demo failed to start (see logs)");
         }
     }
