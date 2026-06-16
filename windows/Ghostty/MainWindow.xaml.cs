@@ -2776,9 +2776,12 @@ public sealed partial class MainWindow : Window
 
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
-        // the var unset leaves the palette unchanged.
+        // the var unset leaves the palette unchanged. Defer to the next tick so
+        // the palette popup closes before the overlay mutates the visual tree,
+        // matching the other command sources.
         if (Environment.GetEnvironmentVariable("WINTTY_DEMO") is not null)
-            sources.Add(new DemoCommandSource(StartDemo));
+            sources.Add(new DemoCommandSource(
+                mode => DispatcherQueue.TryEnqueue(() => StartDemo(mode))));
 #endif
 
         // Null-check App services as a defensive belt (cold-start where App.ProfileRegistry
@@ -2942,23 +2945,25 @@ public sealed partial class MainWindow : Window
         // otherwise start two script reads before the first sets IsRunning.
         if (_demoPlayer is { IsRunning: true }) return;
 
-        var exeDir = AppContext.BaseDirectory;
-        var configDir = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var envValue = Environment.GetEnvironmentVariable("WINTTY_DEMO");
-
-        var path = Ghostty.Core.Demo.DemoScriptParser.ResolveScriptPath(
-            envValue, exeDir, configDir, System.IO.File.Exists);
-
-        var player = EnsureDemoPlayer();
-        if (path is null)
-        {
-            _demoOverlay!.ShowCaption("No demo script found (set WINTTY_DEMO to a .json path)");
-            return;
-        }
-
+        // Whole body in try: EnsureDemoPlayer mutates the visual tree, so a
+        // throw must not escape as an unhandled async-void exception.
         try
         {
+            var exeDir = AppContext.BaseDirectory;
+            var configDir = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var envValue = Environment.GetEnvironmentVariable("WINTTY_DEMO");
+
+            var path = Ghostty.Core.Demo.DemoScriptParser.ResolveScriptPath(
+                envValue, exeDir, configDir, System.IO.File.Exists);
+
+            var player = EnsureDemoPlayer();
+            if (path is null)
+            {
+                _demoOverlay!.ShowCaption("No demo script found (set WINTTY_DEMO to a .json path)");
+                return;
+            }
+
             var json = await System.IO.File.ReadAllTextAsync(path);
             var script = Ghostty.Core.Demo.DemoScriptParser.Parse(json);
             await player.RunAsync(script, mode);
@@ -2966,7 +2971,7 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             (App.LoggerFactory?.CreateLogger("Demo"))?.LogError(ex, "Failed to start demo.");
-            _demoOverlay!.ShowCaption("Demo script failed to load");
+            _demoOverlay?.ShowCaption("Demo failed to start (see logs)");
         }
     }
 

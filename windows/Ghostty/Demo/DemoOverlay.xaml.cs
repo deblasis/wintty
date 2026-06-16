@@ -1,6 +1,7 @@
 #if DEMO
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -18,7 +19,7 @@ internal sealed partial class DemoOverlay : UserControl
     public DemoOverlay()
     {
         InitializeComponent();
-        Loaded += (_, _) => LoadLogo();
+        Loaded += async (_, _) => await LoadLogoAsync();
     }
 
     /// <summary>Show a caption, optionally with a step indicator (stepped mode).</summary>
@@ -71,31 +72,30 @@ internal sealed partial class DemoOverlay : UserControl
     // (see Ghostty.Core.csproj). Load it from that assembly's manifest so the
     // overlay reuses the existing brand asset instead of bundling a copy.
     // BitmapImage cannot read a managed Stream directly, hence the
-    // DataWriter/StoreAsync -> SetSourceAsync dance. The sync block here is
-    // deliberate and bounded: it runs once on Loaded over a tiny embedded PNG.
-    private void LoadLogo()
+    // DataWriter/StoreAsync -> SetSourceAsync dance. Must stay fully async:
+    // blocking SetSourceAsync on the UI thread (.GetAwaiter().GetResult())
+    // deadlocks, since the decode marshals back to the UI thread.
+    private async Task LoadLogoAsync()
     {
         var asm = typeof(Ghostty.Core.Version.KittyLogo).Assembly;
         using var stream = asm.GetManifestResourceStream("Ghostty.Core.Branding.wintty_logo.png");
         if (stream is null) return;
 
         using var ms = new MemoryStream();
-        stream.CopyTo(ms);
+        await stream.CopyToAsync(ms);
         var bytes = ms.ToArray();
 
         var bitmap = new BitmapImage();
-        using (var ras = new InMemoryRandomAccessStream())
+        using var ras = new InMemoryRandomAccessStream();
+        using (var writer = new DataWriter(ras))
         {
-            using (var writer = new DataWriter(ras))
-            {
-                writer.WriteBytes(bytes);
-                writer.StoreAsync().AsTask().GetAwaiter().GetResult();
-                writer.FlushAsync().AsTask().GetAwaiter().GetResult();
-                writer.DetachStream();
-            }
-            ras.Seek(0);
-            bitmap.SetSourceAsync(ras).AsTask().GetAwaiter().GetResult();
+            writer.WriteBytes(bytes);
+            await writer.StoreAsync();
+            await writer.FlushAsync();
+            writer.DetachStream();
         }
+        ras.Seek(0);
+        await bitmap.SetSourceAsync(ras);
 
         LogoImage.Source = bitmap;
     }
