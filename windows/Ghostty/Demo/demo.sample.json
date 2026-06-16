@@ -1,0 +1,21 @@
+{
+  "title": "Wintty feature tour",
+  "typeDelayMs": 45,
+  "beatGapMs": 800,
+  "beats": [
+    { "type": "caption", "text": "Welcome to Wintty", "durationMs": 2000 },
+    { "type": "type",    "text": "echo hello from wintty", "enter": true },
+    { "type": "wait",    "ms": 1000 },
+    { "type": "caption", "text": "Splitting panes" },
+    { "type": "action",  "key": "split_vertical" },
+    { "type": "type",    "text": "ls", "enter": true },
+    { "type": "wait",    "ms": 1200 },
+    { "type": "caption", "text": "Clearing the screen" },
+    { "type": "binding", "action": "clear_screen" },
+    { "type": "caption", "text": "Drop-down quake terminal" },
+    { "type": "action",  "key": "toggle_quick_terminal" },
+    { "type": "wait",    "ms": 1500 },
+    { "type": "action",  "key": "toggle_quick_terminal" },
+    { "type": "caption", "text": "Thanks for watching", "durationMs": 2500 }
+  ]
+}
