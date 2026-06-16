@@ -2270,6 +2270,19 @@ pub const CAPI = struct {
         return @ptrCast(sc);
     }
 
+    /// Return the DirectComposition surface handle backing this surface's
+    /// swap chain in SwapChainPanel mode. Bind it to a WinUI 3
+    /// SwapChainPanel via ISwapChainPanelNative2::SetSwapChainHandle.
+    /// Returns null on non-DX12 builds or when the surface is not in
+    /// SwapChainPanel mode.
+    export fn ghostty_surface_get_swap_chain_handle(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const api = surface.core_surface.renderer.api;
+        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
+        const dev = api.dev orelse return null;
+        return @ptrCast(dev.swap_chain_surface_handle orelse return null);
+    }
+
     /// Mirrors ghostty_surface_shared_texture_s in include/ghostty.h.
     const SharedTextureSnapshotC = extern struct {
         resource_handle: ?*anyopaque,

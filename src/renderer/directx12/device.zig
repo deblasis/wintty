@@ -38,6 +38,13 @@ fence_event: std.os.windows.HANDLE,
 
 swap_chain: ?*dxgi.IDXGISwapChain1,
 
+/// DirectComposition surface handle backing the swap chain in
+/// SwapChainPanel mode. Owned by Device: created in init, closed in
+/// deinit. The embedder retrieves it via
+/// ghostty_surface_get_swap_chain_handle and binds it to the panel with
+/// ISwapChainPanelNative2::SetSwapChainHandle. Null in all other modes.
+swap_chain_surface_handle: ?std.os.windows.HANDLE = null,
+
 // DirectComposition objects, only used for HWND surfaces.
 dcomp_device: ?*dcomp.IDCompositionDevice,
 dcomp_target: ?*dcomp.IDCompositionTarget,
@@ -282,6 +289,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
 
     // -- Swap chain + composition (surface-dependent) --
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
+    var swap_chain_surface_handle: ?std.os.windows.HANDLE = null;
     var dcomp_device_ptr: ?*dcomp.IDCompositionDevice = null;
     var dcomp_target_ptr: ?*dcomp.IDCompositionTarget = null;
     var dcomp_visual_ptr: ?*dcomp.IDCompositionVisual = null;
@@ -322,21 +330,28 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
                 return error.DCompCommitFailed;
             }
         },
-        .swap_chain_panel => |panel| {
-            // SwapChainPanel surface: composition swap chain, panel owns composition.
-            swap_chain = try createCompositionSwapChain(
+        .swap_chain_panel => {
+            // SwapChainPanel surface: present into a DirectComposition
+            // surface handle rather than binding the swap chain object to
+            // the panel directly. The embedder binds the handle via
+            // ISwapChainPanelNative2::SetSwapChainHandle. Binding the
+            // handle (a stable composition primitive) instead of the swap
+            // chain object means DWM composites the panel as soon as the
+            // window is shown -- the direct SetSwapChain path could leave
+            // presented frames uncomposited until the first OS activation
+            // (the blank-until-focus startup race) -- and the binding
+            // survives ResizeBuffers without re-binding.
+            const result = try createSurfaceHandleSwapChain(
                 factory.?,
                 command_queue.?,
                 opts.width,
                 opts.height,
             );
-            errdefer _ = swap_chain.?.Release();
-
-            // Tell the panel about the swap chain.
-            const hr = panel.SetSwapChain(@ptrCast(swap_chain.?));
-            if (FAILED(hr)) {
-                log.err("ISwapChainPanelNative.SetSwapChain failed: 0x{x}", .{@as(u32, @bitCast(hr))});
-                return error.SwapChainPanelBindFailed;
+            swap_chain = result.swap_chain;
+            swap_chain_surface_handle = result.handle;
+            errdefer {
+                _ = swap_chain.?.Release();
+                _ = d3d12.CloseHandle(swap_chain_surface_handle.?);
             }
         },
         .composition => {
@@ -379,6 +394,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         .fence_value = std.atomic.Value(u64).init(0),
         .fence_event = fence_event,
         .swap_chain = swap_chain,
+        .swap_chain_surface_handle = swap_chain_surface_handle,
         .dcomp_device = dcomp_device_ptr,
         .dcomp_target = dcomp_target_ptr,
         .dcomp_visual = dcomp_visual_ptr,
@@ -398,6 +414,9 @@ pub fn deinit(self: *Device) void {
     if (self.dcomp_target) |t| _ = t.Release();
     if (self.dcomp_device) |d| _ = d.Release();
     if (self.swap_chain) |sc| _ = sc.Release();
+    // Close the composition surface handle after releasing the swap
+    // chain that presents into it.
+    if (self.swap_chain_surface_handle) |h| _ = d3d12.CloseHandle(h);
 
     if (self.shared_texture) |st| {
         _ = d3d12.CloseHandle(st.fence_handle);
@@ -516,17 +535,14 @@ fn enableDebugLayer() void {
     }
 }
 
-fn createCompositionSwapChain(
-    factory: *dxgi.IDXGIFactory2,
-    queue: *d3d12.ID3D12CommandQueue,
-    width: u32,
-    height: u32,
-) !*dxgi.IDXGISwapChain1 {
+/// Build the swap-chain description shared by every composition path
+/// (HWND, SwapChainPanel via surface handle, and bare composition).
+fn compositionSwapChainDesc(width: u32, height: u32) dxgi.DXGI_SWAP_CHAIN_DESC1 {
     // DXGI rejects 0-dimension swap chains.
     const actual_width = @max(width, 1);
     const actual_height = @max(height, 1);
 
-    const desc = dxgi.DXGI_SWAP_CHAIN_DESC1{
+    return .{
         .Width = actual_width,
         .Height = actual_height,
         .Format = .B8G8R8A8_UNORM,
@@ -553,6 +569,15 @@ fn createCompositionSwapChain(
         .AlphaMode = .PREMULTIPLIED,
         .Flags = 0,
     };
+}
+
+fn createCompositionSwapChain(
+    factory: *dxgi.IDXGIFactory2,
+    queue: *d3d12.ID3D12CommandQueue,
+    width: u32,
+    height: u32,
+) !*dxgi.IDXGISwapChain1 {
+    const desc = compositionSwapChainDesc(width, height);
 
     var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
     // DX12 passes the command queue (not the device) to swap chain creation.
@@ -567,6 +592,70 @@ fn createCompositionSwapChain(
         return error.SwapChainCreationFailed;
     }
     return swap_chain.?;
+}
+
+const SurfaceHandleSwapChain = struct {
+    swap_chain: *dxgi.IDXGISwapChain1,
+    handle: std.os.windows.HANDLE,
+};
+
+/// Create a DirectComposition surface handle and a composition swap chain
+/// bound to it. The caller owns both: Release the swap chain and
+/// CloseHandle the handle. Used by SwapChainPanel mode so the embedder
+/// can bind the handle via ISwapChainPanelNative2::SetSwapChainHandle.
+fn createSurfaceHandleSwapChain(
+    factory: *dxgi.IDXGIFactory2,
+    queue: *d3d12.ID3D12CommandQueue,
+    width: u32,
+    height: u32,
+) !SurfaceHandleSwapChain {
+    // The composition-surface-handle entry point lives on IDXGIFactoryMedia,
+    // which the factory we already created supports via QueryInterface.
+    var media: ?*dxgi.IDXGIFactoryMedia = null;
+    {
+        const hr = factory.vtable.QueryInterface(
+            factory,
+            &dxgi.IDXGIFactoryMedia.IID,
+            @ptrCast(&media),
+        );
+        if (FAILED(hr)) {
+            log.err("QueryInterface for IDXGIFactoryMedia failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.FactoryMediaQueryFailed;
+        }
+    }
+    defer _ = media.?.Release();
+
+    var handle: std.os.windows.HANDLE = undefined;
+    {
+        const hr = dcomp.DCompositionCreateSurfaceHandle(
+            dcomp.COMPOSITIONOBJECT_ALL_ACCESS,
+            null,
+            &handle,
+        );
+        if (FAILED(hr)) {
+            log.err("DCompositionCreateSurfaceHandle failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+            return error.SurfaceHandleCreationFailed;
+        }
+    }
+    errdefer _ = d3d12.CloseHandle(handle);
+
+    const desc = compositionSwapChainDesc(width, height);
+
+    var swap_chain: ?*dxgi.IDXGISwapChain1 = null;
+    // DX12 passes the command queue (not the device) to swap chain creation.
+    const hr = media.?.CreateSwapChainForCompositionSurfaceHandle(
+        @ptrCast(queue),
+        handle,
+        &desc,
+        null,
+        &swap_chain,
+    );
+    if (FAILED(hr)) {
+        log.err("CreateSwapChainForCompositionSurfaceHandle failed: 0x{x}", .{@as(u32, @bitCast(hr))});
+        return error.SwapChainCreationFailed;
+    }
+
+    return .{ .swap_chain = swap_chain.?, .handle = handle };
 }
 
 fn createDCompDevice() !*dcomp.IDCompositionDevice {

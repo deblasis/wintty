@@ -530,6 +530,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SwapChainPanelInterop.Release(panelPtr);
         Host.Register(_surface, this);
 
+        // Bind the renderer's DirectComposition surface handle to the
+        // panel. libghostty presents into this handle; binding it (rather
+        // than the swap chain object) lets DWM composite the panel as soon
+        // as the window is shown, avoiding the blank-until-focus startup
+        // race, and keeps the binding valid across resizes.
+        var swapChainHandle = NativeMethods.SurfaceGetSwapChainHandle(_surface);
+        if (swapChainHandle != IntPtr.Zero)
+            SwapChainPanelInterop.SetSwapChainHandle(Panel, swapChainHandle);
+
         // Request focus so keyboard input starts flowing immediately.
         // Focus lives on the UserControl now, not the panel.
         this.Focus(FocusState.Programmatic);

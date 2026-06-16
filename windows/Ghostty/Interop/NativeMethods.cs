@@ -519,6 +519,15 @@ internal static partial class NativeMethods
     internal static bool SurfaceSharedTexture(GhosttySurface surface, out GhosttySharedTextureSnapshot snapshot)
         => SurfaceSharedTextureNative(surface, out snapshot) != 0;
 
+    // Returns the DirectComposition surface handle backing this surface's
+    // swap chain in SwapChainPanel mode, or IntPtr.Zero on non-DX12 builds
+    // or before the swap chain is created. Bind it to the SwapChainPanel
+    // via ISwapChainPanelNative2::SetSwapChainHandle. Ghostty owns the
+    // handle for the surface lifetime - do not close it.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_get_swap_chain_handle")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial IntPtr SurfaceGetSwapChainHandle(GhosttySurface surface);
+
     // ---- surface input -------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_key")]
