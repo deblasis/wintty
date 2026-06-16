@@ -1,5 +1,18 @@
 <Project>
   <!--
+    Demo mode is compiled in for every Debug build (so `dotnet test` exercises
+    the Core demo logic) and for Release only when explicitly opted in with
+    `-p:Demo=true`. Public Release builds define no DEMO symbol, so every file
+    wrapped in `#if DEMO` compiles to nothing and ships zero demo bytes.
+  -->
+  <PropertyGroup>
+    <!-- One source of truth for "is demo mode on?" so the DEMO constant and the
+         csproj Page/Compile/None conditions can't drift, and so a future
+         constant that merely contains the substring "DEMO" can't false-match. -->
+    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
+    <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
+  </PropertyGroup>
+  <!--
     'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which
     lacks the PRI/Appx task DLLs. These ship with Visual Studio Build Tools.
     Redirect when missing. See WindowsAppSDK#3997.
