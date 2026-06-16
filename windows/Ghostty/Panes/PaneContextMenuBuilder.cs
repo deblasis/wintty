@@ -105,6 +105,10 @@ internal static class PaneContextMenuBuilder
             case PaneMenuCommand.ChangeTabTitle: promptTabTitle(); break;
             case PaneMenuCommand.ChangeTerminalTitle: promptTerminalTitle(); break;
 
+            // Smart close: the router closes the split leaf when the tab has
+            // multiple panes, else the whole tab (with the confirmation).
+            case PaneMenuCommand.ClosePane: invokePaneAction(PaneAction.CloseActiveProgressive); break;
+
             default: throw new ArgumentOutOfRangeException(nameof(command), command, null);
         }
     }
