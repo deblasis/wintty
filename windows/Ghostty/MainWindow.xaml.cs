@@ -199,6 +199,14 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
+#if DEMO
+    private Ghostty.Demo.DemoPlayer? _demoPlayer;
+    private Ghostty.Demo.DemoOverlay? _demoOverlay;
+    private Windows.UI.Input.Preview.Injection.InputInjector? _demoInjector;
+    // True while a "keys" beat is injecting real keystrokes; suppresses the
+    // demo's own abort/step/pause handler so injected keys aren't consumed.
+    private volatile bool _demoInjecting;
+#endif
 
     // Last libghostty-computed default window size (initial_size action), in
     // physical pixels. null until received; reset_window_size is a no-op
@@ -308,6 +316,47 @@ public sealed partial class MainWindow : Window
         Ghostty.Core.Session.WindowSession? restore = null)
     {
         InitializeComponent();
+
+#if DEMO
+        // Demo mode key handling: while a demo runs, Esc aborts, Space/Right
+        // step (stepped mode), P toggles pause (auto mode). handledEventsToo
+        // so these are seen even if the focused terminal marks them handled.
+        if (this.Content is Microsoft.UI.Xaml.UIElement demoRoot)
+        {
+            demoRoot.AddHandler(
+                Microsoft.UI.Xaml.UIElement.KeyDownEvent,
+                new Microsoft.UI.Xaml.Input.KeyEventHandler(OnDemoKeyDown),
+                handledEventsToo: true);
+        }
+
+        // If the window loses focus while a demo runs, abort it. The "keys" beat
+        // injects global input, so a recording that switches away should stop
+        // rather than keep puppeting (and never risk input landing elsewhere).
+        Activated += (_, args) =>
+        {
+            if (args.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated
+                && _demoPlayer is { IsRunning: true })
+            {
+                _demoPlayer.Abort();
+            }
+        };
+
+        // Hands-free recording: WINTTY_DEMO_AUTOSTART=auto|stepped plays the demo
+        // a few seconds after launch, so you can hit record then start the app.
+        // The delay lets the first pane's shell come up before the type beats.
+        var autoStart = Environment.GetEnvironmentVariable("WINTTY_DEMO_AUTOSTART");
+        if (!string.IsNullOrEmpty(autoStart))
+        {
+            var mode = autoStart.Equals("stepped", StringComparison.OrdinalIgnoreCase)
+                ? Ghostty.Core.Demo.DemoMode.Stepped
+                : Ghostty.Core.Demo.DemoMode.Auto;
+            var startTimer = DispatcherQueue.CreateTimer();
+            startTimer.Interval = TimeSpan.FromSeconds(3);
+            startTimer.IsRepeating = false;
+            startTimer.Tick += (_, _) => { startTimer.Stop(); StartDemo(mode); };
+            startTimer.Start();
+        }
+#endif
 
         IsQuickTerminal = isQuickTerminal;
 
@@ -2757,6 +2806,16 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+#if DEMO
+        // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
+        // the var unset leaves the palette unchanged. Defer to the next tick so
+        // the palette popup closes before the overlay mutates the visual tree,
+        // matching the other command sources.
+        if (Environment.GetEnvironmentVariable("WINTTY_DEMO") is not null)
+            sources.Add(new DemoCommandSource(
+                mode => DispatcherQueue.TryEnqueue(() => StartDemo(mode))));
+#endif
+
         // Null-check App services as a defensive belt (cold-start where App.ProfileRegistry
         // isn't wired yet would skip the source entirely; ProfileCommandSource itself
         // returns an empty list when its registry has no profiles).
@@ -2865,6 +2924,193 @@ public sealed partial class MainWindow : Window
             }
         }
     }
+
+#if DEMO
+    // Inject raw UTF-8 text into the active surface, exactly as typed input
+    // would arrive via SurfaceText. Used by the demo player for "type"/"key".
+    private void InjectDemoText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return;
+
+        var surfaceHandle = leaf.Terminal().SurfaceHandle;
+        if (surfaceHandle == IntPtr.Zero) return;
+
+        var surface = new GhosttySurface(surfaceHandle);
+        var bytes = Encoding.UTF8.GetBytes(text);
+        unsafe
+        {
+            fixed (byte* p = bytes)
+            {
+                NativeMethods.SurfaceText(surface, (IntPtr)p, (UIntPtr)bytes.Length);
+            }
+        }
+    }
+
+    // Write a config key=value and reload, so the demo can showcase appearance
+    // settings (theme, opacity, gradients, fonts, ...) that have no action. Same
+    // write+reload path AdjustOpacity uses; the change persists in the config
+    // file, which is fine for a throwaway recording profile.
+    private void ApplyDemoConfig(string key, string value)
+    {
+        _configWriter.Write(() => _configEditor.SetValue(key, value), key);
+    }
+
+    // Run a command-palette command by id without opening the palette. Lets the
+    // demo "command" beat fire palette-only commands that have no PaneAction
+    // (e.g. Pro "shell:open_sessions"). Returns false if no such command exists.
+    private bool RunDemoCommand(string id) => _commandPaletteVm?.TryExecuteById(id) ?? false;
+
+    // Inject REAL keystrokes (not SurfaceText) so features watching the WinUI
+    // input pipeline observe them (e.g. Pro keycast chips). Goes to the focused
+    // surface, which is correct during a recording. Chars are injected as Unicode
+    // (WM_CHAR); special keys as virtual-key down/up.
+    private Windows.UI.Input.Preview.Injection.InputInjector? DemoInjector =>
+        _demoInjector ??= Windows.UI.Input.Preview.Injection.InputInjector.TryCreate();
+
+    // SAFETY: InjectKeyboardInput is global -- it reaches whatever window is
+    // foreground. Never inject unless OUR window is foreground, so the demo can
+    // never leak keystrokes into another app (e.g. while focus is elsewhere).
+    private bool DemoWindowIsForeground()
+    {
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        return PInvoke.GetForegroundWindow() == hwnd;
+    }
+
+    private void InjectRealChar(string s)
+    {
+        var injector = DemoInjector;
+        if (injector is null || !DemoWindowIsForeground()) return;
+        // Iterate UTF-16 code units: Unicode injection wants the surrogate pair
+        // of a non-BMP rune as two separate ScanCode events, which is exactly
+        // what enumerating chars produces.
+        foreach (var ch in s)
+        {
+            var down = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+            {
+                ScanCode = ch,
+                KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.Unicode,
+            };
+            var up = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+            {
+                ScanCode = ch,
+                KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.Unicode
+                    | Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.KeyUp,
+            };
+            injector.InjectKeyboardInput(new[] { down, up });
+        }
+    }
+
+    private void InjectRealEnter()
+    {
+        var injector = DemoInjector;
+        if (injector is null || !DemoWindowIsForeground()) return;
+        var down = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+        {
+            VirtualKey = (ushort)Windows.System.VirtualKey.Enter,
+        };
+        var up = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+        {
+            VirtualKey = (ushort)Windows.System.VirtualKey.Enter,
+            KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.KeyUp,
+        };
+        injector.InjectKeyboardInput(new[] { down, up });
+    }
+
+    // Lazily build the overlay (spanning the whole root grid) and the player.
+    private Ghostty.Demo.DemoPlayer EnsureDemoPlayer()
+    {
+        if (_demoPlayer is not null) return _demoPlayer;
+
+        _demoOverlay = new Ghostty.Demo.DemoOverlay();
+        RootGrid.Children.Add(_demoOverlay);
+        Microsoft.UI.Xaml.Controls.Grid.SetRowSpan(_demoOverlay, 99);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(_demoOverlay, 99);
+
+        _demoPlayer = new Ghostty.Demo.DemoPlayer(
+            invokeAction: action => _router.Invoke(action),
+            invokeBinding: ExecuteBindingAction,
+            injectText: InjectDemoText,
+            applyConfig: ApplyDemoConfig,
+            runCommand: RunDemoCommand,
+            injectRealChar: InjectRealChar,
+            injectRealEnter: InjectRealEnter,
+            setInjecting: v => _demoInjecting = v,
+            showCaption: (text, idx, total) => _demoOverlay!.ShowCaption(text, idx, total),
+            hideOverlay: () => _demoOverlay!.Hide(),
+            log: App.LoggerFactory?.CreateLogger("Demo")
+                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        return _demoPlayer;
+    }
+
+    private async void StartDemo(Ghostty.Core.Demo.DemoMode mode)
+    {
+        // Guard at entry, not just inside RunAsync: a fast double-trigger would
+        // otherwise start two script reads before the first sets IsRunning.
+        if (_demoPlayer is { IsRunning: true }) return;
+
+        var demoLog = App.LoggerFactory?.CreateLogger("Demo");
+
+        // Whole body in try: EnsureDemoPlayer mutates the visual tree, so a
+        // throw must not escape as an unhandled async-void exception.
+        try
+        {
+            var exeDir = AppContext.BaseDirectory;
+            var configDir = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var envValue = Environment.GetEnvironmentVariable("WINTTY_DEMO");
+
+            var path = Ghostty.Core.Demo.DemoScriptParser.ResolveScriptPath(
+                envValue, exeDir, configDir, System.IO.File.Exists);
+            demoLog?.LogInformation("Demo script resolved: env='{Env}' path='{Path}'", envValue, path);
+
+            var player = EnsureDemoPlayer();
+            if (path is null)
+            {
+                _demoOverlay!.ShowCaption("No demo script found (set WINTTY_DEMO to a .json path)");
+                return;
+            }
+
+            var json = await System.IO.File.ReadAllTextAsync(path);
+            var script = Ghostty.Core.Demo.DemoScriptParser.Parse(json);
+            await player.RunAsync(script, mode);
+        }
+        catch (Exception ex)
+        {
+            demoLog?.LogError(ex, "Failed to start demo.");
+            _demoOverlay?.ShowCaption("Demo failed to start (see logs)");
+        }
+    }
+
+    private void OnDemoKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (_demoPlayer is null || !_demoPlayer.IsRunning) return;
+
+        // Ignore keys while a "keys" beat is injecting: those events are the
+        // demo's own synthetic input, not the operator's abort/step/pause.
+        if (_demoInjecting) return;
+
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.Escape:
+                _demoPlayer.Abort();
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Space:
+            case Windows.System.VirtualKey.Right:
+                _demoPlayer.Step();
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.P:
+                _demoPlayer.TogglePause();
+                e.Handled = true;
+                break;
+        }
+    }
+#endif
 
     // Prevent the delegates from being GC'd while the picker holds pointers.
     private NativeMethods.InlineThemeCallback? _inlineThemeCb;
