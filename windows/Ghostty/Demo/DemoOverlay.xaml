@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Ghostty.Demo.DemoOverlay"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsHitTestVisible="False">
+
+    <!-- Lower-third caption. Whole control is hit-test invisible so it never
+         steals input from the terminal the demo is driving. -->
+    <Grid>
+        <Border x:Name="CaptionPill"
+                Opacity="0"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Bottom"
+                Margin="0,0,0,72"
+                Padding="20,12"
+                CornerRadius="14"
+                Background="#CC1B1B1F"
+                BorderBrush="#33FFFFFF"
+                BorderThickness="1">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="PillSlide" Y="12"/>
+            </Border.RenderTransform>
+            <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                <Image x:Name="LogoImage"
+                       Width="32" Height="32"
+                       RenderTransformOrigin="0.5,0.5">
+                    <Image.RenderTransform>
+                        <RotateTransform Angle="-12"/>
+                    </Image.RenderTransform>
+                </Image>
+                <TextBlock x:Name="CaptionText"
+                           VerticalAlignment="Center"
+                           FontSize="20"
+                           FontWeight="SemiBold"
+                           Foreground="White"/>
+                <TextBlock x:Name="StepText"
+                           VerticalAlignment="Center"
+                           Margin="6,0,0,0"
+                           FontSize="13"
+                           Opacity="0.6"
+                           Foreground="White"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>
