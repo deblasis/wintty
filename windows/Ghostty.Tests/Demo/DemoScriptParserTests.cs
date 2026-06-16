@@ -44,5 +44,53 @@ public class DemoScriptParserTests
         var script = DemoScriptParser.Parse("""{ "beats": [] }""");
         Assert.Empty(script.Beats);
     }
+
+    [Fact]
+    public void Resolve_PrefersEnvPathWhenFileExists()
+    {
+        var path = DemoScriptParser.ResolveScriptPath(
+            envValue: @"C:\scripts\my.json",
+            exeDir: @"C:\app",
+            configDir: @"C:\cfg",
+            fileExists: p => p == @"C:\scripts\my.json");
+
+        Assert.Equal(@"C:\scripts\my.json", path);
+    }
+
+    [Fact]
+    public void Resolve_FallsBackToExeAdjacent()
+    {
+        var path = DemoScriptParser.ResolveScriptPath(
+            envValue: null,
+            exeDir: @"C:\app",
+            configDir: @"C:\cfg",
+            fileExists: p => p == @"C:\app\demo.json");
+
+        Assert.Equal(@"C:\app\demo.json", path);
+    }
+
+    [Fact]
+    public void Resolve_FallsBackToConfigDir()
+    {
+        var path = DemoScriptParser.ResolveScriptPath(
+            envValue: "1", // present but not a file path
+            exeDir: @"C:\app",
+            configDir: @"C:\cfg",
+            fileExists: p => p == @"C:\cfg\wintty\demo.json");
+
+        Assert.Equal(@"C:\cfg\wintty\demo.json", path);
+    }
+
+    [Fact]
+    public void Resolve_ReturnsNullWhenNothingExists()
+    {
+        var path = DemoScriptParser.ResolveScriptPath(
+            envValue: "1",
+            exeDir: @"C:\app",
+            configDir: @"C:\cfg",
+            fileExists: _ => false);
+
+        Assert.Null(path);
+    }
 }
 #endif
