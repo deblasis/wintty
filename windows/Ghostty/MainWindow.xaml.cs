@@ -199,6 +199,10 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
+#if DEMO
+    private Ghostty.Demo.DemoPlayer? _demoPlayer;
+    private Ghostty.Demo.DemoOverlay? _demoOverlay;
+#endif
 
     // Last libghostty-computed default window size (initial_size action), in
     // physical pixels. null until received; reset_window_size is a no-op
@@ -308,6 +312,19 @@ public sealed partial class MainWindow : Window
         Ghostty.Core.Session.WindowSession? restore = null)
     {
         InitializeComponent();
+
+#if DEMO
+        // Demo mode key handling: while a demo runs, Esc aborts, Space/Right
+        // step (stepped mode), P toggles pause (auto mode). handledEventsToo
+        // so these are seen even if the focused terminal marks them handled.
+        if (this.Content is Microsoft.UI.Xaml.UIElement demoRoot)
+        {
+            demoRoot.AddHandler(
+                Microsoft.UI.Xaml.UIElement.KeyDownEvent,
+                new Microsoft.UI.Xaml.Input.KeyEventHandler(OnDemoKeyDown),
+                handledEventsToo: true);
+        }
+#endif
 
         IsQuickTerminal = isQuickTerminal;
 
@@ -2757,6 +2774,13 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+#if DEMO
+        // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
+        // the var unset leaves the palette unchanged.
+        if (Environment.GetEnvironmentVariable("WINTTY_DEMO") is not null)
+            sources.Add(new DemoCommandSource(StartDemo));
+#endif
+
         // Null-check App services as a defensive belt (cold-start where App.ProfileRegistry
         // isn't wired yet would skip the source entirely; ProfileCommandSource itself
         // returns an empty list when its registry has no profiles).
@@ -2865,6 +2889,109 @@ public sealed partial class MainWindow : Window
             }
         }
     }
+
+#if DEMO
+    // Inject raw UTF-8 text into the active surface, exactly as typed input
+    // would arrive via SurfaceText. Used by the demo player for "type"/"key".
+    private void InjectDemoText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return;
+
+        var surfaceHandle = leaf.Terminal().SurfaceHandle;
+        if (surfaceHandle == IntPtr.Zero) return;
+
+        var surface = new GhosttySurface(surfaceHandle);
+        var bytes = Encoding.UTF8.GetBytes(text);
+        unsafe
+        {
+            fixed (byte* p = bytes)
+            {
+                NativeMethods.SurfaceText(surface, (IntPtr)p, (UIntPtr)bytes.Length);
+            }
+        }
+    }
+
+    // Lazily build the overlay (spanning the whole root grid) and the player.
+    private Ghostty.Demo.DemoPlayer EnsureDemoPlayer()
+    {
+        if (_demoPlayer is not null) return _demoPlayer;
+
+        _demoOverlay = new Ghostty.Demo.DemoOverlay();
+        RootGrid.Children.Add(_demoOverlay);
+        Microsoft.UI.Xaml.Controls.Grid.SetRowSpan(_demoOverlay, 99);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(_demoOverlay, 99);
+
+        _demoPlayer = new Ghostty.Demo.DemoPlayer(
+            invokeAction: action => _router.Invoke(action),
+            invokeBinding: ExecuteBindingAction,
+            injectText: InjectDemoText,
+            showCaption: (text, idx, total) => _demoOverlay!.ShowCaption(text, idx, total),
+            hideOverlay: () => _demoOverlay!.Hide(),
+            log: App.LoggerFactory?.CreateLogger("Demo")
+                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        return _demoPlayer;
+    }
+
+    private async void StartDemo(Ghostty.Core.Demo.DemoMode mode)
+    {
+        // Guard at entry, not just inside RunAsync: a fast double-trigger would
+        // otherwise start two script reads before the first sets IsRunning.
+        if (_demoPlayer is { IsRunning: true }) return;
+
+        var exeDir = AppContext.BaseDirectory;
+        var configDir = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var envValue = Environment.GetEnvironmentVariable("WINTTY_DEMO");
+
+        var path = Ghostty.Core.Demo.DemoScriptParser.ResolveScriptPath(
+            envValue, exeDir, configDir, System.IO.File.Exists);
+
+        var player = EnsureDemoPlayer();
+        if (path is null)
+        {
+            _demoOverlay!.ShowCaption("No demo script found (set WINTTY_DEMO to a .json path)");
+            return;
+        }
+
+        try
+        {
+            var json = await System.IO.File.ReadAllTextAsync(path);
+            var script = Ghostty.Core.Demo.DemoScriptParser.Parse(json);
+            await player.RunAsync(script, mode);
+        }
+        catch (Exception ex)
+        {
+            (App.LoggerFactory?.CreateLogger("Demo"))?.LogError(ex, "Failed to start demo.");
+            _demoOverlay!.ShowCaption("Demo script failed to load");
+        }
+    }
+
+    private void OnDemoKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (_demoPlayer is null || !_demoPlayer.IsRunning) return;
+
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.Escape:
+                _demoPlayer.Abort();
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Space:
+            case Windows.System.VirtualKey.Right:
+                _demoPlayer.Step();
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.P:
+                _demoPlayer.TogglePause();
+                e.Handled = true;
+                break;
+        }
+    }
+#endif
 
     // Prevent the delegates from being GC'd while the picker holds pointers.
     private NativeMethods.InlineThemeCallback? _inlineThemeCb;

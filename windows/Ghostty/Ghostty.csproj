@@ -247,6 +247,27 @@
   </ItemGroup>
 
   <!--
+    Demo mode files compile only when the DEMO constant is set (see
+    windows/Directory.Build.props). The *.cs are self-gated with #if DEMO, but
+    the XAML toolchain would still generate a g.cs for DemoOverlay.xaml in a
+    non-demo build, leaking the type. Exclude both from non-demo builds so
+    public Release binaries carry zero demo bytes.
+  -->
+  <ItemGroup Condition="!$(DefineConstants.Contains('DEMO'))">
+    <Page Remove="Demo\DemoOverlay.xaml" />
+    <Compile Remove="Demo\**\*.cs" />
+  </ItemGroup>
+
+  <!--
+    Copy the sample script beside the exe in demo builds so a bare "Start Demo"
+    works without setting WINTTY_DEMO. The resolver looks for "demo.json", so
+    rename or point WINTTY_DEMO at this sample. Public builds never copy it.
+  -->
+  <ItemGroup Condition="$(DefineConstants.Contains('DEMO'))">
+    <None Update="Demo\demo.sample.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Fail the build (do not just warn) when ghostty.dll is missing. The
     Condition="Exists(...)" on the <None Include> above is evaluated at
     MSBuild project-load time, not target-execution time, so a missing
