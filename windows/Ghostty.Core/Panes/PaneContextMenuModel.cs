@@ -33,7 +33,6 @@ public enum PaneMenuCommand
     /// <summary>
     /// Smart close: closes the active split leaf when the tab has more than one
     /// pane, otherwise closes the whole tab (with the multi-pane confirmation).
-    /// Dispatched as <c>PaneAction.CloseActiveProgressive</c>.
     /// </summary>
     ClosePane,
 }
