@@ -46,6 +46,19 @@ public class DemoScriptParserTests
     }
 
     [Fact]
+    public void Parse_ConfigBeat_ReadsKeyAndValue()
+    {
+        var script = DemoScriptParser.Parse("""
+        { "beats": [ { "type": "config", "key": "theme", "value": "catppuccin-mocha" } ] }
+        """);
+
+        var beat = Assert.Single(script.Beats);
+        Assert.Equal("config", beat.Type);
+        Assert.Equal("theme", beat.Key);
+        Assert.Equal("catppuccin-mocha", beat.Value);
+    }
+
+    [Fact]
     public void Resolve_PrefersEnvPathWhenFileExists()
     {
         var path = DemoScriptParser.ResolveScriptPath(

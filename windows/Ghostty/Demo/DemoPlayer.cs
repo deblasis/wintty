@@ -23,6 +23,7 @@ internal sealed class DemoPlayer
     private readonly Action<PaneAction> _invokeAction;
     private readonly Action<string> _invokeBinding;
     private readonly Action<string> _injectText;
+    private readonly Action<string, string> _applyConfig; // config key, value
     private readonly Action<string, int?, int?> _showCaption; // text, stepIndex, stepTotal
     private readonly Action _hideOverlay;
     private readonly ILogger _log;
@@ -37,6 +38,7 @@ internal sealed class DemoPlayer
         Action<PaneAction> invokeAction,
         Action<string> invokeBinding,
         Action<string> injectText,
+        Action<string, string> applyConfig,
         Action<string, int?, int?> showCaption,
         Action hideOverlay,
         ILogger log)
@@ -44,6 +46,7 @@ internal sealed class DemoPlayer
         _invokeAction = invokeAction;
         _invokeBinding = invokeBinding;
         _injectText = injectText;
+        _applyConfig = applyConfig;
         _showCaption = showCaption;
         _hideOverlay = hideOverlay;
         _log = log;
@@ -150,6 +153,13 @@ internal sealed class DemoPlayer
                     _injectText(seq);
                 else
                     _log.LogWarning("Demo: unknown key '{Chord}', skipping.", beat.Chord);
+                break;
+
+            case "config":
+                if (!string.IsNullOrWhiteSpace(beat.Key) && beat.Value is not null)
+                    _applyConfig(beat.Key, beat.Value);
+                else
+                    _log.LogWarning("Demo: config beat needs 'key' and 'value', skipping.");
                 break;
 
             case "wait":

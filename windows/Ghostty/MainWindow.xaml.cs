@@ -2917,6 +2917,15 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // Write a config key=value and reload, so the demo can showcase appearance
+    // settings (theme, opacity, gradients, fonts, ...) that have no action. Same
+    // write+reload path AdjustOpacity uses; the change persists in the config
+    // file, which is fine for a throwaway recording profile.
+    private void ApplyDemoConfig(string key, string value)
+    {
+        _configWriter.Write(() => _configEditor.SetValue(key, value), key);
+    }
+
     // Lazily build the overlay (spanning the whole root grid) and the player.
     private Ghostty.Demo.DemoPlayer EnsureDemoPlayer()
     {
@@ -2931,6 +2940,7 @@ public sealed partial class MainWindow : Window
             invokeAction: action => _router.Invoke(action),
             invokeBinding: ExecuteBindingAction,
             injectText: InjectDemoText,
+            applyConfig: ApplyDemoConfig,
             showCaption: (text, idx, total) => _demoOverlay!.ShowCaption(text, idx, total),
             hideOverlay: () => _demoOverlay!.Hide(),
             log: App.LoggerFactory?.CreateLogger("Demo")

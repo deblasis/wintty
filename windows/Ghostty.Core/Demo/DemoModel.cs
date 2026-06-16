@@ -22,14 +22,18 @@ internal enum DemoMode
 /// </summary>
 internal sealed class DemoBeat
 {
-    /// <summary>caption | action | binding | type | key | wait</summary>
+    /// <summary>caption | action | binding | type | key | wait | config</summary>
     public string Type { get; set; } = "";
 
     // caption / type
     public string? Text { get; set; }
 
-    // "action" beat: a PaneAction name (underscore/case tolerant), e.g. "split_vertical"
+    // "action" beat: a PaneAction name (underscore/case tolerant), e.g. "split_vertical".
+    // "config" beat: the config key to set, e.g. "theme" or "background-opacity".
     public string? Key { get; set; }
+
+    // "config" beat: the value to write for Key, e.g. "catppuccin-mocha" or "0.85".
+    public string? Value { get; set; }
 
     // "binding" beat: a libghostty binding action, e.g. "clear_screen"
     public string? Action { get; set; }
