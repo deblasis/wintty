@@ -1,21 +1,97 @@
 {
   "title": "Wintty feature tour",
-  "typeDelayMs": 45,
-  "beatGapMs": 800,
+  "typeDelayMs": 40,
+  "beatGapMs": 750,
+
+  "_comment": "OSS feature showcase. Note: 'config' beats write to your config file and persist (theme/opacity); record with a throwaway XDG_CONFIG_HOME if you don't want that. Shell-output beats use pwsh and [char]27 for ESC.",
+
   "beats": [
-    { "type": "caption", "text": "Welcome to Wintty", "durationMs": 2000 },
-    { "type": "type",    "text": "echo hello from wintty", "enter": true },
-    { "type": "wait",    "ms": 1000 },
-    { "type": "caption", "text": "Splitting panes" },
-    { "type": "action",  "key": "split_vertical" },
-    { "type": "type",    "text": "ls", "enter": true },
-    { "type": "wait",    "ms": 1200 },
-    { "type": "caption", "text": "Clearing the screen" },
-    { "type": "binding", "action": "clear_screen" },
+    { "type": "caption", "text": "Welcome to Wintty", "durationMs": 2200 },
+    { "type": "type", "text": "echo hello from wintty", "enter": true },
+    { "type": "wait", "ms": 900 },
+
+    { "type": "caption", "text": "Split panes any direction" },
+    { "type": "action", "key": "split_vertical" },
+    { "type": "type", "text": "ls", "enter": true },
+    { "type": "wait", "ms": 700 },
+    { "type": "action", "key": "split_horizontal" },
+    { "type": "type", "text": "Get-Date", "enter": true },
+    { "type": "wait", "ms": 800 },
+
+    { "type": "caption", "text": "Equalize, then zoom one pane" },
+    { "type": "action", "key": "equalize_splits" },
+    { "type": "wait", "ms": 900 },
+    { "type": "action", "key": "toggle_split_zoom" },
+    { "type": "wait", "ms": 1300 },
+    { "type": "action", "key": "toggle_split_zoom" },
+    { "type": "wait", "ms": 700 },
+
+    { "type": "caption", "text": "Tabs, horizontal or vertical" },
+    { "type": "action", "key": "new_tab" },
+    { "type": "type", "text": "echo a fresh tab", "enter": true },
+    { "type": "wait", "ms": 700 },
+    { "type": "action", "key": "toggle_tab_layout" },
+    { "type": "wait", "ms": 1400 },
+    { "type": "action", "key": "toggle_tab_layout" },
+    { "type": "wait", "ms": 600 },
+
+    { "type": "caption", "text": "See every tab at a glance" },
+    { "type": "action", "key": "show_tab_overview" },
+    { "type": "wait", "ms": 1800 },
+    { "type": "key", "chord": "escape" },
+    { "type": "wait", "ms": 500 },
+
     { "type": "caption", "text": "Drop-down quake terminal" },
-    { "type": "action",  "key": "toggle_quick_terminal" },
-    { "type": "wait",    "ms": 1500 },
-    { "type": "action",  "key": "toggle_quick_terminal" },
-    { "type": "caption", "text": "Thanks for watching", "durationMs": 2500 }
+    { "type": "action", "key": "toggle_quick_terminal" },
+    { "type": "wait", "ms": 1500 },
+    { "type": "action", "key": "toggle_quick_terminal" },
+    { "type": "wait", "ms": 600 },
+
+    { "type": "caption", "text": "Built-in terminal inspector" },
+    { "type": "action", "key": "toggle_inspector" },
+    { "type": "wait", "ms": 1800 },
+    { "type": "action", "key": "toggle_inspector" },
+    { "type": "wait", "ms": 600 },
+
+    { "type": "caption", "text": "Switch themes live" },
+    { "type": "config", "key": "theme", "value": "dracula" },
+    { "type": "wait", "ms": 1600 },
+    { "type": "config", "key": "theme", "value": "catppuccin-mocha" },
+    { "type": "wait", "ms": 1600 },
+
+    { "type": "caption", "text": "Transparency, your way" },
+    { "type": "config", "key": "background-opacity", "value": "0.82" },
+    { "type": "wait", "ms": 1600 },
+    { "type": "config", "key": "background-opacity", "value": "1.00" },
+    { "type": "wait", "ms": 600 },
+
+    { "type": "caption", "text": "Scale the text instantly" },
+    { "type": "binding", "action": "increase_font_size:2" },
+    { "type": "wait", "ms": 1200 },
+    { "type": "binding", "action": "reset_font_size" },
+    { "type": "wait", "ms": 600 },
+
+    { "type": "caption", "text": "Window titles, progress, toasts" },
+    { "type": "type", "text": "$e=[char]27; Write-Host \"$e]2;Wintty by deblasis$([char]7)\"", "enter": true },
+    { "type": "wait", "ms": 900 },
+    { "type": "type", "text": "$e=[char]27; 1..100 | % { Write-Host -NoNewline \"$e]9;4;1;$_$([char]7)\"; Start-Sleep -Milliseconds 20 }", "enter": true },
+    { "type": "wait", "ms": 1400 },
+    { "type": "type", "text": "$e=[char]27; Write-Host \"$e]9;Demo finished building$([char]7)\"", "enter": true },
+    { "type": "wait", "ms": 1200 },
+
+    { "type": "caption", "text": "Search your scrollback" },
+    { "type": "action", "key": "open_search" },
+    { "type": "wait", "ms": 1400 },
+    { "type": "key", "chord": "escape" },
+    { "type": "wait", "ms": 500 },
+
+    { "type": "caption", "text": "Undo and redo pane edits" },
+    { "type": "action", "key": "undo" },
+    { "type": "wait", "ms": 1100 },
+    { "type": "action", "key": "redo" },
+    { "type": "wait", "ms": 900 },
+
+    { "type": "binding", "action": "clear_screen" },
+    { "type": "caption", "text": "That's Wintty", "durationMs": 2600 }
   ]
 }
