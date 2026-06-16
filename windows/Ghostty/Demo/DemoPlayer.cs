@@ -24,6 +24,9 @@ internal sealed class DemoPlayer
     private readonly Action<string> _invokeBinding;
     private readonly Action<string> _injectText;
     private readonly Action<string, string> _applyConfig; // config key, value
+    private readonly Func<string, bool> _runCommand; // palette command id -> handled
+    private readonly Action<string> _injectRealChar; // real WM_CHAR (keycast-visible)
+    private readonly Action _injectRealEnter; // real VK_RETURN
     private readonly Action<string, int?, int?> _showCaption; // text, stepIndex, stepTotal
     private readonly Action _hideOverlay;
     private readonly ILogger _log;
@@ -39,6 +42,9 @@ internal sealed class DemoPlayer
         Action<string> invokeBinding,
         Action<string> injectText,
         Action<string, string> applyConfig,
+        Func<string, bool> runCommand,
+        Action<string> injectRealChar,
+        Action injectRealEnter,
         Action<string, int?, int?> showCaption,
         Action hideOverlay,
         ILogger log)
@@ -47,6 +53,9 @@ internal sealed class DemoPlayer
         _invokeBinding = invokeBinding;
         _injectText = injectText;
         _applyConfig = applyConfig;
+        _runCommand = runCommand;
+        _injectRealChar = injectRealChar;
+        _injectRealEnter = injectRealEnter;
         _showCaption = showCaption;
         _hideOverlay = hideOverlay;
         _log = log;
@@ -162,6 +171,24 @@ internal sealed class DemoPlayer
                     _log.LogWarning("Demo: config beat needs 'key' and 'value', skipping.");
                 break;
 
+            case "command":
+                // Fire a palette command by id (for command-only features with no
+                // PaneAction, e.g. Pro sessions "shell:open_sessions").
+                if (string.IsNullOrWhiteSpace(beat.Key))
+                    _log.LogWarning("Demo: command beat missing 'key' (command id), skipping.");
+                else if (!_runCommand(beat.Key))
+                    _log.LogWarning("Demo: command id '{Key}' not found, skipping.", beat.Key);
+                break;
+
+            case "keys":
+                // Like "type", but injects REAL key events (WM_CHAR / VK), so
+                // features that observe the input pipeline (e.g. Pro keycast) see
+                // them. Requires the window to be focused/foreground.
+                await TypeRealAsync(beat.Text ?? "", beat.TypeDelayMs ?? script.TypeDelayMs, ct);
+                if (beat.Enter)
+                    _injectRealEnter();
+                break;
+
             case "wait":
                 await DelayWithPauseAsync(beat.Ms ?? 0, ct);
                 break;
@@ -180,6 +207,19 @@ internal sealed class DemoPlayer
         {
             ct.ThrowIfCancellationRequested();
             _injectText(rune.ToString());
+            if (perCharMs > 0)
+                await Task.Delay(perCharMs, ct);
+        }
+    }
+
+    // Same hand-typed animation as TypeAsync, but each char is a REAL injected
+    // keystroke (WM_CHAR) so the input pipeline observes it (Pro keycast chips).
+    private async Task TypeRealAsync(string text, int perCharMs, CancellationToken ct)
+    {
+        foreach (var rune in text.EnumerateRunes())
+        {
+            ct.ThrowIfCancellationRequested();
+            _injectRealChar(rune.ToString());
             if (perCharMs > 0)
                 await Task.Delay(perCharMs, ct);
         }

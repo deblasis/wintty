@@ -127,6 +127,23 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
         _allCommands = _sources.SelectMany(s => s.GetCommands()).ToList();
     }
 
+#if DEMO
+    /// <summary>
+    /// Find a command by its <see cref="CommandItem.Id"/> across all sources and
+    /// run it without opening the palette UI. Returns false if no command matches
+    /// (e.g. a Pro-only command id in an OSS build). Used by the demo "command"
+    /// beat to fire palette-only commands that have no PaneAction.
+    /// </summary>
+    public bool TryExecuteById(string id)
+    {
+        RebuildCommands();
+        var cmd = _allCommands.FirstOrDefault(c => c.Id == id);
+        if (cmd is null) return false;
+        cmd.Execute(cmd);
+        return true;
+    }
+#endif
+
     public void Close()
     {
         IsOpen = false;

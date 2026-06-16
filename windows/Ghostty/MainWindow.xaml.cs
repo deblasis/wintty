@@ -202,6 +202,7 @@ public sealed partial class MainWindow : Window
 #if DEMO
     private Ghostty.Demo.DemoPlayer? _demoPlayer;
     private Ghostty.Demo.DemoOverlay? _demoOverlay;
+    private Windows.UI.Input.Preview.Injection.InputInjector? _demoInjector;
 #endif
 
     // Last libghostty-computed default window size (initial_size action), in
@@ -2942,6 +2943,64 @@ public sealed partial class MainWindow : Window
         _configWriter.Write(() => _configEditor.SetValue(key, value), key);
     }
 
+    // Run a command-palette command by id without opening the palette. Lets the
+    // demo "command" beat fire palette-only commands that have no PaneAction
+    // (e.g. Pro "shell:open_sessions"). Returns false if no such command exists.
+    private bool RunDemoCommand(string id) => _commandPaletteVm?.TryExecuteById(id) ?? false;
+
+    // Inject REAL keystrokes (not SurfaceText) so features watching the WinUI
+    // input pipeline observe them (e.g. Pro keycast chips). Goes to the focused
+    // surface, which is correct during a recording. Chars are injected as Unicode
+    // (WM_CHAR); special keys as virtual-key down/up.
+    private Windows.UI.Input.Preview.Injection.InputInjector? DemoInjector =>
+        _demoInjector ??= Windows.UI.Input.Preview.Injection.InputInjector.TryCreate();
+
+    // SAFETY: InjectKeyboardInput is global -- it reaches whatever window is
+    // foreground. Never inject unless OUR window is foreground, so the demo can
+    // never leak keystrokes into another app (e.g. while focus is elsewhere).
+    private bool DemoWindowIsForeground()
+    {
+        var hwnd = new HWND(WindowNative.GetWindowHandle(this));
+        return PInvoke.GetForegroundWindow() == hwnd;
+    }
+
+    private void InjectRealChar(string s)
+    {
+        var injector = DemoInjector;
+        if (injector is null || !DemoWindowIsForeground()) return;
+        foreach (var ch in s)
+        {
+            var down = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+            {
+                ScanCode = ch,
+                KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.Unicode,
+            };
+            var up = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+            {
+                ScanCode = ch,
+                KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.Unicode
+                    | Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.KeyUp,
+            };
+            injector.InjectKeyboardInput(new[] { down, up });
+        }
+    }
+
+    private void InjectRealEnter()
+    {
+        var injector = DemoInjector;
+        if (injector is null || !DemoWindowIsForeground()) return;
+        var down = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+        {
+            VirtualKey = (ushort)Windows.System.VirtualKey.Enter,
+        };
+        var up = new Windows.UI.Input.Preview.Injection.InjectedInputKeyboardInfo
+        {
+            VirtualKey = (ushort)Windows.System.VirtualKey.Enter,
+            KeyOptions = Windows.UI.Input.Preview.Injection.InjectedInputKeyOptions.KeyUp,
+        };
+        injector.InjectKeyboardInput(new[] { down, up });
+    }
+
     // Lazily build the overlay (spanning the whole root grid) and the player.
     private Ghostty.Demo.DemoPlayer EnsureDemoPlayer()
     {
@@ -2957,6 +3016,9 @@ public sealed partial class MainWindow : Window
             invokeBinding: ExecuteBindingAction,
             injectText: InjectDemoText,
             applyConfig: ApplyDemoConfig,
+            runCommand: RunDemoCommand,
+            injectRealChar: InjectRealChar,
+            injectRealEnter: InjectRealEnter,
             showCaption: (text, idx, total) => _demoOverlay!.ShowCaption(text, idx, total),
             hideOverlay: () => _demoOverlay!.Hide(),
             log: App.LoggerFactory?.CreateLogger("Demo")
