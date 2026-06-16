@@ -29,6 +29,7 @@ public class PaneContextMenuModelTests
             PaneMenuCommand.ToggleInspector,
             PaneMenuCommand.ChangeTabTitle,
             PaneMenuCommand.ChangeTerminalTitle,
+            PaneMenuCommand.ClosePane,
         }, commands);
     }
 
@@ -37,7 +38,7 @@ public class PaneContextMenuModelTests
     {
         var items = PaneContextMenuModel.Build(hasSelection: true, isZoomed: false);
 
-        Assert.Equal(3, items.Count(i => i.Kind == PaneMenuItemKind.Separator));
+        Assert.Equal(4, items.Count(i => i.Kind == PaneMenuItemKind.Separator));
         Assert.NotEqual(PaneMenuItemKind.Separator, items[0].Kind);
         Assert.NotEqual(PaneMenuItemKind.Separator, items[^1].Kind);
         for (var i = 1; i < items.Count; i++)
