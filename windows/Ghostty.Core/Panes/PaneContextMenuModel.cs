@@ -30,6 +30,11 @@ public enum PaneMenuCommand
     ToggleInspector,
     ChangeTabTitle,
     ChangeTerminalTitle,
+    /// <summary>
+    /// Smart close: closes the active split leaf when the tab has more than one
+    /// pane, otherwise closes the whole tab (with the multi-pane confirmation).
+    /// </summary>
+    ClosePane,
 }
 
 /// <summary>One row of the pane context menu.</summary>
@@ -74,5 +79,7 @@ public static class PaneContextMenuModel
             Separator(),
             Action(PaneMenuCommand.ChangeTabTitle,      "Change Tab Title...",      "\uE70F"),
             Action(PaneMenuCommand.ChangeTerminalTitle, "Change Terminal Title...", "\uE8AC"),
+            Separator(),
+            Action(PaneMenuCommand.ClosePane,           "Close Pane",               "\uE711"),
         };
 }
