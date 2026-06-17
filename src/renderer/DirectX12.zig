@@ -195,9 +195,12 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !DirectX12 {
 
     const surface: surface_pkg.Surface = if (w.hwnd) |hwnd|
         .{ .hwnd = hwnd }
-    else if (w.swap_chain_panel) |panel|
-        // panel is an opaque COM-compatible pointer from apprt; alignment is guaranteed.
-        .{ .swap_chain_panel = @ptrCast(@alignCast(panel)) }
+    else if (w.swap_chain_panel != null)
+        // Presence of the panel pointer selects SwapChainPanel mode. The
+        // renderer no longer binds the panel itself: it creates a
+        // DirectComposition surface handle + swap chain, and the embedder
+        // binds the handle via ISwapChainPanelNative2::SetSwapChainHandle.
+        .swap_chain_panel
     else if (w.shared_texture.enabled)
         .{ .shared_texture = .{
             .width = w.shared_texture.width,
