@@ -55,6 +55,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Version"
@@ -64,18 +65,26 @@
                                FontFamily="Cascadia Mono, Consolas"
                                IsTextSelectionEnabled="True" />
 
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Build"
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Label"
+                               x:Name="LabelLabel"
                                HorizontalAlignment="Right"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock x:Name="BuildValue" Grid.Row="1" Grid.Column="1"
+                    <TextBlock x:Name="LabelValue" Grid.Row="1" Grid.Column="1"
                                FontFamily="Cascadia Mono, Consolas"
                                IsTextSelectionEnabled="True" />
 
-                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Commit"
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Build"
+                               HorizontalAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="BuildValue" Grid.Row="2" Grid.Column="1"
+                               FontFamily="Cascadia Mono, Consolas"
+                               IsTextSelectionEnabled="True" />
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Commit"
                                x:Name="CommitLabel"
                                HorizontalAlignment="Right"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock x:Name="CommitValue" Grid.Row="2" Grid.Column="1"
+                    <TextBlock x:Name="CommitValue" Grid.Row="3" Grid.Column="1"
                                FontFamily="Cascadia Mono, Consolas"
                                IsTextSelectionEnabled="True">
                         <Hyperlink x:Name="CommitLink">
