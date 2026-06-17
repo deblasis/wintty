@@ -349,10 +349,6 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
             );
             swap_chain = result.swap_chain;
             swap_chain_surface_handle = result.handle;
-            errdefer {
-                _ = swap_chain.?.Release();
-                _ = d3d12.CloseHandle(swap_chain_surface_handle.?);
-            }
         },
         .composition => {
             // Composition surface: create the swap chain but don't bind
@@ -380,7 +376,14 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
         },
     }
     // Defensive: if a future fallible step lands between here and the
-    // return, this prevents leaking the resource and both NT handles.
+    // return, these prevent leaking the surface handle / swap chain (panel
+    // mode) and the shared resource + both NT handles (shared-texture
+    // mode). swap_chain_surface_handle is only set in panel mode, so this
+    // errdefer is a no-op for the other surface variants.
+    errdefer if (swap_chain_surface_handle) |h| {
+        _ = swap_chain.?.Release();
+        _ = d3d12.CloseHandle(h);
+    };
     errdefer if (result_shared_texture) |st| {
         _ = d3d12.CloseHandle(st.fence_handle);
         _ = d3d12.CloseHandle(st.resource_handle);
@@ -603,6 +606,12 @@ const SurfaceHandleSwapChain = struct {
 /// bound to it. The caller owns both: Release the swap chain and
 /// CloseHandle the handle. Used by SwapChainPanel mode so the embedder
 /// can bind the handle via ISwapChainPanelNative2::SetSwapChainHandle.
+///
+/// Each call mints a fresh surface handle. The embedder binds the handle
+/// to the panel exactly once after surface creation, so any future
+/// device-removed (TDR) recovery that recreates the swap chain must also
+/// mint a new handle here AND have the embedder re-bind it via
+/// SetSwapChainHandle, or the panel would composite a dead handle.
 fn createSurfaceHandleSwapChain(
     factory: *dxgi.IDXGIFactory2,
     queue: *d3d12.ID3D12CommandQueue,

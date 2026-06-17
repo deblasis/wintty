@@ -9,6 +9,7 @@ using Ghostty.Core.Search;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Interop;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -535,9 +536,29 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // than the swap chain object) lets DWM composite the panel as soon
         // as the window is shown, avoiding the blank-until-focus startup
         // race, and keeps the binding valid across resizes.
+        //
+        // Best-effort: a bind failure must not abort surface setup, since
+        // the surface is already created and registered above. Worst case
+        // the panel composites on the next OS activation (the pre-fix
+        // behavior), so log and continue rather than throwing.
         var swapChainHandle = NativeMethods.SurfaceGetSwapChainHandle(_surface);
-        if (swapChainHandle != IntPtr.Zero)
-            SwapChainPanelInterop.SetSwapChainHandle(Panel, swapChainHandle);
+        if (swapChainHandle == IntPtr.Zero)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogWarning(
+                "SwapChainPanel surface handle was null; panel left unbound");
+        }
+        else
+        {
+            try
+            {
+                SwapChainPanelInterop.SetSwapChainHandle(Panel, swapChainHandle);
+            }
+            catch (Exception ex)
+            {
+                Ghostty.Logging.StaticLoggers.App.LogWarning(
+                    "Binding swap-chain handle to panel failed: {Message}", ex.Message);
+            }
+        }
 
         // Request focus so keyboard input starts flowing immediately.
         // Focus lives on the UserControl now, not the panel.

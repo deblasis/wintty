@@ -369,7 +369,10 @@ pub const Platform = union(PlatformTag) {
     pub const Windows = if (builtin.target.os.tag == .windows) struct {
         /// The HWND to render into, or null for composition/shared texture modes.
         hwnd: ?std.os.windows.HANDLE,
-        /// ISwapChainPanelNative pointer for composition swap chain, or null.
+        /// Non-null selects SwapChainPanel mode. The renderer only checks
+        /// it for null; it no longer binds the panel itself. The embedder
+        /// binds the surface handle from ghostty_surface_get_swap_chain_handle
+        /// via ISwapChainPanelNative2::SetSwapChainHandle.
         swap_chain_panel: ?*anyopaque = null,
         /// Shared-texture surface configuration. Only honoured when
         /// both `hwnd` and `swap_chain_panel` are null and

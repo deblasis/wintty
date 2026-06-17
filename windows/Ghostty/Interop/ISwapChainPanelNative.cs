@@ -86,7 +86,11 @@ internal static class SwapChainPanelInterop
             unsafe
             {
                 var vtbl = *(IntPtr*)ppv;
-                // slot 4: SetSwapChainHandle(HANDLE swapChainHandle)
+                // slot 4: SetSwapChainHandle(HANDLE swapChainHandle). Read
+                // the slot as a raw pointer and invoke it directly on
+                // purpose: a [GeneratedComInterface]/ComWrappers projection
+                // would reintroduce the marshalling layer this whole file
+                // avoids for NativeAOT trim-safety.
                 var setSwapChainHandle =
                     (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int>)(*((IntPtr*)vtbl + 4));
                 var shr = setSwapChainHandle(ppv, swapChainHandle);
