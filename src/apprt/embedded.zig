@@ -388,7 +388,10 @@ pub const Platform = union(PlatformTag) {
     pub const Windows = if (builtin.target.os.tag == .windows) struct {
         /// The HWND to render into, or null for composition/shared texture modes.
         hwnd: ?std.os.windows.HANDLE,
-        /// ISwapChainPanelNative pointer for composition swap chain, or null.
+        /// Non-null selects SwapChainPanel mode. The renderer only checks
+        /// it for null; it no longer binds the panel itself. The embedder
+        /// binds the surface handle from ghostty_surface_get_swap_chain_handle
+        /// via ISwapChainPanelNative2::SetSwapChainHandle.
         swap_chain_panel: ?*anyopaque = null,
         /// Shared-texture surface configuration. Only honoured when
         /// both `hwnd` and `swap_chain_panel` are null and
@@ -2279,6 +2282,19 @@ pub const CAPI = struct {
         const dev = api.dev orelse return null;
         const sc = dev.swap_chain orelse return null;
         return @ptrCast(sc);
+    }
+
+    /// Return the DirectComposition surface handle backing this surface's
+    /// swap chain in SwapChainPanel mode. Bind it to a WinUI 3
+    /// SwapChainPanel via ISwapChainPanelNative2::SetSwapChainHandle.
+    /// Returns null on non-DX12 builds or when the surface is not in
+    /// SwapChainPanel mode.
+    export fn ghostty_surface_get_swap_chain_handle(surface: *Surface) ?*anyopaque {
+        if (comptime builtin.os.tag != .windows) return null;
+        const api = surface.core_surface.renderer.api;
+        if (comptime !@hasField(@TypeOf(api), "dev")) return null;
+        const dev = api.dev orelse return null;
+        return @ptrCast(dev.swap_chain_surface_handle orelse return null);
     }
 
     /// Mirrors ghostty_surface_shared_texture_s in include/ghostty.h.
