@@ -7,6 +7,7 @@ public sealed class VersionRendererTests
 {
     private static VersionInfo Sample() => new(
         WinttyVersion:       "1.2.0",
+        BuildLabel:          "",
         WinttyVersionString: "1.2.0-tip+abc1234",
         WinttyCommit:        "abc1234",
         Edition:             Edition.Oss,
@@ -128,5 +129,27 @@ public sealed class VersionRendererTests
     {
         var info = Sample() with { WinttyCommit = "" };
         Assert.Null(VersionRenderer.CommitUrl(info));
+    }
+
+    [Fact]
+    public void RenderPlainBody_WithLabel_RendersLabelFirstInVersionBlock()
+    {
+        var info = Sample() with { BuildLabel = "session-foo" };
+        var output = VersionRenderer.RenderPlainBody(info);
+
+        Assert.StartsWith(
+            "Version\n" +
+            "  label:          session-foo\n" +
+            "  version:        1.2.0\n" +
+            "  channel:        tip\n" +
+            "  edition:        oss\n",
+            output);
+    }
+
+    [Fact]
+    public void RenderPlainBody_EmptyLabel_OmitsLabelLine()
+    {
+        var output = VersionRenderer.RenderPlainBody(Sample());
+        Assert.DoesNotContain("label:", output);
     }
 }
