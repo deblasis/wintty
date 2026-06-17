@@ -108,3 +108,22 @@ pub extern "dcomp" fn DCompositionCreateDevice(
     iid: *const GUID,
     dcompositionDevice: *?*anyopaque,
 ) callconv(.winapi) HRESULT;
+
+/// Access mask passed to DCompositionCreateSurfaceHandle. This value is
+/// not exposed by any public header; DirectComposition's own samples and
+/// Windows Terminal both use it to request full access to the surface
+/// handle.
+pub const COMPOSITIONOBJECT_ALL_ACCESS: u32 = 0x0003;
+
+/// Create a standalone DirectComposition surface handle. A composition
+/// swap chain created against this handle (via
+/// IDXGIFactoryMedia.CreateSwapChainForCompositionSurfaceHandle) can be
+/// bound to a XAML SwapChainPanel through
+/// ISwapChainPanelNative2::SetSwapChainHandle. The handle is the stable
+/// composition primitive: the panel references the handle, not the swap
+/// chain object, so the binding survives ResizeBuffers untouched.
+pub extern "dcomp" fn DCompositionCreateSurfaceHandle(
+    desiredAccess: u32,
+    securityAttributes: ?*anyopaque,
+    surfaceHandle: *std.os.windows.HANDLE,
+) callconv(.winapi) HRESULT;
