@@ -51,6 +51,14 @@ test "ISwapChainPanelNative IID" {
     try std.testing.expectEqualSlices(u8, &iid.data4, &[_]u8{ 0xa2, 0x0c, 0xf6, 0xf1, 0xea, 0x90, 0x55, 0x4b });
 }
 
+test "IDXGIFactoryMedia IID" {
+    const iid = dxgi.IDXGIFactoryMedia.IID;
+    try std.testing.expectEqual(iid.data1, 0x41e7d1f2);
+    try std.testing.expectEqual(iid.data2, 0xa591);
+    try std.testing.expectEqual(iid.data3, 0x4f7b);
+    try std.testing.expectEqualSlices(u8, &iid.data4, &[_]u8{ 0xa2, 0xe5, 0xfa, 0x9c, 0x84, 0x3e, 0x1c, 0x12 });
+}
+
 // Verify DXGI error constants match the Windows SDK values.
 // These are HRESULT codes that cross the COM boundary, so wrong
 // values would silently miss device-loss events.
