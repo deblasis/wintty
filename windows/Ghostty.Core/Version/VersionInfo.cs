@@ -9,6 +9,9 @@ namespace Ghostty.Core.Version;
 public sealed record VersionInfo(
     // Wintty-side (BuildInfo.g.cs constants)
     string WinttyVersion,
+    // Optional free-form build identifier, empty by default. Rendered only
+    // when non-empty so parallel local builds are tellable apart.
+    string BuildLabel,
     string WinttyVersionString,
     string WinttyCommit,
     Edition Edition,

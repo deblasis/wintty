@@ -26,6 +26,7 @@ public static class VersionRenderer
         var lib = LibGhosttyBuildInfoBridge.Read();
         return new VersionInfo(
             WinttyVersion:       BuildInfo.WinttyVersion,
+            BuildLabel:          BuildInfo.BuildLabel,
             WinttyVersionString: BuildInfo.WinttyVersionString,
             WinttyCommit:        BuildInfo.WinttyCommit,
             Edition:             BuildInfo.Edition,
@@ -105,6 +106,10 @@ public static class VersionRenderer
     private static void AppendBody(StringBuilder sb, VersionInfo info)
     {
         sb.Append("Version\n");
+        // Free-form build identifier first, so it is the most prominent line
+        // when present. Omitted entirely when empty (the default).
+        if (!string.IsNullOrEmpty(info.BuildLabel))
+            Field(sb, "label", info.BuildLabel);
         Field(sb, "version",     info.WinttyVersion);
         Field(sb, "channel",     info.LibGhostty.Channel);
         Field(sb, "edition",     EditionLabel.Format(info.Edition));
