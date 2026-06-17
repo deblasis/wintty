@@ -118,6 +118,14 @@
       <_WinttyDirtyOutput></_WinttyDirtyOutput>
     </PropertyGroup>
 
+    <!--
+      BuildLabel is an optional, free-form identifier baked into the binary so
+      parallel local builds are tellable apart in `wintty +version` and the
+      About window. Default empty -> nothing renders. Pass it at build time:
+        dotnet build -p:Platform=x64 -p:BuildLabel="session-foo"
+      The value is injected verbatim into a C# string literal, so keep it
+      simple text - no double quotes or backslashes.
+    -->
     <Exec Command="git rev-parse --short HEAD"
           ConsoleToMSBuild="true"
           IgnoreExitCode="true"
@@ -153,6 +161,7 @@
       <_BuildInfoLines Include="    public const string WinttyVersionString = &quot;$(_WinttyVersionString)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string WinttyCommit = &quot;$(_WinttyCommit)$(_WinttyCommitDirty)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string MsbuildConfig = &quot;$(Configuration)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string BuildLabel = &quot;$(BuildLabel)&quot;%3B"/>
       <_BuildInfoLines Include="    public const Edition Edition = Edition.Oss%3B"/>
       <_BuildInfoLines Include="}"/>
     </ItemGroup>
