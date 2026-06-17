@@ -608,6 +608,60 @@ pub const IDXGIFactory2 = extern struct {
     }
 };
 
+// IDXGIFactoryMedia
+// QI'd from the IDXGIFactory2 we already create. Exposes the
+// composition-surface-handle swap chain entry point used by the
+// SwapChainPanel path.
+pub const IDXGIFactoryMedia = extern struct {
+    vtable: *const VTable,
+
+    pub const IID = GUID{
+        .data1 = 0x41e7d1f2,
+        .data2 = 0xa591,
+        .data3 = 0x4f7b,
+        .data4 = .{ 0xa2, 0xe5, 0xfa, 0x9c, 0x84, 0x3e, 0x1c, 0x12 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown
+        QueryInterface: *const fn (*IDXGIFactoryMedia, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*IDXGIFactoryMedia) callconv(.winapi) u32,
+        Release: *const fn (*IDXGIFactoryMedia) callconv(.winapi) u32,
+        // IDXGIFactoryMedia
+        CreateSwapChainForCompositionSurfaceHandle: *const fn (
+            self: *IDXGIFactoryMedia,
+            pDevice: *IUnknown,
+            hSurface: HWND,
+            pDesc: *const DXGI_SWAP_CHAIN_DESC1,
+            pRestrictToOutput: ?*anyopaque, // IDXGIOutput, nullable
+            ppSwapChain: *?*IDXGISwapChain1,
+        ) callconv(.winapi) HRESULT,
+        CreateDecodeSwapChainForCompositionSurfaceHandle: Reserved,
+    };
+
+    pub inline fn CreateSwapChainForCompositionSurfaceHandle(
+        self: *IDXGIFactoryMedia,
+        device: *IUnknown,
+        surface: HWND,
+        desc: *const DXGI_SWAP_CHAIN_DESC1,
+        restrict_to_output: ?*anyopaque,
+        swap_chain: *?*IDXGISwapChain1,
+    ) HRESULT {
+        return self.vtable.CreateSwapChainForCompositionSurfaceHandle(
+            self,
+            device,
+            surface,
+            desc,
+            restrict_to_output,
+            swap_chain,
+        );
+    }
+
+    pub inline fn Release(self: *IDXGIFactoryMedia) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
 // ISwapChainPanelNative
 pub const ISwapChainPanelNative = extern struct {
     vtable: *const VTable,
