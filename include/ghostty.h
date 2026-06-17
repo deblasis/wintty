@@ -1187,6 +1187,12 @@ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t)
 // cross-device synchronization issues. Returns NULL on non-DX12 builds or if
 // the renderer device is not yet initialized.
 GHOSTTY_API void* ghostty_surface_get_d3d12_device(ghostty_surface_t);
+// Returns the DirectComposition surface handle backing this surface's swap
+// chain in SwapChainPanel mode. Bind it to a WinUI 3 SwapChainPanel via
+// ISwapChainPanelNative2::SetSwapChainHandle. Returns NULL on non-DX12
+// builds or when the surface is not in SwapChainPanel mode. Ghostty owns
+// the handle for the surface lifetime -- do NOT CloseHandle it.
+GHOSTTY_API void* ghostty_surface_get_swap_chain_handle(ghostty_surface_t);
 
 // Snapshot of the shared-texture state for a surface. All fields are
 // filled in atomically by a single ghostty_surface_shared_texture()
