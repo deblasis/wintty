@@ -80,6 +80,18 @@ internal sealed partial class AboutWindow : Window
             ? edition
             : $"{edition} ({info.LibGhostty.Channel})";
 
+        // Free-form build identifier. Empty by default, in which case the row
+        // collapses (both cells hidden) just like the Commit row below.
+        if (string.IsNullOrEmpty(info.BuildLabel))
+        {
+            LabelLabel.Visibility = Visibility.Collapsed;
+            LabelValue.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            LabelValue.Text = info.BuildLabel;
+        }
+
         // CommitUrl is null when the commit is unknown. Guard the parse too:
         // the commit string is build-derived, so a malformed value collapses
         // the row rather than throwing and taking down the whole window.

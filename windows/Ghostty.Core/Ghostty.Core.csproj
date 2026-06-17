@@ -118,6 +118,15 @@
       <_WinttyDirtyOutput></_WinttyDirtyOutput>
     </PropertyGroup>
 
+    <!--
+      BuildLabel is an optional, free-form identifier baked into the binary so
+      parallel local builds are tellable apart in `wintty +version` and the
+      About window. Default empty -> nothing renders. Pass it at build time:
+        dotnet build -p:Platform=x64 -p:BuildLabel="session-foo"
+      The value is baked into a C# string literal; backslashes and double
+      quotes are escaped below so an arbitrary label stays valid source.
+      (A literal newline in the value is still not supported.)
+    -->
     <Exec Command="git rev-parse --short HEAD"
           ConsoleToMSBuild="true"
           IgnoreExitCode="true"
@@ -142,6 +151,9 @@
       <_WinttyChannel Condition="'$(Channel)' == 'Stable'">stable</_WinttyChannel>
       <_WinttyChannel Condition="'$(_WinttyChannel)' == ''">tip</_WinttyChannel>
       <_WinttyVersionString>$(_WinttyVersion)-$(_WinttyChannel)+$(_WinttyCommit)$(_WinttyCommitDirty)</_WinttyVersionString>
+      <!-- Escape backslash first, then double-quote, so an arbitrary BuildLabel
+           stays a valid C# string literal in the generated source. -->
+      <_WinttyBuildLabel>$(BuildLabel.Replace('\','\\').Replace('"','\"'))</_WinttyBuildLabel>
     </PropertyGroup>
 
     <ItemGroup>
@@ -153,6 +165,7 @@
       <_BuildInfoLines Include="    public const string WinttyVersionString = &quot;$(_WinttyVersionString)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string WinttyCommit = &quot;$(_WinttyCommit)$(_WinttyCommitDirty)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string MsbuildConfig = &quot;$(Configuration)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string BuildLabel = &quot;$(_WinttyBuildLabel)&quot;%3B"/>
       <_BuildInfoLines Include="    public const Edition Edition = Edition.Oss%3B"/>
       <_BuildInfoLines Include="}"/>
     </ItemGroup>
