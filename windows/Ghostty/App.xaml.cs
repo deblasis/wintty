@@ -62,6 +62,13 @@ public partial class App : Application
     // works from anywhere in the process and the hidden window stays
     // alive across regular window close/reopen cycles.
     private MainWindow? _quakeWindow;
+
+    // App-wide singleton settings window: one for the whole process,
+    // regardless of which window opened it (mirrors _quakeWindow). Its
+    // dependencies are app-global, so it outlives the window that opened it.
+    // UI-thread-only access.
+    private Window? _settingsWindow;
+
     private Ghostty.Session.SessionManager? _sessionManager;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
     private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
@@ -912,6 +919,39 @@ public partial class App : Application
             if (ReferenceEquals(w, _quakeWindow)) continue;
             w.Close();
         }
+    }
+
+    /// <summary>
+    /// Show the app-wide settings window, or focus the existing one if it is
+    /// already open. One settings window serves the whole process, so opening
+    /// it from any window reuses the same instance. The caller guards on
+    /// SettingsUiEnabled. UI thread only.
+    /// </summary>
+    internal void ShowOrActivateSettings()
+    {
+        if (_settingsWindow is not null)
+        {
+            _settingsWindow.Activate();
+            return;
+        }
+
+        var keybindings = new KeyBindingsProvider(_configService!);
+        var themeProvider = new ThemeProvider(_configService!);
+        var window = new Ghostty.Settings.SettingsWindow(
+            _configService!, ConfigFileEditor!, keybindings, themeProvider);
+        window.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow = window;
+        window.Activate();
+    }
+
+    /// <summary>
+    /// Close the app-wide settings window if it is open. Called from the last
+    /// window's teardown so the settings window does not outlive the app.
+    /// </summary>
+    internal void CloseSettingsWindow()
+    {
+        _settingsWindow?.Close();
+        _settingsWindow = null;
     }
 
     // Whether the last toggle_visibility hid the windows, and the set it hid.
