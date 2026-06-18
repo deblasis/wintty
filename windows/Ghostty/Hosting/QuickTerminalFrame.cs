@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Windows.Win32.Foundation;
 using Ghostty.Core.Hosting;
+using Ghostty.Interop;
 
 namespace Ghostty.Hosting;
 
@@ -42,6 +43,7 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 {
     private const uint WM_NCCALCSIZE = 0x0083;
     private const uint WM_NCHITTEST = 0x0084;
+    private const uint WM_NCPAINT = 0x0085;
     private const uint WM_STYLECHANGING = 0x007C;
     private const uint WM_STYLECHANGED = 0x007D;
 
@@ -70,6 +72,10 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
     private readonly IntPtr _hwnd;
     private readonly Func<QuickTerminalPosition> _position;
+    // Supplies the color (COLORREF, 0x00BBGGRR) for the kept sizing strip so it
+    // matches the terminal theme instead of Windows' default frame band. Read
+    // on every WM_NCPAINT so a live theme/config reload is picked up.
+    private readonly Func<uint> _borderColorRef;
     private readonly ILogger<QuickTerminalFrame>? _logger;
 
     // Held for the subclass's lifetime: the GC must not collect the delegate
@@ -103,11 +109,14 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     public QuickTerminalFrame(
         IntPtr hwnd,
         Func<QuickTerminalPosition> position,
+        Func<uint> borderColorRef,
         ILogger<QuickTerminalFrame>? logger)
     {
         ArgumentNullException.ThrowIfNull(position);
+        ArgumentNullException.ThrowIfNull(borderColorRef);
         _hwnd = hwnd;
         _position = position;
+        _borderColorRef = borderColorRef;
         _logger = logger;
         _proc = WndProc;
         _grip = Math.Max(1, GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER));
@@ -132,6 +141,11 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
     public void Dispose()
     {
+        if (_stripBrush != IntPtr.Zero)
+        {
+            Win32Interop.DeleteObject(_stripBrush);
+            _stripBrush = IntPtr.Zero;
+        }
         if (!_installed) return;
         // Best-effort: comctl32 also removes the subclass automatically on
         // WM_NCDESTROY, so if the HWND is already gone (teardown ordering) this
@@ -211,11 +225,65 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
                 case WM_NCHITTEST:
                     return (IntPtr)HitTest(lParam);
+
+                // Windows paints the kept sizing strip as its default frame
+                // band, which ignores the terminal theme. Paint it ourselves
+                // with the theme color so it blends with the terminal instead of
+                // showing a stray light/dark border at the resize edge. Return
+                // handled (0) so the default frame paint is suppressed.
+                case WM_NCPAINT:
+                    PaintBorderStrip(hWnd, edge);
+                    return IntPtr.Zero;
             }
         }
 
         return DefSubclassProc(hWnd, msg, wParam, lParam);
     }
+
+    // Fill the kept non-client sizing strip (the one edge left non-client by
+    // WM_NCCALCSIZE) with the theme color. The window DC is window-relative, so
+    // the strip rect is in window coordinates.
+    private void PaintBorderStrip(IntPtr hWnd, QuickTerminalResizeEdge edge)
+    {
+        if (!GetWindowRect(hWnd, out var r)) return;
+        var w = r.right - r.left;
+        var h = r.bottom - r.top;
+        if (w <= 0 || h <= 0) return;
+
+        // Clamp the strip into the window so a transient sub-_grip size (e.g.
+        // during the borderless transition) can't produce an inside-out rect.
+        var strip = edge switch
+        {
+            QuickTerminalResizeEdge.Bottom => new RECT { left = 0, top = Math.Max(0, h - _grip), right = w, bottom = h },
+            QuickTerminalResizeEdge.Top => new RECT { left = 0, top = 0, right = w, bottom = Math.Min(h, _grip) },
+            QuickTerminalResizeEdge.Left => new RECT { left = 0, top = 0, right = Math.Min(w, _grip), bottom = h },
+            QuickTerminalResizeEdge.Right => new RECT { left = Math.Max(0, w - _grip), top = 0, right = w, bottom = h },
+            _ => default,
+        };
+        if (strip.right <= strip.left || strip.bottom <= strip.top) return;
+
+        // WM_NCPAINT can fire every frame during the reveal (SetWindowRgn with
+        // bRedraw) and on every drag-resize tick, so cache the brush and only
+        // recreate it when the theme color actually changes.
+        var color = _borderColorRef();
+        if (_stripBrush == IntPtr.Zero || color != _stripBrushColor)
+        {
+            if (_stripBrush != IntPtr.Zero) Win32Interop.DeleteObject(_stripBrush);
+            _stripBrush = Win32Interop.CreateSolidBrush(color);
+            _stripBrushColor = color;
+        }
+        if (_stripBrush == IntPtr.Zero) return;
+
+        var hdc = Win32Interop.GetWindowDC(hWnd);
+        if (hdc == IntPtr.Zero) return;
+        try { Win32Interop.FillRect(hdc, in strip, _stripBrush); }
+        finally { Win32Interop.ReleaseDC(hWnd, hdc); }
+    }
+
+    // Cached solid brush for the resize strip, keyed on its last color so
+    // WM_NCPAINT does not churn a GDI object per paint. Freed in Dispose.
+    private IntPtr _stripBrush;
+    private uint _stripBrushColor;
 
     /// <summary>
     /// Map the cursor position to a resize hit-code for the kept strip, or
