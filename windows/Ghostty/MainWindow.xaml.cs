@@ -192,7 +192,6 @@ public sealed partial class MainWindow : Window
     private CaptionColors _lastButtonColors;
 
     private GradientTintVisual? _gradientVisual;
-    private Window? _settingsWindow;
     private Window? _aboutWindow;
     private InspectorWindow? _inspectorWindow;
 
@@ -695,20 +694,10 @@ public sealed partial class MainWindow : Window
             {
                 if (configService.SettingsUiEnabled)
                 {
-                    var editor = App.ConfigFileEditor!;
-                    var keybindings = new KeyBindingsProvider(configService);
-                    var themeProvider = new ThemeProvider(configService);
-                    // Reuse existing settings window if still open.
-                    if (_settingsWindow is not null)
-                    {
-                        _settingsWindow.Activate();
-                        return;
-                    }
-                    var settingsWin = new Ghostty.Settings.SettingsWindow(
-                        configService, editor, keybindings, themeProvider);
-                    settingsWin.Closed += (_, _) => _settingsWindow = null;
-                    _settingsWindow = settingsWin;
-                    settingsWin.Activate();
+                    // One settings window serves the whole process; App owns
+                    // the singleton (mirrors the quake window), so opening it
+                    // from any window reuses the same instance.
+                    ((App)Application.Current).ShowOrActivateSettings();
                     return;
                 }
 
@@ -1197,9 +1186,13 @@ public sealed partial class MainWindow : Window
             _windowState.Save();
         }
 
-        // Close settings window if open.
-        _settingsWindow?.Close();
-        _settingsWindow = null;
+        // The settings window is a single app-wide instance owned by App.
+        // Close it only when this is the last window closing -- closing it on
+        // any window's teardown would yank it away while other windows are
+        // still open. WindowsByRoot.Count <= 1 is the same "last regular
+        // window" signal used above for config shutdown.
+        if (Ghostty.App.WindowsByRoot.Count <= 1)
+            ((App)Application.Current).CloseSettingsWindow();
 
         // Close About window if open.
         _aboutWindow?.Close();
