@@ -2186,6 +2186,9 @@ public sealed partial class MainWindow : Window
         _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
             WindowNative.GetWindowHandle(this),
             () => _configService.QuickTerminalPosition,
+            // Color the kept resize strip with the terminal background so it
+            // blends instead of showing Windows' default frame band.
+            () => Ghostty.Interop.Win32Interop.RgbToColorRef(_configService.BackgroundColor),
             App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
 
         // Borderless: a quake terminal is positioned by config and toggled by the
@@ -2395,13 +2398,27 @@ public sealed partial class MainWindow : Window
     private void Show()
     {
         _hiding = false;
+        var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration > 0)
+            _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
+
         if (!AppWindow.IsVisible)
         {
             MoveToQuakePosition();
+
+            // Seed the reveal's collapsed start region BEFORE the window is
+            // shown. AppWindow.Show() forces an immediate present; without this
+            // the first frame would be the full rectangular window before the
+            // clip-reveal begins.
+            if (duration > 0)
+                _slideAnimator!.PrepareIn(
+                    _configService.QuickTerminalPosition,
+                    AppWindow.Size.Width,
+                    AppWindow.Size.Height);
+
             AppWindow.Show();
         }
 
-        var duration = _configService.QuickTerminalAnimationDuration;
         if (duration <= 0)
         {
             _slideAnimator?.SnapToShown();
@@ -2411,8 +2428,7 @@ public sealed partial class MainWindow : Window
         }
 
         _autohideArmed = false;
-        _slideAnimator ??= new QuickTerminalSlideAnimator(RootGrid);
-        _slideAnimator.AnimateIn(
+        _slideAnimator!.AnimateIn(
             _configService.QuickTerminalPosition,
             AppWindow.Size.Width,
             AppWindow.Size.Height,
