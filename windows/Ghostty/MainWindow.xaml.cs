@@ -2186,6 +2186,14 @@ public sealed partial class MainWindow : Window
         _quakeFrame = new Ghostty.Hosting.QuickTerminalFrame(
             WindowNative.GetWindowHandle(this),
             () => _configService.QuickTerminalPosition,
+            // Color the kept resize strip with the terminal background so it
+            // blends instead of showing Windows' default frame band. Convert
+            // BackgroundColor (0x00RRGGBB) to a GDI COLORREF (0x00BBGGRR).
+            () =>
+            {
+                var c = _configService.BackgroundColor;
+                return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+            },
             App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
 
         // Borderless: a quake terminal is positioned by config and toggled by the
@@ -2395,13 +2403,29 @@ public sealed partial class MainWindow : Window
     private void Show()
     {
         _hiding = false;
+        var duration = _configService.QuickTerminalAnimationDuration;
+
         if (!AppWindow.IsVisible)
         {
             MoveToQuakePosition();
+
+            // Seed the slide's start frame BEFORE the window is shown.
+            // AppWindow.Show() forces an immediate present; without this the
+            // first frame is stale -- the resting content (a full-terminal
+            // flash on the first toggle) or the leftover off-screen state from
+            // the prior hide (a held empty frame) -- before the slide begins.
+            if (duration > 0)
+            {
+                _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
+                _slideAnimator.PrepareIn(
+                    _configService.QuickTerminalPosition,
+                    AppWindow.Size.Width,
+                    AppWindow.Size.Height);
+            }
+
             AppWindow.Show();
         }
 
-        var duration = _configService.QuickTerminalAnimationDuration;
         if (duration <= 0)
         {
             _slideAnimator?.SnapToShown();
@@ -2411,7 +2435,7 @@ public sealed partial class MainWindow : Window
         }
 
         _autohideArmed = false;
-        _slideAnimator ??= new QuickTerminalSlideAnimator(RootGrid);
+        _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
         _slideAnimator.AnimateIn(
             _configService.QuickTerminalPosition,
             AppWindow.Size.Width,

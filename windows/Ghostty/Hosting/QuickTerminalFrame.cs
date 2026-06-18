@@ -42,6 +42,7 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 {
     private const uint WM_NCCALCSIZE = 0x0083;
     private const uint WM_NCHITTEST = 0x0084;
+    private const uint WM_NCPAINT = 0x0085;
     private const uint WM_STYLECHANGING = 0x007C;
     private const uint WM_STYLECHANGED = 0x007D;
 
@@ -70,6 +71,10 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
     private readonly IntPtr _hwnd;
     private readonly Func<QuickTerminalPosition> _position;
+    // Supplies the color (COLORREF, 0x00BBGGRR) for the kept sizing strip so it
+    // matches the terminal theme instead of Windows' default frame band. Read
+    // on every WM_NCPAINT so a live theme/config reload is picked up.
+    private readonly Func<uint> _borderColorRef;
     private readonly ILogger<QuickTerminalFrame>? _logger;
 
     // Held for the subclass's lifetime: the GC must not collect the delegate
@@ -103,11 +108,14 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     public QuickTerminalFrame(
         IntPtr hwnd,
         Func<QuickTerminalPosition> position,
+        Func<uint> borderColorRef,
         ILogger<QuickTerminalFrame>? logger)
     {
         ArgumentNullException.ThrowIfNull(position);
+        ArgumentNullException.ThrowIfNull(borderColorRef);
         _hwnd = hwnd;
         _position = position;
+        _borderColorRef = borderColorRef;
         _logger = logger;
         _proc = WndProc;
         _grip = Math.Max(1, GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER));
@@ -211,10 +219,56 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
                 case WM_NCHITTEST:
                     return (IntPtr)HitTest(lParam);
+
+                // Windows paints the kept sizing strip as its default frame
+                // band, which ignores the terminal theme. Paint it ourselves
+                // with the theme color so it blends with the terminal instead of
+                // showing a stray light/dark border at the resize edge. Return
+                // handled (0) so the default frame paint is suppressed.
+                case WM_NCPAINT:
+                    PaintBorderStrip(hWnd, edge);
+                    return IntPtr.Zero;
             }
         }
 
         return DefSubclassProc(hWnd, msg, wParam, lParam);
+    }
+
+    // Fill the kept non-client sizing strip (the one edge left non-client by
+    // WM_NCCALCSIZE) with the theme color. The window DC is window-relative, so
+    // the strip rect is in window coordinates.
+    private void PaintBorderStrip(IntPtr hWnd, QuickTerminalResizeEdge edge)
+    {
+        if (!GetWindowRect(hWnd, out var r)) return;
+        var w = r.right - r.left;
+        var h = r.bottom - r.top;
+        if (w <= 0 || h <= 0) return;
+
+        var strip = edge switch
+        {
+            QuickTerminalResizeEdge.Bottom => new RECT { left = 0, top = h - _grip, right = w, bottom = h },
+            QuickTerminalResizeEdge.Top => new RECT { left = 0, top = 0, right = w, bottom = _grip },
+            QuickTerminalResizeEdge.Left => new RECT { left = 0, top = 0, right = _grip, bottom = h },
+            QuickTerminalResizeEdge.Right => new RECT { left = w - _grip, top = 0, right = w, bottom = h },
+            _ => default,
+        };
+        if (strip.right <= strip.left || strip.bottom <= strip.top) return;
+
+        var hdc = GetWindowDC(hWnd);
+        if (hdc == IntPtr.Zero) return;
+        try
+        {
+            var brush = CreateSolidBrush(_borderColorRef());
+            if (brush != IntPtr.Zero)
+            {
+                FillRect(hdc, in strip, brush);
+                DeleteObject(brush);
+            }
+        }
+        finally
+        {
+            ReleaseDC(hWnd, hdc);
+        }
     }
 
     /// <summary>
@@ -277,6 +331,27 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetWindowPos(
         IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowDC")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial IntPtr GetWindowDC(IntPtr hWnd);
+
+    [LibraryImport("user32.dll", EntryPoint = "ReleaseDC")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [LibraryImport("user32.dll", EntryPoint = "FillRect")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int FillRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "CreateSolidBrush")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial IntPtr CreateSolidBrush(uint color);
+
+    [LibraryImport("gdi32.dll", EntryPoint = "DeleteObject")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DeleteObject(IntPtr hObject);
 }
 
 internal static partial class QuickTerminalFrameLogExtensions
