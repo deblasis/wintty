@@ -2187,13 +2187,8 @@ public sealed partial class MainWindow : Window
             WindowNative.GetWindowHandle(this),
             () => _configService.QuickTerminalPosition,
             // Color the kept resize strip with the terminal background so it
-            // blends instead of showing Windows' default frame band. Convert
-            // BackgroundColor (0x00RRGGBB) to a GDI COLORREF (0x00BBGGRR).
-            () =>
-            {
-                var c = _configService.BackgroundColor;
-                return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
-            },
+            // blends instead of showing Windows' default frame band.
+            () => Ghostty.Interop.Win32Interop.RgbToColorRef(_configService.BackgroundColor),
             App.LoggerFactory?.CreateLogger<Ghostty.Hosting.QuickTerminalFrame>());
 
         // Borderless: a quake terminal is positioned by config and toggled by the
@@ -2404,24 +2399,22 @@ public sealed partial class MainWindow : Window
     {
         _hiding = false;
         var duration = _configService.QuickTerminalAnimationDuration;
+        if (duration > 0)
+            _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
 
         if (!AppWindow.IsVisible)
         {
             MoveToQuakePosition();
 
-            // Seed the slide's start frame BEFORE the window is shown.
-            // AppWindow.Show() forces an immediate present; without this the
-            // first frame is stale -- the resting content (a full-terminal
-            // flash on the first toggle) or the leftover off-screen state from
-            // the prior hide (a held empty frame) -- before the slide begins.
+            // Seed the reveal's collapsed start region BEFORE the window is
+            // shown. AppWindow.Show() forces an immediate present; without this
+            // the first frame would be the full rectangular window before the
+            // clip-reveal begins.
             if (duration > 0)
-            {
-                _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
-                _slideAnimator.PrepareIn(
+                _slideAnimator!.PrepareIn(
                     _configService.QuickTerminalPosition,
                     AppWindow.Size.Width,
                     AppWindow.Size.Height);
-            }
 
             AppWindow.Show();
         }
@@ -2435,8 +2428,7 @@ public sealed partial class MainWindow : Window
         }
 
         _autohideArmed = false;
-        _slideAnimator ??= new QuickTerminalSlideAnimator(WindowNative.GetWindowHandle(this), RootGrid);
-        _slideAnimator.AnimateIn(
+        _slideAnimator!.AnimateIn(
             _configService.QuickTerminalPosition,
             AppWindow.Size.Width,
             AppWindow.Size.Height,

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Windows.Win32.Foundation;
 using Ghostty.Core.Hosting;
+using Ghostty.Interop;
 
 namespace Ghostty.Hosting;
 
@@ -140,6 +141,11 @@ internal sealed partial class QuickTerminalFrame : IDisposable
 
     public void Dispose()
     {
+        if (_stripBrush != IntPtr.Zero)
+        {
+            Win32Interop.DeleteObject(_stripBrush);
+            _stripBrush = IntPtr.Zero;
+        }
         if (!_installed) return;
         // Best-effort: comctl32 also removes the subclass automatically on
         // WM_NCDESTROY, so if the HWND is already gone (teardown ordering) this
@@ -244,32 +250,40 @@ internal sealed partial class QuickTerminalFrame : IDisposable
         var h = r.bottom - r.top;
         if (w <= 0 || h <= 0) return;
 
+        // Clamp the strip into the window so a transient sub-_grip size (e.g.
+        // during the borderless transition) can't produce an inside-out rect.
         var strip = edge switch
         {
-            QuickTerminalResizeEdge.Bottom => new RECT { left = 0, top = h - _grip, right = w, bottom = h },
-            QuickTerminalResizeEdge.Top => new RECT { left = 0, top = 0, right = w, bottom = _grip },
-            QuickTerminalResizeEdge.Left => new RECT { left = 0, top = 0, right = _grip, bottom = h },
-            QuickTerminalResizeEdge.Right => new RECT { left = w - _grip, top = 0, right = w, bottom = h },
+            QuickTerminalResizeEdge.Bottom => new RECT { left = 0, top = Math.Max(0, h - _grip), right = w, bottom = h },
+            QuickTerminalResizeEdge.Top => new RECT { left = 0, top = 0, right = w, bottom = Math.Min(h, _grip) },
+            QuickTerminalResizeEdge.Left => new RECT { left = 0, top = 0, right = Math.Min(w, _grip), bottom = h },
+            QuickTerminalResizeEdge.Right => new RECT { left = Math.Max(0, w - _grip), top = 0, right = w, bottom = h },
             _ => default,
         };
         if (strip.right <= strip.left || strip.bottom <= strip.top) return;
 
-        var hdc = GetWindowDC(hWnd);
+        // WM_NCPAINT can fire every frame during the reveal (SetWindowRgn with
+        // bRedraw) and on every drag-resize tick, so cache the brush and only
+        // recreate it when the theme color actually changes.
+        var color = _borderColorRef();
+        if (_stripBrush == IntPtr.Zero || color != _stripBrushColor)
+        {
+            if (_stripBrush != IntPtr.Zero) Win32Interop.DeleteObject(_stripBrush);
+            _stripBrush = Win32Interop.CreateSolidBrush(color);
+            _stripBrushColor = color;
+        }
+        if (_stripBrush == IntPtr.Zero) return;
+
+        var hdc = Win32Interop.GetWindowDC(hWnd);
         if (hdc == IntPtr.Zero) return;
-        try
-        {
-            var brush = CreateSolidBrush(_borderColorRef());
-            if (brush != IntPtr.Zero)
-            {
-                FillRect(hdc, in strip, brush);
-                DeleteObject(brush);
-            }
-        }
-        finally
-        {
-            ReleaseDC(hWnd, hdc);
-        }
+        try { Win32Interop.FillRect(hdc, in strip, _stripBrush); }
+        finally { Win32Interop.ReleaseDC(hWnd, hdc); }
     }
+
+    // Cached solid brush for the resize strip, keyed on its last color so
+    // WM_NCPAINT does not churn a GDI object per paint. Freed in Dispose.
+    private IntPtr _stripBrush;
+    private uint _stripBrushColor;
 
     /// <summary>
     /// Map the cursor position to a resize hit-code for the kept strip, or
@@ -331,27 +345,6 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetWindowPos(
         IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-
-    [LibraryImport("user32.dll", EntryPoint = "GetWindowDC")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial IntPtr GetWindowDC(IntPtr hWnd);
-
-    [LibraryImport("user32.dll", EntryPoint = "ReleaseDC")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
-
-    [LibraryImport("user32.dll", EntryPoint = "FillRect")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial int FillRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
-
-    [LibraryImport("gdi32.dll", EntryPoint = "CreateSolidBrush")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    private static partial IntPtr CreateSolidBrush(uint color);
-
-    [LibraryImport("gdi32.dll", EntryPoint = "DeleteObject")]
-    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DeleteObject(IntPtr hObject);
 }
 
 internal static partial class QuickTerminalFrameLogExtensions

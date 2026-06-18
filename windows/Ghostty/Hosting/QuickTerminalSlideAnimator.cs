@@ -1,7 +1,7 @@
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Ghostty.Core.Hosting;
+using Ghostty.Interop;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
@@ -30,7 +30,7 @@ namespace Ghostty.Hosting;
 /// ease-out curve. A monotonic token guards completion so a re-toggle mid
 /// animation does not fire a stale <c>Hide()</c>.
 /// </summary>
-internal sealed partial class QuickTerminalSlideAnimator : IDisposable
+internal sealed class QuickTerminalSlideAnimator : IDisposable
 {
     private readonly nint _hwnd;
     private readonly Visual _visual; // content visual, used only for the Center fade
@@ -123,12 +123,17 @@ internal sealed partial class QuickTerminalSlideAnimator : IDisposable
 
         if (p < 1.0) return;
 
-        // Done.
+        // Done. Snapshot the run's state before invoking the completion
+        // callback -- done() (e.g. AppWindow.Hide()) could synchronously start
+        // a new run, which would overwrite _appearing/_position mid-method.
         StopLoop();
-        if (_appearing)
+        var appearing = _appearing;
+        var position = _position;
+
+        if (appearing)
         {
             // Settled: drop the clip so the window is fully rectangular again.
-            if (_position == QuickTerminalPosition.Center) _visual.Opacity = 1f;
+            if (position == QuickTerminalPosition.Center) _visual.Opacity = 1f;
             else ClearRegion();
         }
 
@@ -138,7 +143,7 @@ internal sealed partial class QuickTerminalSlideAnimator : IDisposable
 
         // After a hide completes the window is collapsed; reset the clip so the
         // next show starts from a clean (full) window before PrepareIn re-seeds.
-        if (!_appearing && _position != QuickTerminalPosition.Center)
+        if (!appearing && position != QuickTerminalPosition.Center)
             ClearRegion();
     }
 
@@ -184,28 +189,22 @@ internal sealed partial class QuickTerminalSlideAnimator : IDisposable
         var fh = Math.Clamp((int)Math.Round(f * h), 0, h);
         var rgn = position switch
         {
-            QuickTerminalPosition.Top => CreateRectRgn(0, 0, w, fh),
-            QuickTerminalPosition.Bottom => CreateRectRgn(0, h - fh, w, h),
-            QuickTerminalPosition.Left => CreateRectRgn(0, 0, fw, h),
-            QuickTerminalPosition.Right => CreateRectRgn(w - fw, 0, w, h),
-            _ => CreateRectRgn(0, 0, w, h),
+            QuickTerminalPosition.Top => Win32Interop.CreateRectRgn(0, 0, w, fh),
+            QuickTerminalPosition.Bottom => Win32Interop.CreateRectRgn(0, h - fh, w, h),
+            QuickTerminalPosition.Left => Win32Interop.CreateRectRgn(0, 0, fw, h),
+            QuickTerminalPosition.Right => Win32Interop.CreateRectRgn(w - fw, 0, w, h),
+            _ => Win32Interop.CreateRectRgn(0, 0, w, h),
         };
+        // Bail if region creation failed (e.g. GDI exhaustion): passing a null
+        // region to SetWindowRgn would REMOVE the clip (full-window flash) --
+        // worse than skipping this frame and retrying on the next tick.
+        if (rgn == IntPtr.Zero) return;
         // On success the system takes ownership of rgn (and frees the previous
         // one), so we only delete it ourselves when the call fails.
-        if (SetWindowRgn(_hwnd, rgn, true) == 0)
-            DeleteObject(rgn);
+        if (Win32Interop.SetWindowRgn(_hwnd, rgn, true) == 0)
+            Win32Interop.DeleteObject(rgn);
     }
 
     // Null region == remove the clip (full rectangular window).
-    private void ClearRegion() => SetWindowRgn(_hwnd, 0, true);
-
-    [LibraryImport("gdi32.dll")]
-    private static partial nint CreateRectRgn(int x1, int y1, int x2, int y2);
-
-    [LibraryImport("user32.dll")]
-    private static partial int SetWindowRgn(nint hWnd, nint hRgn, [MarshalAs(UnmanagedType.Bool)] bool bRedraw);
-
-    [LibraryImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool DeleteObject(nint hObject);
+    private void ClearRegion() => Win32Interop.SetWindowRgn(_hwnd, IntPtr.Zero, true);
 }
