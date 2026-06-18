@@ -1,179 +1,210 @@
 using System;
-using System.Numerics;
+using System.Diagnostics;
 using Ghostty.Core.Hosting;
+using Ghostty.Interop;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 
 namespace Ghostty.Hosting;
 
 /// <summary>
-/// Runs the quake show/hide animation on a window's root content visual
-/// using <see cref="Microsoft.UI.Composition"/> (the lifted
-/// DirectComposition API). The window is always placed at its final rect
-/// first (by the caller); this only translates / fades the *content*, so
-/// no swap-chain resize occurs and the SwapChainPanel-bound DX12 terminal
-/// rides along on the compositor thread.
+/// Animates the quake window's show/hide as a window-region "reveal": the
+/// window stays at its final rect the whole time and we grow (show) or shrink
+/// (hide) its visible region from the docked edge via <c>SetWindowRgn</c>. The
+/// area outside the region is not part of the window, so the desktop shows
+/// through it -- there is no empty backdrop frame, which is what translating
+/// the content inside a full-size window unavoidably produced (the window's own
+/// backdrop filled the not-yet-covered area).
 ///
-/// Edge positions (top/bottom/left/right) slide via the element's
-/// <c>Translation</c> facade (enabled once with
-/// <see cref="ElementCompositionPreview.SetIsTranslationEnabled"/>).
-/// Center has no edge to slide from, so it fades opacity 0..1.
+/// This mirrors Windows Terminal's quake dropdown
+/// (<c>IslandWindow::_doSlideAnimation</c>), which clips the window region
+/// rather than moving the window or its content. Content never moves and is
+/// always fully painted (the DirectComposition surface-handle binding ensures
+/// the surface composites on show), so the reveal exposes a live terminal.
 ///
-/// A monotonically increasing token guards completion callbacks: if the
-/// user re-toggles mid-animation, the stale batch's Completed handler is
-/// ignored so a half-finished hide does not call Hide() after a new show.
+/// Center has no edge to reveal from, so it fades opacity instead.
+///
+/// Driven per frame from <see cref="CompositionTarget.Rendering"/> with an
+/// ease-out curve. A monotonic token guards completion so a re-toggle mid
+/// animation does not fire a stale <c>Hide()</c>.
 /// </summary>
 internal sealed class QuickTerminalSlideAnimator : IDisposable
 {
-    private readonly UIElement _content;
-    private readonly Visual _visual;
-    private readonly Compositor _compositor;
+    private readonly nint _hwnd;
+    private readonly Visual _visual; // content visual, used only for the Center fade
+    private readonly Stopwatch _clock = new();
+
+    // Monotonic guard: bumped on every Prepare/Run/Snap/Dispose so an in-flight
+    // Rendering tick or completion from a superseded run is ignored.
     private long _token;
+    private bool _subscribed;
 
-    // Cached easing functions (constants) created once and reused across
-    // toggles, disposed in Dispose(). Avoids per-toggle allocation.
-    private CubicBezierEasingFunction? _easeIn;
-    private CubicBezierEasingFunction? _easeOut;
+    // Current run parameters.
+    private QuickTerminalPosition _position;
+    private int _w;
+    private int _h;
+    private double _durationMs;
+    private bool _appearing;
+    private Action? _onCompleted;
+    private long _runToken;
 
-    // The most recent run's compositor objects. Disposed at the start of the
-    // next run (and in Dispose()), so at most one batch+animation lingers
-    // between toggles rather than accumulating one pair per toggle.
-    private CompositionScopedBatch? _batch;
-    private CompositionAnimation? _anim;
-
-    public QuickTerminalSlideAnimator(UIElement content)
+    public QuickTerminalSlideAnimator(nint hwnd, UIElement content)
     {
         ArgumentNullException.ThrowIfNull(content);
-        _content = content;
-        // Translation composes WITH XAML layout (unlike Offset, which
-        // replaces it), so animating it never fights the layout pass.
-        ElementCompositionPreview.SetIsTranslationEnabled(content, true);
+        _hwnd = hwnd;
         _visual = ElementCompositionPreview.GetElementVisual(content);
-        _compositor = _visual.Compositor;
-    }
-
-    /// <summary>Slide / fade the content into view from the docked edge.</summary>
-    public void AnimateIn(
-        QuickTerminalPosition position,
-        double width,
-        double height,
-        TimeSpan duration,
-        Action? onCompleted)
-    {
-        Run(position, width, height, duration, appearing: true, onCompleted);
-    }
-
-    /// <summary>Slide / fade the content out, then invoke onCompleted (Hide()).</summary>
-    public void AnimateOut(
-        QuickTerminalPosition position,
-        double width,
-        double height,
-        TimeSpan duration,
-        Action? onCompleted)
-    {
-        Run(position, width, height, duration, appearing: false, onCompleted);
-    }
-
-    private void Run(
-        QuickTerminalPosition position,
-        double width,
-        double height,
-        TimeSpan duration,
-        bool appearing,
-        Action? onCompleted)
-    {
-        var token = ++_token;
-
-        // Off-screen translation vector for the docked edge. Center uses
-        // opacity instead, so its offset is zero.
-        var off = position switch
-        {
-            QuickTerminalPosition.Top => new Vector3(0f, -(float)height, 0f),
-            QuickTerminalPosition.Bottom => new Vector3(0f, (float)height, 0f),
-            QuickTerminalPosition.Left => new Vector3(-(float)width, 0f, 0f),
-            QuickTerminalPosition.Right => new Vector3((float)width, 0f, 0f),
-            _ => Vector3.Zero, // Center
-        };
-        var isCenter = position == QuickTerminalPosition.Center;
-
-        // Dispose the previous run's compositor objects before starting a
-        // new one, so at most one batch+animation lingers between toggles.
-        _anim?.Dispose();
-        _batch?.Dispose();
-
-        // Ease-out on appear (decelerate into place), ease-in on hide.
-        // Cached: the bezier control points are constants.
-        _easeIn ??= _compositor.CreateCubicBezierEasingFunction(new Vector2(0.1f, 0.9f), new Vector2(0.2f, 1.0f));
-        _easeOut ??= _compositor.CreateCubicBezierEasingFunction(new Vector2(0.8f, 0.0f), new Vector2(0.9f, 0.1f));
-        var easing = appearing ? _easeIn : _easeOut;
-
-        var batch = _compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
-        CompositionAnimation anim;
-
-        if (isCenter)
-        {
-            // Fade. Set the start opacity explicitly so a re-toggle from a
-            // partial state still animates the full range.
-            _visual.Opacity = appearing ? 0f : 1f;
-            var fade = _compositor.CreateScalarKeyFrameAnimation();
-            fade.InsertKeyFrame(1f, appearing ? 1f : 0f, easing);
-            fade.Duration = duration;
-            _visual.StartAnimation("Opacity", fade);
-            anim = fade;
-        }
-        else
-        {
-            // Seed the start translation synchronously (mirrors the fade
-            // path's Opacity pre-set) so no frame renders at the resting
-            // position before the compositor applies keyframe 0.
-            _visual.Properties.InsertVector3("Translation", appearing ? off : Vector3.Zero);
-            var slide = _compositor.CreateVector3KeyFrameAnimation();
-            slide.InsertKeyFrame(0f, appearing ? off : Vector3.Zero);
-            slide.InsertKeyFrame(1f, appearing ? Vector3.Zero : off, easing);
-            slide.Duration = duration;
-            _visual.StartAnimation("Translation", slide);
-            anim = slide;
-        }
-
-        _batch = batch;
-        _anim = anim;
-
-        batch.Completed += (_, _) =>
-        {
-            if (token != _token) return; // superseded by a newer toggle
-            // Normalize to the resting state so the next show starts clean.
-            if (isCenter) _visual.Opacity = appearing ? 1f : 0f;
-            onCompleted?.Invoke();
-        };
-        batch.End();
     }
 
     /// <summary>
-    /// Snap to the fully-shown resting state with no animation (used when
-    /// duration == 0, or to clear a half-finished animation). Bumps the
-    /// token so any in-flight batch completion is ignored.
+    /// Synchronously set the collapsed start state BEFORE the window is shown,
+    /// so the first presented frame is the reveal's frame 0 (nothing visible)
+    /// rather than the full window flashing in.
     /// </summary>
+    public void PrepareIn(QuickTerminalPosition position, double width, double height)
+    {
+        _token++;
+        StopLoop();
+        if (position == QuickTerminalPosition.Center)
+        {
+            ClearRegion();
+            _visual.Opacity = 0f;
+        }
+        else
+        {
+            _visual.Opacity = 1f;
+            ApplyRegion(position, (int)width, (int)height, 0.0);
+        }
+    }
+
+    /// <summary>Reveal the window from its docked edge.</summary>
+    public void AnimateIn(QuickTerminalPosition position, double width, double height, TimeSpan duration, Action? onCompleted)
+        => Run(position, width, height, duration, appearing: true, onCompleted);
+
+    /// <summary>Collapse the window toward its docked edge, then invoke onCompleted (Hide()).</summary>
+    public void AnimateOut(QuickTerminalPosition position, double width, double height, TimeSpan duration, Action? onCompleted)
+        => Run(position, width, height, duration, appearing: false, onCompleted);
+
+    private void Run(QuickTerminalPosition position, double width, double height, TimeSpan duration, bool appearing, Action? onCompleted)
+    {
+        var token = ++_token;
+        _runToken = token;
+        _position = position;
+        _w = (int)width;
+        _h = (int)height;
+        _durationMs = Math.Max(1.0, duration.TotalMilliseconds);
+        _appearing = appearing;
+        _onCompleted = onCompleted;
+
+        // Seed frame 0 so the first tick has no visible jump.
+        if (position == QuickTerminalPosition.Center)
+            _visual.Opacity = appearing ? 0f : 1f;
+        else
+            ApplyRegion(position, _w, _h, appearing ? 0.0 : 1.0);
+
+        _clock.Restart();
+        StartLoop();
+    }
+
+    private void OnRendering(object? sender, object e)
+    {
+        if (_runToken != _token) { StopLoop(); return; }
+
+        var p = Math.Clamp(_clock.Elapsed.TotalMilliseconds / _durationMs, 0.0, 1.0);
+        // Ease-out (decelerate into place). visibleFraction: 0->1 appearing, 1->0 hiding.
+        var eased = 1.0 - Math.Pow(1.0 - p, 3.0);
+        var visible = _appearing ? eased : 1.0 - eased;
+
+        if (_position == QuickTerminalPosition.Center)
+            _visual.Opacity = (float)visible;
+        else
+            ApplyRegion(_position, _w, _h, visible);
+
+        if (p < 1.0) return;
+
+        // Done. Snapshot the run's state before invoking the completion
+        // callback -- done() (e.g. AppWindow.Hide()) could synchronously start
+        // a new run, which would overwrite _appearing/_position mid-method.
+        StopLoop();
+        var appearing = _appearing;
+        var position = _position;
+
+        if (appearing)
+        {
+            // Settled: drop the clip so the window is fully rectangular again.
+            if (position == QuickTerminalPosition.Center) _visual.Opacity = 1f;
+            else ClearRegion();
+        }
+
+        var done = _onCompleted;
+        _onCompleted = null;
+        done?.Invoke();
+
+        // After a hide completes the window is collapsed; reset the clip so the
+        // next show starts from a clean (full) window before PrepareIn re-seeds.
+        if (!appearing && position != QuickTerminalPosition.Center)
+            ClearRegion();
+    }
+
+    /// <summary>Snap to the fully-shown rectangular state (duration == 0, or to
+    /// clear a half-finished animation).</summary>
     public void SnapToShown()
     {
         _token++;
-        _visual.StopAnimation("Translation");
-        _visual.StopAnimation("Opacity");
-        _anim?.Dispose();
-        _batch?.Dispose();
-        _anim = null;
-        _batch = null;
-        _visual.Properties.InsertVector3("Translation", Vector3.Zero);
+        StopLoop();
+        ClearRegion();
         _visual.Opacity = 1f;
     }
 
     public void Dispose()
     {
-        _visual.StopAnimation("Translation");
-        _visual.StopAnimation("Opacity");
-        _anim?.Dispose();
-        _batch?.Dispose();
-        _easeIn?.Dispose();
-        _easeOut?.Dispose();
+        _token++;
+        StopLoop();
+        ClearRegion();
+        _visual.Opacity = 1f;
     }
+
+    private void StartLoop()
+    {
+        if (_subscribed) return;
+        CompositionTarget.Rendering += OnRendering;
+        _subscribed = true;
+    }
+
+    private void StopLoop()
+    {
+        if (!_subscribed) return;
+        CompositionTarget.Rendering -= OnRendering;
+        _subscribed = false;
+        _clock.Stop();
+    }
+
+    // Clip the window to the revealed fraction (0..1) measured from the docked
+    // edge. The window stays put; only its visible region grows/shrinks.
+    private void ApplyRegion(QuickTerminalPosition position, int w, int h, double f)
+    {
+        if (w <= 0 || h <= 0) return;
+        var fw = Math.Clamp((int)Math.Round(f * w), 0, w);
+        var fh = Math.Clamp((int)Math.Round(f * h), 0, h);
+        var rgn = position switch
+        {
+            QuickTerminalPosition.Top => Win32Interop.CreateRectRgn(0, 0, w, fh),
+            QuickTerminalPosition.Bottom => Win32Interop.CreateRectRgn(0, h - fh, w, h),
+            QuickTerminalPosition.Left => Win32Interop.CreateRectRgn(0, 0, fw, h),
+            QuickTerminalPosition.Right => Win32Interop.CreateRectRgn(w - fw, 0, w, h),
+            _ => Win32Interop.CreateRectRgn(0, 0, w, h),
+        };
+        // Bail if region creation failed (e.g. GDI exhaustion): passing a null
+        // region to SetWindowRgn would REMOVE the clip (full-window flash) --
+        // worse than skipping this frame and retrying on the next tick.
+        if (rgn == IntPtr.Zero) return;
+        // On success the system takes ownership of rgn (and frees the previous
+        // one), so we only delete it ourselves when the call fails.
+        if (Win32Interop.SetWindowRgn(_hwnd, rgn, true) == 0)
+            Win32Interop.DeleteObject(rgn);
+    }
+
+    // Null region == remove the clip (full rectangular window).
+    private void ClearRegion() => Win32Interop.SetWindowRgn(_hwnd, IntPtr.Zero, true);
 }
