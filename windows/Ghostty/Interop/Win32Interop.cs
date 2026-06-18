@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using Windows.Win32.Foundation;
 
 namespace Ghostty.Interop;
 
@@ -50,4 +51,29 @@ internal static partial class Win32Interop
     [LibraryImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool DeleteObject(IntPtr hObject);
+
+    // --- Window-region clipping (quake reveal) + non-client strip fill ---
+
+    [LibraryImport("user32.dll")]
+    public static partial int SetWindowRgn(
+        IntPtr hWnd, IntPtr hRgn, [MarshalAs(UnmanagedType.Bool)] bool bRedraw);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetWindowDC(IntPtr hWnd);
+
+    [LibraryImport("user32.dll")]
+    public static partial int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [LibraryImport("user32.dll")]
+    public static partial int FillRect(IntPtr hDC, in RECT lprc, IntPtr hbr);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial IntPtr CreateSolidBrush(uint color);
+
+    /// <summary>
+    /// Convert a packed <c>0x00RRGGBB</c> color to a GDI <c>COLORREF</c>
+    /// (<c>0x00BBGGRR</c>) by swapping the red and blue bytes.
+    /// </summary>
+    public static uint RgbToColorRef(uint rgb)
+        => ((rgb & 0xFFu) << 16) | (rgb & 0xFF00u) | ((rgb >> 16) & 0xFFu);
 }
