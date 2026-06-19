@@ -30,7 +30,7 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
     {
         WinTextUnit.Character => CoreTextUnit.Character,
         WinTextUnit.Format => CoreTextUnit.Character,
-        WinTextUnit.Word => CoreTextUnit.Line,
+        WinTextUnit.Word => CoreTextUnit.Word,
         WinTextUnit.Line => CoreTextUnit.Line,
         WinTextUnit.Paragraph => CoreTextUnit.Line,
         _ => CoreTextUnit.Document,
@@ -56,7 +56,11 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
 
     public ITextRangeProvider FindAttribute(int attributeId, object value, bool backward) => null!;
 
-    public ITextRangeProvider FindText(string text, bool backward, bool ignoreCase) => null!;
+    public ITextRangeProvider FindText(string text, bool backward, bool ignoreCase)
+    {
+        var match = Doc.Find(text, _span.Start, _span.End, backward, ignoreCase);
+        return match is { } m ? new TerminalTextRangeProvider(_peer, m) : null!;
+    }
 
     // Text attributes (foreground/background color, etc.) are added in a later
     // stage; null signals "no value" to clients until then.
