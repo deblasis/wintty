@@ -162,6 +162,39 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     }
 
     /// <summary>
+    /// Read the full screen contents for accessibility (UIA text provider).
+    /// Returns "" once the surface is gone so a screen reader polling during
+    /// teardown can't touch freed native state. Takes the renderer mutex; the
+    /// automation peer caches the result for 500ms.
+    ///
+    /// UIA calls arrive on a UIA/RPC thread, so there is a narrow race between
+    /// this guard and the native read if the surface is disposed concurrently.
+    /// libghostty serializes the read on its renderer mutex and the guard makes
+    /// the window small; macOS accepts the same race for the same reason. An
+    /// empty string on a transient/teardown miss is the intended graceful
+    /// degradation (a screen reader must not crash on a momentary read failure).
+    /// </summary>
+    internal string AccessibilityReadScreenText()
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return "";
+        return NativeMethods.SurfaceReadScreenText(_surface);
+    }
+
+    /// <summary>
+    /// Read the current selection's flattened-viewport offsets for accessibility,
+    /// or null when there is no selection or the surface is gone.
+    /// </summary>
+    internal (uint OffsetStart, uint OffsetLen)? AccessibilitySelectionOffsets()
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return null;
+        var sel = NativeMethods.SurfaceReadSelection(_surface);
+        return sel is { } s ? (s.OffsetStart, s.OffsetLen) : null;
+    }
+
+    protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer()
+        => new Ghostty.Accessibility.TerminalAutomationPeer(this);
+
+    /// <summary>
     /// Returns the pid of the shell process attached to this surface, or
     /// null when libghostty cannot report one (surface not yet created,
     /// already disposed, or the platform's pty layer is a stub). The
