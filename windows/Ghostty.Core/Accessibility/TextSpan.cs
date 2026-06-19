@@ -15,6 +15,7 @@ public readonly record struct TextSpan(int Start, int End)
 public enum TextUnit
 {
     Character,
+    Word,
     Line,
     Document,
 }
