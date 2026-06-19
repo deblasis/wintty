@@ -15,6 +15,10 @@ namespace Ghostty.Accessibility;
 /// </summary>
 internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomationPeer, ITextProvider
 {
+    // Screen reads take the renderer mutex, so we serve a cached document for
+    // this long between fetches. Matches the macOS surface's 500ms CachedValue.
+    private const long ScreenTextCacheMs = 500;
+
     private readonly TerminalControl _owner;
     private readonly CachedValue<TerminalDocument> _document;
 
@@ -22,7 +26,7 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     {
         _owner = owner;
         _document = new CachedValue<TerminalDocument>(
-            durationMs: 500,
+            durationMs: ScreenTextCacheMs,
             fetch: () => new TerminalDocument(_owner.AccessibilityReadScreenText()),
             nowMs: () => Environment.TickCount64);
     }

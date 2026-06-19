@@ -166,6 +166,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// Returns "" once the surface is gone so a screen reader polling during
     /// teardown can't touch freed native state. Takes the renderer mutex; the
     /// automation peer caches the result for 500ms.
+    ///
+    /// UIA calls arrive on a UIA/RPC thread, so there is a narrow race between
+    /// this guard and the native read if the surface is disposed concurrently.
+    /// libghostty serializes the read on its renderer mutex and the guard makes
+    /// the window small; macOS accepts the same race for the same reason. An
+    /// empty string on a transient/teardown miss is the intended graceful
+    /// degradation (a screen reader must not crash on a momentary read failure).
     /// </summary>
     internal string AccessibilityReadScreenText()
     {
