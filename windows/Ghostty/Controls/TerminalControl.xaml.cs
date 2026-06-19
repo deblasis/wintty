@@ -191,8 +191,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return sel is { } s ? (s.OffsetStart, s.OffsetLen) : null;
     }
 
+    private Ghostty.Accessibility.TerminalAutomationPeer? _automationPeer;
+
+    // Cache the peer so UIA re-querying a still-loaded control reuses one instance
+    // (and its single announcement timer) instead of accumulating peers/timers.
     protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer()
-        => new Ghostty.Accessibility.TerminalAutomationPeer(this);
+        => _automationPeer ??= new Ghostty.Accessibility.TerminalAutomationPeer(this);
 
     /// <summary>
     /// Returns the pid of the shell process attached to this surface, or
