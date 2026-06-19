@@ -1,6 +1,7 @@
 using System;
 using Ghostty.Controls;
 using Ghostty.Core.Accessibility;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
@@ -21,6 +22,8 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     private readonly TerminalControl _owner;
     private readonly CachedValue<TerminalDocument> _document;
+    private readonly TerminalOutputAnnouncer _announcer = new();
+    private readonly DispatcherTimer _announceTimer;
 
     internal TerminalAutomationPeer(TerminalControl owner) : base(owner)
     {
@@ -29,6 +32,42 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
             durationMs: ScreenTextCacheMs,
             fetch: () => new TerminalDocument(_owner.AccessibilityReadScreenText()),
             nowMs: () => Environment.TickCount64);
+
+        // Poll on the UI thread; the body is inert unless a screen reader is
+        // present and this surface is active, so non-AT users pay nothing beyond
+        // a cached read. The 500ms document cache throttles announcements. The
+        // timer runs only while the owner is loaded (started/stopped on its
+        // Loaded/Unloaded, including across tab/split reloads); a cached peer
+        // means one timer per control, not one per UIA query.
+        _announceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _announceTimer.Tick += OnAnnounceTick;
+        owner.Loaded += OnOwnerLoaded;
+        owner.Unloaded += OnOwnerUnloaded;
+        if (owner.IsLoaded) _announceTimer.Start();
+    }
+
+    private void OnOwnerLoaded(object sender, RoutedEventArgs e) => _announceTimer.Start();
+
+    private void OnOwnerUnloaded(object sender, RoutedEventArgs e) => _announceTimer.Stop();
+
+    private void OnAnnounceTick(object? sender, object e)
+    {
+        // Inert unless a screen reader is attached and this surface is active.
+        if (!ScreenReaderDetector.IsRunning() || !_owner.IsActive)
+        {
+            _announcer.Reseed(Document.Text);
+            return;
+        }
+
+        var text = _announcer.Observe(Document.Text);
+        if (!string.IsNullOrEmpty(text))
+        {
+            RaiseNotificationEvent(
+                AutomationNotificationKind.Other,
+                AutomationNotificationProcessing.All,
+                text,
+                "terminal-output");
+        }
     }
 
     /// <summary>Current cached screen document. Refreshed at most every 500ms.</summary>
