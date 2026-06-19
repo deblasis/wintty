@@ -384,6 +384,16 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigFinalize(GhosttyConfig config);
 
+    // Layer an additional config file on top of already-loaded config
+    // (e.g. the High Contrast override). Path is null-terminated UTF-8;
+    // StringMarshalling.Utf8 is a [LibraryImport] option, not a [MarshalAs],
+    // so it coexists with DisableRuntimeMarshalling (see the clipboard
+    // request binding for the same rationale).
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_file",
+        StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadFile(GhosttyConfig config, string path);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_config_clone")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyConfig ConfigClone(GhosttyConfig config);
