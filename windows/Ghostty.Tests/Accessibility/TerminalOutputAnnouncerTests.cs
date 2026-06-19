@@ -55,6 +55,14 @@ public class TerminalOutputAnnouncerTests
     }
 
     [Fact]
+    public void SingleLongLine_OverCharCap_UsesSingularSummary()
+    {
+        var a = new TerminalOutputAnnouncer(maxLines: 20, maxChars: 5);
+        a.Observe("p\n");
+        Assert.Equal("1 new line", a.Observe("p\nthis line is long\n"));
+    }
+
+    [Fact]
     public void AllWhitespaceAppend_AnnouncesNothing()
     {
         var a = new TerminalOutputAnnouncer();

@@ -37,10 +37,16 @@ public sealed class TerminalOutputAnnouncer
             _seeded = true;
             return null;
         }
-        if (screenText.Length == _announced.Length && screenText == _announced) return null;
+        if (screenText == _announced) return null;
         if (!screenText.StartsWith(_announced, StringComparison.Ordinal))
         {
-            _announced = screenText; // diverged: re-baseline silently
+            // The new screen is no longer a prefix of what we announced: a clear,
+            // a full-screen redraw, or scrollback that wrapped and dropped the
+            // oldest lines. Re-baseline silently. Note: under sustained output that
+            // exceeds the scrollback buffer this can recur every tick, degrading to
+            // no announcements - that is intentional fail-safe behavior (silence
+            // beats speaking garbage during redraws).
+            _announced = screenText;
             return null;
         }
         var delta = screenText.Substring(_announced.Length);
@@ -66,7 +72,7 @@ public sealed class TerminalOutputAnnouncer
             if (lines[i].Trim().Length > 0) count++;
         if (count == 0) return null;
         if (count > _maxLines || settled.Length > _maxChars)
-            return count + " new lines";
+            return count == 1 ? "1 new line" : count + " new lines";
 
         var sb = new StringBuilder();
         for (var i = 0; i < lines.Length; i++)

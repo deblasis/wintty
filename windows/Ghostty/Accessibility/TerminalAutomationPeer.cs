@@ -23,7 +23,7 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     private readonly TerminalControl _owner;
     private readonly CachedValue<TerminalDocument> _document;
     private readonly TerminalOutputAnnouncer _announcer = new();
-    private DispatcherTimer? _announceTimer;
+    private readonly DispatcherTimer _announceTimer;
 
     internal TerminalAutomationPeer(TerminalControl owner) : base(owner)
     {
@@ -35,23 +35,20 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
         // Poll on the UI thread; the body is inert unless a screen reader is
         // present and this surface is active, so non-AT users pay nothing beyond
-        // a cached read. The 500ms document cache throttles announcements.
+        // a cached read. The 500ms document cache throttles announcements. The
+        // timer runs only while the owner is loaded (started/stopped on its
+        // Loaded/Unloaded, including across tab/split reloads); a cached peer
+        // means one timer per control, not one per UIA query.
         _announceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _announceTimer.Tick += OnAnnounceTick;
-        _announceTimer.Start();
+        owner.Loaded += OnOwnerLoaded;
         owner.Unloaded += OnOwnerUnloaded;
+        if (owner.IsLoaded) _announceTimer.Start();
     }
 
-    private void OnOwnerUnloaded(object sender, RoutedEventArgs e)
-    {
-        if (_announceTimer is { } timer)
-        {
-            timer.Stop();
-            timer.Tick -= OnAnnounceTick;
-            _announceTimer = null;
-        }
-        _owner.Unloaded -= OnOwnerUnloaded;
-    }
+    private void OnOwnerLoaded(object sender, RoutedEventArgs e) => _announceTimer.Start();
+
+    private void OnOwnerUnloaded(object sender, RoutedEventArgs e) => _announceTimer.Stop();
 
     private void OnAnnounceTick(object? sender, object e)
     {
