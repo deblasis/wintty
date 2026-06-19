@@ -18,6 +18,11 @@ public static class TextRangeNavigator
                 var (start, end) = doc.LineBounds(span.Start);
                 return new TextSpan(start, end);
 
+            case TextUnit.Word:
+                var wordStart = doc.WordUnitStart(span.Start);
+                var wordEnd = doc.NextWordStart(wordStart);
+                return new TextSpan(wordStart, wordEnd);
+
             case TextUnit.Character:
             default:
                 var s = doc.ClampOffset(span.Start);
@@ -40,6 +45,7 @@ public static class TextRangeNavigator
         return unit switch
         {
             TextUnit.Line => MoveByLine(doc, from, count),
+            TextUnit.Word => MoveByWord(doc, from, count),
             _ => MoveByCharacter(doc, from, count),
         };
     }
@@ -51,6 +57,22 @@ public static class TextRangeNavigator
         var target = doc.ClampOffset(from + count);
         // Report the characters actually traversed (signed), 0 when fully clamped.
         return (target, target - from);
+    }
+
+    private static (int, int) MoveByWord(TerminalDocument doc, int from, int count)
+    {
+        var pos = from;
+        var moved = 0;
+        var step = count > 0 ? 1 : -1;
+        var times = count > 0 ? count : -count;
+        for (var i = 0; i < times; i++)
+        {
+            var next = step > 0 ? doc.NextWordStart(pos) : doc.PrevWordStart(pos);
+            if (next == pos) break; // clamped at a boundary
+            pos = next;
+            moved += step;
+        }
+        return (pos, moved);
     }
 
     private static (int, int) MoveByLine(TerminalDocument doc, int from, int count)
