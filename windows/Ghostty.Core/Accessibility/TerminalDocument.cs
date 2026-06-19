@@ -104,8 +104,11 @@ public sealed class TerminalDocument
         if (e <= s || text.Length > e - s) return null;
 
         var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        var window = Text.Substring(s, e - s);
-        var rel = backward ? window.LastIndexOf(text, comparison) : window.IndexOf(text, comparison);
+        // Search a span over the window so a find on the whole document does not
+        // copy the screen text.
+        var window = Text.AsSpan(s, e - s);
+        var needle = text.AsSpan();
+        var rel = backward ? window.LastIndexOf(needle, comparison) : window.IndexOf(needle, comparison);
         return rel < 0 ? null : new TextSpan(s + rel, s + rel + text.Length);
     }
 }
