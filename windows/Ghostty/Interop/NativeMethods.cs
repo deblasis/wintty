@@ -191,6 +191,56 @@ internal struct GhosttyCells
     public ushort Cols;
 }
 
+// Mirrors ghostty_point_tag_e.
+internal enum GhosttyPointTag
+{
+    Active = 0,
+    Viewport = 1,
+    Screen = 2,
+    Surface = 3,
+}
+
+// Mirrors ghostty_point_coord_e.
+internal enum GhosttyPointCoord
+{
+    Exact = 0,
+    TopLeft = 1,
+    BottomRight = 2,
+}
+
+// Mirrors ghostty_point_s.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyPoint
+{
+    public GhosttyPointTag Tag;
+    public GhosttyPointCoord Coord;
+    public uint X;
+    public uint Y;
+}
+
+// Mirrors ghostty_selection_s. Passed by value to ghostty_surface_read_text.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttySelection
+{
+    public GhosttyPoint TopLeft;
+    public GhosttyPoint BottomRight;
+    // C99 _Bool on the C side; byte on the managed side.
+    public byte Rectangle;
+}
+
+// Mirrors ghostty_text_s. Text is a NUL-terminated UTF-8 buffer of TextLen
+// bytes owned by libghostty; copy it out then free with ghostty_surface_free_text.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyText
+{
+    public double TlPxX;
+    public double TlPxY;
+    public uint OffsetStart;
+    public uint OffsetLen;
+    public IntPtr Text;
+    public UIntPtr TextLen;
+}
+
 // Runtime callback delegates. These are called from the Zig side on its
 // own thread; marshal to the UI dispatcher before touching XAML.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -499,6 +549,64 @@ internal static partial class NativeMethods
         {
             SurfaceFreeCellsNative(surface, ref native);
         }
+    }
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_text")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceReadTextNative(GhosttySurface surface, GhosttySelection sel, out GhosttyText text);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_read_selection")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceReadSelectionNative(GhosttySurface surface, out GhosttyText text);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_free_text")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceFreeTextNative(GhosttySurface surface, ref GhosttyText text);
+
+    // A whole-region selection (top-left -> bottom-right) over the given point space.
+    private static GhosttySelection WholeRegion(GhosttyPointTag tag) => new()
+    {
+        TopLeft = new GhosttyPoint { Tag = tag, Coord = GhosttyPointCoord.TopLeft, X = 0, Y = 0 },
+        BottomRight = new GhosttyPoint { Tag = tag, Coord = GhosttyPointCoord.BottomRight, X = 0, Y = 0 },
+        Rectangle = 0,
+    };
+
+    private static string CopyAndFree(GhosttySurface surface, ref GhosttyText native)
+    {
+        try
+        {
+            if (native.Text == IntPtr.Zero) return "";
+            var len = (int)native.TextLen;
+            return len <= 0 ? "" : (Marshal.PtrToStringUTF8(native.Text, len) ?? "");
+        }
+        finally
+        {
+            SurfaceFreeTextNative(surface, ref native);
+        }
+    }
+
+    /// <summary>
+    /// Read the full screen contents (scrollback + viewport) as a string for
+    /// accessibility. Returns "" on failure. Takes the renderer mutex; callers
+    /// must cache + throttle.
+    /// </summary>
+    internal static string SurfaceReadScreenText(GhosttySurface surface)
+    {
+        if (SurfaceReadTextNative(surface, WholeRegion(GhosttyPointTag.Screen), out var native) == 0) return "";
+        return CopyAndFree(surface, ref native);
+    }
+
+    /// <summary>
+    /// Read the current selection's text and its flattened-viewport offsets.
+    /// Returns null when there is no selection.
+    /// </summary>
+    internal static (string Text, uint OffsetStart, uint OffsetLen)? SurfaceReadSelection(GhosttySurface surface)
+    {
+        if (SurfaceReadSelectionNative(surface, out var native) == 0) return null;
+        var start = native.OffsetStart;
+        var len = native.OffsetLen;
+        var text = CopyAndFree(surface, ref native);
+        return (text, start, len);
     }
 
     // Returns the pid of the foreground process attached to the pty, or
