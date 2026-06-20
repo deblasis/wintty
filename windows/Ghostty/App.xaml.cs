@@ -29,6 +29,7 @@ public partial class App : Application
 {
     // Process-global libghostty: bootstrap host owns the app handle; per-window hosts own only their surfaces.
     private ConfigService? _configService;
+    private Ghostty.Accessibility.HighContrastMonitor? _highContrastMonitor;
     private ConfigFileEditor? _configEditor;
     private ConfigWriteScheduler? _configWriteScheduler;
     private WindowsPowerStateMonitor? _powerStateMonitor;
@@ -625,6 +626,16 @@ public partial class App : Application
             factory);
         BootstrapHost = _bootstrapHost;
         _configService.SetApp(_bootstrapHost.App);
+
+        // App-level: High Contrast is a system-wide state and config is
+        // applied app-wide, so a single monitor drives the surface override.
+        // Constructed AFTER SetApp so its initial Apply() reloads into a live
+        // app -- before SetApp, ConfigService.Reload() bails at the
+        // _app.Handle==Zero guard and the override would never apply. Placed
+        // before window creation so AppUpdateConfig lands before any surface
+        // renders (no flash of the user's colors when HC is already on).
+        _highContrastMonitor = new Ghostty.Accessibility.HighContrastMonitor(
+            _configService, DispatcherQueue.GetForCurrentThread());
 
         Uri? activationUri = null;
         try
@@ -1292,6 +1303,8 @@ public partial class App : Application
                 BootstrapHost = null;
                 _lifetimeSupervisor = null;
                 LifetimeSupervisor = null;
+                _highContrastMonitor?.Dispose();
+                _highContrastMonitor = null;
                 _configService = null;
                 ConfigService = null;
                 _powerStateMonitor = null;

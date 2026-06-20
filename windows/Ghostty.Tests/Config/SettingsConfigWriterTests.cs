@@ -131,6 +131,8 @@ public class SettingsConfigWriterTests
         public bool VerticalTabs => false;
         public bool CommandPaletteGroupCommands => false;
         public bool WindowsSingleInstance => false;
+        public bool WindowsHighContrast => false;
+        public void SetHighContrastOverride(string? body) { }
         public string CommandPaletteBackground => "acrylic";
         public string LogLevel => "info";
         public string LogFilter => string.Empty;
