@@ -125,4 +125,28 @@ public class ViewportColorMapTests
         var map = Map("abc", Grid(3, new[] { (0u, 0u, 0u), (0u, 0u, 0u), (0u, 0u, 0u) }));
         Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 3)).Kind);
     }
+
+    [Fact]
+    public void TrailingWhitespaceLine_DoesNotShiftAnchor()
+    {
+        // The document's last line is whitespace only; the grid trims it as blank.
+        // Both anchors must treat trailing whitespace the same way, or the content
+        // line shifts off-grid and maps to nothing.
+        var map = Map("ab\n  ", Grid(2,
+            new[] { (A, 3u, 0u), (B, 3u, 0u) },
+            new[] { (0u, 0u, 0u), (0u, 0u, 0u) }));
+        var r = map.Foreground(new TextSpan(0, 2)); // "ab"
+        Assert.Equal(ColorResultKind.Uniform, r.Kind);
+        Assert.Equal(3u, r.Rgb);
+    }
+
+    [Fact]
+    public void MalformedGrid_LengthMismatch_ReturnsNotMapped()
+    {
+        // Rows*Cols disagrees with the backing array (e.g. a torn off-thread snapshot):
+        // decline instead of indexing out of range.
+        var grid = new CellGrid(new[] { new Cell(A, 1u, 0u) }, 5, 5);
+        var map = new ViewportColorMap(new TerminalDocument("abc"), grid);
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 3)).Kind);
+    }
 }

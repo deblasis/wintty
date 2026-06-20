@@ -35,6 +35,15 @@ internal sealed class ViewportColorMap
         _doc = doc;
         _cells = cells;
 
+        // Decline a malformed or concurrently-torn grid (null backing array or a
+        // length that disagrees with rows*cols) instead of risking an out-of-range
+        // index below. The grid comes from a 500ms cache read off the UI thread, and
+        // CellGrid is a multi-field struct, so a partially-published snapshot is
+        // possible; bail out and report NotMapped rather than crash.
+        if (cells.Rows <= 0 || cells.Cols <= 0 ||
+            cells.Cells is null || cells.Cells.Length < (long)cells.Rows * cells.Cols)
+            return; // _hasContent stays false
+
         var lastContentRow = LastContentRow(cells);
         var lastContentDocLine = LastContentDocLine(doc);
         if (lastContentRow < 0 || lastContentDocLine < 0) return; // _hasContent = false
@@ -106,12 +115,15 @@ internal sealed class ViewportColorMap
         return offset + 1 < text.Length && text[offset] == s[0] && text[offset + 1] == s[1];
     }
 
-    // Greatest document line index that contains a non-newline character, or -1.
+    // Greatest document line index that contains a non-whitespace character, or -1.
+    // Mirrors LastContentRow's "blank" rule (which skips whitespace cells) so the two
+    // anchors agree: a trailing whitespace-only line would otherwise shift the anchor
+    // by a row and make every cell mis-map.
     private static int LastContentDocLine(TerminalDocument doc)
     {
         var t = doc.Text;
         for (var i = t.Length - 1; i >= 0; i--)
-            if (t[i] != '\n') return doc.LineIndexForOffset(i);
+            if (!char.IsWhiteSpace(t[i])) return doc.LineIndexForOffset(i);
         return -1;
     }
 
