@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Security;
 
 namespace Ghostty.Accessibility;
 
@@ -28,8 +29,16 @@ internal static class HighContrastOverrideFile
             File.WriteAllText(path, body);
             return path;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or SecurityException
+            or ArgumentException
+            or NotSupportedException)
         {
+            // Best-effort: any write failure degrades to "no override", so the
+            // surface keeps the user's colors rather than aborting the whole
+            // reload. Covers the documented failure surface of CreateDirectory
+            // / WriteAllText (PathTooLongException derives from IOException).
             return null;
         }
     }
