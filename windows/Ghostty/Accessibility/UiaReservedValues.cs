@@ -33,10 +33,18 @@ internal static partial class UiaReservedValues
     {
         try
         {
-            // UIA reserved values are process-lifetime singletons, so we do not
-            // Release p: the RCW's own reference is harmless against an object
-            // that outlives the process, and releasing a borrowed static pointer
-            // would risk an over-release.
+            // Use Marshal.GetObjectForIUnknown here, NOT the codebase's usual
+            // ComCreate.Wrap (StrategyBasedComWrappers). UIA recognizes a reserved value
+            // by exact IUnknown pointer identity; ComWrappers produces a fresh CCW on the
+            // return trip, so UIA no longer matches it and the color attribute silently
+            // defaults to black (verified live). GetObjectForIUnknown preserves the pointer
+            // so UIA reports it as "not supported" as intended. SYSLIB1099 is accepted for
+            // this special case (NativeAOT is not a shipping target yet).
+            //
+            // UIA reserved values are process-lifetime singletons, so we deliberately do not
+            // Release p afterwards: the extra reference is harmless against an object that
+            // outlives the process, and releasing a possibly-borrowed static pointer would
+            // risk an over-release.
             if (getter(out var p) == 0 && p != IntPtr.Zero)
                 return Marshal.GetObjectForIUnknown(p);
         }
