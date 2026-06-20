@@ -1,0 +1,128 @@
+using System;
+using Ghostty.Core.Tabs;
+
+namespace Ghostty.Core.Accessibility;
+
+internal enum ColorResultKind { NotMapped, Uniform, Mixed }
+
+/// <summary>Result of a color query. <c>Rgb</c> (0x00RRGGBB) is only meaningful
+/// when <c>Kind == Uniform</c>.</summary>
+internal readonly record struct ColorResult(ColorResultKind Kind, uint Rgb)
+{
+    public static readonly ColorResult NotMapped = new(ColorResultKind.NotMapped, 0);
+    public static readonly ColorResult Mixed = new(ColorResultKind.Mixed, 0);
+    public static ColorResult Uniform(uint rgb) => new(ColorResultKind.Uniform, rgb);
+}
+
+/// <summary>
+/// Maps a screen-document text range to viewport cell colors. The viewport grid
+/// (from read_cells) is anchored as a suffix of the document: the last grid row
+/// that has content corresponds to the last document line that has content.
+/// Every queried cell is validated by codepoint against the document character,
+/// so any misalignment (scrolled up, soft-wrap, wide chars, a stale snapshot)
+/// declines to NotMapped instead of reporting a wrong color. Pure; no platform
+/// dependencies. Best-effort and viewport-only by design.
+/// </summary>
+internal sealed class ViewportColorMap
+{
+    private readonly TerminalDocument _doc;
+    private readonly CellGrid _cells;
+    private readonly int _rowShift; // gridRow = docLine - _rowShift
+    private readonly bool _hasContent;
+
+    public ViewportColorMap(TerminalDocument doc, CellGrid cells)
+    {
+        _doc = doc;
+        _cells = cells;
+
+        var lastContentRow = LastContentRow(cells);
+        var lastContentDocLine = LastContentDocLine(doc);
+        if (lastContentRow < 0 || lastContentDocLine < 0) return; // _hasContent = false
+
+        _hasContent = true;
+        _rowShift = lastContentDocLine - lastContentRow;
+    }
+
+    public ColorResult Foreground(TextSpan span) => Reduce(span, fg: true);
+
+    public ColorResult Background(TextSpan span) => Reduce(span, fg: false);
+
+    private ColorResult Reduce(TextSpan span, bool fg)
+    {
+        if (!_hasContent) return ColorResult.NotMapped;
+
+        var text = _doc.Text;
+        var start = _doc.ClampOffset(span.Start);
+        var end = _doc.ClampOffset(span.End);
+        if (end <= start) return ColorResult.NotMapped;
+
+        // Establish line index and line start once, then maintain them
+        // incrementally so the scan is linear in the span length.
+        var line = _doc.LineIndexForOffset(start);
+        var lineStart = _doc.LineBounds(start).Start;
+
+        var haveColor = false;
+        uint color = 0;
+        var mixed = false;
+        var sawCell = false;
+
+        for (var o = start; o < end; o++)
+        {
+            if (text[o] == '\n') { line++; lineStart = o + 1; continue; }
+
+            var gridRow = line - _rowShift;
+            if (gridRow < 0 || gridRow >= _cells.Rows) return ColorResult.NotMapped;
+
+            var col = o - lineStart;
+            if (col >= _cells.Cols) return ColorResult.NotMapped;
+
+            var cell = _cells.Cells[gridRow * _cells.Cols + col];
+            if (!CodepointMatches(cell.Codepoint, text, o)) return ColorResult.NotMapped;
+
+            sawCell = true;
+            var c = fg ? cell.Fg : cell.Bg;
+            if (!haveColor) { color = c; haveColor = true; }
+            else if (c != color) mixed = true;
+        }
+
+        if (!sawCell) return ColorResult.NotMapped;
+        return mixed ? ColorResult.Mixed : ColorResult.Uniform(color);
+    }
+
+    // True when the cell's codepoint, encoded as UTF-16, matches the document
+    // text at `offset`. Empty / wide-spacer cells (codepoint 0) and astral
+    // codepoints whose surrogate pair does not line up both return false, which
+    // makes the caller decline rather than guess.
+    private static bool CodepointMatches(uint codepoint, string text, int offset)
+    {
+        if (codepoint == 0) return false;
+        if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return false;
+        if (codepoint <= 0xFFFF) return text[offset] == (char)codepoint;
+
+        var s = char.ConvertFromUtf32((int)codepoint);
+        return offset + 1 < text.Length && text[offset] == s[0] && text[offset + 1] == s[1];
+    }
+
+    // Greatest document line index that contains a non-newline character, or -1.
+    private static int LastContentDocLine(TerminalDocument doc)
+    {
+        var t = doc.Text;
+        for (var i = t.Length - 1; i >= 0; i--)
+            if (t[i] != '\n') return doc.LineIndexForOffset(i);
+        return -1;
+    }
+
+    // Greatest grid row index that has a non-blank cell, or -1. A cell is blank
+    // when its codepoint is 0 (empty / spacer) or whitespace, matching how
+    // read_text trims trailing blank rows.
+    private static int LastContentRow(CellGrid cells)
+    {
+        for (var r = cells.Rows - 1; r >= 0; r--)
+            for (var c = 0; c < cells.Cols; c++)
+            {
+                var cp = cells.Cells[r * cells.Cols + c].Codepoint;
+                if (cp != 0 && !(cp <= 0xFFFF && char.IsWhiteSpace((char)cp))) return r;
+            }
+        return -1;
+    }
+}
