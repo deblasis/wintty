@@ -57,11 +57,15 @@ internal sealed class ViewportColorMap
         if (end <= start) return ColorResult.NotMapped;
 
         // Establish line index and line start once, then maintain them
-        // incrementally so the scan is linear in the span length.
+        // incrementally so the scan is linear in the span length. The column is
+        // the UTF-16 distance from the line start: identity with the grid column
+        // for BMP text. Astral codepoints take two UTF-16 units but one cell, so
+        // the column drifts past them and the codepoint check below declines the
+        // range (no wrong color); declining emoji-heavy spans is an accepted
+        // best-effort limitation.
         var line = _doc.LineIndexForOffset(start);
         var lineStart = _doc.LineBounds(start).Start;
 
-        var haveColor = false;
         uint color = 0;
         var mixed = false;
         var sawCell = false;
@@ -79,9 +83,8 @@ internal sealed class ViewportColorMap
             var cell = _cells.Cells[gridRow * _cells.Cols + col];
             if (!CodepointMatches(cell.Codepoint, text, o)) return ColorResult.NotMapped;
 
-            sawCell = true;
             var c = fg ? cell.Fg : cell.Bg;
-            if (!haveColor) { color = c; haveColor = true; }
+            if (!sawCell) { color = c; sawCell = true; }
             else if (c != color) mixed = true;
         }
 
