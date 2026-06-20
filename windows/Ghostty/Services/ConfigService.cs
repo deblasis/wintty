@@ -58,7 +58,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public bool VerticalTabs { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
     public bool WindowsSingleInstance { get; private set; }
+    public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
+
+    // The High Contrast override config body to layer on top of the user's
+    // config, or null when HC is inactive/opted-out. Set by
+    // HighContrastMonitor; consumed in Reload. Only touched on the UI thread
+    // (the monitor marshals its events, and Reload runs on the UI thread).
+    private string? _highContrastOverrideBody;
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
 
@@ -389,6 +396,15 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         {
             newConfig = NativeMethods.ConfigNew();
             NativeMethods.ConfigLoadDefaultFiles(newConfig);
+            // Layer the High Contrast override last so it wins over the
+            // user's colors while HC is active. Skipped (body == null) when
+            // HC is off or opted-out, restoring the user's config.
+            if (_highContrastOverrideBody is { } hcBody)
+            {
+                var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
+                if (hcPath is not null)
+                    NativeMethods.ConfigLoadFile(newConfig, hcPath);
+            }
             NativeMethods.ConfigFinalize(newConfig);
         }
         catch (Exception ex)
@@ -467,6 +483,21 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// own save does not trigger a redundant reload.
     /// </summary>
     public void SuppressWatcher(bool suppress) => _suppressWatcher = suppress;
+
+    /// <summary>
+    /// Set (or clear, with null) the High Contrast override config body and
+    /// reload so the layered colors take effect. Called by
+    /// <c>HighContrastMonitor</c> on the UI thread. Skips the reload when the
+    /// body is unchanged, so spurious palette-change events don't churn the
+    /// config.
+    /// </summary>
+    public void SetHighContrastOverride(string? body)
+    {
+        if (string.Equals(_highContrastOverrideBody, body, StringComparison.Ordinal))
+            return;
+        _highContrastOverrideBody = body;
+        Reload();
+    }
 
     private void CacheDiagnostics()
     {
@@ -572,6 +603,9 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         WindowsSingleInstance = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("windows-single-instance", ""),
             defaultValue: false);
+        WindowsHighContrast = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("windows-high-contrast", ""),
+            defaultValue: true);
         CommandPaletteBackground = WindowsOnlyKeyParsers.ParseStringAllowed(
             GetFileValue("command-palette-background", ""),
             allowed: CommandPaletteBackgroundAllowed,
