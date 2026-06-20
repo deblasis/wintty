@@ -75,7 +75,10 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
     // Resolve the fg/bg color for the current range against the cached viewport
     // cells. Best-effort and viewport-only: NotMapped (scrollback, misalignment,
     // surface gone) maps to the UIA NotSupported sentinel; Mixed maps to the
-    // mixed sentinel (or NotSupported if the platform can't provide it).
+    // mixed sentinel (or NotSupported if the platform can't provide it). The
+    // NotSupported()! sites are null-forgiving on purpose: if UIAutomationCore
+    // yields no sentinel, a null attribute value is itself read as "unsupported"
+    // by clients, so the fallback is safe.
     private object ColorAttribute(bool fg)
     {
         if (_peer.ViewportCells is not { } grid) return UiaReservedValues.NotSupported()!;

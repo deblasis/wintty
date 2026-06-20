@@ -31,6 +31,10 @@ internal static partial class UiaReservedValues
     {
         try
         {
+            // UIA reserved values are process-lifetime singletons, so we do not
+            // Release p: the RCW's own reference is harmless against an object
+            // that outlives the process, and releasing a borrowed static pointer
+            // would risk an over-release.
             if (getter(out var p) == 0 && p != IntPtr.Zero)
                 return Marshal.GetObjectForIUnknown(p);
         }
