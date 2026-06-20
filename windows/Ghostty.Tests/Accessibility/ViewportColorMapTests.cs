@@ -50,4 +50,34 @@ public class ViewportColorMapTests
         Assert.Equal(ColorResultKind.Uniform, r.Kind);
         Assert.Equal(7u, r.Rgb);
     }
+
+    [Fact]
+    public void DifferentColors_ReturnMixed()
+    {
+        var map = Map("ab", Grid(2, new[] { (A, 1u, 0u), (B, 9u, 0u) }));
+        Assert.Equal(ColorResultKind.Mixed, map.Foreground(new TextSpan(0, 2)).Kind);
+    }
+
+    [Fact]
+    public void RangeCrossingNewline_SkipsDelimiter()
+    {
+        var map = Map("ab\ncd", Grid(2,
+            new[] { (A, 4u, 0u), (B, 4u, 0u) },
+            new[] { (C, 4u, 0u), (D, 4u, 0u) }));
+        var r = map.Foreground(new TextSpan(0, 5));
+        Assert.Equal(ColorResultKind.Uniform, r.Kind);
+        Assert.Equal(4u, r.Rgb);
+    }
+
+    [Fact]
+    public void BlankMiddleLine_StillMapsLaterLine()
+    {
+        var map = Map("ab\n\ncd", Grid(2,
+            new[] { (A, 5u, 0u), (B, 5u, 0u) },
+            new[] { (0u, 0u, 0u), (0u, 0u, 0u) },
+            new[] { (C, 7u, 0u), (D, 7u, 0u) }));
+        var r = map.Foreground(new TextSpan(4, 6));
+        Assert.Equal(ColorResultKind.Uniform, r.Kind);
+        Assert.Equal(7u, r.Rgb);
+    }
 }
