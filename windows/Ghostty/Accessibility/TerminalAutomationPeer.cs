@@ -22,6 +22,10 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     private readonly TerminalControl _owner;
     private readonly CachedValue<TerminalDocument> _document;
+    // Viewport cells for color attributes. Fetched lazily (only when a color
+    // attribute is queried) and cached for the same 500ms window as the
+    // document, since read_cells is expensive and takes the renderer mutex.
+    private readonly CachedValue<Ghostty.Core.Tabs.CellGrid?> _cells;
     private readonly TerminalOutputAnnouncer _announcer = new();
     private readonly DispatcherTimer _announceTimer;
 
@@ -31,6 +35,10 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
         _document = new CachedValue<TerminalDocument>(
             durationMs: ScreenTextCacheMs,
             fetch: () => new TerminalDocument(_owner.AccessibilityReadScreenText()),
+            nowMs: () => Environment.TickCount64);
+        _cells = new CachedValue<Ghostty.Core.Tabs.CellGrid?>(
+            durationMs: ScreenTextCacheMs,
+            fetch: () => _owner.AccessibilityReadViewportCells(),
             nowMs: () => Environment.TickCount64);
 
         // Poll on the UI thread; the body is inert unless a screen reader is
@@ -72,6 +80,10 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     /// <summary>Current cached screen document. Refreshed at most every 500ms.</summary>
     internal TerminalDocument Document => _document.Get();
+
+    /// <summary>Current cached viewport cells, or null. Refreshed at most every
+    /// 500ms; fetched only when a color attribute is queried.</summary>
+    internal Ghostty.Core.Tabs.CellGrid? ViewportCells => _cells.Get();
 
     /// <summary>Bridge this peer to its UIA provider, for range GetEnclosingElement.</summary>
     internal IRawElementProviderSimple Provider => ProviderFromPeer(this);
