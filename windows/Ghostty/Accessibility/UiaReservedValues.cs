@@ -12,28 +12,18 @@ namespace Ghostty.Accessibility;
 /// </summary>
 internal static partial class UiaReservedValues
 {
-    private static object? _notSupported;
-    private static bool _notSupportedResolved;
-    private static object? _mixed;
-    private static bool _mixedResolved;
+    // Resolved once on first use. Lazy gives thread-safe publication because UIA
+    // GetAttributeValue can be called from UIA/RPC threads, not just the UI thread.
+    private static readonly Lazy<object?> _notSupported =
+        new(() => FromIUnknown(UiaGetReservedNotSupportedValue));
+    private static readonly Lazy<object?> _mixed =
+        new(() => FromIUnknown(UiaGetReservedMixedAttributeValue));
 
     /// <summary>The reserved "not supported" value, or null if unavailable.</summary>
-    public static object? NotSupported()
-    {
-        if (_notSupportedResolved) return _notSupported;
-        _notSupportedResolved = true;
-        _notSupported = FromIUnknown(UiaGetReservedNotSupportedValue);
-        return _notSupported;
-    }
+    public static object? NotSupported() => _notSupported.Value;
 
     /// <summary>The reserved "mixed attribute value", or null if unavailable.</summary>
-    public static object? Mixed()
-    {
-        if (_mixedResolved) return _mixed;
-        _mixedResolved = true;
-        _mixed = FromIUnknown(UiaGetReservedMixedAttributeValue);
-        return _mixed;
-    }
+    public static object? Mixed() => _mixed.Value;
 
     private delegate int ReservedGetter(out IntPtr value);
 
