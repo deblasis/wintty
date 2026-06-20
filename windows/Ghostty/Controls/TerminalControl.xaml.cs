@@ -191,6 +191,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         return sel is { } s ? (s.OffsetStart, s.OffsetLen) : null;
     }
 
+    /// <summary>
+    /// Read the viewport cells (codepoint + resolved fg/bg) for accessibility,
+    /// or null when the surface is gone or the read fails. Takes the renderer
+    /// mutex; the automation peer caches the result for 500ms.
+    /// </summary>
+    internal Ghostty.Core.Tabs.CellGrid? AccessibilityReadViewportCells()
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return null;
+        return NativeMethods.SurfaceReadCells(_surface);
+    }
+
     private Ghostty.Accessibility.TerminalAutomationPeer? _automationPeer;
 
     // Cache the peer so UIA re-querying a still-loaded control reuses one instance
