@@ -73,24 +73,26 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
     }
 
     // Resolve the fg/bg color for the current range against the cached viewport
-    // cells. Best-effort and viewport-only: NotMapped (scrollback, misalignment,
-    // surface gone) maps to the UIA NotSupported sentinel; Mixed maps to the
-    // mixed sentinel (or NotSupported if the platform can't provide it). The
-    // NotSupported()! sites are null-forgiving on purpose: if UIAutomationCore
-    // yields no sentinel, a null attribute value is itself read as "unsupported"
-    // by clients, so the fallback is safe.
+    // cells. Best-effort and viewport-only. A uniform run reports its COLORREF;
+    // everything else reports NotSupported. The NotSupported()! sites are
+    // null-forgiving on purpose: if UIAutomationCore yields no sentinel, a null
+    // attribute value is itself read as "unsupported" by clients, so the fallback
+    // is safe.
+    //
+    // A multi-color (Mixed) range should report the UIA reserved "mixed" value,
+    // but WinUI 3's ITextRangeProvider projection does not surface that sentinel
+    // to clients (verified live: a mixed range comes back as NotSupported, not
+    // Mixed). Reporting NotSupported is therefore the honest result for Mixed and
+    // NotMapped alike, instead of picking one cell's color and lying.
     private object ColorAttribute(bool fg)
     {
         if (_peer.ViewportCells is not { } grid) return UiaReservedValues.NotSupported()!;
 
         var map = new ViewportColorMap(Doc, grid);
         var result = fg ? map.Foreground(_span) : map.Background(_span);
-        return result.Kind switch
-        {
-            ColorResultKind.Uniform => UiaColor.ToColorRef(result.Rgb),
-            ColorResultKind.Mixed => UiaReservedValues.Mixed() ?? UiaReservedValues.NotSupported()!,
-            _ => UiaReservedValues.NotSupported()!,
-        };
+        return result.Kind == ColorResultKind.Uniform
+            ? UiaColor.ToColorRef(result.Rgb)
+            : UiaReservedValues.NotSupported()!;
     }
 
     public void GetBoundingRectangles(out double[] rectangles) => rectangles = Array.Empty<double>();
