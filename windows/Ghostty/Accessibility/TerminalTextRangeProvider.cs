@@ -1,5 +1,6 @@
 using System;
 using Ghostty.Core.Accessibility;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Automation.Text;
 using CoreTextUnit = Ghostty.Core.Accessibility.TextUnit;
@@ -62,9 +63,32 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
         return match is { } m ? new TerminalTextRangeProvider(_peer, m) : null!;
     }
 
-    // Text attributes (foreground/background color, etc.) are added in a later
-    // stage; null signals "no value" to clients until then.
-    public object GetAttributeValue(int attributeId) => null!;
+    public object GetAttributeValue(int attributeId)
+    {
+        if (attributeId == (int)AutomationTextAttributesEnum.ForegroundColorAttribute)
+            return ColorAttribute(fg: true);
+        if (attributeId == (int)AutomationTextAttributesEnum.BackgroundColorAttribute)
+            return ColorAttribute(fg: false);
+        return UiaReservedValues.NotSupported()!;
+    }
+
+    // Resolve the fg/bg color for the current range against the cached viewport
+    // cells. Best-effort and viewport-only: NotMapped (scrollback, misalignment,
+    // surface gone) maps to the UIA NotSupported sentinel; Mixed maps to the
+    // mixed sentinel (or NotSupported if the platform can't provide it).
+    private object ColorAttribute(bool fg)
+    {
+        if (_peer.ViewportCells is not { } grid) return UiaReservedValues.NotSupported()!;
+
+        var map = new ViewportColorMap(Doc, grid);
+        var result = fg ? map.Foreground(_span) : map.Background(_span);
+        return result.Kind switch
+        {
+            ColorResultKind.Uniform => UiaColor.ToColorRef(result.Rgb),
+            ColorResultKind.Mixed => UiaReservedValues.Mixed() ?? UiaReservedValues.NotSupported()!,
+            _ => UiaReservedValues.NotSupported()!,
+        };
+    }
 
     public void GetBoundingRectangles(out double[] rectangles) => rectangles = Array.Empty<double>();
 
