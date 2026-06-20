@@ -80,4 +80,49 @@ public class ViewportColorMapTests
         Assert.Equal(ColorResultKind.Uniform, r.Kind);
         Assert.Equal(7u, r.Rgb);
     }
+
+    [Fact]
+    public void CodepointMismatch_ReturnsNotMapped()
+    {
+        var map = Map("zzz", Grid(3, new[] { (A, 1u, 0u), (B, 1u, 0u), (C, 1u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 3)).Kind);
+    }
+
+    [Fact]
+    public void WideChar_DeclinesAcrossSpacer()
+    {
+        var map = Map("中x", Grid(3,
+            new[] { (0x4e2du, 1u, 0u), (0u, 1u, 0u), ((uint)'x', 1u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 2)).Kind);
+    }
+
+    [Fact]
+    public void ColumnPastGridWidth_ReturnsNotMapped()
+    {
+        var map = Map("abcd", Grid(3, new[] { (A, 1u, 0u), (B, 1u, 0u), (C, 1u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 4)).Kind);
+    }
+
+    [Fact]
+    public void EmptyRange_ReturnsNotMapped()
+    {
+        var map = Map("abc", Grid(3, new[] { (A, 1u, 0u), (B, 1u, 0u), (C, 1u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(1, 1)).Kind);
+    }
+
+    [Fact]
+    public void NewlineOnlyRange_ReturnsNotMapped()
+    {
+        var map = Map("a\nb", Grid(1,
+            new[] { (A, 1u, 0u) },
+            new[] { (B, 1u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(1, 2)).Kind);
+    }
+
+    [Fact]
+    public void BlankGrid_ReturnsNotMapped()
+    {
+        var map = Map("abc", Grid(3, new[] { (0u, 0u, 0u), (0u, 0u, 0u), (0u, 0u, 0u) }));
+        Assert.Equal(ColorResultKind.NotMapped, map.Foreground(new TextSpan(0, 3)).Kind);
+    }
 }
