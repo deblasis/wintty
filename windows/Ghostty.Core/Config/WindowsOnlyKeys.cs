@@ -55,6 +55,8 @@ public static class WindowsOnlyKeys
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
         new("windows-single-instance",
             "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process."),
+        new("windows-high-contrast",
+            "When true (default), the terminal surface follows the Windows High Contrast theme automatically; set false to keep your configured colors even in High Contrast mode."),
     ];
 
     public static readonly FrozenSet<string> Set =
