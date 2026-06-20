@@ -50,6 +50,22 @@ public interface IConfigService : IDisposable
     bool WindowsSingleInstance { get; }
 
     /// <summary>
+    /// Windows-only: default true. Backed by the "windows-high-contrast"
+    /// key. When true, the terminal surface follows the OS High Contrast
+    /// theme; false keeps the user's configured colors regardless of OS
+    /// High Contrast.
+    /// </summary>
+    bool WindowsHighContrast { get; }
+
+    /// <summary>
+    /// Set (or clear, with null) the High Contrast color override body to
+    /// layer on top of the user's config, then reload so it takes effect.
+    /// Called by the High Contrast monitor. A no-op when the body is
+    /// unchanged.
+    /// </summary>
+    void SetHighContrastOverride(string? body);
+
+    /// <summary>
     /// Windows-only: backdrop material for the command palette.
     /// One of "acrylic", "mica", "opaque". Default "acrylic".
     /// Backed by the "command-palette-background" key.
