@@ -801,21 +801,56 @@ fn setupXdgDataDirs(
     return true;
 }
 
-/// Prepend a value to an environment variable such as PATH.
-/// The returned value is always allocated so it must be freed.
+/// Prepend a value to a delimiter-separated environment variable, joining
+/// `value` in front of `current` with `delimiter`. The returned value is
+/// always allocated so it must be freed.
+///
+/// `delimiter` is explicit because the right separator is not always the
+/// host's: pass `std.fs.path.delimiter` for host PATH-style lists, but a
+/// fixed `';'` for variables whose format is host-independent, such as
+/// Windows' CLINK_PATH (always `;`-separated, even when set off-Windows in
+/// tests).
 fn prependEnv(
     alloc: Allocator,
     current: []const u8,
     value: []const u8,
+    delimiter: u8,
 ) Allocator.Error![]u8 {
     // If there is no prior value, we return it as-is
     if (current.len == 0) return try alloc.dupe(u8, value);
 
     return try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{
         value,
-        std.fs.path.delimiter,
+        delimiter,
         current,
     });
+}
+
+test "prependEnv empty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const result = try prependEnv(alloc, "", "foo", ':');
+    defer alloc.free(result);
+    try testing.expectEqualStrings(result, "foo");
+}
+
+test "prependEnv existing colon delimiter" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const result = try prependEnv(alloc, "a:b", "foo", ':');
+    defer alloc.free(result);
+    try testing.expectEqualStrings(result, "foo:a:b");
+}
+
+test "prependEnv existing semicolon delimiter" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const result = try prependEnv(alloc, "a;b", "foo", ';');
+    defer alloc.free(result);
+    try testing.expectEqualStrings(result, "foo;a;b");
 }
 
 test "xdg: empty XDG_DATA_DIRS" {
@@ -1359,10 +1394,15 @@ fn setupCmd(
         dir.close();
         try env.put(
             "CLINK_PATH",
-            try internal_os.prependEnv(
+            // CLINK_PATH is a Windows-format list and is always
+            // ';'-separated, independent of the host (Clink only runs on
+            // Windows; using the host path delimiter would emit ':' under
+            // unit tests on POSIX).
+            try prependEnv(
                 alloc_arena,
                 env.get("CLINK_PATH") orelse "",
                 clink_dir,
+                ';',
             ),
         );
     } else |err| switch (err) {
