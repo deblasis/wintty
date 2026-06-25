@@ -481,13 +481,23 @@ test "isCjkAnsiCodePageFor: non-CJK codepages return false" {
 
 /// True if `arg0` is the WSL launcher (`wsl`/`wsl.exe`, case-insensitive,
 /// any path). Cheap pre-check so callers can skip work for non-WSL commands.
+///
+/// Delegates to `identify`, which strips surrounding quotes and splits on
+/// both path separators, so it is deterministic regardless of host. A
+/// hand-rolled `std.fs.path.basename` here would follow the *host* separator
+/// and miss a `C:\...\wsl.exe` arg0 on POSIX (and silently disagree with
+/// `identify` on quoted paths).
 pub fn isWslExe(arg0: []const u8) bool {
-    const exe = std.fs.path.basename(arg0);
-    const name = if (std.ascii.endsWithIgnoreCase(exe, ".exe"))
-        exe[0 .. exe.len - 4]
-    else
-        exe;
-    return std.ascii.eqlIgnoreCase("wsl", name);
+    return identify(arg0) == .wsl;
+}
+
+test "isWslExe: windows path, forward slashes, quoted, bare, non-wsl" {
+    try testing.expect(isWslExe("C:\\Windows\\System32\\wsl.exe"));
+    try testing.expect(isWslExe("C:/Windows/System32/wsl.exe"));
+    try testing.expect(isWslExe("\"wsl.exe\""));
+    try testing.expect(isWslExe("wsl"));
+    try testing.expect(!isWslExe("C:\\Windows\\System32\\cmd.exe"));
+    try testing.expect(!isWslExe(""));
 }
 
 /// If `argv` invokes the WSL launcher, return the target distro from
