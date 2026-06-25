@@ -1333,10 +1333,15 @@ fn setupCmd(
         dir.close();
         try env.put(
             "CLINK_PATH",
+            // CLINK_PATH is a Windows-format list and is always
+            // ';'-separated, independent of the host (Clink only runs on
+            // Windows; using the host path delimiter would emit ':' under
+            // unit tests on POSIX).
             try internal_os.prependEnv(
                 alloc_arena,
                 env.get("CLINK_PATH") orelse "",
                 clink_dir,
+                ';',
             ),
         );
     } else |err| switch (err) {
