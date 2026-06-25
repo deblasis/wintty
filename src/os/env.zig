@@ -45,19 +45,27 @@ pub fn appendEnvAlways(
     });
 }
 
-/// Prepend a value to an environment variable such as PATH.
-/// The returned value is always allocated so it must be freed.
+/// Prepend a value to a delimiter-separated environment variable, joining
+/// `value` in front of `current` with `delimiter`. The returned value is
+/// always allocated so it must be freed.
+///
+/// `delimiter` is explicit because the right separator is not always the
+/// host's: pass `std.fs.path.delimiter` for host PATH-style lists, but a
+/// fixed `';'` for variables whose format is host-independent, such as
+/// Windows' CLINK_PATH (always `;`-separated, even when set off-Windows in
+/// tests).
 pub fn prependEnv(
     alloc: Allocator,
     current: []const u8,
     value: []const u8,
+    delimiter: u8,
 ) Error![]u8 {
     // If there is no prior value, we return it as-is
     if (current.len == 0) return try alloc.dupe(u8, value);
 
     return try std.fmt.allocPrint(alloc, "{s}{c}{s}", .{
         value,
-        std.fs.path.delimiter,
+        delimiter,
         current,
     });
 }
@@ -159,20 +167,25 @@ test "prependEnv empty" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    const result = try prependEnv(alloc, "", "foo");
+    const result = try prependEnv(alloc, "", "foo", ':');
     defer alloc.free(result);
     try testing.expectEqualStrings(result, "foo");
 }
 
-test "prependEnv existing" {
+test "prependEnv existing colon delimiter" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    const result = try prependEnv(alloc, "a:b", "foo");
+    const result = try prependEnv(alloc, "a:b", "foo", ':');
     defer alloc.free(result);
-    if (builtin.os.tag == .windows) {
-        try testing.expectEqualStrings(result, "foo;a:b");
-    } else {
-        try testing.expectEqualStrings(result, "foo:a:b");
-    }
+    try testing.expectEqualStrings(result, "foo:a:b");
+}
+
+test "prependEnv existing semicolon delimiter" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const result = try prependEnv(alloc, "a;b", "foo", ';');
+    defer alloc.free(result);
+    try testing.expectEqualStrings(result, "foo;a;b");
 }
