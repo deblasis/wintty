@@ -1223,8 +1223,17 @@ test "Image.estimatedUploadStagingBytes returns imageStagingBytes for .pending" 
         .pixel_format = .rgba,
         .data = &data,
     } };
-    // 2x2 RGBA -> aligned pitch 256 * height 2 = 512.
-    try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+    // estimatedUploadStagingBytes only tracks staging bytes on backends whose
+    // Texture carries pending_staging_bytes (DX12); the rest return 0 by
+    // contract. A .pending image builds on every backend, so assert both arms
+    // rather than skipping (unlike the .ready/.replace siblings, which gate
+    // because their Texture is not zero-initializable off DX12).
+    if (comptime @hasField(Texture, "pending_staging_bytes")) {
+        // 2x2 RGBA -> aligned pitch 256 * height 2 = 512.
+        try std.testing.expectEqual(@as(u64, 512), img.estimatedUploadStagingBytes());
+    } else {
+        try std.testing.expectEqual(@as(u64, 0), img.estimatedUploadStagingBytes());
+    }
 }
 
 test "Image.estimatedUploadStagingBytes returns 0 for .ready" {
