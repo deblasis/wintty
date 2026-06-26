@@ -54,14 +54,16 @@ internal enum GhosttyActionTag
     ConfigChange = 48,
     CloseWindow = 49,
     RingBell = 50,
-    ShowChildExited = 55,
-    ProgressReport = 56,
-    StartSearch    = 59,
-    EndSearch      = 60,
-    SearchTotal    = 61,
-    SearchSelected = 62,
-    PromptReady    = 65,
-    FirstRender    = 66,
+    // SELECTION_CHANGED (51) was inserted upstream, shifting every later
+    // tag +1. These dispatched tags are realigned to the current header.
+    ShowChildExited = 56,
+    ProgressReport = 57,
+    StartSearch    = 60,
+    EndSearch      = 61,
+    SearchTotal    = 62,
+    SearchSelected = 63,
+    PromptReady    = 66,
+    FirstRender    = 67,
 }
 
 // ghostty_action_scrollbar_s:
