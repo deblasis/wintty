@@ -270,6 +270,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal void RaisePromptReady() => PromptReady?.Invoke(this, EventArgs.Empty);
     internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
 
+    /// <summary>
+    /// Notify the UIA automation peer that the terminal selection changed so
+    /// assistive tech re-queries it. No-op when no automation peer has been
+    /// created (i.e. no AT client is attached), so non-AT users pay nothing.
+    /// </summary>
+    internal void RaiseSelectionChanged() => _automationPeer?.RaiseSelectionChangedEvent();
+
     private bool _bellBorderActive;
     private bool _bellTitlePending;
     private BellAudioPlayer? _bellAudio;
