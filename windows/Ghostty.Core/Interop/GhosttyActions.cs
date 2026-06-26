@@ -54,8 +54,9 @@ internal enum GhosttyActionTag
     ConfigChange = 48,
     CloseWindow = 49,
     RingBell = 50,
-    // SELECTION_CHANGED (51) was inserted upstream, shifting every later
-    // tag +1. These dispatched tags are realigned to the current header.
+    // SELECTION_CHANGED was inserted upstream at 51, shifting every later
+    // tag +1 (the dispatched tags below are realigned to the current header).
+    SelectionChanged = 51,
     ShowChildExited = 56,
     ProgressReport = 57,
     StartSearch    = 60,

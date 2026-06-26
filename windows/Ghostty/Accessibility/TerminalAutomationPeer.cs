@@ -78,6 +78,18 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
         }
     }
 
+    /// <summary>
+    /// Raise the UIA TextSelectionChanged event so assistive tech re-queries
+    /// <see cref="GetSelection"/>. Mirrors the macOS surface posting
+    /// NSAccessibility .selectedTextChanged. Guarded by ListenerExists so it
+    /// is inert when no AT client is attached.
+    /// </summary>
+    internal void RaiseSelectionChangedEvent()
+    {
+        if (AutomationPeer.ListenerExists(AutomationEvents.TextPatternOnTextSelectionChanged))
+            RaiseAutomationEvent(AutomationEvents.TextPatternOnTextSelectionChanged);
+    }
+
     /// <summary>Current cached screen document. Refreshed at most every 500ms.</summary>
     internal TerminalDocument Document => _document.Get();
 
