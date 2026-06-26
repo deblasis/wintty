@@ -32,6 +32,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.ConfigChange, 48)]
     [InlineData((int)GhosttyActionTag.CloseWindow, 49)]
     [InlineData((int)GhosttyActionTag.RingBell, 50)]
+    [InlineData((int)GhosttyActionTag.SelectionChanged, 51)]
     [InlineData((int)GhosttyActionTag.ProgressReport, 57)]
     [InlineData((int)GhosttyActionTag.StartSearch, 60)]
     [InlineData((int)GhosttyActionTag.EndSearch, 61)]
