@@ -736,6 +736,24 @@ internal sealed class GhosttyHost : IDisposable
                     return 1;
                 }
 
+                case GhosttyActionTag.SelectionChanged:
+                {
+                    // Payload-less: core fires this on a selection state
+                    // transition (already coalesced in Surface.zig). Route it
+                    // to the surface's UIA peer so assistive tech re-queries
+                    // the selection, mirroring macOS posting NSAccessibility
+                    // .selectedTextChanged. The resolve-guard drops the action
+                    // if the surface was torn down before the dispatched
+                    // callback runs; the raise itself is inert when no AT
+                    // client is listening (same as SetTitle/MouseShape).
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaiseSelectionChanged();
+                    });
+                    return 1;
+                }
+
                 case GhosttyActionTag.RingBell:
                 {
                     // Core already debounces the bell (100ms in Surface.zig)
