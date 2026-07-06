@@ -435,7 +435,7 @@ pub const Shaders = struct {
         }
 
         // Create a dedicated root signature for post-process shaders.
-        // Uses CBV at b0 (binding remapped in shader_wrapper before glslang),
+        // Uses CBV at b0 (binding remapped by zioshade from binding=1),
         // 1 SRV at t0, 1 sampler at s0.
         const post_root_sig = if (custom_shaders.len > 0)
             Pipeline.createPostRootSignature(dev) catch null

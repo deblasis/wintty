@@ -186,8 +186,7 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
 }
 
 /// Root signature for custom post-process shaders.
-/// The shader_wrapper remaps binding=1 to binding=0 in the GLSL input
-/// before glslang, so SPIRV-Cross naturally outputs register(b0).
+/// zioshade remaps binding=1 to register(b0) during SPIR-V -> HLSL cross-compilation.
 /// Layout:
 ///   [0] CBV at b0 (uniforms constant buffer)
 ///   [1] Descriptor table: 1 SRV at t0
@@ -212,7 +211,7 @@ pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSi
     };
 
     const root_params = [_]d3d12.D3D12_ROOT_PARAMETER1{
-        // [0] Inline CBV at b0 (remapped from b1 in shader_wrapper).
+        // [0] Inline CBV at b0 (remapped from binding=1 by zioshade binding_shift=-1).
         .{
             .ParameterType = .CBV,
             .u = .{ .Descriptor = .{

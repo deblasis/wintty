@@ -80,8 +80,10 @@
         .zlib = .{ .path = "./pkg/zlib", .lazy = true },
 
         // Shader translation
-        .glslang = .{ .path = "./pkg/glslang", .lazy = true },
-        .spirv_cross = .{ .path = "./pkg/spirv-cross", .lazy = true },
+        .zioshade = .{
+            .url = "https://github.com/deblasis/zioshade/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "zioshade-0.2.0-8s3a2it0OQAES_OnG-WFM0suUG3lO3Jrt6HPWmx9rTC1",
+        },
 
         // Wayland
         .wayland = .{
