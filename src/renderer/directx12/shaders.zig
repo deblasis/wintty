@@ -346,7 +346,7 @@ pub const Shaders = struct {
     /// for draw-time binding but do not own it -- deinit releases it here.
     root_signature: ?*d3d12.ID3D12RootSignature = null,
     /// Separate root signature for custom post-process shaders. Has exactly
-    /// the bindings the SPIRV-Cross HLSL output expects (b0, t0, s0) without
+    /// the bindings the zioshade HLSL output expects (b0, t0, s0) without
     /// the main root signature's extra SRV slots.
     post_root_signature: ?*d3d12.ID3D12RootSignature = null,
     pipelines: Pipelines = .{},

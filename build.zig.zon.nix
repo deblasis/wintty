@@ -395,7 +395,7 @@ in
       path = fetchZigArtifact {
         name = "zioshade";
         url = "https://github.com/deblasis/zioshade/archive/refs/tags/v0.2.0.tar.gz";
-        hash = "sha256-BbLG98jAbRYGocrTBEPqDRTNwuOaENACAwX07YfhZlc=";
+        hash = "sha256-5+YzDoVcFxXurERvhuiwNhfjTxZl9LR5p8I5hCvFuLA=";
         unpack = false;
       };
     }
