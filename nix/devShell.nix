@@ -35,7 +35,6 @@
   fontconfig,
   freetype,
   glib,
-  glslang,
   gtk4,
   gtk4-layer-shell,
   gobject-introspection,
@@ -55,7 +54,6 @@
   libXinerama,
   libXrandr,
   libxml2,
-  spirv-cross,
   simdutf,
   zlib,
   alejandra,
@@ -171,9 +169,6 @@ in
         oniguruma
         simdutf
         zlib
-
-        glslang
-        spirv-cross
 
         libxkbcommon
         libX11
