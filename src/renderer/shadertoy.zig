@@ -260,8 +260,12 @@ test "zioshade rejects invalid shader" {
     const src = try testGlslZ(alloc, test_invalid);
     defer alloc.free(src);
 
-    const result = zioshade.compileGlslToHlsl(alloc, src, .fragment);
-    try testing.expectError(error.CompileError, result);
+    // zioshade's error taxonomy is not stable pre-1.0, so assert only that
+    // the invalid shader is rejected (today: error.SemanticFailed).
+    if (zioshade.compileGlslToHlsl(alloc, src, .fragment)) |hlsl| {
+        alloc.free(hlsl);
+        return error.TestUnexpectedResult;
+    } else |_| {}
 }
 
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");
