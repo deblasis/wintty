@@ -37,6 +37,7 @@ const blast_mib = 32;
 const HPCON = windows.LPVOID;
 const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+const CREATE_NO_WINDOW = 0x08000000;
 // ProcThreadAttributeValue(22, false, true, false)
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
@@ -161,32 +162,59 @@ const k32 = struct {
 // Child mode: blast plain text to stdout.
 // ---------------------------------------------------------------------
 
-fn childBlast(mib: usize) void {
-    // The parent spawns us with STARTF_USESTDHANDLES + null std handles
-    // (mirroring ghostty's Command.zig), so the console connection comes
-    // from the pseudoconsole attribute and the std handle values are
-    // unusable. Open the attached console output directly; if we are not
-    // attached to any console, exit instead of spamming whatever the
-    // parent's stdio points at.
-    const conout = std.unicode.utf8ToUtf16LeStringLiteral("CONOUT$");
-    const stdout = windows.kernel32.CreateFileW(
-        conout,
-        windows.GENERIC_WRITE,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
-        null,
-        windows.OPEN_EXISTING,
-        0,
-        null,
-    );
-    if (stdout == windows.INVALID_HANDLE_VALUE) std.process.exit(2);
+const BlastTarget = enum { conout, stdout };
+const BlastContent = enum { text, vt };
 
-    // 64 KiB block of 80-column lines: 78 visible chars + \r\n.
+fn childBlast(mib: usize, target: BlastTarget, content: BlastContent) void {
+    const out = switch (target) {
+        // ConPTY spawn: our std handles are the pseudoconsole's; write to
+        // the attached console via CONOUT$ (the Console-API output path
+        // that conhost renders cell-by-cell).
+        .conout => blk: {
+            const conout = std.unicode.utf8ToUtf16LeStringLiteral("CONOUT$");
+            const h = windows.kernel32.CreateFileW(
+                conout,
+                windows.GENERIC_WRITE,
+                windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+                null,
+                windows.OPEN_EXISTING,
+                0,
+                null,
+            );
+            if (h == windows.INVALID_HANDLE_VALUE) std.process.exit(2);
+            break :blk h;
+        },
+        // Raw-pipe spawn: stdout was redirected to a pipe. Writing here
+        // goes straight to the pipe with NO conhost in the data path,
+        // even though CREATE_NO_WINDOW gave us a hidden console.
+        .stdout => windows.GetStdHandle(windows.STD_OUTPUT_HANDLE) catch std.process.exit(2),
+    };
+
+    // 64 KiB block. `text`: plain 80-col lines (78 chars + CRLF), the
+    // console-cell workload. `vt`: same but every line is wrapped in an
+    // SGR color set/reset, so conhost must parse/translate VT rather
+    // than just fill cells (post-#17510 this is the passthrough path).
     var block: [64 * 1024]u8 = undefined;
     var i: usize = 0;
-    while (i + 80 <= block.len) : (i += 80) {
-        for (block[i..][0..78], 0..) |*ch, j| ch.* = 'a' + @as(u8, @intCast(j % 26));
-        block[i + 78] = '\r';
-        block[i + 79] = '\n';
+    switch (content) {
+        .text => while (i + 80 <= block.len) : (i += 80) {
+            for (block[i..][0..78], 0..) |*ch, j| ch.* = 'a' + @as(u8, @intCast(j % 26));
+            block[i + 78] = '\r';
+            block[i + 79] = '\n';
+        },
+        .vt => {
+            // "\x1b[3Xm" + 70 chars + "\x1b[0m\r\n" = 82 bytes/line.
+            const prefix = "\x1b[3"; // color digit appended per line
+            while (i + 82 <= block.len) {
+                @memcpy(block[i..][0..prefix.len], prefix);
+                block[i + prefix.len] = '1' + @as(u8, @intCast((i / 82) % 7));
+                block[i + prefix.len + 1] = 'm';
+                const body = block[i + prefix.len + 2 ..][0..70];
+                for (body, 0..) |*ch, j| ch.* = 'a' + @as(u8, @intCast(j % 26));
+                @memcpy(block[i + prefix.len + 2 + 70 ..][0..6], "\x1b[0m\r\n");
+                i += prefix.len + 2 + 70 + 6;
+            }
+        },
     }
     const payload = block[0..i];
 
@@ -194,10 +222,33 @@ fn childBlast(mib: usize) void {
     while (remaining > 0) {
         const want: windows.DWORD = @intCast(@min(remaining, payload.len));
         var written: windows.DWORD = 0;
-        if (windows.kernel32.WriteFile(stdout, payload.ptr, want, &written, null) == 0) return;
+        if (windows.kernel32.WriteFile(out, payload.ptr, want, &written, null) == 0) return;
         if (written == 0) return;
         remaining -= written;
     }
+}
+
+/// Build `"<exe>" blast <mib> <target> <content>` as a null-terminated
+/// UTF-16 command line into buf_out.
+fn buildBlastCmd(
+    buf_out: []u16,
+    exe_w: [:0]const u16,
+    target: BlastTarget,
+    content: BlastContent,
+) ![:0]u16 {
+    var cmd_utf8_buf: [std.fs.max_path_bytes + 48]u8 = undefined;
+    var exe_utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_utf8_len = std.unicode.utf16LeToUtf8(&exe_utf8_buf, exe_w) catch
+        return error.BadExePath;
+    const cmd_utf8 = std.fmt.bufPrint(
+        &cmd_utf8_buf,
+        "\"{s}\" blast {d} {s} {s}",
+        .{ exe_utf8_buf[0..exe_utf8_len], blast_mib, @tagName(target), @tagName(content) },
+    ) catch return error.CmdTooLong;
+    const len = std.unicode.utf8ToUtf16Le(buf_out[0 .. buf_out.len - 1], cmd_utf8) catch
+        return error.BadCmd;
+    buf_out[len] = 0;
+    return buf_out[0..len :0];
 }
 
 // ---------------------------------------------------------------------
@@ -215,7 +266,7 @@ const Session = struct {
     child_thread: windows.HANDLE,
     api: Api,
 
-    fn spawn(api: Api, exe_w: [:0]const u16, pipe_buf: windows.DWORD) !Session {
+    fn spawn(api: Api, exe_w: [:0]const u16, pipe_buf: windows.DWORD, content: BlastContent) !Session {
         var s: Session = undefined;
         s.api = api;
 
@@ -251,20 +302,8 @@ const Session = struct {
             null,
         ) == 0) return error.AttrListUpdate;
 
-        // Command line: "<exe>" blast <mib>
-        var cmd_utf8_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-        var exe_utf8_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe_utf8_len = std.unicode.utf16LeToUtf8(&exe_utf8_buf, exe_w) catch
-            return error.BadExePath;
-        const cmd_utf8 = std.fmt.bufPrint(
-            &cmd_utf8_buf,
-            "\"{s}\" blast {d}",
-            .{ exe_utf8_buf[0..exe_utf8_len], blast_mib },
-        ) catch return error.CmdTooLong;
-        var cmd_w: [cmd_utf8_buf.len + 1]u16 = undefined;
-        const cmd_w_len = std.unicode.utf8ToUtf16Le(&cmd_w, cmd_utf8) catch
-            return error.BadCmd;
-        cmd_w[cmd_w_len] = 0;
+        var cmd_w_buf: [std.fs.max_path_bytes + 1]u16 = undefined;
+        const cmd_w = try buildBlastCmd(&cmd_w_buf, exe_w, .conout, content);
 
         // Mirror ghostty Command.zig: STARTF_USESTDHANDLES with null std
         // handles prevents the child from binding to the parent's
@@ -278,7 +317,7 @@ const Session = struct {
 
         if (k32.CreateProcessW(
             null,
-            @ptrCast(&cmd_w),
+            cmd_w.ptr,
             null,
             null,
             windows.TRUE,
@@ -376,8 +415,9 @@ fn runSerial(
     buf: []u8,
     pipe_buf: windows.DWORD,
     parse_ns_per_byte: u64,
+    content: BlastContent,
 ) !Stats {
-    var s = try Session.spawn(api, exe_w, pipe_buf);
+    var s = try Session.spawn(api, exe_w, pipe_buf, content);
     defer s.deinit();
     const waiter = try std.Thread.spawn(.{}, Session.waitAndClose, .{&s});
     defer waiter.join();
@@ -393,6 +433,68 @@ fn runSerial(
         if (n == 0) break;
         st.record(n, buf.len, timer.read());
         simulateParse(&timer, n, parse_ns_per_byte);
+    }
+    return st;
+}
+
+/// Baseline with NO conhost in the data path: spawn the child with its
+/// stdout redirected straight to an anonymous pipe (CREATE_NO_WINDOW
+/// gives it a hidden console, but stdout is the pipe, so writes bypass
+/// conhost entirely). Same drain loop as runSerial. This isolates
+/// whether ConPTY/conhost is the throughput bottleneck at all, or
+/// whether the ~12 MB/s ceiling is the child write + pipe + our read.
+fn runRawPipe(exe_w: [:0]const u16, buf: []u8, content: BlastContent) !Stats {
+    var read_h: windows.HANDLE = undefined;
+    var write_h: windows.HANDLE = undefined;
+    // Inheritable write end so the child gets it as stdout.
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&read_h, &write_h, &sa, 0) == 0) return error.CreatePipe;
+    defer windows.CloseHandle(read_h);
+    // Our read end must NOT be inherited.
+    try windows.SetHandleInformation(read_h, windows.HANDLE_FLAG_INHERIT, 0);
+
+    var cmd_w_buf: [std.fs.max_path_bytes + 1]u16 = undefined;
+    const cmd_w = try buildBlastCmd(&cmd_w_buf, exe_w, .stdout, content);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = write_h;
+    si.hStdError = write_h;
+    si.hStdInput = null;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_NO_WINDOW,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    defer windows.CloseHandle(pi.hProcess);
+    defer windows.CloseHandle(pi.hThread);
+    // Close our copy of the write end so the read sees EOF at child exit.
+    windows.CloseHandle(write_h);
+
+    var timer = try std.time.Timer.start();
+    var st: Stats = .{};
+    while (true) {
+        var n: windows.DWORD = 0;
+        if (windows.kernel32.ReadFile(read_h, buf.ptr, @intCast(buf.len), &n, null) == 0) {
+            if (readEof(windows.kernel32.GetLastError())) break;
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
+        st.record(n, buf.len, timer.read());
     }
     return st;
 }
@@ -459,8 +561,9 @@ fn runGather(
     exe_w: [:0]const u16,
     pipe_buf: windows.DWORD,
     parse_ns_per_byte: u64,
+    content: BlastContent,
 ) !Stats {
-    var s = try Session.spawn(api, exe_w, pipe_buf);
+    var s = try Session.spawn(api, exe_w, pipe_buf, content);
     defer s.deinit();
     const waiter = try std.Thread.spawn(.{}, Session.waitAndClose, .{&s});
     defer waiter.join();
@@ -534,7 +637,11 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(alloc);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "blast")) {
-        childBlast(try std.fmt.parseInt(usize, args[2], 10));
+        // blast <mib> [conout|stdout] [text|vt]
+        const mib = try std.fmt.parseInt(usize, args[2], 10);
+        const target: BlastTarget = if (args.len >= 4 and std.mem.eql(u8, args[3], "stdout")) .stdout else .conout;
+        const content: BlastContent = if (args.len >= 5 and std.mem.eql(u8, args[4], "vt")) .vt else .text;
+        childBlast(mib, target, content);
         return;
     }
 
@@ -547,10 +654,54 @@ pub fn main() !void {
     const exe_w = exe_w_buf[0..exe_w_len :0];
 
     std.debug.print(
-        "conpty_probe: child blasts {d} MiB plain text per experiment\n" ++
+        "conpty_probe: child blasts {d} MiB per experiment\n" ++
             "(read-side byte counts; ConPTY re-renders so they differ from child-written bytes)\n",
         .{blast_mib},
     );
+
+    // --- Bottleneck attribution: is conhost the ceiling at all? ---
+    // All rows use the same 64 KiB serial drain and the same child; only
+    // the transport/content varies. If raw-pipe is ~same MB/s as ConPTY,
+    // conhost is NOT the bottleneck (the ~12 MB/s is child-write + pipe +
+    // our read). If raw-pipe is far faster, conhost IS the bottleneck,
+    // and text-vs-vt shows whether it's Console-API cell processing or
+    // VT translation.
+    {
+        const buf = try alloc.alloc(u8, 64 * 1024);
+        defer alloc.free(buf);
+        std.debug.print("\n=== bottleneck attribution (64 KiB serial drain, parse=0) ===\n", .{});
+        std.debug.print("{s:<48} {s:>12} {s:>9} {s:>8}\n", .{ "path", "bytes", "MB/s", "avg" });
+
+        const RawRow = struct { name: []const u8, content: BlastContent };
+        for ([_]RawRow{
+            .{ .name = "raw pipe (NO conhost)   text", .content = .text },
+            .{ .name = "raw pipe (NO conhost)   vt", .content = .vt },
+        }) |row| {
+            var st: Stats = undefined;
+            for (0..2) |_| st = try runRawPipe(exe_w, buf, row.content);
+            const avg: u64 = if (st.reads == 0) 0 else st.bytes / st.reads;
+            std.debug.print("{s:<48} {d:>12} {d:>9.1} {d:>8}\n", .{ row.name, st.bytes, st.mbps(), avg });
+        }
+
+        var apis0_buf: [2]Api = undefined;
+        var apis0_len: usize = 0;
+        apis0_buf[apis0_len] = Api.inbox();
+        apis0_len += 1;
+        if (Api.bundled()) |api| {
+            apis0_buf[apis0_len] = api;
+            apis0_len += 1;
+        }
+        for (apis0_buf[0..apis0_len]) |api| {
+            for ([_]BlastContent{ .text, .vt }) |content| {
+                var st: Stats = undefined;
+                for (0..2) |_| st = try runSerial(api, exe_w, buf, 0, 0, content);
+                const avg: u64 = if (st.reads == 0) 0 else st.bytes / st.reads;
+                var name_buf: [64]u8 = undefined;
+                const name = std.fmt.bufPrint(&name_buf, "ConPTY {s:<18} {s}", .{ api.name, @tagName(content) }) catch unreachable;
+                std.debug.print("{s:<48} {d:>12} {d:>9.1} {d:>8}\n", .{ name, st.bytes, st.mbps(), avg });
+            }
+        }
+    }
 
     // Same process, same machine, interleaved: run the full matrix
     // under the in-box API and (when a conpty.dll + OpenConsole.exe
@@ -583,9 +734,9 @@ pub fn main() !void {
                     .serial => blk: {
                         const buf = try alloc.alloc(u8, ex.buf_size);
                         defer alloc.free(buf);
-                        break :blk try runSerial(api, exe_w, buf, ex.pipe_buf, ex.parse_ns_per_byte);
+                        break :blk try runSerial(api, exe_w, buf, ex.pipe_buf, ex.parse_ns_per_byte, .text);
                     },
-                    .gather => try runGather(api, exe_w, ex.pipe_buf, ex.parse_ns_per_byte),
+                    .gather => try runGather(api, exe_w, ex.pipe_buf, ex.parse_ns_per_byte, .text),
                 };
                 _ = round;
             }

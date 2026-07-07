@@ -42,7 +42,19 @@ jobs:
           Expand-Archive conpty-pkg.zip -DestinationPath conpty-pkg
           Copy-Item conpty-pkg/runtimes/win-x64/native/conpty.dll .
           Copy-Item conpty-pkg/build/native/runtimes/x64/OpenConsole.exe .
-          Get-Item conpty.dll, OpenConsole.exe | Format-Table Name, Length
+          # Dump exact file/product versions so we can confirm whether this
+          # build postdates microsoft/terminal#17510 (VtEngine removal).
+          Get-Item conpty.dll, OpenConsole.exe | ForEach-Object {
+            "{0}  len={1}  file={2}  product={3}" -f `
+              $_.Name, $_.Length, $_.VersionInfo.FileVersion, $_.VersionInfo.ProductVersion
+          }
+          $ch = (Get-Item "$env:SystemRoot\System32\conhost.exe").VersionInfo
+          "in-box conhost.exe  file={0}" -f $ch.FileVersion
+          $ib = "$env:SystemRoot\System32\OpenConsole.exe"
+          if (Test-Path $ib) {
+            $vi = (Get-Item $ib).VersionInfo
+            "in-box OpenConsole.exe  file={0}  product={1}" -f $vi.FileVersion, $vi.ProductVersion
+          } else { "in-box OpenConsole.exe  (absent)" }
 
       - name: Run probe
         shell: cmd
