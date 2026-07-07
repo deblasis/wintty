@@ -1,0 +1,35 @@
+name: ConPTY Read Probe
+
+# Scratch measurement workflow: quantifies ConPTY read-path behavior on a
+# real Windows machine before porting upstream's io-gather thread
+# (ghostty-org/ghostty#13209) to the Windows transport. Lives only on the
+# probe/conpty-read branch; delete branch + workflow when done.
+on:
+  push:
+    branches: [probe/conpty-read]
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build probe
+        shell: cmd
+        run: zig build-exe probe\conpty_probe.zig -O ReleaseFast
+
+      - name: Run probe
+        shell: cmd
+        run: conpty_probe.exe 2>&1
