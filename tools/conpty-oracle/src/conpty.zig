@@ -21,8 +21,17 @@ const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
 /// How long we let the child run before the watchdog terminates it so a
-/// stuck program can't hang the oracle.
-const watchdog_ms: windows.DWORD = 60 * 1000;
+/// stuck program can't hang the oracle. Overridable via the
+/// CONPTY_ORACLE_WATCHDOG_MS env var (CI lowers it so input-reading
+/// programs don't each burn the full default).
+const watchdog_ms_default: windows.DWORD = 60 * 1000;
+
+fn watchdogMs() windows.DWORD {
+    const v = std.process.getEnvVarOwned(std.heap.page_allocator, "CONPTY_ORACLE_WATCHDOG_MS") catch return watchdog_ms_default;
+    defer std.heap.page_allocator.free(v);
+    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+    return std.fmt.parseInt(windows.DWORD, trimmed, 10) catch watchdog_ms_default;
+}
 
 const STARTUPINFOEX = extern struct {
     StartupInfo: windows.STARTUPINFOW,
@@ -163,10 +172,11 @@ const Session = struct {
     /// a stuck child so a broken program can't hang the oracle.
     fn waitAndClose(s: *Session) void {
         const WAIT_TIMEOUT = 0x102;
-        if (k32.WaitForSingleObject(s.child, watchdog_ms) == WAIT_TIMEOUT) {
+        const ms = watchdogMs();
+        if (k32.WaitForSingleObject(s.child, ms) == WAIT_TIMEOUT) {
             std.debug.print(
-                "conpty-oracle: watchdog: child stuck after {d}s; terminating\n",
-                .{watchdog_ms / 1000},
+                "conpty-oracle: watchdog: child stuck after {d}ms; terminating\n",
+                .{ms},
             );
             windows.TerminateProcess(s.child, 1) catch {};
             _ = k32.WaitForSingleObject(s.child, windows.INFINITE);

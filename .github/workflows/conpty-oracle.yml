@@ -1,0 +1,82 @@
+name: ConPTY Oracle
+
+# Differential cell-identity oracle: build the harness, compile the
+# corpus, and run `selfcheck` (same program under ConPTY twice -> assert
+# the ghostty-vt cell dump is byte-identical). This is the P0.2 milestone:
+# prove the capture->parse->dump pipeline is sound and triage which corpus
+# programs are deterministic under ConPTY-vs-ConPTY. Scratch branch only.
+on:
+  push:
+    branches: [oracle/differential-cell-identity]
+  workflow_dispatch: {}
+
+jobs:
+  oracle:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build oracle
+        shell: cmd
+        run: |
+          cd tools\conpty-oracle
+          zig build
+
+      - name: Compile corpus programs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path corpus-bin | Out-Null
+          $ok = 0; $fail = 0; $failed = @()
+          Get-ChildItem differential-corpus/programs/*.c | ForEach-Object {
+            $name = $_.BaseName
+            $out = "corpus-bin/$name.exe"
+            # mingw ABI matches the oracle; <windows.h> resolves from zig's
+            # bundled headers. Tolerate per-file compile failures.
+            zig cc -target x86_64-windows-gnu -o $out $_.FullName 2>$null
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $out)) { $ok++ }
+            else { $fail++; $failed += $name }
+          }
+          "compiled OK: $ok   failed: $fail"
+          if ($failed.Count) { "did not compile: $($failed -join ', ')" }
+
+      - name: Selfcheck (ConPTY determinism triage)
+        shell: pwsh
+        env:
+          # Bound input-reading programs so they don't burn the default 60s.
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          $det = @(); $nondet = @(); $err = @()
+          Get-ChildItem corpus-bin/*.exe | ForEach-Object {
+            $name = $_.BaseName
+            $log = & $oracle selfcheck $_.FullName 120 30 2>&1 | Out-String
+            switch ($LASTEXITCODE) {
+              0 { $det += $name;    "  OK   $name" }
+              1 { $nondet += $name; "  DIFF $name" }
+              default { $err += $name; "  ERR  $name (exit $LASTEXITCODE)"; $log.Trim() }
+            }
+          }
+          ""
+          "==== selfcheck summary ===="
+          "deterministic     : $($det.Count)"
+          "non-deterministic : $($nondet.Count)  [$($nondet -join ', ')]"
+          "harness error     : $($err.Count)  [$($err -join ', ')]"
+          ""
+          # Fail the job only if the harness itself never worked (no program
+          # produced a stable dump) -> the pipeline is broken, not the corpus.
+          if ($det.Count -eq 0) {
+            "FAIL: no program was deterministic - harness/capture/dump pipeline is broken"
+            exit 1
+          }
+          "PASS: oracle pipeline is sound ($($det.Count) deterministic programs)"
