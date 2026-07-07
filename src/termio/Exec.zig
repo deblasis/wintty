@@ -1537,6 +1537,23 @@ pub const ReadThread = struct {
     /// this bounds both gather latency and lock hold time.
     const buffer_capacity = 64 * 1024;
 
+    /// Read buffer size for the Windows serial loop
+    /// (threadMainWindows). ConPTY has no analogue of the ~1 KiB pty
+    /// read cap on macOS/Linux: measured against both the in-box
+    /// conhost and the bundled OpenConsole pair, a read this size
+    /// returns 46-65 KiB per call under bulk output, so a 1 KiB
+    /// buffer only multiplied ReadFile calls, terminal lock
+    /// acquisitions, and render wakeups 45-63x for the same stream.
+    /// Throughput doesn't change either way; ConPTY's own VT
+    /// rendering caps it well below what either buffer size can
+    /// drain.
+    ///
+    /// Deliberately equal to buffer_capacity so one batch bounds
+    /// terminal lock hold time the same on every platform. If the
+    /// posix pipeline ever retunes that const for gather-specific
+    /// reasons, revisit this value independently.
+    const windows_read_capacity = buffer_capacity;
+
     /// How many gathered bytes mark a stream as saturated. The macOS
     /// kernel tty output queue hands the master at most about 1 KiB
     /// per read, so gathering a full 1 KiB means the writer filled
@@ -2006,7 +2023,7 @@ pub const ReadThread = struct {
         };
         defer crash.sentry.thread_state = null;
 
-        var buf: [1024]u8 = undefined;
+        var buf: [windows_read_capacity]u8 = undefined;
         while (true) {
             while (true) {
                 var n: windows.DWORD = 0;
