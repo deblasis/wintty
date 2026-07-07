@@ -31,7 +31,9 @@ jobs:
         shell: cmd
         run: |
           cd tools\conpty-oracle
-          zig build
+          rem gnu ABI (matches the corpus compile) + simd=false to avoid the
+          rem simdutf/highway C++ deps that fail under the runner's MSVC toolchain.
+          zig build -Dtarget=x86_64-windows-gnu
 
       - name: Compile corpus programs
         shell: pwsh

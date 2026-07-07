@@ -16,11 +16,15 @@ pub fn build(b: *std.Build) void {
     // Forward target/optimize so the ghostty-vt module is built for our
     // (Windows) target, and set emit-lib-vt so the parent build only
     // configures the vt library and skips the full app (which requires
-    // a native SDK lookup that fails when cross-compiling).
+    // a native SDK lookup that fails when cross-compiling). Disable SIMD:
+    // the oracle has no perf need, and it drops the simdutf/highway C++
+    // deps that fail to compile under the MSVC toolchain on CI runners,
+    // giving a pure-Zig, libc-free build.
     if (b.lazyDependency("ghostty", .{
         .target = target,
         .optimize = optimize,
         .@"emit-lib-vt" = true,
+        .simd = false,
     })) |dep| {
         exe_mod.addImport(
             "ghostty-vt",
