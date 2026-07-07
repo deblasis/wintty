@@ -101,7 +101,23 @@ const k32 = struct {
 // ---------------------------------------------------------------------
 
 fn childBlast(mib: usize) void {
-    const stdout = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE) catch return;
+    // The parent spawns us with STARTF_USESTDHANDLES + null std handles
+    // (mirroring ghostty's Command.zig), so the console connection comes
+    // from the pseudoconsole attribute and the std handle values are
+    // unusable. Open the attached console output directly; if we are not
+    // attached to any console, exit instead of spamming whatever the
+    // parent's stdio points at.
+    const conout = std.unicode.utf8ToUtf16LeStringLiteral("CONOUT$");
+    const stdout = windows.kernel32.CreateFileW(
+        conout,
+        windows.GENERIC_WRITE,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+        null,
+        windows.OPEN_EXISTING,
+        0,
+        null,
+    );
+    if (stdout == windows.INVALID_HANDLE_VALUE) std.process.exit(2);
 
     // 64 KiB block of 80-column lines: 78 visible chars + \r\n.
     var block: [64 * 1024]u8 = undefined;
@@ -187,8 +203,13 @@ const Session = struct {
             return error.BadCmd;
         cmd_w[cmd_w_len] = 0;
 
+        // Mirror ghostty Command.zig: STARTF_USESTDHANDLES with null std
+        // handles prevents the child from binding to the parent's
+        // console/stdio; the pseudoconsole attribute is then the child's
+        // sole console connection. bInheritHandles = TRUE also matches.
         var siex = std.mem.zeroes(STARTUPINFOEX);
         siex.StartupInfo.cb = @sizeOf(STARTUPINFOEX);
+        siex.StartupInfo.dwFlags = windows.STARTF_USESTDHANDLES;
         siex.lpAttributeList = attr_list;
         var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
 
@@ -197,7 +218,7 @@ const Session = struct {
             @ptrCast(&cmd_w),
             null,
             null,
-            windows.FALSE,
+            windows.TRUE,
             EXTENDED_STARTUPINFO_PRESENT,
             null,
             null,
@@ -212,9 +233,16 @@ const Session = struct {
 
     /// Waiter-thread body: once the child exits, close the
     /// pseudoconsole and our copy of the conhost-side write handle so
-    /// the reader observes pipe EOF after the final flush.
+    /// the reader observes pipe EOF after the final flush. A 60s
+    /// watchdog terminates a stuck child so a broken experiment can't
+    /// hang the job.
     fn waitAndClose(s: *Session) void {
-        _ = k32.WaitForSingleObject(s.child, windows.INFINITE);
+        const WAIT_TIMEOUT = 0x102;
+        if (k32.WaitForSingleObject(s.child, 60 * 1000) == WAIT_TIMEOUT) {
+            std.debug.print("watchdog: child stuck after 60s; terminating\n", .{});
+            windows.TerminateProcess(s.child, 1) catch {};
+            _ = k32.WaitForSingleObject(s.child, windows.INFINITE);
+        }
         k32.ClosePseudoConsole(s.hpcon);
         _ = windows.CloseHandle(s.out_write);
     }
