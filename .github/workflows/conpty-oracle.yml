@@ -52,6 +52,22 @@ jobs:
           "compiled OK: $ok   failed: $fail"
           if ($failed.Count) { "did not compile: $($failed -join ', ')" }
 
+      - name: Sanity dump (guard against false-pass on empty captures)
+        shell: pwsh
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          $exe = "corpus-bin/test_cell_grid.exe"
+          $d = & $oracle dump $exe 120 30 | Out-String
+          "--- test_cell_grid dump (first 25 lines) ---"
+          ($d -split "`n" | Select-Object -First 25) -join "`n"
+          "--- dump length: $($d.Length) bytes ---"
+          # A populated 120x30 grid dump is well over 200 bytes; a near-empty
+          # capture (pcon's 0-byte bug) would trip this and fail the run.
+          if ($d.Length -lt 200) {
+            "FAIL: dump is trivially small - capture is likely broken (0-byte trap)"
+            exit 1
+          }
+
       - name: Selfcheck (ConPTY determinism triage)
         shell: pwsh
         env:
