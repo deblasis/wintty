@@ -45,6 +45,67 @@ const STARTUPINFOEX = extern struct {
     lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
 };
 
+const CreatePseudoConsoleFn = *const fn (
+    size: windows.COORD,
+    hInput: windows.HANDLE,
+    hOutput: windows.HANDLE,
+    dwFlags: windows.DWORD,
+    phPC: *HPCON,
+) callconv(.winapi) windows.HRESULT;
+const ClosePseudoConsoleFn = *const fn (hPC: HPCON) callconv(.winapi) void;
+
+/// A resolved ConPTY API trio source: either the OS in-box kernel32
+/// exports or a conpty.dll sitting next to this executable, resolved
+/// via LoadLibraryW + GetProcAddress exactly like ghostty's
+/// pty.zig resolvePseudoConsoleApi.
+const Api = struct {
+    name: []const u8,
+    create: CreatePseudoConsoleFn,
+    close: ClosePseudoConsoleFn,
+
+    fn inbox() Api {
+        return .{
+            .name = "in-box conhost (kernel32)",
+            .create = &k32.CreatePseudoConsole,
+            .close = &k32.ClosePseudoConsole,
+        };
+    }
+
+    /// Mirrors pty.zig adjacentConptyPathW + resolvePseudoConsoleApi:
+    /// load <exe-dir>\conpty.dll and resolve the trio from it. The
+    /// paired OpenConsole.exe must sit in the same directory. Returns
+    /// null if the DLL is absent or lacks the exports.
+    fn bundled() ?Api {
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_path = std.fs.selfExePath(&exe_buf) catch return null;
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
+
+        var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dll_path = std.fmt.bufPrint(
+            &dll_path_buf,
+            "{s}\\conpty.dll",
+            .{exe_dir},
+        ) catch return null;
+
+        var dll_path_w: [std.fs.max_path_bytes]u16 = undefined;
+        const dll_path_w_len = std.unicode.utf8ToUtf16Le(
+            dll_path_w[0 .. dll_path_w.len - 1],
+            dll_path,
+        ) catch return null;
+        dll_path_w[dll_path_w_len] = 0;
+
+        const module = windows.LoadLibraryW(dll_path_w[0..dll_path_w_len :0]) catch return null;
+        const create_ptr = windows.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse return null;
+        const close_ptr = windows.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse return null;
+
+        return .{
+            .name = "bundled conpty.dll (OpenConsole)",
+            .create = @ptrCast(create_ptr),
+            .close = @ptrCast(close_ptr),
+        };
+    }
+};
+
 const k32 = struct {
     extern "kernel32" fn CreatePipe(
         hReadPipe: *windows.HANDLE,
@@ -152,16 +213,18 @@ const Session = struct {
     hpcon: HPCON,
     child: windows.HANDLE,
     child_thread: windows.HANDLE,
+    api: Api,
 
-    fn spawn(exe_w: [:0]const u16, pipe_buf: windows.DWORD) !Session {
+    fn spawn(api: Api, exe_w: [:0]const u16, pipe_buf: windows.DWORD) !Session {
         var s: Session = undefined;
+        s.api = api;
 
         if (k32.CreatePipe(&s.in_read, &s.in_write, null, 0) == 0)
             return error.CreatePipe;
         if (k32.CreatePipe(&s.out_read, &s.out_write, null, pipe_buf) == 0)
             return error.CreatePipe;
 
-        if (k32.CreatePseudoConsole(
+        if (api.create(
             .{ .X = 120, .Y = 30 },
             s.in_read,
             s.out_write,
@@ -243,7 +306,7 @@ const Session = struct {
             windows.TerminateProcess(s.child, 1) catch {};
             _ = k32.WaitForSingleObject(s.child, windows.INFINITE);
         }
-        k32.ClosePseudoConsole(s.hpcon);
+        s.api.close(s.hpcon);
         _ = windows.CloseHandle(s.out_write);
     }
 
@@ -308,12 +371,13 @@ fn readEof(err: windows.Win32Error) bool {
 /// Serial loop: read(); simulate_parse(); repeat. This is the shape of
 /// ghostty's current threadMainWindows.
 fn runSerial(
+    api: Api,
     exe_w: [:0]const u16,
     buf: []u8,
     pipe_buf: windows.DWORD,
     parse_ns_per_byte: u64,
 ) !Stats {
-    var s = try Session.spawn(exe_w, pipe_buf);
+    var s = try Session.spawn(api, exe_w, pipe_buf);
     defer s.deinit();
     const waiter = try std.Thread.spawn(.{}, Session.waitAndClose, .{&s});
     defer waiter.join();
@@ -391,11 +455,12 @@ const Ring = struct {
 };
 
 fn runGather(
+    api: Api,
     exe_w: [:0]const u16,
     pipe_buf: windows.DWORD,
     parse_ns_per_byte: u64,
 ) !Stats {
-    var s = try Session.spawn(exe_w, pipe_buf);
+    var s = try Session.spawn(api, exe_w, pipe_buf);
     defer s.deinit();
     const waiter = try std.Thread.spawn(.{}, Session.waitAndClose, .{&s});
     defer waiter.join();
@@ -483,35 +548,54 @@ pub fn main() !void {
 
     std.debug.print(
         "conpty_probe: child blasts {d} MiB plain text per experiment\n" ++
-            "(read-side byte counts; ConPTY re-renders so they differ from child-written bytes)\n\n",
+            "(read-side byte counts; ConPTY re-renders so they differ from child-written bytes)\n",
         .{blast_mib},
     );
-    std.debug.print(
-        "{s:<55} {s:>9} {s:>12} {s:>9} {s:>7} {s:>7} {s:>7} {s:>7} {s:>8}\n",
-        .{ "experiment", "reads", "bytes", "MB/s", "min", "avg", "max", "=1024", "full%" },
-    );
 
-    for (experiments) |ex| {
-        // Warm-up run then measured run, to stabilize file cache /
-        // process spawn effects.
-        var st: Stats = undefined;
-        for (0..2) |round| {
-            st = switch (ex.mode) {
-                .serial => blk: {
-                    const buf = try alloc.alloc(u8, ex.buf_size);
-                    defer alloc.free(buf);
-                    break :blk try runSerial(exe_w, buf, ex.pipe_buf, ex.parse_ns_per_byte);
-                },
-                .gather => try runGather(exe_w, ex.pipe_buf, ex.parse_ns_per_byte),
-            };
-            _ = round;
-        }
+    // Same process, same machine, interleaved: run the full matrix
+    // under the in-box API and (when a conpty.dll + OpenConsole.exe
+    // pair sits next to this exe, resolved exactly like ghostty's
+    // pty.zig) under the bundled API.
+    var apis_buf: [2]Api = undefined;
+    var apis_len: usize = 0;
+    apis_buf[apis_len] = Api.inbox();
+    apis_len += 1;
+    if (Api.bundled()) |api| {
+        apis_buf[apis_len] = api;
+        apis_len += 1;
+    } else {
+        std.debug.print("note: no adjacent conpty.dll; running in-box API only\n", .{});
+    }
 
-        const avg: u64 = if (st.reads == 0) 0 else st.bytes / st.reads;
-        const full_pct: f64 = if (st.reads == 0) 0 else @as(f64, @floatFromInt(st.full)) * 100.0 / @as(f64, @floatFromInt(st.reads));
+    for (apis_buf[0..apis_len]) |api| {
+        std.debug.print("\n=== ConPTY API: {s} ===\n", .{api.name});
         std.debug.print(
-            "{s:<55} {d:>9} {d:>12} {d:>9.1} {d:>7} {d:>7} {d:>7} {d:>7} {d:>7.1}%\n",
-            .{ ex.name, st.reads, st.bytes, st.mbps(), st.min, avg, st.max, st.eq_1024, full_pct },
+            "{s:<55} {s:>9} {s:>12} {s:>9} {s:>7} {s:>7} {s:>7} {s:>7} {s:>8}\n",
+            .{ "experiment", "reads", "bytes", "MB/s", "min", "avg", "max", "=1024", "full%" },
         );
+
+        for (experiments) |ex| {
+            // Warm-up run then measured run, to stabilize file cache /
+            // process spawn effects.
+            var st: Stats = undefined;
+            for (0..2) |round| {
+                st = switch (ex.mode) {
+                    .serial => blk: {
+                        const buf = try alloc.alloc(u8, ex.buf_size);
+                        defer alloc.free(buf);
+                        break :blk try runSerial(api, exe_w, buf, ex.pipe_buf, ex.parse_ns_per_byte);
+                    },
+                    .gather => try runGather(api, exe_w, ex.pipe_buf, ex.parse_ns_per_byte),
+                };
+                _ = round;
+            }
+
+            const avg: u64 = if (st.reads == 0) 0 else st.bytes / st.reads;
+            const full_pct: f64 = if (st.reads == 0) 0 else @as(f64, @floatFromInt(st.full)) * 100.0 / @as(f64, @floatFromInt(st.reads));
+            std.debug.print(
+                "{s:<55} {d:>9} {d:>12} {d:>9.1} {d:>7} {d:>7} {d:>7} {d:>7} {d:>7.1}%\n",
+                .{ ex.name, st.reads, st.bytes, st.mbps(), st.min, avg, st.max, st.eq_1024, full_pct },
+            );
+        }
     }
 }

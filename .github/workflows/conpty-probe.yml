@@ -30,6 +30,20 @@ jobs:
         shell: cmd
         run: zig build-exe probe\conpty_probe.zig -O ReleaseFast
 
+      # Same pair the app bundles (windows/Ghostty/Ghostty.csproj pin).
+      # Placed next to the probe exe so it resolves them exactly like
+      # pty.zig resolvePseudoConsoleApi does in production.
+      - name: Fetch bundled ConPTY pair (pinned version)
+        shell: pwsh
+        run: |
+          $ver = "1.25.260427001-preview"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$ver/microsoft.windows.console.conpty.$ver.nupkg"
+          curl.exe -sSL -o conpty-pkg.zip $url
+          Expand-Archive conpty-pkg.zip -DestinationPath conpty-pkg
+          Copy-Item conpty-pkg/runtimes/win-x64/native/conpty.dll .
+          Copy-Item conpty-pkg/build/native/runtimes/x64/OpenConsole.exe .
+          Get-Item conpty.dll, OpenConsole.exe | Format-Table Name, Length
+
       - name: Run probe
         shell: cmd
         run: conpty_probe.exe 2>&1
