@@ -1876,7 +1876,16 @@ pub const ReadThread = struct {
         };
         defer crash.sentry.thread_state = null;
 
-        var buf: [1024]u8 = undefined;
+        // Match the posix pipeline's batch size. ConPTY has no analogue
+        // of the ~1 KiB pty read cap on macOS/Linux: measured against
+        // both the in-box conhost and our bundled OpenConsole pair,
+        // a 64 KiB read returns ~46-65 KiB per call under bulk output.
+        // A 1 KiB buffer forced 45-63x more ReadFile calls, terminal
+        // lock acquisitions, and render wakeups for the same data.
+        // Throughput itself is capped by ConPTY's own VT rendering
+        // (~10-13 MB/s), so this is an overhead reduction, not a
+        // throughput win.
+        var buf: [buffer_capacity]u8 = undefined;
         while (true) {
             while (true) {
                 var n: windows.DWORD = 0;
