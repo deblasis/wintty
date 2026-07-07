@@ -1,0 +1,16 @@
+.{
+    .name = .conpty_oracle,
+    .version = "0.0.0",
+    .fingerprint = 0x9e86e0b21a2b3c4d,
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        // The wintty root exposes the `ghostty-vt` module. Path dependency
+        // so the oracle always tests against the source it lives with.
+        .ghostty = .{ .path = "../../" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
