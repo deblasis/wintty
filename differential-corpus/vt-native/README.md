@@ -46,17 +46,20 @@ divergence (bare-LF processing).**
 
 - `console_only` — Console-API only; nothing reaches a raw pipe (by design).
 
-**Real divergence (1) — bare LF processing:**
+**Real divergence (1) — bare LF processing — FOUND AND FIXED:**
 
 - `vt_newline` — words separated by a bare `\n` (no CR). conhost applies
   `ENABLE_PROCESSED_OUTPUT`, treating `\n` as a full newline (column 1 + line
   feed), so each word lands at column 1; raw VT to ghostty-vt treats `\n` as
   pure line feed (down, **same column**), producing a staircase. **This was
   the entire `vt_scroll_region` divergence too** — not scroll regions.
-  **Transport consequence:** a raw-pipe transport must reproduce console
-  LF→newline processing (translate `\n`→`\r\n`, or treat LF as newline) or
-  restrict to programs that emit explicit CRLF. Small, well-defined, not a
-  dealbreaker.
+- **Fix, validated in CI:** with `CONPTY_ORACLE_RAW_LF_TO_CRLF=1`,
+  `captureRawPipe` inserts a CR before any lone LF — reproducing the console
+  newline processing a production raw-pipe transport would provide — and
+  `vt_newline` becomes **CELL-IDENTICAL**. So a raw-pipe Tier-1 transport that
+  reproduces LF→newline (translate `\n`→`\r\n`, or treat LF as newline) is
+  cell-identical to ConPTY across the **entire** tested VT feature surface.
+  Small, well-defined, not a dealbreaker.
 
 Two harness lessons baked in: (1) the ConPTY side must set UTF-8 codepage
 (`SetConsoleOutputCP(65001)`, as production wintty does) or it mangles UTF-8,
