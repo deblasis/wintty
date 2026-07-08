@@ -199,9 +199,9 @@
   },
   {
     "type": "archive",
-    "url": "https://github.com/deblasis/zioshade/archive/refs/tags/v0.2.0.tar.gz",
-    "dest": "vendor/p/zioshade-0.2.0-8s3a2it0OQAES_OnG-WFM0suUG3lO3Jrt6HPWmx9rTC1",
-    "sha256": "e7e6330e855c1715eeac446f86e8b03617e34f1665f4b479a7c239842bc5b8b0"
+    "url": "https://github.com/deblasis/zioshade/archive/refs/tags/v0.3.0.tar.gz",
+    "dest": "vendor/p/zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ",
+    "sha256": "4a37668fd6bc665b7e1a77579dd7484a92c16187e91908c918921048b3290b99"
   },
   {
     "type": "archive",

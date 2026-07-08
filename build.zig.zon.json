@@ -164,10 +164,10 @@
     "url": "https://github.com/ivanstepanovftw/zigimg/archive/d7b7ab0ba0899643831ef042bd73289510b39906.tar.gz",
     "hash": "sha256-vkcTloGX+vRw7e6GYJLO9eocYaEOYjXYE0dT7jscZ4A="
   },
-  "zioshade-0.2.0-8s3a2it0OQAES_OnG-WFM0suUG3lO3Jrt6HPWmx9rTC1": {
+  "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ": {
     "name": "zioshade",
-    "url": "https://github.com/deblasis/zioshade/archive/refs/tags/v0.2.0.tar.gz",
-    "hash": "sha256-5+YzDoVcFxXurERvhuiwNhfjTxZl9LR5p8I5hCvFuLA="
+    "url": "https://github.com/deblasis/zioshade/archive/refs/tags/v0.3.0.tar.gz",
+    "hash": "sha256-Sjdmj9a8Zlt+GndXnddISpLBYYfpGQjJGJIQSLMpC5k="
   },
   "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
     "name": "zlib",

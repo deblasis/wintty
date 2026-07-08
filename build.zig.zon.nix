@@ -391,11 +391,11 @@ in
       };
     }
     {
-      name = "zioshade-0.2.0-8s3a2it0OQAES_OnG-WFM0suUG3lO3Jrt6HPWmx9rTC1";
+      name = "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ";
       path = fetchZigArtifact {
         name = "zioshade";
-        url = "https://github.com/deblasis/zioshade/archive/refs/tags/v0.2.0.tar.gz";
-        hash = "sha256-5+YzDoVcFxXurERvhuiwNhfjTxZl9LR5p8I5hCvFuLA=";
+        url = "https://github.com/deblasis/zioshade/archive/refs/tags/v0.3.0.tar.gz";
+        hash = "sha256-Sjdmj9a8Zlt+GndXnddISpLBYYfpGQjJGJIQSLMpC5k=";
         unpack = false;
       };
     }
