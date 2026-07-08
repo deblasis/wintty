@@ -75,33 +75,46 @@ jobs:
           CONPTY_ORACLE_WATCHDOG_MS: "8000"
         run: |
           $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
-          $det = @(); $nondet = @(); $err = @()
+          # Known-noisy: these print per-run values (PID / raw HANDLE), so
+          # they differ run-to-run through no fault of the transport. See
+          # differential-corpus/README.md "Noise-floor finding". Non-
+          # determinism OUTSIDE this list is a real regression.
+          $noisy = @("test_console_api", "test_setstdhandle")
+          $det = @(); $nondet = @(); $noisyhit = @(); $err = @()
           Get-ChildItem corpus-bin/*.exe | ForEach-Object {
             $name = $_.BaseName
             $log = & $oracle selfcheck $_.FullName 120 30 2>&1 | Out-String
             switch ($LASTEXITCODE) {
-              0 { $det += $name;    "  OK   $name" }
+              0 { $det += $name;    "  OK    $name" }
               1 {
-                $nondet += $name; "  DIFF $name"
-                # Surface the run-to-run diff so we can characterize the
-                # ConPTY nondeterminism (the oracle's noise floor).
-                "  ---- $name run1 vs run2 (first 40 diff lines) ----"
-                ($log.Trim() -split "`n" | Select-Object -First 40) -join "`n"
-                "  ---- end $name ----"
+                if ($noisy -contains $name) { $noisyhit += $name; "  NOISY $name (expected: prints PID/handle)" }
+                else {
+                  $nondet += $name; "  DIFF  $name  <-- UNEXPECTED"
+                  "  ---- $name run1 vs run2 (first 40 diff lines) ----"
+                  ($log.Trim() -split "`n" | Select-Object -First 40) -join "`n"
+                  "  ---- end $name ----"
+                }
               }
-              default { $err += $name; "  ERR  $name (exit $LASTEXITCODE)"; $log.Trim() }
+              default { $err += $name; "  ERR   $name (exit $LASTEXITCODE)"; $log.Trim() }
             }
           }
           ""
           "==== selfcheck summary ===="
-          "deterministic     : $($det.Count)"
-          "non-deterministic : $($nondet.Count)  [$($nondet -join ', ')]"
-          "harness error     : $($err.Count)  [$($err -join ', ')]"
+          "deterministic         : $($det.Count)"
+          "known-noisy (expected): $($noisyhit.Count)  [$($noisyhit -join ', ')]"
+          "UNEXPECTED non-det    : $($nondet.Count)  [$($nondet -join ', ')]"
+          "harness error         : $($err.Count)  [$($err -join ', ')]"
           ""
-          # Fail the job only if the harness itself never worked (no program
-          # produced a stable dump) -> the pipeline is broken, not the corpus.
           if ($det.Count -eq 0) {
             "FAIL: no program was deterministic - harness/capture/dump pipeline is broken"
             exit 1
           }
-          "PASS: oracle pipeline is sound ($($det.Count) deterministic programs)"
+          if ($nondet.Count -gt 0) {
+            "FAIL: $($nondet.Count) program(s) non-deterministic outside the known-noisy list - ConPTY determinism regression or new self-noise to characterize"
+            exit 1
+          }
+          if ($err.Count -gt 0) {
+            "FAIL: $($err.Count) harness error(s)"
+            exit 1
+          }
+          "PASS: ConPTY deterministic across $($det.Count) programs (+$($noisyhit.Count) known-noisy); oracle pipeline sound"

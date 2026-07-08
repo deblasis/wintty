@@ -35,3 +35,19 @@ hang or diverge for reasons unrelated to the transport. The oracle's
 `selfcheck` mode (run the same program twice under ConPTY, assert identical)
 is the triage: anything non-deterministic under ConPTY-vs-ConPTY is excluded
 from the differential set before any candidate transport is compared.
+
+## Noise-floor finding (2026-07-07, windows-latest)
+
+Of 49 compiling programs, `selfcheck` found **47 byte-identical run-to-run
+and 2 not** — and characterizing the 2 confirmed **ConPTY itself is fully
+deterministic**. The only differences were values the *program* prints that
+inherently vary per run:
+
+- `test_console_api` — prints its own PID (`GetConsoleProcessList ... PID=…`).
+- `test_setstdhandle` — prints a raw `HANDLE` value (`dummy handle 0000…CC`).
+
+So the oracle's ConPTY noise floor is effectively **zero** — "cell-identical
+to ConPTY" is a well-defined target. These two are **excluded from the strict
+differential set** (they'd throw spurious diffs against any transport, ConPTY
+included). Any future program that prints a PID/handle/address belongs on this
+list, or the oracle must normalize such tokens.
