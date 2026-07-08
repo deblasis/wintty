@@ -63,6 +63,35 @@ pub fn dumpCells(alloc: Allocator, bytes: []const u8, cols: u16, rows: u16) ![]u
     defer stream.deinit();
     stream.nextSlice(bytes);
 
+    // Visual-identity normalization. conhost paints a blank space after a
+    // colored word with that word's foreground (`red ` stays red through
+    // the space), where raw VT resets first. A space has no foreground
+    // glyph, so this is invisible -- but it registers as a cell diff. So
+    // reset any blank `.codepoint` cell (space or empty) whose *only*
+    // non-default attributes are invisible on a blank cell (fg, bold,
+    // italic, faint, blink). Cells with a background, inverse, or a line
+    // decoration (underline/strikethrough/overline) ARE visible when blank
+    // and are left untouched. Both transports get the same normalization,
+    // so any surviving diff is a genuinely visible one.
+    {
+        var it = t.screens.active.pages.rowIterator(.right_down, .{ .screen = .{} }, null);
+        while (it.next()) |pin| {
+            for (pin.cells(.all)) |*cell| {
+                if (cell.style_id == 0) continue; // already default
+                if (cell.content_tag != .codepoint) continue; // grapheme/wide/bg cell
+                const cp = cell.codepoint();
+                if (cp != ' ' and cp != 0) continue; // has a visible glyph
+                const st = pin.style(cell);
+                if (std.meta.activeTag(st.bg_color) != .none) continue; // bg is visible
+                if (st.flags.inverse) continue; // inverse shows fg as bg
+                if (st.flags.underline != .none) continue;
+                if (st.flags.strikethrough) continue;
+                if (st.flags.overline) continue;
+                cell.style_id = 0; // remaining attrs are invisible on a blank cell
+            }
+        }
+    }
+
     var f: vt.formatter.TerminalFormatter = .init(&t, .{
         .emit = .vt,
         .unwrap = false,
