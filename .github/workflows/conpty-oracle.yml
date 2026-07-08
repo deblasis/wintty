@@ -81,7 +81,14 @@ jobs:
             $log = & $oracle selfcheck $_.FullName 120 30 2>&1 | Out-String
             switch ($LASTEXITCODE) {
               0 { $det += $name;    "  OK   $name" }
-              1 { $nondet += $name; "  DIFF $name" }
+              1 {
+                $nondet += $name; "  DIFF $name"
+                # Surface the run-to-run diff so we can characterize the
+                # ConPTY nondeterminism (the oracle's noise floor).
+                "  ---- $name run1 vs run2 (first 40 diff lines) ----"
+                ($log.Trim() -split "`n" | Select-Object -First 40) -join "`n"
+                "  ---- end $name ----"
+              }
               default { $err += $name; "  ERR  $name (exit $LASTEXITCODE)"; $log.Trim() }
             }
           }
