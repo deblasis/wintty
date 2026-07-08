@@ -18,6 +18,12 @@ static void emit(HANDLE h, const char *s, DWORD n) {
 int main(void) {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
 
+    /* Match production wintty (UTF-8 active codepage, #301): without this
+     * ConPTY interprets the UTF-8 bytes below per the system ANSI codepage
+     * and mangles them. Harmless over a raw pipe (WriteFile is unaffected
+     * by console CP). */
+    SetConsoleOutputCP(65001);
+
     /* plain text */
     W(h, "plain text line\r\n");
 

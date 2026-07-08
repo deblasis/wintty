@@ -14,6 +14,9 @@ static void emit(HANDLE h, const char *s, DWORD n) {
 int main(void) {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
 
+    /* UTF-8 console CP (match production wintty); harmless over a raw pipe */
+    SetConsoleOutputCP(65001);
+
     /* exactly 120 'a' then 1 'b': the 'b' must wrap to the next row and
      * the wrap state on the boundary row must match across transports */
     W(h,

@@ -161,3 +161,6 @@ jobs:
           } else {
             "RESULT: inconclusive (no VT-native program produced comparable output)"
           }
+          # Informational step: the per-program exit codes above must not
+          # fail the job. Reset so the leaked $LASTEXITCODE doesn't red the run.
+          exit 0
