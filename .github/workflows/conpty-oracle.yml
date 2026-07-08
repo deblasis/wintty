@@ -118,3 +118,46 @@ jobs:
             exit 1
           }
           "PASS: ConPTY deterministic across $($det.Count) programs (+$($noisyhit.Count) known-noisy); oracle pipeline sound"
+
+      - name: Candidate transport (raw-pipe vs ConPTY)
+        shell: pwsh
+        env:
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          # The decisive experiment: is a conhost-free raw pipe cell-identical
+          # to ConPTY for VT-native output? Build the purpose-built VT-native
+          # programs (write only via std output) + the negative control, and
+          # compare each under ConPTY vs a raw pipe.
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          New-Item -ItemType Directory -Force -Path vt-bin | Out-Null
+          Get-ChildItem differential-corpus/vt-native/*.c | ForEach-Object {
+            zig cc -target x86_64-windows-gnu -o "vt-bin/$($_.BaseName).exe" $_.FullName 2>$null
+          }
+          $identical = @(); $notident = @(); $nooutput = @()
+          Get-ChildItem vt-bin/*.exe | ForEach-Object {
+            $name = $_.BaseName
+            $log = & $oracle compare-transports $_.FullName 120 30 2>&1 | Out-String
+            switch ($LASTEXITCODE) {
+              0 { $identical += $name; "  CELL-IDENTICAL  $name" }
+              2 { $nooutput  += $name; "  NO-OUTPUT       $name (Console-API, not VT-native)" }
+              default {
+                $notident += $name; "  NOT-IDENTICAL   $name"
+                ($log.Trim() -split "`n" | Select-Object -First 40) -join "`n"
+              }
+            }
+          }
+          ""
+          "==== transport comparison ===="
+          "cell-identical (conpty==rawpipe): $($identical.Count)  [$($identical -join ', ')]"
+          "not identical                   : $($notident.Count)  [$($notident -join ', ')]"
+          "no raw-pipe output (boundary)   : $($nooutput.Count)  [$($nooutput -join ', ')]"
+          ""
+          # Informational: both CELL-IDENTICAL and NOT-IDENTICAL are legitimate
+          # research outcomes. Do not fail the job on the finding; surface it.
+          if ($identical.Count -gt 0 -and $notident.Count -eq 0) {
+            "RESULT: raw-pipe is cell-identical to ConPTY for every VT-native program tested"
+          } elseif ($notident.Count -gt 0) {
+            "RESULT: raw-pipe DIVERGES from ConPTY for $($notident.Count) VT-native program(s) - see diffs above"
+          } else {
+            "RESULT: inconclusive (no VT-native program produced comparable output)"
+          }

@@ -41,3 +41,44 @@ pub fn dump(alloc: Allocator, bytes: []const u8, cols: u16, rows: u16) ![]u8 {
 
     return out.toOwnedSlice();
 }
+
+/// Comparison dump for pitting one transport against another (ConPTY vs
+/// raw pipe). Unlike `dump`, this isolates *transport fidelity* from the
+/// preamble a host injects: ConPTY emits an OSC 4 palette + DECSET modes
+/// at startup that a raw-pipe stream never carries, and resolving palette
+/// indices to RGB would let each terminal's palette table leak in. So:
+///   - `.palette = null` -> a cell using color index N emits `38;5;N` in
+///     BOTH dumps regardless of palette (color *intent* is compared, not
+///     the palette table), while truecolor cells stay RGB;
+///   - `.extra = .none` -> only the grid content with per-cell SGR, no
+///     palette/modes/tabstops preamble and no cursor/charset trailer (the
+///     grid and per-cell styles always live in the content, not `extra`).
+/// The cursor position is appended manually so cursor / alt-screen
+/// divergence is still caught.
+pub fn dumpCells(alloc: Allocator, bytes: []const u8, cols: u16, rows: u16) ![]u8 {
+    var t: vt.Terminal = try .init(alloc, .{ .cols = cols, .rows = rows });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(bytes);
+
+    var f: vt.formatter.TerminalFormatter = .init(&t, .{
+        .emit = .vt,
+        .unwrap = false,
+        .trim = false,
+        .palette = null, // indices stay indices; fair across differing palettes
+    });
+    f.extra = .none; // grid content only, no host preamble/trailer
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try f.format(&out.writer);
+
+    const cur = t.screens.active.cursor;
+    try out.writer.print("\n#cursor x={} y={} pending_wrap={} screen={s}\n", .{
+        cur.x, cur.y, cur.pending_wrap, @tagName(t.screens.active_key),
+    });
+
+    return out.toOwnedSlice();
+}

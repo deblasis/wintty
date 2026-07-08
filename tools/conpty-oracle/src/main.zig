@@ -30,6 +30,7 @@ fn usage() noreturn {
         \\  conpty-oracle dump <exe> <cols> <rows>
         \\  conpty-oracle selfcheck <exe> <cols> <rows> [runs=2]
         \\  conpty-oracle diff <exeA> <exeB> <cols> <rows>
+        \\  conpty-oracle compare-transports <exe> <cols> <rows>
         \\
     , .{});
     std.process.exit(2);
@@ -155,6 +156,50 @@ pub fn main() !void {
         try stdout.print(
             "selfcheck OK: {s} at {d}x{d} produced identical dumps across {d} runs ({d} bytes)\n",
             .{ exe, cols, rows, runs, first.len },
+        );
+        try stdout.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, mode, "compare-transports")) {
+        if (args.len != 5) usage();
+        const exe = args[2];
+        const cols = parseSize(args[3]);
+        const rows = parseSize(args[4]);
+
+        // A: the program under ConPTY (conhost renders its output to VT).
+        const bytes_c = try conpty.capture(alloc, exe, cols, rows);
+        defer alloc.free(bytes_c);
+        const dump_c = try dump_mod.dumpCells(alloc, bytes_c, cols, rows);
+
+        // B: the program over a raw pipe (no conhost in the data path).
+        const bytes_r = try conpty.captureRawPipe(alloc, exe);
+        defer alloc.free(bytes_r);
+
+        // No raw-pipe output => the program is Console-API-driven, not
+        // VT-native. That's the transport boundary, a distinct outcome.
+        if (bytes_r.len < 8) {
+            try stdout.print(
+                "NO-OUTPUT: {s} produced no raw-pipe output ({d} bytes) - Console-API program, not VT-native\n",
+                .{ exe, bytes_r.len },
+            );
+            try stdout.flush();
+            std.process.exit(2);
+        }
+
+        const dump_r = try dump_mod.dumpCells(alloc, bytes_r, cols, rows);
+        if (try printDiff(stdout, "conpty", dump_c, "rawpipe", dump_r)) {
+            try stdout.print(
+                "NOT-IDENTICAL: {s} conpty != rawpipe at {d}x{d}\n",
+                .{ exe, cols, rows },
+            );
+            try stdout.flush();
+            std.process.exit(1);
+        }
+
+        try stdout.print(
+            "CELL-IDENTICAL: {s} conpty == rawpipe at {d}x{d} ({d} bytes)\n",
+            .{ exe, cols, rows, dump_c.len },
         );
         try stdout.flush();
         return;

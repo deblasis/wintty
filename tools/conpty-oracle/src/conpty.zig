@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const HPCON = windows.LPVOID;
 const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+const CREATE_NO_WINDOW = 0x08000000;
 // ProcThreadAttributeValue(22, false, true, false)
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
@@ -232,6 +233,73 @@ pub fn capture(
     while (true) {
         var n: windows.DWORD = 0;
         if (windows.kernel32.ReadFile(s.out_read, &buf, buf.len, &n, null) == 0) {
+            if (readEof(windows.kernel32.GetLastError())) break;
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
+        try out.appendSlice(alloc, buf[0..n]);
+    }
+
+    return out.toOwnedSlice(alloc);
+}
+
+/// Run `exe_path` with its stdout redirected straight to an anonymous
+/// pipe — NO pseudoconsole, no conhost in the data path — and return
+/// every byte it writes, drained to EOF. `CREATE_NO_WINDOW` gives the
+/// child a hidden console, but since stdout is the pipe, a program that
+/// writes VT via its std output handle reaches us verbatim. A program
+/// that instead relies on the Console API (WriteConsoleOutput, etc.)
+/// produces nothing here — that empty result is the VT-native boundary,
+/// not an error. Caller owns the result.
+pub fn captureRawPipe(alloc: Allocator, exe_path: []const u8) ![]u8 {
+    var read_h: windows.HANDLE = undefined;
+    var write_h: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE, // child inherits the write end
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&read_h, &write_h, &sa, 0) == 0) return error.CreatePipe;
+    defer windows.CloseHandle(read_h);
+    // Our read end must not leak into the child.
+    try windows.SetHandleInformation(read_h, windows.HANDLE_FLAG_INHERIT, 0);
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{exe_path});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = write_h;
+    si.hStdError = write_h;
+    si.hStdInput = null;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_NO_WINDOW,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    defer windows.CloseHandle(pi.hProcess);
+    defer windows.CloseHandle(pi.hThread);
+    // Close our copy of the write end so the read sees EOF at child exit.
+    windows.CloseHandle(write_h);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        var n: windows.DWORD = 0;
+        if (windows.kernel32.ReadFile(read_h, &buf, buf.len, &n, null) == 0) {
             if (readEof(windows.kernel32.GetLastError())) break;
             return error.ReadFailed;
         }
