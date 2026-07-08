@@ -34,6 +34,17 @@ fn watchdogMs() windows.DWORD {
     return std.fmt.parseInt(windows.DWORD, trimmed, 10) catch watchdog_ms_default;
 }
 
+/// When CONPTY_ORACLE_RAW_LF_TO_CRLF is set (to anything but "0"), the
+/// raw-pipe capture translates bare LF to CR+LF, reproducing the console's
+/// ENABLE_PROCESSED_OUTPUT newline handling that a production raw-pipe
+/// transport would have to provide. Used to validate that doing so makes a
+/// bare-LF program cell-identical to ConPTY.
+fn rawLfToCrlf() bool {
+    const v = std.process.getEnvVarOwned(std.heap.page_allocator, "CONPTY_ORACLE_RAW_LF_TO_CRLF") catch return false;
+    defer std.heap.page_allocator.free(v);
+    return !std.mem.eql(u8, std.mem.trim(u8, v, " \t\r\n"), "0");
+}
+
 const STARTUPINFOEX = extern struct {
     StartupInfo: windows.STARTUPINFOW,
     lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
@@ -307,5 +318,19 @@ pub fn captureRawPipe(alloc: Allocator, exe_path: []const u8) ![]u8 {
         try out.appendSlice(alloc, buf[0..n]);
     }
 
-    return out.toOwnedSlice(alloc);
+    const raw = try out.toOwnedSlice(alloc);
+    if (!rawLfToCrlf()) return raw;
+
+    // Reproduce console LF->newline processing: insert a CR before any LF
+    // not already preceded by one. (A doubled CR is idempotent, so this is
+    // safe even for streams that already use CRLF.)
+    defer alloc.free(raw);
+    var xl: std.ArrayList(u8) = .empty;
+    errdefer xl.deinit(alloc);
+    for (raw) |b| {
+        if (b == '\n' and (xl.items.len == 0 or xl.items[xl.items.len - 1] != '\r'))
+            try xl.append(alloc, '\r');
+        try xl.append(alloc, b);
+    }
+    return xl.toOwnedSlice(alloc);
 }
