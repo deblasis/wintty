@@ -34,6 +34,7 @@ fn usage() noreturn {
         \\  conpty-oracle compare-resize <exe> <cols0> <rows0> <cols1> <rows1>
         \\  conpty-oracle signal-probe <child_exe> <helper_exe> <C|B>
         \\  conpty-oracle teardown-probe <tree_child_exe>
+        \\  conpty-oracle rawpty <rawpty_child_exe> <cols> <rows>
         \\
     , .{});
     std.process.exit(2);
@@ -405,6 +406,49 @@ pub fn main() !void {
             "RESULT: raw-pipe teardown INCOMPLETE (assign={} alive_before={} dead_after={} no_wedge={})\n",
             .{ t.assign_ok, t.alive_before, t.dead_after, t.no_wedge },
         );
+        try stdout.flush();
+        std.process.exit(1);
+    }
+
+    if (std.mem.eql(u8, mode, "rawpty")) {
+        if (args.len != 5) usage();
+        const child_exe = args[2];
+        const cols = parseSize(args[3]);
+        const rows = parseSize(args[4]);
+
+        const r = try conpty.rawPtyLifecycle(alloc, child_exe, cols, rows);
+        defer alloc.free(r.output);
+
+        try stdout.print(
+            "raw-pipe transport lifecycle (no ConPTY):\n" ++
+                "  spawn+job     assign_to_job = {}\n" ++
+                "  READY         got_ready     = {}\n" ++
+                "  RESIZE (2048) got_resize    = {}  (in-band size report on stdin pipe)\n" ++
+                "  SIGNAL (brk)  got_signal    = {}  (console-group ctrl event)\n" ++
+                "  COMPOSED      both_in_1_run = {}\n" ++
+                "  TEARDOWN      alive_before  = {}  dead_after = {}  no_wedge = {}\n",
+            .{
+                r.assign_ok, r.got_ready,    r.got_resize, r.got_signal,
+                r.composed,  r.alive_before, r.dead_after, r.no_wedge,
+            },
+        );
+        try stdout.writeAll("  child said: ");
+        try writeEscaped(stdout, std.mem.trim(u8, r.output, "\r\n"));
+        try stdout.writeAll("\n");
+
+        const pass = r.assign_ok and r.got_ready and r.got_resize and
+            r.got_signal and r.composed and r.alive_before and
+            r.dead_after and r.no_wedge;
+        if (pass) {
+            try stdout.print(
+                "RESULT: raw-pipe transport composes resize + signals + teardown end-to-end (no ConPTY)\n",
+                .{},
+            );
+            try stdout.flush();
+            return;
+        }
+
+        try stdout.print("RESULT: raw-pipe transport lifecycle INCOMPLETE - see flags above\n", .{});
         try stdout.flush();
         std.process.exit(1);
     }

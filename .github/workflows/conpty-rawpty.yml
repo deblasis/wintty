@@ -1,0 +1,59 @@
+name: ConPTY RawPTY Lifecycle
+
+# P1.2: the integrated raw-pipe transport prototype. Proves the three
+# transport realities COMPOSE in one lifecycle over a real pipe pair with NO
+# ConPTY: spawn (job + shared console + pipes) -> read READY -> resize in-band
+# (DECSET 2048 on stdin) -> signal (console-group CTRL_BREAK) -> tear the tree
+# down (job KILL_ON_JOB_CLOSE) with no leak and no pipe wedge. Research branch.
+on:
+  push:
+    branches: [transport/raw-pipe-realities]
+  workflow_dispatch: {}
+
+jobs:
+  rawpty:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build oracle
+        shell: cmd
+        run: |
+          cd tools\conpty-oracle
+          zig build -Dtarget=x86_64-windows-gnu
+
+      - name: Compile rawpty child
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path rawpty-bin | Out-Null
+          zig cc -target x86_64-windows-gnu -o rawpty-bin/rawpty_child.exe differential-corpus/lifecycle/rawpty_child.c
+          if ($LASTEXITCODE -ne 0) { "FAIL: rawpty_child.c did not compile"; exit 1 }
+          "compiled rawpty_child.exe"
+
+      - name: RawPTY lifecycle (resize + signals + teardown, no ConPTY)
+        shell: pwsh
+        env:
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          "==== raw-pipe transport lifecycle ===="
+          & $oracle rawpty rawpty-bin/rawpty_child.exe 100 40
+          $rc = $LASTEXITCODE
+          ""
+          if ($rc -eq 0) {
+            "RESULT: raw-pipe transport composes end-to-end (resize + signals + teardown, no ConPTY)"
+          } else {
+            "RESULT: raw-pipe transport lifecycle incomplete (rc=$rc) - see flags above"
+            exit 1
+          }

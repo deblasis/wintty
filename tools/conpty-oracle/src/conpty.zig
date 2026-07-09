@@ -1033,3 +1033,152 @@ pub fn assignUnderConpty(alloc: Allocator, child_exe: []const u8) !struct { ok: 
 
     return .{ .ok = ok, .err = err };
 }
+
+pub const RawPtyResult = struct {
+    assign_ok: bool, // AssignProcessToJobObject succeeded
+    got_ready: bool, // child announced READY
+    got_resize: bool, // child reflowed from the in-band 2048 report
+    got_signal: bool, // child received the console-group CTRL_BREAK
+    composed: bool, // child saw BOTH resize and signal in one run
+    alive_before: bool, // child + grandchild alive before teardown
+    dead_after: bool, // both terminated by closing the job
+    no_wedge: bool, // pipe reached EOF after kill (no leaked writer)
+    output: []u8,
+};
+
+/// P1.2 integrated raw-pipe transport prototype. Composes all three proven
+/// transport realities into ONE lifecycle over a real pipe pair, with NO
+/// ConPTY: spawn the child (suspended) with its stdout/stdin on pipes and a
+/// shared console (inherited, own process group) inside a KILL_ON_JOB_CLOSE
+/// job; resume; read its READY; resize it in-band (DECSET 2048 on the stdin
+/// pipe); signal it (GenerateConsoleCtrlEvent CTRL_BREAK to its group); then
+/// tear the whole tree down by closing the job and confirm no leak / no
+/// wedge. Proves the mechanisms compose, not just work in isolation. The
+/// transport owns the console here (as a winpty-style agent/host would); in
+/// production wintty that role is a small console-owning helper.
+pub fn rawPtyLifecycle(
+    alloc: Allocator,
+    child_exe: []const u8,
+    cols1: u16,
+    rows1: u16,
+) !RawPtyResult {
+    // Pipe pair: child stdout -> us, us -> child stdin.
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    var in_read: windows.HANDLE = undefined;
+    var in_write: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&out_read, &out_write, &sa, 0) == 0) return error.CreatePipe;
+    if (k32.CreatePipe(&in_read, &in_write, &sa, 0) == 0) return error.CreatePipe;
+    try windows.SetHandleInformation(out_read, windows.HANDLE_FLAG_INHERIT, 0);
+    try windows.SetHandleInformation(in_write, windows.HANDLE_FLAG_INHERIT, 0);
+
+    // Teardown job.
+    const job = k32.CreateJobObjectW(null, null) orelse return error.CreateJobObject;
+    var eli = std.mem.zeroes(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+    eli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (k32.SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &eli,
+        @sizeOf(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+    ) == 0) return error.SetJobInfo;
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = out_write;
+    si.hStdError = out_write;
+    si.hStdInput = in_read;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    // CREATE_SUSPENDED so we assign to the job before the child forks;
+    // CREATE_NEW_PROCESS_GROUP so we can target the child's group with a
+    // console control event. No new console: the child inherits ours (the
+    // agent/host console), while its stdio stays on the pipes.
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    windows.CloseHandle(out_write);
+    windows.CloseHandle(in_read);
+
+    const assign_ok = k32.AssignProcessToJobObject(job, pi.hProcess) != 0;
+    _ = k32.ResumeThread(pi.hThread);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // 1) READY.
+    try drainUntilQuiet(alloc, &out, out_read, 400, 6000);
+    const got_ready = std.mem.indexOf(u8, out.items, "READY") != null;
+    const grand_pid = parseTaggedPid(out.items, "grand=");
+
+    // 2) RESIZE in-band (DECSET 2048 report on the stdin pipe).
+    var rep_buf: [64]u8 = undefined;
+    const report = std.fmt.bufPrint(
+        &rep_buf,
+        "\x1b[48;{d};{d};{d};{d}t",
+        .{ rows1, cols1, @as(u32, rows1) * 18, @as(u32, cols1) * 9 },
+    ) catch unreachable;
+    var w: windows.DWORD = 0;
+    _ = windows.kernel32.WriteFile(in_write, report.ptr, @intCast(report.len), &w, null);
+    try drainUntilQuiet(alloc, &out, out_read, 400, 5000);
+    const got_resize = std.mem.indexOf(u8, out.items, "RESIZE:") != null;
+
+    // 3) SIGNAL (console-group CTRL_BREAK to the child's group).
+    _ = k32.SetConsoleCtrlHandler(null, windows.TRUE);
+    _ = k32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
+    try drainUntilQuiet(alloc, &out, out_read, 400, 5000);
+    _ = k32.SetConsoleCtrlHandler(null, windows.FALSE);
+    const got_signal = std.mem.indexOf(u8, out.items, "SIGNAL:") != null;
+    const composed = std.mem.indexOf(u8, out.items, "COMPOSED") != null;
+
+    // Liveness before teardown.
+    const grand_h = k32.OpenProcess(PROCESS_QUERY_SYNC, windows.FALSE, grand_pid);
+    const alive_before = processActive(pi.hProcess) and
+        (grand_h != null and processActive(grand_h.?));
+
+    // 4) TEARDOWN: closing the last job handle kills the whole tree.
+    windows.CloseHandle(job);
+    const dead_child = k32.WaitForSingleObject(pi.hProcess, 5000) == 0;
+    const dead_grand = grand_h != null and
+        k32.WaitForSingleObject(grand_h.?, 5000) == 0;
+    const dead_after = dead_child and dead_grand;
+    const no_wedge = try drainToEof(alloc, &out, out_read, 5000);
+
+    if (grand_h) |h| windows.CloseHandle(h);
+    windows.CloseHandle(pi.hProcess);
+    windows.CloseHandle(pi.hThread);
+    windows.CloseHandle(in_write);
+    windows.CloseHandle(out_read);
+
+    return .{
+        .assign_ok = assign_ok,
+        .got_ready = got_ready,
+        .got_resize = got_resize,
+        .got_signal = got_signal,
+        .composed = composed,
+        .alive_before = alive_before,
+        .dead_after = dead_after,
+        .no_wedge = no_wedge,
+        .output = try out.toOwnedSlice(alloc),
+    };
+}
