@@ -31,6 +31,7 @@ fn usage() noreturn {
         \\  conpty-oracle selfcheck <exe> <cols> <rows> [runs=2]
         \\  conpty-oracle diff <exeA> <exeB> <cols> <rows>
         \\  conpty-oracle compare-transports <exe> <cols> <rows>
+        \\  conpty-oracle compare-resize <exe> <cols0> <rows0> <cols1> <rows1>
         \\
     , .{});
     std.process.exit(2);
@@ -200,6 +201,54 @@ pub fn main() !void {
         try stdout.print(
             "CELL-IDENTICAL: {s} conpty == rawpipe at {d}x{d} ({d} bytes)\n",
             .{ exe, cols, rows, dump_c.len },
+        );
+        try stdout.flush();
+        return;
+    }
+
+    if (std.mem.eql(u8, mode, "compare-resize")) {
+        if (args.len != 7) usage();
+        const exe = args[2];
+        const cols0 = parseSize(args[3]);
+        const rows0 = parseSize(args[4]);
+        const cols1 = parseSize(args[5]);
+        const rows1 = parseSize(args[6]);
+
+        // A: under ConPTY, resized via ResizePseudoConsole (the child learns
+        // the new size from a WINDOW_BUFFER_SIZE_EVENT).
+        const bytes_c = try conpty.captureResize(alloc, exe, cols0, rows0, cols1, rows1);
+        defer alloc.free(bytes_c);
+        const dump_c = try dump_mod.dumpCells(alloc, bytes_c, cols1, rows1);
+
+        // B: over a raw pipe, resized via an in-band 2048 report on stdin
+        // (the injection-free substitute a raw-pipe transport would use).
+        const bytes_r = try conpty.captureRawPipeResize(alloc, exe, cols1, rows1);
+        defer alloc.free(bytes_r);
+
+        // No raw-pipe output at all => the child never spoke VT (wrong
+        // program for this mode). Distinct from a resize that didn't land.
+        if (bytes_r.len < 8) {
+            try stdout.print(
+                "NO-OUTPUT: {s} produced no raw-pipe output ({d} bytes)\n",
+                .{ exe, bytes_r.len },
+            );
+            try stdout.flush();
+            std.process.exit(2);
+        }
+
+        const dump_r = try dump_mod.dumpCells(alloc, bytes_r, cols1, rows1);
+        if (try printDiff(stdout, "conpty(resize)", dump_c, "rawpipe(2048)", dump_r)) {
+            try stdout.print(
+                "NOT-IDENTICAL: {s} conpty(resize {d}x{d}->{d}x{d}) != rawpipe(2048)\n",
+                .{ exe, cols0, rows0, cols1, rows1 },
+            );
+            try stdout.flush();
+            std.process.exit(1);
+        }
+
+        try stdout.print(
+            "CELL-IDENTICAL: {s} conpty(resize)==rawpipe(2048) at {d}x{d} ({d} bytes)\n",
+            .{ exe, cols1, rows1, dump_c.len },
         );
         try stdout.flush();
         return;

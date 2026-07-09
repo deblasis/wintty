@@ -1,0 +1,89 @@
+name: ConPTY Resize Oracle
+
+# Transport reality #1: RESIZE. A raw-pipe transport has no console to
+# ResizePseudoConsole, so it delivers resize in-band via DECSET 2048
+# (`CSI 48;rows;cols;hpix;wpix t` on the child's stdin). This job measures
+# whether a resize-aware child, redrawing from that in-band report over a raw
+# pipe, lands on a cell grid IDENTICAL to the same child under ConPTY (which
+# learns resize from a WINDOW_BUFFER_SIZE_EVENT). Research branch only.
+on:
+  push:
+    branches: [transport/raw-pipe-realities]
+  workflow_dispatch: {}
+
+jobs:
+  resize:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build oracle
+        shell: cmd
+        run: |
+          cd tools\conpty-oracle
+          zig build -Dtarget=x86_64-windows-gnu
+
+      - name: Compile resize child
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resize-bin | Out-Null
+          zig cc -target x86_64-windows-gnu -o resize-bin/vt_resize.exe differential-corpus/vt-native/vt_resize.c
+          if ($LASTEXITCODE -ne 0) { "FAIL: vt_resize.c did not compile"; exit 1 }
+          "compiled vt_resize.exe"
+
+      - name: Compare resize (raw-pipe 2048 vs ConPTY ResizePseudoConsole)
+        shell: pwsh
+        env:
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          $exe = "resize-bin/vt_resize.exe"
+          # A few grow/shrink pairs so a size-specific quirk can't hide.
+          $cases = @(
+            @{c0=120; r0=30; c1=80;  r1=24},
+            @{c0=80;  r0=24; c1=132; r1=43},
+            @{c0=100; r0=40; c1=60;  r1=20}
+          )
+          $identical = 0; $notident = 0; $err = 0
+          foreach ($k in $cases) {
+            $label = "$($k.c0)x$($k.r0) -> $($k.c1)x$($k.r1)"
+            "==== resize $label ===="
+            $log = & $oracle compare-resize $exe $k.c0 $k.r0 $k.c1 $k.r1 2>&1 | Out-String
+            switch ($LASTEXITCODE) {
+              0 { $identical++; "  CELL-IDENTICAL  $label"; ($log.Trim() -split "`n" | Select-Object -Last 1) }
+              1 {
+                $notident++
+                "  NOT-IDENTICAL   $label"
+                ($log.Trim() -split "`n" | Select-Object -First 60) -join "`n"
+              }
+              2 { $err++; "  NO-OUTPUT       $label (child spoke no VT - harness/child bug)"; $log.Trim() }
+              default { $err++; "  ERR             $label (exit $LASTEXITCODE)"; $log.Trim() }
+            }
+            ""
+          }
+          "==== resize summary ===="
+          "cell-identical (rawpipe-2048 == conpty-resize): $identical"
+          "not identical                                 : $notident"
+          "harness error                                 : $err"
+          ""
+          # A harness error (no output / crash) is a real failure. The
+          # identical-vs-divergent finding itself is a research result and
+          # does not red the run -- the diffs above are the deliverable.
+          if ($err -gt 0) { "FAIL: harness error on $err case(s)"; exit 1 }
+          if ($identical -gt 0 -and $notident -eq 0) {
+            "RESULT: raw-pipe DECSET-2048 resize is cell-identical to ConPTY resize across all cases"
+          } elseif ($notident -gt 0) {
+            "RESULT: raw-pipe DECSET-2048 resize DIVERGES from ConPTY on $notident case(s) - see diffs"
+          }
+          exit 0

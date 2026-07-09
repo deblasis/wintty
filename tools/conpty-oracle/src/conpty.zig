@@ -101,7 +101,56 @@ const k32 = struct {
         hHandle: windows.HANDLE,
         dwMilliseconds: windows.DWORD,
     ) callconv(.winapi) windows.DWORD;
+    extern "kernel32" fn ResizePseudoConsole(
+        hPC: HPCON,
+        size: windows.COORD,
+    ) callconv(.winapi) windows.HRESULT;
+    extern "kernel32" fn PeekNamedPipe(
+        hNamedPipe: windows.HANDLE,
+        lpBuffer: ?windows.LPVOID,
+        nBufferSize: windows.DWORD,
+        lpBytesRead: ?*windows.DWORD,
+        lpTotalBytesAvail: ?*windows.DWORD,
+        lpBytesLeftThisMessage: ?*windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
 };
+
+/// Drain `read_h` into `out` until no bytes arrive for `quiet_ms`, or the
+/// hard `max_ms` cap elapses, or the pipe closes (EOF). Unlike the one-shot
+/// captures, an interactive child stays alive across a resize, so there is
+/// no EOF to stop on mid-run — we stop on quiescence. Polls availability
+/// with PeekNamedPipe (works on anonymous pipes) so a blocking ReadFile
+/// can't wedge on a live-but-idle child.
+fn drainUntilQuiet(
+    alloc: Allocator,
+    out: *std.ArrayList(u8),
+    read_h: windows.HANDLE,
+    quiet_ms: u64,
+    max_ms: u64,
+) !void {
+    var buf: [64 * 1024]u8 = undefined;
+    const step_ms: u64 = 10;
+    var idle: u64 = 0;
+    var elapsed: u64 = 0;
+    while (elapsed < max_ms) {
+        var avail: windows.DWORD = 0;
+        const ok = k32.PeekNamedPipe(read_h, null, 0, null, &avail, null);
+        if (ok == 0) break; // pipe closed/broken => EOF
+        if (avail > 0) {
+            var n: windows.DWORD = 0;
+            const want: windows.DWORD = @min(avail, @as(windows.DWORD, buf.len));
+            if (windows.kernel32.ReadFile(read_h, &buf, want, &n, null) != 0 and n > 0) {
+                try out.appendSlice(alloc, buf[0..n]);
+                idle = 0;
+                continue; // more may be waiting; drain greedily
+            }
+        }
+        std.Thread.sleep(step_ms * std.time.ns_per_ms);
+        idle += step_ms;
+        elapsed += step_ms;
+        if (idle >= quiet_ms) break;
+    }
+}
 
 /// A ConPTY session: pipes + pseudoconsole + child, mirroring ghostty
 /// src/pty.zig WindowsPty.open (anonymous output pipe, in-box API).
@@ -337,4 +386,145 @@ pub fn captureRawPipe(alloc: Allocator, exe_path: []const u8) ![]u8 {
         try xl.append(alloc, b);
     }
     return xl.toOwnedSlice(alloc);
+}
+
+/// Resize timing knobs. Quiescence window (how long output must be silent
+/// before a drain is considered complete) and the hard per-drain cap.
+const resize_quiet_ms: u64 = 300;
+const resize_max_ms: u64 = 8000;
+
+/// Run `exe_path` under a cols0 x rows0 ConPTY, let it settle, resize the
+/// pseudoconsole to cols1 x rows1 (which conhost signals to the child as a
+/// WINDOW_BUFFER_SIZE_EVENT), let it settle again, and return everything
+/// conhost rendered across both phases. This is the ConPTY arm of the
+/// resize-fidelity comparison: the classic console-API resize path a
+/// raw-pipe transport has to substitute for.
+pub fn captureResize(
+    alloc: Allocator,
+    exe_path: []const u8,
+    cols0: u16,
+    rows0: u16,
+    cols1: u16,
+    rows1: u16,
+) ![]u8 {
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{exe_path});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var s = try Session.spawn(cmd_w, cols0, rows0);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Phase 1: initial paint (the child emits its "READY" banner).
+    try drainUntilQuiet(alloc, &out, s.out_read, resize_quiet_ms, resize_max_ms);
+
+    // Trigger the resize. conhost delivers a WINDOW_BUFFER_SIZE_EVENT to the
+    // child and repaints its buffer at the new size.
+    if (k32.ResizePseudoConsole(
+        s.hpcon,
+        .{ .X = @intCast(cols1), .Y = @intCast(rows1) },
+    ) != windows.S_OK) return error.ResizePseudoConsole;
+
+    // Phase 2: the child's redraw at the new size.
+    try drainUntilQuiet(alloc, &out, s.out_read, resize_quiet_ms, resize_max_ms);
+
+    // Tear down: the child may still be blocked reading input, so terminate
+    // it, then close the pseudoconsole and handles (no waiter thread here).
+    windows.TerminateProcess(s.child, 0) catch {};
+    _ = k32.WaitForSingleObject(s.child, 2000);
+    k32.ClosePseudoConsole(s.hpcon);
+    windows.CloseHandle(s.out_write);
+    s.deinit();
+
+    return out.toOwnedSlice(alloc);
+}
+
+/// Run `exe_path` over a raw pipe (no conhost) with a live stdin pipe, let
+/// it settle, then emit an in-band size report (`CSI 48;rows;cols;hpix;wpix
+/// t`, byte-for-byte what ghostty's `size_report.zig` writes) on its stdin —
+/// exactly what a raw-pipe transport does on resize — let it settle, and
+/// return everything the child wrote. This is the candidate arm: resize via
+/// DECSET 2048 instead of ResizePseudoConsole. Pixel fields use 9x18 cells
+/// (they don't affect the child's grid; the child parses only rows/cols).
+pub fn captureRawPipeResize(
+    alloc: Allocator,
+    exe_path: []const u8,
+    cols1: u16,
+    rows1: u16,
+) ![]u8 {
+    // Output pipe: child stdout -> us.
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    // Input pipe: us -> child stdin.
+    var in_read: windows.HANDLE = undefined;
+    var in_write: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&out_read, &out_write, &sa, 0) == 0) return error.CreatePipe;
+    if (k32.CreatePipe(&in_read, &in_write, &sa, 0) == 0) return error.CreatePipe;
+    // Our ends must not leak into the child.
+    try windows.SetHandleInformation(out_read, windows.HANDLE_FLAG_INHERIT, 0);
+    try windows.SetHandleInformation(in_write, windows.HANDLE_FLAG_INHERIT, 0);
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{exe_path});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = out_write;
+    si.hStdError = out_write;
+    si.hStdInput = in_read;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_NO_WINDOW,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    // Close the child-side ends we no longer need so EOF propagates at exit.
+    windows.CloseHandle(out_write);
+    windows.CloseHandle(in_read);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Phase 1: initial paint ("READY").
+    try drainUntilQuiet(alloc, &out, out_read, resize_quiet_ms, resize_max_ms);
+
+    // Emit the in-band size report on the child's stdin.
+    var rep_buf: [64]u8 = undefined;
+    const report = std.fmt.bufPrint(
+        &rep_buf,
+        "\x1b[48;{d};{d};{d};{d}t",
+        .{ rows1, cols1, @as(u32, rows1) * 18, @as(u32, cols1) * 9 },
+    ) catch unreachable;
+    var written: windows.DWORD = 0;
+    _ = windows.kernel32.WriteFile(in_write, report.ptr, @intCast(report.len), &written, null);
+
+    // Phase 2: the child's redraw at the new size (it then exits -> EOF).
+    try drainUntilQuiet(alloc, &out, out_read, resize_quiet_ms, resize_max_ms);
+
+    windows.TerminateProcess(pi.hProcess, 0) catch {};
+    _ = k32.WaitForSingleObject(pi.hProcess, 2000);
+    windows.CloseHandle(pi.hProcess);
+    windows.CloseHandle(pi.hThread);
+    windows.CloseHandle(in_write);
+    windows.CloseHandle(out_read);
+
+    return out.toOwnedSlice(alloc);
 }
