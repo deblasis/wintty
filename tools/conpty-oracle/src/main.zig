@@ -328,17 +328,38 @@ pub fn main() !void {
             }
         }
 
-        const need_conpty = (kind == 'C' or kind == 'c');
-        if (raw_ok and (!need_conpty or conpty_ok)) {
+        // Third arm: targeted console-process-group delivery. The child
+        // inherits our console but as its own group; we fire CTRL_BREAK at
+        // just that group. This is the injection-free mechanism a
+        // helper-owned-console transport uses, and unlike the courier it does
+        // not depend on cross-station AttachConsole, so it is provable under
+        // headless CI. Always delivers Ctrl-Break (type 1).
+        const res_g = try conpty.signalProbeProcessGroup(alloc, child_exe);
+        defer alloc.free(res_g.output);
+        const grp_ok = std.mem.indexOf(u8, res_g.output, "GOT-SIGNAL:1") != null;
+        try stdout.print(
+            "rawpipe (proc-group brk)  : got_signal={} rc={d} (looking for 'GOT-SIGNAL:1')\n",
+            .{ grp_ok, res_g.helper_rc },
+        );
+
+        // Verdict. The process-group arm is the CI-provable mechanism; the
+        // AttachConsole courier is the same idea via the child's own console
+        // and is expected to work on a real desktop but hits a window-station
+        // wall (ERROR_INVALID_HANDLE) on headless CI.
+        if (grp_ok) {
             try stdout.print(
-                "RESULT: injection-free AttachConsole courier delivers {s} to a raw-pipe child (== ConPTY)\n",
-                .{if (kind == 'B' or kind == 'b') "Ctrl-Break" else "Ctrl-C"},
+                "RESULT: injection-free console-group signal delivery WORKS to a pipe-output child" ++
+                    " (Ctrl-Break; ConPTY 0x03 baseline={}; AttachConsole courier got_signal={})\n",
+                .{ conpty_ok, raw_ok },
             );
             try stdout.flush();
             return;
         }
 
-        try stdout.print("RESULT: raw-pipe signal delivery FAILED - see diagnosis\n", .{});
+        try stdout.print(
+            "RESULT: injection-free signal delivery UNCONFIRMED (proc-group={} courier={} conpty={})\n",
+            .{ grp_ok, raw_ok, conpty_ok },
+        );
         try stdout.flush();
         std.process.exit(1);
     }

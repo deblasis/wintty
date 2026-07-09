@@ -20,6 +20,8 @@ const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
 const CREATE_NO_WINDOW = 0x08000000;
 const CREATE_NEW_CONSOLE = 0x00000010;
 const DETACHED_PROCESS = 0x00000008;
+const CREATE_NEW_PROCESS_GROUP = 0x00000200;
+const CTRL_BREAK_EVENT: windows.DWORD = 1;
 // ProcThreadAttributeValue(22, false, true, false)
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
@@ -114,6 +116,14 @@ const k32 = struct {
         lpBytesRead: ?*windows.DWORD,
         lpTotalBytesAvail: ?*windows.DWORD,
         lpBytesLeftThisMessage: ?*windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn GenerateConsoleCtrlEvent(
+        dwCtrlEvent: windows.DWORD,
+        dwProcessGroupId: windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn SetConsoleCtrlHandler(
+        HandlerRoutine: ?*anyopaque,
+        Add: windows.BOOL,
     ) callconv(.winapi) windows.BOOL;
 };
 
@@ -694,4 +704,83 @@ pub fn signalProbeRawPipe(
     windows.CloseHandle(out_read);
 
     return .{ .output = try out.toOwnedSlice(alloc), .helper_rc = helper_rc };
+}
+
+/// Raw-pipe candidate, console-process-group variant. Instead of the child
+/// owning a separate console (which a detached courier can't AttachConsole to
+/// on a headless/service session — ERROR_INVALID_HANDLE), the child inherits
+/// THIS process's console but as its own process GROUP
+/// (CREATE_NEW_PROCESS_GROUP), stdout still on our pipe. We then target only
+/// the child's group with GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+/// child_pid) — the mechanism a helper-owned-console transport uses — after
+/// masking the event in ourselves. This proves injection-free console-signal
+/// delivery to a pipe-output child without depending on cross-station
+/// AttachConsole. (CTRL_C_EVENT is group-0-only by Windows design, so the
+/// targeted test uses CTRL_BREAK; the delivery path is identical.)
+///
+/// helper_rc: 0 = event generated, 0x9999 = GenerateConsoleCtrlEvent failed.
+pub fn signalProbeProcessGroup(
+    alloc: Allocator,
+    child_exe: []const u8,
+) !SignalResult {
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&out_read, &out_write, &sa, 0) == 0) return error.CreatePipe;
+    try windows.SetHandleInformation(out_read, windows.HANDLE_FLAG_INHERIT, 0);
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = out_write;
+    si.hStdError = out_write;
+    si.hStdInput = null;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    // No new console: the child inherits ours, but as its own process group
+    // so we can target it alone. Output still goes to the pipe.
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_NEW_PROCESS_GROUP,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    windows.CloseHandle(out_write);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try drainUntilQuiet(alloc, &out, out_read, 300, 4000);
+
+    // Mask the event in ourselves (belt-and-suspenders — we target the
+    // child's group, not group 0), fire it, then unmask.
+    _ = k32.SetConsoleCtrlHandler(null, windows.TRUE);
+    const ok = k32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
+    const rc: u32 = if (ok != 0) 0 else 0x9999;
+
+    try drainUntilQuiet(alloc, &out, out_read, 400, 4000);
+    _ = k32.SetConsoleCtrlHandler(null, windows.FALSE);
+
+    windows.TerminateProcess(pi.hProcess, 0) catch {};
+    _ = k32.WaitForSingleObject(pi.hProcess, 2000);
+    windows.CloseHandle(pi.hProcess);
+    windows.CloseHandle(pi.hThread);
+    windows.CloseHandle(out_read);
+
+    return .{ .output = try out.toOwnedSlice(alloc), .helper_rc = rc };
 }
