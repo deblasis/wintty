@@ -1,0 +1,75 @@
+name: ConPTY Signal Oracle
+
+# Transport reality #2: SIGNALS (Ctrl-C). A raw-pipe transport shares no
+# console with the child, so GenerateConsoleCtrlEvent can't target it
+# directly. The injection-free courier (ctrlc_helper) detaches from its own
+# console, AttachConsole()s the child's, and raises the event there. This job
+# measures whether that delivers CTRL_C_EVENT / CTRL_BREAK_EVENT to a
+# raw-pipe child (child spawned with its own console, stdout still on a pipe)
+# the same way writing 0x03 to the ConPTY input does under ConPTY. Research
+# branch only.
+on:
+  push:
+    branches: [transport/raw-pipe-realities]
+  workflow_dispatch: {}
+
+jobs:
+  signal:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build oracle
+        shell: cmd
+        run: |
+          cd tools\conpty-oracle
+          zig build -Dtarget=x86_64-windows-gnu
+
+      - name: Compile signal child + courier
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path signal-bin | Out-Null
+          zig cc -target x86_64-windows-gnu -o signal-bin/sig_child.exe differential-corpus/signals/sig_child.c
+          if ($LASTEXITCODE -ne 0) { "FAIL: sig_child.c did not compile"; exit 1 }
+          zig cc -target x86_64-windows-gnu -o signal-bin/ctrlc_helper.exe differential-corpus/signals/ctrlc_helper.c
+          if ($LASTEXITCODE -ne 0) { "FAIL: ctrlc_helper.c did not compile"; exit 1 }
+          "compiled sig_child.exe + ctrlc_helper.exe"
+
+      - name: Signal probe (AttachConsole courier vs ConPTY 0x03)
+        shell: pwsh
+        env:
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          $child  = "signal-bin/sig_child.exe"
+          $helper = "signal-bin/ctrlc_helper.exe"
+          $fail = 0
+          foreach ($kind in @("C", "B")) {
+            $name = if ($kind -eq "C") { "Ctrl-C" } else { "Ctrl-Break" }
+            "==== signal $name ===="
+            $log = & $oracle signal-probe $child $helper $kind 2>&1 | Out-String
+            $rc = $LASTEXITCODE
+            ($log.Trim() -split "`n") -join "`n"
+            if ($rc -ne 0) { $fail++; "  (delivery not confirmed for $name, rc=$rc)" }
+            ""
+          }
+          "==== signal summary ===="
+          if ($fail -eq 0) {
+            "RESULT: injection-free AttachConsole courier delivers Ctrl-C AND Ctrl-Break to a raw-pipe child"
+          } else {
+            "RESULT: signal delivery unconfirmed for $fail case(s) - see diagnosis above (research finding, not a build error)"
+          }
+          # Surface the finding without reding the run on a research outcome;
+          # compile/harness failures already exit non-zero above.
+          exit 0

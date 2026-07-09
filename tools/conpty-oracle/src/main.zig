@@ -32,6 +32,7 @@ fn usage() noreturn {
         \\  conpty-oracle diff <exeA> <exeB> <cols> <rows>
         \\  conpty-oracle compare-transports <exe> <cols> <rows>
         \\  conpty-oracle compare-resize <exe> <cols0> <rows0> <cols1> <rows1>
+        \\  conpty-oracle signal-probe <child_exe> <helper_exe> <C|B>
         \\
     , .{});
     std.process.exit(2);
@@ -252,6 +253,67 @@ pub fn main() !void {
         );
         try stdout.flush();
         return;
+    }
+
+    if (std.mem.eql(u8, mode, "signal-probe")) {
+        if (args.len != 5) usage();
+        const child_exe = args[2];
+        const helper_exe = args[3];
+        if (args[4].len != 1) usage();
+        const kind = args[4][0];
+        if (kind != 'C' and kind != 'c' and kind != 'B' and kind != 'b') usage();
+
+        // Escape non-printable bytes so the child's VT-framed output (ConPTY
+        // side) reads legibly, then trim to the informative markers.
+        const marker = if (kind == 'B' or kind == 'b') "GOT-SIGNAL:1" else "GOT-SIGNAL:0";
+
+        // ConPTY baseline: Ctrl-Break isn't a single input byte, so the
+        // baseline only covers Ctrl-C; the raw-pipe arm covers both.
+        var conpty_ok = false;
+        if (kind == 'C' or kind == 'c') {
+            const res_c = try conpty.signalProbeConpty(alloc, child_exe);
+            defer alloc.free(res_c.output);
+            conpty_ok = res_c.gotSignal();
+            try stdout.print(
+                "conpty  (write 0x03)      : got_signal={} (looking for '{s}')\n",
+                .{ conpty_ok, marker },
+            );
+        } else {
+            try stdout.print("conpty  (write 0x03)      : n/a (Ctrl-Break not a single input byte)\n", .{});
+        }
+
+        const res_r = try conpty.signalProbeRawPipe(alloc, child_exe, helper_exe, kind);
+        defer alloc.free(res_r.output);
+        const raw_ok = res_r.gotSignal();
+        try stdout.print(
+            "rawpipe (AttachConsole)   : got_signal={} helper_rc={d} (looking for '{s}')\n",
+            .{ raw_ok, res_r.helper_rc, marker },
+        );
+
+        // Diagnose the courier if it didn't land.
+        if (!raw_ok) {
+            const why = switch (res_r.helper_rc) {
+                10 => "AttachConsole(childpid) failed - child has no attachable console",
+                11 => "GenerateConsoleCtrlEvent failed",
+                0 => "courier ran clean but child saw no signal - group/timing",
+                else => "courier error",
+            };
+            try stdout.print("  diagnosis: {s}\n", .{why});
+        }
+
+        const need_conpty = (kind == 'C' or kind == 'c');
+        if (raw_ok and (!need_conpty or conpty_ok)) {
+            try stdout.print(
+                "RESULT: injection-free AttachConsole courier delivers {s} to a raw-pipe child (== ConPTY)\n",
+                .{if (kind == 'B' or kind == 'b') "Ctrl-Break" else "Ctrl-C"},
+            );
+            try stdout.flush();
+            return;
+        }
+
+        try stdout.print("RESULT: raw-pipe signal delivery FAILED - see diagnosis\n", .{});
+        try stdout.flush();
+        std.process.exit(1);
     }
 
     if (std.mem.eql(u8, mode, "diff")) {

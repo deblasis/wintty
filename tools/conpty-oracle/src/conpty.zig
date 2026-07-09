@@ -18,6 +18,7 @@ const HPCON = windows.LPVOID;
 const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
 const CREATE_NO_WINDOW = 0x08000000;
+const CREATE_NEW_CONSOLE = 0x00000010;
 // ProcThreadAttributeValue(22, false, true, false)
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
@@ -527,4 +528,166 @@ pub fn captureRawPipeResize(
     windows.CloseHandle(out_read);
 
     return out.toOwnedSlice(alloc);
+}
+
+/// Outcome of a signal-delivery probe: what the child printed (contains
+/// GOT-SIGNAL / NO-SIGNAL) plus the courier's exit code (raw-pipe arm only;
+/// 0xffff_ffff on the ConPTY arm, which delivers 0x03 with no courier).
+pub const SignalResult = struct {
+    output: []u8,
+    helper_rc: u32,
+
+    pub fn gotSignal(self: SignalResult) bool {
+        return std.mem.indexOf(u8, self.output, "GOT-SIGNAL") != null;
+    }
+};
+
+const no_helper: u32 = 0xffff_ffff;
+
+/// Spawn a bare process (no redirected IO, no inherited handles), wait for
+/// it, and return its exit code. Used to run the Ctrl-C courier.
+fn spawnWait(alloc: Allocator, cmd_w: [:0]u16) !u32 {
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+    _ = alloc;
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.FALSE,
+        CREATE_NO_WINDOW,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    defer windows.CloseHandle(pi.hProcess);
+    defer windows.CloseHandle(pi.hThread);
+    _ = k32.WaitForSingleObject(pi.hProcess, 5000);
+    var code: windows.DWORD = 0;
+    _ = windows.kernel32.GetExitCodeProcess(pi.hProcess, &code);
+    return code;
+}
+
+/// ConPTY baseline: run `child_exe` under a pseudoconsole, wait for its READY
+/// banner, then write 0x03 (Ctrl-C) to the ConPTY input pipe — conhost, which
+/// owns the child's console, raises CTRL_C_EVENT. Return what the child
+/// printed. This is the behaviour a raw-pipe transport has to reproduce.
+pub fn signalProbeConpty(
+    alloc: Allocator,
+    child_exe: []const u8,
+) !SignalResult {
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var s = try Session.spawn(cmd_w, 80, 25);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Wait for READY (the child has registered its handler and is blocked).
+    try drainUntilQuiet(alloc, &out, s.out_read, 300, 4000);
+
+    // Deliver Ctrl-C as a byte on the console input pipe.
+    const etx = [_]u8{0x03};
+    var w: windows.DWORD = 0;
+    _ = windows.kernel32.WriteFile(s.in_write, &etx, 1, &w, null);
+
+    // Capture the child's reaction (GOT-SIGNAL) as it runs to exit.
+    try drainUntilQuiet(alloc, &out, s.out_read, 400, 4000);
+
+    windows.TerminateProcess(s.child, 0) catch {};
+    _ = k32.WaitForSingleObject(s.child, 2000);
+    k32.ClosePseudoConsole(s.hpcon);
+    windows.CloseHandle(s.out_write);
+    s.deinit();
+
+    return .{ .output = try out.toOwnedSlice(alloc), .helper_rc = no_helper };
+}
+
+/// Raw-pipe candidate: run `child_exe` with its stdout on a pipe (no conhost
+/// in the data path) but its OWN console (CREATE_NEW_CONSOLE) so it can
+/// receive console control events. Wait for READY, then run `helper_exe`
+/// (the AttachConsole courier) against the child's PID to deliver `kind`
+/// ('C' = Ctrl-C, 'B' = Ctrl-Break) injection-free. Return what the child
+/// printed plus the courier's exit code.
+pub fn signalProbeRawPipe(
+    alloc: Allocator,
+    child_exe: []const u8,
+    helper_exe: []const u8,
+    kind: u8,
+) !SignalResult {
+    // Output pipe: child stdout -> us.
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&out_read, &out_write, &sa, 0) == 0) return error.CreatePipe;
+    try windows.SetHandleInformation(out_read, windows.HANDLE_FLAG_INHERIT, 0);
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = out_write;
+    si.hStdError = out_write;
+    si.hStdInput = null;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    // CREATE_NEW_CONSOLE gives the child its own console (attachable by the
+    // courier) while STARTF_USESTDHANDLES keeps its stdout on our pipe, so
+    // output still bypasses conhost. This is the raw-pipe-with-signals model.
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_NEW_CONSOLE,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    windows.CloseHandle(out_write);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Wait for READY.
+    try drainUntilQuiet(alloc, &out, out_read, 300, 4000);
+
+    // Run the courier against the child's PID.
+    const kind_str = if (kind == 'B' or kind == 'b') "B" else "C";
+    const hc_utf8 = try std.fmt.allocPrint(
+        alloc,
+        "\"{s}\" {d} {s}",
+        .{ helper_exe, pi.dwProcessId, kind_str },
+    );
+    defer alloc.free(hc_utf8);
+    const hc_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, hc_utf8);
+    defer alloc.free(hc_w);
+    const helper_rc = spawnWait(alloc, hc_w) catch 0xffff_fffe;
+
+    // Capture the child's reaction (GOT-SIGNAL) as it runs to exit (EOF).
+    try drainUntilQuiet(alloc, &out, out_read, 400, 4000);
+
+    windows.TerminateProcess(pi.hProcess, 0) catch {};
+    _ = k32.WaitForSingleObject(pi.hProcess, 2000);
+    windows.CloseHandle(pi.hProcess);
+    windows.CloseHandle(pi.hThread);
+    windows.CloseHandle(out_read);
+
+    return .{ .output = try out.toOwnedSlice(alloc), .helper_rc = helper_rc };
 }
