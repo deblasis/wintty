@@ -26,6 +26,8 @@ int main(void) {
 
     /* G1 + SO/SI locking shift: designate G1 special, SO invokes it,
      * SI returns to G0 (ASCII) */
-    W(h, "\x1b[8;1H\x1b)0\x0elqk\x0fASCII");
+    /* NB: split the literal after \x0f so the C hex escape does not
+     * greedily swallow the 'A' of ASCII (A is a hex digit). */
+    W(h, "\x1b[8;1H\x1b)0\x0elqk\x0f" "ASCII");
     return 0;
 }
