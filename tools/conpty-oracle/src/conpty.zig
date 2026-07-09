@@ -19,6 +19,7 @@ const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
 const CREATE_NO_WINDOW = 0x08000000;
 const CREATE_NEW_CONSOLE = 0x00000010;
+const DETACHED_PROCESS = 0x00000008;
 // ProcThreadAttributeValue(22, false, true, false)
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 22 | 0x00020000;
 
@@ -551,13 +552,16 @@ fn spawnWait(alloc: Allocator, cmd_w: [:0]u16) !u32 {
     si.cb = @sizeOf(windows.STARTUPINFOW);
     var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
     _ = alloc;
+    // DETACHED_PROCESS: the courier starts with no console of its own, so its
+    // FreeConsole() is a no-op and AttachConsole(target) runs from a clean
+    // state (avoids ERROR_ACCESS_DENIED from being already-attached).
     if (k32.CreateProcessW(
         null,
         cmd_w.ptr,
         null,
         null,
         windows.FALSE,
-        CREATE_NO_WINDOW,
+        DETACHED_PROCESS,
         null,
         null,
         &si,

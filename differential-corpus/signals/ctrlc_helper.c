@@ -13,10 +13,10 @@
  * terminal is untouched. No DLLs, no hooks, no injection.
  *
  * usage: ctrlc_helper <pid> <C|B>
- *   exit 0  = event generated
- *   exit 2  = bad args
- *   exit 10 = AttachConsole(<pid>) failed (child has no attachable console)
- *   exit 11 = GenerateConsoleCtrlEvent failed
+ *   exit 0            = event generated
+ *   exit 2            = bad args
+ *   exit 1000 + errno = AttachConsole(<pid>) failed (errno = GetLastError)
+ *   exit 2000 + errno = GenerateConsoleCtrlEvent failed
  */
 #include <windows.h>
 #include <stdlib.h>
@@ -28,17 +28,20 @@ int main(int argc, char **argv) {
         ? CTRL_BREAK_EVENT
         : CTRL_C_EVENT;
 
-    /* Leave our own console, join the target's. */
+    /* Leave our own console (if any), join the target's. The courier is
+     * spawned DETACHED_PROCESS so this is normally a no-op and AttachConsole
+     * starts from a clean, console-less state. */
     FreeConsole();
-    if (!AttachConsole(pid)) return 10;
+    if (!AttachConsole(pid)) return 1000 + (int)(GetLastError() & 0x3ff);
 
     /* Don't let the event we're about to raise terminate the courier. */
     SetConsoleCtrlHandler(NULL, TRUE);
 
     BOOL ok = GenerateConsoleCtrlEvent(evt, 0);
+    DWORD ge = GetLastError();
 
     /* Give the event time to propagate to the target before we detach. */
     Sleep(300);
     FreeConsole();
-    return ok ? 0 : 11;
+    return ok ? 0 : (2000 + (int)(ge & 0x3ff));
 }

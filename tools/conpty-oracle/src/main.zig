@@ -38,6 +38,18 @@ fn usage() noreturn {
     std.process.exit(2);
 }
 
+/// Name the handful of Win32 error codes the Ctrl-C courier can hit so the
+/// diagnosis is legible without a lookup.
+fn win32Err(code: u32) []const u8 {
+    return switch (code) {
+        5 => "ERROR_ACCESS_DENIED - caller already attached to a console",
+        6 => "ERROR_INVALID_HANDLE - target process has no console",
+        87 => "ERROR_INVALID_PARAMETER",
+        1811 => "ERROR_NO_PROC_SLOTS",
+        else => "?",
+    };
+}
+
 fn parseSize(s: []const u8) u16 {
     const v = std.fmt.parseInt(u16, s, 10) catch usage();
     if (v == 0) usage();
@@ -290,15 +302,25 @@ pub fn main() !void {
             .{ raw_ok, res_r.helper_rc, marker },
         );
 
-        // Diagnose the courier if it didn't land.
+        // Diagnose the courier if it didn't land. Exit codes 1000+errno /
+        // 2000+errno carry the Win32 GetLastError from the courier.
         if (!raw_ok) {
-            const why = switch (res_r.helper_rc) {
-                10 => "AttachConsole(childpid) failed - child has no attachable console",
-                11 => "GenerateConsoleCtrlEvent failed",
-                0 => "courier ran clean but child saw no signal - group/timing",
-                else => "courier error",
-            };
-            try stdout.print("  diagnosis: {s}\n", .{why});
+            const rc = res_r.helper_rc;
+            if (rc >= 1000 and rc < 2000) {
+                try stdout.print(
+                    "  diagnosis: AttachConsole(childpid) failed, GetLastError={d} ({s})\n",
+                    .{ rc - 1000, win32Err(rc - 1000) },
+                );
+            } else if (rc >= 2000 and rc < 3000) {
+                try stdout.print(
+                    "  diagnosis: GenerateConsoleCtrlEvent failed, GetLastError={d} ({s})\n",
+                    .{ rc - 2000, win32Err(rc - 2000) },
+                );
+            } else if (rc == 0) {
+                try stdout.print("  diagnosis: courier ran clean but child saw no signal - group/timing\n", .{});
+            } else {
+                try stdout.print("  diagnosis: courier error rc={d}\n", .{rc});
+            }
         }
 
         const need_conpty = (kind == 'C' or kind == 'c');
