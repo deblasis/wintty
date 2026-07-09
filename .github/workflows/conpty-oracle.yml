@@ -165,24 +165,26 @@ jobs:
           # fail the job. Reset so the leaked $LASTEXITCODE doesn't red the run.
           exit 0
 
-      - name: LF->CRLF fix validation
+      - name: Console line-control fix validation
         shell: pwsh
         env:
           CONPTY_ORACLE_WATCHDOG_MS: "8000"
-          # Make the raw-pipe capture reproduce console LF->newline
+          # Make the raw-pipe capture reproduce console LF/VT/FF->newline
           # processing, as a production raw-pipe transport would.
           CONPTY_ORACLE_RAW_LF_TO_CRLF: "1"
         run: |
-          # vt_newline is NOT-IDENTICAL by default (conhost turns bare LF into
-          # a newline; raw VT does not). With LF->CRLF translation applied to
-          # the raw side, it must become cell-identical -- proving the one
-          # real divergence is fixed by reproducing console newline handling.
+          # vt_newline (bare LF) and vt_index (VT/FF as index) are both
+          # NOT-IDENTICAL by default: conhost's ENABLE_PROCESSED_OUTPUT turns
+          # LF/VT/FF into newlines; raw VT treats them as index. With that
+          # processing reproduced on the raw side, both must become
+          # cell-identical -- proving this whole divergence class is closed
+          # by one output-processing rule.
           $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
-          & $oracle compare-transports vt-bin/vt_newline.exe 120 30
-          $rc = $LASTEXITCODE
-          if ($rc -eq 0) {
-            "PASS: vt_newline is CELL-IDENTICAL once the raw pipe reproduces console LF->newline processing"
-            exit 0
+          $fail = 0
+          foreach ($p in @("vt_newline", "vt_index")) {
+            & $oracle compare-transports "vt-bin/$p.exe" 120 30
+            if ($LASTEXITCODE -eq 0) { "PASS: $p CELL-IDENTICAL with console line-control processing" }
+            else { "FAIL: $p still diverges (rc=$LASTEXITCODE)"; $fail = 1 }
           }
-          "FAIL: vt_newline still diverges with LF->CRLF (rc=$rc) - the fix did not close the gap"
-          exit 1
+          if ($fail) { exit 1 }
+          "PASS: LF/VT/FF divergence class closed by reproducing console line-control processing"

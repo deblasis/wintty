@@ -321,14 +321,18 @@ pub fn captureRawPipe(alloc: Allocator, exe_path: []const u8) ![]u8 {
     const raw = try out.toOwnedSlice(alloc);
     if (!rawLfToCrlf()) return raw;
 
-    // Reproduce console LF->newline processing: insert a CR before any LF
-    // not already preceded by one. (A doubled CR is idempotent, so this is
-    // safe even for streams that already use CRLF.)
+    // Reproduce the console's ENABLE_PROCESSED_OUTPUT line-control handling:
+    // conhost treats LF (0x0A), VT (0x0B) and FF (0x0C) all as a newline
+    // (column 1 + down), where a raw VT parser treats them as index (down,
+    // same column). Insert a CR before any of them not already preceded by
+    // one, so `CR + <ctrl>` == newline. (A doubled CR is idempotent, so this
+    // is safe even for streams that already use CRLF.)
     defer alloc.free(raw);
     var xl: std.ArrayList(u8) = .empty;
     errdefer xl.deinit(alloc);
     for (raw) |b| {
-        if (b == '\n' and (xl.items.len == 0 or xl.items[xl.items.len - 1] != '\r'))
+        const is_line_ctrl = b == '\n' or b == 0x0b or b == 0x0c;
+        if (is_line_ctrl and (xl.items.len == 0 or xl.items[xl.items.len - 1] != '\r'))
             try xl.append(alloc, '\r');
         try xl.append(alloc, b);
     }
