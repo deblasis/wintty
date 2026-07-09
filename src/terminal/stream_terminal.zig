@@ -271,6 +271,7 @@ pub const Handler = struct {
                 self.terminal.modes.set(.cursor_blinking, self.default_cursor_blink);
                 self.terminal.screens.active.cursor.cursor_style = self.default_cursor_style;
             },
+            .soft_reset => self.terminal.softReset(),
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
             .semantic_prompt => try self.terminal.semanticPrompt(value),
