@@ -106,8 +106,24 @@ int main(void) {
             if (!ReadConsoleInputW(in, rec, 16, &nread)) break;
             for (DWORD k = 0; k < nread; k++) {
                 if (rec[k].EventType == WINDOW_BUFFER_SIZE_EVENT) {
-                    COORD sz = rec[k].Event.WindowBufferSizeEvent.dwSize;
-                    redraw(o, (unsigned)sz.X, (unsigned)sz.Y);
+                    /* dwSize is the SCREEN BUFFER size; its height is sticky
+                     * on shrink (the buffer keeps its scrollback rows), so it
+                     * reports the OLD row count when the viewport shrinks
+                     * (measured: 120x30->80x24 delivers dwSize 80x30). The
+                     * true visible size is the viewport rectangle srWindow --
+                     * what a correct TUI uses. The raw-pipe 2048 report
+                     * carries the exact viewport size with no such ambiguity. */
+                    CONSOLE_SCREEN_BUFFER_INFO csbi;
+                    unsigned cols, rows;
+                    if (GetConsoleScreenBufferInfo(o, &csbi)) {
+                        cols = (unsigned)(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+                        rows = (unsigned)(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+                    } else {
+                        COORD sz = rec[k].Event.WindowBufferSizeEvent.dwSize;
+                        cols = (unsigned)sz.X;
+                        rows = (unsigned)sz.Y;
+                    }
+                    redraw(o, cols, rows);
                     return 0;
                 }
             }
