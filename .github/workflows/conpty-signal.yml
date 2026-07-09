@@ -66,7 +66,10 @@ jobs:
           }
           "==== signal summary ===="
           if ($fail -eq 0) {
-            "RESULT: injection-free AttachConsole courier delivers Ctrl-C AND Ctrl-Break to a raw-pipe child"
+            "RESULT: injection-free console-group signal delivery (GenerateConsoleCtrlEvent to the"
+            "        child's group) reaches a pipe-output child; ConPTY 0x03 is the baseline. The"
+            "        AttachConsole-to-own-console courier is the same idea for a real desktop but"
+            "        hits a window-station wall on headless CI (see per-case diagnosis)."
           } else {
             "RESULT: signal delivery unconfirmed for $fail case(s) - see diagnosis above (research finding, not a build error)"
           }
