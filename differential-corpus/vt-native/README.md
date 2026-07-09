@@ -70,44 +70,61 @@ background, inverse, and line decorations (visible when blank) — which
 neutralizes conhost's cosmetic "paint the trailing space with the active fg"
 quirk (the sole difference on `vt_smoke` before normalization).
 
-## Fundamentals compliance sweep (2026-07-09)
+## Fundamentals compliance sweep (2026-07-09) — COMPLETE
 
-Tested the primitives everything in a terminal composes from.
-**CELL-IDENTICAL (11):**
+Tested the primitives everything in a terminal composes from. The
+output-fidelity surface is essentially exhausted (remaining VT is input/query
+sequences not observable in an output cell grid).
 
-- `vt_smoke`, `vt_wrap` — SGR (16/256/truecolor, all flags), wrap, wide chars.
-- `vt_cursor_ops` — CUU/CUD/CUF/CUB, CHA/VPA, CNL/CPL, edge clamping, **DECSC/DECRC**.
-- `vt_autowrap` — DECAWM on/off and the **deferred / pending-wrap** at the last
-  column (the classic minefield) incl. the captured pending-wrap flag.
-- `vt_tabs` — HT default 8-col stops, CHT/CBT, HTS/TBC.
-- `vt_scroll_region` (DECSTBM+RI), `vt_altscreen` (DECSET 1049), `vt_erase`
-  (EL/ED + colored-bg fill), `vt_edit` (IL/DL/ICH/DCH/ECH).
-- `vt_charset` box-drawing — DEC Special Graphics `lqkxmj` → `┌─┐│└┘`, and
-  SO/SI locking shifts — **identical** (see the one glyph caveat below).
-- `vt_newline`, `vt_index` — **with console line-control processing** (below).
+**CELL-IDENTICAL (17 + 2 with line-control processing = 19):**
 
-**Divergence class — console line-control (LF/VT/FF) — FOUND AND FIXED:**
-conhost's `ENABLE_PROCESSED_OUTPUT` treats LF (0x0A), **VT (0x0B) and FF
-(0x0C)** all as a newline (col 1 + down); raw VT treats them as index (down,
-same column) → staircase. `captureRawPipe` with `CONPTY_ORACLE_RAW_LF_TO_CRLF=1`
-prepends a CR before all three, and both `vt_newline` and `vt_index` become
-CELL-IDENTICAL (CI-validated). A raw-pipe transport must reproduce this one
-output-processing rule; it closes the whole class.
+- **Text/attrs:** SGR 16/256/truecolor + every flag, wrap, wide chars, combining
+  (`vt_smoke`, `vt_wrap`).
+- **Cursor:** CUU/CUD/CUF/CUB, CHA/VPA, CNL/CPL, edge clamping, **DECSC/DECRC**
+  (`vt_cursor_ops`).
+- **Autowrap:** DECAWM on/off and the **deferred / pending-wrap** at the last
+  column — the classic minefield — incl. the captured pending-wrap flag
+  (`vt_autowrap`).
+- **Tabs:** HT 8-col stops, CHT/CBT, HTS/TBC (`vt_tabs`).
+- **Scrolling:** scroll regions DECSTBM+RI (`vt_scroll_region`), explicit SU/SD
+  within a region (`vt_scroll_su_sd`).
+- **Screens:** alt-screen DECSET 1049 round-trip (`vt_altscreen`).
+- **Erase/edit:** EL/ED + colored-bg fill (`vt_erase`), IL/DL/ICH/DCH/ECH
+  (`vt_edit`), IRM insert mode (`vt_insert_mode`).
+- **Modes/misc:** DECOM origin mode (`vt_origin`), REP repeat (`vt_rep`),
+  **DECDWL/DECDHL/DECSWL** double width+height lines (`vt_dwdh`), **DECSCA
+  protected fields + selective erase** DECSEL/DECSED (`vt_protect`), **DECSLRM
+  left/right margins** (`vt_margins`), **RIS hard reset** (`vt_ris`).
+- **Box-drawing:** DEC Special Graphics `lqkxmj`→`┌─┐│└┘` + SO/SI locking shifts
+  (`vt_charset`; one glyph caveat below).
+- **Line control:** LF/VT/FF (`vt_newline`, `vt_index`) — with console
+  line-control processing (below).
 
-**Two remaining divergences (characterized):**
+**Divergence class — console line-control (LF/VT/FF) — FIXED + validated:**
+conhost's `ENABLE_PROCESSED_OUTPUT` treats LF (0x0A), VT (0x0B) and FF (0x0C)
+all as a newline (col 1 + down); raw VT treats them as index. `captureRawPipe`
+with `CONPTY_ORACLE_RAW_LF_TO_CRLF=1` prepends CR before all three → both
+CELL-IDENTICAL (CI-gated). A raw-pipe transport reproduces this one rule.
 
-1. **DEC diamond glyph** (`vt_charset`): DEC Special Graphics `` ` `` maps to
-   `♦` (U+2666) under conhost vs `◆` (U+25C6) under ghostty-vt — a per-glyph
-   Unicode-mapping difference. Box-drawing and every other special glyph
-   match; cosmetic.
-2. **DECSTR soft reset** (`vt_softreset`): **ghostty-vt does not implement
-   `CSI ! p`** — it logs `ignoring unimplemented CSI p with intermediates: !`,
-   so region/origin/attrs/charset are not reset. This is masked under ConPTY
-   (conhost performs the reset, then re-serializes the result), but a
-   **raw-pipe transport needs ghostty-vt to implement DECSTR**. The oracle
-   is thus also a finder of ghostty-vt VT-coverage gaps a raw pipe must fill.
+**Open items (all characterized):**
 
-Net: across the fundamental building blocks, a raw-pipe transport is
-cell-identical to ConPTY given (a) UTF-8 CP, (b) console LF/VT/FF processing,
-with two known items — a cosmetic glyph mapping and a concrete ghostty-vt gap
-(DECSTR).
+1. **Scrollback on full-screen SU** — ghostty pushes SU-scrolled lines to
+   scrollback; ConPTY doesn't expose conhost's. The *visible grid is identical*
+   (SU/SD within a region is byte-identical); the `.screen` (scrollback-
+   inclusive) dump differs by exactly those lines. Structural: ConPTY never
+   conveys conhost's scrollback — the terminal builds its own from the stream.
+2. **DEC diamond glyph** — Special Graphics `` ` `` → `♦` (U+2666) conhost vs
+   `◆` (U+25C6) ghostty. Cosmetic per-glyph Unicode mapping; box-drawing itself
+   identical.
+3. **DECSTR soft reset (`CSI ! p`) unimplemented in ghostty-vt** — masked under
+   ConPTY (conhost does it), but a raw-pipe transport needs ghostty-vt to
+   implement it. **The oracle doubles as a finder of ghostty-vt VT-coverage
+   gaps a raw pipe must fill** — an enumerable to-do list, not a blocker.
+
+**Net:** across the fundamental building blocks, a conhost-free raw pipe is
+cell-identical to ConPTY given (a) UTF-8 CP and (b) console LF/VT/FF
+processing — two small, validated rules — with one cosmetic glyph note, one
+scrollback-semantics note, and a short list of ghostty-vt VT gaps to fill
+(DECSTR first). The fidelity question is answered; the next frontier is the
+non-fidelity transport realities (resize, signals, teardown) the oracle can't
+measure.
