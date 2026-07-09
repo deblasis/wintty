@@ -125,7 +125,67 @@ const k32 = struct {
         HandlerRoutine: ?*anyopaque,
         Add: windows.BOOL,
     ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn CreateJobObjectW(
+        lpJobAttributes: ?*windows.SECURITY_ATTRIBUTES,
+        lpName: ?windows.LPCWSTR,
+    ) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn AssignProcessToJobObject(
+        hJob: windows.HANDLE,
+        hProcess: windows.HANDLE,
+    ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn SetInformationJobObject(
+        hJob: windows.HANDLE,
+        JobObjectInformationClass: windows.DWORD,
+        lpJobObjectInformation: *anyopaque,
+        cbJobObjectInformationLength: windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn ResumeThread(hThread: windows.HANDLE) callconv(.winapi) windows.DWORD;
+    extern "kernel32" fn OpenProcess(
+        dwDesiredAccess: windows.DWORD,
+        bInheritHandle: windows.BOOL,
+        dwProcessId: windows.DWORD,
+    ) callconv(.winapi) ?windows.HANDLE;
 };
+
+const CREATE_SUSPENDED = 0x00000004;
+const JobObjectExtendedLimitInformation: windows.DWORD = 9;
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+const STILL_ACTIVE: windows.DWORD = 259;
+const PROCESS_QUERY_SYNC: windows.DWORD = 0x00100000 | 0x0400; // SYNCHRONIZE|QUERY_INFORMATION
+
+const JOBOBJECT_BASIC_LIMIT_INFORMATION = extern struct {
+    PerProcessUserTimeLimit: i64,
+    PerJobUserTimeLimit: i64,
+    LimitFlags: u32,
+    MinimumWorkingSetSize: usize,
+    MaximumWorkingSetSize: usize,
+    ActiveProcessLimit: u32,
+    Affinity: usize,
+    PriorityClass: u32,
+    SchedulingClass: u32,
+};
+const IO_COUNTERS = extern struct {
+    ReadOperationCount: u64,
+    WriteOperationCount: u64,
+    OtherOperationCount: u64,
+    ReadTransferCount: u64,
+    WriteTransferCount: u64,
+    OtherTransferCount: u64,
+};
+const JOBOBJECT_EXTENDED_LIMIT_INFORMATION = extern struct {
+    BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+    IoInfo: IO_COUNTERS,
+    ProcessMemoryLimit: usize,
+    JobMemoryLimit: usize,
+    PeakProcessMemoryUsed: usize,
+    PeakJobMemoryUsed: usize,
+};
+
+fn processActive(h: windows.HANDLE) bool {
+    var code: windows.DWORD = 0;
+    if (windows.kernel32.GetExitCodeProcess(h, &code) == 0) return false;
+    return code == STILL_ACTIVE;
+}
 
 /// Drain `read_h` into `out` until no bytes arrive for `quiet_ms`, or the
 /// hard `max_ms` cap elapses, or the pipe closes (EOF). Unlike the one-shot
@@ -783,4 +843,193 @@ pub fn signalProbeProcessGroup(
     windows.CloseHandle(out_read);
 
     return .{ .output = try out.toOwnedSlice(alloc), .helper_rc = rc };
+}
+
+/// Drain `read_h` into `out` until the pipe closes (EOF) or `max_ms` elapses.
+/// Returns true if EOF was reached (all writers gone), false on timeout —
+/// which, when the writer is a process tree, means a leaked descendant is
+/// still holding the write end (a read-loop wedge).
+fn drainToEof(
+    alloc: Allocator,
+    out: *std.ArrayList(u8),
+    read_h: windows.HANDLE,
+    max_ms: u64,
+) !bool {
+    var buf: [64 * 1024]u8 = undefined;
+    const step_ms: u64 = 20;
+    var elapsed: u64 = 0;
+    while (elapsed < max_ms) {
+        var avail: windows.DWORD = 0;
+        const ok = k32.PeekNamedPipe(read_h, null, 0, null, &avail, null);
+        if (ok == 0) return true; // EOF: every writer closed
+        if (avail > 0) {
+            var n: windows.DWORD = 0;
+            const want: windows.DWORD = @min(avail, @as(windows.DWORD, buf.len));
+            if (windows.kernel32.ReadFile(read_h, &buf, want, &n, null) != 0 and n > 0) {
+                try out.appendSlice(alloc, buf[0..n]);
+                continue;
+            }
+        }
+        std.Thread.sleep(step_ms * std.time.ns_per_ms);
+        elapsed += step_ms;
+    }
+    return false; // timed out: a descendant still holds the pipe (wedge)
+}
+
+/// Parse the decimal that follows `tag` (e.g. "CHILD:") in `buf`.
+fn parseTaggedPid(buf: []const u8, tag: []const u8) u32 {
+    const at = std.mem.indexOf(u8, buf, tag) orelse return 0;
+    var i = at + tag.len;
+    var v: u32 = 0;
+    while (i < buf.len and buf[i] >= '0' and buf[i] <= '9') : (i += 1) {
+        v = v * 10 + (buf[i] - '0');
+    }
+    return v;
+}
+
+pub const TeardownResult = struct {
+    assign_ok: bool, // AssignProcessToJobObject succeeded (no ConPTY job conflict)
+    assign_err: u32, // GetLastError when assign failed (0 on success)
+    child_pid: u32,
+    grand_pid: u32,
+    alive_before: bool, // both processes STILL_ACTIVE before the job closes
+    dead_after: bool, // both exited within timeout after the job closes
+    no_wedge: bool, // the output pipe reached EOF after kill (no leaked writer)
+    output: []u8,
+};
+
+/// The teardown spike: spawn `child_exe` (which forks a grandchild that
+/// inherits the stdout pipe) over a raw pipe with NO ConPTY, place it in a
+/// job with KILL_ON_JOB_CLOSE, verify the whole tree is alive, then close the
+/// job handle and verify (a) both child AND grandchild die — no leak, and (b)
+/// the pipe reaches EOF — no read-loop wedge. This is the POSIX-equivalent
+/// tree kill a raw-pipe transport gets precisely because there is no ConPTY
+/// job object to conflict with.
+pub fn teardownProbe(alloc: Allocator, child_exe: []const u8) !TeardownResult {
+    var out_read: windows.HANDLE = undefined;
+    var out_write: windows.HANDLE = undefined;
+    var sa = windows.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    if (k32.CreatePipe(&out_read, &out_write, &sa, 0) == 0) return error.CreatePipe;
+    try windows.SetHandleInformation(out_read, windows.HANDLE_FLAG_INHERIT, 0);
+
+    const job = k32.CreateJobObjectW(null, null) orelse return error.CreateJobObject;
+    var eli = std.mem.zeroes(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+    eli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (k32.SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &eli,
+        @sizeOf(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+    ) == 0) return error.SetJobInfo;
+
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    si.cb = @sizeOf(windows.STARTUPINFOW);
+    si.dwFlags = windows.STARTF_USESTDHANDLES;
+    si.hStdOutput = out_write;
+    si.hStdError = out_write;
+    si.hStdInput = null;
+    var pi = std.mem.zeroes(windows.PROCESS_INFORMATION);
+
+    // CREATE_SUSPENDED so we can assign to the job before the child forks —
+    // guaranteeing the grandchild is born inside the job too.
+    if (k32.CreateProcessW(
+        null,
+        cmd_w.ptr,
+        null,
+        null,
+        windows.TRUE,
+        CREATE_SUSPENDED,
+        null,
+        null,
+        &si,
+        &pi,
+    ) == 0) return error.CreateProcess;
+    windows.CloseHandle(out_write);
+
+    const assign_ok = k32.AssignProcessToJobObject(job, pi.hProcess) != 0;
+    const assign_err: u32 = if (assign_ok) 0 else @intFromEnum(windows.kernel32.GetLastError());
+    _ = k32.ResumeThread(pi.hThread);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // Let the tree announce CHILD:/GRAND: (both then sleep, holding the pipe).
+    try drainUntilQuiet(alloc, &out, out_read, 400, 6000);
+    const child_pid = parseTaggedPid(out.items, "CHILD:");
+    const grand_pid = parseTaggedPid(out.items, "GRAND:");
+
+    const grand_h = k32.OpenProcess(PROCESS_QUERY_SYNC, windows.FALSE, grand_pid);
+    const alive_before = processActive(pi.hProcess) and
+        (grand_h != null and processActive(grand_h.?));
+
+    // KILL: dropping the last job handle terminates the whole tree.
+    windows.CloseHandle(job);
+
+    const dead_child = k32.WaitForSingleObject(pi.hProcess, 5000) == 0; // WAIT_OBJECT_0
+    const dead_grand = grand_h != null and
+        k32.WaitForSingleObject(grand_h.?, 5000) == 0;
+    const dead_after = dead_child and dead_grand;
+
+    // With every writer dead, the reader must now hit EOF (no wedge).
+    const no_wedge = try drainToEof(alloc, &out, out_read, 5000);
+
+    if (grand_h) |h| windows.CloseHandle(h);
+    windows.CloseHandle(pi.hProcess);
+    windows.CloseHandle(pi.hThread);
+    windows.CloseHandle(out_read);
+
+    return .{
+        .assign_ok = assign_ok,
+        .assign_err = assign_err,
+        .child_pid = child_pid,
+        .grand_pid = grand_pid,
+        .alive_before = alive_before,
+        .dead_after = dead_after,
+        .no_wedge = no_wedge,
+        .output = try out.toOwnedSlice(alloc),
+    };
+}
+
+/// ConPTY contrast: spawn `child_exe` under a pseudoconsole and try to place
+/// it in our own job. This is expected to FAIL (the child is already in
+/// ConPTY's job object) — the reason wintty can't job-kill a ConPTY child and
+/// uses a manual wait thread. Returns .{ ok, err }.
+pub fn assignUnderConpty(alloc: Allocator, child_exe: []const u8) !struct { ok: bool, err: u32 } {
+    const cmd_utf8 = try std.fmt.allocPrint(alloc, "\"{s}\"", .{child_exe});
+    defer alloc.free(cmd_utf8);
+    const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cmd_utf8);
+    defer alloc.free(cmd_w);
+
+    var s = try Session.spawn(cmd_w, 80, 25);
+
+    const job = k32.CreateJobObjectW(null, null) orelse return error.CreateJobObject;
+    var eli = std.mem.zeroes(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+    eli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    _ = k32.SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &eli,
+        @sizeOf(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+    );
+
+    const ok = k32.AssignProcessToJobObject(job, s.child) != 0;
+    const err: u32 = if (ok) 0 else @intFromEnum(windows.kernel32.GetLastError());
+
+    windows.CloseHandle(job);
+    windows.TerminateProcess(s.child, 0) catch {};
+    _ = k32.WaitForSingleObject(s.child, 2000);
+    k32.ClosePseudoConsole(s.hpcon);
+    windows.CloseHandle(s.out_write);
+    s.deinit();
+
+    return .{ .ok = ok, .err = err };
 }

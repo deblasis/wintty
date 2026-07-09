@@ -33,6 +33,7 @@ fn usage() noreturn {
         \\  conpty-oracle compare-transports <exe> <cols> <rows>
         \\  conpty-oracle compare-resize <exe> <cols0> <rows0> <cols1> <rows1>
         \\  conpty-oracle signal-probe <child_exe> <helper_exe> <C|B>
+        \\  conpty-oracle teardown-probe <tree_child_exe>
         \\
     , .{});
     std.process.exit(2);
@@ -359,6 +360,50 @@ pub fn main() !void {
         try stdout.print(
             "RESULT: injection-free signal delivery UNCONFIRMED (proc-group={} courier={} conpty={})\n",
             .{ grp_ok, raw_ok, conpty_ok },
+        );
+        try stdout.flush();
+        std.process.exit(1);
+    }
+
+    if (std.mem.eql(u8, mode, "teardown-probe")) {
+        if (args.len != 3) usage();
+        const child_exe = args[2];
+
+        const t = try conpty.teardownProbe(alloc, child_exe);
+        defer alloc.free(t.output);
+        try stdout.print(
+            "rawpipe (job KILL_ON_JOB_CLOSE):\n" ++
+                "  assign_to_job = {} (err={d})\n" ++
+                "  tree          = child:{d} grand:{d}\n" ++
+                "  alive_before  = {}\n" ++
+                "  dead_after    = {}   (both child AND grandchild terminated by job close)\n" ++
+                "  no_wedge      = {}   (pipe hit EOF after kill -> no leaked writer)\n",
+            .{ t.assign_ok, t.assign_err, t.child_pid, t.grand_pid, t.alive_before, t.dead_after, t.no_wedge },
+        );
+
+        // ConPTY contrast: the same job assignment is expected to fail because
+        // the child already belongs to ConPTY's job object.
+        const c = try conpty.assignUnderConpty(alloc, child_exe);
+        try stdout.print(
+            "conpty  (contrast):\n" ++
+                "  assign_to_job = {} (err={d}) {s}\n",
+            .{ c.ok, c.err, if (c.ok) "" else "(expected: child already in ConPTY's job)" },
+        );
+
+        const pass = t.assign_ok and t.alive_before and t.dead_after and t.no_wedge;
+        if (pass) {
+            try stdout.print(
+                "RESULT: raw-pipe job-object teardown kills the whole tree with no leak and no wedge" ++
+                    " (ConPTY job-assign contrast: ok={})\n",
+                .{c.ok},
+            );
+            try stdout.flush();
+            return;
+        }
+
+        try stdout.print(
+            "RESULT: raw-pipe teardown INCOMPLETE (assign={} alive_before={} dead_after={} no_wedge={})\n",
+            .{ t.assign_ok, t.alive_before, t.dead_after, t.no_wedge },
         );
         try stdout.flush();
         std.process.exit(1);
