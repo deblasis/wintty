@@ -3608,6 +3608,58 @@ pub fn fullReset(self: *Terminal) void {
     self.flags.dirty.clear = true;
 }
 
+/// Soft Terminal Reset (DECSTR, `CSI ! p`).
+///
+/// Unlike `fullReset` (RIS), this does NOT clear the screen, scrollback, or
+/// alternate screen, and does not change the active screen. It returns the
+/// terminal's programmable state to its power-up defaults per DEC STD 070:
+/// text cursor enabled (DECTCEM), replace mode (IRM), absolute origin
+/// (DECOM), autowrap on (DECAWM), normal rendition (SGR), ASCII character
+/// sets, full scrolling region, unprotected characters (DECSCA), and a
+/// cleared saved-cursor (DECSC). The cursor is not moved.
+pub fn softReset(self: *Terminal) void {
+    const screen: *Screen = self.screens.active;
+
+    // Modes DECSTR returns to their power-up defaults. These are the ones
+    // that affect the rendered grid; matches conhost (see the differential
+    // corpus `vt_softreset`: autowrap ends up ON, i.e. the default).
+    self.modes.set(.cursor_visible, true);
+    self.modes.set(.insert, false);
+    self.modes.set(.origin, false);
+    self.modes.set(.wraparound, true);
+
+    // Select graphic rendition back to normal.
+    screen.cursor.style = .{};
+    screen.manualStyleUpdate() catch |err| {
+        log.warn("softReset error resetting style err={}", .{err});
+        screen.cursor.style = .{};
+        screen.manualStyleUpdate() catch unreachable;
+    };
+
+    // Character sets: G0-G3 ASCII, GL=G0, no pending single shift.
+    screen.charset = .{};
+
+    // Character protection (DECSCA) off; clear the cursor's protected bit.
+    // (screen.protected_mode itself is intentionally not reset to .off; see
+    // setProtectedMode — eraseChars depends on the most-recent mode.)
+    screen.cursor.protected = false;
+
+    // Scrolling region / margins back to the full screen.
+    self.scrolling_region = .{
+        .top = 0,
+        .bottom = self.rows - 1,
+        .left = 0,
+        .right = self.cols - 1,
+    };
+
+    // Clear the pending-wrap latch and the saved cursor (DECSC) state.
+    screen.cursor.pending_wrap = false;
+    screen.saved_cursor = null;
+
+    // Repeat (REP) scratch.
+    self.previous_char = null;
+}
+
 /// Returns true if the point is dirty, used for testing.
 fn isDirty(t: *const Terminal, pt: point.Point) bool {
     return t.screens.active.pages.getCell(pt).?.isDirty();
@@ -13331,6 +13383,57 @@ test "Terminal: fullReset origin mode" {
     try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.y);
     try testing.expectEqual(@as(usize, 0), t.screens.active.cursor.x);
     try testing.expect(!t.modes.get(.origin));
+}
+
+test "Terminal: softReset resets state without clearing the screen" {
+    var t = try init(testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    // Put content on the screen so we can confirm it survives.
+    try t.printString("hello");
+
+    // Pile on non-default programmable state.
+    t.modes.set(.origin, true);
+    t.modes.set(.insert, true);
+    t.modes.set(.wraparound, false);
+    t.modes.set(.cursor_visible, false);
+    t.scrolling_region = .{ .top = 2, .bottom = 5, .left = 0, .right = 9 };
+    t.configureCharset(.G0, .dec_special);
+    t.setProtectedMode(.iso);
+    t.saveCursor();
+    try t.setAttribute(.{ .bold = {} });
+
+    t.softReset();
+
+    // Modes back to their power-up defaults.
+    try testing.expect(t.modes.get(.cursor_visible));
+    try testing.expect(!t.modes.get(.insert));
+    try testing.expect(!t.modes.get(.origin));
+    try testing.expect(t.modes.get(.wraparound));
+
+    // Scrolling region restored to the full screen.
+    try testing.expectEqual(@as(usize, 0), t.scrolling_region.top);
+    try testing.expectEqual(@as(usize, 9), t.scrolling_region.bottom);
+
+    // SGR back to normal rendition.
+    try testing.expect(!t.screens.active.cursor.style.flags.bold);
+
+    // Character set reset (no pending single shift after G0->ASCII).
+    try testing.expect(t.screens.active.charset.single_shift == null);
+
+    // Protected-character bit cleared.
+    try testing.expect(!t.screens.active.cursor.protected);
+
+    // Saved cursor (DECSC) cleared.
+    try testing.expect(t.screens.active.saved_cursor == null);
+
+    // The screen content is preserved — this is the key difference from
+    // fullReset (RIS), which clears it.
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("hello", str);
+    }
 }
 
 test "Terminal: fullReset status display" {

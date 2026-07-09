@@ -77,6 +77,7 @@ pub const Action = union(Key) {
     next_line,
     reverse_index,
     full_reset,
+    soft_reset,
     set_mode: Mode,
     reset_mode: Mode,
     save_mode: Mode,
@@ -184,6 +185,7 @@ pub const Action = union(Key) {
             "next_line",
             "reverse_index",
             "full_reset",
+            "soft_reset",
             "set_mode",
             "reset_mode",
             "save_mode",
@@ -1767,6 +1769,15 @@ pub fn Stream(comptime H: type) type {
                 // to the same unimplemented warning as before.
                 'p' => switch (input.intermediates.len) {
                     1, 2 => decrqm: {
+                        // DECSTR - Soft Terminal Reset (CSI ! p). Distinct
+                        // from DECRQM below, which uses the '$' intermediate.
+                        if (input.intermediates.len == 1 and
+                            input.intermediates[0] == '!')
+                        {
+                            self.handler.vt(.soft_reset, {});
+                            break :decrqm;
+                        }
+
                         const ansi_mode = ansi: {
                             switch (input.intermediates.len) {
                                 1 => if (input.intermediates[0] == '$') break :ansi true,
