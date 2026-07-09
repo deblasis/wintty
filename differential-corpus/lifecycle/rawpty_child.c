@@ -89,7 +89,11 @@ int main(int argc, char **argv) {
         si.hStdInput = in;
         PROCESS_INFORMATION pi;
         ZeroMemory(&pi, sizeof pi);
-        if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        /* Grandchild in its OWN process group so a CTRL_BREAK targeted at our
+         * group doesn't hit it (Unix job-control semantics would signal the
+         * whole group). It still inherits the job, so job teardown alone is
+         * what kills it -- letting the harness attribute the kill correctly. */
+        if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi)) {
             gpid = pi.dwProcessId;
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
