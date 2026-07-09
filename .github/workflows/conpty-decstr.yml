@@ -1,0 +1,59 @@
+name: ConPTY DECSTR Validation
+
+# Validate the DECSTR (CSI ! p) soft-reset implementation end-to-end against
+# conhost: the oracle depends on ghostty-vt by path, so this build includes
+# the new Terminal.softReset(). Before the fix, vt_softreset was NOT-IDENTICAL
+# (ghostty ignored DECSTR while conhost applied it); after, it must be
+# CELL-IDENTICAL. Research branch only.
+on:
+  push:
+    branches: [transport/raw-pipe-realities]
+  workflow_dispatch: {}
+
+jobs:
+  decstr:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Windows version
+        shell: cmd
+        run: ver
+
+      - name: Build oracle (includes ghostty-vt with DECSTR)
+        shell: cmd
+        run: |
+          cd tools\conpty-oracle
+          zig build -Dtarget=x86_64-windows-gnu
+
+      - name: Compile DECSTR corpus program
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path decstr-bin | Out-Null
+          zig cc -target x86_64-windows-gnu -o decstr-bin/vt_softreset.exe differential-corpus/vt-native/vt_softreset.c
+          if ($LASTEXITCODE -ne 0) { "FAIL: vt_softreset.c did not compile"; exit 1 }
+          "compiled vt_softreset.exe"
+
+      - name: DECSTR cell-identity (raw-pipe ghostty vs ConPTY conhost)
+        shell: pwsh
+        env:
+          CONPTY_ORACLE_WATCHDOG_MS: "8000"
+        run: |
+          $oracle = "tools/conpty-oracle/zig-out/bin/conpty-oracle.exe"
+          "==== DECSTR compare-transports ===="
+          & $oracle compare-transports decstr-bin/vt_softreset.exe 120 30
+          $rc = $LASTEXITCODE
+          ""
+          if ($rc -eq 0) {
+            "RESULT: DECSTR (CSI ! p) is CELL-IDENTICAL to conhost — ghostty-vt gap closed"
+          } else {
+            "RESULT: DECSTR still diverges from conhost (rc=$rc) — see diff above"
+            exit 1
+          }
