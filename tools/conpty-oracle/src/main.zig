@@ -301,6 +301,11 @@ pub fn main() !void {
             "rawpipe (AttachConsole)   : got_signal={} helper_rc={d} (looking for '{s}')\n",
             .{ raw_ok, res_r.helper_rc, marker },
         );
+        // Show what the raw-pipe child actually printed (incl. its CON: line,
+        // which distinguishes "no console" from "attach failed").
+        try stdout.writeAll("  child said: ");
+        try writeEscaped(stdout, std.mem.trim(u8, res_r.output, "\r\n"));
+        try stdout.writeAll("\n");
 
         // Diagnose the courier if it didn't land. Exit codes 1000+errno /
         // 2000+errno carry the Win32 GetLastError from the courier.

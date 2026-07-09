@@ -38,6 +38,19 @@ int main(void) {
         return 3;
     }
 
+    /* Self-report console state so the harness can tell "child has no
+     * console" apart from "console exists but courier can't attach". A
+     * process with no console has GetConsoleCP()==0; GetConsoleWindow() is
+     * NULL for a console with no window (CREATE_NO_WINDOW) but non-NULL for a
+     * visible one. */
+    {
+        char b[96];
+        UINT cp = GetConsoleCP();
+        HWND hw = GetConsoleWindow();
+        int n = wsprintfA(b, "CON: cp=%u win=%p\r\n", cp, (void *)hw);
+        emit(b, (DWORD)n);
+    }
+
     W("READY\r\n");
 
     DWORD r = WaitForSingleObject(g_evt, 5000);
