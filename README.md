@@ -31,13 +31,13 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** DX12 renderer in progress, WinUI 3 shell with tabs, splits, jump list, taskbar progress, and runtime layout switch landed
+> **Status:** DX12 renderer + WinUI 3 shell shipping tabs, splits, quick terminal, command palette, settings UI, notifications, jump lists, taskbar progress, Mica/Acrylic/Crystal backdrops, and a UIA accessibility provider. Usable daily-driver; polishing renderer throughput and finishing the remaining native-integration surface below.
 >
 > **MVWT** Minimum Viewable Windows Terminal
-> `[█████████████████▌░░] 88%`
+> `[████████████████████] ~100%`
 >
-> **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/ghostty/issues/26))
-> `[░░░░░░░░░░░░░░░░░░░░]  0%`
+> **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/wintty/issues/26))
+> `[██████████████░░░░░░] ~70%`
 >
 > The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
 > as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
@@ -78,7 +78,7 @@
 > - [x] DLL init regression test and build instructions
 > - [x] Full Windows CI test suite
 >
-> **DX12 renderer infrastructure** (in fork, in progress)
+> **DX12 renderer** (in fork)
 >
 > - [x] DXGI bindings (adapters, factories, swap chains -- carried from DX11)
 > - [x] DirectComposition bindings (DWM composition -- carried from DX11)
@@ -89,18 +89,39 @@
 > - [x] DX12 render pipeline (PSOs, root signatures, command lists)
 > - [x] DX12 GPU primitives (upload heap buffers, textures, samplers)
 > - [x] Backend enum with `directx12` variant
+> - [x] Three surface modes: HWND, SwapChainPanel (composition), shared texture
 >
 > **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
 >
 > - [x] DX11 swap chain created from Zig, bound to WinUI 3 SwapChainPanel
 > - [x] Instanced cell grid rendering, bitmap font, animated demo scenes, resize, DPI
 >
-> **App scaffold** (in fork)
+> **App shell** (`windows/Ghostty/` + `windows/Ghostty.Core/`)
 >
-> - [x] C# WinUI 3 project scaffold (`windows/Ghostty/`)
-> - [x] P/Invoke bindings for libghostty C API
+> - [x] C# WinUI 3 project scaffold + P/Invoke bindings for libghostty C API
 > - [x] `--version` flag working from command line
-> - [x] Interop test suite (7 tests against the real DLL)
+> - [x] Interop test suite against the real DLL
+> - [x] ConPTY shell spawning (pwsh, cmd, WSL distros, MSYS2/fish) with UTF-8 codepage handling
+> - [x] Tabs (vertical tab strip, tab overview, snap zones, color palettes, per-tab icons, rename)
+> - [x] Splits (split tree, pane context menus, directional navigation)
+> - [x] Quick Terminal (quake/dropdown): position, size, screen, animation, autohide, global hotkey
+> - [x] Command palette (frecency autocomplete, built-in/config/jump/profile/demo command sources)
+> - [x] Native settings UI (Appearance, Keybindings, General, Profiles, Terminal, Colors, Raw editor, Advanced, cheat-sheet)
+> - [x] Profiles with auto-discovery of installed shells (pwsh, cmd, WSL, MSYS2) + icon resolution (Win32, SVG)
+> - [x] Session save/restore (window/tab/split state)
+> - [x] Scrollback search, resize overlay, inspector, bell, single-instance
+> - [x] Clipboard with paste confirmation (MIME + format marshalling)
+>
+> **Native Windows integration**
+>
+> - [x] Mica / Acrylic / **Crystal** backdrops with tint resolver
+> - [x] Toast notifications (bell, long-running command completion) with rate-limiting
+> - [x] Jump lists (recent directories, pinned profiles via `ICustomDestinationList`)
+> - [x] Taskbar progress + attention overlay (OSC 9;4, `ITaskbarList3`)
+> - [x] Dark/Light theme sync + **High-Contrast** support for the terminal surface
+> - [x] Power / energy awareness (power-saver mode, adaptive behavior)
+> - [x] Branded app icon + icon picker
+> - [x] Kitty image protocol transport (ConPTY bypass); renderer upload path in progress
 >
 > ### Architecture: Surface Modes
 >
@@ -114,12 +135,26 @@
 >
 > ### What is next
 >
-> **Feature parity** (later)
+> **Renderer throughput** ([#93](https://github.com/deblasis/wintty/issues/93), [#94](https://github.com/deblasis/wintty/issues/94))
 >
-> - [ ] Multi-window, tabs, splits
-> - [ ] Native settings UI, desktop notifications
-> - [ ] Quick terminal, command palette, global keybinds
-> - [ ] Installer packages (MSI, MSIX, winget), auto-update
+> - [ ] Scroll optimization -- row versioning / GPU buffer rotation so a viewport scroll only re-uploads the newly exposed rows
+> - [ ] Adaptive presentation -- waitable swap chain, `ALLOW_TEARING` / VRR, skip-present when idle
+> - [ ] Glyph Protocol upload parity (DX12 + DirectWrite atlas) ([#551](https://github.com/deblasis/wintty/issues/551))
+> - [ ] Kitty image upload wiring through the DX12 atlas
+>
+> **Native integration gaps** ([#81](https://github.com/deblasis/wintty/issues/81))
+>
+> - [ ] System tray / background mode (minimize-to-tray + always-show icon)
+> - [ ] "Open Terminal Here" Explorer context menu (classic registry + Win11 `IExplorerCommand`)
+> - [ ] Default terminal handoff (`ITerminalHandoff`) -- register as a Windows 11 default terminal
+> - [ ] First-class automation surface (control CLI / COM server) to match macOS AppleScript + Shortcuts
+> - [ ] Multi-window
+>
+> **Config surface & packaging** ([#214](https://github.com/deblasis/wintty/issues/214))
+>
+> - [ ] `windows-*` config keys mirroring the `macos-*` surface (titlebar style, backdrop, window buttons, icon theming, etc.)
+> - [ ] Installer packages (MSI, MSIX, winget); auto-update ships via the sponsor tier (Velopack)
+> - [ ] VT-compliance CI (esctest) once Actions billing is restored ([#508](https://github.com/deblasis/wintty/issues/508))
 >
 > ### .NET Examples
 >
