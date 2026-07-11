@@ -171,6 +171,14 @@
 > maintain Windows-specific changes right now, so here we are.
 > GitHub Actions are disabled for this fork because we are poor and just.
 > I mean, we use `just` for insanity checks.
+>
+> [!NOTE]
+> **To everyone who has kindly sponsored this OSS work -- THANK YOU! 🙏**
+>
+> In the next few days I'll start offering sponsor perks like **auto-updates**
+> and **signed binaries**. Keep an eye on these pages, or
+> [reach out / sponsor](https://github.com/sponsors/deblasis) so I can keep
+> you posted. Stay tuned.
 
 ## About
 
