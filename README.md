@@ -21,6 +21,85 @@
   </p>
 </p>
 
+> [!IMPORTANT]
+> ## This is a Windows Support Fork
+>
+> This fork is focused on building **Windows support** for Ghostty, following
+> [Mitchell's architectural direction](https://github.com/ghostty-org/ghostty/discussions/2563).
+> Work is done in **stacked feature branches** (`018-*`, `019-*`, ...) to keep
+> scope small and produce tightly scoped PRs for upstream review.
+>
+> **Status:** Foundation done, working on renderer and app shell
+>
+> The goal is a native Windows experience that feels like Ghostty was built
+> for Windows first, consistent with the philosophy applied to macOS and Linux.
+>
+> The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
+> as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
+> The C# layer handles windowing, input, and platform integration via P/Invoke.
+>
+> ### What is done
+>
+> **Build infrastructure** (merged upstream, 13+ PRs)
+>
+> - [x] `zig build test` passing on Windows (2604 tests, 53 skipped)
+> - [x] All shared dependencies building (FreeType, HarfBuzz, zlib, oniguruma, glslang, etc.)
+> - [x] `zig build test-lib-vt` passing on all platforms
+> - [x] Windows CI running without `continue-on-error`
+> - [x] Backslash path handling in config parsing (PR #11782 merged)
+> - [x] CRLF line ending fix for comptime parsing + `.gitattributes` normalization
+>
+> **DLL and runtime** (on fork, PRs open upstream)
+>
+> - [x] `ghostty.dll` building on Windows (PR #11856 -- CRT init fix for MSVC DLL mode)
+> - [x] DLL init regression test and build instructions (PR #11856)
+> - [x] Full Windows CI test suite (PR #11839)
+>
+> **SwapChainPanel spike** (on fork, branch [`024-windows/swapchain-spike`](https://github.com/deblasis/ghostty/tree/024-windows/swapchain-spike))
+>
+> - [x] DX11 swap chain created from Zig, bound to WinUI 3 SwapChainPanel
+>       via ISwapChainPanelNative
+> - [x] Instanced cell grid rendering, bitmap font, animated demo scenes,
+>       resize, DPI
+> - [x] Demo video: https://www.youtube.com/watch?v=-Cn9mlxX_GA
+>
+> **App scaffold** (on fork, closed upstream pending approach consensus)
+>
+> - [x] C# WinUI 3 project scaffold (`windows/Ghostty/`)
+> - [x] P/Invoke bindings for libghostty C API
+> - [x] `--version` flag working from command line
+> - [x] Interop test suite (7 tests against the real DLL)
+> - PRs #11841 and #11842 were closed by Mitchell -- the spike needed to
+>   happen first to answer open questions about the data model. These PRs
+>   still contain useful groundwork and lessons that inform the path forward.
+>
+> ### What is next
+>
+> - [ ] C# or not -- seems like there is consensus but waiting on Mitchell's call
+> - [ ] HWND vs SwapChainPanel -- the spike proved SwapChainPanel works but
+>       this is still a POC. Waiting to see how it is received by the
+>       community and Mitchell.
+> - [ ] Come back with the platform struct once the data model is agreed on
+>
+> **DX11 renderer infrastructure** (PR #11886, open upstream)
+>
+> - [ ] Extracted from the spike into upstream-ready code. Stacked on
+>       #11839 + #11856. Pending review.
+>
+> **After approach is agreed on**
+>
+> - [ ] DirectWrite font backend
+> - [ ] ConPTY shell spawning
+> - [ ] Keyboard, mouse, clipboard
+> - [ ] Per-monitor DPI, dark/light mode theming
+>
+> **Feature parity** (later)
+>
+> - [ ] Multi-window, tabs, splits
+> - [ ] Native settings UI, desktop notifications
+> - [ ] Quick terminal, command palette, global keybinds
+> - [ ] Installer packages (MSI, MSIX, winget), auto-update
+
 ## About
 
 Ghostty is a terminal emulator that differentiates itself by being
@@ -149,7 +228,7 @@ C-compatible library for embedding a fast, feature-rich terminal emulator
 in any 3rd party project. This library is called `libghostty`.
 
 Due to the scope of this project, we're breaking libghostty down into
-separate libraries, starting with `libghostty-vt`. The goal of
+separate actually libraries, starting with `libghostty-vt`. The goal of
 this project is to focus on parsing terminal sequences and maintaining
 terminal state. This is covered in more detail in this
 [blog post](https://mitchellh.com/writing/libghostty-is-coming).
