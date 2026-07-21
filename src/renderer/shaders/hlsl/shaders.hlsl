@@ -104,8 +104,9 @@ bool padding_extend_down()  { return (padding_extend_packed & EXTEND_DOWN)  != 0
 // ---------------------------------------------------------------------------
 // Color helpers
 //
-// Simplified vs. Metal: no Display P3 conversion, no linearize/unlinearize,
-// no minimum-contrast enforcement.
+// Simplified vs. Metal: no Display P3 conversion. The pipeline stays in
+// premultiplied sRGB for blending; the minimum-contrast helpers below
+// linearize locally, only for their WCAG luminance decision.
 // ---------------------------------------------------------------------------
 
 // Unpack a uint containing RGBA as four u8 bytes (R in the low byte) to
@@ -139,6 +140,56 @@ float4 load_color_f4(float4 color)
 {
     color.rgb *= color.a;
     return color;
+}
+
+// ---------------------------------------------------------------------------
+// Minimum-contrast enforcement (ports the Metal path in shaders.metal).
+//
+// The WCAG relative-luminance formula is defined on linear RGB, so these
+// helpers linearize locally even though the rest of the pipeline stays in
+// premultiplied sRGB. Like the Metal renderer, the contrast decision runs on
+// the premultiplied colors directly (no un-premultiply); for opaque text --
+// the case min-contrast targets -- premultiplied equals straight. The only
+// substituted colors are pure white and pure black, which are identical in
+// linear and sRGB and need no conversion back.
+// ---------------------------------------------------------------------------
+
+// sRGB gamma -> linear, component-wise.
+float3 linearize_rgb(float3 srgb)
+{
+    float3 lo = srgb / 12.92;
+    float3 hi = pow((srgb + 0.055) / 1.055, 2.4);
+    return lerp(hi, lo, step(srgb, float3(0.04045, 0.04045, 0.04045)));
+}
+
+float relative_luminance(float3 linear_rgb)
+{
+    return dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
+}
+
+// WCAG 2.0 contrast ratio. Inputs are linear RGB.
+float contrast_ratio(float3 a, float3 b)
+{
+    float la = relative_luminance(a);
+    float lb = relative_luminance(b);
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05);
+}
+
+// Return fg unchanged if it already meets min_ratio against bg; otherwise
+// return whichever of white/black contrasts best with bg. fg and bg are
+// premultiplied sRGB, matching Metal, which also runs this on premultiplied
+// colors.
+float4 contrasted_color(float min_ratio, float4 fg, float4 bg)
+{
+    float3 fg_lin = linearize_rgb(fg.rgb);
+    float3 bg_lin = linearize_rgb(bg.rgb);
+    if (contrast_ratio(fg_lin, bg_lin) >= min_ratio)
+        return fg;
+
+    float white_ratio = contrast_ratio(float3(1.0, 1.0, 1.0), bg_lin);
+    float black_ratio = contrast_ratio(float3(0.0, 0.0, 0.0), bg_lin);
+    return white_ratio > black_ratio ? float4(1.0, 1.0, 1.0, 1.0)
+                                     : float4(0.0, 0.0, 0.0, 1.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +396,15 @@ CellTextVSOut CellTextVS(uint vid : SV_VertexID, CellTextVSIn inst)
     o.bg_color = float4(
         cell_bg.rgb + global_bg.rgb * (1.0 - cell_bg.a),
         comp_a);
+
+    // Minimum-contrast: if the glyph's foreground doesn't meet the configured
+    // WCAG contrast ratio against its background, substitute black or white.
+    // Matches the Metal renderer, including the placement before the cursor
+    // override. Color glyphs (emoji/images) carry NO_MIN_CONTRAST and are
+    // left untouched. Default min_contrast is 1, which disables this branch.
+    if (min_contrast > 1.0 && (inst.bools & NO_MIN_CONTRAST) == 0u) {
+        o.color = contrasted_color(min_contrast, o.color, o.bg_color);
+    }
 
     // Cursor color override: if this cell sits at the cursor position but is
     // not itself the cursor glyph, replace the fg color with cursor_color.
