@@ -112,6 +112,8 @@
                     <TextBlock x:Name="CopyrightText"
                                HorizontalAlignment="Center"
                                TextAlignment="Center"
+                               MaxWidth="340"
+                               TextWrapping="Wrap"
                                IsTextSelectionEnabled="True"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                Style="{StaticResource CaptionTextBlockStyle}" />

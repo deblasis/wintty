@@ -15,8 +15,12 @@ public static class AboutContent
 
     // Year and holders are pinned to the repo LICENSE file, not the current
     // date: this is the copyright on the work, so it tracks LICENSE and only
-    // changes when that file does.
-    public const string Copyright = "(c) 2024 Mitchell Hashimoto, Ghostty contributors";
+    // changes when that file does. Wintty (the Windows port + its own features)
+    // gets its own line; the upstream Ghostty notice is retained verbatim, as
+    // MIT requires, on the "Based on Ghostty" line.
+    public const string Copyright =
+        "Wintty (c) 2026 Alessandro De Blasis\n" +
+        "Based on Ghostty (c) 2024 Mitchell Hashimoto, Ghostty contributors";
 
     public const string GitHubUrl = "https://github.com/deblasis/wintty";
     public const string DocsUrl = "https://wintty.io/docs";
