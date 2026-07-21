@@ -38,4 +38,11 @@ public class AboutContentTests
         Assert.Contains("MIT", AboutContent.LicenseNote);
         Assert.Contains("Ghostty contributors", AboutContent.Copyright);
     }
+
+    [Fact]
+    public void Copyright_CreditsWinttyAlongsideUpstream()
+    {
+        Assert.Contains("Wintty", AboutContent.Copyright);
+        Assert.Contains("Based on Ghostty", AboutContent.Copyright);
+    }
 }

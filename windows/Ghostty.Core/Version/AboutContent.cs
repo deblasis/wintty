@@ -13,10 +13,15 @@ public static class AboutContent
 
     public const string LicenseNote = "MIT License";
 
-    // Year and holders are pinned to the repo LICENSE file, not the current
-    // date: this is the copyright on the work, so it tracks LICENSE and only
-    // changes when that file does.
-    public const string Copyright = "(c) 2024 Mitchell Hashimoto, Ghostty contributors";
+    // Two lines: Wintty's own copyright for the Windows port and its added
+    // features, then the upstream Ghostty notice retained verbatim as MIT
+    // requires. Only the "Based on Ghostty" line is pinned to the repo LICENSE
+    // and changes when that file does; the Wintty line is this port's own copy.
+    // The embedded '\n' is intentional: the About TextBlock renders it as a
+    // line break, keeping this value UI-free and unit-testable here in Core.
+    public const string Copyright =
+        "Wintty (c) 2026 Alessandro De Blasis\n" +
+        "Based on Ghostty (c) 2024 Mitchell Hashimoto, Ghostty contributors";
 
     public const string GitHubUrl = "https://github.com/deblasis/wintty";
     public const string DocsUrl = "https://wintty.io/docs";
