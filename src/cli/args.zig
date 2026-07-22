@@ -1531,23 +1531,23 @@ pub const LineIterator = struct {
     }
 
     pub fn next(self: *Self) ?[]const u8 {
-        // First prime the reader.
-        // File readers at least are initialized with a size of 0,
-        // and this will actually prompt the reader to get the actual
-        // size of the file, which will be used in the EOF check below.
-        //
-        // This will also optimize reads down the line as we're
-        // more likely to beworking with buffered data.
-        //
-        // fillMore asserts that the buffer has available capacity,
-        // so skip this if it's full.
-        if (self.r.bufferedLen() < self.r.buffer.len) {
-            self.r.fillMore() catch {};
-        }
-
         var writer: std.Io.Writer = .fixed(self.entry[2..]);
 
-        var entry = while (self.r.seek != self.r.end) {
+        var entry = while (true) {
+            // Make sure the buffer has data before reading a line. When the
+            // buffer drains (seek == end) we refill it; a refill that adds
+            // nothing means we've reached true end-of-file. This matters for
+            // a run of comment or blank lines longer than the reader's
+            // buffer: those are skipped with `continue` without returning, so
+            // without refilling here the drained buffer would look like EOF
+            // and silently truncate every line after the comment block.
+            // fillMore requires spare capacity, which always holds once the
+            // buffer is fully drained.
+            if (self.r.seek == self.r.end) {
+                self.r.fillMore() catch {};
+                if (self.r.seek == self.r.end) return null;
+            }
+
             // Reset write head
             writer.end = 0;
 
@@ -1570,7 +1570,7 @@ pub const LineIterator = struct {
             // Ignore blank lines and comments
             if (entry.len == 0 or entry[0] == '#') continue;
             break entry;
-        } else return null;
+        };
 
         if (mem.indexOf(u8, entry, "=")) |idx| {
             const key = std.mem.trim(u8, entry[0..idx], whitespace);
@@ -1664,6 +1664,41 @@ test "LineIterator" {
     try testing.expectEqualStrings("--E", iter.next().?);
     try testing.expectEqualStrings("--F=value ", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "LineIterator comment run larger than reader buffer" {
+    const testing = std.testing;
+
+    // A run of comment/blank lines longer than the reader's buffer used to
+    // drain the buffer inside next() and be mistaken for EOF, silently
+    // dropping every line after it. Write such a file and read it back
+    // through a small buffer (matching how config files are streamed) to
+    // make sure the setting after the comment block still parses.
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    {
+        var file = try td.dir.createFile("config", .{});
+        defer file.close();
+        var wbuf: [256]u8 = undefined;
+        var fw = file.writer(&wbuf);
+        const w = &fw.interface;
+        try w.writeAll("first=1\n");
+        // ~1KB of comments, far larger than the 64-byte read buffer below.
+        var i: usize = 0;
+        while (i < 100) : (i += 1) try w.writeAll("# filler comment line\n");
+        try w.writeAll("last=2\n");
+        try fw.end();
+    }
+
+    var file = try td.dir.openFile("config", .{});
+    defer file.close();
+    var rbuf: [64]u8 = undefined;
+    var fr = file.reader(&rbuf);
+
+    var iter: LineIterator = .init(&fr.interface);
+    try testing.expectEqualStrings("--first=1", iter.next().?);
+    try testing.expectEqualStrings("--last=2", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
 }
 
