@@ -218,6 +218,20 @@
                 </StackPanel>
             </ctrl:SettingsGroup>
 
+            <ctrl:SettingsGroup Header="Color"
+                                Description="How Wintty handles color in the terminal.">
+                <ctrl:SettingsCard Header="When NO_COLOR is set"
+                                   Description="NO_COLOR (no-color.org) turns off colored output in many programs, including PowerShell — which strips a powerline prompt's colors. Choose how Wintty reacts when it inherits NO_COLOR from the environment."
+                                   ctrl:SettingsCard.ConfigKey="no-color-override">
+                    <ComboBox x:Name="NoColorOverrideCombo" MinWidth="240"
+                              SelectionChanged="NoColorOverride_SelectionChanged">
+                        <ComboBoxItem Content="Re-enable colors and notify" Tag="notify" />
+                        <ComboBoxItem Content="Re-enable colors silently" Tag="strip" />
+                        <ComboBoxItem Content="Keep NO_COLOR (colors off)" Tag="keep" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
+
             <ctrl:SettingsGroup Header="Power Saving"
                                 Description="Reduce GPU and compositor work when Windows is in a power-saving state.">
                 <ctrl:SettingsCard Header="Power saving mode"
