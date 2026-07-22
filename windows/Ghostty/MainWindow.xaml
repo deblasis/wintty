@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:cmdpalette="using:Ghostty.Controls.CommandPalette"
+    xmlns:notifications="using:Ghostty.Controls.Notifications"
     xmlns:tabs="using:Ghostty.Tabs"
     Title="Wintty">
 
@@ -147,6 +148,18 @@
                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                   Visibility="Collapsed"
                   ToolTipService.ToolTip="Power saving mode active."/>
+
+        <!--
+            Generic in-window notice surface. Bottom-anchored in the terminal
+            content area (Row 1, Col 1 — clear of both tab strips and the OS
+            caption buttons), overlaying only the terminal so it never covers
+            chrome. Renders one InfoBar per active Notice (NO_COLOR is its first
+            customer). Attached to App.NotificationService in code-behind.
+        -->
+        <notifications:NotificationHost x:Name="NotificationHost"
+                                        Grid.Row="1" Grid.Column="1"
+                                        VerticalAlignment="Bottom"
+                                        HorizontalAlignment="Stretch"/>
 
         <!--
             Quake pin toggle. Always-visible top-right toggle shown only
