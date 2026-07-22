@@ -516,8 +516,6 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         // These default to false because they're rarely available as
         // system packages so we usually want to statically link them.
         for (&[_][]const u8{
-            "glslang",
-            "spirv-cross",
             "simdutf",
         }) |dep| {
             _ = b.systemIntegrationOption(dep, .{ .default = false });
