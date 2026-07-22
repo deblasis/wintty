@@ -69,7 +69,7 @@
 > **Build infrastructure** (17 PRs merged upstream)
 >
 > - [x] `zig build test` passing on Windows (2604 tests, 53 skipped)
-> - [x] All shared dependencies building (FreeType, HarfBuzz, zlib, oniguruma, glslang, etc.)
+> - [x] All shared dependencies building (FreeType, HarfBuzz, zlib, oniguruma, zioshade, etc.)
 > - [x] `zig build test-lib-vt` passing on all platforms
 > - [x] Windows CI running without `continue-on-error`
 > - [x] Backslash path handling in config parsing

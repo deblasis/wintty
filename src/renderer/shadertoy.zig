@@ -2,8 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const glslang = @import("glslang");
-const spvcross = @import("spirv_cross");
+const zioshade = @import("zioshade");
 const configpkg = @import("../config.zig");
 const compat_file = @import("../lib/compat/file.zig");
 const global = @import("../global.zig");
@@ -75,9 +74,14 @@ pub fn loadFromFiles(
     return try list.toOwnedSlice(alloc_gpa);
 }
 
-/// Load a single shader from a file and convert it to the target language.
-/// On Windows, runs the compilation on a fresh OS thread to avoid C++
-/// runtime thread-local state issues when called from .NET threads.
+/// Load a single shader from a file and convert it to the target language
+/// using zioshade (pure-Zig GLSL -> SPIR-V -> HLSL/MSL/GLSL compiler).
+///
+/// On Windows the compile runs on a dedicated large-stack OS thread. The
+/// renderer is driven from a .NET/WinUI thread whose default stack is only
+/// ~1 MiB, and zioshade's front-end and SPIR-V passes recurse deeply enough
+/// on real shaders to overflow it. Compiling on our own thread gives the
+/// recursion the headroom it needs.
 pub fn loadFromFile(
     alloc_gpa: Allocator,
     path: []const u8,
@@ -105,7 +109,7 @@ pub fn loadFromFile(
             .{ .stack_size = 8 * 1024 * 1024 },
             Ctx.run,
             .{&ctx},
-        ) catch return error.OutOfMemory;
+        ) catch |err| return err;
         thread.join();
 
         return ctx.result;
@@ -144,41 +148,51 @@ fn compileShader(
         try stream.writer.writeByte(0);
         break :glsl stream.written()[0 .. stream.written().len - 1 :0];
     };
-    // On Windows, use the MSVC-compiled shader_wrapper.dll for the full
-    // GLSL -> SPIR-V -> HLSL pipeline to avoid C++ ABI issues.
-    if (builtin.os.tag == .windows and target == .hlsl) {
-        return glslang.wrapper.compileToHlsl(alloc_gpa, glsl) catch |err| {
-            log.warn("wrapper compile failed path={s} err={}", .{ path, err });
-            return err;
-        };
-    }
 
-    // Convert to SPIR-V (non-Windows or non-HLSL path)
-    const spirv: []const u8 = spirv: {
-        var stream: std.Io.Writer.Allocating = .init(alloc);
-        var errlog: SpirvLog = .{ .alloc = alloc };
-        defer errlog.deinit();
-        spirvFromGlsl(&stream.writer, &errlog, glsl) catch |err| {
-            if (errlog.info.len > 0 or errlog.debug.len > 0) {
-                log.warn("spirv error path={s} info={s} debug={s}", .{
-                    path,
-                    errlog.info,
-                    errlog.debug,
-                });
-            }
-            return err;
-        };
-        var list: std.ArrayListAligned(u8, .of(u32)) = .empty;
-        try list.appendSlice(alloc, stream.written());
-        break :spirv list.items;
-    };
-
-    // Convert to target format
+    // All targets go through zioshade's one-shot compilers. The HLSL path
+    // applies binding_shift -1 so the Globals cbuffer lands in register(b0)
+    // with its channel texture/sampler in t0/s0; the MSL path emits fragment
+    // entry main0 with the uniform buffer at [[buffer(1)]]; the GLSL path
+    // emits #version 430. These are the contracts the renderers depend on.
     return switch (target) {
-        .glsl => try glslFromSpv(alloc_gpa, spirv),
-        .msl => try mslFromSpv(alloc_gpa, spirv),
-        .hlsl => try hlslFromSpv(alloc_gpa, spirv),
+        .hlsl => zioshade.compileGlslToHlsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("zioshade HLSL compile failed path={s} err={}", .{ path, err });
+            logCompileDiagnostics(alloc, glsl, path);
+            return err;
+        },
+        .msl => zioshade.compileGlslToMsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("zioshade MSL compile failed path={s} err={}", .{ path, err });
+            logCompileDiagnostics(alloc, glsl, path);
+            return err;
+        },
+        .glsl => zioshade.compileGlslToGlsl(alloc_gpa, glsl, .fragment) catch |err| {
+            log.warn("zioshade GLSL compile failed path={s} err={}", .{ path, err });
+            logCompileDiagnostics(alloc, glsl, path);
+            return err;
+        },
     };
+}
+
+/// Re-run the GLSL front-end with structured diagnostics so a failed
+/// compile logs line/column details instead of only an error name. Backend
+/// (SPIR-V to target) failures produce no front-end diagnostics, in which
+/// case this logs nothing extra. `alloc` is expected to be an arena; the
+/// diagnostic messages are freed with it.
+fn logCompileDiagnostics(alloc: Allocator, glsl: [:0]const u8, path: []const u8) void {
+    var diags: std.ArrayListUnmanaged(zioshade.diagnostic.Diagnostic) = .empty;
+    _ = zioshade.compileToSPIRVWithDiagnostics(alloc, glsl, .{
+        .stage = .fragment,
+        .version = 430,
+    }, &diags) catch {};
+    for (diags.items) |d| {
+        log.warn("shader {s} path={s} line={d} column={d}: {s}", .{
+            @tagName(d.kind),
+            path,
+            d.line,
+            d.column,
+            d.message,
+        });
+    }
 }
 
 /// Convert a ShaderToy shader into valid GLSL.
@@ -194,223 +208,6 @@ pub fn glslFromShader(writer: *std.Io.Writer, src: []const u8) !void {
     try writer.writeAll(src);
 }
 
-/// Convert a GLSL shader into SPIR-V assembly.
-pub fn spirvFromGlsl(
-    writer: *std.Io.Writer,
-    errlog: ?*SpirvLog,
-    src: [:0]const u8,
-) !void {
-    // So we can run unit tests without fear.
-    if (builtin.is_test) try glslang.testing.ensureInit();
-
-    const c = glslang.c;
-    const resource = c.glslang_default_resource();
-    const input: c.glslang_input_t = .{
-        .language = c.GLSLANG_SOURCE_GLSL,
-        .stage = c.GLSLANG_STAGE_FRAGMENT,
-        .client = c.GLSLANG_CLIENT_VULKAN,
-        .client_version = c.GLSLANG_TARGET_VULKAN_1_2,
-        .target_language = c.GLSLANG_TARGET_SPV,
-        .target_language_version = c.GLSLANG_TARGET_SPV_1_5,
-        .code = src.ptr,
-        .default_version = 100,
-        .default_profile = c.GLSLANG_NO_PROFILE,
-        .force_default_version_and_profile = 0,
-        .forward_compatible = 0,
-        .messages = c.GLSLANG_MSG_DEFAULT_BIT,
-        .resource = resource,
-        .callbacks = .{
-            .include_system = null,
-            .include_local = null,
-            .free_include_result = null,
-        },
-        .callbacks_ctx = null,
-    };
-
-    const shader = try glslang.Shader.create(&input);
-    defer shader.delete();
-
-    shader.preprocess(&input) catch |err| {
-        if (errlog) |ptr| ptr.fromShader(shader) catch {};
-        return err;
-    };
-    shader.parse(&input) catch |err| {
-        if (errlog) |ptr| ptr.fromShader(shader) catch {};
-        return err;
-    };
-
-    const program = try glslang.Program.create();
-    defer program.delete();
-    program.addShader(shader);
-    program.link(
-        c.GLSLANG_MSG_SPV_RULES_BIT |
-            c.GLSLANG_MSG_VULKAN_RULES_BIT,
-    ) catch |err| {
-        if (errlog) |ptr| ptr.fromProgram(program) catch {};
-        return err;
-    };
-    program.spirvGenerate(c.GLSLANG_STAGE_FRAGMENT);
-    const size = program.spirvGetSize();
-    const ptr = try program.spirvGetPtr();
-    const ptr_u8: [*]u8 = @ptrCast(ptr);
-    const slice_u8: []u8 = ptr_u8[0 .. size * 4];
-    try writer.writeAll(slice_u8);
-}
-
-/// Retrieve errors from spirv compilation.
-pub const SpirvLog = struct {
-    alloc: Allocator,
-    info: [:0]const u8 = "",
-    debug: [:0]const u8 = "",
-
-    pub fn deinit(self: *const SpirvLog) void {
-        if (self.info.len > 0) self.alloc.free(self.info);
-        if (self.debug.len > 0) self.alloc.free(self.debug);
-    }
-
-    fn fromShader(self: *SpirvLog, shader: *glslang.Shader) !void {
-        const info = try shader.getInfoLog();
-        const debug = try shader.getDebugInfoLog();
-        self.info = "";
-        self.debug = "";
-        if (info.len > 0) self.info = try self.alloc.dupeZ(u8, info);
-        if (debug.len > 0) self.debug = try self.alloc.dupeZ(u8, debug);
-    }
-
-    fn fromProgram(self: *SpirvLog, program: *glslang.Program) !void {
-        const info = try program.getInfoLog();
-        const debug = try program.getDebugInfoLog();
-        self.info = "";
-        self.debug = "";
-        if (info.len > 0) self.info = try self.alloc.dupeZ(u8, info);
-        if (debug.len > 0) self.debug = try self.alloc.dupeZ(u8, debug);
-    }
-};
-
-/// Convert SPIR-V binary to MSL.
-pub fn mslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
-    const c = spvcross.c;
-    return try spvCross(alloc, spvcross.c.SPVC_BACKEND_MSL, spv, (struct {
-        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
-            // We enable decoration binding, because we need this
-            // to properly locate the uniform block to index 1.
-            if (c.spvc_compiler_options_set_bool(
-                options,
-                c.SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING,
-                c.SPVC_TRUE,
-            ) != c.SPVC_SUCCESS) {
-                return error.SpvcFailed;
-            }
-        }
-    }).setOptions);
-}
-
-/// Convert SPIR-V binary to HLSL.
-pub fn hlslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
-    const c = spvcross.c;
-    return try spvCross(alloc, c.SPVC_BACKEND_HLSL, spv, (struct {
-        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
-            // Target Shader Model 6.0 for broad DX12 hardware support.
-            if (c.spvc_compiler_options_set_uint(
-                options,
-                c.SPVC_COMPILER_OPTION_HLSL_SHADER_MODEL,
-                60,
-            ) != c.SPVC_SUCCESS) {
-                return error.SpvcFailed;
-            }
-        }
-    }).setOptions);
-}
-
-/// Convert SPIR-V binary to GLSL.
-pub fn glslFromSpv(alloc: Allocator, spv: []const u8) ![:0]const u8 {
-    const GLSL_VERSION = 430;
-
-    const c = spvcross.c;
-    return try spvCross(alloc, c.SPVC_BACKEND_GLSL, spv, (struct {
-        fn setOptions(options: c.spvc_compiler_options) error{SpvcFailed}!void {
-            if (c.spvc_compiler_options_set_uint(
-                options,
-                c.SPVC_COMPILER_OPTION_GLSL_VERSION,
-                GLSL_VERSION,
-            ) != c.SPVC_SUCCESS) {
-                return error.SpvcFailed;
-            }
-        }
-    }).setOptions);
-}
-
-fn spvCross(
-    alloc: Allocator,
-    backend: spvcross.c.spvc_backend,
-    spv: []const u8,
-    comptime optionsFn_: ?*const fn (c: spvcross.c.spvc_compiler_options) error{SpvcFailed}!void,
-) ![:0]const u8 {
-    // Spir-V is always a multiple of 4 because it is written as a series of words
-    if (@mod(spv.len, 4) != 0) return error.SpirvInvalid;
-
-    // Compiler context
-    const c = spvcross.c;
-    var ctx: c.spvc_context = undefined;
-    if (c.spvc_context_create(&ctx) != c.SPVC_SUCCESS) return error.SpvcFailed;
-    defer c.spvc_context_destroy(ctx);
-
-    // It would be better to get this out into an output parameter to
-    // show users but for now we can just log it.
-    c.spvc_context_set_error_callback(ctx, @ptrCast(&(struct {
-        fn callback(_: ?*anyopaque, msg_ptr: [*c]const u8) callconv(.c) void {
-            const msg = std.mem.sliceTo(msg_ptr, 0);
-            std.log.warn("spirv-cross error message={s}", .{msg});
-        }
-    }).callback), null);
-
-    // Parse the Spir-V binary to an IR
-    var ir: c.spvc_parsed_ir = undefined;
-    if (c.spvc_context_parse_spirv(
-        ctx,
-        @ptrCast(@alignCast(spv.ptr)),
-        spv.len / 4,
-        &ir,
-    ) != c.SPVC_SUCCESS) {
-        return error.SpvcFailed;
-    }
-
-    // Build our compiler to GLSL
-    var compiler: c.spvc_compiler = undefined;
-    if (c.spvc_context_create_compiler(
-        ctx,
-        backend,
-        ir,
-        c.SPVC_CAPTURE_MODE_TAKE_OWNERSHIP,
-        &compiler,
-    ) != c.SPVC_SUCCESS) {
-        return error.SpvcFailed;
-    }
-
-    // Setup our options if we have any
-    if (optionsFn_) |optionsFn| {
-        var options: c.spvc_compiler_options = undefined;
-        if (c.spvc_compiler_create_compiler_options(compiler, &options) != c.SPVC_SUCCESS) {
-            return error.SpvcFailed;
-        }
-
-        try optionsFn(options);
-
-        if (c.spvc_compiler_install_compiler_options(compiler, options) != c.SPVC_SUCCESS) {
-            return error.SpvcFailed;
-        }
-    }
-
-    // Compile the resulting string. This string pointer is owned by the
-    // context so we don't need to free it.
-    var result: [*:0]const u8 = undefined;
-    if (c.spvc_compiler_compile(compiler, @ptrCast(&result)) != c.SPVC_SUCCESS) {
-        return error.SpvcFailed;
-    }
-
-    return try alloc.dupeZ(u8, std.mem.sliceTo(result, 0));
-}
-
 /// Convert ShaderToy shader to null-terminated glsl for testing.
 fn testGlslZ(alloc: Allocator, src: []const u8) ![:0]const u8 {
     var buf: std.Io.Writer.Allocating = .init(alloc);
@@ -419,94 +216,121 @@ fn testGlslZ(alloc: Allocator, src: []const u8) ![:0]const u8 {
     return try buf.toOwnedSliceSentinel(0);
 }
 
-test "spirv" {
+test "zioshade compiles CRT shader to HLSL" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     const src = try testGlslZ(alloc, test_crt);
     defer alloc.free(src);
 
-    var buf: [4096 * 4]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    try spirvFromGlsl(&writer, null, src);
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, src, .fragment);
+    defer alloc.free(hlsl);
+    try testing.expect(hlsl.len > 0);
+
+    // Golden invariants the DX12 renderer depends on: the Globals uniform
+    // block must land in register(b0) (binding_shift -1), the channel
+    // texture in t0 with its sampler in s0, and the pixel shader must
+    // return SV_Target.
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(b0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(t0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(s0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "SV_Target") != null);
 }
 
-test "spirv invalid" {
+test "zioshade compiles CRT shader to MSL" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_crt);
+    defer alloc.free(src);
+
+    const msl = try zioshade.compileGlslToMsl(alloc, src, .fragment);
+    defer alloc.free(msl);
+    try testing.expect(msl.len > 0);
+
+    // Golden invariants the Metal renderer depends on: fragment entry point
+    // main0 and the uniform buffer at [[buffer(1)]].
+    try testing.expect(std.mem.indexOf(u8, msl, "main0") != null);
+    try testing.expect(std.mem.indexOf(u8, msl, "[[buffer(1)]]") != null);
+}
+
+test "zioshade compiles CRT shader to GLSL" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_crt);
+    defer alloc.free(src);
+
+    const glsl = try zioshade.compileGlslToGlsl(alloc, src, .fragment);
+    defer alloc.free(glsl);
+    try testing.expect(glsl.len > 0);
+
+    // Golden invariant the OpenGL renderer depends on: modern GLSL output.
+    try testing.expect(std.mem.startsWith(u8, glsl, "#version 430"));
+}
+
+test "zioshade compiles focus shader to all targets" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const src = try testGlslZ(alloc, test_focus);
+    defer alloc.free(src);
+
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, src, .fragment);
+    defer alloc.free(hlsl);
+    try testing.expect(hlsl.len > 0);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(b0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "SV_Target") != null);
+
+    const msl = try zioshade.compileGlslToMsl(alloc, src, .fragment);
+    defer alloc.free(msl);
+    try testing.expect(msl.len > 0);
+    try testing.expect(std.mem.indexOf(u8, msl, "main0") != null);
+    try testing.expect(std.mem.indexOf(u8, msl, "[[buffer(1)]]") != null);
+
+    const glsl = try zioshade.compileGlslToGlsl(alloc, src, .fragment);
+    defer alloc.free(glsl);
+    try testing.expect(glsl.len > 0);
+    try testing.expect(std.mem.startsWith(u8, glsl, "#version 430"));
+}
+
+test "zioshade loadFromFile compiles a real shader file from disk to HLSL" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Exercise the exact runtime entry point the renderer calls (including
+    // the Windows large-stack worker thread): write a shader to disk, then
+    // read it back, prepend the shadertoy prefix, and compile to the DX12
+    // target through zioshade. Uses a temp dir so we don't depend on cwd.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "shader.glsl", .data = test_crt });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("shader.glsl", &path_buf);
+
+    const hlsl = try loadFromFile(alloc, path, .hlsl);
+    defer alloc.free(hlsl);
+
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(b0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(t0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "register(s0)") != null);
+    try testing.expect(std.mem.indexOf(u8, hlsl, "SV_Target") != null);
+}
+
+test "zioshade rejects invalid shader" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     const src = try testGlslZ(alloc, test_invalid);
     defer alloc.free(src);
 
-    var buf: [4096 * 4]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-
-    var errlog: SpirvLog = .{ .alloc = alloc };
-    defer errlog.deinit();
-    try testing.expectError(error.GlslangFailed, spirvFromGlsl(&writer, &errlog, src));
-    try testing.expect(errlog.info.len > 0);
-}
-
-test "shadertoy to msl" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    const src = try testGlslZ(alloc, test_crt);
-    defer alloc.free(src);
-
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try spirvFromGlsl(&buf.writer, null, src);
-
-    // TODO: Replace this with an aligned version of Writer.Allocating
-    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
-    defer spvlist.deinit(alloc);
-    try spvlist.appendSlice(alloc, buf.written());
-
-    const msl = try mslFromSpv(alloc, spvlist.items);
-    defer alloc.free(msl);
-}
-
-test "shadertoy to glsl" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    const src = try testGlslZ(alloc, test_crt);
-    defer alloc.free(src);
-
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try spirvFromGlsl(&buf.writer, null, src);
-
-    // TODO: Replace this with an aligned version of Writer.Allocating
-    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
-    defer spvlist.deinit(alloc);
-    try spvlist.appendSlice(alloc, buf.written());
-
-    const glsl = try glslFromSpv(alloc, spvlist.items);
-    defer alloc.free(glsl);
-
-    // log.warn("glsl={s}", .{glsl});
-}
-
-test "shadertoy to hlsl" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    const src = try testGlslZ(alloc, test_crt);
-    defer alloc.free(src);
-
-    var buf: std.Io.Writer.Allocating = .init(alloc);
-    defer buf.deinit();
-    try spirvFromGlsl(&buf.writer, null, src);
-
-    // TODO: Replace this with an aligned version of Writer.Allocating
-    var spvlist: std.ArrayListAligned(u8, .of(u32)) = .empty;
-    defer spvlist.deinit(alloc);
-    try spvlist.appendSlice(alloc, buf.written());
-
-    const hlsl = try hlslFromSpv(alloc, spvlist.items);
-    defer alloc.free(hlsl);
+    // zioshade's error taxonomy is not stable pre-1.0, so assert only that
+    // the invalid shader is rejected rather than matching a specific error.
+    if (zioshade.compileGlslToHlsl(alloc, src, .fragment)) |hlsl| {
+        alloc.free(hlsl);
+        return error.TestUnexpectedResult;
+    } else |_| {}
 }
 
 const test_crt = @embedFile("shaders/test_shadertoy_crt.glsl");

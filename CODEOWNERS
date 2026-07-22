@@ -142,9 +142,7 @@
 # Renderer
 /src/renderer.zig @ghostty-org/renderer
 /src/renderer/ @ghostty-org/renderer
-/pkg/glslang/ @ghostty-org/renderer
 /pkg/opengl/ @ghostty-org/renderer
-/pkg/spirv-cross/ @ghostty-org/renderer
 /pkg/wuffs/ @ghostty-org/renderer
 
 # Shell

@@ -20,9 +20,6 @@
   pkgs.simdutf
   pkgs.zlib
 
-  pkgs.glslang
-  pkgs.spirv-cross
-
   pkgs.libxkbcommon
 
   pkgs.glib
