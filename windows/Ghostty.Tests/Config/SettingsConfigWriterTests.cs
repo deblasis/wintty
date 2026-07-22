@@ -134,6 +134,7 @@ public class SettingsConfigWriterTests
         public bool WindowsHighContrast => false;
         public void SetHighContrastOverride(string? body) { }
         public string CommandPaletteBackground => "acrylic";
+        public string NoColorOverride => "notify";
         public string LogLevel => "info";
         public string LogFilter => string.Empty;
         public string WindowTheme => "auto";

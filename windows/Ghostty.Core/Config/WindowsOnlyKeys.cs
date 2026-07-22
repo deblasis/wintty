@@ -53,6 +53,8 @@ public static class WindowsOnlyKeys
             "Id of the profile opened for a new tab or window when none is specified."),
         new("profile-order",
             "Comma-separated list of profile ids defining the order shown in the tab picker and command palette."),
+        new("no-color-override",
+            "How Wintty reacts to a NO_COLOR value inherited from the environment: notify (default -- honor NO_COLOR but show a one-time notice offering to enable color), strip (enable color by removing NO_COLOR from spawned shells), or keep (honor NO_COLOR silently)."),
         new("windows-single-instance",
             "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process."),
         new("windows-high-contrast",
