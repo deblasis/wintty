@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    NotificationHost: the app's generic in-window notice surface. Renders one
+    InfoBar per active Notice from INotificationService, stacked at the BOTTOM
+    of the terminal content area so banners never fight the tab strip, the
+    prompt, or the OS caption buttons (mirrors macOS Ghostty's bottom-anchored
+    UpdateOverlay).
+
+    The inner StackPanel is bottom-aligned and only as tall as its content, so
+    when there are no notices it occupies nothing and passes all pointer events
+    through to the terminal underneath. MainWindow calls Attach() once to bind
+    the shared service.
+-->
+<UserControl
+    x:Class="Ghostty.Controls.Notifications.NotificationHost"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel x:Name="Stack"
+                Orientation="Vertical"
+                Spacing="4"
+                VerticalAlignment="Bottom"
+                HorizontalAlignment="Stretch"
+                Margin="8,0,8,8"/>
+</UserControl>

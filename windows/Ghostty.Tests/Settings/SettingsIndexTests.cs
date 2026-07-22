@@ -20,6 +20,7 @@ public class SettingsIndexTests
         "font-family",
         "font-size",
         "background-opacity",
+        "no-color-override",
         "custom-shader",
         "background-style",
         "background-blur-follows-opacity",

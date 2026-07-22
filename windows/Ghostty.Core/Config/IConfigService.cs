@@ -73,6 +73,15 @@ public interface IConfigService : IDisposable
     string CommandPaletteBackground { get; }
 
     /// <summary>
+    /// Windows-only: how Wintty reacts to a <c>NO_COLOR</c> value inherited
+    /// from the launching environment. One of "notify" (default — honor
+    /// NO_COLOR but show a one-time notice offering to enable color), "strip"
+    /// (enable color by removing NO_COLOR from spawned shells), or "keep"
+    /// (honor NO_COLOR silently). Backed by the "no-color-override" key.
+    /// </summary>
+    string NoColorOverride { get; }
+
+    /// <summary>
     /// Minimum log level for the Windows shell's diagnostic logger,
     /// read from the <c>log-level</c> config key. One of
     /// <c>trace</c>, <c>debug</c>, <c>info</c>, <c>warn</c>, <c>error</c>,

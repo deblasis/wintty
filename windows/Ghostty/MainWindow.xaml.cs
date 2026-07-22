@@ -552,6 +552,13 @@ public sealed partial class MainWindow : Window
         ApplyRootGridBackground();
         RefreshPowerSaverIcon();
 
+        // Bind the generic notice surface to the app-wide queue. Renders any
+        // notice already raised at startup (e.g. the NO_COLOR notice). The quake
+        // window shares the queue too; a transient notice showing there is
+        // harmless and it stays hidden until summoned.
+        if (Ghostty.App.NotificationService is { } notifications)
+            NotificationHost.Attach(notifications);
+
         // Parent every existing and future PaneHost into the shared
         // container declared in MainWindow.xaml. This is the single
         // owner for PaneHost lifetime in the visual tree — both tab

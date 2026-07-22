@@ -22,6 +22,7 @@ public class WindowsOnlyKeysTests
     [InlineData("power-saver-mode")]
     [InlineData("default-profile")]
     [InlineData("profile-order")]
+    [InlineData("no-color-override")]
     public void Contains_KnownKey(string key)
     {
         Assert.True(WindowsOnlyKeys.Contains(key));
