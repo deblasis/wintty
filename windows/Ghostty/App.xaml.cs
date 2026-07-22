@@ -32,6 +32,7 @@ public partial class App : Application
     private Ghostty.Accessibility.HighContrastMonitor? _highContrastMonitor;
     private ConfigFileEditor? _configEditor;
     private ConfigWriteScheduler? _configWriteScheduler;
+    private Ghostty.Core.Notifications.NotificationService? _notificationService;
     private WindowsPowerStateMonitor? _powerStateMonitor;
     private Ghostty.Core.Profiles.DiscoveryService? _discoveryService;
     private Ghostty.Core.Profiles.ProfileRegistry? _profileRegistry;
@@ -168,6 +169,13 @@ public partial class App : Application
     /// shuts.
     /// </summary>
     internal static IConfigFileEditor? ConfigFileEditor { get; private set; }
+
+    /// <summary>
+    /// App-wide queue of transient in-window notices. Each window's
+    /// NotificationHost binds to it; features raise notices through it without
+    /// touching XAML.
+    /// </summary>
+    internal static Ghostty.Core.Notifications.INotificationService? NotificationService { get; private set; }
 
     internal static HostLifetimeSupervisor? LifetimeSupervisor { get; private set; }
 
@@ -464,6 +472,56 @@ public partial class App : Application
         // the factory exists, and cannot receive a logger through its ctor) and for call
         // sites inside static scopes.
         Ghostty.Logging.StaticLoggers.Initialize(factory);
+
+        // App-wide notice queue. Constructed before the NO_COLOR check (its
+        // first customer) and before any window, so a startup notice is already
+        // in the collection when the first NotificationHost binds.
+        _notificationService = new Ghostty.Core.Notifications.NotificationService();
+        NotificationService = _notificationService;
+
+        // NO_COLOR handling. NO_COLOR (https://no-color.org) is a user-facing
+        // convention telling color-aware programs to disable ANSI color; a
+        // terminal normally passes it through untouched. PowerShell 7.2+ obeys
+        // it by flipping $PSStyle.OutputRendering to PlainText, which drops
+        // color from everything it renders -- including a powerline prompt's
+        // background segments. We HONOR it by default (per the standard), but in
+        // the default "notify" mode we surface a one-time notice explaining the
+        // monochrome output and offering to enable color -- which strips
+        // NO_COLOR from this process's environment so tabs opened afterward
+        // inherit a color-capable env (libghostty snapshots it per surface via
+        // getEnvMap). "strip" enables color unconditionally at launch; "keep"
+        // honors NO_COLOR silently.
+        {
+            var noColorLog = factory.CreateLogger("Ghostty.NoColor");
+
+            void RemoveNoColorFromEnv()
+            {
+                Environment.SetEnvironmentVariable("NO_COLOR", null);
+                noColorLog.LogInformation(
+                    "Removed NO_COLOR from the environment so terminal colors work.");
+            }
+
+            // Persist a resolved preference so the notice does not recur. Logs
+            // rather than silently dropping it if the scheduler is unavailable
+            // (it is constructed just below and torn down only at shutdown, so
+            // this is defensive).
+            void PersistNoColorMode(string mode)
+            {
+                if (ConfigWriteScheduler is { } scheduler)
+                    scheduler.Schedule("no-color-override", mode);
+                else
+                    noColorLog.LogWarning(
+                        "Could not persist no-color-override={Mode}: config write scheduler unavailable.",
+                        mode);
+            }
+
+            var noColorNotice = Ghostty.Core.Env.NoColorStartup.Resolve(
+                present: Environment.GetEnvironmentVariable("NO_COLOR") is not null,
+                overrideMode: _configService.NoColorOverride,
+                removeFromEnv: RemoveNoColorFromEnv,
+                persistMode: PersistNoColorMode);
+            if (noColorNotice is not null) _notificationService.Show(noColorNotice);
+        }
 
         // Single-instance gate. Decided here -- after ConfigService gives us
         // the value and the logger factory exists (so failures are visible
@@ -1297,6 +1355,8 @@ public partial class App : Application
                 _discoveryService = null;
                 _configWriteScheduler = null;
                 ConfigWriteScheduler = null;
+                _notificationService = null;
+                NotificationService = null;
                 _configEditor = null;
                 ConfigFileEditor = null;
                 _bootstrapHost = null;

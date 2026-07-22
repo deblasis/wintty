@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Ghostty.Core.Config;
+using Ghostty.Core.Env;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -60,6 +61,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     public bool WindowsSingleInstance { get; private set; }
     public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
+    public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
 
     // The High Contrast override config body to layer on top of the user's
     // config, or null when HC is inactive/opted-out. Set by
@@ -610,6 +612,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             GetFileValue("command-palette-background", ""),
             allowed: CommandPaletteBackgroundAllowed,
             defaultValue: "acrylic");
+        NoColorOverride = WindowsOnlyKeyParsers.ParseStringAllowed(
+            GetFileValue("no-color-override", ""),
+            allowed: NoColorPolicy.Allowed,
+            defaultValue: NoColorPolicy.Default);
         // Windows-only logger keys. Parsing into LogLevel/filter rules
         // happens in LoggingBootstrap; here we just surface the raw
         // strings so reloads can re-read them without parser knowledge.
