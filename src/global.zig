@@ -4,7 +4,6 @@ const build_config = @import("build_config.zig");
 const cli = @import("cli.zig");
 const internal_os = @import("os/main.zig");
 const fontconfig = @import("fontconfig");
-const glslang = @import("glslang");
 const harfbuzz = @import("harfbuzz");
 const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
@@ -163,8 +162,9 @@ pub const GlobalState = struct {
         // affects a lot of behaviors in a shell.
         try internal_os.ensureLocale(self.alloc);
 
-        // Initialize glslang for shader compilation
-        try glslang.init();
+        // Shader compilation uses zioshade, a pure-Zig cross compiler that
+        // needs no global initialization (unlike the former glslang C++
+        // library, which required glslang.init() here).
 
         // Initialize oniguruma for regex
         try oni.init(&.{oni.Encoding.utf8});

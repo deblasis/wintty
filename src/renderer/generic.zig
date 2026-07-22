@@ -488,7 +488,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             /// Shadertoy uses a sampler for accessing the various channel
             /// textures. In Metal, we need to explicitly create these since
-            /// the glslang-to-msl compiler doesn't do it for us (as we
+            /// the GLSL-to-MSL compiler doesn't do it for us (as we
             /// normally would in hand-written MSL). To keep it clean and
             /// consistent, we just force all rendering APIs to provide an
             /// explicit sampler.

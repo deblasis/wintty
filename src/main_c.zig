@@ -229,7 +229,7 @@ pub export fn ghostty_string_free(str: String) void {
 // On Windows, Zig's _DllMainCRTStartup does not initialize the MSVC C
 // runtime when targeting MSVC ABI. Without initialization, any C library
 // function that depends on CRT internal state (setlocale, malloc from C
-// dependencies, C++ constructors in glslang) crashes with null pointer
+// dependencies, C++ constructors in linked C++ libraries) crashes with null pointer
 // dereferences. Declaring DllMain causes Zig's start.zig to call it
 // during DLL_PROCESS_ATTACH/DETACH, and for MSVC we forward to the CRT
 // bootstrap functions from libvcruntime and libucrt (already linked).

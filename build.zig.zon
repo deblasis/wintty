@@ -79,9 +79,14 @@
         .wuffs = .{ .path = "./pkg/wuffs", .lazy = true },
         .zlib = .{ .path = "./pkg/zlib", .lazy = true },
 
-        // Shader translation
-        .glslang = .{ .path = "./pkg/glslang", .lazy = true },
-        .spirv_cross = .{ .path = "./pkg/spirv-cross", .lazy = true },
+        // Shader translation: zioshade is a pure-Zig GLSL -> SPIR-V ->
+        // HLSL/MSL/GLSL cross compiler. It replaces the glslang and
+        // spirv-cross C++ packages, so custom shader compilation is
+        // in-process with no C++ dependencies.
+        .zioshade = .{
+            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.3.0.tar.gz",
+            .hash = "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ",
+        },
 
         // Wayland
         .wayland = .{

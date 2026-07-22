@@ -24,11 +24,6 @@
     "url": "https://deps.files.ghostty.org/gettext-0.24.tar.gz",
     "hash": "sha256-yRhQPVk9cNr0hE0XWhPYFq+stmfAb7oeydzVACwVGLc="
   },
-  "N-V-__8AABzkUgISeKGgXAzgtutgJsZc0-kkeqBBscJgMkvy": {
-    "name": "glslang",
-    "url": "https://deps.files.ghostty.org/glslang-12201278a1a05c0ce0b6eb6026c65cd3e9247aa041b1c260324bf29cee559dd23ba1.tar.gz",
-    "hash": "sha256-FKLtu1Ccs+UamlPj9eQ12/WXFgS0uDPmPmB26MCpl7U="
-  },
   "gobject-0.3.0-Skun7ANLnwDvEfIpVmohcppXgOvg_I6YOJFmPIsKfXk-": {
     "name": "gobject",
     "url": "https://deps.files.ghostty.org/gobject-2025-11-08-23-1.tar.zst",
@@ -104,11 +99,6 @@
     "url": "https://deps.files.ghostty.org/sentry-1220446be831adcca918167647c06c7b825849fa3fba5f22da394667974537a9c77e.tar.gz",
     "hash": "sha256-KsZJfMjWGo0xCT5HrduMmyxFsWsHBbszSoNbZCPDGN8="
   },
-  "N-V-__8AANb6pwD7O1WG6L5nvD_rNMvnSc9Cpg1ijSlTYywv": {
-    "name": "spirv_cross",
-    "url": "https://deps.files.ghostty.org/spirv_cross-1220fb3b5586e8be67bc3feb34cbe749cf42a60d628d2953632c2f8141302748c8da.tar.gz",
-    "hash": "sha256-tStvz8Ref6abHwahNiwVVHNETizAmZVVaxVsU7pmV+M="
-  },
   "uucode-0.1.0-ZZjBPj96QADXyt5sqwBJUnhaDYs_qBeeKijZvlRa0eqM": {
     "name": "uucode",
     "url": "git+https://github.com/jacobsandlund/uucode#5f05f8f83a75caea201f12cc8ea32a2d82ea9732",
@@ -173,6 +163,11 @@
     "name": "zigimg",
     "url": "https://github.com/ivanstepanovftw/zigimg/archive/d7b7ab0ba0899643831ef042bd73289510b39906.tar.gz",
     "hash": "sha256-vkcTloGX+vRw7e6GYJLO9eocYaEOYjXYE0dT7jscZ4A="
+  },
+  "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ": {
+    "name": "zioshade",
+    "url": "https://github.com/zioShade/zioshade/archive/refs/tags/v0.3.0.tar.gz",
+    "hash": "sha256-QgPZELB4NeeAOAMpffbXI2G6hXlc91tL9+tQ7z3sWWA="
   },
   "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o": {
     "name": "zlib",
