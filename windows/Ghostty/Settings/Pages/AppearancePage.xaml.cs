@@ -58,6 +58,9 @@ internal sealed partial class AppearancePage : Page
             if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
             SelectComboByTag(PowerSaverModeCombo, powerMode.Trim().ToLowerInvariant());
 
+            // NoColorOverride is already normalized to one of notify/strip/keep.
+            SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
+
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
             if (cs.IsConfiguredInFile("background-tint-color"))
             {
@@ -249,6 +252,12 @@ internal sealed partial class AppearancePage : Page
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
             OnValueChanged("background-style", item.Tag?.ToString() ?? "frosted");
+    }
+
+    private void NoColorOverride_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { SelectedItem: ComboBoxItem item })
+            OnValueChanged("no-color-override", item.Tag?.ToString() ?? "notify");
     }
 
     private void PowerSaverMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
