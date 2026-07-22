@@ -86,6 +86,7 @@
         .zioshade = .{
             .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.3.0.tar.gz",
             .hash = "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ",
+            .lazy = true,
         },
 
         // Wayland

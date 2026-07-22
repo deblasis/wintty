@@ -384,11 +384,10 @@ pub fn add(
     // zioshade: pure-Zig GLSL -> SPIR-V -> HLSL/MSL/GLSL cross compiler.
     // Replaces the glslang and spirv-cross C++ packages, so there is no C++
     // to link and no artifact to add to static_libs.
-    {
-        const zioshade_dep = b.dependency("zioshade", .{
-            .target = target,
-            .optimize = optimize,
-        });
+    if (b.lazyDependency("zioshade", .{
+        .target = target,
+        .optimize = optimize,
+    })) |zioshade_dep| {
         step.root_module.addImport("zioshade", zioshade_dep.module("zioshade"));
     }
 

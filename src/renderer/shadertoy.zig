@@ -107,7 +107,7 @@ pub fn loadFromFile(
             .{ .stack_size = 8 * 1024 * 1024 },
             Ctx.run,
             .{&ctx},
-        ) catch return error.OutOfMemory;
+        ) catch |err| return err;
         thread.join();
 
         return ctx.result;
@@ -296,14 +296,18 @@ test "zioshade loadFromFile compiles a real shader file from disk to HLSL" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    // Exercise the exact runtime entry point the renderer calls: read the
-    // .glsl off disk, prepend the shadertoy prefix, and compile to the DX12
-    // target through zioshade. The test binary's cwd is the project root.
-    const hlsl = try loadFromFile(
-        alloc,
-        "src/renderer/shaders/test_shadertoy_crt.glsl",
-        .hlsl,
-    );
+    // Exercise the exact runtime entry point the renderer calls (including
+    // the Windows large-stack worker thread): write a shader to disk, then
+    // read it back, prepend the shadertoy prefix, and compile to the DX12
+    // target through zioshade. Uses a temp dir so we don't depend on cwd.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "shader.glsl", .data = test_crt });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("shader.glsl", &path_buf);
+
+    const hlsl = try loadFromFile(alloc, path, .hlsl);
     defer alloc.free(hlsl);
 
     try testing.expect(std.mem.indexOf(u8, hlsl, "register(b0)") != null);
