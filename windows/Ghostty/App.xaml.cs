@@ -479,58 +479,71 @@ public partial class App : Application
         _notificationService = new Ghostty.Core.Notifications.NotificationService();
         NotificationService = _notificationService;
 
-        // NO_COLOR handling. NO_COLOR (https://no-color.org) makes color-aware
-        // programs drop ANSI color; PowerShell 7.2+ honors it by flipping
-        // $PSStyle.OutputRendering to PlainText, which strips color from
-        // everything it renders -- including a powerline prompt's background
-        // segments. When it was inherited unintentionally that reads as
-        // "colors are broken". Per the no-color-override key we remove it from
-        // this process's environment BEFORE any surface is created, so the
-        // child shell libghostty spawns via getEnvMap never inherits it; in the
-        // default "notify" mode we raise a one-time notice. "keep" leaves
-        // NO_COLOR untouched.
+        // NO_COLOR handling. NO_COLOR (https://no-color.org) is a user-facing
+        // convention telling color-aware programs to disable ANSI color; a
+        // terminal normally passes it through untouched. PowerShell 7.2+ obeys
+        // it by flipping $PSStyle.OutputRendering to PlainText, which drops
+        // color from everything it renders -- including a powerline prompt's
+        // background segments. We HONOR it by default (per the standard), but in
+        // the default "notify" mode we surface a one-time notice explaining the
+        // monochrome output and offering to enable color -- which strips
+        // NO_COLOR from this process's environment so tabs opened afterward
+        // inherit a color-capable env (libghostty snapshots it per surface via
+        // getEnvMap). "strip" enables color unconditionally at launch; "keep"
+        // honors NO_COLOR silently.
         {
+            var noColorLog = factory.CreateLogger("Ghostty.NoColor");
             var noColorPresent = Environment.GetEnvironmentVariable("NO_COLOR") is not null;
             var noColorOutcome = Ghostty.Core.Env.NoColorPolicy.Decide(
                 noColorPresent, _configService.NoColorOverride);
+
+            // Persist a resolved preference so the notice does not recur. Logs
+            // rather than silently dropping it if the scheduler is unavailable
+            // (it is constructed just below and torn down only at shutdown, so
+            // this is defensive).
+            void PersistNoColorMode(string mode)
+            {
+                if (ConfigWriteScheduler is { } scheduler)
+                    scheduler.Schedule("no-color-override", mode);
+                else
+                    noColorLog.LogWarning(
+                        "Could not persist no-color-override={Mode}: config write scheduler unavailable.",
+                        mode);
+            }
+
             if (noColorOutcome.Strip)
             {
                 Environment.SetEnvironmentVariable("NO_COLOR", null);
-                factory.CreateLogger("Ghostty.NoColor").LogInformation(
-                    "Removed NO_COLOR from the environment (no-color-override={Mode}) so terminal colors work.",
-                    _configService.NoColorOverride);
+                noColorLog.LogInformation(
+                    "Removed NO_COLOR from the environment (no-color-override=strip) so terminal colors work.");
             }
             if (noColorOutcome.Notify)
             {
                 _notificationService.Show(new Ghostty.Core.Notifications.Notice
                 {
-                    Title = "Colors re-enabled",
-                    Message = "NO_COLOR was set in your environment, which turns off "
-                        + "colored output. Wintty removed it for shells launched here so "
-                        + "prompts and programs render in color.",
+                    Title = "NO_COLOR is set",
+                    Message = "NO_COLOR is set in your environment, so programs are rendering "
+                        + "without color (the no-color.org standard). Wintty honors it by "
+                        + "default; enabling color applies to tabs you open next.",
                     Severity = Ghostty.Core.Notifications.NoticeSeverity.Informational,
                     DedupKey = "no-color",
                     Actions = new[]
                     {
+                        // Enable color for subsequently-opened tabs: drop NO_COLOR
+                        // from this process's env (new surfaces re-snapshot it) and
+                        // remember the choice.
                         new Ghostty.Core.Notifications.NoticeAction(
-                            "Don't show again",
+                            "Enable color",
                             () =>
                             {
-                                // Scheduler is constructed later in OnLaunched and
-                                // torn down at shutdown; it exists at any realistic
-                                // click time. Log rather than silently drop the
-                                // preference if it's somehow gone.
-                                var scheduler = ConfigWriteScheduler;
-                                if (scheduler is null)
-                                {
-                                    factory.CreateLogger("Ghostty.NoColor").LogWarning(
-                                        "Could not persist no-color-override=strip: "
-                                        + "config write scheduler unavailable.");
-                                    return;
-                                }
-                                scheduler.Schedule(
-                                    "no-color-override", Ghostty.Core.Env.NoColorPolicy.Strip);
-                            }),
+                                Environment.SetEnvironmentVariable("NO_COLOR", null);
+                                PersistNoColorMode(Ghostty.Core.Env.NoColorPolicy.Strip);
+                            },
+                            IsPrimary: true),
+                        // Honor NO_COLOR going forward without nagging.
+                        new Ghostty.Core.Notifications.NoticeAction(
+                            "Keep it off",
+                            () => PersistNoColorMode(Ghostty.Core.Env.NoColorPolicy.Keep)),
                     },
                 });
             }

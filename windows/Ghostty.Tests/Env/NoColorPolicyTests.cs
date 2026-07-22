@@ -18,10 +18,12 @@ public class NoColorPolicyTests
     }
 
     [Fact]
-    public void Notify_default_strips_and_notifies()
+    public void Notify_default_honors_no_color_and_notifies()
     {
+        // Default honors NO_COLOR (does NOT strip — a terminal passes the
+        // standard through) but informs the user, offering to enable color.
         var o = NoColorPolicy.Decide(present: true, NoColorPolicy.Notify);
-        Assert.True(o.Strip);
+        Assert.False(o.Strip);
         Assert.True(o.Notify);
     }
 
@@ -34,7 +36,7 @@ public class NoColorPolicyTests
     }
 
     [Fact]
-    public void Keep_mode_honors_no_color()
+    public void Keep_mode_honors_no_color_silently()
     {
         var o = NoColorPolicy.Decide(present: true, NoColorPolicy.Keep);
         Assert.False(o.Strip);
@@ -47,7 +49,7 @@ public class NoColorPolicyTests
         // ParseStringAllowed already normalizes to Default before this is
         // called, but Decide must be self-consistent for any string.
         var o = NoColorPolicy.Decide(present: true, "banana");
-        Assert.True(o.Strip);
+        Assert.False(o.Strip);
         Assert.True(o.Notify);
     }
 

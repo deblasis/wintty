@@ -7,6 +7,16 @@ namespace Ghostty.Core.Notifications;
 /// window binds to <see cref="Active"/> and renders one banner per notice.
 ///
 /// <para>
+/// Scope: this is for <b>app-level</b> in-window notices and inline user
+/// choices (e.g. the NO_COLOR notice) — things the shell wants to tell the user
+/// about itself. Terminal-originated desktop notifications (libghostty's
+/// <c>desktop_notification</c> action, OSC 9 / OSC 777) are a separate concern
+/// and belong on the native Windows notification surface (toasts), matching how
+/// the macOS app routes them to the system notification center rather than into
+/// an in-window banner.
+/// </para>
+///
+/// <para>
 /// Not thread-safe: <see cref="Show"/> and <see cref="Dismiss"/> mutate the
 /// bound collection and must be called on the UI thread. Callers reacting to
 /// off-thread events (e.g. a libghostty action on a thread-pool thread) must

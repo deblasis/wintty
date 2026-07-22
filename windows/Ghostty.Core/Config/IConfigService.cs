@@ -74,10 +74,10 @@ public interface IConfigService : IDisposable
 
     /// <summary>
     /// Windows-only: how Wintty reacts to a <c>NO_COLOR</c> value inherited
-    /// from the launching environment. One of "notify" (strip it so colors
-    /// work and show a one-time notice), "strip" (strip it silently), or
-    /// "keep" (honor NO_COLOR). Default "notify". Backed by the
-    /// "no-color-override" key.
+    /// from the launching environment. One of "notify" (default — honor
+    /// NO_COLOR but show a one-time notice offering to enable color), "strip"
+    /// (enable color by removing NO_COLOR from spawned shells), or "keep"
+    /// (honor NO_COLOR silently). Backed by the "no-color-override" key.
     /// </summary>
     string NoColorOverride { get; }
 

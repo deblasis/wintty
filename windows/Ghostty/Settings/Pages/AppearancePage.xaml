@@ -221,13 +221,13 @@
             <ctrl:SettingsGroup Header="Color"
                                 Description="How Wintty handles color in the terminal.">
                 <ctrl:SettingsCard Header="When NO_COLOR is set"
-                                   Description="NO_COLOR (no-color.org) turns off colored output in many programs, including PowerShell — which strips a powerline prompt's colors. Choose how Wintty reacts when it inherits NO_COLOR from the environment."
+                                   Description="NO_COLOR (no-color.org) tells programs to turn off colored output, including PowerShell — which then strips a powerline prompt's colors. Wintty honors it by default; choose how it reacts when it inherits NO_COLOR from the environment."
                                    ctrl:SettingsCard.ConfigKey="no-color-override">
                     <ComboBox x:Name="NoColorOverrideCombo" MinWidth="240"
                               SelectionChanged="NoColorOverride_SelectionChanged">
-                        <ComboBoxItem Content="Re-enable colors and notify" Tag="notify" />
-                        <ComboBoxItem Content="Re-enable colors silently" Tag="strip" />
-                        <ComboBoxItem Content="Keep NO_COLOR (colors off)" Tag="keep" />
+                        <ComboBoxItem Content="Honor NO_COLOR, notify me" Tag="notify" />
+                        <ComboBoxItem Content="Always enable color" Tag="strip" />
+                        <ComboBoxItem Content="Honor NO_COLOR silently" Tag="keep" />
                     </ComboBox>
                 </ctrl:SettingsCard>
             </ctrl:SettingsGroup>

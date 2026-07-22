@@ -4,8 +4,8 @@ namespace Ghostty.Core.Env;
 
 /// <summary>
 /// Result of the <c>NO_COLOR</c> startup decision: whether to remove the
-/// variable from the child-shell environment and whether to surface the
-/// one-time notice to the user.
+/// variable from the child-shell environment and whether to surface the notice
+/// to the user.
 /// </summary>
 public readonly record struct NoColorOutcome(bool Strip, bool Notify);
 
@@ -14,14 +14,17 @@ public readonly record struct NoColorOutcome(bool Strip, bool Notify);
 /// from the launching environment.
 ///
 /// <para>
-/// <c>NO_COLOR</c> (see https://no-color.org) makes color-aware programs
-/// disable ANSI color. PowerShell 7.2+ honors it by switching
-/// <c>$PSStyle.OutputRendering</c> to <c>PlainText</c>, which strips color
-/// from everything it renders — including a powerline prompt's background
-/// segments. When the variable was set unintentionally (e.g. inherited from
-/// a parent process) that reads as "colors are broken". Wintty can remove it
-/// from the shell environment it spawns so color works, and tell the user it
-/// did so.
+/// <c>NO_COLOR</c> (see https://no-color.org) is a user-facing convention that
+/// tells color-aware programs to disable ANSI color. A terminal emulator
+/// normally passes it through untouched — the programs inside decide. So the
+/// default here is to <b>honor</b> it. PowerShell 7.2+ obeys it by switching
+/// <c>$PSStyle.OutputRendering</c> to <c>PlainText</c>, which drops color from
+/// everything it renders (including a powerline prompt's background segments).
+/// Because that can be surprising when <c>NO_COLOR</c> was inherited without
+/// the user realizing, the default also shows a one-time notice explaining why
+/// output is monochrome and offering to enable color for Wintty. Users who want
+/// color unconditionally can opt into stripping; users who set <c>NO_COLOR</c>
+/// deliberately can silence the notice.
 /// </para>
 ///
 /// <para>
@@ -32,19 +35,19 @@ public readonly record struct NoColorOutcome(bool Strip, bool Notify);
 /// </summary>
 public static class NoColorPolicy
 {
-    /// <summary>Strip <c>NO_COLOR</c> and show the one-time notice.</summary>
+    /// <summary>Honor <c>NO_COLOR</c> and show the one-time notice (offering to enable color).</summary>
     public const string Notify = "notify";
 
-    /// <summary>Strip <c>NO_COLOR</c> silently (no notice).</summary>
+    /// <summary>Strip <c>NO_COLOR</c> so color always works; show no notice.</summary>
     public const string Strip = "strip";
 
-    /// <summary>Honor <c>NO_COLOR</c>: leave it untouched, show nothing.</summary>
+    /// <summary>Honor <c>NO_COLOR</c> silently — leave it untouched, show nothing.</summary>
     public const string Keep = "keep";
 
     /// <summary>Allowed values for the <c>no-color-override</c> config key.</summary>
     public static readonly string[] Allowed = { Notify, Strip, Keep };
 
-    /// <summary>Default when the key is unset or invalid.</summary>
+    /// <summary>Default when the key is unset or invalid: honor + notify.</summary>
     public const string Default = Notify;
 
     /// <summary>
@@ -59,9 +62,9 @@ public static class NoColorPolicy
 
         return @override switch
         {
-            Keep => new NoColorOutcome(Strip: false, Notify: false),
             Strip => new NoColorOutcome(Strip: true, Notify: false),
-            _ => new NoColorOutcome(Strip: true, Notify: true), // notify (default)
+            Keep => new NoColorOutcome(Strip: false, Notify: false),
+            _ => new NoColorOutcome(Strip: false, Notify: true), // notify (default): honor + inform
         };
     }
 }
