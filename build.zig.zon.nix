@@ -152,15 +152,6 @@ in
       };
     }
     {
-      name = "N-V-__8AABzkUgISeKGgXAzgtutgJsZc0-kkeqBBscJgMkvy";
-      path = fetchZigArtifact {
-        name = "glslang";
-        url = "https://deps.files.ghostty.org/glslang-12201278a1a05c0ce0b6eb6026c65cd3e9247aa041b1c260324bf29cee559dd23ba1.tar.gz";
-        hash = "sha256-FKLtu1Ccs+UamlPj9eQ12/WXFgS0uDPmPmB26MCpl7U=";
-        unpack = false;
-      };
-    }
-    {
       name = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3";
       path = fetchZigArtifact {
         name = "gobject";
@@ -296,15 +287,6 @@ in
       };
     }
     {
-      name = "N-V-__8AANb6pwD7O1WG6L5nvD_rNMvnSc9Cpg1ijSlTYywv";
-      path = fetchZigArtifact {
-        name = "spirv_cross";
-        url = "https://deps.files.ghostty.org/spirv_cross-1220fb3b5586e8be67bc3feb34cbe749cf42a60d628d2953632c2f8141302748c8da.tar.gz";
-        hash = "sha256-tStvz8Ref6abHwahNiwVVHNETizAmZVVaxVsU7pmV+M=";
-        unpack = false;
-      };
-    }
-    {
       name = "translate_c-0.0.0-Q_BUWmU6BwB_9JKG2l2W7i_mhmYWeRseTGBEHi_YlV5f";
       path = fetchZigArtifact {
         name = "translate_c";
@@ -436,6 +418,15 @@ in
         name = "zlib";
         url = "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz";
         hash = "sha256-F+iIY/NgBnKrSRgvIXKBtvxNPHYr3jYZNeQ2qVIU0Fw=";
+        unpack = false;
+      };
+    }
+    {
+      name = "zioshade-0.3.0-8s3a2uVYOwAHpAAk_zLu4kTfOSj7v8dc_PVtujKe78MZ";
+      path = fetchZigArtifact {
+        name = "zioshade";
+        url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.3.0.tar.gz";
+        hash = "sha256-QgPZELB4NeeAOAMpffbXI2G6hXlc91tL9+tQ7z3sWWA=";
         unpack = false;
       };
     }
