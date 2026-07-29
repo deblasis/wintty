@@ -93,7 +93,12 @@ fn findDxc(b: *std.Build, arch: std.Target.Cpu.Arch) ?[]const u8 {
 }
 
 fn findDxcInSdk(b: *std.Build, arch: std.Target.Cpu.Arch, arch_str: []const u8) ?[]const u8 {
-    const sdk = std.zig.WindowsSdk.find(b.allocator, arch) catch return null;
+    const sdk = std.zig.WindowsSdk.find(
+        b.allocator,
+        b.graph.io,
+        arch,
+        &b.graph.environ_map,
+    ) catch return null;
     const w10 = sdk.windows10sdk orelse return null;
 
     const path = std.fmt.allocPrint(
@@ -102,21 +107,23 @@ fn findDxcInSdk(b: *std.Build, arch: std.Target.Cpu.Arch, arch_str: []const u8) 
         .{ w10.path, w10.version, arch_str },
     ) catch return null;
 
-    std.fs.accessAbsolute(path, .{}) catch return null;
+    std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return null;
     return path;
 }
 
 fn findDxcInPath(b: *std.Build) ?[]const u8 {
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "where", "dxc.exe" },
-    }) catch return null;
+    var code: u8 = undefined;
+    const stdout = b.runAllowFail(
+        &.{ "where", "dxc.exe" },
+        &code,
+        .ignore,
+    ) catch return null;
 
-    if (result.term.Exited != 0) return null;
+    if (code != 0) return null;
 
     // "where" returns one path per line; take the first.
-    const first_line = std.mem.sliceTo(result.stdout, '\n');
-    const trimmed = std.mem.trimRight(u8, first_line, "\r\n ");
+    const first_line = std.mem.sliceTo(stdout, '\n');
+    const trimmed = std.mem.trimEnd(u8, first_line, "\r\n ");
     if (trimmed.len == 0) return null;
 
     // Dupe onto the build allocator so it outlives the process result.

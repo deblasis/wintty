@@ -272,6 +272,8 @@ pub const RenderGlyphError = error{
     CouldNotFindContext,
     DebugOpCode,
     DeferredLoadingUnavailable,
+    // Raised by the Windows directwrite_freetype backend's face lookup.
+    DirectWriteError,
     DivideByZero,
     ENDFInExecStream,
     ExecutionTooLong,

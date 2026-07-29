@@ -35,7 +35,7 @@ pub fn run(alloc: Allocator) !u8 {
     // just suppresses the logo, the version text below still works. Writer
     // errors propagate so a half-emitted APC sequence doesn't get hidden
     // and leave garbage on screen.
-    if (kitty_logo.supported(alloc, stdout_file)) {
+    if (kitty_logo.supported(&environ_map, tty)) {
         kitty_logo.write(alloc, stdout) catch |err| switch (err) {
             error.OutOfMemory => {},
             else => return err,

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const windows = @import("os/main.zig").windows;
 const posix = std.posix;
+const global = @import("global.zig");
 const assert = @import("quirks.zig").inlineAssert;
 
 const log = std.log.scoped(.pty);
@@ -366,7 +367,41 @@ const WindowsPty = struct {
     };
 
     var pseudo_console_api: ?PseudoConsoleApi = null;
-    var pseudo_console_api_once = std.once(resolvePseudoConsoleApi);
+
+    /// Zig 0.16 removed `std.once` with no std replacement, so this is a
+    /// minimal stand-in with the same contract: `resolvePseudoConsoleApi`
+    /// runs exactly once, and every caller returns only after that run has
+    /// published `pseudo_console_api`.
+    const OnceState = enum(u8) { uninitialized, in_progress, done };
+    var pseudo_console_api_state: std.atomic.Value(u8) = .init(
+        @intFromEnum(OnceState.uninitialized),
+    );
+
+    fn pseudoConsoleApiOnce() void {
+        // Fast path: the result is already published.
+        if (pseudo_console_api_state.load(.acquire) ==
+            @intFromEnum(OnceState.done)) return;
+
+        // Try to claim the initialization slot.
+        if (pseudo_console_api_state.cmpxchgStrong(
+            @intFromEnum(OnceState.uninitialized),
+            @intFromEnum(OnceState.in_progress),
+            .acq_rel,
+            .acquire,
+        )) |_| {
+            // Someone else claimed it. Resolution is a handful of syscalls
+            // done once per process, so spinning here is bounded and rare.
+            while (pseudo_console_api_state.load(.acquire) !=
+                @intFromEnum(OnceState.done))
+            {
+                std.atomic.spinLoopHint();
+            }
+            return;
+        }
+
+        resolvePseudoConsoleApi();
+        pseudo_console_api_state.store(@intFromEnum(OnceState.done), .release);
+    }
 
     out_pipe: windows.HANDLE,
     in_pipe: windows.HANDLE,
@@ -386,7 +421,11 @@ const WindowsPty = struct {
         buf_out: *[std.fs.max_path_bytes]u16,
     ) ?[:0]const u16 {
         var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const exe_path = std.fs.selfExePath(&exe_buf) catch return null;
+        const exe_len = std.process.executablePath(
+            global.io(),
+            &exe_buf,
+        ) catch return null;
+        const exe_path = exe_buf[0..exe_len];
         const exe_dir = std.fs.path.dirname(exe_path) orelse return null;
 
         var dll_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -429,15 +468,15 @@ const WindowsPty = struct {
             return;
         };
 
-        const module = std.os.windows.LoadLibraryW(path_w) catch {
+        const module = windows.exp.kernel32.LoadLibraryW(path_w) orelse {
             log.warn("pty: bundled conpty.dll present but LoadLibraryW failed; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
             return;
         };
 
-        const create_ptr = std.os.windows.kernel32.GetProcAddress(module, "CreatePseudoConsole");
-        const resize_ptr = std.os.windows.kernel32.GetProcAddress(module, "ResizePseudoConsole");
-        const close_ptr = std.os.windows.kernel32.GetProcAddress(module, "ClosePseudoConsole");
+        const create_ptr = windows.exp.kernel32.GetProcAddress(module, "CreatePseudoConsole");
+        const resize_ptr = windows.exp.kernel32.GetProcAddress(module, "ResizePseudoConsole");
+        const close_ptr = windows.exp.kernel32.GetProcAddress(module, "ClosePseudoConsole");
         if (create_ptr == null or resize_ptr == null or close_ptr == null) {
             log.warn("pty: bundled conpty.dll missing required exports; using OS conhost (Kitty graphics and Sixel will not work)", .{});
             pseudo_console_api = fallback;
@@ -455,7 +494,7 @@ const WindowsPty = struct {
     /// Return the resolved ConPTY API trio. First call drives the
     /// `std.once` resolver; subsequent calls return the cached value.
     fn pseudoConsoleApi() PseudoConsoleApi {
-        pseudo_console_api_once.call();
+        pseudoConsoleApiOnce();
         return pseudo_console_api.?;
     }
 
@@ -568,7 +607,7 @@ const WindowsPty = struct {
         // ConPTY is the sole Windows transport. Create the pseudoconsole
         // over the freshly created pipe pair; it owns those handles
         // internally for the rest of the PTY's life.
-        var hpcon: windows.exp.HPCON = undefined;
+        var hpcon: windows.HPCON = undefined;
         const result = pseudoConsoleApi().create(
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
             pty.in_pipe_pty,

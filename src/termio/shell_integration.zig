@@ -1389,9 +1389,9 @@ fn setupCmd(
         "{s}/shell-integration/cmd",
         .{resource_dir},
     );
-    if (std.fs.openDirAbsolute(clink_dir, .{})) |dir_| {
+    if (std.Io.Dir.openDirAbsolute(global.io(), clink_dir, .{})) |dir_| {
         var dir = dir_;
-        dir.close();
+        dir.close(global.io());
         try env.put(
             "CLINK_PATH",
             // CLINK_PATH is a Windows-format list and is always

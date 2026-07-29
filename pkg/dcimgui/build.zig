@@ -172,7 +172,7 @@ pub fn build(b: *std.Build) !void {
             );
         }
         if (backend_dx12) {
-            lib.addCSourceFiles(.{
+            lib.root_module.addCSourceFiles(.{
                 .root = upstream.path("backends"),
                 .files = &.{"imgui_impl_dx12.cpp"},
                 .flags = flags.items,
@@ -186,14 +186,14 @@ pub fn build(b: *std.Build) !void {
             // compiles its shaders at runtime via D3DCompile, so it needs
             // these Windows import libs. Linking them on the static lib
             // propagates the requirement to anything that links dcimgui.
-            lib.linkSystemLibrary("dxgi");
+            lib.root_module.linkSystemLibrary("dxgi", dynamic_link_opts);
             // The d3dcompiler import-lib name differs by ABI: the Windows
             // SDK ships d3dcompiler.lib (MSVC), while Zig's bundled mingw
             // defs only provide the versioned d3dcompiler_47.
-            lib.linkSystemLibrary(if (target.result.abi == .msvc)
+            lib.root_module.linkSystemLibrary(if (target.result.abi == .msvc)
                 "d3dcompiler"
             else
-                "d3dcompiler_47");
+                "d3dcompiler_47", dynamic_link_opts);
         }
     }
 
