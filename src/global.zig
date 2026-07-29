@@ -47,6 +47,18 @@ pub const InitOpts = union(enum) {
         argv: [*][*:0]u8,
         environ: std.process.Environ,
     },
+
+    /// Windows embedders. The args vector on Windows is the raw WTF-16
+    /// command line, which a C `char**` cannot represent, so it is passed
+    /// through as-is instead of being reassembled from argv.
+    ///
+    /// `cmdline` is borrowed, not copied: `std.process.Args.Iterator` keeps
+    /// a reference to it, so it must stay valid for as long as the args are
+    /// readable, which in practice is the life of the process.
+    c_wide: struct {
+        cmdline: []const u16,
+        environ: std.process.Environ,
+    },
 };
 
 /// Initialize the global state.
@@ -61,19 +73,21 @@ pub fn init(opts: InitOpts) !void {
         .environ = switch (opts) {
             .main, .tool => |m| m.environ,
             .c => |c| c.environ,
+            .c_wide => |c| c.environ,
         },
         .args = switch (opts) {
             .main, .tool => |m| m.args,
-            // On Windows the args vector is the raw WTF-16 command line,
-            // which a C `argv` cannot carry. Rather than reject the C API
-            // outright, read the real command line from the PEB, the same
-            // source std's own Windows start code uses. Embedders (the
-            // WinUI shell) pass argc = 0 / argv = null and expect exactly
-            // this. Everywhere else the caller's argv is authoritative.
+            // A C `char**` cannot carry WTF-16, so on Windows the narrow
+            // entry point cannot express the args vector at all. Fall back
+            // to the process command line from the PEB, the same source
+            // std's own Windows start code uses, so existing embedders keep
+            // working. Callers that need to supply their own args use
+            // `c_wide`. Elsewhere the caller's argv is authoritative.
             .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
                 std.os.windows.peb().ProcessParameters.CommandLine.slice()
             else
                 c.argv[0..c.argc] },
+            .c_wide => |c| .{ .vector = c.cmdline },
         },
         .tmp_dir_path = null,
         .action = null,
@@ -83,6 +97,18 @@ pub fn init(opts: InitOpts) !void {
     };
     const self = &state.?;
     errdefer deinit();
+
+    // Don't let the narrow-entry-point fallback above be silent: a caller
+    // that passed argv on Windows is not getting the args it asked for.
+    if (comptime builtin.os.tag == .windows) switch (opts) {
+        .c => |c| if (c.argc > 0) std.log.warn(
+            "ghostty_init cannot carry WTF-16 args on Windows so argv was " ++
+                "ignored and the process command line used instead; call " ++
+                "ghostty_init_wide to supply args explicitly",
+            .{},
+        ),
+        else => {},
+    };
 
     self.gpa = gpa: {
         // Use the libc allocator if it is available because it is WAY
@@ -125,7 +151,7 @@ pub fn init(opts: InitOpts) !void {
     // Tool binaries (ghostty-bench, ghostty-gen) have their own action
     // namespace and detect their own actions, so we skip detection here.
     self.action = switch (opts) {
-        .main, .c => try cli.action.detectArgs(
+        .main, .c, .c_wide => try cli.action.detectArgs(
             cli.ghostty.Action,
             self.alloc,
             self.args,
