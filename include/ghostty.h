@@ -1126,6 +1126,15 @@ typedef enum {
 // Published API
 
 GHOSTTY_API int ghostty_init(uintptr_t, char**);
+
+#ifdef _WIN32
+// Windows args are a WTF-16 command line, which char** above cannot
+// represent, so ghostty_init ignores argv there and uses the process
+// command line. Pass the command line explicitly with this instead.
+// Length is in UTF-16 code units. The buffer is borrowed and must
+// outlive the process's use of the args.
+GHOSTTY_API int ghostty_init_wide(const uint16_t*, uintptr_t);
+#endif
 GHOSTTY_API void ghostty_cli_try_action(void);
 GHOSTTY_API void ghostty_build_info(ghostty_build_info_s *out);
 GHOSTTY_API ghostty_info_s ghostty_info(void);
