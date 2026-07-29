@@ -158,7 +158,7 @@ pub fn begin(opts: Options) RenderPass {
         cl.OMSetRenderTargets(
             rtv_count,
             &rtv_handles,
-            0, // FALSE -- handles are individual, not contiguous
+            .FALSE, // handles are individual, not contiguous
             null,
         );
 

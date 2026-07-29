@@ -324,7 +324,7 @@ pub const RenderState = struct {
             .codepoint, .codepoint_grapheme => if (raw.wide == .spacer_tail)
                 0
             else
-                raw.content.codepoint,
+                raw.content.codepoint.data,
             // Background-only cells carry no text.
             .bg_color_palette, .bg_color_rgb => 0,
         };

@@ -558,7 +558,7 @@ pub const LoadingImage = struct {
         }
 
         self.data.deinit(alloc);
-        self.data = .{};
+        self.data = .empty;
         try self.data.ensureUnusedCapacity(alloc, result.data.len);
         try self.data.appendSlice(alloc, result.data[0..result.data.len]);
 
@@ -590,7 +590,7 @@ pub const LoadingImage = struct {
         }
 
         self.data.deinit(alloc);
-        self.data = .{};
+        self.data = .empty;
         try self.data.ensureUnusedCapacity(alloc, result.data.len);
         try self.data.appendSlice(alloc, result.data[0..result.data.len]);
 

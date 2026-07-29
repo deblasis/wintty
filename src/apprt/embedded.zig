@@ -1649,7 +1649,7 @@ pub const CAPI = struct {
         pub fn deinit(self: *Cells) void {
             if (self.cells) |ptr| {
                 const len: usize = @as(usize, self.rows) * @as(usize, self.cols);
-                global.alloc.free(ptr[0..len]);
+                global.alloc().free(ptr[0..len]);
                 self.cells = null;
             }
         }
@@ -2035,8 +2035,8 @@ pub const CAPI = struct {
         result: *Cells,
     ) bool {
         const core_surface = &surface.core_surface;
-        core_surface.renderer_state.mutex.lock();
-        defer core_surface.renderer_state.mutex.unlock();
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
         return readCellsLocked(core_surface, result) catch |err| {
             log.warn("error reading cells err={}", .{err});
             return false;
@@ -2044,7 +2044,7 @@ pub const CAPI = struct {
     }
 
     fn readCellsLocked(core_surface: *CoreSurface, result: *Cells) !bool {
-        const alloc = global.alloc;
+        const alloc = global.alloc();
 
         // Build a render state for the current viewport. This resolves cell
         // colors (palette, default fg/bg, reverse mode) the same way the
@@ -2124,7 +2124,7 @@ pub const CAPI = struct {
         if (comptime builtin.os.tag != .windows) return null;
 
         const picker_mod = @import("../cli/inline_theme_picker.zig");
-        const alloc = global.alloc;
+        const alloc = global.alloc();
 
         // Discover themes using an arena.
         var arena = std.heap.ArenaAllocator.init(alloc);
@@ -2302,8 +2302,8 @@ pub const CAPI = struct {
         if (api_ptr.dev == null) return false;
         const dev = &api_ptr.dev.?;
 
-        dev.shared_texture_mutex.lock();
-        defer dev.shared_texture_mutex.unlock();
+        dev.shared_texture_mutex.lockUncancelable(global.io());
+        defer dev.shared_texture_mutex.unlock(global.io());
 
         const st = dev.shared_texture orelse return false;
 

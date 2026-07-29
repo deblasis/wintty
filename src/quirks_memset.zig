@@ -67,9 +67,16 @@ comptime {
     //   3. Weak COFF builds fatally error because MSVC's linker
     //      errors when two identical linked symbols exist. MSVC has
     //      CRT which links so we don't need this there anyways.
+    //   4. The MSVC CRT (libvcruntime) defines a strong `memset`, so
+    //      exporting ours collides at link time whatever our linkage
+    //      is -- not just the weak-COFF case in 3. Point 3's rationale
+    //      ("MSVC has CRT which links so we don't need this there
+    //      anyways") applies to the whole msvc ABI, which is how
+    //      libghostty.dll links on Windows.
     const enabled =
         std.simd.suggestVectorLength(u8) != null and
         builtin.object_format != .c and
+        builtin.abi != .msvc and
         !(linkage == .weak and builtin.object_format == .coff);
 
     if (enabled) @export(&memset, .{
