@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -136,8 +137,25 @@ public static partial class Program
     [STAThread]
     static int Main(string[] args)
     {
-        return MainImpl(args);
+        // Everything below eventually calls into libghostty, and a
+        // Debug-optimized build uses far more stack per call than a release
+        // one. Both entry paths need the headroom: CLI actions call
+        // ghostty_init straight from here, and the GUI calls it (and
+        // ghostty_surface_new) from inside deep XAML callbacks. The default
+        // 1MB main-thread stack is not enough for either, so run the whole
+        // program on a thread we size ourselves.
+        var exitCode = 0;
+        var main = new Thread(() => exitCode = MainImpl(args), MainStackSize);
+        main.SetApartmentState(ApartmentState.STA);
+        main.Start();
+        main.Join();
+        return exitCode;
     }
+
+    /// <summary>
+    /// Stack reserved for the thread the whole program runs on.
+    /// </summary>
+    private const int MainStackSize = 32 * 1024 * 1024;
 
     static int MainImpl(string[] args)
     {
