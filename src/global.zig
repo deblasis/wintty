@@ -52,11 +52,15 @@ pub const InitOpts = union(enum) {
     /// command line, which a C `char**` cannot represent, so it is passed
     /// through as-is instead of being reassembled from argv.
     ///
+    /// The payload is `Args.Vector` rather than `[]const u16` so this prong
+    /// still compiles off Windows, where the vector is a narrow `argv`. Only
+    /// `ghostty_init_wide` constructs it, and that export is Windows-only.
+    ///
     /// `cmdline` is borrowed, not copied: `std.process.Args.Iterator` keeps
     /// a reference to it, so it must stay valid for as long as the args are
     /// readable, which in practice is the life of the process.
     c_wide: struct {
-        cmdline: []const u16,
+        cmdline: std.process.Args.Vector,
         environ: std.process.Environ,
     },
 };
