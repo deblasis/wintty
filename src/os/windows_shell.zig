@@ -243,7 +243,7 @@ pub fn installRootFromExe(alloc: std.mem.Allocator, arg0: []const u8) ?[]u8 {
     // A drive-root install (`C:\bin\bash.exe`) leaves a trailing separator
     // (`C:\`); strip it so the result honors rootedToWindows's "no trailing
     // separator" contract (otherwise root-relative paths get a doubled `\`).
-    const normalized = std.mem.trimRight(u8, root, "\\/");
+    const normalized = std.mem.trimEnd(u8, root, "\\/");
     if (normalized.len == 0) return null;
     return alloc.dupe(u8, normalized) catch null;
 }
