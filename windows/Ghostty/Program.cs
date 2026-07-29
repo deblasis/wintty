@@ -190,7 +190,7 @@ public static partial class Program
                 Environment.Exit(0);
 
             RegisterNativeResolver();
-            InitGhostty(args);
+            InitGhostty();
             RegisterThemeCallback();
             var exitCode = NativeMethods.CliRunAction();
             CleanupThemeCallback();
@@ -224,27 +224,19 @@ public static partial class Program
     }
 
     /// <summary>
-    /// Marshal the managed args array into a C-style argv (null-terminated
-    /// UTF-8 strings) and call ghostty_init. The program name "ghostty" is
-    /// prepended as argv[0] since .NET's args array omits it.
+    /// Initialize libghostty from this process's command line.
     ///
-    /// The allocated argv is intentionally not freed: ghostty_init stores
-    /// the pointers in std.os.argv, and ghostty_cli_run_action reads them
-    /// later. The OS reclaims everything on process exit.
+    /// The marshalled buffer is intentionally not freed: libghostty keeps a
+    /// reference to it and ghostty_cli_run_action reads the args later. The
+    /// OS reclaims it on process exit.
     /// </summary>
-    private static void InitGhostty(string[] args)
+    private static void InitGhostty()
     {
-        // Build argv: ["ghostty", args[0], args[1], ...]
-        var argc = args.Length + 1;
-        var argv = new IntPtr[argc];
-        argv[0] = Marshal.StringToCoTaskMemUTF8("ghostty");
-        for (int i = 0; i < args.Length; i++)
-            argv[i + 1] = Marshal.StringToCoTaskMemUTF8(args[i]);
-
-        var argvPtr = Marshal.AllocCoTaskMem(IntPtr.Size * argc);
-        Marshal.Copy(argv, 0, argvPtr, argc);
-
-        var result = NativeMethods.Init((UIntPtr)argc, argvPtr);
+        // Pass the real WTF-16 command line rather than rebuilding a UTF-8
+        // argv. ghostty_init's char** cannot represent WTF-16, so it would
+        // ignore what we passed and use the process command line anyway,
+        // and reassembling argv would lose unpaired surrogates in paths.
+        var result = NativeMethods.InitWideFromProcess();
         if (result != 0)
         {
             // ghostty_init failed (e.g. invalid action). The Zig
