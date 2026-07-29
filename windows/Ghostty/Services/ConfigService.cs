@@ -302,7 +302,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         _dispatcher = dispatcher;
 
-        NativeMethods.Init(UIntPtr.Zero, IntPtr.Zero);
+        NativeMethods.InitWideFromProcess();
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);

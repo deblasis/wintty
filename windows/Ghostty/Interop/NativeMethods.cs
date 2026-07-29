@@ -366,6 +366,38 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial int Init(UIntPtr argc, IntPtr argv);
 
+    /// <summary>
+    /// Initialize libghostty with an explicit WTF-16 command line.
+    /// </summary>
+    /// <remarks>
+    /// Prefer this over <see cref="Init"/> on Windows. The args vector on
+    /// Windows is the raw WTF-16 command line, which the char** that
+    /// ghostty_init takes cannot represent, so that entry point ignores
+    /// argv and falls back to the process command line.
+    ///
+    /// <paramref name="len"/> is in UTF-16 code units, not bytes. The
+    /// buffer is borrowed by the args iterator and must stay alive for the
+    /// life of the process; see <see cref="InitWideFromProcess"/>.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_init_wide")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial int InitWide(IntPtr cmdline, UIntPtr len);
+
+    /// <summary>
+    /// Initialize libghostty from this process's own command line.
+    /// </summary>
+    /// <remarks>
+    /// The marshalled buffer is intentionally never freed: libghostty keeps
+    /// a reference to it for as long as the args are readable, which is the
+    /// life of the process. The OS reclaims it on exit.
+    /// </remarks>
+    internal static int InitWideFromProcess()
+    {
+        var cmdline = Environment.CommandLine;
+        var buf = Marshal.StringToHGlobalUni(cmdline);
+        return InitWide(buf, (UIntPtr)cmdline.Length);
+    }
+
     // ---- config --------------------------------------------------------
 
     [LibraryImport(Dll, EntryPoint = "ghostty_config_new")]
