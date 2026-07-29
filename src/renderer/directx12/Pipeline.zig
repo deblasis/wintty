@@ -291,8 +291,8 @@ pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSi
 /// Create a pipeline with specific shaders and input layout.
 pub fn init(opts: Options) !Pipeline {
     const no_blend = d3d12.D3D12_RENDER_TARGET_BLEND_DESC{
-        .BlendEnable = 0,
-        .LogicOpEnable = 0,
+        .BlendEnable = .FALSE,
+        .LogicOpEnable = .FALSE,
         .SrcBlend = .ONE,
         .DestBlend = .ZERO,
         .BlendOp = .ADD,
@@ -304,8 +304,8 @@ pub fn init(opts: Options) !Pipeline {
     };
 
     const premul_blend = d3d12.D3D12_RENDER_TARGET_BLEND_DESC{
-        .BlendEnable = 1,
-        .LogicOpEnable = 0,
+        .BlendEnable = .TRUE,
+        .LogicOpEnable = .FALSE,
         .SrcBlend = .ONE,
         .DestBlend = .INV_SRC_ALPHA,
         .BlendOp = .ADD,
@@ -355,21 +355,21 @@ pub fn init(opts: Options) !Pipeline {
             .RasterizedStream = 0,
         },
         .BlendState = .{
-            .AlphaToCoverageEnable = 0,
-            .IndependentBlendEnable = 0,
+            .AlphaToCoverageEnable = .FALSE,
+            .IndependentBlendEnable = .FALSE,
             .RenderTarget = rt_blends,
         },
         .SampleMask = 0xFFFFFFFF,
         .RasterizerState = .{
             .FillMode = .SOLID,
             .CullMode = .NONE,
-            .FrontCounterClockwise = 0,
+            .FrontCounterClockwise = .FALSE,
             .DepthBias = 0,
             .DepthBiasClamp = 0.0,
             .SlopeScaledDepthBias = 0.0,
-            .DepthClipEnable = 1,
-            .MultisampleEnable = 0,
-            .AntialiasedLineEnable = 0,
+            .DepthClipEnable = .TRUE,
+            .MultisampleEnable = .FALSE,
+            .AntialiasedLineEnable = .FALSE,
             .ForcedSampleCount = 0,
             .ConservativeRaster = 0,
         },

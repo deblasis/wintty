@@ -428,7 +428,7 @@ pub const Shaders = struct {
         });
 
         // Compile custom post-process shaders
-        var post_list = std.ArrayListUnmanaged(Pipeline){};
+        var post_list: std.ArrayListUnmanaged(Pipeline) = .empty;
         errdefer {
             for (post_list.items) |*p| p.deinit();
             post_list.deinit(alloc);
