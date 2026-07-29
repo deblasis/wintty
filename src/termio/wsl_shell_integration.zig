@@ -7,7 +7,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const EnvMap = std.process.EnvMap;
+const EnvMap = std.process.Environ.Map;
+const global = @import("../global.zig");
 const posix_path = @import("../os/posix_path.zig");
 
 const log = std.log.scoped(.wsl_shell_integration);
@@ -21,7 +22,7 @@ const log = std.log.scoped(.wsl_shell_integration);
 /// arena (values are placed into `env`).
 pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
     // Names we actually set, to register in WSLENV at the end.
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(alloc);
 
     // zsh: ZDOTDIR -> <resource_dir>/shell-integration/zsh (holds our .zshenv,
@@ -77,8 +78,12 @@ pub fn setup(alloc: Allocator, resource_dir: []const u8, env: *EnvMap) !void {
 }
 
 fn dirExists(path: []const u8) bool {
-    var dir = std.fs.openDirAbsolute(path, .{}) catch return false;
-    dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(
+        global.io(),
+        path,
+        .{},
+    ) catch return false;
+    dir.close(global.io());
     return true;
 }
 
@@ -90,7 +95,7 @@ fn dirExists(path: []const u8) bool {
 fn appendWslenv(alloc: Allocator, env: *EnvMap, names: []const []const u8) !void {
     if (names.len == 0) return;
 
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
 
     if (env.get("WSLENV")) |existing| try buf.appendSlice(alloc, existing);

@@ -28,7 +28,7 @@ pub fn wslToWindows(
     // Everything else lives inside the distro filesystem -> UNC form.
     const name = distro orelse return error.UnknownDistro;
 
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     try buf.appendSlice(alloc, "\\\\wsl.localhost\\");
     try buf.appendSlice(alloc, name);
@@ -68,7 +68,7 @@ pub fn rootedToWindows(
     // Everything else lives under the install root.
     const root = install_root orelse return error.UnknownRoot;
 
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     try buf.appendSlice(alloc, root);
     try buf.append(alloc, '\\');
@@ -100,7 +100,7 @@ pub fn windowsToWsl(alloc: Allocator, win_path: []const u8) Allocator.Error!?[]u
     if (p.len < 2 or p[1] != ':' or !std.ascii.isAlphabetic(p[0])) return null;
 
     const rest = p[2..]; // keeps the leading separator if any
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     try buf.appendSlice(alloc, "/mnt/");
     try buf.append(alloc, std.ascii.toLower(p[0]));
@@ -127,7 +127,7 @@ fn driveAfter(path: []const u8, prefix: []const u8) ?Mount {
 
 /// Build the drive-letter form `<D>:\<backslashed rest>` from a matched mount.
 fn driveForm(alloc: Allocator, m: Mount) Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
     try buf.append(alloc, std.ascii.toUpper(m.drive));
     try buf.appendSlice(alloc, ":\\");
