@@ -140,7 +140,7 @@ fn createTestDevice() !TestDevice {
     if (com.FAILED(hr) or fence == null) return error.FenceCreationFailed;
     errdefer _ = fence.?.Release();
 
-    const fence_event = d3d12.CreateEventW(null, 0, 0, null) orelse
+    const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse
         return error.FenceEventCreationFailed;
     errdefer _ = d3d12.CloseHandle(fence_event);
 
@@ -301,11 +301,11 @@ test "Buffer: syncFromArrayLists concatenates correctly" {
     var buf = try TestU32.init(.{ .device = dev.device }, 64);
     defer buf.deinit();
 
-    var list1 = std.ArrayListUnmanaged(u32){};
+    var list1 = std.ArrayListUnmanaged(u32).empty;
     defer list1.deinit(std.testing.allocator);
     try list1.appendSlice(std.testing.allocator, &.{ 1, 2, 3 });
 
-    var list2 = std.ArrayListUnmanaged(u32){};
+    var list2 = std.ArrayListUnmanaged(u32).empty;
     defer list2.deinit(std.testing.allocator);
     try list2.appendSlice(std.testing.allocator, &.{ 4, 5 });
 
