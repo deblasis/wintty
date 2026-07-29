@@ -153,8 +153,8 @@ pub fn initShared(
     if (deps.config.target.result.os.tag == .windows and
         deps.config.renderer == .directx12)
     {
-        lib.linkSystemLibrary("d3d12");
-        lib.linkSystemLibrary("dxgi");
+        lib.root_module.linkSystemLibrary("d3d12", dynamic_link_opts);
+        lib.root_module.linkSystemLibrary("dxgi", dynamic_link_opts);
     }
 
     // Get our debug symbols

@@ -17,14 +17,11 @@ const build_config = @import("../build_config.zig");
 const logo_png = @embedFile("wintty_logo.png");
 
 /// Returns true when stdout is a TTY connected to a terminal we have positive
-/// reason to believe supports the kitty graphics protocol. Allocates a
-/// throwaway env map; +actions only run once per process so the cost is
-/// negligible.
-pub fn supported(alloc: Allocator, stdout: std.fs.File) bool {
-    if (!stdout.isTty()) return false;
-
-    var env = std.process.getEnvMap(alloc) catch return false;
-    defer env.deinit();
+/// reason to believe supports the kitty graphics protocol. The caller passes
+/// the already-resolved tty state and environment so we don't duplicate the
+/// probe or allocate a throwaway env map.
+pub fn supported(env: *const std.process.Environ.Map, tty: bool) bool {
+    if (!tty) return false;
 
     // Wintty sets TERM_PROGRAM=<build_config.term_program> when spawning a
     // shell; "ghostty" stays in the match list so shells inherited from
