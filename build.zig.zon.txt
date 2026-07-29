@@ -34,4 +34,4 @@ https://deps.files.ghostty.org/zig_js-3c23860e47fdcdc5af805efb7fd0bdac5fd3e9bc.t
 https://deps.files.ghostty.org/zig_objc-c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz
 https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz
 https://github.com/vancluever/arocc/archive/ecbc5c799574e0da2758a961b12efa586007f03c.tar.gz
-https://github.com/zioShade/zioshade/archive/refs/tags/v0.3.0.tar.gz
+https://github.com/zioShade/zioshade/archive/refs/tags/v0.4.0.tar.gz
