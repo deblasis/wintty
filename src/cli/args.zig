@@ -1685,10 +1685,10 @@ test "LineIterator comment run larger than reader buffer" {
     var td = try internal_os.TempDir.init();
     defer td.deinit();
     {
-        var file = try td.dir.createFile("config", .{});
-        defer file.close();
+        var file = try td.dir.createFile(testing.io, "config", .{});
+        defer file.close(testing.io);
         var wbuf: [256]u8 = undefined;
-        var fw = file.writer(&wbuf);
+        var fw = file.writer(testing.io, &wbuf);
         const w = &fw.interface;
         try w.writeAll("first=1\n");
         // ~1KB of comments, far larger than the 64-byte read buffer below.
@@ -1698,10 +1698,10 @@ test "LineIterator comment run larger than reader buffer" {
         try fw.end();
     }
 
-    var file = try td.dir.openFile("config", .{});
-    defer file.close();
+    var file = try td.dir.openFile(testing.io, "config", .{});
+    defer file.close(testing.io);
     var rbuf: [64]u8 = undefined;
-    var fr = file.reader(&rbuf);
+    var fr = file.reader(testing.io, &rbuf);
 
     var iter: LineIterator = .init(&fr.interface);
     try testing.expectEqualStrings("--first=1", iter.next().?);

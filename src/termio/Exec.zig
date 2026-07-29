@@ -4398,9 +4398,9 @@ test "maybeWrapGitBashWithWinpty windows: absolute bash with adjacent winpty is 
     // accessAbsolute existence check passes, then assert winpty is prepended.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "bash.exe", .data = "" });
-    try tmp.dir.writeFile(.{ .sub_path = "winpty.exe", .data = "" });
-    const real = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "bash.exe", .data = "" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "winpty.exe", .data = "" });
+    const real = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
     const bash = try std.fmt.allocPrintSentinel(alloc, "{s}\\bash.exe", .{real}, 0);
     const winpty = try std.fmt.allocPrint(alloc, "{s}\\winpty.exe", .{real});
 

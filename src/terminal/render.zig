@@ -2089,7 +2089,7 @@ test "allHyperlinkCells empty viewport" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 5,
         .rows = 2,
     });
@@ -2113,7 +2113,7 @@ test "allHyperlinkCells multiple hyperlinks" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 20,
         .rows = 3,
     });
@@ -2391,7 +2391,7 @@ test "resolveCell default style" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
@@ -2424,7 +2424,7 @@ test "resolveCell non-default style" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
@@ -2449,7 +2449,7 @@ test "resolveCell wide character spacer tail" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
@@ -2473,7 +2473,7 @@ test "resolveCell background-only cell" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 5,
         .rows = 2,
     });
@@ -2502,7 +2502,7 @@ test "resolveCell inverse video swaps fg and bg" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
@@ -2527,7 +2527,7 @@ test "resolveCell inverse video swaps resolved palette colors" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
@@ -2554,7 +2554,7 @@ test "resolveCell out of range resolves to blank" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t = try Terminal.init(alloc, .{
+    var t = try Terminal.init(testing.io, alloc, .{
         .cols = 10,
         .rows = 3,
     });
