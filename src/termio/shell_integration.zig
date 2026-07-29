@@ -979,7 +979,7 @@ test "bash: ENV is a POSIX path on Windows" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(.bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1001,7 +1001,7 @@ test "zsh: ZDOTDIR is a POSIX path on Windows" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .zsh);
+    var res: TmpResourcesDir = try .init(.zsh);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1022,7 +1022,7 @@ test "xdg fish: POSIX path and ':' delimiter on Windows" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .fish);
+    var res: TmpResourcesDir = try .init(.fish);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1048,7 +1048,7 @@ test "xdg elvish: keeps the Windows path on Windows" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .elvish);
+    var res: TmpResourcesDir = try .init(.elvish);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1290,7 +1290,7 @@ test "powershell" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    var res: TmpResourcesDir = try .init(.powershell);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1326,7 +1326,7 @@ test "powershell: user-supplied args are left untouched" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    var res: TmpResourcesDir = try .init(.powershell);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1423,7 +1423,7 @@ test "cmd: PROMPT carries OSC 133 marks" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    var res: TmpResourcesDir = try .init(.cmd);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1443,7 +1443,7 @@ test "cmd: preserves existing PROMPT body" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    var res: TmpResourcesDir = try .init(.cmd);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1465,7 +1465,7 @@ test "cmd: CLINK_PATH includes the shell-integration cmd dir" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    var res: TmpResourcesDir = try .init(.cmd);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1487,7 +1487,7 @@ test "cmd: CLINK_PATH prepends ours and preserves existing entries" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    var res: TmpResourcesDir = try .init(.cmd);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1511,7 +1511,7 @@ test "cmd: CLINK_PATH is left unset when the cmd integration dir is absent" {
     const alloc = arena.allocator();
 
     // A resources dir whose shell-integration has bash but no cmd/.
-    var res: TmpResourcesDir = try .init(alloc, .bash);
+    var res: TmpResourcesDir = try .init(.bash);
     defer res.deinit();
 
     var env = EnvMap.init(alloc);
@@ -1689,7 +1689,7 @@ test "fish" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var res: TmpResourcesDir = try .init(testing.allocator, .fish);
+    var res: TmpResourcesDir = try .init(.fish);
     defer res.deinit();
 
     var env = EnvMap.init(testing.allocator);
@@ -1731,7 +1731,7 @@ test "fish: missing resources" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const resources_dir = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(resources_dir);
 
     var env = EnvMap.init(alloc);

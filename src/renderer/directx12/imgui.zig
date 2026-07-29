@@ -205,7 +205,7 @@ test "imgui dx12 backend produces and records draw data on a real device" {
     var fence: ?*d3d12.ID3D12Fence = null;
     if (com.FAILED(dev.CreateFence(0, .NONE, &d3d12.ID3D12Fence.IID, @ptrCast(&fence)))) return error.SkipZigTest;
     defer _ = fence.?.Release();
-    const fence_event = d3d12.CreateEventW(null, 0, 0, null) orelse return error.SkipZigTest;
+    const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse return error.SkipZigTest;
     defer _ = d3d12.CloseHandle(fence_event);
 
     // Offscreen render target (256x256 B8G8R8A8) + RTV.
@@ -262,7 +262,7 @@ test "imgui dx12 backend produces and records draw data on a real device" {
     // exercises the real RenderDrawData path (descriptor heap binding, PSO,
     // draws) rather than just the draw-data generation.
     const rtvs = [_]d3d12.D3D12_CPU_DESCRIPTOR_HANDLE{rtv.cpu};
-    cl.OMSetRenderTargets(1, &rtvs, 0, null);
+    cl.OMSetRenderTargets(1, &rtvs, .FALSE, null);
     const viewport = d3d12.D3D12_VIEWPORT{ .TopLeftX = 0, .TopLeftY = 0, .Width = 256, .Height = 256, .MinDepth = 0, .MaxDepth = 1 };
     cl.RSSetViewports(1, @ptrCast(&viewport));
     renderDrawData(draw_data, cl, &srv_heap);
