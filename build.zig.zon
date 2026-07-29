@@ -93,11 +93,11 @@
         // spirv-cross C++ packages, so custom shader compilation is
         // in-process with no C++ dependencies.
         // Pinned to a main commit rather than v0.3.0: that tag hard-errors on
-        // Zig 0.16, and 0.16 support only landed on main afterwards. Move back
-        // to a tag once one is cut that includes it.
+        // Zig 0.16. Move to a tag once one is cut past zioshade PR 492, which
+        // carries the 0.16 build and packaging fix this pin depends on.
         .zioshade = .{
-            .url = "https://github.com/zioShade/zioshade/archive/df9784f7ead8e022694ba99e8028d72b3543666e.tar.gz",
-            .hash = "zioshade-0.3.0-8s3a2rr9QwDixLiGcwI-DL7psQwDctzxjj2KSCYHjUn2",
+            .url = "https://github.com/zioShade/zioshade/archive/194fe60.tar.gz",
+            .hash = "zioshade-0.3.0-8s3a2jwtRAD_DxI5B-ULCA3dcBhOPwN3KI2keGqsEONI",
             .lazy = true,
         },
 
