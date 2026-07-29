@@ -139,6 +139,46 @@ pub export fn ghostty_init(argc: usize, argv: [*][*:0]u8) c_int {
     return 0;
 }
 
+/// Initialize ghostty global state from a Windows embedder.
+///
+/// `ghostty_init` takes a C `char**`, which cannot represent the WTF-16
+/// command line that Windows actually uses for its args vector, so on
+/// Windows it falls back to the process command line and ignores argv.
+/// This entry point lets the embedder pass the real thing.
+///
+/// `cmdline` is the WTF-16 command line as Windows hands it out (e.g.
+/// `GetCommandLineW`, or .NET's `Environment.CommandLine`), and `len` is
+/// its length in UTF-16 code units, not bytes.
+///
+/// IMPORTANT: the buffer is borrowed, not copied. The args iterator keeps
+/// a reference to it, so it must stay valid for the life of the process.
+fn ghosttyInitWide(cmdline: [*]const u16, len: usize) callconv(.c) c_int {
+    assert(builtin.link_libc);
+
+    global.init(.{
+        .c_wide = .{
+            .cmdline = cmdline[0..len],
+            // Windows never uses a POSIX environ block, so the global
+            // block is always the right source here.
+            .environ = .{ .block = .{ .use_global = true } },
+        },
+    }) catch |err| {
+        std.log.err("failed to initialize ghostty error={}", .{err});
+        return 1;
+    };
+
+    return 0;
+}
+
+comptime {
+    // Windows-only: everywhere else the args vector is a POSIX argv and
+    // `ghostty_init` already expresses it exactly.
+    if (builtin.os.tag == .windows) @export(&ghosttyInitWide, .{
+        .name = "ghostty_init_wide",
+        .linkage = .strong,
+    });
+}
+
 /// Runs an action if it is specified. If there is no action this returns
 /// false. If there is an action then this doesn't return.
 pub export fn ghostty_cli_try_action() void {
