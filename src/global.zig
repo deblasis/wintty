@@ -65,14 +65,14 @@ pub fn init(opts: InitOpts) !void {
         },
         .args = switch (opts) {
             .main, .tool => |m| m.args,
-            // TODO: Using the C API from Windows is unsupported at this time.
-            //
-            // When do we plan on supporting Windows, it's recommended to
-            // ensure that the C API can take a UNICODE_STRING (aka []16, a
-            // WTF-16 string) so that it can just be passed into
-            // std.process.Args.Vector directly.
-            .c => |c| .{ .vector = if (builtin.os.tag == .windows)
-                return error.UnsupportedOSForCApi
+            // On Windows the args vector is the raw WTF-16 command line,
+            // which a C `argv` cannot carry. Rather than reject the C API
+            // outright, read the real command line from the PEB, the same
+            // source std's own Windows start code uses. Embedders (the
+            // WinUI shell) pass argc = 0 / argv = null and expect exactly
+            // this. Everywhere else the caller's argv is authoritative.
+            .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
+                std.os.windows.peb().ProcessParameters.CommandLine.slice()
             else
                 c.argv[0..c.argc] },
         },
