@@ -304,10 +304,10 @@ test "zioshade loadFromFile compiles a real shader file from disk to HLSL" {
     // target through zioshade. Uses a temp dir so we don't depend on cwd.
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "shader.glsl", .data = test_crt });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "shader.glsl", .data = test_crt });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try tmp.dir.realpath("shader.glsl", &path_buf);
+    const path = path_buf[0..try tmp.dir.realPathFile(testing.io, "shader.glsl", &path_buf)];
 
     const hlsl = try loadFromFile(alloc, path, .hlsl);
     defer alloc.free(hlsl);
