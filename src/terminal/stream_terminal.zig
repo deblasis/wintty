@@ -2431,7 +2431,7 @@ test "request mode DECRQM with write_pty callback" {
 }
 
 test "request mode DECRQM ANSI form with write_pty callback" {
-    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
     const S = struct {
@@ -2458,7 +2458,7 @@ test "request mode DECRQM ANSI form with write_pty callback" {
 }
 
 test "device status DECXCPR extended cursor position with write_pty callback" {
-    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
     const S = struct {

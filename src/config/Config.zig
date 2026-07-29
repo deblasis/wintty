@@ -11479,14 +11479,14 @@ test "issue 228: empty foreground after theme defers to theme value" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11519,14 +11519,14 @@ test "issue 228: empty selection-background after theme resets optional to null"
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11555,14 +11555,14 @@ test "issue 228: empty cursor-color after theme resets optional to null" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11589,14 +11589,14 @@ test "issue 228: empty palette after theme defers to theme palette" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11630,14 +11630,14 @@ test "issue 228: theme foreground preserved when no empty foreground written" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11667,14 +11667,14 @@ test "issue 228: non-empty foreground still overrides theme" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try td.dir.realpath("theme_with_colors", &path_buf);
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &path_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
@@ -11728,25 +11728,25 @@ test "issue 228: empty foreground via real config file defers to theme" {
     defer td.deinit();
     var buf: [4096]u8 = undefined;
     {
-        var file = try td.dir.createFile("theme_with_colors", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "theme_with_colors", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.writeAll(@embedFile("testdata/theme_with_colors"));
         try writer.end();
     }
     var theme_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const theme_path = try td.dir.realpath("theme_with_colors", &theme_buf);
+    const theme_path = theme_buf[0..try td.dir.realPathFile(testing.io, "theme_with_colors", &theme_buf)];
 
     {
-        var file = try td.dir.createFile("config", .{});
-        defer file.close();
-        var writer = file.writer(&buf);
+        var file = try td.dir.createFile(testing.io, "config", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
         try writer.interface.print("theme = {s}\n", .{theme_path});
         try writer.interface.writeAll("foreground =\n");
         try writer.end();
     }
     var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cfg_path = try td.dir.realpath("config", &cfg_buf);
+    const cfg_path = cfg_buf[0..try td.dir.realPathFile(testing.io, "config", &cfg_buf)];
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
