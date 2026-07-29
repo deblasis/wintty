@@ -14,6 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const com = @import("com.zig");
+const global = @import("../../global.zig");
 const d3d12 = @import("d3d12.zig");
 const dcomp = @import("dcomp.zig");
 const dxgi = @import("dxgi.zig");
@@ -56,7 +57,7 @@ shared_texture: ?SharedTextureState = null,
 
 /// Guards shared_texture for atomic snapshot reads by
 /// ghostty_surface_shared_texture() on the apprt thread.
-shared_texture_mutex: std.Thread.Mutex = .{},
+shared_texture_mutex: std.Io.Mutex = .init,
 
 /// Shared-texture mode state. Populated by Device.init when the
 /// surface variant is .shared_texture, torn down in Device.deinit,
@@ -281,7 +282,7 @@ pub fn init(surface: @import("surface.zig").Surface, opts: InitOptions) !Device 
     }
     errdefer _ = fence.?.Release();
 
-    const fence_event = d3d12.CreateEventW(null, 0, 0, null) orelse {
+    const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse {
         log.err("CreateEventW failed for fence event", .{});
         return error.FenceEventCreationFailed;
     };
@@ -488,8 +489,8 @@ pub fn recreateSharedTexture(self: *Device, width: u32, height: u32) !void {
     // (see doc comment above).
     _ = d3d12.CloseHandle(new_state.fence_handle);
 
-    self.shared_texture_mutex.lock();
-    defer self.shared_texture_mutex.unlock();
+    self.shared_texture_mutex.lockUncancelable(global.io());
+    defer self.shared_texture_mutex.unlock(global.io());
 
     const old = self.shared_texture orelse {
         // Caller violated the contract: this method only makes

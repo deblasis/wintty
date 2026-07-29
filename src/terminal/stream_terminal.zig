@@ -5,6 +5,7 @@ const apc = @import("apc.zig");
 const clipboard = @import("clipboard.zig");
 const csi = @import("csi.zig");
 const dcs = @import("dcs.zig");
+const sixel = @import("sixel.zig");
 const device_attributes = @import("device_attributes.zig");
 const device_status = @import("device_status.zig");
 const stream = @import("stream.zig");
@@ -439,6 +440,25 @@ pub const Handler = struct {
                 );
                 response[encoded.len] = 0;
                 self.writePty(response[0..encoded.len :0]);
+            },
+
+            .sixel => |sixel_cmd| if (comptime build_options.kitty_graphics) {
+                const io = self.terminal.io();
+                const alloc = self.terminal.gpa();
+
+                // Sixel has no render path of its own: it decodes into a
+                // synthesized kitty graphics command and reuses that
+                // pipeline. See sixel/image.zig.
+                var kcmd = sixel.synthKittyCommand(
+                    alloc,
+                    sixel_cmd,
+                    .{},
+                ) catch return;
+                defer kcmd.deinit(alloc);
+
+                // Sixel has no response channel, so drop any kitty
+                // response (DEC didn't define a query path for sixel).
+                _ = self.terminal.kittyGraphics(io, alloc, &kcmd);
             },
 
             .xtgettcap => |*gettcap| {

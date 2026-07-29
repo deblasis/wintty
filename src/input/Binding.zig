@@ -2301,7 +2301,7 @@ pub const Set = struct {
     /// slice of CEntry allocated with `alloc`. Action strings are allocPrintZ'd
     /// with `alloc`; the caller owns the returned slice and its strings.
     pub fn cList(self: *const Set, alloc: Allocator) ![]CEntry {
-        var list: std.ArrayListUnmanaged(CEntry) = .{};
+        var list: std.ArrayListUnmanaged(CEntry) = .empty;
         errdefer list.deinit(alloc);
         var path: [keybind_max_steps]Trigger = undefined;
         try cListWalk(self, alloc, &path, 0, &list);

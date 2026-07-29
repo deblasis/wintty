@@ -537,7 +537,7 @@ pub const StreamHandler = struct {
                 defer kcmd.deinit(self.alloc);
                 // Sixel has no response channel; drop any kitty
                 // response (DEC didn't define a query path for sixel).
-                _ = self.terminal.kittyGraphics(self.alloc, &kcmd);
+                _ = self.terminal.kittyGraphics(global.io(), self.alloc, &kcmd);
             },
         }
     }
@@ -1616,7 +1616,7 @@ pub const StreamHandler = struct {
 
         // iTerm2's File= protocol has no response channel, unlike the
         // kitty graphics APC. We drop the response.
-        _ = self.terminal.kittyGraphics(self.alloc, &cmd);
+        _ = self.terminal.kittyGraphics(global.io(), self.alloc, &cmd);
     }
 
     /// Handle one event from an iTerm2 OSC 1337 multipart File=

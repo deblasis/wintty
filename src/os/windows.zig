@@ -8,15 +8,33 @@ const windows = std.os.windows;
 // information (mostly coming from stdlib) and manually-defined constants and
 // external functions.
 
-// Registry access, used to resolve the default WSL distro name.
+// Registry access, used to resolve the default WSL distro name. Zig 0.16
+// dropped the advapi32 bindings and HKEY_CURRENT_USER from std, so both are
+// declared here.
 pub const kernel32 = windows.kernel32;
-pub const advapi32 = windows.advapi32;
 pub const HKEY = windows.HKEY;
-pub const HKEY_CURRENT_USER = windows.HKEY_CURRENT_USER;
-pub const OpenFile = windows.OpenFile;
 pub const CloseHandle = windows.CloseHandle;
+pub const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+
+pub const advapi32 = struct {
+    /// Restrict-Reg-Flags: the value-type mask passed to RegGetValueW.
+    pub const RRF = struct {
+        pub const RT_REG_SZ: DWORD = 0x00000002;
+    };
+
+    pub extern "advapi32" fn RegGetValueW(
+        hkey: HKEY,
+        lpSubKey: ?[*:0]const u16,
+        lpValue: ?[*:0]const u16,
+        dwFlags: DWORD,
+        pdwType: ?*DWORD,
+        pvData: ?*anyopaque,
+        pcbData: ?*DWORD,
+    ) callconv(.winapi) LONG;
+};
 
 // Utility functions
+pub const GetCurrentProcess = windows.GetCurrentProcess;
 pub const GetCurrentProcessId = windows.GetCurrentProcessId;
 pub const GetLastError = windows.GetLastError;
 pub const unexpectedError = windows.unexpectedError;
@@ -27,12 +45,15 @@ pub const BOOL = windows.BOOL;
 pub const COORD = windows.COORD;
 pub const DWORD = windows.DWORD;
 pub const DWORD_PTR = windows.DWORD_PTR;
+pub const FARPROC = windows.FARPROC;
 pub const HANDLE = windows.HANDLE;
+pub const HMODULE = windows.HMODULE;
 pub const HWND = windows.HWND;
 pub const HINSTANCE = windows.HINSTANCE;
 pub const HPCON = windows.LPVOID;
 pub const HRESULT = c_long;
 pub const LARGE_INTEGER = windows.LARGE_INTEGER;
+pub const LONG = windows.LONG;
 pub const LPCWSTR = windows.LPCWSTR;
 pub const LPSTR = windows.LPSTR;
 pub const LPVOID = windows.LPVOID;
@@ -80,7 +101,7 @@ pub const MAX_PATH = windows.MAX_PATH;
 pub const FALSE: windows.BOOL = .fromBool(false);
 pub const TRUE: windows.BOOL = .fromBool(true);
 pub const SYNCHRONIZE = windows.SYNCHRONIZE;
-pub const WAIT_OBJECT_0 = windows.WAIT_OBJECT_0;
+pub const WAIT_OBJECT_0: DWORD = 0x00000000;
 pub const DUPLICATE_SAME_ACCESS = windows.DUPLICATE_SAME_ACCESS;
 
 // Bit-field and enum constant values
@@ -119,21 +140,32 @@ pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = ProcThreadAttributeValue(
     false,
 );
 
+pub const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = ProcThreadAttributeValue(
+    .ProcThreadAttributeHandleList,
+    false,
+    true,
+    false,
+);
+
 // Types needed for ntdll calls
 pub const ACCESS_MASK = windows.ACCESS_MASK;
 pub const IO_STATUS_BLOCK = windows.IO_STATUS_BLOCK;
 pub const NTSTATUS = windows.NTSTATUS;
 pub const OBJECT_ATTRIBUTES = windows.OBJECT.ATTRIBUTES;
 
-pub const SetHandleInformation = windows.SetHandleInformation;
+/// Zig 0.16 dropped Set/GetHandleInformation from std, so both are wrapped
+/// here over our own kernel32 externs.
+pub fn SetHandleInformation(handle: HANDLE, mask: DWORD, flags: DWORD) !void {
+    if (exp.kernel32.SetHandleInformation(handle, mask, flags) == FALSE) {
+        return windows.unexpectedError(windows.GetLastError());
+    }
+}
 
-/// GetHandleInformation is not wrapped in Zig std yet (std only wraps
-/// SetHandleInformation). Expose a small wrapper here so callers can
-/// verify handle inheritance flags without reaching into kernel32
-/// directly.
+/// Lets callers verify handle inheritance flags without reaching into
+/// kernel32 directly.
 pub fn GetHandleInformation(handle: HANDLE, flags: *DWORD) !void {
-    if (exp.kernel32.GetHandleInformation(handle, flags) == 0) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (exp.kernel32.GetHandleInformation(handle, flags) == FALSE) {
+        return windows.unexpectedError(windows.GetLastError());
     }
 }
 
@@ -180,6 +212,26 @@ pub const exp = struct {
             hObject: HANDLE,
             lpdwFlags: *DWORD,
         ) callconv(.winapi) BOOL;
+        // Zig 0.16 dropped these from std.os.windows.kernel32. The bundled
+        // conpty.dll loader in pty.zig resolves its entry points with them.
+        // Zig 0.16 also dropped DuplicateHandle. The child-exit watcher in
+        // termio/Exec.zig dups the process handle with it.
+        pub extern "kernel32" fn DuplicateHandle(
+            hSourceProcessHandle: HANDLE,
+            hSourceHandle: HANDLE,
+            hTargetProcessHandle: HANDLE,
+            lpTargetHandle: *HANDLE,
+            dwDesiredAccess: DWORD,
+            bInheritHandle: BOOL,
+            dwOptions: DWORD,
+        ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn LoadLibraryW(
+            lpLibFileName: [*:0]const u16,
+        ) callconv(.winapi) ?HMODULE;
+        pub extern "kernel32" fn GetProcAddress(
+            hModule: HMODULE,
+            lpProcName: [*:0]const u8,
+        ) callconv(.winapi) ?FARPROC;
         pub extern "kernel32" fn CreatePseudoConsole(
             size: COORD,
             hInput: HANDLE,
@@ -290,6 +342,13 @@ pub const exp = struct {
         ) callconv(.winapi) BOOL;
         pub extern "kernel32" fn CancelIoEx(
             hFile: HANDLE,
+            lpOverlapped: ?*OVERLAPPED,
+        ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn WriteFile(
+            hFile: HANDLE,
+            lpBuffer: [*]const u8,
+            nNumberOfBytesToWrite: DWORD,
+            lpNumberOfBytesWritten: ?*DWORD,
             lpOverlapped: ?*OVERLAPPED,
         ) callconv(.winapi) BOOL;
         pub extern "kernel32" fn ReadFile(

@@ -142,8 +142,8 @@ pub fn threadEnter(
         };
         const src = cmd.pid orelse return error.ProcessNoPid;
         var dup: windows.HANDLE = undefined;
-        const self_proc = windows.kernel32.GetCurrentProcess();
-        if (windows.kernel32.DuplicateHandle(
+        const self_proc = windows.GetCurrentProcess();
+        if (windows.exp.kernel32.DuplicateHandle(
             self_proc,
             src,
             self_proc,
@@ -151,8 +151,8 @@ pub fn threadEnter(
             0,
             windows.FALSE,
             windows.DUPLICATE_SAME_ACCESS,
-        ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) == .FALSE) {
+            return windows.unexpectedError(windows.GetLastError());
         }
         break :blk dup;
     } else {};
@@ -163,8 +163,8 @@ pub fn threadEnter(
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer _ = posix.system.close(pipe[0]);
-    errdefer _ = posix.system.close(pipe[1]);
+    errdefer internal_os.closePipeEnd(pipe[0]);
+    errdefer internal_os.closePipeEnd(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -209,7 +209,7 @@ pub fn threadEnter(
             io.alloc.destroy(ctx);
         }
         const wt = try std.Thread.spawn(.{}, winProcessWaitThread, .{ io.alloc, ctx });
-        wt.setName("proc-wait") catch {};
+        wt.setName(global.io(), "proc-wait") catch {};
         td.backend.exec.process_wait_thread = wt;
     }
 
@@ -261,16 +261,17 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
-        .SUCCESS => {},
+    switch (internal_os.writePipeEnd(exec.read_thread_pipe, "x")) {
+        .ok => {},
 
-        // EPIPE means that our read thread is closed already, which is
-        // completely fine since that is what we were trying to achieve.
-        .PIPE => {},
+        // A broken pipe means our read thread is closed already, which
+        // is completely fine since that is what we were trying to
+        // achieve.
+        .broken_pipe => {},
 
-        else => |e| log.warn(
-            "error writing to read thread quit pipe err=E{s}",
-            .{@tagName(e)},
+        .failed => log.warn(
+            "error writing to read thread quit pipe",
+            .{},
         ),
     }
 
@@ -627,7 +628,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.TerminalMode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        _ = posix.system.close(self.read_thread_pipe);
+        internal_os.closePipeEnd(self.read_thread_pipe);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -1464,10 +1465,10 @@ fn winProcessWaitThread(alloc: Allocator, ctx: *WinProcessWaitCtx) void {
     defer alloc.destroy(ctx);
     defer windows.CloseHandle(ctx.handle);
 
-    switch (windows.kernel32.WaitForSingleObject(ctx.handle, windows.INFINITE)) {
+    switch (windows.exp.kernel32.WaitForSingleObject(ctx.handle, windows.INFINITE)) {
         windows.WAIT_OBJECT_0 => {},
         windows.WAIT_FAILED => {
-            log.err("proc-wait: WaitForSingleObject failed err={}", .{windows.kernel32.GetLastError()});
+            log.err("proc-wait: WaitForSingleObject failed err={}", .{windows.GetLastError()});
             return;
         },
         else => |r| {
@@ -1477,8 +1478,8 @@ fn winProcessWaitThread(alloc: Allocator, ctx: *WinProcessWaitCtx) void {
     }
 
     var exit_code: windows.DWORD = 1;
-    if (windows.kernel32.GetExitCodeProcess(ctx.handle, &exit_code) == 0) {
-        log.err("proc-wait: GetExitCodeProcess failed err={}", .{windows.kernel32.GetLastError()});
+    if (windows.exp.kernel32.GetExitCodeProcess(ctx.handle, &exit_code) == .FALSE) {
+        log.err("proc-wait: GetExitCodeProcess failed err={}", .{windows.GetLastError()});
         // processExitCommon with a best-effort code of 1
     }
 
@@ -1648,7 +1649,7 @@ pub const ReadThread = struct {
 
     fn threadMainPosix(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
-        defer _ = posix.system.close(quit);
+        defer internal_os.closePipeEnd(quit);
 
         // Right now, on Darwin, `std.Thread.setName` can only name the current
         // thread, and we have no way to get the current thread from within it,
@@ -2014,7 +2015,7 @@ pub const ReadThread = struct {
 
     fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
-        defer _ = posix.system.close(quit);
+        defer internal_os.closePipeEnd(quit);
 
         // Setup our crash metadata
         crash.sentry.thread_state = .{
@@ -2266,7 +2267,7 @@ fn execCommand(
                     var args: std.ArrayList([:0]const u8) = .empty;
                     errdefer args.deinit(alloc);
 
-                    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+                    var iter = try std.process.Args.IteratorGeneral(.{}).init(
                         alloc,
                         v,
                     );
@@ -2516,8 +2517,11 @@ fn maybeProvisionWslTerminfo(
     // file). Optional: any lookup failure just means we run the (idempotent,
     // self-skipping) install script.
     const cache: ?DiskCache = cache: {
+        var environ_map = global.environMap() catch break :cache null;
+        defer environ_map.deinit();
         const state_dir = internal_os.xdg.state(
             alloc,
+            &environ_map,
             .{ .subdir = "ghostty" },
         ) catch break :cache null;
         defer alloc.free(state_dir);
@@ -2542,7 +2546,7 @@ fn maybeProvisionWslTerminfo(
 
     // Best-effort record; a write failure just re-runs the self-skipping
     // script next launch.
-    if (cache) |c| c.add(alloc, key, std.time.timestamp()) catch {};
+    if (cache) |c| c.add(alloc, key, std.Io.Timestamp.now(global.io(), .real).toSeconds()) catch {};
 }
 
 test "wslTerminfoLauncherPrefix builds wsl sh -c prefix" {
@@ -2621,7 +2625,7 @@ fn maybeWrapGitBashWithWinpty(
 
     const winpty: []const u8 = found: {
         for (candidates) |c| {
-            std.fs.accessAbsolute(c, .{}) catch continue;
+            std.Io.Dir.accessAbsolute(global.io(), c, .{}) catch continue;
             break :found c;
         }
         return args;
@@ -2739,7 +2743,7 @@ fn pwshTailRequiresFirstStatement(tail: []const [:0]const u8) ?[]const u8 {
 ///   here but would suppress whatever the user was hoping to observe;
 ///   the safer choice is to leave their argv as-is.
 fn firstStatementReason(script: []const u8) ?[]const u8 {
-    const first = std.mem.trimLeft(u8, script, " \t\r\n");
+    const first = std.mem.trimStart(u8, script, " \t\r\n");
     if (first.len == 0) return null;
     if (first[0] == '{') return "a scriptblock literal";
     if (asciiStartsWithIgnoreCase(first, "#requires")) return "a #requires directive";

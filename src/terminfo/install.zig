@@ -76,7 +76,7 @@ pub fn install(
         return error.InstallFailed;
     };
     switch (term) {
-        .Exited => |rc| if (rc != 0) return error.InstallFailed,
+        .exited => |rc| if (rc != 0) return error.InstallFailed,
         else => return error.InstallFailed,
     }
 }

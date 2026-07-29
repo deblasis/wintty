@@ -418,7 +418,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             1,
             0,
             &attribute_list_size,
-        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) == .FALSE) return windows.unexpectedError(windows.GetLastError());
 
         // Allocate the handle list from the arena so its lifetime
         // outlives the attribute list until after CreateProcessW.
@@ -455,14 +455,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             @sizeOf(windows.HANDLE) * handles.len,
             null,
             null,
-        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) == .FALSE) return windows.unexpectedError(windows.GetLastError());
 
         break :b .{ attribute_list_buf.ptr, stdin, stdout, stderr };
     };
 
     var startup_info_ex = windows.STARTUPINFOEX{
         .StartupInfo = .{
-            .cb = if (attribute_list != null) @sizeOf(windows.STARTUPINFOEX) else @sizeOf(windows.STARTUPINFOW),
+            .cb = @sizeOf(windows.STARTUPINFOEX),
             .hStdError = stderr,
             .hStdOutput = stdout,
             .hStdInput = stdin,
@@ -485,14 +485,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     };
 
     var flags: windows.DWORD = windows.CREATE_UNICODE_ENVIRONMENT;
-    if (attribute_list != null) flags |= windows.EXTENDED_STARTUPINFO_PRESENT;
+    flags |= windows.EXTENDED_STARTUPINFO_PRESENT;
 
     // Suppress the console window for non-pseudoconsole spawns (helper /
     // test processes spawned with explicit std handles). ConPTY attaches
     // a pseudo-console which already suppresses the window; handle-list
     // spawns need the flag explicitly.
     if (self.pseudo_console == null) {
-        flags |= windows.exp.CREATE_NO_WINDOW;
+        flags |= windows.CREATE_NO_WINDOW;
     }
 
     var process_information: windows.PROCESS_INFORMATION = undefined;

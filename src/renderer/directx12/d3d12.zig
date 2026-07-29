@@ -1710,14 +1710,11 @@ pub const DxcLibrary = struct {
     /// Returns null if the DLL cannot be loaded.
     pub fn load() ?DxcLibrary {
         const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("dxcompiler.dll");
-        const dll = std.os.windows.LoadLibraryW(dll_name) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => return null,
-        };
+        const dll = LoadLibraryW(dll_name) orelse return null;
 
         // Get the DxcCreateInstance function
-        const proc = std.os.windows.kernel32.GetProcAddress(dll, "DxcCreateInstance") orelse {
-            std.os.windows.FreeLibrary(dll);
+        const proc = GetProcAddress(dll, "DxcCreateInstance") orelse {
+            _ = FreeLibrary(dll);
             return null;
         };
 
@@ -1730,7 +1727,7 @@ pub const DxcLibrary = struct {
     /// Unload the DLL.
     pub fn deinit(self: DxcLibrary) void {
         if (self.dll) |dll| {
-            std.os.windows.FreeLibrary(dll);
+            _ = FreeLibrary(dll);
         }
     }
 
@@ -1743,6 +1740,21 @@ pub const DxcLibrary = struct {
 };
 
 // --- Kernel32 helpers for fence synchronization ---
+
+// Zig 0.16 dropped the dynamic-loading trio from std.os.windows; the
+// dxcompiler.dll loader below is the only consumer here.
+pub extern "kernel32" fn LoadLibraryW(
+    lpLibFileName: [*:0]const u16,
+) callconv(.winapi) ?std.os.windows.HMODULE;
+
+pub extern "kernel32" fn GetProcAddress(
+    hModule: std.os.windows.HMODULE,
+    lpProcName: [*:0]const u8,
+) callconv(.winapi) ?std.os.windows.FARPROC;
+
+pub extern "kernel32" fn FreeLibrary(
+    hLibModule: std.os.windows.HMODULE,
+) callconv(.winapi) std.os.windows.BOOL;
 
 pub extern "kernel32" fn CreateEventW(
     lpEventAttributes: ?*anyopaque,

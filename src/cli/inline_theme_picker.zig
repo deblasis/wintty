@@ -4,7 +4,7 @@ const Config = @import("../config/Config.zig");
 const configpkg = @import("../config.zig");
 const themepkg = @import("../config/theme.zig");
 const input = @import("../input.zig");
-const global_state = &@import("../global.zig").state;
+const global = @import("../global.zig");
 
 const zf = @import("zf");
 
@@ -45,15 +45,19 @@ pub fn discoverThemes(arena: Allocator) ![]ThemeEntry {
     var it: themepkg.LocationIterator = .{ .arena_alloc = arena };
 
     while (try it.next()) |loc| {
-        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| {
+        var dir = std.Io.Dir.cwd().openDir(
+            global.io(),
+            loc.dir,
+            .{ .iterate = true },
+        ) catch |err| {
             if (err != error.FileNotFound)
                 log.warn("failed to open theme dir {s}: {}", .{ loc.dir, err });
             continue;
         };
-        defer dir.close();
+        defer dir.close(global.io());
 
         var walker = dir.iterate();
-        while (try walker.next()) |entry| {
+        while (try walker.next(global.io())) |entry| {
             switch (entry.kind) {
                 .file, .sym_link => {
                     if (std.mem.eql(u8, entry.name, ".DS_Store"))
@@ -412,7 +416,7 @@ pub const InlineThemePicker = struct {
 
             for (self.themes, 0..) |*theme, i| {
                 theme.rank = zf.rank(theme.name, tokens.items, .{
-                    .to_lower = true,
+                    .case_sensitive = false,
                     .plain = true,
                 });
                 if (theme.rank != null) self.filtered.append(self.allocator, i) catch {};
