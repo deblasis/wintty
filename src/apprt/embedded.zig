@@ -2969,41 +2969,28 @@ pub const CAPI = struct {
         // rather than a render loop, so it can't hand us a device and command
         // buffer the way MTKView does for the Metal inspector above.
         //
-        // The DirectX12 implementation isn't wired up yet. The exports exist
-        // so embedders link, and init reports failure so the inspector window
-        // stays inert rather than presenting a swap chain that was never
-        // created; embedders must skip present/resize/shutdown when init
-        // returns false.
+        // init reports failure while there is no DirectX12 backend behind
+        // these, which keeps the inspector window inert instead of presenting
+        // a swap chain that was never created.
 
         export fn ghostty_inspector_directx12_surface_init(
-            ptr: *Inspector,
-            swap_chain_panel: ?*anyopaque,
-            width: u32,
-            height: u32,
+            _: *Inspector,
+            _: ?*anyopaque,
+            _: u32,
+            _: u32,
         ) bool {
-            _ = ptr;
-            _ = swap_chain_panel;
-            _ = width;
-            _ = height;
+            log.warn("directx12 inspector surface backend is not implemented", .{});
             return false;
         }
 
-        export fn ghostty_inspector_directx12_surface_present(ptr: *Inspector) void {
-            _ = ptr;
-        }
+        export fn ghostty_inspector_directx12_surface_present(_: *Inspector) void {}
 
         export fn ghostty_inspector_directx12_surface_resize(
-            ptr: *Inspector,
-            width: u32,
-            height: u32,
-        ) void {
-            _ = ptr;
-            _ = width;
-            _ = height;
-        }
+            _: *Inspector,
+            _: u32,
+            _: u32,
+        ) void {}
 
-        export fn ghostty_inspector_directx12_surface_shutdown(ptr: *Inspector) void {
-            _ = ptr;
-        }
+        export fn ghostty_inspector_directx12_surface_shutdown(_: *Inspector) void {}
     };
 };

@@ -2900,7 +2900,8 @@ public sealed partial class MainWindow : Window
         var inspector = NativeMethods.SurfaceInspector(new GhosttySurface(surfaceHandle));
         if (inspector.Handle == IntPtr.Zero) return;
 
-        var window = new InspectorWindow(inspector);
+        var window = new InspectorWindow(
+            inspector, App.LoggerFactory?.CreateLogger<InspectorWindow>());
 
         // The inspector presents into the bound surface every frame. If the
         // active surface changes (pane focus/close, tab switch) that surface
