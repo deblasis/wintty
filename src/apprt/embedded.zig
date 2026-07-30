@@ -2980,5 +2980,35 @@ pub const CAPI = struct {
             }
             ptr.deinitDx12Heap();
         }
+
+        // Swap-chain-owning inspector API. The embedder gives us its
+        // SwapChainPanel and we own the swap chain, the same split the
+        // terminal surface uses: WinUI's SwapChainPanel is a compositor sink
+        // rather than a render loop, so it can't hand us a device and command
+        // buffer the way MTKView does for the Metal inspector above.
+        //
+        // init reports failure while there is no DirectX12 backend behind
+        // these, which keeps the inspector window inert instead of presenting
+        // a swap chain that was never created.
+
+        export fn ghostty_inspector_directx12_surface_init(
+            _: *Inspector,
+            _: ?*anyopaque,
+            _: u32,
+            _: u32,
+        ) bool {
+            log.warn("directx12 inspector surface backend is not implemented", .{});
+            return false;
+        }
+
+        export fn ghostty_inspector_directx12_surface_present(_: *Inspector) void {}
+
+        export fn ghostty_inspector_directx12_surface_resize(
+            _: *Inspector,
+            _: u32,
+            _: u32,
+        ) void {}
+
+        export fn ghostty_inspector_directx12_surface_shutdown(_: *Inspector) void {}
     };
 };
