@@ -1338,6 +1338,21 @@ GHOSTTY_API bool ghostty_inspector_metal_shutdown(ghostty_inspector_t);
 GHOSTTY_API bool ghostty_inspector_directx12_init(ghostty_inspector_t, void*, void*, uint32_t, uint32_t);
 GHOSTTY_API void ghostty_inspector_directx12_render(ghostty_inspector_t, void*);
 GHOSTTY_API void ghostty_inspector_directx12_shutdown(ghostty_inspector_t);
+
+// Swap-chain-owning variant, where libghostty creates and drives the swap
+// chain bound to the embedder's SwapChainPanel, rather than rendering into a
+// command list the embedder owns.
+//
+// init takes an ISwapChainPanelNative* plus the panel size in pixels; resize
+// takes the new pixel size. The panel pointer is borrowed for the duration of
+// the init call only: the embedder may release it once init returns, so an
+// implementation that retains the panel must AddRef it.
+//
+// Skip present/resize/shutdown when init returns false.
+GHOSTTY_API bool ghostty_inspector_directx12_surface_init(ghostty_inspector_t, void*, uint32_t, uint32_t);
+GHOSTTY_API void ghostty_inspector_directx12_surface_present(ghostty_inspector_t);
+GHOSTTY_API void ghostty_inspector_directx12_surface_resize(ghostty_inspector_t, uint32_t, uint32_t);
+GHOSTTY_API void ghostty_inspector_directx12_surface_shutdown(ghostty_inspector_t);
 #endif
 
 // APIs I'd like to get rid of eventually but are still needed for now.
