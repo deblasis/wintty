@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -27,15 +28,17 @@ internal sealed partial class InspectorWindow : Window
     private static readonly TimeSpan PresentInterval = TimeSpan.FromMilliseconds(16);
 
     private readonly GhosttyInspector _inspector;
+    private readonly ILogger<InspectorWindow>? _logger;
     private readonly DispatcherTimer _timer;
     private bool _initialized;
     private bool _closed;
 
-    public InspectorWindow(GhosttyInspector inspector)
+    public InspectorWindow(GhosttyInspector inspector, ILogger<InspectorWindow>? logger)
     {
         InitializeComponent();
 
         _inspector = inspector;
+        _logger = logger;
 
         Title = $"{AppIdentity.ProductName} Inspector";
 
@@ -80,21 +83,44 @@ internal sealed partial class InspectorWindow : Window
     {
         if (_initialized || _closed) return;
 
-        var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
+        // QueryInterface throws on failure, and App leaves unhandled exceptions
+        // unhandled, so letting one escape a Loaded handler would tear down the
+        // terminal along with the inspector.
         try
         {
-            // libghostty creates the swap chain and binds it to the panel
-            // synchronously here, so the panel pointer can be released right
-            // after (same contract as the terminal surface).
-            _initialized = NativeMethods.InspectorDirectX12SurfaceInit(
-                _inspector, panelPtr, PixelWidth, PixelHeight);
+            var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
+            try
+            {
+                // The panel pointer is borrowed for the duration of the call:
+                // libghostty AddRefs it if it retains anything, so we release
+                // as soon as init returns (same contract as the terminal
+                // surface).
+                _initialized = NativeMethods.InspectorDirectX12SurfaceInit(
+                    _inspector, panelPtr, PixelWidth, PixelHeight);
+            }
+            finally
+            {
+                SwapChainPanelInterop.Release(panelPtr);
+            }
         }
-        finally
+        catch (Exception ex)
         {
-            SwapChainPanelInterop.Release(panelPtr);
+            _logger?.LogSwapChainInitFailed(ex);
         }
 
-        if (!_initialized) return;
+        // Close rather than sit here as a blank window: libghostty logs why it
+        // refused, and leaving the window open would make the next toggle press
+        // close this dead window instead of opening a working one.
+        //
+        // Queued rather than closed inline: tearing the window down from inside
+        // its own Loaded handler runs teardown during a layout pass, and a throw
+        // from Close() would escape the handler the try/catch above exists to
+        // contain.
+        if (!_initialized)
+        {
+            DispatcherQueue.TryEnqueue(Close);
+            return;
+        }
 
         NativeMethods.InspectorSetContentScale(_inspector, RasterScale, RasterScale);
         NativeMethods.InspectorSetSize(_inspector, PixelWidth, PixelHeight);
@@ -248,4 +274,16 @@ internal sealed partial class InspectorWindow : Window
                 break;
         }
     }
+}
+
+internal static partial class InspectorWindowLogExtensions
+{
+    // Warning, not Error: the inspector is a diagnostic overlay, so a failed
+    // swap chain costs the user the inspector window and nothing else. The
+    // terminal keeps running.
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Inspector.SwapChainInitFailed,
+                   Level = LogLevel.Warning,
+                   Message = "[InspectorWindow] swap chain init failed; inspector window closed")]
+    internal static partial void LogSwapChainInitFailed(
+        this ILogger<InspectorWindow> logger, Exception ex);
 }
