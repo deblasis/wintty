@@ -63,9 +63,18 @@
       to Ghostty.csproj (which would drag WinAppSDK targets into a plain
       net10.0 test assembly).
     -->
+    <!--
+      Every file that P/Invokes libghostty, for EntryPointParityTests (and
+      NativeMethods.cs also for MarshalComplianceTests). Unlike a missing export
+      site, a missing import site fails SILENTLY (unscanned means unchecked), so
+      add a file here if it starts importing a ghostty_* symbol.
+    -->
     <EmbeddedResource Include="..\Ghostty\Interop\NativeMethods.cs"
-                      Link="Interop\NativeMethods.cs"
-                      LogicalName="Ghostty.Tests.Interop.NativeMethods.cs" />
+                      Link="Interop\Imports\NativeMethods.cs"
+                      LogicalName="Ghostty.Tests.Interop.Imports.NativeMethods.cs" />
+    <EmbeddedResource Include="..\Ghostty.Core\Version\LibGhosttyBuildInfo.cs"
+                      Link="Interop\Imports\LibGhosttyBuildInfo.cs"
+                      LogicalName="Ghostty.Tests.Interop.Imports.LibGhosttyBuildInfo.cs" />
     <!--
       Every zig file that declares `export fn ghostty_*`. EntryPointParityTests
       scans these for the symbols NativeMethods.cs imports; the C header is NOT
@@ -73,14 +82,19 @@
       Add a file here if a new one starts exporting a ghostty_* symbol.
     -->
     <EmbeddedResource Include="..\..\src\apprt\embedded.zig"
+                      Link="Interop\Exports\apprt.embedded.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.apprt.embedded.zig" />
     <EmbeddedResource Include="..\..\src\benchmark\CApi.zig"
+                      Link="Interop\Exports\benchmark.CApi.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.benchmark.CApi.zig" />
     <EmbeddedResource Include="..\..\src\config\CApi.zig"
+                      Link="Interop\Exports\config.CApi.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.config.CApi.zig" />
     <EmbeddedResource Include="..\..\src\log_bridge.zig"
+                      Link="Interop\Exports\log_bridge.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.log_bridge.zig" />
     <EmbeddedResource Include="..\..\src\main_c.zig"
+                      Link="Interop\Exports\main_c.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
   </ItemGroup>
 
