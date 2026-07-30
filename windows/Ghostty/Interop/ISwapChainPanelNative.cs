@@ -46,12 +46,15 @@ internal static class SwapChainPanelInterop
 
     /// <summary>
     /// QueryInterfaces a WinUI 3 SwapChainPanel for ISwapChainPanelNative
-    /// and returns the raw interface pointer, used as the SwapChainPanel
-    /// mode selector passed to ghostty_surface_new. libghostty does not
-    /// call through this pointer (it presents into a composition surface
-    /// handle instead), so the caller MUST Release it once SurfaceNew
-    /// returns. The managed SwapChainPanel keeps composition alive via its
-    /// own ref.
+    /// and returns the raw interface pointer. Two callers, both of which
+    /// borrow it only for the duration of the call they pass it to, so the
+    /// caller MUST Release it as soon as that call returns. The managed
+    /// SwapChainPanel keeps composition alive via its own ref.
+    ///
+    /// For ghostty_surface_new it is only a mode selector: libghostty does
+    /// not call through it, and presents into a composition surface handle
+    /// instead. For the inspector's swap chain init libghostty does bind
+    /// the panel, but still does not retain the pointer.
     /// </summary>
     public static IntPtr QueryInterface(Microsoft.UI.Xaml.Controls.SwapChainPanel panel)
     {

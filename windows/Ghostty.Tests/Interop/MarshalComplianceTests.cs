@@ -11,7 +11,7 @@ namespace Ghostty.Tests.Interop;
 // (no [MarshalAs], two-BOOL-shape: byte for libghostty _Bool, int for Win32 BOOL).
 public class MarshalComplianceTests
 {
-    private const string ResourceName = "Ghostty.Tests.Interop.NativeMethods.cs";
+    private const string ResourceName = "Ghostty.Tests.Interop.Imports.NativeMethods.cs";
 
     // Note: `StringMarshalling = StringMarshalling.Utf8` is a separate,
     // supported mechanism and is NOT what this test scans for. Only the
