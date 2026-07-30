@@ -66,6 +66,22 @@
     <EmbeddedResource Include="..\Ghostty\Interop\NativeMethods.cs"
                       Link="Interop\NativeMethods.cs"
                       LogicalName="Ghostty.Tests.Interop.NativeMethods.cs" />
+    <!--
+      Every zig file that declares `export fn ghostty_*`. EntryPointParityTests
+      scans these for the symbols NativeMethods.cs imports; the C header is NOT
+      usable for this, because fork-added exports are routinely omitted from it.
+      Add a file here if a new one starts exporting a ghostty_* symbol.
+    -->
+    <EmbeddedResource Include="..\..\src\apprt\embedded.zig"
+                      LogicalName="Ghostty.Tests.Interop.Exports.apprt.embedded.zig" />
+    <EmbeddedResource Include="..\..\src\benchmark\CApi.zig"
+                      LogicalName="Ghostty.Tests.Interop.Exports.benchmark.CApi.zig" />
+    <EmbeddedResource Include="..\..\src\config\CApi.zig"
+                      LogicalName="Ghostty.Tests.Interop.Exports.config.CApi.zig" />
+    <EmbeddedResource Include="..\..\src\log_bridge.zig"
+                      LogicalName="Ghostty.Tests.Interop.Exports.log_bridge.zig" />
+    <EmbeddedResource Include="..\..\src\main_c.zig"
+                      LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
   </ItemGroup>
 
   <ItemGroup>
