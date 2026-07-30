@@ -96,4 +96,10 @@ internal static class LogEvents
         public const int ForwardFailed     = 2904;
         public const int ServerStartFailed = 2905;
     }
+
+    // 3000-3099: Inspector
+    internal static class Inspector
+    {
+        public const int SwapChainInitFailed = 3000;
+    }
 }
