@@ -1293,6 +1293,12 @@ typedef struct {
   ghostty_cell_s* cells;
   uint16_t rows;
   uint16_t cols;
+  // Cursor in viewport coordinates, resolved under the same renderer-lock hold
+  // as the cells. Valid only when cursor_in_viewport is true; false means the
+  // cursor is below the viewport (it only ever scrolls up into scrollback).
+  uint16_t cursor_row;
+  uint16_t cursor_col;
+  bool cursor_in_viewport;
 } ghostty_cells_s;
 
 GHOSTTY_API bool ghostty_surface_read_cells(ghostty_surface_t, ghostty_cells_s*);

@@ -1646,6 +1646,21 @@ pub const CAPI = struct {
         rows: u16 = 0,
         cols: u16 = 0,
 
+        /// Cursor position in VIEWPORT coordinates (0-based, y down).
+        /// Meaningful only when `cursor_in_viewport` is true.
+        ///
+        /// The cursor rides along with the cells rather than having its own
+        /// accessor so that both are resolved under a single hold of the
+        /// renderer mutex. A separate call would let a caller pair a cursor
+        /// from one frame with cells from another.
+        cursor_row: u16 = 0,
+        cursor_col: u16 = 0,
+
+        /// False when the cursor is not on screen. The viewport only ever
+        /// scrolls UP into scrollback and the cursor always lives in the
+        /// active area, so this means the cursor is BELOW the viewport.
+        cursor_in_viewport: bool = false,
+
         pub fn deinit(self: *Cells) void {
             if (self.cells) |ptr| {
                 const len: usize = @as(usize, self.rows) * @as(usize, self.cols);
@@ -2077,10 +2092,28 @@ pub const CAPI = struct {
             }
         }
 
+        // Clamp into the grid we just emitted: the render state and the row
+        // data are consistent here, but the consumer indexes `out` with these
+        // and must not be handed an out-of-range cell.
+        const cursor_vp = state.cursor.viewport;
+        const cursor_row: u16 = if (cursor_vp) |c|
+            @intCast(@min(@as(usize, c.y), rows - 1))
+        else
+            0;
+        const cursor_col: u16 = if (cursor_vp) |c| col: {
+            const x = @min(@as(usize, c.x), cols - 1);
+            // On the tail half of a wide character, report the character's
+            // own cell so a reader lands on the glyph, not its spacer.
+            break :col @intCast(if (c.wide_tail and x > 0) x - 1 else x);
+        } else 0;
+
         result.* = .{
             .cells = out.ptr,
             .rows = @intCast(rows),
             .cols = @intCast(cols),
+            .cursor_row = cursor_row,
+            .cursor_col = cursor_col,
+            .cursor_in_viewport = cursor_vp != null,
         };
         return true;
     }

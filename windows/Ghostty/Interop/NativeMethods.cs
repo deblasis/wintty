@@ -189,6 +189,13 @@ internal struct GhosttyCells
     public IntPtr Cells; // ghostty_cell_s* (rows*cols)
     public ushort Rows;
     public ushort Cols;
+    // Cursor in viewport coordinates, resolved under the same renderer-lock
+    // hold as the cells. Valid only when CursorInViewport is non-zero. Kept as
+    // a byte because the assembly sets DisableRuntimeMarshalling, so every
+    // interop field must be blittable and `bool` is not.
+    public ushort CursorRow;
+    public ushort CursorCol;
+    public byte CursorInViewport;
 }
 
 // Mirrors ghostty_point_tag_e.
@@ -585,7 +592,9 @@ internal static partial class NativeMethods
                     }
                 }
             }
-            return new Ghostty.Core.Tabs.CellGrid(managed, rows, cols);
+            return new Ghostty.Core.Tabs.CellGrid(
+                managed, rows, cols,
+                native.CursorRow, native.CursorCol, native.CursorInViewport != 0);
         }
         finally
         {
