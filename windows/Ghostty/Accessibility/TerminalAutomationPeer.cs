@@ -14,7 +14,7 @@ namespace Ghostty.Accessibility;
 /// macOS VoiceOver model (textArea role, cached screen contents, read_selection
 /// offsets as the selected range). Read-only in this stage.
 /// </summary>
-internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomationPeer, ITextProvider
+internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomationPeer, ITextProvider, ITextProvider2
 {
     // Screen reads take the renderer mutex, so we serve a cached document for
     // this long between fetches. Matches the macOS surface's 500ms CachedValue.
@@ -28,6 +28,8 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     private readonly CachedValue<Ghostty.Core.Tabs.CellGrid?> _cells;
     private readonly TerminalOutputAnnouncer _announcer = new();
     private readonly DispatcherTimer _announceTimer;
+    // Last caret offset seen by the tick; null means "not observed yet".
+    private int? _lastCaretOffset;
 
     internal TerminalAutomationPeer(TerminalControl owner) : base(owner)
     {
@@ -64,6 +66,10 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
         if (!ScreenReaderDetector.IsRunning() || !_owner.IsActive)
         {
             _announcer.Reseed(Document.Text);
+            // Drop the remembered caret too, so returning to this surface
+            // re-announces where the caret is rather than staying silent
+            // because it happens to match where it was on the way out.
+            _lastCaretOffset = null;
             return;
         }
 
@@ -76,6 +82,25 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
                 text,
                 "terminal-output");
         }
+
+        RaiseCaretMovedIfChanged();
+    }
+
+    // Caret moves have no dedicated UIA event; the Text pattern's
+    // TextSelectionChanged is what tells a screen reader to re-read the caret,
+    // so a move and a selection change raise the same event.
+    private void RaiseCaretMovedIfChanged()
+    {
+        if (ViewportCells is not { } grid) return;
+
+        var offset = ViewportCaret.Offset(Document, grid);
+        if (_lastCaretOffset == offset) return;
+
+        var first = _lastCaretOffset is null;
+        _lastCaretOffset = offset;
+
+        // The first observation establishes a baseline; there is no move yet.
+        if (!first) RaiseSelectionChangedEvent();
     }
 
     /// <summary>
@@ -108,7 +133,9 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     protected override string GetNameCore() => "Terminal";
 
     protected override object GetPatternCore(PatternInterface patternInterface)
-        => patternInterface == PatternInterface.Text ? this : base.GetPatternCore(patternInterface);
+        => patternInterface is PatternInterface.Text or PatternInterface.Text2
+            ? this
+            : base.GetPatternCore(patternInterface);
 
     // ---- ITextProvider ----------------------------------------------------
 
@@ -133,4 +160,29 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     public ITextRangeProvider RangeFromPoint(global::Windows.Foundation.Point screenLocation) =>
         new TerminalTextRangeProvider(this, new TextSpan(0, 0));
+
+    // ---- ITextProvider2 ---------------------------------------------------
+
+    /// <summary>
+    /// The caret as a degenerate range. <paramref name="isActive"/> means "the
+    /// element holding this caret has keyboard focus": reporting a constant
+    /// true would tell a screen reader that a background pane's caret is the
+    /// live one.
+    /// </summary>
+    public ITextRangeProvider GetCaretRange(out bool isActive)
+    {
+        isActive = _owner.IsActive;
+
+        // Falls back to end-of-document when there are no cells to anchor
+        // against, which is also where an off-screen cursor maps to.
+        var cells = ViewportCells;
+        var offset = cells is { } grid
+            ? ViewportCaret.Offset(Document, grid)
+            : Document.Length;
+
+        return new TerminalTextRangeProvider(this, new TextSpan(offset, offset));
+    }
+
+    public ITextRangeProvider RangeFromAnnotation(IRawElementProviderSimple annotationElement) =>
+        DocumentRange;
 }
