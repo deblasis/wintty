@@ -14,7 +14,8 @@ namespace Ghostty.Accessibility;
 /// macOS VoiceOver model (textArea role, cached screen contents, read_selection
 /// offsets as the selected range). Read-only in this stage.
 /// </summary>
-internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomationPeer, ITextProvider, ITextProvider2
+internal sealed partial class TerminalAutomationPeer
+    : FrameworkElementAutomationPeer, ITextProvider, ITextProvider2, IValueProvider
 {
     // Screen reads take the renderer mutex, so we serve a cached document for
     // this long between fetches. Matches the macOS surface's 500ms CachedValue.
@@ -82,6 +83,19 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
                 AutomationNotificationProcessing.All,
                 text,
                 "terminal-output");
+
+            // Notification carries the words; TextChanged tells a client that
+            // tracks the document to re-read rather than rely on the
+            // announcement alone.
+            //
+            // LiveRegionChanged is deliberately NOT raised, even though
+            // GetLiveSettingCore reports Polite. NVDA answers it by
+            // re-announcing the element's name, so every burst of output ended
+            // with a spoken "Terminal" on top of the text we just sent
+            // (measured: it disappears the moment the event is dropped, and the
+            // caret behaviour is unchanged either way). The property is still
+            // honest about what this control is; the event only added noise.
+            RaiseIfListening(AutomationEvents.TextPatternOnTextChanged);
         }
 
         RaiseCaretMovedIfChanged();
@@ -115,9 +129,13 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     /// is inert when no AT client is attached.
     /// </summary>
     internal void RaiseSelectionChangedEvent()
+        => RaiseIfListening(AutomationEvents.TextPatternOnTextSelectionChanged);
+
+    // Raising an event with no client attached still crosses the UIA boundary,
+    // so every raise is gated. On a non-AT machine this reduces to one check.
+    private void RaiseIfListening(AutomationEvents which)
     {
-        if (AutomationPeer.ListenerExists(AutomationEvents.TextPatternOnTextSelectionChanged))
-            RaiseAutomationEvent(AutomationEvents.TextPatternOnTextSelectionChanged);
+        if (AutomationPeer.ListenerExists(which)) RaiseAutomationEvent(which);
     }
 
     /// <summary>Current cached screen document. Refreshed at most every 500ms.</summary>
@@ -137,8 +155,23 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     protected override string GetNameCore() => "Terminal";
 
+    /// <summary>
+    /// Stable identity for this pane. Without one, every terminal in a split
+    /// or a tab set is indistinguishable to an automation client, which can
+    /// then only address them positionally.
+    /// </summary>
+    protected override string GetAutomationIdCore() => _owner.AccessibilityAutomationId;
+
+    /// <summary>
+    /// The terminal is a live region: content arrives on its own rather than
+    /// in response to the user. Polite so a screen reader finishes what it is
+    /// saying first - Assertive would interrupt the user mid-sentence on every
+    /// line of build output.
+    /// </summary>
+    protected override AutomationLiveSetting GetLiveSettingCore() => AutomationLiveSetting.Polite;
+
     protected override object GetPatternCore(PatternInterface patternInterface)
-        => patternInterface is PatternInterface.Text or PatternInterface.Text2
+        => patternInterface is PatternInterface.Text or PatternInterface.Text2 or PatternInterface.Value
             ? this
             : base.GetPatternCore(patternInterface);
 
@@ -172,8 +205,23 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     public ITextRangeProvider RangeFromChild(IRawElementProviderSimple childElement) => DocumentRange;
 
-    public ITextRangeProvider RangeFromPoint(global::Windows.Foundation.Point screenLocation) =>
-        new TerminalTextRangeProvider(this, new TextSpan(0, 0));
+    /// <summary>
+    /// The character under a screen point, as a degenerate range. This is what
+    /// backs screen-reader mouse and touch exploration, so an unmappable point
+    /// collapses to the start of the document rather than inventing a
+    /// plausible-looking offset somewhere in the middle.
+    /// </summary>
+    public ITextRangeProvider RangeFromPoint(global::Windows.Foundation.Point screenLocation)
+    {
+        var offset = 0;
+        if (ViewportCells is { } grid && _owner.AccessibilityViewportGeometry() is { } geom)
+        {
+            var hit = ViewportHitTest.OffsetFromPoint(
+                Document, grid, geom, screenLocation.X, screenLocation.Y);
+            if (hit >= 0) offset = hit;
+        }
+        return new TerminalTextRangeProvider(this, Degenerate(offset));
+    }
 
     // ---- ITextProvider2 ---------------------------------------------------
 
@@ -191,6 +239,34 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     public ITextRangeProvider RangeFromAnnotation(IRawElementProviderSimple annotationElement) =>
         DocumentRange;
+
+    // ---- IValueProvider ---------------------------------------------------
+
+    /// <summary>
+    /// The screen contents as one string. Redundant with the Text pattern, but
+    /// some clients read Value first and never reach TextPattern; it is the
+    /// same document, so the two cannot disagree.
+    /// </summary>
+    public string Value => Document.Text;
+
+    public bool IsReadOnly => true;
+
+    public void SetValue(string value)
+        => throw new InvalidOperationException("The terminal grid is not editable through UIA.");
+
+    // ---- geometry ---------------------------------------------------------
+
+    /// <summary>
+    /// Screen rectangles for a range, one per visual line, or empty when the
+    /// text is not on screen. Used for braille routing and for the visual
+    /// highlight a screen reader draws around what it is reading.
+    /// </summary>
+    internal double[] BoundingRectangles(TextSpan span)
+    {
+        if (ViewportCells is not { } grid) return Array.Empty<double>();
+        if (_owner.AccessibilityViewportGeometry() is not { } geom) return Array.Empty<double>();
+        return ViewportHitTest.Rects(Document, grid, geom, span);
+    }
 
     // ---- helpers ----------------------------------------------------------
 
