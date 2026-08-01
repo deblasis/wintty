@@ -167,12 +167,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// teardown can't touch freed native state. Takes the renderer mutex; the
     /// automation peer caches the result for 500ms.
     ///
-    /// UIA calls arrive on a UIA/RPC thread, so there is a narrow race between
-    /// this guard and the native read if the surface is disposed concurrently.
-    /// libghostty serializes the read on its renderer mutex and the guard makes
-    /// the window small; macOS accepts the same race for the same reason. An
-    /// empty string on a transient/teardown miss is the intended graceful
-    /// degradation (a screen reader must not crash on a momentary read failure).
+    /// WinUI marshals automation-peer calls onto the UI thread, which is also
+    /// where _surfaceDisposed is written, so the guard and the read are not
+    /// racing. Feed can run on another thread for a mux pane, but libghostty
+    /// serializes reads on its renderer mutex. An empty string on a
+    /// transient/teardown miss is the intended graceful degradation (a screen
+    /// reader must not crash on a momentary read failure).
     /// </summary>
     internal string AccessibilityReadScreenText()
     {
@@ -201,6 +201,64 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return null;
         return NativeMethods.SurfaceReadCells(_surface);
     }
+
+    /// <summary>
+    /// Where this pane's grid sits on screen, in physical pixels, or null when
+    /// the control has no usable layout (never measured, collapsed in a
+    /// background tab, or detached mid-reparent). Backs UIA bounding
+    /// rectangles and hit-testing.
+    ///
+    /// Computed on demand rather than cached on a layout pass: WinUI marshals
+    /// automation-peer calls onto the UI thread, so live XAML is legal here,
+    /// and a cache would only add a way for the reported rectangle to describe
+    /// a frame that is no longer on screen.
+    /// </summary>
+    internal Ghostty.Core.Accessibility.ViewportGeometry? AccessibilityViewportGeometry()
+    {
+        try
+        {
+            if (XamlRoot is not { Content: { } root } xamlRoot) return null;
+            var env = xamlRoot.ContentIslandEnvironment;
+            if (env is null) return null;
+            nint hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(env.AppWindowId);
+            if (hwnd == 0) return null;
+
+            // The panel's offset is in DIPs relative to the window content; the
+            // window's client origin is already in physical screen pixels, so
+            // only the former is scaled.
+            var client = new System.Drawing.Point(0, 0);
+            PInvoke.ClientToScreen(new Windows.Win32.Foundation.HWND(hwnd), ref client);
+            var scale = xamlRoot.RasterizationScale;
+            var offset = Panel.TransformToVisual(root)
+                .TransformPoint(new Windows.Foundation.Point(0, 0));
+
+            var geom = new Ghostty.Core.Accessibility.ViewportGeometry(
+                client.X + offset.X * scale,
+                client.Y + offset.Y * scale,
+                Panel.ActualWidth * scale,
+                Panel.ActualHeight * scale);
+            return geom.IsUsable ? geom : null;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidOperationException or ArgumentException)
+        {
+            // TransformToVisual throws for an element that is not in the tree,
+            // which is exactly a pane that should not be reporting geometry, and
+            // the island interop can fail the same way mid-teardown. Narrow
+            // rather than bare: anything else here is a bug, and swallowing it
+            // would leave a screen reader silently pointed at nothing.
+            return null;
+        }
+    }
+
+    // Stable identity for this pane in the automation tree. Assigned once and
+    // kept for the control's lifetime so a client that bound to a pane still
+    // finds it after the pane is backgrounded and shown again.
+    private static int _nextAutomationId;
+    private readonly string _automationId =
+        "TerminalGrid-" + System.Threading.Interlocked.Increment(ref _nextAutomationId)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    internal string AccessibilityAutomationId => _automationId;
 
     private Ghostty.Accessibility.TerminalAutomationPeer? _automationPeer;
 

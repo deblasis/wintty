@@ -95,7 +95,7 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
             : UiaReservedValues.NotSupported()!;
     }
 
-    public void GetBoundingRectangles(out double[] rectangles) => rectangles = Array.Empty<double>();
+    public void GetBoundingRectangles(out double[] rectangles) => rectangles = _peer.BoundingRectangles(_span);
 
     public IRawElementProviderSimple GetEnclosingElement() => _peer.Provider;
 
