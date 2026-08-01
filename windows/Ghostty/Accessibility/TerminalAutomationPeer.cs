@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using Ghostty.Controls;
 using Ghostty.Core.Accessibility;
 using Microsoft.UI.Xaml;
@@ -62,10 +63,22 @@ internal sealed partial class TerminalAutomationPeer
 
     private void OnOwnerUnloaded(object sender, RoutedEventArgs e) => _announceTimer.Stop();
 
+    /// <summary>
+    /// Whether anything is listening. A screen reader sets SPI_GETSCREENREADER,
+    /// but plenty of assistive and automation clients subscribe to UIA events
+    /// without claiming to be one - gating on the flag alone meant those
+    /// clients advised for TextChanged and then never received a single event.
+    /// ListenerExists is the UIA-native answer to "did anyone advise", and it
+    /// is a cheap field read when nobody did.
+    /// </summary>
+    private static bool AnyoneListening() =>
+        ScreenReaderDetector.IsRunning()
+        || AutomationPeer.ListenerExists(AutomationEvents.TextPatternOnTextChanged)
+        || AutomationPeer.ListenerExists(AutomationEvents.TextPatternOnTextSelectionChanged);
+
     private void OnAnnounceTick(object? sender, object e)
     {
-        // Inert unless a screen reader is attached and this surface is active.
-        if (!ScreenReaderDetector.IsRunning() || !_owner.IsActive)
+        if (!AnyoneListening() || !_owner.IsActive)
         {
             _announcer.Reseed(Document.Text);
             // Drop the remembered caret too, so returning to this surface
@@ -169,6 +182,45 @@ internal sealed partial class TerminalAutomationPeer
     /// line of build output.
     /// </summary>
     protected override AutomationLiveSetting GetLiveSettingCore() => AutomationLiveSetting.Polite;
+
+    /// <summary>
+    /// True when this pane is not actually on screen. The default only knows
+    /// about Visibility and clipping, but split zoom parks the non-zoomed panes
+    /// with a Composition Translation rather than collapsing them - a
+    /// SwapChainPanel keeps compositing when collapsed, so zoom moves the tree
+    /// instead. XAML layout cannot see that facade, so without this a parked
+    /// pane reports itself on screen and hands out bounding rectangles for
+    /// pixels the user cannot see.
+    /// </summary>
+    protected override bool IsOffscreenCore()
+    {
+        if (base.IsOffscreenCore()) return true;
+
+        DependencyObject? node = _owner;
+        while (node is not null)
+        {
+            if (node is UIElement e && IsTranslatedAway(e)) return true;
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    private static bool IsTranslatedAway(UIElement e)
+    {
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(e);
+            return visual.Properties.TryGetVector3("Translation", out var t)
+                       == Microsoft.UI.Composition.CompositionGetValueStatus.Succeeded
+                   && (Math.Abs(t.X) > 0.5f || Math.Abs(t.Y) > 0.5f);
+        }
+        catch (COMException)
+        {
+            // The visual is gone mid-teardown; treat that as "not parked" and
+            // let the ordinary offscreen rules decide.
+            return false;
+        }
+    }
 
     protected override object GetPatternCore(PatternInterface patternInterface)
         => patternInterface is PatternInterface.Text or PatternInterface.Text2 or PatternInterface.Value
