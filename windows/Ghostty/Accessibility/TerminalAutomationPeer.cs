@@ -282,6 +282,12 @@ internal sealed partial class TerminalAutomationPeer
     /// element holding this caret has keyboard focus": reporting a constant
     /// true would tell a screen reader that a background pane's caret is the
     /// live one.
+    ///
+    /// Note that WinUI does NOT carry this out-parameter across to a native UIA
+    /// client - proven by forcing it to false unconditionally and watching a
+    /// real client still read 1, with S_OK, for a backgrounded window. We keep
+    /// computing it honestly so the value is right the day the projection
+    /// starts honouring it, but nothing downstream can rely on it today.
     /// </summary>
     public ITextRangeProvider GetCaretRange(out bool isActive)
     {
