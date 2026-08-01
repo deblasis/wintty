@@ -22,9 +22,10 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     private readonly TerminalControl _owner;
     private readonly CachedValue<TerminalDocument> _document;
-    // Viewport cells for color attributes. Fetched lazily (only when a color
-    // attribute is queried) and cached for the same 500ms window as the
-    // document, since read_cells is expensive and takes the renderer mutex.
+    // Viewport cells, for color attributes and for locating the cursor. Fetched
+    // lazily and cached for the same 500ms window as the document, since
+    // read_cells is expensive and takes the renderer mutex. The caret path is
+    // the exception and refreshes both - see CaretOffset.
     private readonly CachedValue<Ghostty.Core.Tabs.CellGrid?> _cells;
     private readonly TerminalOutputAnnouncer _announcer = new();
     private readonly DispatcherTimer _announceTimer;
@@ -148,11 +149,20 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
 
     public SupportedTextSelection SupportedTextSelection => SupportedTextSelection.Single;
 
+    /// <summary>
+    /// The selection, or the caret as a degenerate range when nothing is
+    /// selected. Never empty: <see cref="SupportedTextSelection"/> is
+    /// <c>Single</c>, which promises a range here, and screen readers resolve
+    /// the caret through this method rather than through
+    /// <see cref="GetCaretRange"/>. Returning an empty array makes NVDA fail to
+    /// construct a text position at all ("UIAutomationTextRangeArray is
+    /// empty"), which silences every caret-move announcement.
+    /// </summary>
     public ITextRangeProvider[] GetSelection()
     {
-        var offsets = _owner.AccessibilitySelectionOffsets();
-        if (offsets is not { } o) return Array.Empty<ITextRangeProvider>();
-        var span = SelectionRange.FromOffsets(o.OffsetStart, o.OffsetLen, Document.Length);
+        var span = _owner.AccessibilitySelectionOffsets() is { } o
+            ? SelectionRange.FromOffsets(o.OffsetStart, o.OffsetLen, Document.Length)
+            : Degenerate(CaretOffset());
         return new ITextRangeProvider[] { new TerminalTextRangeProvider(this, span) };
     }
 
@@ -176,17 +186,35 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     public ITextRangeProvider GetCaretRange(out bool isActive)
     {
         isActive = _owner.IsActive;
-
-        // Falls back to end-of-document when there are no cells to anchor
-        // against, which is also where an off-screen cursor maps to.
-        var cells = ViewportCells;
-        var offset = cells is { } grid
-            ? ViewportCaret.Offset(Document, grid)
-            : Document.Length;
-
-        return new TerminalTextRangeProvider(this, new TextSpan(offset, offset));
+        return new TerminalTextRangeProvider(this, Degenerate(CaretOffset()));
     }
 
     public ITextRangeProvider RangeFromAnnotation(IRawElementProviderSimple annotationElement) =>
         DocumentRange;
+
+    // ---- helpers ----------------------------------------------------------
+
+    /// <summary>
+    /// Document offset of the terminal cursor. Falls back to end-of-document
+    /// when there are no cells to anchor against, which is also where an
+    /// off-screen cursor maps to.
+    ///
+    /// Deliberately uncached. A screen reader asks for the caret immediately
+    /// after the keystroke that moved it, so any time-boxed window can hand
+    /// back a value captured before that keystroke and make the caret trail
+    /// input by one key; shortening the window narrows the race without
+    /// closing it. Both caches are dropped rather than bypassed so the range
+    /// this offset is handed to reads the same snapshot the offset came from.
+    /// Only assistive tech reaches this path, and it costs a few reads per
+    /// second there (measured against NVDA: ~4/s while navigating, peaking at
+    /// 28 in the burst that follows a keypress).
+    /// </summary>
+    private int CaretOffset()
+    {
+        _document.Invalidate();
+        _cells.Invalidate();
+        return ViewportCells is { } grid ? ViewportCaret.Offset(Document, grid) : Document.Length;
+    }
+
+    private static TextSpan Degenerate(int offset) => new(offset, offset);
 }
