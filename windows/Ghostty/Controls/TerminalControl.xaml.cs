@@ -920,7 +920,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // events. We still dedupe on state change as a belt-and-braces
     // guard so libghostty never sees a redundant focus event.
 
-    private bool _focused;
+    // volatile because IsActive is read off the UI thread: UIA serves
+    // GetCaretRange on an RPC thread while the UI thread rewrites this on
+    // focus change, and a stale read would tell a screen reader that a
+    // background pane holds the live caret.
+    private volatile bool _focused;
 
     /// <summary>
     /// True only when this surface is focused AND its window is the OS

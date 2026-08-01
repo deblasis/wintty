@@ -1646,6 +1646,21 @@ pub const CAPI = struct {
         rows: u16 = 0,
         cols: u16 = 0,
 
+        /// Cursor position in VIEWPORT coordinates (0-based, y down).
+        /// Meaningful only when `cursor_in_viewport` is true.
+        ///
+        /// The cursor rides along with the cells rather than having its own
+        /// accessor so that both are resolved under a single hold of the
+        /// renderer mutex. A separate call would let a caller pair a cursor
+        /// from one frame with cells from another.
+        cursor_row: u16 = 0,
+        cursor_col: u16 = 0,
+
+        /// False when the cursor is not on screen. The viewport only ever
+        /// scrolls UP into scrollback and the cursor always lives in the
+        /// active area, so this means the cursor is BELOW the viewport.
+        cursor_in_viewport: bool = false,
+
         pub fn deinit(self: *Cells) void {
             if (self.cells) |ptr| {
                 const len: usize = @as(usize, self.rows) * @as(usize, self.cols);
@@ -2077,12 +2092,38 @@ pub const CAPI = struct {
             }
         }
 
+        const cursor = cursorCell(state.cursor.viewport, rows, cols);
+
         result.* = .{
             .cells = out.ptr,
             .rows = @intCast(rows),
             .cols = @intCast(cols),
+            .cursor_row = cursor.row,
+            .cursor_col = cursor.col,
+            .cursor_in_viewport = cursor.in_viewport,
         };
         return true;
+    }
+
+    /// Resolve the viewport cursor to the cell a reader should land on,
+    /// clamped into a grid of `rows` x `cols`. The caller indexes the emitted
+    /// cells with this, so it must never be out of range.
+    fn cursorCell(
+        viewport: ?terminal.RenderState.Cursor.Viewport,
+        rows: usize,
+        cols: usize,
+    ) struct { row: u16, col: u16, in_viewport: bool } {
+        const c = viewport orelse return .{ .row = 0, .col = 0, .in_viewport = false };
+        assert(rows > 0 and cols > 0);
+
+        const x = @min(@as(usize, c.x), cols - 1);
+        return .{
+            .row = @intCast(@min(@as(usize, c.y), rows - 1)),
+            // On the tail half of a wide character, report the character's own
+            // cell so a reader lands on the glyph and not its spacer.
+            .col = @intCast(if (c.wide_tail and x > 0) x - 1 else x),
+            .in_viewport = true,
+        };
     }
 
     export fn ghostty_surface_free_cells(_: *Surface, ptr: *Cells) void {
