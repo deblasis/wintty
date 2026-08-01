@@ -7,8 +7,19 @@ namespace Ghostty.Core.Tabs;
 /// <summary>One resolved cell: codepoint (0 = empty) + 0x00RRGGBB fg/bg.</summary>
 internal readonly record struct Cell(uint Codepoint, uint Fg, uint Bg);
 
-/// <summary>The viewport as row-major cells. <c>Cells.Length == Rows*Cols</c>.</summary>
-internal readonly record struct CellGrid(Cell[] Cells, int Rows, int Cols);
+/// <summary>
+/// The viewport as row-major cells. <c>Cells.Length == Rows*Cols</c>.
+/// The cursor fields default to "no cursor" so callers that only want cells
+/// (the tab preview) keep constructing this with three arguments and do not
+/// accidentally claim a cursor sitting at the origin.
+/// </summary>
+internal readonly record struct CellGrid(
+    Cell[] Cells,
+    int Rows,
+    int Cols,
+    int CursorRow = 0,
+    int CursorCol = 0,
+    bool CursorInViewport = false);
 
 /// <summary>A run of same-colored text within a preview line.</summary>
 internal readonly record struct PreviewRun(string Text, uint Fg, uint Bg);
