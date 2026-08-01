@@ -35,21 +35,11 @@ internal sealed class ViewportColorMap
         _doc = doc;
         _cells = cells;
 
-        // Decline a malformed or concurrently-torn grid (null backing array or a
-        // length that disagrees with rows*cols) instead of risking an out-of-range
-        // index below. The grid comes from a 500ms cache read off the UI thread, and
-        // CellGrid is a multi-field struct, so a partially-published snapshot is
-        // possible; bail out and report NotMapped rather than crash.
-        if (cells.Rows <= 0 || cells.Cols <= 0 ||
-            cells.Cells is null || cells.Cells.Length < (long)cells.Rows * cells.Cols)
-            return; // _hasContent stays false
-
-        var lastContentRow = LastContentRow(cells);
-        var lastContentDocLine = LastContentDocLine(doc);
-        if (lastContentRow < 0 || lastContentDocLine < 0) return; // _hasContent = false
-
-        _hasContent = true;
-        _rowShift = lastContentDocLine - lastContentRow;
+        // Shared with the caret mapping so both cross between the grid and the
+        // document on exactly the same anchor.
+        var anchor = ViewportAnchor.Create(doc, cells);
+        _hasContent = anchor.HasContent;
+        _rowShift = anchor.RowShift;
     }
 
     public ColorResult Foreground(TextSpan span) => Reduce(span, fg: true);
@@ -113,31 +103,5 @@ internal sealed class ViewportColorMap
 
         var s = char.ConvertFromUtf32((int)codepoint);
         return offset + 1 < text.Length && text[offset] == s[0] && text[offset + 1] == s[1];
-    }
-
-    // Greatest document line index that contains a non-whitespace character, or -1.
-    // Mirrors LastContentRow's "blank" rule (which skips whitespace cells) so the two
-    // anchors agree: a trailing whitespace-only line would otherwise shift the anchor
-    // by a row and make every cell mis-map.
-    private static int LastContentDocLine(TerminalDocument doc)
-    {
-        var t = doc.Text;
-        for (var i = t.Length - 1; i >= 0; i--)
-            if (!char.IsWhiteSpace(t[i])) return doc.LineIndexForOffset(i);
-        return -1;
-    }
-
-    // Greatest grid row index that has a non-blank cell, or -1. A cell is blank
-    // when its codepoint is 0 (empty / spacer) or whitespace, matching how
-    // read_text trims trailing blank rows.
-    private static int LastContentRow(CellGrid cells)
-    {
-        for (var r = cells.Rows - 1; r >= 0; r--)
-            for (var c = 0; c < cells.Cols; c++)
-            {
-                var cp = cells.Cells[r * cells.Cols + c].Codepoint;
-                if (cp != 0 && !(cp <= 0xFFFF && char.IsWhiteSpace((char)cp))) return r;
-            }
-        return -1;
     }
 }
