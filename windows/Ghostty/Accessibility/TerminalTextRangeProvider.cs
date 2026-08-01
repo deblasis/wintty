@@ -69,6 +69,11 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
             return ColorAttribute(fg: true);
         if (attributeId == (int)AutomationTextAttributesEnum.BackgroundColorAttribute)
             return ColorAttribute(fg: false);
+        // The grid is not editable through UIA. Answering NotSupported let a
+        // client assume the text might be typeable and offer editing affordances
+        // over a surface that only accepts keystrokes through the shell.
+        if (attributeId == (int)AutomationTextAttributesEnum.IsReadOnlyAttribute)
+            return true;
         return UiaReservedValues.NotSupported()!;
     }
 
@@ -107,9 +112,15 @@ internal sealed partial class TerminalTextRangeProvider : ITextRangeProvider
 
     public int Move(WinTextUnit unit, int count)
     {
-        // Collapse to the start, move that endpoint, then expand by one unit.
+        var wasDegenerate = _span.IsDegenerate;
+        // Collapse to the start, move that endpoint, then expand by one unit -
+        // unless the range was already empty. UIA requires a degenerate range
+        // to stay degenerate across Move: it is a caret, and expanding it would
+        // turn every caret step into a one-unit selection.
         var (offset, moved) = TextRangeNavigator.MoveEndpointByUnit(Doc, _span.Start, MapUnit(unit), count);
-        _span = TextRangeNavigator.ExpandToEnclosingUnit(Doc, new TextSpan(offset, offset), MapUnit(unit));
+        _span = wasDegenerate
+            ? new TextSpan(offset, offset)
+            : TextRangeNavigator.ExpandToEnclosingUnit(Doc, new TextSpan(offset, offset), MapUnit(unit));
         return moved;
     }
 

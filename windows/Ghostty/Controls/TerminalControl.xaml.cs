@@ -1010,7 +1010,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var env = XamlRoot?.ContentIslandEnvironment;
         if (env is null) return false;
         nint mine = Microsoft.UI.Win32Interop.GetWindowFromWindowId(env.AppWindowId);
-        return mine != 0 && mine == PInvoke.GetForegroundWindow();
+        if (mine == 0 || mine != PInvoke.GetForegroundWindow()) return false;
+        // Foreground is not enough. Windows does not hand the foreground to
+        // anyone else when a window is minimised and nothing else activates, so
+        // GetForegroundWindow keeps naming a window the user cannot see -
+        // measured: minimise, and it still reports itself foreground several
+        // seconds later. A minimised surface is not one the user is looking at,
+        // which is the whole claim this property makes.
+        return !PInvoke.IsIconic(new Windows.Win32.Foundation.HWND(mine));
     }
 
     // Stable per-surface key for the toast Group (dedupe + focus-regain
