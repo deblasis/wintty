@@ -920,11 +920,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // events. We still dedupe on state change as a belt-and-braces
     // guard so libghostty never sees a redundant focus event.
 
-    // volatile because IsActive is read off the UI thread: UIA serves
-    // GetCaretRange on an RPC thread while the UI thread rewrites this on
-    // focus change, and a stale read would tell a screen reader that a
-    // background pane holds the live caret.
-    private volatile bool _focused;
+    // Written and read on the UI thread only. UIA looked like a second reader
+    // on an RPC thread, but WinUI marshals provider calls onto the UI thread
+    // (measured under Narrator and NVDA: every GetSelection landed on the same
+    // managed thread as the DispatcherTimer tick), and the toast paths read
+    // IsActive from inside DispatcherQueue.TryEnqueue. IsActive also walks
+    // XamlRoot, which is thread-affine, so an off-thread caller would fault
+    // rather than merely read this stale.
+    private bool _focused;
 
     /// <summary>
     /// True only when this surface is focused AND its window is the OS
