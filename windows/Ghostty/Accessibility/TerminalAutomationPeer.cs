@@ -28,8 +28,8 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     private readonly CachedValue<Ghostty.Core.Tabs.CellGrid?> _cells;
     private readonly TerminalOutputAnnouncer _announcer = new();
     private readonly DispatcherTimer _announceTimer;
-    // Last caret offset seen by the tick; null means "not observed yet".
-    private int? _lastCaretOffset;
+    // Last cursor cell seen by the tick; null means "not observed yet".
+    private (int Row, int Col, bool InViewport)? _lastCaretCell;
 
     internal TerminalAutomationPeer(TerminalControl owner) : base(owner)
     {
@@ -69,7 +69,7 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
             // Drop the remembered caret too, so returning to this surface
             // re-announces where the caret is rather than staying silent
             // because it happens to match where it was on the way out.
-            _lastCaretOffset = null;
+            _lastCaretCell = null;
             return;
         }
 
@@ -93,11 +93,15 @@ internal sealed partial class TerminalAutomationPeer : FrameworkElementAutomatio
     {
         if (ViewportCells is not { } grid) return;
 
-        var offset = ViewportCaret.Offset(Document, grid);
-        if (_lastCaretOffset == offset) return;
+        // Compare the cursor CELL before mapping it. Resolving an offset walks
+        // the grid and the document, and the document is the whole screen
+        // including scrollback; doing that every 300ms to discover the caret
+        // has not moved is the expensive way to learn nothing.
+        var cell = (grid.CursorRow, grid.CursorCol, grid.CursorInViewport);
+        if (_lastCaretCell == cell) return;
 
-        var first = _lastCaretOffset is null;
-        _lastCaretOffset = offset;
+        var first = _lastCaretCell is null;
+        _lastCaretCell = cell;
 
         // The first observation establishes a baseline; there is no move yet.
         if (!first) RaiseSelectionChangedEvent();
