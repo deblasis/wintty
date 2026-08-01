@@ -260,6 +260,12 @@ internal sealed partial class TerminalAutomationPeer
     /// Screen rectangles for a range, one per visual line, or empty when the
     /// text is not on screen. Used for braille routing and for the visual
     /// highlight a screen reader draws around what it is reading.
+    ///
+    /// Reads the CACHED grid, unlike the caret. A caret query follows the
+    /// keystroke that moved it, so a stale answer is wrong by a whole
+    /// character; a rectangle query follows the pointer or a braille cursor
+    /// over text that is already on screen, where 500ms of staleness is not
+    /// observable and the fresh reads would land on every mouse move.
     /// </summary>
     internal double[] BoundingRectangles(TextSpan span)
     {

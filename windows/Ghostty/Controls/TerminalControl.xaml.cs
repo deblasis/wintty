@@ -239,10 +239,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
                 Panel.ActualHeight * scale);
             return geom.IsUsable ? geom : null;
         }
-        catch
+        catch (Exception ex) when (ex is COMException or InvalidOperationException or ArgumentException)
         {
             // TransformToVisual throws for an element that is not in the tree,
-            // which is exactly a pane that should not be reporting geometry.
+            // which is exactly a pane that should not be reporting geometry, and
+            // the island interop can fail the same way mid-teardown. Narrow
+            // rather than bare: anything else here is a bug, and swallowing it
+            // would leave a screen reader silently pointed at nothing.
             return null;
         }
     }
