@@ -92,13 +92,22 @@
         // HLSL/MSL/GLSL cross compiler. It replaces the glslang and
         // spirv-cross C++ packages, so custom shader compilation is
         // in-process with no C++ dependencies.
-        // Pinned to the v0.4.0 tag (cut past PR #492, which carries the Zig 0.16
-        // build + packaging fix this pin depends on; the older v0.3.0 tag
-        // hard-errored on 0.16). v0.4.0 also completes the float-comparison
-        // NaN-correctness campaign and a fully-clean compile-validity matrix.
+        // Pinned to the v0.5.0 tag. It carries a broad silent-wrong hunt across
+        // all four backends (~17 bug classes), honest errors instead of
+        // placeholder output for unknown types, self-loop lowering, and a C ABI
+        // fix that matters here: caller-owned buffers now come from a
+        // process-global mutex-guarded allocator, so they may be freed from any
+        // thread. Previously they came from a threadlocal allocator, so
+        // compiling on a worker and freeing on the main thread handed an
+        // allocator a pointer it never produced.
+        // Note for anyone diffing generated shader text: v0.5.0 mangles
+        // identifiers that used to collide, so output for unchanged input can
+        // differ from v0.4.0. That is a correctness fix, not a regression.
+        // `zioshade_status_t` also gained ZIOSHADE_ERR_UNSUPPORTED (8), an
+        // additive change; keep a default branch when switching over it.
         .zioshade = .{
-            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.4.0.tar.gz",
-            .hash = "zioshade-0.4.0-8s3a2sRrRACbnWG3W-IvO9Z2s2X4jsvBaO0aU3gd8bbo",
+            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.5.0.tar.gz",
+            .hash = "zioshade-0.5.0-8s3a2t1NSAALg56PbAKbTaDxBDPyUOQ-VR3zKsnPDmky",
             .lazy = true,
         },
 
