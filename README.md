@@ -121,7 +121,7 @@
 > - [x] Dark/Light theme sync + **High-Contrast** support for the terminal surface
 > - [x] Power / energy awareness (power-saver mode, adaptive behavior)
 > - [x] Branded app icon + icon picker
-> - [x] Kitty image protocol transport (ConPTY bypass); renderer upload path in progress
+> - [x] Kitty image protocol transport (ConPTY bypass) with DX12 atlas upload
 >
 > ### Architecture: Surface Modes
 >
@@ -140,7 +140,6 @@
 > - [ ] Scroll optimization -- row versioning / GPU buffer rotation so a viewport scroll only re-uploads the newly exposed rows
 > - [ ] Adaptive presentation -- waitable swap chain, `ALLOW_TEARING` / VRR, skip-present when idle
 > - [ ] Glyph Protocol upload parity (DX12 + DirectWrite atlas) ([#551](https://github.com/deblasis/wintty/issues/551))
-> - [ ] Kitty image upload wiring through the DX12 atlas
 >
 > **Native integration gaps** ([#81](https://github.com/deblasis/wintty/issues/81))
 >
