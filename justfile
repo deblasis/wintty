@@ -128,4 +128,18 @@ sync force="":
     fi
     git fetch upstream
     git rebase upstream/main
-    echo "Rebase complete. Review any conflicts, then: git push --force-with-lease origin windows"
+    echo "Rebase complete. Run 'just sync-verify' before pushing:"
+    echo "  git push --force-with-lease origin windows"
+
+# Post-rebase sanity check: show what this branch changes relative to
+# upstream/main so an accidental revert or a dropped commit is visible
+# before the force-push. Read the file list - anything outside the
+# expected fork surface is a red flag.
+sync-verify:
+    #!/usr/bin/env bash
+    set -e
+    echo "=== commits unique to this branch ==="
+    git log --oneline upstream/main..HEAD | head -60
+    echo ""
+    echo "=== files changed vs upstream/main ==="
+    git diff --stat upstream/main HEAD | tail -30
