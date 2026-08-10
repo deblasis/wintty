@@ -23,7 +23,7 @@ public static partial class Program
     /// return whatever the native action produced via
     /// <c>Environment.Exit(exitCode)</c>.
     /// </summary>
-    private enum ExitCode
+    internal enum ExitCode
     {
         /// <summary>WinUI message loop returned cleanly, or a CLI
         /// action completed with exit code 0.</summary>

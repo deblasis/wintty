@@ -302,7 +302,23 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         _dispatcher = dispatcher;
 
-        NativeMethods.InitWideFromProcess();
+        // A failed ghostty_init runs its own errdefer cleanup but leaves the
+        // global state readable: deinit does not null it, and it frees
+        // resources_dir and tmp_dir_path without nulling those either. So
+        // ConfigNew below would allocate through an already-deinit'd
+        // allocator and later hand back dangling resource paths, surfacing
+        // as a native crash with no managed stack. Program.InitGhostty
+        // checks this on the CLI path; the GUI path comes through here.
+        //
+        // Console.Error rather than a logger: the logging factory is built
+        // from this service's own config, so it does not exist yet.
+        if (NativeMethods.InitWideFromProcess() != 0)
+        {
+            Console.Error.WriteLine(
+                "[Ghostty] ghostty_init failed; libghostty logged the reason above");
+            Console.Error.Flush();
+            Environment.Exit((int)Program.ExitCode.InitFailed);
+        }
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
