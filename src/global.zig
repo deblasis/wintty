@@ -401,6 +401,45 @@ pub fn action() ?cli.ghostty.Action {
     return state.?.action;
 }
 
+/// Write a human-readable explanation of an `init` failure to stderr.
+///
+/// `init` reports a bad command line by returning an error, leaving `std.log`
+/// as the only other sink. libghostty silences that one: `Logging.stderr`
+/// above defaults to false whenever `app_runtime` is `none`, and it does so
+/// before the args are even parsed. An embedder that called us therefore had
+/// nothing to show for a typo but an exit code. Writing to the file directly
+/// skips the log sink so the message survives that default.
+///
+/// The exe has its own copy of this in `main_ghostty.zig`, where it runs
+/// before there is any global state to consult. Keep the wording in sync.
+///
+/// Only the argument-parsing errors get text here. Anything else stays with
+/// the caller's `std.log.err`, which reaches an embedder that registered a
+/// callback via `ghostty_log_set_callback`.
+pub fn reportInitError(err: anyerror) void {
+    const message = switch (err) {
+        error.MultipleActions =>
+            "Error: multiple CLI actions specified. You must specify only one\n" ++
+            "action starting with the `+` character.\n",
+
+        error.InvalidAction =>
+            "Error: unknown CLI action specified. CLI actions are specified with\n" ++
+            "the '+' character.\n\n" ++
+            "All valid CLI actions can be listed with `ghostty +help`\n",
+
+        else => return,
+    };
+
+    // Streaming, not the seekable `writer`: an embedder may have pointed
+    // stderr at a file it is also writing to itself, and a positional write
+    // would start at offset 0 and overwrite what is already there. Streaming
+    // writes go wherever the shared handle's file pointer sits.
+    std.Io.File.stderr().writeStreamingAll(
+        std.Io.Threaded.global_single_threaded.io(),
+        message,
+    ) catch return;
+}
+
 /// This represents the global process state. There should only
 /// be one of these at any given moment. This is extracted into a dedicated
 /// struct because it is reused by main and the static C lib.
