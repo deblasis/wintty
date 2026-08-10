@@ -46,7 +46,7 @@ public static partial class Program
         /// path. <see cref="StartGui"/>'s catch block writes
         /// <c>ghostty-crash.log</c> in <c>AppContext.BaseDirectory</c>.
         /// (A future PR should converge this with the
-        /// <c>%LOCALAPPDATA%\Ghostty\crash.log</c> path used by the
+        /// <c>%LOCALAPPDATA%\Wintty\crash.log</c> path used by the
         /// App-level unhandled-exception handlers.)</summary>
         ManagedUnhandled = 3,
     }
@@ -144,7 +144,8 @@ public static partial class Program
             var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
             Console.SetError(writer);
 
-            Console.Error.WriteLine($"=== Wintty GPU log started {DateTime.UtcNow:O} ===");
+            Console.Error.WriteLine(
+                $"=== {AppIdentity.ProductName} GPU log started {DateTime.UtcNow:O} ===");
             Console.Error.WriteLine($"Log file: {GpuLogPath}");
             Console.Error.Flush();
         }

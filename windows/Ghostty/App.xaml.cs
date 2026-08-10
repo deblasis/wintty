@@ -304,7 +304,7 @@ public partial class App : Application
         InitializeComponent();
 
         // Surface unhandled exceptions to stderr AND to a file under
-        // %LOCALAPPDATA%\Ghostty\ before the process dies. Without
+        // %LOCALAPPDATA%\Wintty\ before the process dies. Without
         // this, a managed exception on the UI thread silently exits
         // with a non-descriptive code and we have nothing to debug
         // from -- especially in Release, where WER captures a dump
@@ -440,7 +440,7 @@ public partial class App : Application
         ConfigService = _configService;
 
         // build the factory from Ghostty config before any other service constructs an
-        // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Ghostty root that
+        // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
         // one folder to attach.
         var logDir = System.IO.Path.Combine(
