@@ -307,23 +307,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // unconditionally, and frees resources_dir and tmp_dir_path without
         // nulling them. ConfigNew and the loads below would then run against
         // a dead I/O implementation and freed resource paths, surfacing as a
-        // native crash with no managed stack. Program.InitGhostty checks this
-        // on the CLI path; a GUI launch comes through here instead.
+        // native crash with no managed stack.
         //
-        // Console.Error, not a logger: the logging factory is built from this
-        // service's own config, and the libghostty log bridge is installed
-        // later still. MainImpl has already pointed stderr at gpu.log, so the
-        // line lands there. Name the log rather than promise a reason --
-        // libghostty is silent on this path, because lib builds disable
-        // stderr logging and its init-error text only covers the two CLI
-        // action errors that a GUI launch cannot produce.
-        if (NativeMethods.InitWideFromProcess() != 0)
-        {
-            Console.Error.WriteLine(
-                @"[Ghostty] ghostty_init failed; see %LOCALAPPDATA%\Wintty\gpu.log");
-            Console.Error.Flush();
-            Environment.Exit((int)Program.ExitCode.InitFailed);
-        }
+        // Program.InitGhostty is the one init entry point for both startup
+        // paths: it checks the status, reports it, exits on failure, and is a
+        // no-op once init has run. A GUI launch reaches init only from here,
+        // since it never goes through Program's CLI branch.
+        Program.InitGhostty();
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
