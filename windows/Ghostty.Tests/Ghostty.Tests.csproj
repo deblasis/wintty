@@ -96,6 +96,14 @@
     <EmbeddedResource Include="..\..\src\main_c.zig"
                       Link="Interop\Exports\main_c.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
+    <!--
+      The CLI Action enum, for CliAliasParityTests. Deliberately NOT under
+      the Interop.Exports prefix: EntryPointParityTests selects its corpus
+      by that prefix and would silently absorb this file.
+    -->
+    <EmbeddedResource Include="..\..\src\cli\ghostty.zig"
+                      Link="Cli\Actions\ghostty.zig"
+                      LogicalName="Ghostty.Tests.Cli.Actions.ghostty.zig" />
   </ItemGroup>
 
   <ItemGroup>

@@ -396,11 +396,23 @@ internal static partial class NativeMethods
     /// <remarks>
     /// The marshalled buffer is intentionally never freed: libghostty keeps
     /// a reference to it for as long as the args are readable, which is the
-    /// life of the process. The OS reclaims it on exit.
+    /// life of the process. The OS reclaims it on exit. That unmanaged copy
+    /// is what discharges the borrow, so the managed string it came from may
+    /// be a temporary. Do not "optimize" this into a <c>fixed</c> pointer or
+    /// a pinned handle over a local: libghostty reads the buffer long after
+    /// this method returns.
+    ///
+    /// This is also the choke point where a bare Windows subcommand becomes
+    /// its <c>+action</c> form, so no caller can forget it. The rewrite is
+    /// assigned back through <c>cmdline</c> on purpose: the string that gets
+    /// marshalled and the string that gets measured must be the same object,
+    /// or libghostty is handed a buffer longer than the length it is told and
+    /// silently drops the last character of the last argument.
     /// </remarks>
     internal static int InitWideFromProcess()
     {
         var cmdline = Environment.CommandLine;
+        Ghostty.Core.Cli.CliAliases.TryRewrite(cmdline, out cmdline, out _);
         var buf = Marshal.StringToHGlobalUni(cmdline);
         return InitWide(buf, (UIntPtr)cmdline.Length);
     }
