@@ -133,6 +133,7 @@ pub export fn ghostty_init(argc: usize, argv: [*][*:0]u8) c_int {
         },
     }) catch |err| {
         std.log.err("failed to initialize ghostty error={}", .{err});
+        global.reportInitError(err);
         return 1;
     };
 
@@ -164,6 +165,7 @@ fn ghosttyInitWide(cmdline: [*]const u16, len: usize) callconv(.c) c_int {
         },
     }) catch |err| {
         std.log.err("failed to initialize ghostty error={}", .{err});
+        global.reportInitError(err);
         return 1;
     };
 
