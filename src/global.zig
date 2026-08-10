@@ -247,7 +247,6 @@ pub fn init(opts: InitOpts) !void {
     // Find our resources directory once for the app so every launch
     // hereafter can use this cached value.
     self.resources_dir = try apprt.runtime.resourcesDir(self.alloc);
-    errdefer self.resources_dir.deinit(self.alloc);
 
     // Setup i18n
     if (self.resources_dir.app()) |v| internal_os.i18n.init(v) catch |err| {
