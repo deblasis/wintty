@@ -21,4 +21,12 @@ internal static class AppIdentity
     /// Wintty → ...) only touch one file instead of scattering literals.
     /// </summary>
     public const string ProductName = "Wintty";
+
+    /// <summary>
+    /// Prefix on diagnostics we write to stderr, gpu.log and the crash
+    /// log, so a line is attributable at a glance when it lands in a
+    /// shared console alongside shell and libghostty output. Built from
+    /// <see cref="ProductName"/> so it cannot drift from the brand.
+    /// </summary>
+    public const string LogTag = $"[{ProductName}]";
 }

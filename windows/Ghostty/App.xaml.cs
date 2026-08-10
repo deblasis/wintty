@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Ghostty.Controls;
+using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
 using Ghostty.Core.Power;
@@ -296,7 +297,7 @@ public partial class App : Application
             // down. A packaged Release launch will lose this — that's
             // acceptable for a one-frame cosmetic flash.
             System.Diagnostics.Debug.WriteLine(
-                $"[Ghostty] OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
+                $"{AppIdentity.LogTag} OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
             RequestedTheme = ApplicationTheme.Dark;
         }
 
@@ -335,7 +336,7 @@ public partial class App : Application
         // FreeConsole gate keeps the console attached in that case).
         try
         {
-            Console.Error.WriteLine($"[Ghostty] {tag}:");
+            Console.Error.WriteLine($"{AppIdentity.LogTag} {tag}:");
             Console.Error.WriteLine(detail);
             Console.Error.Flush();
         }
