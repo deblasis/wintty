@@ -1,9 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using Ghostty.Core.Config;
 using Ghostty.Logging;
+using Ghostty.Services;
 using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Settings;
@@ -24,7 +24,11 @@ namespace Ghostty.Settings;
 /// </summary>
 internal static class WindowStateMigration
 {
-    public static void TryRun(IConfigService configService, IConfigFileEditor editor)
+    // Takes the concrete service rather than IConfigService: the only
+    // member it needs beyond the interface is IsConfiguredInFile, and
+    // IConfigService is public, so widening it would break the tier
+    // overlays' hand-written stubs for the sake of one internal caller.
+    public static void TryRun(ConfigService configService, IConfigFileEditor editor)
     {
         try
         {
@@ -54,25 +58,13 @@ internal static class WindowStateMigration
                 CommandPaletteGroupCommands: GetBool("CommandPaletteGroupCommands"),
                 CommandPaletteBackground: GetString("CommandPaletteBackground"));
 
-            // Read the user's config file directly so we can tell whether
-            // each migrated key is already set. IConfigService exposes
-            // IsConfiguredInFile, but its backing cache is only alive
-            // during ReadFlags() scope and is nulled in the finally, so
-            // calling it from here (outside a reload) returns false for
-            // every key. Scanning three substrings out of a small file
-            // once at startup is cheaper than threading a live snapshot
-            // through the service, and scopes the workaround to this
-            // one-shot migrator; fixing the latent cache bug is a
-            // separate concern tracked by the typed-accessor pattern.
-            var existing = ReadExistingKeysFromConfig(
-                configService.ConfigFilePath,
-                [
-                    "vertical-tabs",
-                    "command-palette-group-commands",
-                    "command-palette-background",
-                ]);
-
-            var appends = LegacyUiSettingsMigrator.ComputeAppends(legacy, existing);
+            // Never overwrite a key the user has already set in their
+            // top-level config file; the legacy JSON only fills in what
+            // is missing. A key reaching the config through an include or
+            // a conditional block is not visible here and gets appended
+            // anyway, same as the scan this replaced.
+            var appends = LegacyUiSettingsMigrator.ComputeAppends(
+                legacy, configService.IsConfiguredInFile);
             if (appends.Count > 0)
             {
                 configService.SuppressWatcher(true);
@@ -118,43 +110,6 @@ internal static class WindowStateMigration
             StaticLoggers.WindowStateMigration.LogMigrationFailed(ex);
         }
     }
-
-    /// <summary>
-    /// Minimal ini scan over the user's config file, restricted to
-    /// the given interesting keys. Matches ghostty's own parser
-    /// semantics for the things we actually care about: skip blank
-    /// and '#'-prefixed lines, split on the first '=', case-insensitive
-    /// key compare, and treat any non-empty value as "set".
-    /// </summary>
-    private static HashSet<string> ReadExistingKeysFromConfig(
-        string configPath, string[] interesting)
-    {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
-            return set;
-
-        var lookup = new HashSet<string>(interesting, StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            foreach (var line in File.ReadLines(configPath))
-            {
-                var trimmed = line.TrimStart();
-                if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;
-                var eq = trimmed.IndexOf('=');
-                if (eq <= 0) continue;
-                var key = trimmed[..eq].Trim();
-                if (!lookup.Contains(key)) continue;
-                var value = trimmed[(eq + 1)..].Trim();
-                if (value.Length == 0) continue;
-                set.Add(key);
-            }
-        }
-        catch (Exception ex)
-        {
-            StaticLoggers.WindowStateMigration.LogScanFailed(ex);
-        }
-        return set;
-    }
 }
 
 internal static partial class WindowStateMigrationLogExtensions
@@ -169,11 +124,5 @@ internal static partial class WindowStateMigrationLogExtensions
                    Level = LogLevel.Warning,
                    Message = "WindowStateMigration: legacy delete failed")]
     internal static partial void LogLegacyDeleteFailed(
-        this ILogger logger, System.Exception ex);
-
-    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.WindowState.MigrationScanFailed,
-                   Level = LogLevel.Warning,
-                   Message = "WindowStateMigration: config scan failed")]
-    internal static partial void LogScanFailed(
         this ILogger logger, System.Exception ex);
 }
