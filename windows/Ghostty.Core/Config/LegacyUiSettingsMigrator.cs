@@ -16,13 +16,17 @@ public sealed record LegacyUiSettingsPayload(
 /// config key/value appends. Produces no side effects -- the caller
 /// writes pairs via <see cref="IConfigFileEditor"/> and prunes the
 /// legacy JSON afterwards. Idempotent: rerunning against the same
-/// <paramref name="isConfigured"/> and <paramref name="legacy"/>
+/// <c>isConfigured</c> and <c>legacy</c>
 /// always yields the same list. Default values are intentionally
 /// omitted so the migration does not bloat the user's config with
 /// values that already match the built-in defaults.
 /// </summary>
 public static class LegacyUiSettingsMigrator
 {
+    /// <summary>
+    /// Compute the key/value pairs to append to the user's config.
+    /// </summary>
+    /// <param name="legacy">Values read from the legacy JSON.</param>
     /// <param name="isConfigured">
     /// Answers whether the user's config already sets a given key; those
     /// keys are left alone. Taken as a predicate rather than a set so the
