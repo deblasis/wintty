@@ -64,10 +64,14 @@ public class WindowsOnlyKeysTests
     [Fact]
     public void All_HasNoDuplicateOrCaseCollidingKeys()
     {
-        // ByKey's ToFrozenDictionary throws on a duplicate, which surfaces as
-        // a TypeInitializationException from whichever test touches the class
-        // first. Comparing against the deduping Set names the real cause.
-        Assert.Equal(WindowsOnlyKeys.All.Count, WindowsOnlyKeys.Set.Count);
+        // A duplicate makes ByKey's ToFrozenDictionary throw during static
+        // init, which otherwise kills whichever test touches the class first
+        // with an opaque TypeInitializationException. Catching it here
+        // surfaces the inner ArgumentException, which names the bad key.
+        // Asserting on Set.Count instead would not work: Set is initialized
+        // by the same type initializer, so the comparison never runs.
+        var ex = Record.Exception(() => _ = WindowsOnlyKeys.ByKey.Count);
+        Assert.True(ex is null, ex?.InnerException?.Message ?? ex?.Message ?? "");
     }
 
     [Fact]

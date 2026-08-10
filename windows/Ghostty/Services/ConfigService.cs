@@ -163,7 +163,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// Raw pane undo/redo <c>undo-timeout</c> value, in milliseconds. Read
     /// live from the libghostty <c>Duration</c> config handle (not the file
     /// cache, which can be stale outside ReadFlags). Returned verbatim,
-    /// including <c>0</c> (upstream's "disable undo" sentinel) — the policy
+    /// including <c>0</c> (upstream's "disable undo" sentinel) -- the policy
     /// interpretation lives in
     /// <see cref="Ghostty.Core.Panes.UndoPolicy.FromConfigMilliseconds"/>.
     /// Falls back to upstream Ghostty's 5s default window when the key isn't
@@ -584,10 +584,11 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
         // windows-settings-ui is a fork-added Zig field, so libghostty
-        // parses it fine, but it's a bool and reads more cheaply from
-        // the file cache alongside the other Windows-only flags below.
-        // It is deliberately absent from WindowsOnlyKeys: the parser
-        // knows it, so there is no unknown-field diagnostic to suppress.
+        // parses it and there is no unknown-field diagnostic to suppress;
+        // that is why it is deliberately absent from WindowsOnlyKeys. It
+        // is still read from the file cache here, which only covers the
+        // top-level config file: a value set in an included file or a
+        // conditional block won't be seen.
         SettingsUiEnabled = string.Equals(
             GetFileValue("windows-settings-ui", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
