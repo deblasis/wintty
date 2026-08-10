@@ -2783,7 +2783,7 @@ test "request mode DECRQM ANSI form with write_pty callback" {
     var handler: Handler = .init(&t);
     handler.effects.write_pty = &S.writePty;
 
-    var s: Stream = .initAlloc(testing.allocator, handler);
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
     // ANSI-form DECRQM (CSI Ps $ p, no '?') must reply like the DEC form, not be
@@ -2810,7 +2810,7 @@ test "device status DECXCPR extended cursor position with write_pty callback" {
     var handler: Handler = .init(&t);
     handler.effects.write_pty = &S.writePty;
 
-    var s: Stream = .initAlloc(testing.allocator, handler);
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
     // DECXCPR (CSI ? 6 n) reports the extended cursor position:
