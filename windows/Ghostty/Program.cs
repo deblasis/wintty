@@ -253,10 +253,14 @@ public static partial class Program
             !args[0].StartsWith('+') &&
             Ghostty.Core.Cli.CliAliases.LooksLikeCommand(args[0]))
         {
-            Console.Error.WriteLine(
+            // stdout, not stderr: RedirectStderrToFile above has already
+            // pointed STD_ERROR_HANDLE at %LOCALAPPDATA%\Wintty\gpu.log, so
+            // anything written to stderr from here is invisible to the user.
+            // The exit code carries the error for scripts.
+            Console.Out.WriteLine(
                 $"unknown command '{args[0]}'. " +
                 $"Run '{ProgramName()} --help' for a list of commands.");
-            Console.Error.Flush();
+            Console.Out.Flush();
             Environment.Exit(1);
         }
 

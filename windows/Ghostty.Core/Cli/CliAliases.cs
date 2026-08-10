@@ -181,8 +181,7 @@ internal static class CliAliases
     {
         var sb = new StringBuilder();
         sb.Append($"Usage: {programName} [command] [options]\n\n");
-        sb.Append($"Run the {AppIdentity.ProductName} terminal emulator, or a specific helper\n");
-        sb.Append("command.\n\n");
+        sb.Append($"Run the {AppIdentity.ProductName} terminal emulator, or a helper command.\n\n");
         sb.Append(
             "If no command is given, run the terminal emulator. All configuration\n" +
             "keys are available as command line options in `--<key>=<value>` form,\n" +
