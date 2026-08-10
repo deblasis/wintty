@@ -59,7 +59,10 @@ internal static class WindowStateMigration
                 CommandPaletteBackground: GetString("CommandPaletteBackground"));
 
             // Never overwrite a key the user has already set in their
-            // config; the legacy JSON only fills in what is missing.
+            // top-level config file; the legacy JSON only fills in what
+            // is missing. A key reaching the config through an include or
+            // a conditional block is not visible here and gets appended
+            // anyway, same as the scan this replaced.
             var appends = LegacyUiSettingsMigrator.ComputeAppends(
                 legacy, configService.IsConfiguredInFile);
             if (appends.Count > 0)
