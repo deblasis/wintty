@@ -85,19 +85,38 @@ public static partial class Program
     /// <summary>
     /// Persistent GPU diagnostic log path.  Survives reboot so we can
     /// read crash details after a GPU driver crash takes down the machine.
-    /// Located next to the executable so it's easy to find.
     /// </summary>
     private static readonly string GpuLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Wintty", "gpu.log");
 
     /// <summary>
+    /// Set to any value to force the <see cref="GpuLogPath"/> redirect on for
+    /// a CLI action, which otherwise keeps the terminal's stderr. This is an
+    /// environment variable rather than a command line flag because
+    /// libghostty parses the process command line itself and rejects any
+    /// option it does not recognize.
+    /// </summary>
+    private const string GpuLogEnvVar = "WINTTY_GPU_LOG";
+
+    private static bool _stderrRedirected;
+
+    /// <summary>
     /// Redirect stderr to a file so all diagnostic output (Zig std.log,
     /// C# Console.Error, DX12 debug layer via OutputDebugString) is
     /// persisted to disk.  Called before any native GPU code runs.
+    ///
+    /// Idempotent: the GUI path and the <see cref="GpuLogEnvVar"/> opt-in can
+    /// both reach it, and re-opening would truncate the log we just wrote.
     /// </summary>
     private static void RedirectStderrToFile()
     {
+        if (_stderrRedirected) return;
+
+        // Set before the attempt, not after: a redirect that failed once is
+        // not going to succeed on a retry, and reopening would truncate.
+        _stderrRedirected = true;
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(GpuLogPath)!);
@@ -159,11 +178,6 @@ public static partial class Program
 
     static int MainImpl(string[] args)
     {
-        // Persist GPU diagnostics to disk before any native code runs.
-        // After a GPU driver crash, the log at %LOCALAPPDATA%\Ghostty\gpu.log
-        // survives reboot and tells us exactly what went wrong.
-        RedirectStderrToFile();
-
         // +version is intercepted here, before the libghostty CLI
         // dispatcher. The renderer lives in C# so it can also drive the
         // Version palette dialog with the same output.
@@ -215,6 +229,18 @@ public static partial class Program
         // window on a typo.
         if (args.Length > 0 && (args[0].StartsWith('+') || isAlias))
         {
+            // A CLI action keeps the terminal's stderr, so that libghostty's
+            // own argument errors reach the user: `wintty +bogus` reports
+            // InvalidAction, `wintty +list-themes +show-config` reports
+            // MultipleActions. Redirecting first turned both into a bare exit
+            // code with the reason buried in a log file.
+            //
+            // WINTTY_GPU_LOG opts back into the file, which is how you capture
+            // diagnostics from a CLI run that has no console to print to (a
+            // scheduled task, a Start Menu launch).
+            if (Environment.GetEnvironmentVariable(GpuLogEnvVar) is not null)
+                RedirectStderrToFile();
+
             // list-themes (without -tui): try the in-process picker first
             // by sending LIST_THEMES to a running Ghostty app's pipe.
             //
@@ -253,16 +279,21 @@ public static partial class Program
             !args[0].StartsWith('+') &&
             Ghostty.Core.Cli.CliAliases.LooksLikeCommand(args[0]))
         {
-            // stdout, not stderr: RedirectStderrToFile above has already
-            // pointed STD_ERROR_HANDLE at %LOCALAPPDATA%\Wintty\gpu.log, so
-            // anything written to stderr from here is invisible to the user.
-            // The exit code carries the error for scripts.
-            Console.Out.WriteLine(
+            Console.Error.WriteLine(
                 $"unknown command '{args[0]}'. " +
                 $"Run '{ProgramName()} --help' for a list of commands.");
-            Console.Out.Flush();
+            Console.Error.Flush();
             Environment.Exit(1);
         }
+
+        // Persist GPU diagnostics to disk before any native code runs. After
+        // a GPU driver crash the log at %LOCALAPPDATA%\Wintty\gpu.log survives
+        // reboot and tells us exactly what went wrong. Nothing above this line
+        // touches the GPU, so starting here costs the GUI no coverage.
+        //
+        // Also covers the case where the block above found no action to run
+        // and fell through to the GUI; the call is idempotent.
+        RedirectStderrToFile();
 
         // Detach from the console before starting WinUI, but ONLY
         // when we are the console's sole owner. Explorer / Start

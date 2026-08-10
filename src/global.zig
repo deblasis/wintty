@@ -401,6 +401,76 @@ pub fn action() ?cli.ghostty.Action {
     return state.?.action;
 }
 
+/// Write a human-readable explanation of an `init` failure to stderr.
+///
+/// `init` reports a bad command line by returning an error, leaving `std.log`
+/// as the only other sink. libghostty silences that one: `Logging.stderr`
+/// above defaults to false whenever `app_runtime` is `none`, and it does so
+/// before the args are even parsed. An embedder that called us therefore had
+/// nothing to show for a typo but an exit code. Writing to the file directly
+/// skips the log sink so the message survives that default.
+///
+/// The exe has its own copy of this in `main_ghostty.zig`, where it runs
+/// before there is any global state to consult. Keep the wording in sync.
+///
+/// Only the argument-parsing errors get text here. Anything else stays with
+/// the caller's `std.log.err`, which reaches an embedder that registered a
+/// callback via `ghostty_log_set_callback`.
+pub fn reportInitError(err: anyerror) void {
+    const message = initErrorMessage(err) orelse return;
+
+    // Streaming, not the seekable `writer`: an embedder may have pointed
+    // stderr at a file it is also writing to itself, and a positional write
+    // would start at offset 0 and overwrite what is already there. Streaming
+    // writes go wherever the shared handle's file pointer sits.
+    //
+    // The global Io rather than `io()`: `init` can fail before it reaches
+    // `io_impl`, which `io()` asserts has been initialized.
+    std.Io.File.stderr().writeStreamingAll(
+        std.Io.Threaded.global_single_threaded.io(),
+        message,
+    ) catch return;
+}
+
+/// The text `reportInitError` writes for `err`, or null for errors with no
+/// user-facing explanation, which stay with the caller's `std.log.err`.
+///
+/// Split from the write so the mapping can be tested without capturing stderr.
+fn initErrorMessage(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
+            "action starting with the `+` character.\n",
+
+        error.InvalidAction => "Error: unknown CLI action specified. CLI actions are specified with\n" ++
+            "the '+' character.\n\n" ++
+            "All valid CLI actions can be listed with `ghostty +help`\n",
+
+        else => null,
+    };
+}
+
+test "initErrorMessage explains the CLI argument errors" {
+    const testing = std.testing;
+
+    // The exe prints its own copy of these from main_ghostty.zig. If either
+    // side is reworded, both should say the same thing.
+    try testing.expectEqualStrings(
+        "Error: unknown CLI action specified. CLI actions are specified with\n" ++
+            "the '+' character.\n\n" ++
+            "All valid CLI actions can be listed with `ghostty +help`\n",
+        initErrorMessage(cli.action.DetectError.InvalidAction).?,
+    );
+    try testing.expectEqualStrings(
+        "Error: multiple CLI actions specified. You must specify only one\n" ++
+            "action starting with the `+` character.\n",
+        initErrorMessage(cli.action.DetectError.MultipleActions).?,
+    );
+}
+
+test "initErrorMessage leaves other errors to the log" {
+    try std.testing.expect(initErrorMessage(error.OutOfMemory) == null);
+}
+
 /// This represents the global process state. There should only
 /// be one of these at any given moment. This is extracted into a dedicated
 /// struct because it is reused by main and the static C lib.
