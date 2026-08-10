@@ -59,6 +59,12 @@ public static class WindowsOnlyKeys
             "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process."),
         new("windows-high-contrast",
             "When true (default), the terminal surface follows the Windows High Contrast theme automatically; set false to keep your configured colors even in High Contrast mode."),
+        new("quick-terminal-key",
+            "Global hotkey chord that toggles the quick terminal (default ctrl+backquote). Unparseable values fall back to the default chord."),
+        new("log-level",
+            "Minimum severity written to the app log: trace, debug, info (default), warn, error, or off. An unrecognized value falls back to info silently."),
+        new("log-filter",
+            "Comma-separated CATEGORY=LEVEL pairs overriding log-level per component (longest matching category prefix wins). Malformed pairs and unknown levels are skipped silently."),
     ];
 
     public static readonly FrozenSet<string> Set =
