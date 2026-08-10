@@ -45,7 +45,7 @@ internal static class LogEvents
         public const int SaveFailed                    = 2301;
         public const int MigrationFailed               = 2302;
         public const int MigrationLegacyDeleteFailed   = 2303;
-        public const int MigrationScanFailed           = 2304;
+        // 2304 retired (was MigrationScanFailed). Not reused: old logs carry it.
     }
 
     // 2400-2499: Shell (taskbar, backdrop)

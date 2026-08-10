@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using Ghostty.Core.Config;
 using Xunit;
 
@@ -13,9 +12,7 @@ public class LegacyUiSettingsMigratorTests
             VerticalTabs: true,
             CommandPaletteGroupCommands: true,
             CommandPaletteBackground: "mica");
-        var existingKeys = new HashSet<string>();
-
-        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, existingKeys);
+        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, _ => false);
 
         Assert.Contains(("vertical-tabs", "true"), pairs);
         Assert.Contains(("command-palette-group-commands", "true"), pairs);
@@ -26,9 +23,8 @@ public class LegacyUiSettingsMigratorTests
     public void Skips_keys_already_present_in_config()
     {
         var legacy = new LegacyUiSettingsPayload(true, true, "opaque");
-        var existingKeys = new HashSet<string> { "vertical-tabs" };
-
-        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, existingKeys);
+        var pairs = LegacyUiSettingsMigrator.ComputeAppends(
+            legacy, k => k == "vertical-tabs");
 
         Assert.DoesNotContain(pairs, p => p.Key == "vertical-tabs");
         Assert.Contains(("command-palette-group-commands", "true"), pairs);
@@ -40,7 +36,7 @@ public class LegacyUiSettingsMigratorTests
     {
         // All three at defaults (false, false, "acrylic") -> no appends.
         var legacy = new LegacyUiSettingsPayload(false, false, "acrylic");
-        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, new HashSet<string>());
+        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, _ => false);
         Assert.Empty(pairs);
     }
 
@@ -48,7 +44,7 @@ public class LegacyUiSettingsMigratorTests
     public void Handles_null_background_gracefully()
     {
         var legacy = new LegacyUiSettingsPayload(true, false, null);
-        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, new HashSet<string>());
+        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, _ => false);
         Assert.Contains(("vertical-tabs", "true"), pairs);
         Assert.DoesNotContain(pairs, p => p.Key == "command-palette-background");
     }
@@ -57,7 +53,7 @@ public class LegacyUiSettingsMigratorTests
     public void Normalizes_background_case()
     {
         var legacy = new LegacyUiSettingsPayload(false, false, "MICA");
-        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, new HashSet<string>());
+        var pairs = LegacyUiSettingsMigrator.ComputeAppends(legacy, _ => false);
         Assert.Contains(("command-palette-background", "mica"), pairs);
     }
 }
