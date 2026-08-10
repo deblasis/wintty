@@ -23,6 +23,12 @@ public class WindowsOnlyKeysTests
     [InlineData("default-profile")]
     [InlineData("profile-order")]
     [InlineData("no-color-override")]
+    [InlineData("accent-color")]
+    [InlineData("windows-single-instance")]
+    [InlineData("windows-high-contrast")]
+    [InlineData("quick-terminal-key")]
+    [InlineData("log-level")]
+    [InlineData("log-filter")]
     public void Contains_KnownKey(string key)
     {
         Assert.True(WindowsOnlyKeys.Contains(key));
@@ -31,11 +37,21 @@ public class WindowsOnlyKeysTests
     [Fact]
     public void Contains_UpstreamKey_IsFalse()
     {
-        // These are all in upstream Zig Config, not Windows-only.
+        // These are all declared in the Zig config schema (upstream or
+        // fork-added), so libghostty parses them normally.
         Assert.False(WindowsOnlyKeys.Contains("background-opacity"));
         Assert.False(WindowsOnlyKeys.Contains("font-size"));
         Assert.False(WindowsOnlyKeys.Contains("theme"));
         Assert.False(WindowsOnlyKeys.Contains("windows-settings-ui"));
+        // ConfigService reads these from the file cache too, but they are
+        // real Zig fields, so libghostty never calls them unknown.
+        Assert.False(WindowsOnlyKeys.Contains("quick-terminal-autohide"));
+        Assert.False(WindowsOnlyKeys.Contains("bell-audio-path"));
+        // scrollback-limit is an upstream compatibility rename to
+        // scrollback-limit-bytes. A valid value parses silently; an invalid
+        // one reports "unknown field" from the rename handler. Registering
+        // it would swallow that genuine value error, so it stays out.
+        Assert.False(WindowsOnlyKeys.Contains("scrollback-limit"));
     }
 
     [Fact]
@@ -43,6 +59,19 @@ public class WindowsOnlyKeysTests
     {
         Assert.True(WindowsOnlyKeys.Contains("Background-Style"));
         Assert.True(WindowsOnlyKeys.Contains("BACKGROUND-STYLE"));
+    }
+
+    [Fact]
+    public void All_HasNoDuplicateOrCaseCollidingKeys()
+    {
+        // A duplicate makes ByKey's ToFrozenDictionary throw during static
+        // init, which otherwise kills whichever test touches the class first
+        // with an opaque TypeInitializationException. Catching it here
+        // surfaces the inner ArgumentException, which names the bad key.
+        // Asserting on Set.Count instead would not work: Set is initialized
+        // by the same type initializer, so the comparison never runs.
+        var ex = Record.Exception(() => _ = WindowsOnlyKeys.ByKey.Count);
+        Assert.True(ex is null, ex?.InnerException?.Message ?? ex?.Message ?? "");
     }
 
     [Fact]
@@ -152,6 +181,25 @@ public class WindowsOnlyKeysTests
     public void IsAgentDetectKey_Expected(string key, bool expected)
     {
         Assert.Equal(expected, Ghostty.Core.Config.WindowsOnlyKeys.IsAgentDetectKey(key));
+    }
+
+    [Theory]
+    [InlineData("quick-terminal-key")]
+    [InlineData("log-level")]
+    [InlineData("log-filter")]
+    public void FileReadKeyDiagnostic_ExtractsKey_AndClassifiesAsWindowsOnly(string configKey)
+    {
+        // Shape of the precomputed diagnostic message (src/cli/diagnostics.zig
+        // Diagnostic.format). ConfigService reads these keys from the raw
+        // config file, so libghostty's parser sees an unknown field and the
+        // filter must absorb it into WindowsOnlyKeysUsed instead of the error
+        // list.
+        var message =
+            $"C:\\Users\\alex\\AppData\\Roaming\\com.mitchellh.ghostty\\config:3:{configKey}: unknown field";
+
+        Assert.True(WindowsOnlyKeys.TryExtractUnknownFieldKey(message, out var key));
+        Assert.Equal(configKey, key);
+        Assert.True(WindowsOnlyKeys.Contains(key));
     }
 
     [Fact]
