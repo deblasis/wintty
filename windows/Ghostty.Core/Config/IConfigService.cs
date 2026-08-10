@@ -147,17 +147,6 @@ public interface IConfigService : IDisposable
     void SuppressWatcher(bool suppress);
 
     /// <summary>
-    /// True when the top-level config file sets this key. The typed
-    /// members above conflate a user override with an inherited theme or
-    /// default value, so they can't answer "did the user set this?".
-    /// Backed by a snapshot of the file taken on each load, so it is
-    /// answerable at any time, not just during a reload. Only that one
-    /// file is covered: a value coming from an included file or a
-    /// conditional block reads as unset.
-    /// </summary>
-    bool IsConfiguredInFile(string key);
-
-    /// <summary>
     /// Number of real diagnostics from the last load/reload. This
     /// excludes "unknown field" noise for keys we know are
     /// Windows-only (see <see cref="WindowsOnlyKeys"/>); those are

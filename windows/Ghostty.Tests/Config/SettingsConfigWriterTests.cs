@@ -143,7 +143,6 @@ public class SettingsConfigWriterTests
         public Ghostty.Core.Bell.BellFeatures BellFeatures => default;
         public string? BellAudioPath => null;
         public double BellAudioVolume => 0.5;
-        public bool IsConfiguredInFile(string key) => false;
         public int DiagnosticsCount => 0;
         public string GetDiagnostic(int index) => string.Empty;
         public IReadOnlyList<string> WindowsOnlyKeysUsed => Array.Empty<string>();

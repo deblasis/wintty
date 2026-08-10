@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using Ghostty.Core.Config;
 using Ghostty.Logging;
+using Ghostty.Services;
 using Microsoft.Extensions.Logging;
 
 namespace Ghostty.Settings;
@@ -23,7 +24,11 @@ namespace Ghostty.Settings;
 /// </summary>
 internal static class WindowStateMigration
 {
-    public static void TryRun(IConfigService configService, IConfigFileEditor editor)
+    // Takes the concrete service rather than IConfigService: the only
+    // member it needs beyond the interface is IsConfiguredInFile, and
+    // IConfigService is public, so widening it would break the tier
+    // overlays' hand-written stubs for the sake of one internal caller.
+    public static void TryRun(ConfigService configService, IConfigFileEditor editor)
     {
         try
         {
@@ -102,7 +107,6 @@ internal static class WindowStateMigration
             StaticLoggers.WindowStateMigration.LogMigrationFailed(ex);
         }
     }
-
 }
 
 internal static partial class WindowStateMigrationLogExtensions
