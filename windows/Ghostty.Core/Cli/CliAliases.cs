@@ -47,6 +47,7 @@ internal static class CliAliases
         "list-keybinds",
         "list-themes",
         "list-themes-tui",
+        "new-tab",
         "new-window",
         "show-config",
         "show-face",
