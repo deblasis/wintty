@@ -147,11 +147,13 @@ public interface IConfigService : IDisposable
     void SuppressWatcher(bool suppress);
 
     /// <summary>
-    /// True iff the user's config file actually sets this key. The typed
+    /// True when the top-level config file sets this key. The typed
     /// members above conflate a user override with an inherited theme or
     /// default value, so they can't answer "did the user set this?".
-    /// Backed by a snapshot of the config file taken on each load, so it
-    /// is answerable at any time, not just during a reload.
+    /// Backed by a snapshot of the file taken on each load, so it is
+    /// answerable at any time, not just during a reload. Only that one
+    /// file is covered: a value coming from an included file or a
+    /// conditional block reads as unset.
     /// </summary>
     bool IsConfiguredInFile(string key);
 

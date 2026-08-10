@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using Ghostty.Core.Config;
@@ -24,17 +23,6 @@ namespace Ghostty.Settings;
 /// </summary>
 internal static class WindowStateMigration
 {
-    /// <summary>
-    /// The config keys this migration can append. Kept in step with the
-    /// fields <see cref="LegacyUiSettingsMigrator.ComputeAppends"/> emits.
-    /// </summary>
-    private static readonly string[] MigratedKeys =
-    [
-        "vertical-tabs",
-        "command-palette-group-commands",
-        "command-palette-background",
-    ];
-
     public static void TryRun(IConfigService configService, IConfigFileEditor editor)
     {
         try
@@ -67,11 +55,8 @@ internal static class WindowStateMigration
 
             // Never overwrite a key the user has already set in their
             // config; the legacy JSON only fills in what is missing.
-            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var key in MigratedKeys)
-                if (configService.IsConfiguredInFile(key)) existing.Add(key);
-
-            var appends = LegacyUiSettingsMigrator.ComputeAppends(legacy, existing);
+            var appends = LegacyUiSettingsMigrator.ComputeAppends(
+                legacy, configService.IsConfiguredInFile);
             if (appends.Count > 0)
             {
                 configService.SuppressWatcher(true);

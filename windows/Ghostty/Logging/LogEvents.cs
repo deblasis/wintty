@@ -45,9 +45,7 @@ internal static class LogEvents
         public const int SaveFailed                    = 2301;
         public const int MigrationFailed               = 2302;
         public const int MigrationLegacyDeleteFailed   = 2303;
-        // 2304 was MigrationScanFailed, retired when the migrator switched
-        // to IConfigService.IsConfiguredInFile. Not reused: old logs still
-        // carry it, and ids are stable per the taxonomy in docs/logging.md.
+        // 2304 retired (was MigrationScanFailed). Not reused: old logs carry it.
     }
 
     // 2400-2499: Shell (taskbar, backdrop)

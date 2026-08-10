@@ -15,31 +15,37 @@ public sealed record LegacyUiSettingsPayload(
 /// One-shot migrator from legacy ui-settings.json to real ghostty
 /// config key/value appends. Produces no side effects -- the caller
 /// writes pairs via <see cref="IConfigFileEditor"/> and prunes the
-/// legacy JSON afterwards. Idempotent: rerunning with the same
-/// <paramref name="existingKeys"/> and <paramref name="legacy"/>
+/// legacy JSON afterwards. Idempotent: rerunning against the same
+/// <paramref name="isConfigured"/> and <paramref name="legacy"/>
 /// always yields the same list. Default values are intentionally
 /// omitted so the migration does not bloat the user's config with
 /// values that already match the built-in defaults.
 /// </summary>
 public static class LegacyUiSettingsMigrator
 {
+    /// <param name="isConfigured">
+    /// Answers whether the user's config already sets a given key; those
+    /// keys are left alone. Taken as a predicate rather than a set so the
+    /// key names live here only, and a caller cannot pass a set that has
+    /// drifted from the keys this method actually asks about.
+    /// </param>
     public static IReadOnlyList<(string Key, string Value)> ComputeAppends(
         LegacyUiSettingsPayload legacy,
-        ISet<string> existingKeys)
+        Func<string, bool> isConfigured)
     {
         var result = new List<(string, string)>();
 
-        if (legacy.VerticalTabs && !existingKeys.Contains("vertical-tabs"))
+        if (legacy.VerticalTabs && !isConfigured("vertical-tabs"))
             result.Add(("vertical-tabs", "true"));
 
         if (legacy.CommandPaletteGroupCommands &&
-            !existingKeys.Contains("command-palette-group-commands"))
+            !isConfigured("command-palette-group-commands"))
             result.Add(("command-palette-group-commands", "true"));
 
         if (!string.IsNullOrWhiteSpace(legacy.CommandPaletteBackground) &&
             !legacy.CommandPaletteBackground.Trim().Equals(
                 "acrylic", StringComparison.OrdinalIgnoreCase) &&
-            !existingKeys.Contains("command-palette-background"))
+            !isConfigured("command-palette-background"))
         {
             result.Add(("command-palette-background",
                 legacy.CommandPaletteBackground.Trim().ToLowerInvariant()));
