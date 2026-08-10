@@ -37,7 +37,8 @@ public class WindowsOnlyKeysTests
     [Fact]
     public void Contains_UpstreamKey_IsFalse()
     {
-        // These are all in upstream Zig Config, not Windows-only.
+        // These are all declared in the Zig config schema (upstream or
+        // fork-added), so libghostty parses them normally.
         Assert.False(WindowsOnlyKeys.Contains("background-opacity"));
         Assert.False(WindowsOnlyKeys.Contains("font-size"));
         Assert.False(WindowsOnlyKeys.Contains("theme"));
@@ -58,6 +59,15 @@ public class WindowsOnlyKeysTests
     {
         Assert.True(WindowsOnlyKeys.Contains("Background-Style"));
         Assert.True(WindowsOnlyKeys.Contains("BACKGROUND-STYLE"));
+    }
+
+    [Fact]
+    public void All_HasNoDuplicateOrCaseCollidingKeys()
+    {
+        // ByKey's ToFrozenDictionary throws on a duplicate, which surfaces as
+        // a TypeInitializationException from whichever test touches the class
+        // first. Comparing against the deduping Set names the real cause.
+        Assert.Equal(WindowsOnlyKeys.All.Count, WindowsOnlyKeys.Set.Count);
     }
 
     [Fact]
@@ -173,12 +183,13 @@ public class WindowsOnlyKeysTests
     [InlineData("quick-terminal-key")]
     [InlineData("log-level")]
     [InlineData("log-filter")]
-    public void FileReadKeyDiagnostic_ExtractsKey_AndIsSuppressed(string configKey)
+    public void FileReadKeyDiagnostic_ExtractsKey_AndClassifiesAsWindowsOnly(string configKey)
     {
-        // Verbatim shape emitted by `wintty +validate-config` for these keys:
-        // ConfigService reads them from the raw config file, so libghostty's
-        // parser sees an unknown field and the filter must absorb it into
-        // WindowsOnlyKeysUsed instead of the error list.
+        // Shape of the precomputed diagnostic message (src/cli/diagnostics.zig
+        // Diagnostic.format). ConfigService reads these keys from the raw
+        // config file, so libghostty's parser sees an unknown field and the
+        // filter must absorb it into WindowsOnlyKeysUsed instead of the error
+        // list.
         var message =
             $"C:\\Users\\alex\\AppData\\Roaming\\com.mitchellh.ghostty\\config:3:{configKey}: unknown field";
 

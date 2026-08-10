@@ -583,8 +583,11 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     private void ReadFlagsCore()
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
-        // windows-settings-ui is a Windows-only key not in the Zig
-        // config schema, so read it from the config file directly.
+        // windows-settings-ui is a fork-added Zig field, so libghostty
+        // parses it fine, but it's a bool and reads more cheaply from
+        // the file cache alongside the other Windows-only flags below.
+        // It is deliberately absent from WindowsOnlyKeys: the parser
+        // knows it, so there is no unknown-field diagnostic to suppress.
         SettingsUiEnabled = string.Equals(
             GetFileValue("windows-settings-ui", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
@@ -1024,6 +1027,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// cannot be read via <c>ghostty_config_get</c>, so we parse the
     /// file ourselves.
     /// </summary>
+    /// <remarks>
+    /// Any key read here that libghostty's parser doesn't know about
+    /// must also be listed in <see cref="WindowsOnlyKeys.All"/>.
+    /// Otherwise its "unknown field" diagnostic reaches
+    /// <see cref="CacheDiagnostics"/> unfiltered and the settings UI
+    /// shows the user a config error for a setting the app honors.
+    /// </remarks>
     private string GetFileValue(string key, string defaultValue)
         => _configFileCache is not null
             && _configFileCache.TryGetValue(key, out var list)

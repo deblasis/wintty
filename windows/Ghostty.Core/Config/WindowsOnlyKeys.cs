@@ -62,9 +62,9 @@ public static class WindowsOnlyKeys
         new("quick-terminal-key",
             "Global hotkey chord that toggles the quick terminal (default ctrl+backquote). Unparseable values fall back to the default chord."),
         new("log-level",
-            "Minimum severity written to the app log: trace, debug, info (default), warn, error, or off."),
+            "Minimum severity written to the app log: trace, debug, info (default), warn, error, or off. An unrecognized value falls back to info silently."),
         new("log-filter",
-            "Comma-separated CATEGORY=LEVEL pairs overriding log-level per component (longest matching category prefix wins)."),
+            "Comma-separated CATEGORY=LEVEL pairs overriding log-level per component (longest matching category prefix wins). Malformed pairs and unknown levels are skipped silently."),
     ];
 
     public static readonly FrozenSet<string> Set =
