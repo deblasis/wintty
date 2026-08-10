@@ -66,8 +66,16 @@ pub const InitOpts = union(enum) {
     },
 };
 
-/// Initialize the global state.
+/// Initialize the global state. This may only be called once per process,
+/// including after `deinit`, which does not reset it. A second call returns
+/// `error.AlreadyInitialized` without touching the state already there.
 pub fn init(opts: InitOpts) !void {
+    // The assignment below is unconditional, so re-initializing would leak
+    // the previous GPA, I/O instance and resources dir, and orphan the
+    // command line the args iterator borrows. Returning before the errdefer
+    // below is armed leaves a live state usable by whoever owns it.
+    if (state != null) return error.AlreadyInitialized;
+
     // Initialize ourself to nothing so we don't have any extra state.
     // IMPORTANT: this MUST be initialized before any log output because
     // the log function uses the global state.
@@ -543,3 +551,18 @@ pub const ResourceLimits = struct {
         if (self.nofile) |lim| internal_os.restoreMaxFiles(lim);
     }
 };
+
+test "init refuses a second call" {
+    // Both values are undefined because the re-entrancy check returns before
+    // it reads either one, so the test needs no real global state. Restore
+    // whatever was there so the rest of the suite is unaffected.
+    const prev = state;
+    defer state = prev;
+    const dummy: GlobalState = undefined;
+    state = dummy;
+
+    try std.testing.expectError(
+        error.AlreadyInitialized,
+        init(.{ .tool = undefined }),
+    );
+}
