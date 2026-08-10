@@ -303,19 +303,24 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         _dispatcher = dispatcher;
 
         // A failed ghostty_init runs its own errdefer cleanup but leaves the
-        // global state readable: deinit does not null it, and it frees
-        // resources_dir and tmp_dir_path without nulling those either. So
-        // ConfigNew below would allocate through an already-deinit'd
-        // allocator and later hand back dangling resource paths, surfacing
-        // as a native crash with no managed stack. Program.InitGhostty
-        // checks this on the CLI path; the GUI path comes through here.
+        // global state readable: deinit never nulls it, deinits io_impl
+        // unconditionally, and frees resources_dir and tmp_dir_path without
+        // nulling them. ConfigNew and the loads below would then run against
+        // a dead I/O implementation and freed resource paths, surfacing as a
+        // native crash with no managed stack. Program.InitGhostty checks this
+        // on the CLI path; a GUI launch comes through here instead.
         //
-        // Console.Error rather than a logger: the logging factory is built
-        // from this service's own config, so it does not exist yet.
+        // Console.Error, not a logger: the logging factory is built from this
+        // service's own config, and the libghostty log bridge is installed
+        // later still. MainImpl has already pointed stderr at gpu.log, so the
+        // line lands there. Name the log rather than promise a reason --
+        // libghostty is silent on this path, because lib builds disable
+        // stderr logging and its init-error text only covers the two CLI
+        // action errors that a GUI launch cannot produce.
         if (NativeMethods.InitWideFromProcess() != 0)
         {
             Console.Error.WriteLine(
-                "[Ghostty] ghostty_init failed; libghostty logged the reason above");
+                @"[Ghostty] ghostty_init failed; see %LOCALAPPDATA%\Wintty\gpu.log");
             Console.Error.Flush();
             Environment.Exit((int)Program.ExitCode.InitFailed);
         }
