@@ -335,13 +335,18 @@ public static partial class Program
     }
 
     /// <summary>
-    /// Initialize libghostty from this process's command line.
+    /// Initialize libghostty from this process's command line, exiting the
+    /// process if it fails.
+    ///
+    /// This is the single init entry point for both startup paths (the CLI
+    /// branch above and <see cref="Services.ConfigService"/> for the GUI).
+    /// It must run exactly once, before any other libghostty export.
     ///
     /// The marshalled buffer is intentionally not freed: libghostty keeps a
     /// reference to it and ghostty_cli_run_action reads the args later. The
     /// OS reclaims it on process exit.
     /// </summary>
-    private static void InitGhostty()
+    internal static void InitGhostty()
     {
         // Pass the real WTF-16 command line rather than rebuilding a UTF-8
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
@@ -350,9 +355,20 @@ public static partial class Program
         var result = NativeMethods.InitWideFromProcess();
         if (result != 0)
         {
-            // ghostty_init failed (e.g. invalid action). The Zig
-            // code logs to stderr. Distinct exit code per the
-            // ExitCode enum above.
+            // ghostty_init failed (e.g. invalid action). There is no
+            // degraded mode to continue in: a failed init already ran
+            // global.init's errdefer, which deinits the allocator and the
+            // I/O instance every later export depends on.
+            //
+            // We write the reason ourselves because libghostty won't: the
+            // lib artifact builds with app_runtime == none, so global
+            // logging defaults to stderr = false and its own "failed to
+            // initialize" line goes nowhere unless GHOSTTY_LOG is set.
+            // Without this, a failed init is a silent exit 2.
+            Console.Error.WriteLine(
+                "[Ghostty] FATAL: ghostty_init failed, exiting with " +
+                $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})");
+            Console.Error.Flush();
             Environment.Exit((int)ExitCode.InitFailed);
         }
     }

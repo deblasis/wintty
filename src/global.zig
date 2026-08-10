@@ -66,8 +66,18 @@ pub const InitOpts = union(enum) {
     },
 };
 
-/// Initialize the global state.
+/// Initialize the global state. This may only be called once per process;
+/// a second call returns `error.AlreadyInitialized` and leaves the existing
+/// state untouched.
 pub fn init(opts: InitOpts) !void {
+    // The assignment below is unconditional, so re-initializing would leak
+    // the previous GPA, I/O instance, tmp dir and resources dir, and orphan
+    // the command line the args iterator borrows. Embedders reach here
+    // through the C API (`ghostty_init`, `ghostty_init_wide`), which already
+    // has a status channel for this, so refuse rather than assert: an
+    // assertion compiles out of exactly the release builds we ship.
+    if (state != null) return error.AlreadyInitialized;
+
     // Initialize ourself to nothing so we don't have any extra state.
     // IMPORTANT: this MUST be initialized before any log output because
     // the log function uses the global state.
