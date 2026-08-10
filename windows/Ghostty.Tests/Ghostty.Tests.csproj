@@ -108,12 +108,12 @@
       Every settings page, for SettingsCardConfigKeyParityTests. A wildcard
       rather than a file list: a page added later is picked up without anyone
       remembering this entry, which is the failure mode the other blocks above
-      have. Link (not LogicalName) because LogicalName cannot be shared across
-      a glob; the default naming rule turns the link path into
-      Ghostty.Tests.Settings.Pages.<file>.xaml.
+      have. LogicalName is still spelled out per item, because deriving it from
+      Link makes the name depend on the host treating "\" as a separator.
     -->
-    <EmbeddedResource Include="..\Ghostty\Settings\Pages\*.xaml"
-                      Link="Settings\Pages\%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\Ghostty\Settings\Pages\**\*.xaml"
+                      Link="Settings\Pages\%(Filename)%(Extension)"
+                      LogicalName="Ghostty.Tests.Settings.Pages.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

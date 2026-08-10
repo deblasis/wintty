@@ -29,7 +29,7 @@ public static class SettingsIndex
             SettingType.Number),
         new("vertical-tabs", "Vertical tab bar",
             "Render tabs in a vertical sidebar instead of the default horizontal strip.",
-            "General", "Tabs",
+            "General", "App Behavior",
             new[] { "tabs", "vertical", "sidebar", "layout", "orientation" },
             SettingType.Toggle),
         new("command-palette-background", "Command palette backdrop",

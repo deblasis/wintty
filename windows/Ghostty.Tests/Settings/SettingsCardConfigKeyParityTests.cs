@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using Ghostty.Core.Settings;
 using Xunit;
 
@@ -12,33 +12,33 @@ namespace Ghostty.Tests.Settings;
 // Pins the SettingsCard.ConfigKey attached properties in the settings page
 // XAML against SettingsIndex.
 //
-// Search results are routed by key: SettingsWindow navigates to the entry's
-// page and then asks SettingsCardLocator.FindByConfigKey for the matching
-// card. A key that exists on only one side of that handshake fails silently
-// -- the page opens, nothing scrolls, nothing pulses, no error anywhere. A
-// typo'd ConfigKey (background-gradient-blend-mode for
+// Search results are routed by key in two legs: SettingsWindow navigates to
+// the entry's Page, and only then does SettingsCardLocator.FindByConfigKey
+// walk THAT page's visual tree for the key. A key that exists on only one
+// side of the handshake, or that sits on a different page than the index
+// claims, fails silently -- the page opens, nothing scrolls, nothing pulses,
+// no error anywhere. A typo'd ConfigKey (background-gradient-blend-mode for
 // background-gradient-blend) shipped exactly that way.
 //
-// The XAML is embedded by Ghostty.Tests.csproj rather than read from disk, so
-// the test does not depend on where the assembly runs from, and does not need
-// a project reference to Ghostty.csproj.
+// The pages are parsed as XML rather than text-scanned so that a key inside
+// an XML comment does not count as a live one. The XAML is embedded by
+// Ghostty.Tests.csproj rather than read from disk, so the test does not
+// depend on where the assembly runs from, and does not need a project
+// reference to Ghostty.csproj.
 public class SettingsCardConfigKeyParityTests
 {
     private const string PagePrefix = "Ghostty.Tests.Settings.Pages.";
 
-    // ctrl: is the only prefix the pages bind to Ghostty.Controls.Settings,
-    // but match any prefix so a renamed namespace alias shows up as a parity
-    // failure rather than as an unscanned card. The prefix is optional: on a
-    // SettingsCard element itself the attached property can be set unqualified.
-    private static readonly Regex ConfigKeyPattern = new(
-        @"(?:(?:[A-Za-z_][\w.]*:)?SettingsCard\.)?ConfigKey\s*=\s*""(?<key>[^""]*)""",
-        RegexOptions.Compiled);
+    // The XAML prefix is an alias (ctrl:), but the namespace it resolves to
+    // is what identifies the property, so a renamed alias changes nothing.
+    private static readonly XNamespace ControlsNamespace = "using:Ghostty.Controls.Settings";
+    private const string AttachedName = "SettingsCard.ConfigKey";
 
-    // Indexed so search can surface them, but not editable from a settings
-    // card yet. Search hits for these navigate to the page without scrolling
+    // Indexed so search can surface them, but not editable from any settings
+    // page yet. Search hits for these navigate to the page without scrolling
     // to anything, which is a gap in the UI, not a broken key. Delete an
-    // entry here when its card lands.
-    private static readonly string[] KeysWithNoCardYet =
+    // entry here when its control lands.
+    private static readonly string[] KeysWithNoControlYet =
     {
         "command-palette-background",
         "command-palette-group-commands",
@@ -67,95 +67,168 @@ public class SettingsCardConfigKeyParityTests
         }
     }
 
+    // Checks the key AND the page it lives on. Asserting only that the key
+    // exists somewhere would let an entry point search at the wrong page,
+    // where the tree walk cannot see the control.
     [Fact]
-    public void EveryIndexedKeyHasACard()
+    public void EveryIndexedKeyHasAControlOnItsOwnPage()
     {
-        var inXaml = ConfigKeysByPage().Values
-            .SelectMany(keys => keys)
-            .ToHashSet(StringComparer.Ordinal);
+        var pages = ConfigKeysByPage();
+        var problems = new List<string>();
 
-        var cardless = SettingsIndex.All
-            .Select(e => e.Key)
-            .Where(k => !inXaml.Contains(k))
-            .Except(KeysWithNoCardYet, StringComparer.Ordinal)
-            .OrderBy(k => k, StringComparer.Ordinal)
-            .ToList();
+        foreach (var entry in SettingsIndex.All)
+        {
+            if (KeysWithNoControlYet.Contains(entry.Key, StringComparer.Ordinal)) continue;
 
-        if (cardless.Count > 0)
+            var expectedPage = PageFileFor(entry.Page);
+            if (!pages.TryGetValue(expectedPage, out var keys))
+            {
+                problems.Add(
+                    $"  {entry.Key}: Page \"{entry.Page}\" has no {expectedPage} in the " +
+                    "scanned corpus");
+                continue;
+            }
+
+            if (keys.Contains(entry.Key)) continue;
+
+            var elsewhere = pages.Where(p => p.Value.Contains(entry.Key))
+                .Select(p => p.Key).ToList();
+            problems.Add(elsewhere.Count > 0
+                ? $"  {entry.Key}: indexed under \"{entry.Page}\" but tagged in " +
+                  string.Join(", ", elsewhere)
+                : $"  {entry.Key}: no ConfigKey anywhere in {expectedPage}");
+        }
+
+        if (problems.Count > 0)
         {
             Assert.Fail(
-                "SettingsIndex entries with no SettingsCard.ConfigKey in any settings " +
-                "page. Choosing one of these in search navigates to the page but never " +
-                "scrolls to or pulses the card. Add the attached property to the card, " +
-                "or list the key in KeysWithNoCardYet if the setting has no card:\n" +
-                string.Join("\n", cardless.Select(k => $"  {k}")));
+                "SettingsIndex entries whose control search cannot reach. Choosing one " +
+                "of these in search navigates to the page but never scrolls to or " +
+                "pulses anything. Add the attached property to the control on that " +
+                "page, correct the entry's Page, or list the key in " +
+                $"{nameof(KeysWithNoControlYet)} if the setting has no control:\n" +
+                string.Join("\n", problems));
         }
     }
 
-    // KeysWithNoCardYet is only honest while it stays a list of keys that
-    // genuinely have no card. Without this, a card added later would leave a
-    // stale entry that permanently exempts a real key from the check above.
+    // The scan only recognizes the qualified attribute form. Without this, a
+    // ConfigKey written any other way would be absent from the scanned set,
+    // and the checks above would report a real key as missing -- or, if the
+    // index has no entry for it either, not report it at all.
     [Fact]
-    public void KeysWithNoCardYetIsNotStale()
+    public void ConfigKeyIsAlwaysWrittenAsTheAttachedProperty()
     {
-        var inXaml = ConfigKeysByPage().Values
+        var problems = new List<string>();
+
+        foreach (var (page, document) in PageDocuments())
+        {
+            foreach (var element in document.Descendants())
+            {
+                // Property-element syntax: <ctrl:SettingsCard.ConfigKey>key</...>.
+                if (element.Name.LocalName == AttachedName)
+                    problems.Add($"  {page}: {AttachedName} set as a property element");
+
+                foreach (var attribute in element.Attributes())
+                {
+                    var local = attribute.Name.LocalName;
+
+                    if (local == "ConfigKey")
+                    {
+                        problems.Add(
+                            $"  {page}: unqualified ConfigKey on <{element.Name.LocalName}>; " +
+                            $"write it as the attached property, {AttachedName}");
+                        continue;
+                    }
+
+                    if (local != AttachedName) continue;
+
+                    if (attribute.Name.Namespace != ControlsNamespace)
+                    {
+                        problems.Add(
+                            $"  {page}: {AttachedName} resolves to " +
+                            $"\"{attribute.Name.Namespace}\", not \"{ControlsNamespace}\"");
+                    }
+                    else if (string.IsNullOrWhiteSpace(attribute.Value))
+                    {
+                        problems.Add(
+                            $"  {page}: empty {AttachedName} on <{element.Name.LocalName}>");
+                    }
+                }
+            }
+        }
+
+        if (problems.Count > 0)
+        {
+            Assert.Fail(
+                "ConfigKey written in a form the parity checks above cannot see:\n" +
+                string.Join("\n", problems));
+        }
+    }
+
+    // KeysWithNoControlYet is only honest while both halves hold: the keys
+    // still exist in the index, and they still have no control. Otherwise a
+    // stale entry permanently exempts a real key from the check above.
+    [Fact]
+    public void KeysWithNoControlYetIsNotStale()
+    {
+        var tagged = ConfigKeysByPage().Values
             .SelectMany(keys => keys)
             .ToHashSet(StringComparer.Ordinal);
+        var indexed = SettingsIndex.All.Select(e => e.Key).ToHashSet(StringComparer.Ordinal);
 
-        var landed = KeysWithNoCardYet.Where(inXaml.Contains).ToList();
+        var landed = KeysWithNoControlYet.Where(tagged.Contains).ToList();
+        var dropped = KeysWithNoControlYet.Where(k => !indexed.Contains(k)).ToList();
 
         Assert.True(
             landed.Count == 0,
-            "These keys now have a SettingsCard, so remove them from " +
-            $"KeysWithNoCardYet: {string.Join(", ", landed)}");
-    }
-
-    // Without this, a ConfigKey written in a spelling the regex does not match
-    // would be absent from the scanned set, and the checks above would report
-    // it as a setting with no card -- or, if the index has no entry for it
-    // either, not report it at all.
-    [Fact]
-    public void EveryConfigKeyOccurrenceIsMatched()
-    {
-        foreach (var (page, source) in PageSources())
-        {
-            var occurrences = Regex.Matches(source, @"\bConfigKey\b").Count;
-            var matched = ConfigKeyPattern.Matches(source).Count;
-
-            Assert.True(
-                occurrences == matched,
-                $"{page} mentions ConfigKey {occurrences} time(s) but the scan " +
-                $"pattern in {nameof(SettingsCardConfigKeyParityTests)} matched " +
-                $"{matched}. The pattern no longer describes how the pages set " +
-                "the attached property, so the parity checks cannot see every card.");
-        }
+            "These keys now have a tagged control, so remove them from " +
+            $"{nameof(KeysWithNoControlYet)}: {string.Join(", ", landed)}");
+        Assert.True(
+            dropped.Count == 0,
+            "These keys are no longer in SettingsIndex, so remove them from " +
+            $"{nameof(KeysWithNoControlYet)}: {string.Join(", ", dropped)}");
     }
 
     // Guards the csproj wildcard. Losing it, or moving the pages, would make
-    // every check above scan an empty corpus and pass. Pages that hold no
-    // cards at all (keybindings, profiles, the raw editor) legitimately
-    // contribute no keys, so this pins the page with the most of them.
+    // the checks above scan an empty corpus. EveryIndexedKeyHasAControlOnItsOwnPage
+    // already fails loudly in that case; this names the cause.
     [Fact]
     public void SettingsPagesAreEmbedded()
     {
         var pages = ConfigKeysByPage();
 
-        Assert.NotEmpty(pages);
-        Assert.NotEmpty(pages["AppearancePage.xaml"]);
+        var missing = SettingsIndex.All
+            .Select(e => PageFileFor(e.Page))
+            .Distinct(StringComparer.Ordinal)
+            .Where(f => !pages.ContainsKey(f))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            missing.Count == 0,
+            "Settings pages named by SettingsIndex are not embedded in the test " +
+            "assembly. Check the EmbeddedResource wildcard in Ghostty.Tests.csproj: " +
+            $"{string.Join(", ", missing)}");
     }
 
+    // SettingsWindow maps an entry's Page to a page instance by its own table;
+    // the file names follow the same "<Page>Page.xaml" convention throughout.
+    private static string PageFileFor(string page) => $"{page}Page.xaml";
+
     private static Dictionary<string, HashSet<string>> ConfigKeysByPage()
-        => PageSources().ToDictionary(
+        => PageDocuments().ToDictionary(
             p => p.Page,
-            p => ConfigKeyPattern.Matches(p.Source)
-                .Select(m => m.Groups["key"].Value)
+            p => p.Document.Descendants()
+                .SelectMany(e => e.Attributes())
+                .Where(a => a.Name == ControlsNamespace + AttachedName)
+                .Select(a => a.Value)
                 .ToHashSet(StringComparer.Ordinal),
             StringComparer.Ordinal);
 
-    private static List<(string Page, string Source)> PageSources()
+    private static List<(string Page, XDocument Document)> PageDocuments()
     {
         var assembly = Assembly.GetExecutingAssembly();
-        var pages = new List<(string, string)>();
+        var pages = new List<(string, XDocument)>();
 
         foreach (var resource in assembly.GetManifestResourceNames()
                      .Where(n => n.StartsWith(PagePrefix, StringComparison.Ordinal)
@@ -163,9 +236,8 @@ public class SettingsCardConfigKeyParityTests
         {
             using var stream = assembly.GetManifestResourceStream(resource);
             Assert.NotNull(stream);
-            using var reader = new StreamReader(stream);
 
-            pages.Add((resource[PagePrefix.Length..], reader.ReadToEnd()));
+            pages.Add((resource[PagePrefix.Length..], XDocument.Load(stream)));
         }
 
         return pages;

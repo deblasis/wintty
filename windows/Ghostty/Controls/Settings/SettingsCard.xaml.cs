@@ -12,8 +12,9 @@ namespace Ghostty.Controls.Settings;
 ///
 /// Header and Description are exposed as dependency properties so
 /// XAML consumers can write Header="Font size" without touching
-/// code-behind. ConfigKey is reserved for Phase 3 (search overlay) --
-/// it tags the card for scroll-to and pulse animation.
+/// code-behind. ConfigKey tags the card for the settings search, which
+/// scrolls to and pulses it; it is attached rather than a plain property
+/// because settings too large for a card row carry it on their own control.
 /// </summary>
 [ContentProperty(Name = nameof(Control))]
 public sealed partial class SettingsCard : UserControl
