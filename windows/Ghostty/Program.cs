@@ -167,11 +167,36 @@ public static partial class Program
         // +version is intercepted here, before the libghostty CLI
         // dispatcher. The renderer lives in C# so it can also drive the
         // Version palette dialog with the same output.
+        //
+        // Still first-argument only. libghostty treats --version as
+        // unconditional, so `wintty --font-size=12 --version` detects the
+        // action and never runs it, which also silences stderr logging for
+        // the session. That is a pre-existing bug and widening the check
+        // here would only paper over half of it.
         if (args.Length > 0 &&
-            (args[0] == "+version" || args[0] == "--version" || args[0] == "-v"))
+            (args[0] == "+version" || args[0] == "--version" ||
+             args[0] == "-v" || args[0] == "version"))
         {
             RegisterNativeResolver();
             Environment.Exit(Cli.CliActions.PrintVersion());
+        }
+
+        // Does the command line lead with a bare Windows subcommand, e.g.
+        // `wintty list-themes`? This is the same call InitWideFromProcess
+        // makes to perform the rewrite, over the same input, so the gate
+        // below can never open on something the rewrite would then fail to
+        // deliver to libghostty.
+        var isAlias = Ghostty.Core.Cli.CliAliases.TryRewrite(
+            Environment.CommandLine, out _, out _);
+
+        // Help is rendered Windows-side for every spelling, including
+        // +help. libghostty's help text names `ghostty`, points at
+        // src/config/Config.zig, and explains `open -na Ghostty.app`.
+        if (Ghostty.Core.Cli.CliAliases.IsHelpRequest(args, isAlias))
+        {
+            Console.Out.Write(Ghostty.Core.Cli.CliAliases.RenderHelp(ProgramName()));
+            Console.Out.Flush();
+            Environment.Exit(0);
         }
 
         // CLI actions are delegated to libghostty, matching the macOS
@@ -182,12 +207,27 @@ public static partial class Program
         // inherit the terminal's console handles natively. This lets
         // Zig's isTty() return true and the Vaxis interactive TUI work.
         // For GUI mode we detach from the console immediately.
-        if (args.Length > 0 && args[0].StartsWith('+'))
+        //
+        // The StartsWith('+') half of the gate is deliberately unchanged
+        // and deliberately not narrowed to known actions: `+bogus` and
+        // `+a +b` have to keep reaching libghostty so it can reject them
+        // and we can exit with InitFailed, rather than silently opening a
+        // window on a typo.
+        if (args.Length > 0 && (args[0].StartsWith('+') || isAlias))
         {
-            // +list-themes (without -tui): try the in-process picker first
+            // list-themes (without -tui): try the in-process picker first
             // by sending LIST_THEMES to a running Ghostty app's pipe.
-            if (args[0] == "+list-themes" && TrySendListThemesMessage())
+            //
+            // Only for a lone argument. The picker cannot honour flags, so
+            // `+list-themes --help` used to reach it and exit 0 having
+            // printed nothing - and the help text above now sends readers
+            // straight at that.
+            if (args.Length == 1 &&
+                (args[0] == "+list-themes" || args[0] == "list-themes") &&
+                TrySendListThemesMessage())
+            {
                 Environment.Exit(0);
+            }
 
             RegisterNativeResolver();
             InitGhostty();
@@ -196,6 +236,32 @@ public static partial class Program
             CleanupThemeCallback();
             if (exitCode >= 0)
                 Environment.Exit(exitCode);
+        }
+
+        // A bare word that is not a command is a typo, not a config key.
+        // libghostty records it as an "invalid field" diagnostic and opens
+        // a window anyway; once we tell users wintty takes subcommands,
+        // that silence is the wrong answer. Narrow on purpose: paths,
+        // flags and -e payloads never match.
+        //
+        // The isAlias / '+' guard keeps this quiet on the one path that
+        // reaches here with a real action: libghostty returning -1 from
+        // CliRunAction. Falling through to the GUI is what that did before,
+        // and "unknown command 'list-themes'" would be a lie.
+        if (args.Length > 0 &&
+            !isAlias &&
+            !args[0].StartsWith('+') &&
+            Ghostty.Core.Cli.CliAliases.LooksLikeCommand(args[0]))
+        {
+            // stdout, not stderr: RedirectStderrToFile above has already
+            // pointed STD_ERROR_HANDLE at %LOCALAPPDATA%\Wintty\gpu.log, so
+            // anything written to stderr from here is invisible to the user.
+            // The exit code carries the error for scripts.
+            Console.Out.WriteLine(
+                $"unknown command '{args[0]}'. " +
+                $"Run '{ProgramName()} --help' for a list of commands.");
+            Console.Out.Flush();
+            Environment.Exit(1);
         }
 
         // Detach from the console before starting WinUI, but ONLY
@@ -221,6 +287,20 @@ public static partial class Program
             FreeConsole();
 
         return StartGui();
+    }
+
+    /// <summary>
+    /// Name to print in usage and error text. Derived from the running
+    /// binary rather than hardcoded so a rebrand does not leave the CLI
+    /// telling users to run a command that no longer exists.
+    /// </summary>
+    private static string ProgramName()
+    {
+        var name = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
+        if (string.IsNullOrEmpty(name)) name = Ghostty.Core.AppIdentity.ProductName;
+        // Lowercased because that is how the command gets typed, and
+        // Windows does not care either way.
+        return name.ToLowerInvariant();
     }
 
     /// <summary>
