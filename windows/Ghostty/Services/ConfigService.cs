@@ -163,7 +163,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// Raw pane undo/redo <c>undo-timeout</c> value, in milliseconds. Read
     /// live from the libghostty <c>Duration</c> config handle (not the file
     /// cache, which can be stale outside ReadFlags). Returned verbatim,
-    /// including <c>0</c> (upstream's "disable undo" sentinel) — the policy
+    /// including <c>0</c> (upstream's "disable undo" sentinel) -- the policy
     /// interpretation lives in
     /// <see cref="Ghostty.Core.Panes.UndoPolicy.FromConfigMilliseconds"/>.
     /// Falls back to upstream Ghostty's 5s default window when the key isn't
@@ -583,8 +583,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     private void ReadFlagsCore()
     {
         AutoReloadEnabled = GetBool("auto-reload-config");
-        // windows-settings-ui is a Windows-only key not in the Zig
-        // config schema, so read it from the config file directly.
+        // windows-settings-ui is a fork-added Zig field, so libghostty
+        // parses it and there is no unknown-field diagnostic to suppress;
+        // that is why it is deliberately absent from WindowsOnlyKeys. It
+        // is still read from the file cache here, which only covers the
+        // top-level config file: a value set in an included file or a
+        // conditional block won't be seen.
         SettingsUiEnabled = string.Equals(
             GetFileValue("windows-settings-ui", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
@@ -1024,6 +1028,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// cannot be read via <c>ghostty_config_get</c>, so we parse the
     /// file ourselves.
     /// </summary>
+    /// <remarks>
+    /// Any key read here that libghostty's parser doesn't know about
+    /// must also be listed in <see cref="WindowsOnlyKeys.All"/>.
+    /// Otherwise its "unknown field" diagnostic reaches
+    /// <see cref="CacheDiagnostics"/> unfiltered and the settings UI
+    /// shows the user a config error for a setting the app honors.
+    /// </remarks>
     private string GetFileValue(string key, string defaultValue)
         => _configFileCache is not null
             && _configFileCache.TryGetValue(key, out var list)
