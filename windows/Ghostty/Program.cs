@@ -23,7 +23,7 @@ public static partial class Program
     /// return whatever the native action produced via
     /// <c>Environment.Exit(exitCode)</c>.
     /// </summary>
-    internal enum ExitCode
+    private enum ExitCode
     {
         /// <summary>WinUI message loop returned cleanly, or a CLI
         /// action completed with exit code 0.</summary>
@@ -36,9 +36,9 @@ public static partial class Program
         /// <c>%LOCALAPPDATA%\CrashDumps\</c>.</summary>
         NativeCrash = 1,
 
-        /// <summary><c>ghostty_init</c> failed. The native library
-        /// already wrote the reason to stderr; no config means no
-        /// app.</summary>
+        /// <summary><c>ghostty_init</c> failed; no config means no app.
+        /// libghostty explains argument errors itself; the status and this
+        /// exit code come from <see cref="InitGhostty"/>.</summary>
         InitFailed = 2,
 
         /// <summary>Unhandled managed exception in the GUI startup
@@ -335,12 +335,26 @@ public static partial class Program
     }
 
     /// <summary>
+    /// Whether <see cref="InitGhostty"/> has already initialized libghostty.
+    /// </summary>
+    /// <remarks>
+    /// Both startup paths call it and both run on the thread <see cref="Main"/>
+    /// creates, which goes on to become the UI thread, so a plain field is
+    /// enough. libghostty refuses a second init, and it reports that refusal
+    /// with the same status as a real failure, so without this gate a
+    /// double-init would be indistinguishable from a fatal one.
+    /// </remarks>
+    private static bool _ghosttyInitialized;
+
+    /// <summary>
     /// Initialize libghostty from this process's command line, exiting the
-    /// process if it fails.
+    /// process if it fails. A second call is a no-op.
     ///
     /// This is the single init entry point for both startup paths (the CLI
     /// branch above and <see cref="Services.ConfigService"/> for the GUI).
-    /// It must run exactly once, before any other libghostty export.
+    /// It must run before any export that touches global state (config, app,
+    /// surface). Exports that only read static build data, such as
+    /// ghostty_build_info behind +version, do not need it.
     ///
     /// The marshalled buffer is intentionally not freed: libghostty keeps a
     /// reference to it and ghostty_cli_run_action reads the args later. The
@@ -348,6 +362,8 @@ public static partial class Program
     /// </summary>
     internal static void InitGhostty()
     {
+        if (_ghosttyInitialized) return;
+
         // Pass the real WTF-16 command line rather than rebuilding a UTF-8
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
         // ignore what we passed and use the process command line anyway,
@@ -356,21 +372,30 @@ public static partial class Program
         if (result != 0)
         {
             // ghostty_init failed (e.g. invalid action). There is no
-            // degraded mode to continue in: a failed init already ran
-            // global.init's errdefer, which deinits the allocator and the
-            // I/O instance every later export depends on.
+            // degraded mode to continue in: global.init runs its errdefer on
+            // the way out, which deinits the allocator and the I/O instance
+            // every later export depends on.
             //
-            // We write the reason ourselves because libghostty won't: the
-            // lib artifact builds with app_runtime == none, so global
-            // logging defaults to stderr = false and its own "failed to
-            // initialize" line goes nowhere unless GHOSTTY_LOG is set.
-            // Without this, a failed init is a silent exit 2.
+            // libghostty explains the argument-parsing errors itself, via
+            // global.reportInitError writing straight to stderr. This line
+            // adds what that cannot: the native status, the exit code about
+            // to be used, and some signal for the errors it has no text for
+            // (global logging defaults to stderr = false in the lib
+            // artifact, so their std.log.err reaches only an embedder that
+            // registered a log callback).
+            //
+            // Where it surfaces depends on the path: a CLI action keeps the
+            // terminal's stderr, while the GUI has already pointed stderr at
+            // the log file by the time ConfigService calls in.
             Console.Error.WriteLine(
-                "[Ghostty] FATAL: ghostty_init failed, exiting with " +
+                $"[{Ghostty.Core.AppIdentity.ProductName}] FATAL: " +
+                $"ghostty_init failed (status {result}), exiting with " +
                 $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})");
             Console.Error.Flush();
             Environment.Exit((int)ExitCode.InitFailed);
         }
+
+        _ghosttyInitialized = true;
     }
 
     private static System.IO.Pipes.NamedPipeClientStream? _themePipe;
