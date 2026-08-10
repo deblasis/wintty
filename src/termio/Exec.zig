@@ -2520,6 +2520,7 @@ fn maybeProvisionWslTerminfo(
         var environ_map = global.environMap() catch break :cache null;
         defer environ_map.deinit();
         const state_dir = internal_os.xdg.state(
+            global.io(),
             alloc,
             &environ_map,
             .{ .subdir = "ghostty" },
