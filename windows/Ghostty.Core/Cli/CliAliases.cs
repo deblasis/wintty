@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Frozen;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 
 namespace Ghostty.Core.Cli;
@@ -31,13 +29,12 @@ internal static class CliAliases
     /// of the <c>Action</c> enum in <c>src/cli/ghostty.zig</c>; a parity
     /// test fails the build when the two sets diverge.
     ///
-    /// Ordinal by construction, not by default: Ghostty.csproj sets
-    /// InvariantGlobalization and Ghostty.Core.csproj does not, and that
-    /// property is process-wide. Culture-sensitive comparison would
-    /// therefore behave one way in Wintty.exe and another under
-    /// `dotnet test`, where ICU collapses ignorable characters.
+    /// Kept in sorted order because <see cref="RenderHelp"/> prints it
+    /// as-is, which is cheaper and more predictable than sorting a set
+    /// whose enumeration order is unspecified. A test asserts the help
+    /// output is ordered, so an entry added in the wrong place fails.
     /// </summary>
-    public static readonly FrozenSet<string> Actions = new[]
+    private static readonly string[] Sorted =
     {
         "boo",
         "crash-report",
@@ -58,7 +55,19 @@ internal static class CliAliases
         "toggle-quick-terminal",
         "validate-config",
         "version",
-    }.ToFrozenSet(StringComparer.Ordinal);
+    };
+
+    /// <summary>
+    /// Lookup form of <see cref="Sorted"/>.
+    ///
+    /// Ordinal by construction, not by default: Ghostty.csproj sets
+    /// InvariantGlobalization and Ghostty.Core.csproj does not, and that
+    /// property is process-wide. Culture-sensitive comparison would
+    /// therefore behave one way in Wintty.exe and another under
+    /// `dotnet test`, where ICU collapses ignorable characters.
+    /// </summary>
+    public static readonly FrozenSet<string> Actions =
+        FrozenSet.ToFrozenSet(Sorted, StringComparer.Ordinal);
 
     /// <summary>
     /// Windows argument separators. Exactly space and tab - not
@@ -167,12 +176,43 @@ internal static class CliAliases
     }
 
     /// <summary>
+    /// Whether to print <see cref="RenderHelp"/> instead of running an
+    /// action or starting the GUI. <paramref name="isAlias"/> is the
+    /// result of <see cref="TryRewrite"/> over the same invocation.
+    /// </summary>
+    public static bool IsHelpRequest(string[] args, bool isAlias)
+    {
+        if (args.Length == 0) return false;
+
+        // An explicit help command in the first position, either spelling.
+        if (args[0] == "help" || args[0] == "+help") return true;
+
+        // Any other action owns --help: it prints that action's own help,
+        // which only libghostty can render.
+        if (args[0].StartsWith('+') || isAlias) return false;
+
+        // -e hands the rest of the line to the child command, so a help
+        // flag anywhere on it is the child's, not ours. Checked before the
+        // help flags rather than alongside them: detectSpecialCase in
+        // src/cli/action.zig returns abort_if_no_action on -e regardless of
+        // whether a help fallback was already recorded, so `--help -e foo`
+        // has to run foo too, not just `-e foo --help`.
+        foreach (var arg in args)
+            if (arg == "-e") return false;
+
+        foreach (var arg in args)
+            if (arg == "--help" || arg == "-h" || arg == "/?") return true;
+
+        return false;
+    }
+
+    /// <summary>
     /// Windows-native usage text. Replaces libghostty's <c>+help</c>
     /// output, which names `ghostty`, points the reader at
     /// <c>src/config/Config.zig</c>, and explains
     /// <c>open -na Ghostty.app</c> - all wrong on Windows.
     ///
-    /// One command per line, rendered from <see cref="Actions"/>, so a
+    /// One command per line, rendered from <see cref="Sorted"/>, so a
     /// new upstream action appears here the moment the parity test forces
     /// it into the set. Upstream prints names without descriptions too,
     /// so there is no description text to drift.
@@ -191,7 +231,7 @@ internal static class CliAliases
         sb.Append($"example `{programName} -e pwsh`.\n\n");
         sb.Append("Commands:\n\n");
 
-        foreach (var name in Actions.OrderBy(static n => n, StringComparer.Ordinal))
+        foreach (var name in Sorted)
             sb.Append($"  {name}\n");
 
         sb.Append("\nEach command also accepts the `+command` spelling inherited from\n");

@@ -109,6 +109,37 @@ public class CliAliasTests
     public void LooksLikeCommandMatchesBareVerbsOnly(string arg, bool expected)
         => Assert.Equal(expected, CliAliases.LooksLikeCommand(arg));
 
+    [Theory]
+    // Bare and + spellings of the help command itself.
+    [InlineData(true, "help")]
+    [InlineData(true, "+help")]
+    // Fallback flags, with no action present.
+    [InlineData(true, "--help")]
+    [InlineData(true, "-h")]
+    [InlineData(true, "/?")]
+    [InlineData(true, "--font-size=12", "--help")]
+    // An action owns --help: only libghostty can render per-action help.
+    [InlineData(false, "+list-themes", "--help")]
+    [InlineData(false, "list-themes", "--help")]
+    // -e hands the line to a child command, so the flag is the child's.
+    // The second case is the ordering that matters: upstream's
+    // abort_if_no_action fires on -e even though --help came first.
+    [InlineData(false, "-e", "pwsh", "--help")]
+    [InlineData(false, "--help", "-e", "pwsh")]
+    [InlineData(false, "-e", "pwsh")]
+    [InlineData(false, "notacommand")]
+    public void IsHelpRequestMatchesUpstreamFallbackRules(bool expected, params string[] args)
+    {
+        // Mirrors what Program.MainImpl passes: the alias flag comes from
+        // TryRewrite over the same invocation.
+        var isAlias = args.Length > 0 && CliAliases.Actions.Contains(args[0]);
+        Assert.Equal(expected, CliAliases.IsHelpRequest(args, isAlias));
+    }
+
+    [Fact]
+    public void IsHelpRequestIgnoresEmptyArgs()
+        => Assert.False(CliAliases.IsHelpRequest([], false));
+
     [Fact]
     public void HelpListsEveryActionAndBothSpellings()
     {

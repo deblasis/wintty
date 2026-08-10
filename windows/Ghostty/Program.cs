@@ -192,7 +192,7 @@ public static partial class Program
         // Help is rendered Windows-side for every spelling, including
         // +help. libghostty's help text names `ghostty`, points at
         // src/config/Config.zig, and explains `open -na Ghostty.app`.
-        if (IsHelpRequest(args, isAlias))
+        if (Ghostty.Core.Cli.CliAliases.IsHelpRequest(args, isAlias))
         {
             Console.Out.Write(Ghostty.Core.Cli.CliAliases.RenderHelp(ProgramName()));
             Console.Out.Flush();
@@ -301,33 +301,6 @@ public static partial class Program
         // Lowercased because that is how the command gets typed, and
         // Windows does not care either way.
         return name.ToLowerInvariant();
-    }
-
-    /// <summary>
-    /// Whether to print the Windows-native usage text instead of running
-    /// an action or starting the GUI.
-    /// </summary>
-    private static bool IsHelpRequest(string[] args, bool isAlias)
-    {
-        if (args.Length == 0) return false;
-
-        // An explicit help command in the first position, either spelling.
-        if (args[0] == "help" || args[0] == "+help") return true;
-
-        // Any other action owns --help: it prints that action's own help,
-        // which only libghostty can render.
-        if (args[0].StartsWith('+') || isAlias) return false;
-
-        foreach (var arg in args)
-        {
-            // -e hands the rest of the line to the child command, so a
-            // --help after it is the child's flag, not ours. Matches
-            // abort_if_no_action in src/cli/action.zig.
-            if (arg == "-e") return false;
-            if (arg == "--help" || arg == "-h" || arg == "/?") return true;
-        }
-
-        return false;
     }
 
     /// <summary>
