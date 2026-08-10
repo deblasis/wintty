@@ -26,6 +26,10 @@ internal static class SettingsCardLocator
     /// </summary>
     public static FrameworkElement? FindByConfigKey(DependencyObject root, string key)
     {
+        // Untagged elements read back the property default, so an empty key
+        // would match the first element walked rather than nothing.
+        if (string.IsNullOrEmpty(key)) return null;
+
         int childCount = VisualTreeHelper.GetChildrenCount(root);
         for (int i = 0; i < childCount; i++)
         {

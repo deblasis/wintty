@@ -109,7 +109,9 @@
       rather than a file list: a page added later is picked up without anyone
       remembering this entry, which is the failure mode the other blocks above
       have. LogicalName is still spelled out per item, because deriving it from
-      Link makes the name depend on the host treating "\" as a separator.
+      Link makes the name depend on the host treating "\" as a separator. It
+      flattens away any subfolder, so two pages sharing a file name collide as
+      a CS1508 duplicate-resource error rather than as a silently dropped page.
     -->
     <EmbeddedResource Include="..\Ghostty\Settings\Pages\**\*.xaml"
                       Link="Settings\Pages\%(Filename)%(Extension)"

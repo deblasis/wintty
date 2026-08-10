@@ -88,8 +88,6 @@ public sealed partial class SettingsCard : UserControl
         card.ControlPresenter.Content = e.NewValue;
     }
 
-    // Reserved for Phase 3: search scroll + pulse animation targets
-    // this attached property to find the card for a given config key.
     public static readonly DependencyProperty ConfigKeyProperty =
         DependencyProperty.RegisterAttached(
             "ConfigKey",

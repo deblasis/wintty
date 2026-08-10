@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Xml;
 using System.Xml.Linq;
 using Ghostty.Core.Settings;
 using Xunit;
@@ -25,6 +26,10 @@ namespace Ghostty.Tests.Settings;
 // Ghostty.Tests.csproj rather than read from disk, so the test does not
 // depend on where the assembly runs from, and does not need a project
 // reference to Ghostty.csproj.
+//
+// This pins the markup, not the running visual tree: a key on a control
+// inside a collapsed panel reads as present here, while the search hit still
+// lands on nothing until the page reveals it.
 public class SettingsCardConfigKeyParityTests
 {
     private const string PagePrefix = "Ghostty.Tests.Settings.Pages.";
@@ -189,6 +194,51 @@ public class SettingsCardConfigKeyParityTests
             $"{nameof(KeysWithNoControlYet)}: {string.Join(", ", dropped)}");
     }
 
+    // The breadcrumb in the results pane reads "<Page> > <Section>", and the
+    // tree walk stops at the first match, so a Section naming a group the card
+    // does not live in sends the user looking under the wrong heading.
+    [Fact]
+    public void EveryIndexedSectionNamesTheGroupItsControlLivesIn()
+    {
+        var controls = TaggedControls()
+            .GroupBy(c => c.Key, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        var mismatched = SettingsIndex.All
+            .Where(e => controls.TryGetValue(e.Key, out var c) && c.Group != e.Section)
+            .Select(e => $"  {e.Key}: indexed under \"{e.Section}\", but its control " +
+                         $"sits in \"{controls[e.Key].Group ?? "no SettingsGroup"}\"")
+            .ToList();
+
+        if (mismatched.Count > 0)
+        {
+            Assert.Fail(
+                "SettingsIndex sections that name a group their control does not " +
+                "live in. Correct the entry's Section, or move the control:\n" +
+                string.Join("\n", mismatched));
+        }
+    }
+
+    // FindByConfigKey returns the first match in visual-tree order, so a key
+    // used twice silently picks one control and strands the other.
+    [Fact]
+    public void NoConfigKeyIsUsedTwice()
+    {
+        var duplicates = TaggedControls()
+            .GroupBy(c => c.Key, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1)
+            .Select(g => $"  {g.Key}: {string.Join(", ", g.Select(c => c.Page))}")
+            .OrderBy(line => line, StringComparer.Ordinal)
+            .ToList();
+
+        if (duplicates.Count > 0)
+        {
+            Assert.Fail(
+                "The same ConfigKey tags more than one control. Search reaches only " +
+                "the first one found:\n" + string.Join("\n", duplicates));
+        }
+    }
+
     // Guards the csproj wildcard. Losing it, or moving the pages, would make
     // the checks above scan an empty corpus. EveryIndexedKeyHasAControlOnItsOwnPage
     // already fails loudly in that case; this names the cause.
@@ -216,14 +266,27 @@ public class SettingsCardConfigKeyParityTests
     private static string PageFileFor(string page) => $"{page}Page.xaml";
 
     private static Dictionary<string, HashSet<string>> ConfigKeysByPage()
-        => PageDocuments().ToDictionary(
-            p => p.Page,
-            p => p.Document.Descendants()
-                .SelectMany(e => e.Attributes())
-                .Where(a => a.Name == ControlsNamespace + AttachedName)
-                .Select(a => a.Value)
-                .ToHashSet(StringComparer.Ordinal),
-            StringComparer.Ordinal);
+        => TaggedControls()
+            .GroupBy(c => c.Page, StringComparer.Ordinal)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(c => c.Key).ToHashSet(StringComparer.Ordinal),
+                StringComparer.Ordinal);
+
+    private static List<(string Page, string Key, string? Group)> TaggedControls()
+        => PageDocuments()
+            .SelectMany(p => p.Document.Descendants()
+                .SelectMany(e => e.Attributes()
+                    .Where(a => a.Name == ControlsNamespace + AttachedName)
+                    .Select(a => (p.Page, Key: a.Value, Group: EnclosingGroupHeader(e)))))
+            .ToList();
+
+    // Cards are grouped visually by SettingsGroup, and its Header is what an
+    // entry's Section has to name for the search breadcrumb to be followable.
+    private static string? EnclosingGroupHeader(XElement element)
+        => element.AncestorsAndSelf()
+            .FirstOrDefault(a => a.Name == ControlsNamespace + "SettingsGroup")
+            ?.Attribute("Header")?.Value;
 
     private static List<(string Page, XDocument Document)> PageDocuments()
     {
@@ -237,7 +300,17 @@ public class SettingsCardConfigKeyParityTests
             using var stream = assembly.GetManifestResourceStream(resource);
             Assert.NotNull(stream);
 
-            pages.Add((resource[PagePrefix.Length..], XDocument.Load(stream)));
+            var page = resource[PagePrefix.Length..];
+            try
+            {
+                pages.Add((page, XDocument.Load(stream)));
+            }
+            catch (XmlException ex)
+            {
+                // XDocument.Load has no base URI here, so its message names a
+                // line but not a file, and every test in this class reports it.
+                Assert.Fail($"{page} is not well-formed XML: {ex.Message}");
+            }
         }
 
         return pages;
