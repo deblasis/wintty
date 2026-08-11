@@ -45,7 +45,7 @@ public static class SettingsIndex
 
         // ----- Appearance / Window Mode -----
         new("window-theme", "Window mode",
-            "Light, dark, or follow the system theme. Ghostty derives from terminal background.",
+            "Light, dark, or follow the system theme. Auto derives from terminal background.",
             "Appearance", "Window Mode",
             new[] { "theme", "dark", "light", "system", "chrome", "titlebar" },
             SettingType.Combo),

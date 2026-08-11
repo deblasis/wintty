@@ -30,8 +30,11 @@ internal static class AppIdentity
     /// <item>kernel object and window class names, which single-instance
     /// and the global hotkey key off.</item>
     /// </list>
-    /// A rebrand therefore touches this constant and the XAML literals
-    /// that cannot reach an internal type, not every "Wintty" in the tree.
+    /// A rebrand therefore touches this constant, the brand names written
+    /// into prose, and the Win32 version resource in <c>ghostty.rc</c>
+    /// that Explorer reads, not every "Wintty" in the tree. XAML surfaces
+    /// read it from code-behind, since this type is internal and x:Bind
+    /// would need it public.
     /// </summary>
     public const string ProductName = "Wintty";
 

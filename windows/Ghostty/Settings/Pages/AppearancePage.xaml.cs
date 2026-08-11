@@ -34,6 +34,12 @@ internal sealed partial class AppearancePage : Page
         _editor = editor;
         _writer = new SettingsConfigWriter(configService, StaticLoggers.SettingsConfigWriter);
         InitializeComponent();
+
+        // Set here rather than in XAML because AppIdentity is internal,
+        // and x:Bind's AOT-generated code would require the type to be
+        // public. Same constraint CommandPaletteControl documents.
+        WindowThemeProductLabel.Text = Ghostty.Core.AppIdentity.ProductName;
+
         _fontList = new SearchableList(FontFamilySearch, chosen => OnValueChanged("font-family", chosen));
         OpacitySlider.Value = configService.BackgroundOpacity;
         SelectWindowTheme(configService.WindowTheme);
