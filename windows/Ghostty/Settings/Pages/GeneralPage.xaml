@@ -22,7 +22,8 @@
 
                 <ctrl:SettingsCard
                     Header="Vertical tabs"
-                    Description="Arrange tabs in a sidebar instead of a horizontal bar.">
+                    Description="Arrange tabs in a sidebar instead of a horizontal bar."
+                    ctrl:SettingsCard.ConfigKey="vertical-tabs">
                     <ToggleSwitch
                         x:Name="VerticalTabsToggle"
                         OffContent="Horizontal tab bar"

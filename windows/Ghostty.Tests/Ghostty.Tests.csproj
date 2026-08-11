@@ -104,6 +104,18 @@
     <EmbeddedResource Include="..\..\src\cli\ghostty.zig"
                       Link="Cli\Actions\ghostty.zig"
                       LogicalName="Ghostty.Tests.Cli.Actions.ghostty.zig" />
+    <!--
+      Every settings page, for SettingsCardConfigKeyParityTests. A wildcard
+      rather than a file list: a page added later is picked up without anyone
+      remembering this entry, which is the failure mode the other blocks above
+      have. LogicalName is still spelled out per item, because deriving it from
+      Link makes the name depend on the host treating "\" as a separator. It
+      flattens away any subfolder, so two pages sharing a file name collide as
+      a CS1508 duplicate-resource error rather than as a silently dropped page.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Settings\Pages\**\*.xaml"
+                      Link="Settings\Pages\%(Filename)%(Extension)"
+                      LogicalName="Ghostty.Tests.Settings.Pages.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

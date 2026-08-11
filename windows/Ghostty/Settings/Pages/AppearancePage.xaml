@@ -161,7 +161,7 @@
                 <StackPanel x:Name="GradientSettingsPanel" Spacing="8" Visibility="Collapsed">
 
                     <ctrl:SettingsCard Header="Blend mode"
-                                       ctrl:SettingsCard.ConfigKey="background-gradient-blend-mode">
+                                       ctrl:SettingsCard.ConfigKey="background-gradient-blend">
                         <ComboBox x:Name="GradientBlendCombo"
                                   SelectionChanged="GradientBlend_SelectionChanged">
                             <ComboBoxItem Content="Overlay (on top of content)" Tag="overlay" />
