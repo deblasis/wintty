@@ -247,25 +247,9 @@ public partial class App : Application
         }
     }
 
-    static App()
-    {
-        // libghostty.dll lives in a `native/` subdirectory next to this
-        // assembly so its filename (ghostty.dll) does not collide with our
-        // own managed Ghostty.dll on case-insensitive filesystems. The
-        // LibraryImport entries use "ghostty" so we resolve that name here.
-        NativeLibrary.SetDllImportResolver(
-            typeof(Interop.NativeMethods).Assembly,
-            (name, assembly, path) =>
-            {
-                if (!string.Equals(name, "ghostty", StringComparison.OrdinalIgnoreCase))
-                    return IntPtr.Zero;
-                // AppContext.BaseDirectory works in all deployment modes
-                // (framework-dependent, single-file, Native AOT).
-                // assembly.Location returns empty under single-file and AOT.
-                var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
-                return NativeLibrary.Load(candidate);
-            });
-    }
+    // Deliberately no static constructor registering a DllImport resolver:
+    // registering an assembly twice throws. See Program.RegisterNativeResolver,
+    // which owns the single registration for every entry path.
 
     public App()
     {

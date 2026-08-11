@@ -178,6 +178,15 @@ public static partial class Program
 
     static int MainImpl(string[] args)
     {
+        // Resolve `ghostty` to native/ghostty.dll for every entry path,
+        // before anything can P/Invoke into it. This is deliberately the
+        // only registration in the process: SetDllImportResolver throws
+        // InvalidOperationException on the second call for an assembly, and
+        // App's static constructor used to register this same assembly
+        // again, so a `+action` run that found no action and fell through to
+        // the GUI died in that static constructor rather than starting.
+        RegisterNativeResolver();
+
         // +version is intercepted here, before the libghostty CLI
         // dispatcher. The renderer lives in C# so it can also drive the
         // Version palette dialog with the same output.
@@ -191,7 +200,6 @@ public static partial class Program
             (args[0] == "+version" || args[0] == "--version" ||
              args[0] == "-v" || args[0] == "version"))
         {
-            RegisterNativeResolver();
             Environment.Exit(Cli.CliActions.PrintVersion());
         }
 
@@ -255,7 +263,6 @@ public static partial class Program
                 Environment.Exit(0);
             }
 
-            RegisterNativeResolver();
             InitGhostty();
             RegisterThemeCallback();
             var exitCode = NativeMethods.CliRunAction();
@@ -506,10 +513,16 @@ public static partial class Program
 
     /// <summary>
     /// Register the native DLL resolver so LibraryImport("ghostty") finds
-    /// native/ghostty.dll. Mirrors the resolver in App.xaml.cs but runs
-    /// before WinUI is initialized, enabling CLI-path P/Invoke calls.
-    /// Registered for both the host assembly (Interop.NativeMethods) and
-    /// Ghostty.Core, since LibGhosttyBuildInfoBridge lives in the latter.
+    /// native/ghostty.dll. The sole registration in the process, called
+    /// first thing in <see cref="MainImpl"/> so every path (CLI and GUI)
+    /// can P/Invoke. Registered for both the host assembly
+    /// (Interop.NativeMethods) and Ghostty.Core, since
+    /// LibGhosttyBuildInfoBridge lives in the latter.
+    ///
+    /// libghostty.dll lives in a `native/` subdirectory next to this
+    /// assembly so its filename (ghostty.dll) does not collide with our own
+    /// managed Ghostty.dll on case-insensitive filesystems, which is why the
+    /// name has to be resolved by hand at all.
     /// </summary>
     private static void RegisterNativeResolver()
     {
@@ -517,12 +530,23 @@ public static partial class Program
         {
             if (!string.Equals(name, "ghostty", StringComparison.OrdinalIgnoreCase))
                 return IntPtr.Zero;
+            // AppContext.BaseDirectory works in all deployment modes
+            // (framework-dependent, single-file, Native AOT).
+            // assembly.Location returns empty under single-file and AOT.
             var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
             return NativeLibrary.Load(candidate);
         }
 
-        NativeLibrary.SetDllImportResolver(typeof(Interop.NativeMethods).Assembly, Resolve);
-        NativeLibrary.SetDllImportResolver(typeof(Ghostty.Core.Version.LibGhosttyBuildInfoBridge).Assembly, Resolve);
+        // Guarded rather than two bare calls: SetDllImportResolver throws on
+        // the second registration for an assembly, so folding Ghostty.Core
+        // into the host assembly would otherwise resurrect the exact crash
+        // this single-registration setup exists to remove, on line one of
+        // MainImpl where nothing can report it yet.
+        var host = typeof(Interop.NativeMethods).Assembly;
+        var core = typeof(Ghostty.Core.Version.LibGhosttyBuildInfoBridge).Assembly;
+        NativeLibrary.SetDllImportResolver(host, Resolve);
+        if (!ReferenceEquals(core, host))
+            NativeLibrary.SetDllImportResolver(core, Resolve);
     }
 
     private static int StartGui()
