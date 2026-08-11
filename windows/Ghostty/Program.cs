@@ -1,10 +1,12 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
 using Ghostty.Interop;
+using Microsoft.Win32.SafeHandles;
 
 namespace Ghostty;
 
@@ -36,6 +38,15 @@ public static partial class Program
         /// managed code sees it. WER captures the minidump under
         /// <c>%LOCALAPPDATA%\CrashDumps\</c>.</summary>
         NativeCrash = 1,
+
+        /// <summary>Unusable command line: a bare word that is not a known
+        /// subcommand. Deliberately shares its value with
+        /// <see cref="NativeCrash"/>, because 1 is the conventional usage
+        /// exit and changing it would break callers. The two are still
+        /// distinguishable in practice - this one always prints
+        /// "unknown command '...'" to stderr first, a native teardown prints
+        /// nothing and leaves a minidump.</summary>
+        UsageError = 1,
 
         /// <summary><c>ghostty_init</c> failed; no config means no app.
         /// libghostty explains argument errors itself; the status and this
@@ -103,6 +114,14 @@ public static partial class Program
     private static bool _stderrRedirected;
 
     /// <summary>
+    /// The <see cref="Console.Error"/> writer from before
+    /// <see cref="RedirectStderrToFile"/> replaced it, or null if the
+    /// redirect never ran. Fatal startup failures are teed here so a launch
+    /// from a terminal shows the reason instead of just an exit code.
+    /// </summary>
+    private static TextWriter? _preRedirectStderr;
+
+    /// <summary>
     /// Redirect stderr to a file so all diagnostic output (Zig std.log,
     /// C# Console.Error, DX12 debug layer via OutputDebugString) is
     /// persisted to disk.  Called before any native GPU code runs.
@@ -122,8 +141,10 @@ public static partial class Program
         {
             Directory.CreateDirectory(Path.GetDirectoryName(GpuLogPath)!);
 
-            // Open log file with unbuffered writes so data hits disk even if
-            // the process is killed by a GPU driver crash.
+            // AutoFlush on the writer below pushes every line to the OS, so a
+            // GPU driver crash loses at most a partial line. This is not
+            // write-through (no FILE_FLAG_WRITE_THROUGH), so the OS cache can
+            // still lose data if the machine itself goes down.
             var hFile = CreateFileW(
                 GpuLogPath,
                 GENERIC_WRITE,
@@ -136,11 +157,25 @@ public static partial class Program
             if (hFile == IntPtr.Zero || hFile == new IntPtr(-1))
                 return;
 
-            // Duplicate the handle so Console and native code both see it.
+            // Point the process stderr handle at the file so native writes
+            // (Zig std.log, the DX12 debug layer) land there too. Console and
+            // native code share this one handle; nothing is duplicated.
             SetStdHandle(STD_ERROR_HANDLE, hFile);
 
+            // Keep the writer we are about to replace so a fatal startup
+            // failure can still reach a terminal. See InitGhostty.
+            _preRedirectStderr = Console.Error;
+
             // Also redirect managed Console.Error so C# writes go to the file.
-            var fs = new FileStream(hFile, FileAccess.Write);
+            //
+            // ownsHandle: false, because SetStdHandle above gave the OS the
+            // same raw HANDLE. The two-argument FileStream(IntPtr, ...) ctor
+            // takes ownership, so disposing or finalizing the stream would
+            // CloseHandle it and leave native stderr writing to a closed
+            // handle. Today the writer stays rooted for process life, which
+            // made that latent rather than live.
+            var handle = new SafeFileHandle(hFile, ownsHandle: false);
+            var fs = new FileStream(handle, FileAccess.Write);
             var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
             Console.SetError(writer);
 
@@ -292,7 +327,7 @@ public static partial class Program
                 $"unknown command '{args[0]}'. " +
                 $"Run '{ProgramName()} --help' for a list of commands.");
             Console.Error.Flush();
-            Environment.Exit(1);
+            Environment.Exit((int)ExitCode.UsageError);
         }
 
         // Persist GPU diagnostics to disk before any native code runs. After
@@ -303,6 +338,24 @@ public static partial class Program
         // Also covers the case where the block above found no action to run
         // and fell through to the GUI; the call is idempotent.
         RedirectStderrToFile();
+
+        // Initialize libghostty here, on MainImpl's own frame, rather than
+        // from ConfigService's constructor. Two reasons:
+        //
+        // A failed init exits the process. From ConfigService that ran inside
+        // Application.Start's initialization callback - an STA COM call - and
+        // it bypassed StartGui's catch, which is the only thing on this path
+        // that writes ghostty-crash.log. Exiting from a top-level frame avoids
+        // both.
+        //
+        // It also puts the one process-lifetime decision at the composition
+        // root instead of partway down the object graph, so a service in
+        // Services/ no longer has to reach back into the entry point to be
+        // constructible.
+        //
+        // Still after the redirect above: the log is the only sink a Start
+        // Menu launch has. InitGhostty tees its fatal line to the terminal.
+        InitGhostty();
 
         // Detach from the console before starting WinUI, but ONLY
         // when we are the console's sole owner. Explorer / Start
@@ -356,14 +409,28 @@ public static partial class Program
     private static bool _ghosttyInitialized;
 
     /// <summary>
+    /// Managed thread that ran <see cref="InitGhostty"/>, for the tripwire in
+    /// that method. Zero until it is first entered.
+    /// </summary>
+    private static int _initThreadId;
+
+    /// <summary>
+    /// Whether <see cref="InitGhostty"/> has completed. Callers that depend on
+    /// libghostty global state assert on this rather than initializing it
+    /// themselves; <see cref="MainImpl"/> owns that decision.
+    /// </summary>
+    internal static bool IsGhosttyInitialized => _ghosttyInitialized;
+
+    /// <summary>
     /// Initialize libghostty from this process's command line, exiting the
     /// process if it fails. A second call is a no-op.
     ///
-    /// This is the single init entry point for both startup paths (the CLI
-    /// branch above and <see cref="Services.ConfigService"/> for the GUI).
-    /// It must run before any export that touches global state (config, app,
-    /// surface). Exports that only read static build data, such as
-    /// ghostty_build_info behind +version, do not need it.
+    /// This is the single init entry point, and both startup paths call it
+    /// from <see cref="MainImpl"/> - the CLI branch before dispatching an
+    /// action, the GUI branch before <see cref="StartGui"/>. It must run
+    /// before any export that touches global state (config, app, surface).
+    /// Exports that only read static build data, such as ghostty_build_info
+    /// behind +version, do not need it.
     ///
     /// The marshalled buffer is intentionally not freed: libghostty keeps a
     /// reference to it and ghostty_cli_run_action reads the args later. The
@@ -371,7 +438,23 @@ public static partial class Program
     /// </summary>
     internal static void InitGhostty()
     {
-        if (_ghosttyInitialized) return;
+        if (_ghosttyInitialized)
+        {
+            // The plain field above is only safe because this is
+            // single-threaded by contract. Say so loudly if that ever stops
+            // being true: an off-thread second caller would race past the gate
+            // into ghostty_init_wide, get AlreadyInitialized back, and exit a
+            // perfectly healthy process with InitFailed. Interlocked would not
+            // fix that - a racing caller has to wait for init to finish, not
+            // just observe that it started - so enforce the invariant instead
+            // of pretending to make it safe.
+            Debug.Assert(
+                _initThreadId == Environment.CurrentManagedThreadId,
+                "InitGhostty is single-threaded by contract; see remarks.");
+            return;
+        }
+
+        _initThreadId = Environment.CurrentManagedThreadId;
 
         // Pass the real WTF-16 command line rather than rebuilding a UTF-8
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
@@ -393,14 +476,27 @@ public static partial class Program
             // artifact, so their std.log.err reaches only an embedder that
             // registered a log callback).
             //
-            // Where it surfaces depends on the path: a CLI action keeps the
-            // terminal's stderr, while the GUI has already pointed stderr at
-            // the log file by the time ConfigService calls in.
-            Console.Error.WriteLine(
+            // A CLI action still owns the terminal's stderr, so one write
+            // reaches the user. The GUI path has already pointed stderr at the
+            // log file, and libghostty's own explanation goes to that same
+            // redirected handle, so a terminal launch would otherwise show
+            // nothing but an exit code. Tee to the pre-redirect writer and name
+            // the log, which is where the rest of the detail is.
+            var message =
                 $"{AppIdentity.LogTag} FATAL: " +
                 $"ghostty_init failed (status {result}), exiting with " +
-                $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})");
+                $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})";
+
+            Console.Error.WriteLine(message);
             Console.Error.Flush();
+
+            if (_preRedirectStderr is { } terminal)
+            {
+                terminal.WriteLine(message);
+                terminal.WriteLine($"{AppIdentity.LogTag} See {GpuLogPath} for details.");
+                terminal.Flush();
+            }
+
             Environment.Exit((int)ExitCode.InitFailed);
         }
 
@@ -525,6 +621,11 @@ public static partial class Program
     /// assembly so its filename (ghostty.dll) does not collide with our own
     /// managed Ghostty.dll on case-insensitive filesystems, which is why the
     /// name has to be resolved by hand at all.
+    ///
+    /// JIT and framework-dependent builds only. A PublishAot build sets
+    /// DirectPInvoke for "ghostty" and links ghostty-static.lib, which binds
+    /// every LibraryImport at link time, so the runtime never consults a
+    /// resolver there and this method has no effect.
     /// </summary>
     private static void RegisterNativeResolver()
     {
@@ -536,7 +637,19 @@ public static partial class Program
             // (framework-dependent, single-file, Native AOT).
             // assembly.Location returns empty under single-file and AOT.
             var candidate = Path.Combine(AppContext.BaseDirectory, "native", "ghostty.dll");
-            return NativeLibrary.Load(candidate);
+
+            // TryLoad, not Load: throwing from inside a resolver surfaces at
+            // whichever P/Invoke happened to be first, which on the CLI paths
+            // is an uncaught DllNotFoundException and a raw CLR stack trace.
+            // Returning zero lets the runtime raise its own error, and the
+            // line below says where we actually looked.
+            if (NativeLibrary.TryLoad(candidate, out var handle))
+                return handle;
+
+            Console.Error.WriteLine(
+                $"{AppIdentity.LogTag} FATAL: could not load {candidate}");
+            Console.Error.Flush();
+            return IntPtr.Zero;
         }
 
         // Guarded rather than two bare calls: SetDllImportResolver throws on
