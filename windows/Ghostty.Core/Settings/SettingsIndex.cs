@@ -21,9 +21,15 @@ public static class SettingsIndex
             "General", "App Behavior",
             new[] { "reload", "watch", "config" },
             SettingType.Toggle),
+        new("undo-timeout", "Undo timeout",
+            "How long a pane split, close, resize, or zoom can be undone, in " +
+            "milliseconds. Set to 0 to disable undo.",
+            "General", "App Behavior",
+            new[] { "undo", "redo", "timeout", "pane", "history" },
+            SettingType.Number),
         new("vertical-tabs", "Vertical tab bar",
             "Render tabs in a vertical sidebar instead of the default horizontal strip.",
-            "General", "Tabs",
+            "General", "App Behavior",
             new[] { "tabs", "vertical", "sidebar", "layout", "orientation" },
             SettingType.Toggle),
         new("command-palette-background", "Command palette backdrop",
@@ -161,6 +167,12 @@ public static class SettingsIndex
             "Background color of selected text.",
             "Colors", "Terminal Colors",
             new[] { "color", "selection", "highlight" },
+            SettingType.Color),
+        new("accent-color", "Accent color",
+            "Color of the active tab background, focus border, and tab strip rail. " +
+            "When unset, the chrome follows cursor-color.",
+            "Colors", "Terminal Colors",
+            new[] { "color", "accent", "tab", "focus", "chrome" },
             SettingType.Color),
 
         // ----- Terminal -----
