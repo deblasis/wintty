@@ -470,8 +470,9 @@ pub fn action() ?cli.ghostty.Action {
 /// nothing to show for a typo but an exit code. Writing to the file directly
 /// skips the log sink so the message survives that default.
 ///
-/// The exe has its own copy of this in `main_ghostty.zig`, where it runs
-/// before there is any global state to consult. Keep the wording in sync.
+/// The exe routes through here too. It touches no global state, by
+/// design: `init` can fail before `io_impl` exists, so the caller may
+/// have nothing initialized to consult.
 ///
 /// Only the argument-parsing errors get text here. Anything else stays with
 /// the caller's `std.log.err`, which reaches an embedder that registered a
@@ -495,15 +496,20 @@ pub fn reportInitError(err: anyerror) void {
 /// The text `reportInitError` writes for `err`, or null for errors with no
 /// user-facing explanation, which stay with the caller's `std.log.err`.
 ///
-/// Split from the write so the mapping can be tested without capturing stderr.
-fn initErrorMessage(err: anyerror) ?[]const u8 {
+/// Split from the write so the mapping can be tested without capturing
+/// stderr, and so `main_ghostty` can ask whether an error explains itself
+/// before falling back to the log.
+pub fn initErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
             "action starting with the `+` character.\n",
 
-        error.InvalidAction => "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-            "the '+' character.\n\n" ++
-            "All valid CLI actions can be listed with `ghostty +help`\n",
+        // Deliberately silent about the `+` convention. The only path to
+        // this error is a `+` argument whose name is not in the action
+        // enum, so explaining the prefix sends the reader hunting for a
+        // mistake they did not make.
+        error.InvalidAction => "Error: unknown CLI action specified.\n\n" ++
+            "All valid CLI actions can be listed with the `+help` action.\n",
 
         else => null,
     };
@@ -512,12 +518,11 @@ fn initErrorMessage(err: anyerror) ?[]const u8 {
 test "initErrorMessage explains the CLI argument errors" {
     const testing = std.testing;
 
-    // The exe prints its own copy of these from main_ghostty.zig. If either
-    // side is reworded, both should say the same thing.
+    // The exe and the C API both print these, so a reword lands in every
+    // surface at once. Pinning the text keeps that deliberate.
     try testing.expectEqualStrings(
-        "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-            "the '+' character.\n\n" ++
-            "All valid CLI actions can be listed with `ghostty +help`\n",
+        "Error: unknown CLI action specified.\n\n" ++
+            "All valid CLI actions can be listed with the `+help` action.\n",
         initErrorMessage(cli.action.DetectError.InvalidAction).?,
     );
     try testing.expectEqualStrings(
