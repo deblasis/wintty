@@ -32,31 +32,17 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     global.init(.{ .main = minimal }) catch |err| {
         defer std.process.exit(1);
 
-        // The argument-error text comes from `global` rather than a second
-        // copy here. The two were hand-synced before, with nothing to fail
-        // when they drifted.
+        // All of it comes from `global` now, including the catch-all for
+        // errors with no bespoke text. This used to be a second copy here,
+        // which is why the C API had no catch-all at all: the exe had one and
+        // `ghostty_init` did not.
         //
-        // Neither branch may use `std.log`. `init` leaves the state null
-        // on the way out, so a log call gets the default `Logging`, whose
-        // `stderr` is false whenever `app_runtime` is `none` - and that
-        // artifact calls `main` for its CLI actions. The report would be
-        // dropped in exactly the build that has no other sink. Writing to
-        // the handle is what `reportInitError` does, and for the same
-        // reason.
-        if (global.initErrorMessage(err)) |_| {
-            global.reportInitError(err);
-        } else {
-            var buf: [256]u8 = undefined;
-            const line = std.fmt.bufPrint(
-                &buf,
-                "invalid CLI invocation err={}\n",
-                .{err},
-            ) catch "invalid CLI invocation\n";
-            std.Io.File.stderr().writeStreamingAll(
-                std.Io.Threaded.global_single_threaded.io(),
-                line,
-            ) catch {};
-        }
+        // It may not use `std.log`. `init` leaves the state null on the way
+        // out, so a log call gets the default `Logging`, whose `stderr` is
+        // false whenever `app_runtime` is `none` - and that artifact calls
+        // `main` for its CLI actions. The report would be dropped in exactly
+        // the build that has no other sink.
+        global.reportInitError(err);
     };
     defer global.deinit();
     const alloc = global.alloc();
