@@ -8,7 +8,6 @@
     xmlns:tabs="using:Ghostty.Tabs">
     <!-- Title comes from AppIdentity.ProductName in the constructor. -->
 
-
     <!--
         Declarative layout for the dual tab-host shell.
 

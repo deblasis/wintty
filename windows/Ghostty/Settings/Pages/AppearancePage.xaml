@@ -11,7 +11,7 @@
             <ctrl:SettingsGroup Header="Window Mode"
                                 Description="How the window chrome and title bar look.">
                 <ctrl:SettingsCard Header="Window mode"
-                                   Description="Auto derives from background luminosity. Ghostty colors the title bar from the terminal palette."
+                                   Description="Auto derives from background luminosity. Wintty colors the title bar from the terminal palette."
                                    ctrl:SettingsCard.ConfigKey="window-theme">
                     <ComboBox x:Name="WindowThemeCombo" MinWidth="260"
                               SelectionChanged="WindowTheme_SelectionChanged">
