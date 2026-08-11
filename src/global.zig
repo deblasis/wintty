@@ -448,8 +448,9 @@ pub fn action() ?cli.ghostty.Action {
 /// nothing to show for a typo but an exit code. Writing to the file directly
 /// skips the log sink so the message survives that default.
 ///
-/// The exe has its own copy of this in `main_ghostty.zig`, where it runs
-/// before there is any global state to consult. Keep the wording in sync.
+/// The exe routes through here too. It touches no global state, by
+/// design: `init` can fail before `io_impl` exists, so the caller may
+/// have nothing initialized to consult.
 ///
 /// Only the argument-parsing errors get text here. Anything else stays with
 /// the caller's `std.log.err`, which reaches an embedder that registered a
@@ -495,8 +496,8 @@ pub fn initErrorMessage(err: anyerror) ?[]const u8 {
 test "initErrorMessage explains the CLI argument errors" {
     const testing = std.testing;
 
-    // The exe prints its own copy of these from main_ghostty.zig. If either
-    // side is reworded, both should say the same thing.
+    // The exe and the C API both print these, so a reword lands in every
+    // surface at once. Pinning the text keeps that deliberate.
     try testing.expectEqualStrings(
         "Error: unknown CLI action specified.\n\n" ++
             "All valid CLI actions can be listed with the `+help` action.\n",

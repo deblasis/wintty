@@ -34,12 +34,28 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
 
         // The argument-error text comes from `global` rather than a second
         // copy here. The two were hand-synced before, with nothing to fail
-        // when they drifted. Errors it has no text for fall back to the
-        // log, which is all the old branch for them did.
+        // when they drifted.
+        //
+        // Neither branch may use `std.log`. `init` leaves the state null
+        // on the way out, so a log call gets the default `Logging`, whose
+        // `stderr` is false whenever `app_runtime` is `none` - and that
+        // artifact calls `main` for its CLI actions. The report would be
+        // dropped in exactly the build that has no other sink. Writing to
+        // the handle is what `reportInitError` does, and for the same
+        // reason.
         if (global.initErrorMessage(err)) |_| {
             global.reportInitError(err);
         } else {
-            std.log.err("invalid CLI invocation err={}", .{err});
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(
+                &buf,
+                "invalid CLI invocation err={}\n",
+                .{err},
+            ) catch "invalid CLI invocation\n";
+            std.Io.File.stderr().writeStreamingAll(
+                std.Io.Threaded.global_single_threaded.io(),
+                line,
+            ) catch {};
         }
     };
     defer global.deinit();
