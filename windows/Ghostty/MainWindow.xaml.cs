@@ -457,6 +457,12 @@ public sealed partial class MainWindow : Window
         // the default title bar row.
         ExtendsContentIntoTitleBar = true;
 
+        // Set here rather than in XAML: AppIdentity is internal, and
+        // {x:Static} against an internal type is not reliable under the
+        // XAML compiler with AOT. This is the caption the shell shows in
+        // Alt+Tab and the taskbar before any tab reports a title.
+        Title = Ghostty.Core.AppIdentity.ProductName;
+
         // Apply window-theme from config. The manager resolves the
         // config value ("light"/"dark"/"system"/"auto") to a concrete
         // dark/light choice and sets both ElementTheme on the XAML root

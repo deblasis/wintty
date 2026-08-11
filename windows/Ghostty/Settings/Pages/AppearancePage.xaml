@@ -49,7 +49,9 @@
                         </ComboBoxItem>
                         <ComboBoxItem Tag="ghostty">
                             <StackPanel>
-                                <TextBlock Text="Wintty" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <!-- Text set in code-behind from AppIdentity.ProductName. -->
+                                <TextBlock x:Name="WindowThemeProductLabel"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
                                 <TextBlock Text="Color title bar from the terminal palette."
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
