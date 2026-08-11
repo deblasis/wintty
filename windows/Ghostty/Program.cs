@@ -6,7 +6,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
 using Ghostty.Interop;
-using Microsoft.Win32.SafeHandles;
 
 namespace Ghostty;
 
@@ -157,26 +156,52 @@ public static partial class Program
             if (hFile == IntPtr.Zero || hFile == new IntPtr(-1))
                 return;
 
+            // Capture the terminal's stderr BEFORE swapping the handle.
+            // Console.Error binds lazily: the first read calls GetStdHandle,
+            // so reading it after SetStdHandle below would hand us a second
+            // writer over the log file and the tee in InitGhostty would write
+            // there twice while the terminal saw nothing.
+            //
+            // A launch with no console (Start Menu, Explorer) has a null
+            // stderr handle, and Console.Error is then a sink that discards.
+            // Record whether there is anything real to tee to.
+            var hStderr = GetStdHandle(STD_ERROR_HANDLE);
+            var terminalStderr = Console.Error;
+
             // Point the process stderr handle at the file so native writes
             // (Zig std.log, the DX12 debug layer) land there too. Console and
             // native code share this one handle; nothing is duplicated.
-            SetStdHandle(STD_ERROR_HANDLE, hFile);
+            if (!SetStdHandle(STD_ERROR_HANDLE, hFile))
+            {
+                // Managed stderr would go to the file while native stderr kept
+                // the console: a split that reads as "the log is just missing
+                // every Zig line". Leave both where they are instead.
+                return;
+            }
 
-            // Keep the writer we are about to replace so a fatal startup
-            // failure can still reach a terminal. See InitGhostty.
-            _preRedirectStderr = Console.Error;
+            if (hStderr != IntPtr.Zero && hStderr != new IntPtr(-1))
+                _preRedirectStderr = terminalStderr;
 
             // Also redirect managed Console.Error so C# writes go to the file.
             //
-            // ownsHandle: false, because SetStdHandle above gave the OS the
-            // same raw HANDLE. The two-argument FileStream(IntPtr, ...) ctor
-            // takes ownership, so disposing or finalizing the stream would
-            // CloseHandle it and leave native stderr writing to a closed
-            // handle. Today the writer stays rooted for process life, which
-            // made that latent rather than live.
-            var handle = new SafeFileHandle(hFile, ownsHandle: false);
-            var fs = new FileStream(handle, FileAccess.Write);
-            var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
+            // OpenStandardError, not a FileStream over the raw handle. Zig's
+            // reportInitError deliberately uses a streaming write so it lands
+            // wherever the shared handle's file pointer sits; a FileStream
+            // snapshots the position at construction and writes at its own
+            // offset, so the managed header and libghostty's explanation
+            // overwrite each other in the log. This stream writes through the
+            // handle, sharing that pointer. It also sidesteps the ownership
+            // question: nothing here wraps the raw HANDLE, which is
+            // deliberately leaked to process exit because SetStdHandle only
+            // stores the value.
+            //
+            // No BOM: native writes through the same handle are raw UTF-8, so
+            // a preamble would only appear if the managed side happened to
+            // write first.
+            var writer = new StreamWriter(
+                Console.OpenStandardError(),
+                new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
+            { AutoFlush = true };
             Console.SetError(writer);
 
             Console.Error.WriteLine(
@@ -200,12 +225,67 @@ public static partial class Program
         // ghostty_surface_new) from inside deep XAML callbacks. The default
         // 1MB main-thread stack is not enough for either, so run the whole
         // program on a thread we size ourselves.
+        // Wrapped because MainImpl now makes the process's first P/Invoke on
+        // its own frame: InitGhostty moved here from ConfigService, which used
+        // to run inside Application.Start where StartGui's catch and
+        // App.UnhandledException could still report a failure. A missing
+        // native/ghostty.dll would otherwise unwind this delegate unhandled
+        // and abort with an exit code that is none of the ExitCode values
+        // callers are told to discriminate on.
         var exitCode = 0;
-        var main = new Thread(() => exitCode = MainImpl(args), MainStackSize);
+        var main = new Thread(
+            () =>
+            {
+                try
+                {
+                    exitCode = MainImpl(args);
+                }
+                catch (Exception ex)
+                {
+                    exitCode = ReportFatal(ex);
+                }
+            },
+            MainStackSize);
         main.SetApartmentState(ApartmentState.STA);
         main.Start();
         main.Join();
         return exitCode;
+    }
+
+    /// <summary>
+    /// Last-resort reporter for an exception that escaped <see cref="MainImpl"/>.
+    /// Writes to stderr, tees to the terminal when stderr has been redirected,
+    /// and drops a crash log next to the binary, mirroring what
+    /// <see cref="StartGui"/>'s catch does for the GUI path.
+    /// </summary>
+    private static int ReportFatal(Exception ex)
+    {
+        var message = $"{AppIdentity.LogTag} FATAL: {ex}";
+
+        try
+        {
+            Console.Error.WriteLine(message);
+            Console.Error.Flush();
+            _preRedirectStderr?.WriteLine(message);
+            _preRedirectStderr?.Flush();
+        }
+        catch
+        {
+            // Reporting must not throw over the top of the real failure.
+        }
+
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(AppContext.BaseDirectory, "ghostty-crash.log"),
+                $"{DateTime.UtcNow:O}\n{ex}\n");
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        return (int)ExitCode.ManagedUnhandled;
     }
 
     /// <summary>
@@ -438,23 +518,25 @@ public static partial class Program
     /// </summary>
     internal static void InitGhostty()
     {
-        if (_ghosttyInitialized)
-        {
-            // The plain field above is only safe because this is
-            // single-threaded by contract. Say so loudly if that ever stops
-            // being true: an off-thread second caller would race past the gate
-            // into ghostty_init_wide, get AlreadyInitialized back, and exit a
-            // perfectly healthy process with InitFailed. Interlocked would not
-            // fix that - a racing caller has to wait for init to finish, not
-            // just observe that it started - so enforce the invariant instead
-            // of pretending to make it safe.
-            Debug.Assert(
-                _initThreadId == Environment.CurrentManagedThreadId,
-                "InitGhostty is single-threaded by contract; see remarks.");
-            return;
-        }
+        // Claim ownership before the gate below, not after. A second thread
+        // arriving while the first is still inside ghostty_init_wide sees
+        // _ghosttyInitialized == false, so a check on that branch could never
+        // observe the race it is meant to catch.
+        //
+        // The Interlocked is not an attempt to make init thread-safe: a racing
+        // caller would have to wait for init to finish, not merely learn that
+        // it started, and that is more machinery than a composition-root call
+        // deserves. It only makes the violation visible from the racing
+        // thread. Without it, that thread would call ghostty_init_wide again,
+        // get AlreadyInitialized back - indistinguishable from a real failure
+        // across the C ABI - and exit a healthy process with InitFailed.
+        var current = Environment.CurrentManagedThreadId;
+        var owner = Interlocked.CompareExchange(ref _initThreadId, current, 0);
+        Debug.Assert(
+            owner == 0 || owner == current,
+            "InitGhostty is single-threaded by contract; see remarks.");
 
-        _initThreadId = Environment.CurrentManagedThreadId;
+        if (_ghosttyInitialized) return;
 
         // Pass the real WTF-16 command line rather than rebuilding a UTF-8
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
