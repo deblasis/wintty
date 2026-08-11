@@ -9,8 +9,8 @@
       control slot on the right. Height and spacing are hard-coded here
       so every row on every page aligns the same way, eliminating the
       drift we had before where each page used ad-hoc StackPanel Spacing
-      values. The ConfigKey attached property is reserved for Phase 3
-      (search) to scroll to + pulse a specific card.
+      values. The ConfigKey attached property lets settings search scroll
+      to + pulse a specific card.
     -->
     <Border
         Padding="16,10"
