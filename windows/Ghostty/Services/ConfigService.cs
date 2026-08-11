@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -309,11 +310,16 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // a dead I/O implementation and freed resource paths, surfacing as a
         // native crash with no managed stack.
         //
-        // Program.InitGhostty is the one init entry point for both startup
-        // paths: it checks the status, reports it, exits on failure, and is a
-        // no-op once init has run. A GUI launch reaches init only from here,
-        // since it never goes through Program's CLI branch.
-        Program.InitGhostty();
+        // Program.MainImpl owns that call and makes it before starting WinUI,
+        // so by the time this constructor runs the decision is already made
+        // and this only has to state the precondition. Initializing from here
+        // would put a process-lifetime decision partway down the object graph,
+        // and its exit-on-failure would run inside Application.Start's
+        // initialization callback where StartGui's catch cannot see it.
+        Debug.Assert(
+            Program.IsGhosttyInitialized,
+            "ghostty_init must run at the composition root before any " +
+            "libghostty export that touches global state.");
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
