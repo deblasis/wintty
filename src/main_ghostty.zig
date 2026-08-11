@@ -30,31 +30,33 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // a global is because the C API needs to be able to access this state;
     // no other Zig code should EVER access the global state.
     global.init(.{ .main = minimal }) catch |err| {
-        var buffer: [1024]u8 = undefined;
-        var stderr_writer = std.Io.File.stderr().writer(
-            std.Io.Threaded.global_single_threaded.io(),
-            &buffer,
-        );
-        const stderr = &stderr_writer.interface;
         defer std.process.exit(1);
-        const ErrSet = @TypeOf(err) || error{Unknown};
-        switch (@as(ErrSet, @errorCast(err))) {
-            error.MultipleActions => try stderr.print(
-                "Error: multiple CLI actions specified. You must specify only one\n" ++
-                    "action starting with the `+` character.\n",
-                .{},
-            ),
 
-            error.InvalidAction => try stderr.print(
-                "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-                    "the '+' character.\n\n" ++
-                    "All valid CLI actions can be listed with `ghostty +help`\n",
-                .{},
-            ),
-
-            else => try stderr.print("invalid CLI invocation err={}\n", .{err}),
+        // The argument-error text comes from `global` rather than a second
+        // copy here. The two were hand-synced before, with nothing to fail
+        // when they drifted.
+        //
+        // Neither branch may use `std.log`. `init` leaves the state null
+        // on the way out, so a log call gets the default `Logging`, whose
+        // `stderr` is false whenever `app_runtime` is `none` - and that
+        // artifact calls `main` for its CLI actions. The report would be
+        // dropped in exactly the build that has no other sink. Writing to
+        // the handle is what `reportInitError` does, and for the same
+        // reason.
+        if (global.initErrorMessage(err)) |_| {
+            global.reportInitError(err);
+        } else {
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(
+                &buf,
+                "invalid CLI invocation err={}\n",
+                .{err},
+            ) catch "invalid CLI invocation\n";
+            std.Io.File.stderr().writeStreamingAll(
+                std.Io.Threaded.global_single_threaded.io(),
+                line,
+            ) catch {};
         }
-        try stderr.flush();
     };
     defer global.deinit();
     const alloc = global.alloc();
