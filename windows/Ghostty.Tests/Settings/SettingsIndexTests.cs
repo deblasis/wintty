@@ -12,6 +12,7 @@ public class SettingsIndexTests
     {
         // General
         "auto-reload-config",
+        "undo-timeout",
         "vertical-tabs",
         "command-palette-background",
         "command-palette-group-commands",
@@ -39,6 +40,7 @@ public class SettingsIndexTests
         "background",
         "cursor-color",
         "selection-background",
+        "accent-color",
         // Terminal
         "scrollback-limit",
         "cursor-style",
