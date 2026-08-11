@@ -24,7 +24,7 @@ The same provider is visible in PerfView and Windows Performance Analyzer.
 
 ### Rolling file
 
-`%LOCALAPPDATA%\Ghostty\logs\ghostty-YYYYMMDD.log`. One file per UTC day.
+`%LOCALAPPDATA%\Wintty\logs\ghostty-YYYYMMDD.log`. One file per UTC day.
 Each file caps at 16 MB; when full, the writer rolls to
 `ghostty-YYYYMMDD-1.log`, `-2.log`, and so on. Files older than 14 days
 are deleted at startup and again whenever the writer crosses a UTC-day
