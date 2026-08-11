@@ -31,10 +31,16 @@ pub const xev = @import("xev").Dynamic;
 /// Global process state. This is initialized in main() for exe artifacts and
 /// by ghostty_init() for lib artifacts. Most other methods in this file will
 /// retrieve items stored in this state.
+///
+/// A failed `init` clears this, so the accessors below trip on their `state.?`
+/// instead of handing out a torn-down `GlobalState`. That unwrap is checked
+/// only in Debug and ReleaseSafe: ReleaseFast and ReleaseSmall still depend on
+/// the caller honoring `init`'s error, because clearing the optional flips its
+/// tag and leaves the payload bytes behind.
 var state: ?GlobalState = null;
 
-/// Whether `init` has been entered, however it finished. This is deliberately
-/// separate from `state`, which a failed `init` clears. See `init`.
+/// Whether `init` has been entered, however it finished. Separate from
+/// `state`, which a failed `init` clears. See `init`.
 var init_attempted: bool = false;
 
 pub const InitOpts = union(enum) {
@@ -72,23 +78,23 @@ pub const InitOpts = union(enum) {
 
 /// Initialize the global state. This may only be called once per process,
 /// including after `deinit` and after a failed `init`. A second call returns
-/// `error.AlreadyInitialized` without touching the state already there.
+/// `error.AlreadyInitialized` without touching whatever state is there.
 pub fn init(opts: InitOpts) !void {
-    // The assignment below is unconditional, so re-initializing would leak
-    // the previous GPA, I/O instance and resources dir, and orphan the
-    // command line the args iterator borrows. Returning before the errdefer
-    // below is armed leaves a live state usable by whoever owns it.
+    // The assignment below is unconditional, so re-initializing would leak the
+    // previous GPA, I/O instance and resources dir, and orphan the command
+    // line the args iterator borrows. It would also re-run process-global
+    // setup that nothing undoes: everywhere, `oni.init` is documented
+    // once-per-process; on POSIX, `crash.init` asserts sentry's init thread
+    // starts exactly once while `crash.deinit` joins it without clearing the
+    // handle, and `ResourceLimits.init` snapshots the limit it later restores.
+    // (Both of those are no-ops on Windows.) Tripping that sentry assert is a
+    // panic in Debug and ReleaseSafe, and illegal behavior in ReleaseFast.
     //
-    // `state` alone cannot answer "has init run", because the errdefer below
-    // clears it so the accessors can catch an embedder that ignored our
-    // error. That would otherwise make a failed init look retryable, and it
-    // is not: `init` performs process-global setup that nothing undoes.
-    // `crash.init` asserts sentry's init thread starts exactly once and
-    // `deinit` joins it without clearing the handle, `oni.init` is documented
-    // once-per-process, and `ResourceLimits.init` snapshots the limit it
-    // later restores. A second pass panics on the first and quietly corrupts
-    // the others, so refuse on the latch as well as on `state`.
-    if (state != null or init_attempted) return error.AlreadyInitialized;
+    // Latched rather than derived from `state`, because the errdefer below
+    // clears that on failure and a failed init must not look retryable.
+    // Returning before the errdefer is armed leaves any live state untouched.
+    assert(state == null or init_attempted);
+    if (init_attempted) return error.AlreadyInitialized;
     init_attempted = true;
 
     // Initialize ourself to nothing so we don't have any extra state.
@@ -97,10 +103,7 @@ pub fn init(opts: InitOpts) !void {
     state = .{
         // Not `undefined`: the errdefer below arms before the real
         // implementation is assigned, and `deinit` unconditionally calls
-        // `io_impl.deinit()`, which locks its mutex. Nothing between the two
-        // can fail today, so this is unreachable rather than live, but it is
-        // one `try` away from locking garbage on the failure path. This value
-        // owns nothing, so overwriting it below leaks nothing.
+        // `io_impl.deinit()`, which locks its mutex.
         .io_impl = .init_single_threaded,
         .gpa = null,
         .alloc = undefined,
@@ -135,12 +138,8 @@ pub fn init(opts: InitOpts) !void {
     // below unwrap `state`, and that unwrap can only catch an embedder that
     // ignored our error if a failed init leaves it absent rather than holding
     // a `GlobalState` full of dead pointers, which is how `ghostty_config_new`
-    // ended up allocating from a deinitialized GPA.
-    //
-    // `state.?` is a checked unwrap only in Debug and ReleaseSafe. ReleaseFast
-    // and ReleaseSmall still depend on the caller honoring our return code;
-    // clearing the optional flips its tag but leaves the payload bytes, so
-    // there is nothing there to trap on.
+    // ended up allocating from a deinitialized GPA. See `state` for what that
+    // does and does not buy in release builds.
     //
     // One block rather than two `errdefer` statements: those unwind in reverse
     // declaration order, so a separate `errdefer state = null;` would run
@@ -531,13 +530,12 @@ test "initErrorMessage leaves other errors to the log" {
     try std.testing.expect(initErrorMessage(error.OutOfMemory) == null);
 }
 
-test "a failed init leaves no state behind" {
+test "a failed init clears the state and is not retryable" {
     // This drives the real `init`, so establish the preconditions rather than
     // inheriting them, and put the globals back afterwards. The `deinit` in
     // the defer matters for the case this test is not expecting: if `init`
-    // ever succeeds here, bailing out without it would strand a live GPA and
-    // a `std.Io.Threaded` with installed signal handlers on the rest of the
-    // suite.
+    // ever succeeds here, bailing out without it would strand the GPA, the
+    // tmp dir, the I/O impl and the resources dir on the rest of the suite.
     const prev_state = state;
     const prev_attempted = init_attempted;
     defer {
@@ -580,7 +578,7 @@ test "a failed init leaves no state behind" {
     } }));
 }
 
-test "logging reads the state when there is one and defaults when there is not" {
+test "logging falls back to defaults with no state" {
     const prev = state;
     defer state = prev;
 
@@ -678,13 +676,13 @@ pub const ResourceLimits = struct {
 };
 
 test "init refuses a second call" {
-    // Both values are undefined because the re-entrancy check returns before
-    // it reads either one, so the test needs no real global state. Restore
-    // whatever was there so the rest of the suite is unaffected.
-    const prev = state;
-    defer state = prev;
-    const dummy: GlobalState = undefined;
-    state = dummy;
+    // Set the latch, which is what the guard actually reads. Faking a non-null
+    // `state` instead would still pass while testing nothing: the guard would
+    // fall through to the real `init` and read `.tool = undefined`. `opts` is
+    // undefined here precisely because the guard returns before touching it.
+    const prev = init_attempted;
+    defer init_attempted = prev;
+    init_attempted = true;
 
     try std.testing.expectError(
         error.AlreadyInitialized,
