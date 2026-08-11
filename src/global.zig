@@ -33,6 +33,10 @@ pub const xev = @import("xev").Dynamic;
 /// retrieve items stored in this state.
 var state: ?GlobalState = null;
 
+/// Whether `init` has been entered, however it finished. This is deliberately
+/// separate from `state`, which a failed `init` clears. See `init`.
+var init_attempted: bool = false;
+
 pub const InitOpts = union(enum) {
     main: std.process.Init.Minimal,
 
@@ -67,20 +71,37 @@ pub const InitOpts = union(enum) {
 };
 
 /// Initialize the global state. This may only be called once per process,
-/// including after `deinit`, which does not reset it. A second call returns
+/// including after `deinit` and after a failed `init`. A second call returns
 /// `error.AlreadyInitialized` without touching the state already there.
 pub fn init(opts: InitOpts) !void {
     // The assignment below is unconditional, so re-initializing would leak
     // the previous GPA, I/O instance and resources dir, and orphan the
     // command line the args iterator borrows. Returning before the errdefer
     // below is armed leaves a live state usable by whoever owns it.
-    if (state != null) return error.AlreadyInitialized;
+    //
+    // `state` alone cannot answer "has init run", because the errdefer below
+    // clears it so the accessors can catch an embedder that ignored our
+    // error. That would otherwise make a failed init look retryable, and it
+    // is not: `init` performs process-global setup that nothing undoes.
+    // `crash.init` asserts sentry's init thread starts exactly once and
+    // `deinit` joins it without clearing the handle, `oni.init` is documented
+    // once-per-process, and `ResourceLimits.init` snapshots the limit it
+    // later restores. A second pass panics on the first and quietly corrupts
+    // the others, so refuse on the latch as well as on `state`.
+    if (state != null or init_attempted) return error.AlreadyInitialized;
+    init_attempted = true;
 
     // Initialize ourself to nothing so we don't have any extra state.
     // IMPORTANT: this MUST be initialized before any log output because
     // the log function uses the global state.
     state = .{
-        .io_impl = undefined,
+        // Not `undefined`: the errdefer below arms before the real
+        // implementation is assigned, and `deinit` unconditionally calls
+        // `io_impl.deinit()`, which locks its mutex. Nothing between the two
+        // can fail today, so this is unreachable rather than live, but it is
+        // one `try` away from locking garbage on the failure path. This value
+        // owns nothing, so overwriting it below leaks nothing.
+        .io_impl = .init_single_threaded,
         .gpa = null,
         .alloc = undefined,
         .environ = switch (opts) {
@@ -111,10 +132,15 @@ pub fn init(opts: InitOpts) !void {
     const self = &state.?;
 
     // Clear the state on the way out, not just tear it down. The accessors
-    // below assert on `state`, and those assertions are meant to catch use
-    // before init - but they cannot fire while a failed init leaves behind a
-    // `GlobalState` full of dead pointers, which is how an embedder that
-    // ignored our error ended up allocating from a deinitialized GPA.
+    // below unwrap `state`, and that unwrap can only catch an embedder that
+    // ignored our error if a failed init leaves it absent rather than holding
+    // a `GlobalState` full of dead pointers, which is how `ghostty_config_new`
+    // ended up allocating from a deinitialized GPA.
+    //
+    // `state.?` is a checked unwrap only in Debug and ReleaseSafe. ReleaseFast
+    // and ReleaseSmall still depend on the caller honoring our return code;
+    // clearing the optional flips its tag but leaves the payload bytes, so
+    // there is nothing there to trap on.
     //
     // One block rather than two `errdefer` statements: those unwind in reverse
     // declaration order, so a separate `errdefer state = null;` would run
@@ -278,10 +304,10 @@ pub fn init(opts: InitOpts) !void {
 /// Cleans up the global state. This doesn't _need_ to be called but
 /// doing so in dev modes will check for memory leaks.
 ///
-/// This deliberately leaves `state` populated, which is what makes `init`
-/// refuse a second call after a `deinit`. A failed `init` is the one case
-/// that does clear it, and it does that in its own `errdefer` rather than
-/// here, so that the once-per-process guard keeps holding for everyone else.
+/// This leaves `state` populated. Only a failed `init` clears it, from its own
+/// `errdefer`, so the accessors below can tell "torn down" from "never there".
+/// Either way `init` refuses a second call; `init_attempted` is what enforces
+/// that, not the presence of a state.
 ///
 /// Asserts that the state exists.
 pub fn deinit() void {
@@ -416,19 +442,15 @@ pub fn rlimits() ResourceLimits {
 /// is no state.
 ///
 /// Unlike the accessors above this one tolerates a missing state rather than
-/// asserting on it. `logFn` reads it on every single log call, including the
-/// `std.log.err` that `ghostty_init` writes to report an `init` failure - and
-/// by then `init`'s `errdefer` has already torn the state back down. Asserting
-/// here would panic inside the code trying to explain the failure.
+/// asserting on it. `logFn` reads it on every log call, including the
+/// `std.log.err` that `ghostty_init` writes to report an `init` failure, which
+/// runs after `init`'s errdefer has cleared the state. Asserting here would
+/// panic inside the code trying to explain the failure.
 ///
-/// The defaults are the same values `init` starts from, so a log emitted
-/// before or after a state exists goes wherever a log emitted at the very
-/// start of `init` would have gone.
-///
-/// Captured by pointer: `logFn` runs this on every log call, and a by-value
-/// capture would copy the whole `GlobalState` (`io_impl` included) just to
-/// read two bits out of it.
+/// The defaults are the same values `init` starts from, so a log emitted with
+/// no state goes wherever one emitted at the very start of `init` would have.
 pub fn logging() GlobalState.Logging {
+    // Pointer capture: a by-value capture copies all of GlobalState.
     return if (state) |*s| s.logging else .{};
 }
 
@@ -510,6 +532,22 @@ test "initErrorMessage leaves other errors to the log" {
 }
 
 test "a failed init leaves no state behind" {
+    // This drives the real `init`, so establish the preconditions rather than
+    // inheriting them, and put the globals back afterwards. The `deinit` in
+    // the defer matters for the case this test is not expecting: if `init`
+    // ever succeeds here, bailing out without it would strand a live GPA and
+    // a `std.Io.Threaded` with installed signal handlers on the rest of the
+    // suite.
+    const prev_state = state;
+    const prev_attempted = init_attempted;
+    defer {
+        if (state != null) deinit();
+        state = prev_state;
+        init_attempted = prev_attempted;
+    }
+    state = null;
+    init_attempted = false;
+
     // An unknown `+action` fails in `detectArgs`, the earliest error `init`
     // can return. That keeps this to the allocator, the I/O impl and the tmp
     // dir rather than standing up (and tearing back down) signal handlers,
@@ -528,23 +566,41 @@ test "a failed init leaves no state behind" {
         .args = .{ .vector = vector },
     } }));
 
-    // The whole point. Every accessor asserts on this, and a failed init that
+    // The whole point. Every accessor unwraps this, and a failed init that
     // left the state populated would hand out a dead allocator and a
-    // deinitialized I/O impl instead of tripping those assertions.
+    // deinitialized I/O impl instead of tripping that unwrap.
     try std.testing.expect(state == null);
+
+    // The latch outlives the cleared state, so the failure is not retryable.
+    // `init` re-runs one-shot process setup that nothing undoes.
+    try std.testing.expect(init_attempted);
+    try std.testing.expectError(error.AlreadyInitialized, init(.{ .main = .{
+        .environ = std.testing.environ,
+        .args = .{ .vector = vector },
+    } }));
 }
 
-test "logging tolerates an absent state" {
-    // The failure path above logs through `logFn` after `init`'s `errdefer`
-    // has run, so this accessor has to survive what the others assert on.
-    try std.testing.expect(state == null);
+test "logging reads the state when there is one and defaults when there is not" {
+    const prev = state;
+    defer state = prev;
 
-    // Compared field by field: `Logging` is a packed struct and the point is
-    // the values, not the backing integer.
-    const expected: GlobalState.Logging = .{};
-    const actual = logging();
-    try std.testing.expectEqual(expected.stderr, actual.stderr);
-    try std.testing.expectEqual(expected.macos, actual.macos);
+    // `logFn` hits this after `init`'s errdefer has cleared the state, so it
+    // has to survive what the other accessors unwrap.
+    state = null;
+    try std.testing.expectEqual(GlobalState.Logging{}, logging());
+
+    // The other branch. Flipped off the defaults so a regression that always
+    // returned them - silently discarding a GHOSTTY_LOG override - fails here
+    // whatever the defaults happen to be on this target.
+    const defaults: GlobalState.Logging = .{};
+    const flipped: GlobalState.Logging = .{
+        .stderr = !defaults.stderr,
+        .macos = !defaults.macos,
+    };
+    var live: GlobalState = undefined;
+    live.logging = flipped;
+    state = live;
+    try std.testing.expectEqual(flipped, logging());
 }
 
 /// This represents the global process state. There should only
