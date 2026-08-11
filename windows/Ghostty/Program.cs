@@ -1,12 +1,10 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
 using Ghostty.Interop;
-using Microsoft.Win32.SafeHandles;
 
 namespace Ghostty;
 
@@ -88,8 +86,23 @@ public static partial class Program
         uint dwFlagsAndAttributes,
         IntPtr hTemplateFile);
 
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr hObject);
+
+    private static readonly IntPtr InvalidHandleValue = new(-1);
+
     private const int STD_ERROR_HANDLE = -12;
-    private const uint GENERIC_WRITE = 0x40000000;
+    /// <summary>
+    /// Append-only write access. Requested INSTEAD of <c>GENERIC_WRITE</c>:
+    /// a handle that carries <c>FILE_APPEND_DATA</c> without
+    /// <c>FILE_WRITE_DATA</c> makes every write an atomic append at the end of
+    /// the file, whatever offset the writer thinks it is at. Two writers share
+    /// this handle - libghostty streaming through the OS file pointer, and the
+    /// managed <see cref="Console.Error"/> writer - and that is what keeps them
+    /// from landing on top of each other.
+    /// </summary>
+    private const uint FILE_APPEND_DATA = 0x00000004;
     private const uint FILE_SHARE_READ = 0x00000001;
     private const uint CREATE_ALWAYS = 2;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
@@ -122,6 +135,17 @@ public static partial class Program
     private static TextWriter? _preRedirectStderr;
 
     /// <summary>
+    /// <see cref="Console.Error"/> as it stood at the very top of
+    /// <see cref="MainImpl"/>. Captured there rather than inside
+    /// <see cref="RedirectStderrToFile"/> because the property binds lazily -
+    /// its first read resolves <c>GetStdHandle</c>, so any
+    /// <c>Console.Error</c> write added above the redirect would otherwise
+    /// decide what this points at. Capturing at the entry point makes it
+    /// structural instead of dependent on statement order.
+    /// </summary>
+    private static TextWriter? _terminalStderr;
+
+    /// <summary>
     /// Redirect stderr to a file so all diagnostic output (Zig std.log,
     /// C# Console.Error, DX12 debug layer via OutputDebugString) is
     /// persisted to disk.  Called before any native GPU code runs.
@@ -147,36 +171,60 @@ public static partial class Program
             // still lose data if the machine itself goes down.
             var hFile = CreateFileW(
                 GpuLogPath,
-                GENERIC_WRITE,
+                FILE_APPEND_DATA,
                 FILE_SHARE_READ,
                 IntPtr.Zero,
                 CREATE_ALWAYS,
                 FILE_ATTRIBUTE_NORMAL,
                 IntPtr.Zero);
 
-            if (hFile == IntPtr.Zero || hFile == new IntPtr(-1))
+            if (hFile == IntPtr.Zero || hFile == InvalidHandleValue)
+            {
+                // Console.Error is still the terminal here, so say so rather
+                // than losing every diagnostic and the tee in silence.
+                Console.Error.WriteLine(
+                    $"{AppIdentity.LogTag} could not open {GpuLogPath}: " +
+                    Marshal.GetPInvokeErrorMessage(Marshal.GetLastPInvokeError()));
+                Console.Error.Flush();
                 return;
+            }
 
             // Point the process stderr handle at the file so native writes
             // (Zig std.log, the DX12 debug layer) land there too. Console and
             // native code share this one handle; nothing is duplicated.
-            SetStdHandle(STD_ERROR_HANDLE, hFile);
+            if (!SetStdHandle(STD_ERROR_HANDLE, hFile))
+            {
+                // Managed stderr would go to the file while native stderr kept
+                // the console: a split that reads as "the log is just missing
+                // every Zig line". Leave both where they are, and close the
+                // handle - FILE_SHARE_READ means holding it would lock the log
+                // against the next run's CreateFileW.
+                CloseHandle(hFile);
+                return;
+            }
 
-            // Keep the writer we are about to replace so a fatal startup
-            // failure can still reach a terminal. See InitGhostty.
-            _preRedirectStderr = Console.Error;
+            // Only now is there something to tee to. `_terminalStderr` was
+            // captured at the top of MainImpl, before anything could bind
+            // Console.Error to a redirected handle; it is TextWriter.Null on a
+            // launch with no console, which discards harmlessly.
+            _preRedirectStderr = _terminalStderr;
 
             // Also redirect managed Console.Error so C# writes go to the file.
             //
-            // ownsHandle: false, because SetStdHandle above gave the OS the
-            // same raw HANDLE. The two-argument FileStream(IntPtr, ...) ctor
-            // takes ownership, so disposing or finalizing the stream would
-            // CloseHandle it and leave native stderr writing to a closed
-            // handle. Today the writer stays rooted for process life, which
-            // made that latent rather than live.
-            var handle = new SafeFileHandle(hFile, ownsHandle: false);
-            var fs = new FileStream(handle, FileAccess.Write);
-            var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
+            // OpenStandardError, not a FileStream over the raw handle. The
+            // append-only access above already makes the two writers' offsets
+            // irrelevant, so this is the second line of defence rather than
+            // the fix; it also sidesteps the ownership question, since nothing
+            // here wraps the raw HANDLE. That handle is deliberately leaked to
+            // process exit because SetStdHandle only stores the value.
+            //
+            // No BOM: native writes through the same handle are raw UTF-8, so
+            // a preamble would only appear if the managed side happened to
+            // write first.
+            var writer = new StreamWriter(
+                Console.OpenStandardError(),
+                new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
+            { AutoFlush = true };
             Console.SetError(writer);
 
             Console.Error.WriteLine(
@@ -200,12 +248,67 @@ public static partial class Program
         // ghostty_surface_new) from inside deep XAML callbacks. The default
         // 1MB main-thread stack is not enough for either, so run the whole
         // program on a thread we size ourselves.
+        // Wrapped because MainImpl now makes the process's first P/Invoke on
+        // its own frame: InitGhostty moved here from ConfigService, which used
+        // to run inside Application.Start where StartGui's catch and
+        // App.UnhandledException could still report a failure. A missing
+        // native/ghostty.dll would otherwise unwind this delegate unhandled
+        // and abort with an exit code that is none of the ExitCode values
+        // callers are told to discriminate on.
         var exitCode = 0;
-        var main = new Thread(() => exitCode = MainImpl(args), MainStackSize);
+        var main = new Thread(
+            () =>
+            {
+                try
+                {
+                    exitCode = MainImpl(args);
+                }
+                catch (Exception ex)
+                {
+                    exitCode = ReportFatal(ex);
+                }
+            },
+            MainStackSize);
         main.SetApartmentState(ApartmentState.STA);
         main.Start();
         main.Join();
         return exitCode;
+    }
+
+    /// <summary>
+    /// Last-resort reporter for an exception that escaped <see cref="MainImpl"/>.
+    /// Writes to stderr, tees to the terminal when stderr has been redirected,
+    /// and drops a crash log next to the binary, mirroring what
+    /// <see cref="StartGui"/>'s catch does for the GUI path.
+    /// </summary>
+    private static int ReportFatal(Exception ex)
+    {
+        var message = $"{AppIdentity.LogTag} FATAL: {ex}";
+
+        try
+        {
+            Console.Error.WriteLine(message);
+            Console.Error.Flush();
+            _preRedirectStderr?.WriteLine(message);
+            _preRedirectStderr?.Flush();
+        }
+        catch
+        {
+            // Reporting must not throw over the top of the real failure.
+        }
+
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(AppContext.BaseDirectory, "ghostty-crash.log"),
+                $"{DateTime.UtcNow:O}\n{ex}\n");
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        return (int)ExitCode.ManagedUnhandled;
     }
 
     /// <summary>
@@ -222,6 +325,10 @@ public static partial class Program
         // App's static constructor used to register this same assembly
         // again, so a `+action` run that found no action and fell through to
         // the GUI died in that static constructor rather than starting.
+        // Before anything can write to Console.Error and bind it to whatever
+        // GetStdHandle returns at that moment. See _terminalStderr.
+        _terminalStderr = Console.Error;
+
         RegisterNativeResolver();
 
         // +version is intercepted here, before the libghostty CLI
@@ -412,7 +519,13 @@ public static partial class Program
     /// Managed thread that ran <see cref="InitGhostty"/>, for the tripwire in
     /// that method. Zero until it is first entered.
     /// </summary>
-    private static int _initThreadId;
+    /// <summary>
+    /// Serializes <see cref="InitGhostty"/>. libghostty allows one init per
+    /// process and reports a refused second call with the same status as a
+    /// real failure, so a second caller must wait for the first to finish
+    /// rather than race past a half-set flag.
+    /// </summary>
+    private static readonly Lock InitLock = new();
 
     /// <summary>
     /// Whether <see cref="InitGhostty"/> has completed. Callers that depend on
@@ -438,23 +551,16 @@ public static partial class Program
     /// </summary>
     internal static void InitGhostty()
     {
-        if (_ghosttyInitialized)
+        // A second caller has to wait for the first to finish, not merely
+        // observe that it started: libghostty refuses a second init, and
+        // reports that refusal with the same status as a real failure, so a
+        // racing caller that got past a half-set flag would exit a healthy
+        // process with InitFailed. The lock is the whole fix and is cheaper
+        // than the tripwire it replaces, which only made the violation
+        // visible in builds that ship with assertions enabled.
+        lock (InitLock)
         {
-            // The plain field above is only safe because this is
-            // single-threaded by contract. Say so loudly if that ever stops
-            // being true: an off-thread second caller would race past the gate
-            // into ghostty_init_wide, get AlreadyInitialized back, and exit a
-            // perfectly healthy process with InitFailed. Interlocked would not
-            // fix that - a racing caller has to wait for init to finish, not
-            // just observe that it started - so enforce the invariant instead
-            // of pretending to make it safe.
-            Debug.Assert(
-                _initThreadId == Environment.CurrentManagedThreadId,
-                "InitGhostty is single-threaded by contract; see remarks.");
-            return;
-        }
-
-        _initThreadId = Environment.CurrentManagedThreadId;
+            if (_ghosttyInitialized) return;
 
         // Pass the real WTF-16 command line rather than rebuilding a UTF-8
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
@@ -487,20 +593,36 @@ public static partial class Program
                 $"ghostty_init failed (status {result}), exiting with " +
                 $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})";
 
-            Console.Error.WriteLine(message);
-            Console.Error.Flush();
-
-            if (_preRedirectStderr is { } terminal)
+            // Terminal first, and each in its own try: a human is watching
+            // that one, and a throw from the log write (disk full, or a
+            // handle FreeConsole invalidated) must not take it down with it.
+            // Neither may escape either - this method exits with InitFailed,
+            // and an exception here would unwind into Main's handler and
+            // turn that into ManagedUnhandled, which is the other code the
+            // ExitCode doc tells callers to discriminate on.
+            try
             {
-                terminal.WriteLine(message);
-                terminal.WriteLine($"{AppIdentity.LogTag} See {GpuLogPath} for details.");
-                terminal.Flush();
+                if (_preRedirectStderr is { } terminal)
+                {
+                    terminal.WriteLine(message);
+                    terminal.WriteLine($"{AppIdentity.LogTag} See {GpuLogPath} for details.");
+                    terminal.Flush();
+                }
             }
+            catch { /* reporting must not change the exit code */ }
+
+            try
+            {
+                Console.Error.WriteLine(message);
+                Console.Error.Flush();
+            }
+            catch { /* as above */ }
 
             Environment.Exit((int)ExitCode.InitFailed);
-        }
+            }
 
-        _ghosttyInitialized = true;
+            _ghosttyInitialized = true;
+        }
     }
 
     private static System.IO.Pipes.NamedPipeClientStream? _themePipe;
@@ -697,18 +819,9 @@ public static partial class Program
         }
         catch (Exception ex)
         {
-            var msg = $"{AppIdentity.LogTag} FATAL: {ex}";
-            Console.Error.WriteLine(msg);
-            Console.Error.Flush();
-
-            try
-            {
-                var logPath = Path.Combine(AppContext.BaseDirectory, "ghostty-crash.log");
-                File.WriteAllText(logPath, msg);
-            }
-            catch { /* best effort */ }
-
-            return (int)ExitCode.ManagedUnhandled;
+            // Same reporting as an escape from MainImpl, so the GUI path also
+            // gets the terminal tee instead of only the log.
+            return ReportFatal(ex);
         }
     }
 }
