@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
+using Ghostty.Core;
 using Ghostty.Core.Input;
 using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Windows;
@@ -637,7 +638,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
-                $"[Ghostty] SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
+                $"{AppIdentity.LogTag} SurfaceNew failed: {ex.Message}\n{ex.StackTrace}");
             throw;
         }
         // Drop our ref: libghostty does not retain the panel pointer.
