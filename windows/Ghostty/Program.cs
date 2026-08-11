@@ -569,10 +569,10 @@ public static partial class Program
         var result = NativeMethods.InitWideFromProcess();
         if (result != 0)
         {
-            // ghostty_init failed (e.g. invalid action). There is no
-            // degraded mode to continue in: global.init runs its errdefer on
-            // the way out, which deinits the allocator and the I/O instance
-            // every later export depends on.
+            // ghostty_init failed (e.g. invalid action). There is no degraded
+            // mode to continue in: the failure leaves the global state tagged
+            // unavailable, so every later export that reaches for the
+            // allocator or the I/O instance traps instead of returning.
             //
             // libghostty explains the argument-parsing errors itself, via
             // global.reportInitError writing straight to stderr. This line
@@ -618,6 +618,9 @@ public static partial class Program
             }
             catch { /* as above */ }
 
+            // Inside the lock deliberately: this never returns, so a caller
+            // queued on InitLock stays queued instead of waking to an unset
+            // flag and calling init a second time.
             Environment.Exit((int)ExitCode.InitFailed);
             }
 

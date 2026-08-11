@@ -37,11 +37,11 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
         // which is why the C API had no catch-all at all: the exe had one and
         // `ghostty_init` did not.
         //
-        // It may not use `std.log`. `init` leaves the state null on the way
-        // out, so a log call gets the default `Logging`, whose `stderr` is
-        // false whenever `app_runtime` is `none` - and that artifact calls
-        // `main` for its CLI actions. The report would be dropped in exactly
-        // the build that has no other sink.
+        // It may not use `std.log`. `init` leaves the state unavailable on
+        // the way out, so a log call gets the default `Logging`, whose
+        // `stderr` is false whenever `app_runtime` is `none` - and that
+        // artifact calls `main` for its CLI actions. The report would be
+        // dropped in exactly the build that has no other sink.
         global.reportInitError(err);
     };
     defer global.deinit();

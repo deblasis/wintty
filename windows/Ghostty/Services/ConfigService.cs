@@ -303,12 +303,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         _dispatcher = dispatcher;
 
-        // A failed ghostty_init runs its own errdefer cleanup but leaves the
-        // global state readable: deinit never nulls it, deinits io_impl
-        // unconditionally, and frees resources_dir and tmp_dir_path without
-        // nulling them. ConfigNew and the loads below would then run against
-        // a dead I/O implementation and freed resource paths, surfacing as a
-        // native crash with no managed stack.
+        // A failed ghostty_init leaves the global state tagged unavailable,
+        // and the accessors trip on that tag rather than reading through it.
+        // ConfigNew allocates from the global allocator, so reaching here
+        // without a successful init is a native trap in Debug and ReleaseSafe
+        // and undefined behavior in ReleaseFast, which is the build where it
+        // would surface as a crash with no managed stack.
         //
         // Program.MainImpl owns that call and makes it before starting WinUI,
         // so by the time this constructor runs the decision is already made
