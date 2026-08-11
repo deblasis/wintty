@@ -35,25 +35,26 @@ var state: State = .uninitialized;
 
 /// Whether there is a usable `GlobalState`, and if not, why not.
 ///
-/// The two absent cases are tags rather than an absent optional payload
-/// because the accessors below reach through this union: a torn-down
-/// `GlobalState` left in place would let them hand out a deinitialized
-/// allocator instead of tripping, which is how `ghostty_config_new` ended up
-/// allocating from a dead GPA after a failed `init`.
+/// Three tags rather than an optional because `init` needs to tell "never
+/// ran" from "ran and is gone" to refuse a second call, and the accessors
+/// need neither of those to be readable. A torn-down `GlobalState` left in
+/// place would let them hand out a deinitialized allocator instead of
+/// tripping, which is how `ghostty_config_new` ended up allocating from a
+/// dead GPA after a failed `init`.
 ///
-/// That reach is checked only in Debug and ReleaseSafe. ReleaseFast and
-/// ReleaseSmall still depend on the caller honoring `init`'s error.
+/// The trip is checked only in Debug and ReleaseSafe. ReleaseFast and
+/// ReleaseSmall still depend on the caller honoring `init`'s error, since
+/// nothing removes the payload bytes; only the tag changes.
 const State = union(enum) {
     /// `init` has not run.
     uninitialized,
 
-    /// `init` succeeded and `deinit` has not run. The only state the
-    /// accessors below will read.
+    /// `init` succeeded and `deinit` has not run. The only tag the accessors
+    /// below will read.
     initialized: GlobalState,
 
-    /// `init` failed, or `deinit` tore the state down. Nothing usable is
-    /// left, and `init` refuses to run again. See `init` for why a failure
-    /// is not retryable.
+    /// `init` failed, or `deinit` tore the state down. See `init` for why a
+    /// failure is not retryable.
     unavailable,
 };
 
@@ -112,8 +113,9 @@ pub fn init(opts: InitOpts) !void {
     // A returned error rather than an assertion because the consequence of
     // being wrong is the leak described above, and an assertion buys nothing
     // where it would matter: `quirks.inlineAssert` is `unreachable`, which
-    // ReleaseFast does not check, so it would fall through and overwrite the
-    // live state in exactly the build where that is hardest to diagnose.
+    // neither ReleaseFast nor ReleaseSmall checks, so it would fall through
+    // and overwrite the live state in exactly the builds where that is
+    // hardest to diagnose.
     if (state != .uninitialized) return error.AlreadyInitialized;
 
     // Initialize ourself to nothing so we don't have any extra state.
@@ -153,11 +155,8 @@ pub fn init(opts: InitOpts) !void {
     } };
     const self = &state.initialized;
 
-    // `deinit` marks the state `unavailable`, which is the half that matters
-    // here: the accessors below reach through `state`, and that reach can only
-    // catch an embedder that ignored our error if a failed init leaves behind
-    // no `initialized` payload full of dead pointers. That is how
-    // `ghostty_config_new` ended up allocating from a deinitialized GPA.
+    // `deinit` leaves the state `unavailable`, which is what an embedder that
+    // ignored our error then trips on. See `State`.
     errdefer deinit();
 
     // Don't let the narrow-entry-point fallback above be silent: a caller
@@ -322,6 +321,11 @@ pub fn init(opts: InitOpts) !void {
 pub fn deinit() void {
     const self = &state.initialized;
 
+    // Deferred rather than written at the end: `self` points into the payload
+    // this tag replaces, so anything appended below has to run first. The GPA
+    // leak report is one of those - it logs, and `logging` reads the tag.
+    defer state = .unavailable;
+
     self.resources_dir.deinit(self.alloc);
 
     // Flush our crash logs
@@ -338,11 +342,6 @@ pub fn deinit() void {
         // the point at which it will output if there were safety violations.
         _ = value.deinit();
     }
-
-    // Must come last: everything above reads through `self`, which points into
-    // the payload this replaces. Leaving the payload in place would let the
-    // accessors keep handing out the allocator and I/O impl just released.
-    state = .unavailable;
 }
 
 /// Helper to return either the state's I/O instance, or one from testing.
@@ -745,16 +744,20 @@ pub const ResourceLimits = struct {
 test "init refuses a second call" {
     // Both tags the guard rejects: a live state, and one a failed `init` or a
     // `deinit` left behind. `opts` is undefined because the guard returns
-    // before touching it - if it ever stopped, this would read `.tool` out of
-    // undefined memory rather than quietly passing.
+    // before touching it - if it ever stopped, this would read an undefined
+    // `Minimal` rather than quietly passing.
     const prev = state;
     defer state = prev;
 
-    for ([_]State{ .{ .initialized = undefined }, .unavailable }) |s| {
-        state = s;
-        try std.testing.expectError(
-            error.AlreadyInitialized,
-            init(.{ .tool = undefined }),
-        );
-    }
+    state = .{ .initialized = undefined };
+    try std.testing.expectError(
+        error.AlreadyInitialized,
+        init(.{ .tool = undefined }),
+    );
+
+    state = .unavailable;
+    try std.testing.expectError(
+        error.AlreadyInitialized,
+        init(.{ .tool = undefined }),
+    );
 }
