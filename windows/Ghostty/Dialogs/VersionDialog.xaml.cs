@@ -33,7 +33,7 @@ internal sealed partial class VersionDialog : ContentDialog
         // Title bar: app icon + "Wintty <version>". Icon URI is the
         // canonical AppIconSource so packaging changes propagate here.
         TitleIcon.Source = new BitmapImage(AppIconSource.Current);
-        TitleText.Text = $"Wintty {info.WinttyVersionString}";
+        TitleText.Text = $"{Ghostty.Core.AppIdentity.ProductName} {info.WinttyVersionString}";
 
         var commitUrl = VersionRenderer.CommitUrl(info);
         if (commitUrl is null)
