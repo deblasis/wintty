@@ -30,32 +30,17 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // a global is because the C API needs to be able to access this state;
     // no other Zig code should EVER access the global state.
     global.init(.{ .main = minimal }) catch |err| {
-        var buffer: [1024]u8 = undefined;
-        var stderr_writer = std.Io.File.stderr().writer(
-            std.Io.Threaded.global_single_threaded.io(),
-            &buffer,
-        );
-        const stderr = &stderr_writer.interface;
         defer std.process.exit(1);
-        const ErrSet = @TypeOf(err) || error{Unknown};
-        switch (@as(ErrSet, @errorCast(err))) {
-            error.MultipleActions => try stderr.print(
-                "Error: multiple CLI actions specified. You must specify only one\n" ++
-                    "action starting with the `+` character.\n",
-                .{},
-            ),
 
-            // Keep in sync with `global.initErrorMessage`, which carries
-            // the reasoning for what this text does and does not say.
-            error.InvalidAction => try stderr.print(
-                "Error: unknown CLI action specified.\n\n" ++
-                    "All valid CLI actions can be listed with the `+help` action.\n",
-                .{},
-            ),
-
-            else => try stderr.print("invalid CLI invocation err={}\n", .{err}),
+        // The argument-error text comes from `global` rather than a second
+        // copy here. The two were hand-synced before, with nothing to fail
+        // when they drifted. Errors it has no text for fall back to the
+        // log, which is all the old branch for them did.
+        if (global.initErrorMessage(err)) |_| {
+            global.reportInitError(err);
+        } else {
+            std.log.err("invalid CLI invocation err={}", .{err});
         }
-        try stderr.flush();
     };
     defer global.deinit();
     const alloc = global.alloc();

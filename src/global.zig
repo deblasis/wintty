@@ -473,8 +473,10 @@ pub fn reportInitError(err: anyerror) void {
 /// The text `reportInitError` writes for `err`, or null for errors with no
 /// user-facing explanation, which stay with the caller's `std.log.err`.
 ///
-/// Split from the write so the mapping can be tested without capturing stderr.
-fn initErrorMessage(err: anyerror) ?[]const u8 {
+/// Split from the write so the mapping can be tested without capturing
+/// stderr, and so `main_ghostty` can ask whether an error explains itself
+/// before falling back to the log.
+pub fn initErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
             "action starting with the `+` character.\n",
