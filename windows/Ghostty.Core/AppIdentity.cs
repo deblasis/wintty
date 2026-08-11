@@ -16,9 +16,22 @@ internal static class AppIdentity
     public const string AumId = "com.deblasis.ghostty";
 
     /// <summary>
-    /// Brand name shown in user-facing surfaces (window titles, dialog
-    /// captions). Gated behind a single constant so rebrands (Ghostty →
-    /// Wintty → ...) only touch one file instead of scattering literals.
+    /// Brand name for what a user reads: window and tab titles, dialog
+    /// captions, the <c>+version</c> header, <see cref="LogTag"/>.
+    ///
+    /// Not the source for the other "Wintty" literals in the tree, which
+    /// track something a rebrand must not move:
+    /// <list type="bullet">
+    /// <item>paths under <c>%LOCALAPPDATA%</c>, where following the brand
+    /// would orphan a user's logs, session and window state with nothing
+    /// left to migrate them;</item>
+    /// <item>the assembly name, which <c>InternalsVisibleTo</c> and
+    /// <c>Process.GetProcessesByName</c> have to match;</item>
+    /// <item>kernel object and window class names, which single-instance
+    /// and the global hotkey key off.</item>
+    /// </list>
+    /// A rebrand therefore touches this constant and the XAML literals
+    /// that cannot reach an internal type, not every "Wintty" in the tree.
     /// </summary>
     public const string ProductName = "Wintty";
 
