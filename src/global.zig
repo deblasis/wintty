@@ -228,10 +228,10 @@ pub fn init(opts: InitOpts) !void {
     // this. Env vars are useful for logging too because they are
     // easy to set.
     logging: {
-        const v = self.environ.getAlloc(self.alloc, "GHOSTTY_LOG") catch |err| switch (err) {
-            error.EnvironmentVariableMissing => break :logging,
-            else => return err,
-        };
+        // Any read failure leaves the defaults, rather than aborting startup
+        // over a logging knob. The parse below is already tolerant, so a
+        // malformed value could not stop init while an unreadable one could.
+        const v = self.environ.getAlloc(self.alloc, "GHOSTTY_LOG") catch break :logging;
         defer self.alloc.free(v);
         self.logging = cli.args.parsePackedStruct(GlobalState.Logging, v) catch .{};
     }
@@ -480,11 +480,15 @@ pub fn action() ?cli.ghostty.Action {
 /// design: `init` can fail before `io_impl` exists, so the caller may
 /// have nothing initialized to consult.
 ///
-/// Only the argument-parsing errors get text here. Anything else stays with
-/// the caller's `std.log.err`, which reaches an embedder that registered a
-/// callback via `ghostty_log_set_callback`.
+/// Every failure gets text, not just the argument-parsing ones. The rest were
+/// previously left to the caller's `std.log.err`, which in the lib artifact
+/// reaches only an embedder that already registered a callback via
+/// `ghostty_log_set_callback` - and that registration typically happens after
+/// init, since init is what the embedder is trying to get through. Eight of
+/// the ten ways `init` can fail produced no bytes anywhere as a result.
 pub fn reportInitError(err: anyerror) void {
-    const message = initErrorMessage(err) orelse return;
+    var buf: [256]u8 = undefined;
+    const message = initErrorText(err, &buf);
 
     // Streaming, not the seekable `writer`: an embedder may have pointed
     // stderr at a file it is also writing to itself, and a positional write
@@ -499,12 +503,27 @@ pub fn reportInitError(err: anyerror) void {
     ) catch return;
 }
 
-/// The text `reportInitError` writes for `err`, or null for errors with no
-/// user-facing explanation, which stay with the caller's `std.log.err`.
+/// The exact text `reportInitError` writes for `err`: the bespoke wording
+/// where there is one, and otherwise a generic line naming the error, so no
+/// failure leaves a caller with a status and nothing to print.
+///
+/// `buf` backs the generic line; the returned slice may point into it.
+///
+/// Split from the write, for the same reason as `initErrorMessage`.
+fn initErrorText(err: anyerror, buf: []u8) []const u8 {
+    return initErrorMessage(err) orelse std.fmt.bufPrint(
+        buf,
+        "Error: ghostty failed to initialize err={t}\n",
+        .{err},
+    ) catch "Error: ghostty failed to initialize.\n";
+}
+
+/// The bespoke text for `err`, or null for errors with no wording of their
+/// own, which `initErrorText` covers with a generic line.
 ///
 /// Split from the write so the mapping can be tested without capturing
-/// stderr, and so `main_ghostty` can ask whether an error explains itself
-/// before falling back to the log.
+/// stderr. It is no longer a question about whether an error explains
+/// itself - every error does now - only about which wording it gets.
 pub fn initErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
@@ -538,8 +557,34 @@ test "initErrorMessage explains the CLI argument errors" {
     );
 }
 
-test "initErrorMessage leaves other errors to the log" {
+test "initErrorMessage has no bespoke wording for the rest" {
     try std.testing.expect(initErrorMessage(error.OutOfMemory) == null);
+    try std.testing.expect(initErrorMessage(error.AlreadyInitialized) == null);
+}
+
+test "initErrorText still explains an error with no wording of its own" {
+    // The point of the change: these used to produce no bytes at all through
+    // the C API. `OutOfMemory` alone can come from `allocTmpDir`,
+    // `detectArgs`, `ensureLocale`, `oni.init` and `resourcesDir`.
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Error: ghostty failed to initialize err=OutOfMemory\n",
+        initErrorText(error.OutOfMemory, &buf),
+    );
+
+    // A bespoke message still wins, and does not touch the buffer.
+    try std.testing.expectEqualStrings(
+        initErrorMessage(error.InvalidAction).?,
+        initErrorText(error.InvalidAction, &buf),
+    );
+
+    // Degrades rather than truncating into nonsense when the buffer cannot
+    // hold the formatted line.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Error: ghostty failed to initialize.\n",
+        initErrorText(error.OutOfMemory, &tiny),
+    );
 }
 
 test "a failed init clears the state and is not retryable" {
