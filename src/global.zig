@@ -479,12 +479,10 @@ fn initErrorMessage(err: anyerror) ?[]const u8 {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
             "action starting with the `+` character.\n",
 
-        // Deliberately silent about the `+` convention. `detectIter` skips
-        // every argument that does not start with `+`, so this error can
-        // only mean the name after the `+` is not an action: explaining the
-        // prefix sends the reader looking for a mistake they did not make.
-        // Naming the action rather than a binary keeps it true for `wintty`
-        // as well as `ghostty`.
+        // Deliberately silent about the `+` convention. The only path to
+        // this error is a `+` argument whose name is not in the action
+        // enum, so explaining the prefix sends the reader hunting for a
+        // mistake they did not make.
         error.InvalidAction => "Error: unknown CLI action specified.\n\n" ++
             "All valid CLI actions can be listed with the `+help` action.\n",
 

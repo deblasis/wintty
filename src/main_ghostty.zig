@@ -45,6 +45,8 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
                 .{},
             ),
 
+            // Keep in sync with `global.initErrorMessage`, which carries
+            // the reasoning for what this text does and does not say.
             error.InvalidAction => try stderr.print(
                 "Error: unknown CLI action specified.\n\n" ++
                     "All valid CLI actions can be listed with the `+help` action.\n",
