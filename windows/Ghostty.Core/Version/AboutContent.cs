@@ -20,7 +20,7 @@ public static class AboutContent
     // The embedded '\n' is intentional: the About TextBlock renders it as a
     // line break, keeping this value UI-free and unit-testable here in Core.
     public const string Copyright =
-        "Wintty (c) 2026 Alessandro De Blasis\n" +
+        AppIdentity.ProductName + " (c) 2026 Alessandro De Blasis\n" +
         "Based on Ghostty (c) 2024 Mitchell Hashimoto, Ghostty contributors";
 
     public const string GitHubUrl = "https://github.com/deblasis/wintty";

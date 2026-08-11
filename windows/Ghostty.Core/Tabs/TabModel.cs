@@ -143,7 +143,7 @@ internal sealed class TabModel : INotifyPropertyChanged
     // Title precedence: explicit user override beats anything; then
     // the shell's OSC 0/2 reported title (which knows what the user
     // is actually running, e.g. "vim file.txt"); then the profile's
-    // display name (PR 4 - so a tab opened from the new-tab split
+    // display name (so a tab opened from the new-tab split
     // button reads its profile Name rather than the generic fallback
     // before the shell sends a title); then the product name for the
     // no-profile / pre-OSC-2 cold-start case.
