@@ -88,13 +88,13 @@ public static class VersionRenderer
         if (ansi && hasCommit)
         {
             sb.Append(Osc8Open).Append(CommitUrlPrefix).Append(info.WinttyCommit).Append(St);
-            sb.Append("Wintty ").Append(info.WinttyVersionString);
+            sb.Append(AppIdentity.ProductName).Append(' ').Append(info.WinttyVersionString);
             sb.Append(Osc8Close);
             sb.Append('\n');
         }
         else
         {
-            sb.Append("Wintty ").Append(info.WinttyVersionString).Append('\n');
+            sb.Append(AppIdentity.ProductName).Append(' ').Append(info.WinttyVersionString).Append('\n');
         }
         if (hasCommit)
         {

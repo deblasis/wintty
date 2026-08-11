@@ -397,7 +397,7 @@ public static partial class Program
             // terminal's stderr, while the GUI has already pointed stderr at
             // the log file by the time ConfigService calls in.
             Console.Error.WriteLine(
-                $"[{Ghostty.Core.AppIdentity.ProductName}] FATAL: " +
+                $"{AppIdentity.LogTag} FATAL: " +
                 $"ghostty_init failed (status {result}), exiting with " +
                 $"{(int)ExitCode.InitFailed} ({nameof(ExitCode.InitFailed)})");
             Console.Error.Flush();

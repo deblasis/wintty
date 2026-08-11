@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using Ghostty.Controls;
+using Ghostty.Core;
 using Ghostty.Core.Panes;
 using Ghostty.Core.Tabs;
 using Ghostty.Panes;
@@ -156,7 +157,7 @@ internal sealed class TitleBarCoordinator
     }
 
     private void UpdateVerticalTitleText()
-        => _verticalTitleText.Text = _boundTab?.EffectiveTitle ?? "Wintty";
+        => _verticalTitleText.Text = _boundTab?.EffectiveTitle ?? AppIdentity.ProductName;
 
     /// <summary>
     /// Subscribe the active tab's active leaf to live title-change
