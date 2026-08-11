@@ -46,9 +46,8 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
             ),
 
             error.InvalidAction => try stderr.print(
-                "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-                    "the '+' character.\n\n" ++
-                    "All valid CLI actions can be listed with `ghostty +help`\n",
+                "Error: unknown CLI action specified.\n\n" ++
+                    "All valid CLI actions can be listed with the `+help` action.\n",
                 .{},
             ),
 

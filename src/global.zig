@@ -479,9 +479,14 @@ fn initErrorMessage(err: anyerror) ?[]const u8 {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
             "action starting with the `+` character.\n",
 
-        error.InvalidAction => "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-            "the '+' character.\n\n" ++
-            "All valid CLI actions can be listed with `ghostty +help`\n",
+        // Deliberately silent about the `+` convention. `detectIter` skips
+        // every argument that does not start with `+`, so this error can
+        // only mean the name after the `+` is not an action: explaining the
+        // prefix sends the reader looking for a mistake they did not make.
+        // Naming the action rather than a binary keeps it true for `wintty`
+        // as well as `ghostty`.
+        error.InvalidAction => "Error: unknown CLI action specified.\n\n" ++
+            "All valid CLI actions can be listed with the `+help` action.\n",
 
         else => null,
     };
@@ -493,9 +498,8 @@ test "initErrorMessage explains the CLI argument errors" {
     // The exe prints its own copy of these from main_ghostty.zig. If either
     // side is reworded, both should say the same thing.
     try testing.expectEqualStrings(
-        "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-            "the '+' character.\n\n" ++
-            "All valid CLI actions can be listed with `ghostty +help`\n",
+        "Error: unknown CLI action specified.\n\n" ++
+            "All valid CLI actions can be listed with the `+help` action.\n",
         initErrorMessage(cli.action.DetectError.InvalidAction).?,
     );
     try testing.expectEqualStrings(
