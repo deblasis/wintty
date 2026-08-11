@@ -3,6 +3,7 @@ using System.Threading;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Ghostty.Core;
 using Ghostty.Interop;
 
 namespace Ghostty;
@@ -45,7 +46,7 @@ public static partial class Program
         /// path. <see cref="StartGui"/>'s catch block writes
         /// <c>ghostty-crash.log</c> in <c>AppContext.BaseDirectory</c>.
         /// (A future PR should converge this with the
-        /// <c>%LOCALAPPDATA%\Ghostty\crash.log</c> path used by the
+        /// <c>%LOCALAPPDATA%\Wintty\crash.log</c> path used by the
         /// App-level unhandled-exception handlers.)</summary>
         ManagedUnhandled = 3,
     }
@@ -143,7 +144,8 @@ public static partial class Program
             var writer = new StreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
             Console.SetError(writer);
 
-            Console.Error.WriteLine($"=== Wintty GPU log started {DateTime.UtcNow:O} ===");
+            Console.Error.WriteLine(
+                $"=== {AppIdentity.ProductName} GPU log started {DateTime.UtcNow:O} ===");
             Console.Error.WriteLine($"Log file: {GpuLogPath}");
             Console.Error.Flush();
         }
@@ -328,7 +330,7 @@ public static partial class Program
     private static string ProgramName()
     {
         var name = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
-        if (string.IsNullOrEmpty(name)) name = Ghostty.Core.AppIdentity.ProductName;
+        if (string.IsNullOrEmpty(name)) name = AppIdentity.ProductName;
         // Lowercased because that is how the command gets typed, and
         // Windows does not care either way.
         return name.ToLowerInvariant();
@@ -529,28 +531,28 @@ public static partial class Program
     {
         try
         {
-            Console.Error.WriteLine("[Ghostty] Program.Main entered");
+            Console.Error.WriteLine($"{AppIdentity.LogTag} Program.Main entered");
             Console.Error.Flush();
 
             WinRT.ComWrappersSupport.InitializeComWrappers();
-            Console.Error.WriteLine("[Ghostty] ComWrappers initialized");
+            Console.Error.WriteLine($"{AppIdentity.LogTag} ComWrappers initialized");
             Console.Error.Flush();
 
             Microsoft.UI.Xaml.Application.Start(p =>
             {
-                Console.Error.WriteLine("[Ghostty] Application.Start callback entered");
+                Console.Error.WriteLine($"{AppIdentity.LogTag} Application.Start callback entered");
                 Console.Error.Flush();
 
                 var context = new Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext(
                     Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
                 System.Threading.SynchronizationContext.SetSynchronizationContext(context);
 
-                Console.Error.WriteLine("[Ghostty] Creating App instance");
+                Console.Error.WriteLine($"{AppIdentity.LogTag} Creating App instance");
                 Console.Error.Flush();
 
                 new App();
 
-                Console.Error.WriteLine("[Ghostty] App instance created");
+                Console.Error.WriteLine($"{AppIdentity.LogTag} App instance created");
                 Console.Error.Flush();
             });
 
@@ -558,7 +560,7 @@ public static partial class Program
         }
         catch (Exception ex)
         {
-            var msg = $"[Ghostty] FATAL: {ex}";
+            var msg = $"{AppIdentity.LogTag} FATAL: {ex}";
             Console.Error.WriteLine(msg);
             Console.Error.Flush();
 
