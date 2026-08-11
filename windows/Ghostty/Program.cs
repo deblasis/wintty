@@ -88,7 +88,16 @@ public static partial class Program
         IntPtr hTemplateFile);
 
     private const int STD_ERROR_HANDLE = -12;
-    private const uint GENERIC_WRITE = 0x40000000;
+    /// <summary>
+    /// Append-only write access. Requested INSTEAD of <c>GENERIC_WRITE</c>:
+    /// a handle that carries <c>FILE_APPEND_DATA</c> without
+    /// <c>FILE_WRITE_DATA</c> makes every write an atomic append at the end of
+    /// the file, whatever offset the writer thinks it is at. Two writers share
+    /// this handle - libghostty streaming through the OS file pointer, and the
+    /// managed <see cref="Console.Error"/> writer - and that is what keeps them
+    /// from landing on top of each other.
+    /// </summary>
+    private const uint FILE_APPEND_DATA = 0x00000004;
     private const uint FILE_SHARE_READ = 0x00000001;
     private const uint CREATE_ALWAYS = 2;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
@@ -146,7 +155,7 @@ public static partial class Program
             // still lose data if the machine itself goes down.
             var hFile = CreateFileW(
                 GpuLogPath,
-                GENERIC_WRITE,
+                FILE_APPEND_DATA,
                 FILE_SHARE_READ,
                 IntPtr.Zero,
                 CREATE_ALWAYS,
@@ -184,16 +193,12 @@ public static partial class Program
 
             // Also redirect managed Console.Error so C# writes go to the file.
             //
-            // OpenStandardError, not a FileStream over the raw handle. Zig's
-            // reportInitError deliberately uses a streaming write so it lands
-            // wherever the shared handle's file pointer sits; a FileStream
-            // snapshots the position at construction and writes at its own
-            // offset, so the managed header and libghostty's explanation
-            // overwrite each other in the log. This stream writes through the
-            // handle, sharing that pointer. It also sidesteps the ownership
-            // question: nothing here wraps the raw HANDLE, which is
-            // deliberately leaked to process exit because SetStdHandle only
-            // stores the value.
+            // OpenStandardError, not a FileStream over the raw handle. The
+            // append-only access above already makes the two writers' offsets
+            // irrelevant, so this is the second line of defence rather than
+            // the fix; it also sidesteps the ownership question, since nothing
+            // here wraps the raw HANDLE. That handle is deliberately leaked to
+            // process exit because SetStdHandle only stores the value.
             //
             // No BOM: native writes through the same handle are raw UTF-8, so
             // a preamble would only appear if the managed side happened to
