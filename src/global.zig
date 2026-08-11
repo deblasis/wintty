@@ -109,7 +109,20 @@ pub fn init(opts: InitOpts) !void {
         .resources_dir = .{},
     };
     const self = &state.?;
-    errdefer deinit();
+
+    // Clear the state on the way out, not just tear it down. The accessors
+    // below assert on `state`, and those assertions are meant to catch use
+    // before init - but they cannot fire while a failed init leaves behind a
+    // `GlobalState` full of dead pointers, which is how an embedder that
+    // ignored our error ended up allocating from a deinitialized GPA.
+    //
+    // One block rather than two `errdefer` statements: those unwind in reverse
+    // declaration order, so a separate `errdefer state = null;` would run
+    // first and `deinit` would then read through a null optional.
+    errdefer {
+        deinit();
+        state = null;
+    }
 
     // Don't let the narrow-entry-point fallback above be silent: a caller
     // that passed argv on Windows is not getting the args it asked for.
@@ -265,6 +278,11 @@ pub fn init(opts: InitOpts) !void {
 /// Cleans up the global state. This doesn't _need_ to be called but
 /// doing so in dev modes will check for memory leaks.
 ///
+/// This deliberately leaves `state` populated, which is what makes `init`
+/// refuse a second call after a `deinit`. A failed `init` is the one case
+/// that does clear it, and it does that in its own `errdefer` rather than
+/// here, so that the once-per-process guard keeps holding for everyone else.
+///
 /// Asserts that the state exists.
 pub fn deinit() void {
     const self = &state.?;
@@ -394,11 +412,24 @@ pub fn rlimits() ResourceLimits {
     return state.?.rlimits;
 }
 
-/// Returns the global state logging configuration.
+/// Returns the global state logging configuration, or the defaults if there
+/// is no state.
 ///
-/// Asserts that the global state is initialized.
+/// Unlike the accessors above this one tolerates a missing state rather than
+/// asserting on it. `logFn` reads it on every single log call, including the
+/// `std.log.err` that `ghostty_init` writes to report an `init` failure - and
+/// by then `init`'s `errdefer` has already torn the state back down. Asserting
+/// here would panic inside the code trying to explain the failure.
+///
+/// The defaults are the same values `init` starts from, so a log emitted
+/// before or after a state exists goes wherever a log emitted at the very
+/// start of `init` would have gone.
+///
+/// Captured by pointer: `logFn` runs this on every log call, and a by-value
+/// capture would copy the whole `GlobalState` (`io_impl` included) just to
+/// read two bits out of it.
 pub fn logging() GlobalState.Logging {
-    return state.?.logging;
+    return if (state) |*s| s.logging else .{};
 }
 
 /// Returns the global state action.
@@ -476,6 +507,44 @@ test "initErrorMessage explains the CLI argument errors" {
 
 test "initErrorMessage leaves other errors to the log" {
     try std.testing.expect(initErrorMessage(error.OutOfMemory) == null);
+}
+
+test "a failed init leaves no state behind" {
+    // An unknown `+action` fails in `detectArgs`, the earliest error `init`
+    // can return. That keeps this to the allocator, the I/O impl and the tmp
+    // dir rather than standing up (and tearing back down) signal handlers,
+    // oniguruma and the resources dir.
+    //
+    // The args vector is platform-typed - a WTF-16 command line on Windows,
+    // an argv elsewhere - so build it the same way `init` does for the `.c`
+    // prong, with a comptime `if` that leaves the other branch unanalyzed.
+    const vector: std.process.Args.Vector = if (comptime builtin.os.tag == .windows)
+        std.unicode.utf8ToUtf16LeStringLiteral("ghostty +definitely-not-an-action")
+    else
+        &.{ "ghostty", "+definitely-not-an-action" };
+
+    try std.testing.expectError(error.InvalidAction, init(.{ .main = .{
+        .environ = std.testing.environ,
+        .args = .{ .vector = vector },
+    } }));
+
+    // The whole point. Every accessor asserts on this, and a failed init that
+    // left the state populated would hand out a dead allocator and a
+    // deinitialized I/O impl instead of tripping those assertions.
+    try std.testing.expect(state == null);
+}
+
+test "logging tolerates an absent state" {
+    // The failure path above logs through `logFn` after `init`'s `errdefer`
+    // has run, so this accessor has to survive what the others assert on.
+    try std.testing.expect(state == null);
+
+    // Compared field by field: `Logging` is a packed struct and the point is
+    // the values, not the backing integer.
+    const expected: GlobalState.Logging = .{};
+    const actual = logging();
+    try std.testing.expectEqual(expected.stderr, actual.stderr);
+    try std.testing.expectEqual(expected.macos, actual.macos);
 }
 
 /// This represents the global process state. There should only
