@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Ghostty.Controls;
+using Ghostty.Core;
 using Ghostty.Core.Config;
 using Ghostty.Core.Hosting;
 using Ghostty.Core.Power;
@@ -296,14 +297,14 @@ public partial class App : Application
             // down. A packaged Release launch will lose this — that's
             // acceptable for a one-frame cosmetic flash.
             System.Diagnostics.Debug.WriteLine(
-                $"[Ghostty] OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
+                $"{AppIdentity.LogTag} OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
             RequestedTheme = ApplicationTheme.Dark;
         }
 
         InitializeComponent();
 
         // Surface unhandled exceptions to stderr AND to a file under
-        // %LOCALAPPDATA%\Ghostty\ before the process dies. Without
+        // %LOCALAPPDATA%\Wintty\ before the process dies. Without
         // this, a managed exception on the UI thread silently exits
         // with a non-descriptive code and we have nothing to debug
         // from -- especially in Release, where WER captures a dump
@@ -335,7 +336,7 @@ public partial class App : Application
         // FreeConsole gate keeps the console attached in that case).
         try
         {
-            Console.Error.WriteLine($"[Ghostty] {tag}:");
+            Console.Error.WriteLine($"{AppIdentity.LogTag} {tag}:");
             Console.Error.WriteLine(detail);
             Console.Error.Flush();
         }
@@ -439,7 +440,7 @@ public partial class App : Application
         ConfigService = _configService;
 
         // build the factory from Ghostty config before any other service constructs an
-        // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Ghostty root that
+        // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
         // one folder to attach.
         var logDir = System.IO.Path.Combine(
