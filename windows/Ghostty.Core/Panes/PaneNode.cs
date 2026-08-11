@@ -1,8 +1,3 @@
-using System.Runtime.CompilerServices;
-
-[assembly: InternalsVisibleTo("Wintty")]
-[assembly: InternalsVisibleTo("Ghostty.Tests")]
-
 namespace Ghostty.Core.Panes;
 
 internal abstract class PaneNode { }
