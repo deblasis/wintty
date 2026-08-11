@@ -457,6 +457,17 @@ public sealed partial class MainWindow : Window
         // the default title bar row.
         ExtendsContentIntoTitleBar = true;
 
+        // Set here rather than in XAML: Window is not a DependencyObject,
+        // so no markup extension can target Title at all, and AppIdentity
+        // is internal besides, which x:Bind's generated code would need
+        // public. Same constraint CommandPaletteControl documents.
+        //
+        // TitleBarCoordinator takes the caption over further down this
+        // constructor, from the active tab's EffectiveTitle, which falls
+        // back to this same constant. So this is the value only until
+        // then, and the two agree.
+        Title = Ghostty.Core.AppIdentity.ProductName;
+
         // Apply window-theme from config. The manager resolves the
         // config value ("light"/"dark"/"system"/"auto") to a concrete
         // dark/light choice and sets both ElementTheme on the XAML root

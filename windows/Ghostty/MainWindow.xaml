@@ -5,8 +5,8 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:cmdpalette="using:Ghostty.Controls.CommandPalette"
     xmlns:notifications="using:Ghostty.Controls.Notifications"
-    xmlns:tabs="using:Ghostty.Tabs"
-    Title="Wintty">
+    xmlns:tabs="using:Ghostty.Tabs">
+    <!-- Title comes from AppIdentity.ProductName in the constructor. -->
 
     <!--
         Declarative layout for the dual tab-host shell.
