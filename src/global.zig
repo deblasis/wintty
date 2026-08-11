@@ -90,11 +90,18 @@ pub fn init(opts: InitOpts) !void {
     // (Both of those are no-ops on Windows.) Tripping that sentry assert is a
     // panic in Debug and ReleaseSafe, and illegal behavior in ReleaseFast.
     //
-    // Latched rather than derived from `state`, because the errdefer below
-    // clears that on failure and a failed init must not look retryable.
+    // The latch, not `state`, is what carries this: the errdefer below clears
+    // the state on failure, and a failed init must not look retryable.
     // Returning before the errdefer is armed leaves any live state untouched.
-    assert(state == null or init_attempted);
-    if (init_attempted) return error.AlreadyInitialized;
+    //
+    // `state != null` is redundant with the latch, which is set below before
+    // the state is ever assigned and is never cleared. It stays as a cheap
+    // guard rather than an assertion because the consequence of being wrong is
+    // the leak described above, and an assertion buys nothing where it would
+    // matter: `quirks.inlineAssert` is `unreachable`, which ReleaseFast does
+    // not check, so it would fall through and overwrite the live state in
+    // exactly the build where that is hardest to diagnose.
+    if (state != null or init_attempted) return error.AlreadyInitialized;
     init_attempted = true;
 
     // Initialize ourself to nothing so we don't have any extra state.
