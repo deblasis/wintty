@@ -121,38 +121,40 @@ pub fn init(opts: InitOpts) !void {
     // Initialize ourself to nothing so we don't have any extra state.
     // IMPORTANT: this MUST be initialized before any log output because
     // the log function uses the global state.
-    state = .{ .initialized = .{
-        // Not `undefined`: the errdefer below arms before the real
-        // implementation is assigned, and `deinit` unconditionally calls
-        // `io_impl.deinit()`, which locks its mutex.
-        .io_impl = .init_single_threaded,
-        .gpa = null,
-        .alloc = undefined,
-        .environ = switch (opts) {
-            .main, .tool => |m| m.environ,
-            .c => |c| c.environ,
-            .c_wide => |c| c.environ,
+    state = .{
+        .initialized = .{
+            // Not `undefined`: the errdefer below arms before the real
+            // implementation is assigned, and `deinit` unconditionally calls
+            // `io_impl.deinit()`, which locks its mutex.
+            .io_impl = .init_single_threaded,
+            .gpa = null,
+            .alloc = undefined,
+            .environ = switch (opts) {
+                .main, .tool => |m| m.environ,
+                .c => |c| c.environ,
+                .c_wide => |c| c.environ,
+            },
+            .args = switch (opts) {
+                .main, .tool => |m| m.args,
+                // A C `char**` cannot carry WTF-16, so on Windows the narrow
+                // entry point cannot express the args vector at all. Fall back
+                // to the process command line from the PEB, the same source
+                // std's own Windows start code uses, so existing embedders keep
+                // working. Callers that need to supply their own args use
+                // `c_wide`. Elsewhere the caller's argv is authoritative.
+                .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
+                    std.os.windows.peb().ProcessParameters.CommandLine.slice()
+                else
+                    c.argv[0..c.argc] },
+                .c_wide => |c| .{ .vector = c.cmdline },
+            },
+            .tmp_dir_path = null,
+            .action = null,
+            .logging = .{},
+            .rlimits = .{},
+            .resources_dir = .{},
         },
-        .args = switch (opts) {
-            .main, .tool => |m| m.args,
-            // A C `char**` cannot carry WTF-16, so on Windows the narrow
-            // entry point cannot express the args vector at all. Fall back
-            // to the process command line from the PEB, the same source
-            // std's own Windows start code uses, so existing embedders keep
-            // working. Callers that need to supply their own args use
-            // `c_wide`. Elsewhere the caller's argv is authoritative.
-            .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
-                std.os.windows.peb().ProcessParameters.CommandLine.slice()
-            else
-                c.argv[0..c.argc] },
-            .c_wide => |c| .{ .vector = c.cmdline },
-        },
-        .tmp_dir_path = null,
-        .action = null,
-        .logging = .{},
-        .rlimits = .{},
-        .resources_dir = .{},
-    } };
+    };
     const self = &state.initialized;
 
     // `deinit` leaves the state `unavailable`, which is what an embedder that
