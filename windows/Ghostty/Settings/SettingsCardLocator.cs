@@ -17,14 +17,25 @@ namespace Ghostty.Settings;
 /// </summary>
 internal static class SettingsCardLocator
 {
-    public static SettingsCard? FindByConfigKey(DependencyObject root, string key)
+    /// <summary>
+    /// Finds the element tagged with <paramref name="key"/>. Matches any
+    /// FrameworkElement rather than only SettingsCard: ConfigKey is an
+    /// attached property, and settings that are too large for a card row
+    /// (the gradient points canvas) carry it on the control itself. Both
+    /// ScrollIntoView and Pulse only need a FrameworkElement.
+    /// </summary>
+    public static FrameworkElement? FindByConfigKey(DependencyObject root, string key)
     {
+        // Untagged elements read back the property default, so an empty key
+        // would match the first element walked rather than nothing.
+        if (string.IsNullOrEmpty(key)) return null;
+
         int childCount = VisualTreeHelper.GetChildrenCount(root);
         for (int i = 0; i < childCount; i++)
         {
             var child = VisualTreeHelper.GetChild(root, i);
-            if (child is SettingsCard card && SettingsCard.GetConfigKey(card) == key)
-                return card;
+            if (child is FrameworkElement element && SettingsCard.GetConfigKey(element) == key)
+                return element;
             var nested = FindByConfigKey(child, key);
             if (nested != null) return nested;
         }
