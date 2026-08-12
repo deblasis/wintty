@@ -10,22 +10,77 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
+/// Options that are macOS-only but do not carry the `macos-` name prefix.
+///
+/// Every entry here was checked twice before it was added: its doc comment
+/// in Config.zig says it only applies to macOS, *and* nothing under
+/// `windows/` reads the key. Both halves matter. Prose alone is not enough,
+/// and neither is the prefix.
+///
+/// If the Windows app ever starts reading one of these, delete it from the
+/// list so the option shows up in the reference again.
+const macos_only_names = [_][]const u8{
+    // "Draw fonts with a thicker stroke, if supported. This is currently
+    // only supported on macOS." A CoreText stroke tweak; the DirectWrite
+    // path has no equivalent and never reads it.
+    "font-thicken",
+    // Strength dial for font-thicken, and dead for the same reason.
+    "font-thicken-strength",
+
+    // "This setting is currently only supported on macOS." Display P3
+    // interpretation of terminal colors, done by the macOS layer.
+    "window-colorspace",
+
+    // "Note: this is only supported on macOS. The GTK runtime does not
+    // support setting the window position". Both halves of the pair are
+    // listed: -y is grouped under -x and would be dropped along with it,
+    // but naming it keeps the two consistent if the field order ever
+    // changes.
+    "window-position-x",
+    "window-position-y",
+
+    // "Resize the window in discrete increments of the focused surface's
+    // cell size ... Currently only supported on macOS."
+    "window-step-resize",
+
+    // "This setting is only supported currently on macOS." The Windows
+    // renderer has its own present model and does not read the key.
+    "window-vsync",
+
+    // "Only implemented on macOS." Describes how the quick terminal
+    // follows macOS Spaces, which Windows has no counterpart for.
+    "quick-terminal-space-behavior",
+
+    // "This is only supported on macOS currently, since Linux builds are
+    // distributed via package managers". Sparkle-backed updates; Wintty
+    // ships no updater that reads this.
+    "auto-update",
+    // The release channel for that same updater: "This only works on macOS
+    // since only macOS has an auto-update feature."
+    "auto-update-channel",
+};
+
 /// Whether an option only applies to macOS, and so has no place in the
 /// Wintty reference.
 ///
-/// The `macos-` name prefix is the only signal used, because it is the only
-/// exact one. Matching prose like "only supported on macOS" looks tempting
+/// Two signals, both exact: the `macos-` name prefix, and the hand-checked
+/// list above. Matching prose like "only supported on macOS" looks tempting
 /// and is wrong: that sentence describes *upstream's* platform support, not
 /// this fork's. `window-save-state` and `undo-timeout` both carry it, and
 /// the Windows app implements both -- filtering on prose would have hidden
-/// options Windows users actually set.
+/// options Windows users actually set. `quick-terminal-animation-duration`
+/// says "Only implemented on macOS" and Windows reads it too.
 ///
-/// Options that merely mention macOS while working everywhere are also left
+/// Options that merely mention macOS while working everywhere are left
 /// alone. Rewriting their prose to drop the macOS clause is not something a
 /// generator can do safely, since the surrounding sentence usually depends
 /// on it.
 fn isMacOSOnly(comptime name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "macos-");
+    if (std.mem.startsWith(u8, name, "macos-")) return true;
+    for (macos_only_names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
 }
 
 pub fn genConfig(writer: *std.Io.Writer) !void {
