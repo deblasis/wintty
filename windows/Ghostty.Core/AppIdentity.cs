@@ -18,8 +18,16 @@ internal static class AppIdentity
     /// already-scheduled toasts from the app, and Windows offers no
     /// migration for that, so treat a change as a one-off break rather
     /// than a rename that follows the brand.
+    ///
+    /// Baked in at build time rather than written here, because every
+    /// tier and variant needs its own: the Shell merges installs that
+    /// share an AUMID into one taskbar button whatever their pack id
+    /// says. The public build gets the default below; wintty-release
+    /// overrides <c>_WinttyAumId</c> per variant. It stays a
+    /// <see langword="const"/> so call sites can keep using it in
+    /// constant contexts and nothing reflects at startup.
     /// </summary>
-    public const string AumId = "com.deblasis.wintty";
+    public const string AumId = Ghostty.Core.Version.BuildInfo.AumId;
 
     /// <summary>
     /// Brand name for what a user reads: window and tab titles, dialog
