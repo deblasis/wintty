@@ -529,8 +529,8 @@ public static partial class Program
 
     /// <summary>
     /// Whether <see cref="InitGhostty"/> has completed. Callers that depend on
-    /// libghostty global state assert on this rather than initializing it
-    /// themselves; <see cref="MainImpl"/> owns that decision.
+    /// libghostty global state check this and throw rather than initializing
+    /// it themselves; <see cref="MainImpl"/> owns that decision.
     /// </summary>
     internal static bool IsGhosttyInitialized => _ghosttyInitialized;
 
@@ -570,9 +570,11 @@ public static partial class Program
         if (result != 0)
         {
             // ghostty_init failed (e.g. invalid action). There is no degraded
-            // mode to continue in: the failure leaves the global state tagged
-            // unavailable, so every later export that reaches for the
-            // allocator or the I/O instance traps instead of returning.
+            // mode to continue in: the failure tears the global state down but
+            // leaves it in place, so every later export that reaches for the
+            // allocator or the I/O instance gets a deinitialized one. Exiting
+            // here is what makes that unreachable, the same way macOS and iOS
+            // exit from their own ghostty_init call sites.
             //
             // libghostty explains the argument-parsing errors itself, via
             // global.reportInitError writing straight to stderr. This line
