@@ -203,7 +203,7 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
         io,
         alloc,
         environ_map,
-        .{ .subdir = "ghostty/sentry" },
+        .{ .subdir = "wintty/sentry" },
     );
 }
 

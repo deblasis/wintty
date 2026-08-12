@@ -557,8 +557,8 @@ language: ?[:0]const u8 = null,
 /// include path separators unless it is an absolute pathname.
 ///
 /// The first directory is the `themes` subdirectory of your Ghostty
-/// configuration directory. This is `$XDG_CONFIG_HOME/ghostty/themes` or
-/// `~/.config/ghostty/themes`.
+/// configuration directory. This is `$XDG_CONFIG_HOME/wintty/themes` or
+/// `~/.config/wintty/themes`.
 ///
 /// The second directory is the `themes` subdirectory of the Ghostty resources
 /// directory. Ghostty ships with a multitude of themes that will be installed
@@ -2605,7 +2605,7 @@ keybind: Keybinds = .{},
 
 /// When this is true, the default configuration file paths will be loaded.
 /// The default configuration file paths are currently only the XDG
-/// config path ($XDG_CONFIG_HOME/ghostty/config.ghostty).
+/// config path ($XDG_CONFIG_HOME/wintty/config.wintty).
 ///
 /// If this is false, the default configuration paths will not be loaded.
 /// This is targeted directly at using Ghostty from the CLI in a way
@@ -3566,7 +3566,7 @@ keybind: Keybinds = .{},
 /// The absolute path to the custom icon file.
 /// Supported formats include PNG, JPEG, and ICNS.
 ///
-/// Defaults to `~/.config/ghostty/Ghostty.icns`
+/// Defaults to `~/.config/wintty/Wintty.icns`
 @"macos-custom-icon": ?[:0]const u8 = null,
 
 /// The material to use for the frame of the macOS app icon.
@@ -4201,67 +4201,93 @@ fn writeConfigTemplate(path: []const u8) !void {
 }
 
 /// Load configurations from the default configuration files. The default
-/// configuration file is at `$XDG_CONFIG_HOME/ghostty/config.ghostty`.
+/// configuration file is at `$XDG_CONFIG_HOME/wintty/config.wintty`.
 ///
 /// On macOS, `$HOME/Library/Application Support/$CFBundleIdentifier/`
 /// is also loaded.
 ///
-/// The legacy `config` file (without extension) is first loaded,
-/// then `config.ghostty`.
+/// Older locations are loaded first so a newer file wins on conflict:
+/// the Ghostty <1.3.0 `config` file (without extension), then
+/// `ghostty/config.ghostty` from before the Wintty rename, then
+/// `wintty/config.wintty`.
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
     // Load XDG first
     const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
     defer alloc.free(legacy_xdg_path);
+    const ghostty_xdg_path = try file_load.ghosttyXdgPath(alloc);
+    defer alloc.free(ghostty_xdg_path);
     const xdg_path = try file_load.defaultXdgPath(alloc);
     defer alloc.free(xdg_path);
     const xdg_loaded: bool = xdg_loaded: {
+        // Oldest first, so a newer file overrides an older one.
         const legacy_xdg_action = self.loadOptionalFile(alloc, legacy_xdg_path);
+        const ghostty_xdg_action = self.loadOptionalFile(alloc, ghostty_xdg_path);
         const xdg_action = self.loadOptionalFile(alloc, xdg_path);
-        if (xdg_action != .not_found and legacy_xdg_action != .not_found) {
-            log.warn("both config files `{s}` and `{s}` exist.", .{ legacy_xdg_path, xdg_path });
-            log.warn("loading them both in that order", .{});
-            break :xdg_loaded true;
+
+        var found: usize = 0;
+        for ([_]OptionalFileAction{
+            legacy_xdg_action,
+            ghostty_xdg_action,
+            xdg_action,
+        }) |action| {
+            if (action != .not_found) found += 1;
         }
 
-        break :xdg_loaded xdg_action != .not_found or
-            legacy_xdg_action != .not_found;
+        if (found > 1) {
+            log.warn("multiple config files exist: `{s}`, `{s}`, `{s}`", .{
+                legacy_xdg_path,
+                ghostty_xdg_path,
+                xdg_path,
+            });
+            log.warn("loading the ones that exist, oldest first", .{});
+        }
+
+        break :xdg_loaded found > 0;
     };
 
     // On macOS load the app support directory as well
     if (comptime builtin.os.tag == .macos) {
         const legacy_app_support_path = try file_load.legacyDefaultAppSupportPath(alloc);
         defer alloc.free(legacy_app_support_path);
-        const app_support_path = try file_load.preferredAppSupportPath(alloc);
+        const ghostty_app_support_path = try file_load.ghosttyAppSupportPath(alloc);
+        defer alloc.free(ghostty_app_support_path);
+        const app_support_path = try file_load.defaultAppSupportPath(alloc);
         defer alloc.free(app_support_path);
         const app_support_loaded: bool = loaded: {
+            // All three names differ, so unlike the previous two-path version
+            // there is no way to double-load the same file.
             const legacy_app_support_action = self.loadOptionalFile(
                 alloc,
                 legacy_app_support_path,
             );
-
-            // The app support path and legacy may be the same, since we
-            // use the `preferred` call above. If its the same, avoid
-            // a double-load.
-            const app_support_action: OptionalFileAction = if (!std.mem.eql(
-                u8,
-                legacy_app_support_path,
-                app_support_path,
-            )) self.loadOptionalFile(
+            const ghostty_app_support_action = self.loadOptionalFile(
+                alloc,
+                ghostty_app_support_path,
+            );
+            const app_support_action = self.loadOptionalFile(
                 alloc,
                 app_support_path,
-            ) else .not_found;
+            );
 
-            if (app_support_action != .not_found and legacy_app_support_action != .not_found) {
-                log.warn(
-                    "both config files `{s}` and `{s}` exist.",
-                    .{ legacy_app_support_path, app_support_path },
-                );
-                log.warn("loading them both in that order", .{});
-                break :loaded true;
+            var found: usize = 0;
+            for ([_]OptionalFileAction{
+                legacy_app_support_action,
+                ghostty_app_support_action,
+                app_support_action,
+            }) |action| {
+                if (action != .not_found) found += 1;
             }
 
-            break :loaded app_support_action != .not_found or
-                legacy_app_support_action != .not_found;
+            if (found > 1) {
+                log.warn("multiple config files exist: `{s}`, `{s}`, `{s}`", .{
+                    legacy_app_support_path,
+                    ghostty_app_support_path,
+                    app_support_path,
+                });
+                log.warn("loading the ones that exist, oldest first", .{});
+            }
+
+            break :loaded found > 0;
         };
 
         // If both files are not found, then we create a template file.
