@@ -10,8 +10,8 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
-/// Options the Windows app cannot use, and that do not carry the `macos-`
-/// name prefix.
+/// Options the Windows app cannot use, and that do not carry the `macos-`,
+/// `gtk-`, `adw-` or `linux-` name prefix.
 ///
 /// Every entry here was checked twice before it was added: its doc comment
 /// in Config.zig rules Windows out, *and* nothing under
@@ -64,13 +64,57 @@ const unsupported_names = [_][]const u8{
     // unusable here: nothing under windows/ reads it, and whether an initial
     // window opens is decided by the shell itself.
     "initial-window",
+
+    // "GTK only." Picks the language of the GTK app runtime's own strings.
+    // The WinUI shell does not read it and has no gettext catalog.
+    "language",
+
+    // "This only affects GTK builds." Sets the X11 `WM_CLASS` class field,
+    // the Wayland app ID and the DBus bus name. Nothing under windows/ reads
+    // it; the Windows app is identified by its AUMID instead.
+    "class",
+    // "This only affects GTK builds." The other half of `WM_CLASS`.
+    "x11-instance-name",
+
+    // "This feature is only supported on GTK." A second line of text under
+    // the window title, which the WinUI title bar does not have.
+    "window-subtitle",
+
+    // "Currently only supported on Linux (GTK)." The WinUI tab strip has its
+    // own show/hide rules and does not read this key.
+    "window-show-tab-bar",
+
+    // "Currently only supported in the GTK app runtime." Both titlebar color
+    // keys only take effect under `window-theme = wintty`, which is itself
+    // GTK-only. `window-theme` stays, because it is cross-platform and
+    // windows/Ghostty/Services/ShellThemeService.cs reads it -- only these
+    // two color keys go.
+    "window-titlebar-background",
+    "window-titlebar-foreground",
+
+    // "Only implemented on Linux." Delays process exit after the last window
+    // closes; nothing under windows/ reads it.
+    "quit-after-last-window-closed-delay",
+
+    // "Only has an effect on Linux Wayland." Describes wlr-layer-shell
+    // keyboard focus for the quick terminal, which has no Windows analogue.
+    "quick-terminal-keyboard-interactivity",
+
+    // "This configuration only applies to GTK." Windows toasts go through
+    // Microsoft.Windows.AppNotifications, and neither this key nor its
+    // `clipboard-copy` / `config-reload` values appear under windows/.
+    "app-notifications",
+
+    // "This is only supported on Linux, since this is the only platform
+    // where we have multiple options." Chooses between epoll and io_uring.
+    "async-backend",
 };
 
 /// Whether an option has no place in the Wintty reference, because the
 /// Windows app cannot act on it.
 ///
-/// Two signals, both exact: the `macos-` name prefix, which is always
-/// Windows-irrelevant, and the hand-checked
+/// Two signals, both exact: a name prefix that names another platform's app
+/// runtime -- `macos-`, `gtk-`, `adw-`, `linux-` -- and the hand-checked
 /// list above. Matching prose like "only supported on macOS" looks tempting
 /// and is wrong: that sentence describes *upstream's* platform support, not
 /// this fork's. `window-save-state` and `undo-timeout` both carry it, and
@@ -78,12 +122,29 @@ const unsupported_names = [_][]const u8{
 /// options Windows users actually set. `quick-terminal-animation-duration`
 /// says "Only implemented on macOS" and Windows reads it too.
 ///
-/// Options that merely mention macOS while working everywhere are left
-/// alone. Rewriting their prose to drop the macOS clause is not something a
-/// generator can do safely, since the surrounding sentence usually depends
-/// on it.
+/// The same trap exists for Linux. `window-theme` reads as Linux-only until
+/// you notice the clause belongs to one of its *values* (`wintty`), and
+/// windows/Ghostty/Services/ShellThemeService.cs reads the option. The
+/// `server` value of `window-decoration` is the same shape.
+/// `freetype-load-flags` mentions Linux and then names Windows in the very
+/// next sentence. All three stay.
+///
+/// Every prefixed option was checked the same way as the list above: all
+/// sixteen `gtk-` and `linux-` fields were grepped for across windows/ and
+/// none of them is read, so the prefix rule is safe. `adw-` currently
+/// matches no field at all -- `adw-toolbar-style` is a deprecated alias for
+/// `gtk-toolbar-style` -- and is listed so a future rename cannot slip an
+/// Adwaita option into the reference.
+///
+/// Options that merely mention macOS or Linux while working everywhere are
+/// left alone. Rewriting their prose to drop the platform clause is not
+/// something a generator can do safely, since the surrounding sentence
+/// usually depends on it.
 fn isUnsupportedOnWindows(comptime name: []const u8) bool {
-    if (std.mem.startsWith(u8, name, "macos-")) return true;
+    const prefixes = [_][]const u8{ "macos-", "gtk-", "adw-", "linux-" };
+    for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, name, prefix)) return true;
+    }
     for (unsupported_names) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
@@ -105,8 +166,9 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\browser's search functionality to find the option you're looking
         \\for.
         \\
-        \\Options Wintty cannot act on, including every macOS-only one,
-        \\are omitted. Options unique to this build are listed
+        \\Options Wintty cannot act on, including the macOS-only and
+        \\Linux/GTK-only ones, are omitted. Options unique to this build
+        \\are listed
         \\under
         \\[Windows-Only Options](/docs/config/windows-only).
         \\
@@ -139,8 +201,8 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
                 if (next_field.name[0] == '_') break;
                 if (@hasDecl(help_strings.Config, next_field.name)) break;
 
-                // A macOS-only field can be grouped under an option we are
-                // keeping. Drop its header without ending the group.
+                // A field for another platform can be grouped under an option
+                // we are keeping. Drop its header without ending the group.
                 if (comptime isUnsupportedOnWindows(next_field.name)) continue;
 
                 try writer.writeAll("## `");
