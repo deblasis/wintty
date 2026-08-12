@@ -95,64 +95,56 @@ pub const InitOpts = union(enum) {
 /// including after `deinit` and after a failed `init`. A second call returns
 /// `error.AlreadyInitialized` without touching whatever state is there.
 pub fn init(opts: InitOpts) !void {
-    // The assignment below is unconditional, so re-initializing would leak the
-    // previous GPA, I/O instance and resources dir, and orphan the command
-    // line the args iterator borrows. It would also re-run process-global
-    // setup that nothing undoes: everywhere, `oni.init` is documented
-    // once-per-process; on POSIX, `crash.init` asserts sentry's init thread
-    // starts exactly once while `crash.deinit` joins it without clearing the
-    // handle, and `ResourceLimits.init` snapshots the limit it later restores.
-    // (Both of those are no-ops on Windows.) Tripping that sentry assert is a
-    // panic in Debug and ReleaseSafe, and illegal behavior in ReleaseFast.
+    // Re-initializing would leak the previous GPA, I/O instance and resources
+    // dir, orphan the command line the args iterator borrows, and re-run
+    // process-global setup that nothing undoes: `oni.init` is documented
+    // once-per-process everywhere, and on POSIX `crash.init` asserts sentry's
+    // init thread starts exactly once while `crash.deinit` joins it without
+    // clearing the handle, and `ResourceLimits.init` snapshots the limit it
+    // later restores (both no-ops on Windows).
     //
-    // `.unavailable` is what makes a failure stick: `deinit`, which the
-    // errdefer below calls, leaves that tag, so a failed init is refused here
-    // rather than looking retryable. Returning before the errdefer is armed
-    // leaves any live state untouched.
-    //
-    // A returned error rather than an assertion because the consequence of
-    // being wrong is the leak described above, and an assertion buys nothing
-    // where it would matter: `quirks.inlineAssert` is `unreachable`, which
-    // neither ReleaseFast nor ReleaseSmall checks, so it would fall through
-    // and overwrite the live state in exactly the builds where that is
-    // hardest to diagnose.
+    // An error rather than an assertion: `quirks.inlineAssert` is
+    // `unreachable`, which ReleaseFast and ReleaseSmall do not check, so it
+    // would fall through and do all of that in the builds where it is hardest
+    // to diagnose. Returning here leaves any live state untouched.
     if (state != .uninitialized) return error.AlreadyInitialized;
 
-    // Initialize ourself to nothing so we don't have any extra state.
-    // IMPORTANT: this MUST be initialized before any log output because
-    // the log function uses the global state.
-    state = .{ .initialized = .{
-        // Not `undefined`: the errdefer below arms before the real
-        // implementation is assigned, and `deinit` unconditionally calls
-        // `io_impl.deinit()`, which locks its mutex.
-        .io_impl = .init_single_threaded,
-        .gpa = null,
-        .alloc = undefined,
-        .environ = switch (opts) {
-            .main, .tool => |m| m.environ,
-            .c => |c| c.environ,
-            .c_wide => |c| c.environ,
+    // Initialize ourself to nothing so we don't have any extra state. The log
+    // calls below do not depend on this: with no state `logging` returns the
+    // same defaults assigned here, and `GHOSTTY_LOG` is not read until much
+    // further down.
+    state = .{
+        .initialized = .{
+            // Not `undefined`: the errdefer below arms before the real
+            // implementation is assigned, and `deinit` unconditionally calls
+            // `io_impl.deinit()`, which locks its mutex.
+            .io_impl = .init_single_threaded,
+            .gpa = null,
+            .alloc = undefined,
+            .environ = switch (opts) {
+                .main, .tool => |m| m.environ,
+                .c => |c| c.environ,
+                .c_wide => |c| c.environ,
+            },
+            .args = switch (opts) {
+                .main, .tool => |m| m.args,
+                // A C `char**` cannot carry WTF-16, so on Windows the narrow
+                // entry point cannot express the args vector at all. Fall back to
+                // the process command line from the PEB, as std's own Windows
+                // start code does; `c_wide` is how a caller supplies its own.
+                .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
+                    std.os.windows.peb().ProcessParameters.CommandLine.slice()
+                else
+                    c.argv[0..c.argc] },
+                .c_wide => |c| .{ .vector = c.cmdline },
+            },
+            .tmp_dir_path = null,
+            .action = null,
+            .logging = .{},
+            .rlimits = .{},
+            .resources_dir = .{},
         },
-        .args = switch (opts) {
-            .main, .tool => |m| m.args,
-            // A C `char**` cannot carry WTF-16, so on Windows the narrow
-            // entry point cannot express the args vector at all. Fall back
-            // to the process command line from the PEB, the same source
-            // std's own Windows start code uses, so existing embedders keep
-            // working. Callers that need to supply their own args use
-            // `c_wide`. Elsewhere the caller's argv is authoritative.
-            .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
-                std.os.windows.peb().ProcessParameters.CommandLine.slice()
-            else
-                c.argv[0..c.argc] },
-            .c_wide => |c| .{ .vector = c.cmdline },
-        },
-        .tmp_dir_path = null,
-        .action = null,
-        .logging = .{},
-        .rlimits = .{},
-        .resources_dir = .{},
-    } };
+    };
     const self = &state.initialized;
 
     // `deinit` leaves the state `unavailable`, which is what an embedder that
@@ -293,9 +285,8 @@ pub fn init(opts: InitOpts) !void {
     try internal_os.ensureLocale();
     syncEnviron();
 
-    // Shader compilation uses zioshade, a pure-Zig cross compiler that
-    // needs no global initialization (unlike the former glslang C++
-    // library, which required glslang.init() here).
+    // No shader compiler init: zioshade is pure Zig and needs none, where
+    // upstream calls `glslang.init()` here.
 
     // Initialize oniguruma for regex
     try oni.init(&.{oni.Encoding.utf8});
@@ -479,23 +470,20 @@ pub fn action() ?cli.ghostty.Action {
 
 /// Write a human-readable explanation of an `init` failure to stderr.
 ///
-/// `init` reports a bad command line by returning an error, leaving `std.log`
-/// as the only other sink. libghostty silences that one: `Logging.stderr`
-/// above defaults to false whenever `app_runtime` is `none`, and it does so
-/// before the args are even parsed. An embedder that called us therefore had
-/// nothing to show for a typo but an exit code. Writing to the file directly
-/// skips the log sink so the message survives that default.
+/// `init` reports a failure by returning an error, leaving `std.log` as the
+/// only other sink, and libghostty silences that one: `GlobalState.Logging`
+/// defaults `stderr` to false whenever `app_runtime` is `none`, before the
+/// args are even parsed. Writing to the file directly is what gets a message to an
+/// embedder that would otherwise have nothing but an exit code.
 ///
-/// The exe routes through here too. It touches no global state, by
-/// design: `init` can fail before `io_impl` exists, so the caller may
-/// have nothing initialized to consult.
+/// Every failure gets text, not just the argument-parsing ones. Left to
+/// `std.log.err`, the rest would reach only an embedder that registered a
+/// `ghostty_log_set_callback`, and that registration typically comes after
+/// the init it is trying to get through.
 ///
-/// Every failure gets text, not just the argument-parsing ones. The rest were
-/// previously left to the caller's `std.log.err`, which in the lib artifact
-/// reaches only an embedder that already registered a callback via
-/// `ghostty_log_set_callback` - and that registration typically happens after
-/// init, since init is what the embedder is trying to get through. Eight of
-/// the ten ways `init` can fail produced no bytes anywhere as a result.
+/// The exe routes through here too. It touches no global state by design:
+/// `init` can fail before `io_impl` exists, so the caller may have nothing
+/// initialized to consult.
 pub fn reportInitError(err: anyerror) void {
     var buf: [256]u8 = undefined;
     const message = initErrorText(err, &buf);
@@ -532,8 +520,7 @@ fn initErrorText(err: anyerror, buf: []u8) []const u8 {
 /// own, which `initErrorText` covers with a generic line.
 ///
 /// Split from the write so the mapping can be tested without capturing
-/// stderr. It is no longer a question about whether an error explains
-/// itself - every error does now - only about which wording it gets.
+/// stderr.
 pub fn initErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.MultipleActions => "Error: multiple CLI actions specified. You must specify only one\n" ++
@@ -573,9 +560,9 @@ test "initErrorMessage has no bespoke wording for the rest" {
 }
 
 test "initErrorText still explains an error with no wording of its own" {
-    // The point of the change: these used to produce no bytes at all through
-    // the C API. `OutOfMemory` alone can come from `allocTmpDir`,
-    // `detectArgs`, `ensureLocale`, `oni.init` and `resourcesDir`.
+    // The generic line is what most failures get: `OutOfMemory` alone can
+    // come from `allocTmpDir`, `detectArgs`, `ensureLocale`, `oni.init` and
+    // `resourcesDir`.
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "Error: ghostty failed to initialize err=OutOfMemory\n",
@@ -610,14 +597,10 @@ test "a failed init leaves no usable state and is not retryable" {
     }
     state = .uninitialized;
 
-    // An unknown `+action` fails in `detectArgs`, the earliest error `init`
-    // can return. That keeps this to the allocator, the I/O impl and the tmp
-    // dir rather than standing up (and tearing back down) signal handlers,
-    // oniguruma and the resources dir.
-    //
-    // The args vector is platform-typed - a WTF-16 command line on Windows,
-    // an argv elsewhere - so build it the same way `init` does for the `.c`
-    // prong, with a comptime `if` that leaves the other branch unanalyzed.
+    // An unknown `+action` fails in `detectArgs`, the earliest error a caller
+    // can provoke, so this never stands up signal handlers, oniguruma or the
+    // resources dir. The args vector is platform-typed, so build it under a
+    // comptime `if` that leaves the other branch unanalyzed.
     const vector: std.process.Args.Vector = if (comptime builtin.os.tag == .windows)
         std.unicode.utf8ToUtf16LeStringLiteral("ghostty +definitely-not-an-action")
     else
