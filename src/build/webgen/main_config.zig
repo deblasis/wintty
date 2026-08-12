@@ -10,16 +10,17 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
-/// Options that are macOS-only but do not carry the `macos-` name prefix.
+/// Options the Windows app cannot use, and that do not carry the `macos-`
+/// name prefix.
 ///
 /// Every entry here was checked twice before it was added: its doc comment
-/// in Config.zig says it only applies to macOS, *and* nothing under
+/// in Config.zig rules Windows out, *and* nothing under
 /// `windows/` reads the key. Both halves matter. Prose alone is not enough,
 /// and neither is the prefix.
 ///
 /// If the Windows app ever starts reading one of these, delete it from the
 /// list so the option shows up in the reference again.
-const macos_only_names = [_][]const u8{
+const unsupported_names = [_][]const u8{
     // "Draw fonts with a thicker stroke, if supported. This is currently
     // only supported on macOS." A CoreText stroke tweak; the DirectWrite
     // path has no equivalent and never reads it.
@@ -58,12 +59,18 @@ const macos_only_names = [_][]const u8{
     // The release channel for that same updater: "This only works on macOS
     // since only macOS has an auto-update feature."
     "auto-update-channel",
+
+    // "Only implemented on Linux and macOS." Not macOS-only, but just as
+    // unusable here: nothing under windows/ reads it, and whether an initial
+    // window opens is decided by the shell itself.
+    "initial-window",
 };
 
-/// Whether an option only applies to macOS, and so has no place in the
-/// Wintty reference.
+/// Whether an option has no place in the Wintty reference, because the
+/// Windows app cannot act on it.
 ///
-/// Two signals, both exact: the `macos-` name prefix, and the hand-checked
+/// Two signals, both exact: the `macos-` name prefix, which is always
+/// Windows-irrelevant, and the hand-checked
 /// list above. Matching prose like "only supported on macOS" looks tempting
 /// and is wrong: that sentence describes *upstream's* platform support, not
 /// this fork's. `window-save-state` and `undo-timeout` both carry it, and
@@ -75,9 +82,9 @@ const macos_only_names = [_][]const u8{
 /// alone. Rewriting their prose to drop the macOS clause is not something a
 /// generator can do safely, since the surrounding sentence usually depends
 /// on it.
-fn isMacOSOnly(comptime name: []const u8) bool {
+fn isUnsupportedOnWindows(comptime name: []const u8) bool {
     if (std.mem.startsWith(u8, name, "macos-")) return true;
-    for (macos_only_names) |candidate| {
+    for (unsupported_names) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
     return false;
@@ -98,8 +105,9 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\browser's search functionality to find the option you're looking
         \\for.
         \\
-        \\Options that only apply to macOS are omitted. Options Ghostty
-        \\does not have are listed separately under
+        \\Options Wintty cannot act on, including every macOS-only one,
+        \\are omitted. Options Ghostty does not have are listed separately
+        \\under
         \\[Windows-Only Options](/docs/config/windows-only).
         \\
         \\In the future, we'll have a more user-friendly way to view and
@@ -117,7 +125,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         // Skipping a documented field also drops the undocumented fields
         // grouped under it, since those are only reachable through the
         // inner loop below.
-        if (comptime isMacOSOnly(field.name)) continue;
+        if (comptime isUnsupportedOnWindows(field.name)) continue;
 
         // Write the field name.
         try writer.writeAll("## `");
@@ -133,7 +141,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
 
                 // A macOS-only field can be grouped under an option we are
                 // keeping. Drop its header without ending the group.
-                if (comptime isMacOSOnly(next_field.name)) continue;
+                if (comptime isUnsupportedOnWindows(next_field.name)) continue;
 
                 try writer.writeAll("## `");
                 try writer.writeAll(next_field.name);

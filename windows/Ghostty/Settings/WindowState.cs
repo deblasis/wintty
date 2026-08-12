@@ -10,15 +10,15 @@ namespace Ghostty.Settings;
 /// <summary>
 /// Persistent window state (placement only). The UI preferences
 /// that used to live alongside these fields (vertical-tabs, command
-/// palette backdrop + grouping) have moved to the real ghostty
+/// palette backdrop + grouping) have moved to the real Wintty
 /// config file via <see cref="WindowStateMigration"/>. What remains
 /// is strictly ephemeral shell state -- the window's last geometry
-/// -- that must not pollute the user's committed ghostty config.
-/// One JSON file at <c>%APPDATA%\Ghostty\window-state.json</c>,
+/// -- that must not pollute the user's committed Wintty config.
+/// One JSON file at <c>%APPDATA%\Wintty\window-state.json</c>,
 /// loaded once at startup and written on window close.
 ///
 /// Kept separate from the real config for two reasons: (1) this
-/// value churns on every close, which would make the ghostty config
+/// value churns on every close, which would make the Wintty config
 /// file noisy under source control, and (2) libghostty does not know
 /// about window placement -- it is purely a shell concern.
 ///
