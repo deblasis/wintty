@@ -106,7 +106,7 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\for.
         \\
         \\Options Wintty cannot act on, including every macOS-only one,
-        \\are omitted. Options Ghostty does not have are listed separately
+        \\are omitted. Options this build adds on top of upstream are listed
         \\under
         \\[Windows-Only Options](/docs/config/windows-only).
         \\
