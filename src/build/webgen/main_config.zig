@@ -10,6 +10,24 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
+/// Whether an option only applies to macOS, and so has no place in the
+/// Wintty reference.
+///
+/// The `macos-` name prefix is the only signal used, because it is the only
+/// exact one. Matching prose like "only supported on macOS" looks tempting
+/// and is wrong: that sentence describes *upstream's* platform support, not
+/// this fork's. `window-save-state` and `undo-timeout` both carry it, and
+/// the Windows app implements both -- filtering on prose would have hidden
+/// options Windows users actually set.
+///
+/// Options that merely mention macOS while working everywhere are also left
+/// alone. Rewriting their prose to drop the macOS clause is not something a
+/// generator can do safely, since the surrounding sentence usually depends
+/// on it.
+fn isMacOSOnly(comptime name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "macos-");
+}
+
 pub fn genConfig(writer: *std.Io.Writer) !void {
     // Write the header
     try writer.writeAll(
@@ -19,11 +37,15 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\editOnGithubLink: https://github.com/ghostty-org/ghostty/edit/main/src/config/Config.zig
         \\---
         \\
-        \\This is a reference of all Ghostty configuration options. These
+        \\This is a reference of the Ghostty configuration options. These
         \\options are ordered roughly by how common they are to be used
         \\and grouped with related options. I recommend utilizing your
         \\browser's search functionality to find the option you're looking
         \\for.
+        \\
+        \\Options that only apply to macOS are omitted. Options Ghostty
+        \\does not have are listed separately under
+        \\[Windows-Only Options](/docs/config/windows-only).
         \\
         \\In the future, we'll have a more user-friendly way to view and
         \\organize these options.
@@ -31,11 +53,16 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
         \\
     );
 
-    @setEvalBranchQuota(50_000);
+    @setEvalBranchQuota(200_000);
     const fields = @typeInfo(Config).@"struct".fields;
     inline for (fields, 0..) |field, i| {
         if (field.name[0] == '_') continue;
         if (!@hasDecl(help_strings.Config, field.name)) continue;
+
+        // Skipping a documented field also drops the undocumented fields
+        // grouped under it, since those are only reachable through the
+        // inner loop below.
+        if (comptime isMacOSOnly(field.name)) continue;
 
         // Write the field name.
         try writer.writeAll("## `");
@@ -48,6 +75,10 @@ pub fn genConfig(writer: *std.Io.Writer) !void {
             inline for (fields[i + 1 ..]) |next_field| {
                 if (next_field.name[0] == '_') break;
                 if (@hasDecl(help_strings.Config, next_field.name)) break;
+
+                // A macOS-only field can be grouped under an option we are
+                // keeping. Drop its header without ending the group.
+                if (comptime isMacOSOnly(next_field.name)) continue;
 
                 try writer.writeAll("## `");
                 try writer.writeAll(next_field.name);
