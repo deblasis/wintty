@@ -91,15 +91,19 @@ fn configPath(alloc_arena: Allocator) ![]const u8 {
 /// Returns a const list of possible paths the main config file could be
 /// in for the current OS.
 fn configPathCandidates(alloc_arena: Allocator) ![]const []const u8 {
-    var paths: std.ArrayList([]const u8) = try .initCapacity(alloc_arena, 4);
+    // Three names per location: the current one, the pre-rename Ghostty one,
+    // and the Ghostty <1.3.0 one.
+    var paths: std.ArrayList([]const u8) = try .initCapacity(alloc_arena, 6);
     errdefer paths.deinit(alloc_arena);
 
     if (comptime builtin.os.tag == .macos) {
         paths.appendAssumeCapacity(try file_load.defaultAppSupportPath(alloc_arena));
+        paths.appendAssumeCapacity(try file_load.ghosttyAppSupportPath(alloc_arena));
         paths.appendAssumeCapacity(try file_load.legacyDefaultAppSupportPath(alloc_arena));
     }
 
     paths.appendAssumeCapacity(try file_load.defaultXdgPath(alloc_arena));
+    paths.appendAssumeCapacity(try file_load.ghosttyXdgPath(alloc_arena));
     paths.appendAssumeCapacity(try file_load.legacyDefaultXdgPath(alloc_arena));
 
     return paths.items;

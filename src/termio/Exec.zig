@@ -2523,7 +2523,7 @@ fn maybeProvisionWslTerminfo(
             global.io(),
             alloc,
             &environ_map,
-            .{ .subdir = "ghostty" },
+            .{ .subdir = "wintty" },
         ) catch break :cache null;
         defer alloc.free(state_dir);
         const path = std.fs.path.join(
