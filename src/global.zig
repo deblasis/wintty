@@ -31,32 +31,7 @@ pub const xev = @import("xev").Dynamic;
 /// Global process state. This is initialized in main() for exe artifacts and
 /// by ghostty_init() for lib artifacts. Most other methods in this file will
 /// retrieve items stored in this state.
-var state: State = .uninitialized;
-
-/// Whether there is a usable `GlobalState`, and if not, why not.
-///
-/// Three tags rather than an optional because `init` needs to tell "never
-/// ran" from "ran and is gone" to refuse a second call, and the accessors
-/// need neither of those to be readable. A torn-down `GlobalState` left in
-/// place would let them hand out a deinitialized allocator instead of
-/// tripping, which is how `ghostty_config_new` ended up allocating from a
-/// dead GPA after a failed `init`.
-///
-/// The trip is checked only in Debug and ReleaseSafe. ReleaseFast and
-/// ReleaseSmall still depend on the caller honoring `init`'s error, since
-/// nothing removes the payload bytes; only the tag changes.
-const State = union(enum) {
-    /// `init` has not run.
-    uninitialized,
-
-    /// `init` succeeded and `deinit` has not run. The only tag the accessors
-    /// below will read.
-    initialized: GlobalState,
-
-    /// `init` failed, or `deinit` tore the state down. See `init` for why a
-    /// failure is not retryable.
-    unavailable,
-};
+var state: ?GlobalState = null;
 
 pub const InitOpts = union(enum) {
     main: std.process.Init.Minimal,
@@ -93,7 +68,7 @@ pub const InitOpts = union(enum) {
 
 /// Initialize the global state. This may only be called once per process,
 /// including after `deinit` and after a failed `init`. A second call returns
-/// `error.AlreadyInitialized` without touching whatever state is there.
+/// `error.AlreadyInitialized` without touching the state that is there.
 pub fn init(opts: InitOpts) !void {
     // Re-initializing would leak the previous GPA, I/O instance and resources
     // dir, orphan the command line the args iterator borrows, and re-run
@@ -103,52 +78,44 @@ pub fn init(opts: InitOpts) !void {
     // clearing the handle, and `ResourceLimits.init` snapshots the limit it
     // later restores (both no-ops on Windows).
     //
-    // An error rather than an assertion: `quirks.inlineAssert` is
-    // `unreachable`, which ReleaseFast and ReleaseSmall do not check, so it
-    // would fall through and do all of that in the builds where it is hardest
-    // to diagnose. Returning here leaves any live state untouched.
-    if (state != .uninitialized) return error.AlreadyInitialized;
+    // The state outlives both a failure and a `deinit`, so its presence is
+    // what carries this. An error rather than an assertion: the consequence of
+    // being wrong is the leak above, and `quirks.inlineAssert` is
+    // `unreachable`, which ReleaseFast and ReleaseSmall do not check - it
+    // would fall through in the builds where that is hardest to diagnose.
+    if (state != null) return error.AlreadyInitialized;
 
-    // Initialize ourself to nothing so we don't have any extra state. The log
-    // calls below do not depend on this: with no state `logging` returns the
-    // same defaults assigned here, and `GHOSTTY_LOG` is not read until much
-    // further down.
+    // Initialize ourself to nothing so we don't have any extra state.
+    // IMPORTANT: this MUST be initialized before any log output because
+    // the log function uses the global state.
     state = .{
-        .initialized = .{
-            // Not `undefined`: the errdefer below arms before the real
-            // implementation is assigned, and `deinit` unconditionally calls
-            // `io_impl.deinit()`, which locks its mutex.
-            .io_impl = .init_single_threaded,
-            .gpa = null,
-            .alloc = undefined,
-            .environ = switch (opts) {
-                .main, .tool => |m| m.environ,
-                .c => |c| c.environ,
-                .c_wide => |c| c.environ,
-            },
-            .args = switch (opts) {
-                .main, .tool => |m| m.args,
-                // A C `char**` cannot carry WTF-16, so on Windows the narrow
-                // entry point cannot express the args vector at all. Fall back to
-                // the process command line from the PEB, as std's own Windows
-                // start code does; `c_wide` is how a caller supplies its own.
-                .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
-                    std.os.windows.peb().ProcessParameters.CommandLine.slice()
-                else
-                    c.argv[0..c.argc] },
-                .c_wide => |c| .{ .vector = c.cmdline },
-            },
-            .tmp_dir_path = null,
-            .action = null,
-            .logging = .{},
-            .rlimits = .{},
-            .resources_dir = .{},
+        .io_impl = undefined,
+        .gpa = null,
+        .alloc = undefined,
+        .environ = switch (opts) {
+            .main, .tool => |m| m.environ,
+            .c => |c| c.environ,
+            .c_wide => |c| c.environ,
         },
+        .args = switch (opts) {
+            .main, .tool => |m| m.args,
+            // A C `char**` cannot carry WTF-16, so on Windows the narrow
+            // entry point cannot express the args vector at all. Fall back to
+            // the process command line from the PEB, as std's own Windows
+            // start code does; `c_wide` is how a caller supplies its own.
+            .c => |c| .{ .vector = if (comptime builtin.os.tag == .windows)
+                std.os.windows.peb().ProcessParameters.CommandLine.slice()
+            else
+                c.argv[0..c.argc] },
+            .c_wide => |c| .{ .vector = c.cmdline },
+        },
+        .tmp_dir_path = null,
+        .action = null,
+        .logging = .{},
+        .rlimits = .{},
+        .resources_dir = .{},
     };
-    const self = &state.initialized;
-
-    // `deinit` leaves the state `unavailable`, which is what an embedder that
-    // ignored our error then trips on. See `State`.
+    const self = &state.?;
     errdefer deinit();
 
     // Don't let the narrow-entry-point fallback above be silent: a caller
@@ -304,18 +271,13 @@ pub fn init(opts: InitOpts) !void {
 /// Cleans up the global state. This doesn't _need_ to be called but
 /// doing so in dev modes will check for memory leaks.
 ///
-/// This leaves the state `unavailable`, so the accessors below trip rather
-/// than handing out what was just released, and `init` refuses to run again.
-/// A failed `init` lands in the same place, through its errdefer.
+/// This leaves the state in place, torn down. `init` reads its presence to
+/// refuse a second call, which it must: a failure and a `deinit` are both
+/// permanent.
 ///
-/// Asserts that the state is initialized.
+/// Asserts that the state exists.
 pub fn deinit() void {
-    const self = &state.initialized;
-
-    // Deferred rather than written at the end: `self` points into the payload
-    // this tag replaces, so anything appended below has to run first. The GPA
-    // leak report is one of those - it logs, and `logging` reads the tag.
-    defer state = .unavailable;
+    const self = &state.?;
 
     self.resources_dir.deinit(self.alloc);
 
@@ -341,7 +303,7 @@ pub fn deinit() void {
 pub fn io() std.Io {
     if (builtin.is_test) return std.testing.io;
 
-    return state.initialized.io();
+    return state.?.io();
 }
 
 /// Helper to return either the state's I/O instance, or one from testing.
@@ -350,7 +312,7 @@ pub fn io() std.Io {
 pub fn alloc() std.mem.Allocator {
     if (builtin.is_test) return std.testing.allocator;
 
-    return state.initialized.alloc;
+    return state.?.alloc;
 }
 
 /// Helper to return either the state's environment, or one from testing.
@@ -359,7 +321,7 @@ pub fn alloc() std.mem.Allocator {
 pub fn environ() std.process.Environ {
     if (builtin.is_test) return std.testing.environ;
 
-    return state.initialized.environ;
+    return state.?.environ;
 }
 
 /// Helper to create an environment map off of the state's environment, or one
@@ -369,7 +331,7 @@ pub fn environ() std.process.Environ {
 pub fn environMap() !std.process.Environ.Map {
     if (builtin.is_test) return std.testing.environ.createMap(std.testing.allocator);
 
-    return state.initialized.environ.createMap(state.initialized.alloc);
+    return state.?.environ.createMap(state.?.alloc);
 }
 
 /// Re-synchronizes the global Environ (both the higher-level and I/O versions)
@@ -400,8 +362,8 @@ pub fn syncEnviron() void {
                 while (std.c.environ[len]) |_| : (len += 1) {}
                 break :env_len len;
             } :null] } };
-            state.initialized.environ = new_environ;
-            state.initialized.io_impl.environ = .{ .process_environ = new_environ };
+            state.?.environ = new_environ;
+            state.?.io_impl.environ = .{ .process_environ = new_environ };
         },
     }
 }
@@ -412,7 +374,7 @@ pub fn syncEnviron() void {
 pub fn args() std.process.Args {
     if (builtin.is_test) return .{ .vector = &.{} };
 
-    return state.initialized.args;
+    return state.?.args;
 }
 
 /// Returns the temporary directory discovered from the global environment
@@ -421,7 +383,7 @@ pub fn args() std.process.Args {
 ///
 /// Asserts that the global state is initialized.
 pub fn tmpDirPath() []const u8 {
-    return state.initialized.tmp_dir_path.?;
+    return state.?.tmp_dir_path.?;
 }
 
 /// Returns the global state resources_dir, or an empty one when testing.
@@ -430,7 +392,7 @@ pub fn tmpDirPath() []const u8 {
 pub fn resourcesDir() internal_os.ResourcesDir {
     if (builtin.is_test) return .{};
 
-    return state.initialized.resources_dir;
+    return state.?.resources_dir;
 }
 
 /// Returns the global state rlimits, or an empty one when testing.
@@ -439,33 +401,21 @@ pub fn resourcesDir() internal_os.ResourcesDir {
 pub fn rlimits() ResourceLimits {
     if (builtin.is_test) return .{};
 
-    return state.initialized.rlimits;
+    return state.?.rlimits;
 }
 
-/// Returns the global state logging configuration, or the defaults when there
-/// is no usable state.
+/// Returns the global state logging configuration.
 ///
-/// Unlike the accessors above this one tolerates an absent state rather than
-/// trapping. `logFn` reads it on every log call, including the `std.log.err`
-/// that `ghostty_init` writes to report an `init` failure, which runs after
-/// `init`'s errdefer has already marked the state unavailable. Trapping here
-/// would panic inside the code trying to explain the failure.
-///
-/// The defaults are the same values `init` starts from, so a log emitted with
-/// no state goes wherever one emitted at the very start of `init` would have.
+/// Asserts that the global state is initialized.
 pub fn logging() GlobalState.Logging {
-    return switch (state) {
-        // Pointer capture: a by-value capture copies all of GlobalState.
-        .initialized => |*s| s.logging,
-        .uninitialized, .unavailable => .{},
-    };
+    return state.?.logging;
 }
 
 /// Returns the global state action.
 ///
 /// Asserts that the global state is initialized.
 pub fn action() ?cli.ghostty.Action {
-    return state.initialized.action;
+    return state.?.action;
 }
 
 /// Write a human-readable explanation of an `init` failure to stderr.
@@ -584,72 +534,6 @@ test "initErrorText still explains an error with no wording of its own" {
     );
 }
 
-test "a failed init leaves no usable state and is not retryable" {
-    // This drives the real `init`, so establish the preconditions rather than
-    // inheriting them, and put the state back afterwards. The `deinit` in the
-    // defer matters for the case this test is not expecting: if `init` ever
-    // succeeds here, bailing out without it would strand the GPA, the tmp
-    // dir, the I/O impl and the resources dir on the rest of the suite.
-    const prev = state;
-    defer {
-        if (state == .initialized) deinit();
-        state = prev;
-    }
-    state = .uninitialized;
-
-    // An unknown `+action` fails in `detectArgs`, the earliest error a caller
-    // can provoke, so this never stands up signal handlers, oniguruma or the
-    // resources dir. The args vector is platform-typed, so build it under a
-    // comptime `if` that leaves the other branch unanalyzed.
-    const vector: std.process.Args.Vector = if (comptime builtin.os.tag == .windows)
-        std.unicode.utf8ToUtf16LeStringLiteral("ghostty +definitely-not-an-action")
-    else
-        &.{ "ghostty", "+definitely-not-an-action" };
-
-    try std.testing.expectError(error.InvalidAction, init(.{ .main = .{
-        .environ = std.testing.environ,
-        .args = .{ .vector = vector },
-    } }));
-
-    // The whole point. Every accessor reaches through this tag, and a failed
-    // init that left an `initialized` payload would hand out a dead allocator
-    // and a deinitialized I/O impl instead of tripping.
-    try std.testing.expect(state == .unavailable);
-
-    // And that tag is also what makes the failure stick. `init` re-runs
-    // one-shot process setup that nothing undoes.
-    try std.testing.expectError(error.AlreadyInitialized, init(.{ .main = .{
-        .environ = std.testing.environ,
-        .args = .{ .vector = vector },
-    } }));
-}
-
-test "logging falls back to defaults with no usable state" {
-    const prev = state;
-    defer state = prev;
-
-    // `logFn` hits this after `init`'s errdefer has marked the state
-    // unavailable, so it has to survive what the other accessors trap on. The
-    // uninitialized tag covers a log emitted before `init` is ever called.
-    state = .uninitialized;
-    try std.testing.expectEqual(GlobalState.Logging{}, logging());
-    state = .unavailable;
-    try std.testing.expectEqual(GlobalState.Logging{}, logging());
-
-    // The other branch. Flipped off the defaults so a regression that always
-    // returned them - silently discarding a GHOSTTY_LOG override - fails here
-    // whatever the defaults happen to be on this target.
-    const defaults: GlobalState.Logging = .{};
-    const flipped: GlobalState.Logging = .{
-        .stderr = !defaults.stderr,
-        .macos = !defaults.macos,
-    };
-    var live: GlobalState = undefined;
-    live.logging = flipped;
-    state = .{ .initialized = live };
-    try std.testing.expectEqual(flipped, logging());
-}
-
 /// This represents the global process state. There should only
 /// be one of these at any given moment. This is extracted into a dedicated
 /// struct because it is reused by main and the static C lib.
@@ -725,20 +609,15 @@ pub const ResourceLimits = struct {
 };
 
 test "init refuses a second call" {
-    // Both tags the guard rejects: a live state, and one a failed `init` or a
-    // `deinit` left behind. `opts` is undefined because the guard returns
-    // before touching it - if it ever stopped, this would read an undefined
-    // `Minimal` rather than quietly passing.
+    // A present state is what the guard reads, and `init` leaves one behind
+    // whether it succeeded, failed or has since been torn down. `opts` is
+    // undefined because the guard returns before touching it - if it ever
+    // stopped, this would read an undefined `Minimal` rather than quietly
+    // passing.
     const prev = state;
     defer state = prev;
+    state = undefined;
 
-    state = .{ .initialized = undefined };
-    try std.testing.expectError(
-        error.AlreadyInitialized,
-        init(.{ .tool = undefined }),
-    );
-
-    state = .unavailable;
     try std.testing.expectError(
         error.AlreadyInitialized,
         init(.{ .tool = undefined }),
