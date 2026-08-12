@@ -98,6 +98,13 @@ pub fn build(b: *std.Build) !void {
 
     // Ghostty webdata
     const webdata = try buildpkg.GhosttyWebdata.init(b, &deps);
+    {
+        // The website only needs these .mdx files, but the install step drags
+        // in the whole app build to get them. This lets the docs be
+        // regenerated on their own.
+        const step = b.step("webdata", "Generate website reference data");
+        for (webdata.steps) |s| step.dependOn(s);
+    }
     if (config.emit_webdata) webdata.install();
 
     // Ghostty bench tools

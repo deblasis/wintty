@@ -7,6 +7,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &buffer);
     const stdout = &stdout_writer.interface;
     try genConfig(stdout);
+    try stdout.flush();
 }
 
 pub fn genConfig(writer: *std.Io.Writer) !void {
