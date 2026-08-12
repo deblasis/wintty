@@ -154,6 +154,21 @@
       <!-- Escape backslash first, then double-quote, so an arbitrary BuildLabel
            stays a valid C# string literal in the generated source. -->
       <_WinttyBuildLabel>$(BuildLabel.Replace('\','\\').Replace('"','\"'))</_WinttyBuildLabel>
+      <!--
+        The Shell's identity key for this build. Windows groups taskbar
+        buttons, jump lists and toasts by AUMID, so two installs sharing
+        one string merge into a single app in the shell no matter how
+        they were packaged. Baking it in here rather than hardcoding it
+        in AppIdentity lets each tier AND each variant carry its own,
+        which is the only way Pro Desktop and Pro Enterprise can differ:
+        they are one tier off one patch series, split only by ProVariant,
+        so nothing patch-shaped can tell them apart.
+
+        Overridable so wintty-release can set it per variant. The default
+        is what the public build ships. Escaped like BuildLabel above.
+      -->
+      <_WinttyAumId Condition="'$(_WinttyAumId)' == ''">com.deblasis.wintty</_WinttyAumId>
+      <_WinttyAumId>$(_WinttyAumId.Replace('\','\\').Replace('"','\"'))</_WinttyAumId>
     </PropertyGroup>
 
     <ItemGroup>
@@ -166,6 +181,7 @@
       <_BuildInfoLines Include="    public const string WinttyCommit = &quot;$(_WinttyCommit)$(_WinttyCommitDirty)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string MsbuildConfig = &quot;$(Configuration)&quot;%3B"/>
       <_BuildInfoLines Include="    public const string BuildLabel = &quot;$(_WinttyBuildLabel)&quot;%3B"/>
+      <_BuildInfoLines Include="    public const string AumId = &quot;$(_WinttyAumId)&quot;%3B"/>
       <_BuildInfoLines Include="    public const Edition Edition = Edition.Oss%3B"/>
       <_BuildInfoLines Include="}"/>
     </ItemGroup>
