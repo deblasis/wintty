@@ -457,7 +457,7 @@ test "disk cache default path" {
     const testing = std.testing;
     const alloc = std.testing.allocator;
 
-    const path = try DiskCache.defaultPath(alloc, "ghostty");
+    const path = try DiskCache.defaultPath(alloc, "wintty");
     defer alloc.free(path);
     try testing.expect(path.len > 0);
 }
