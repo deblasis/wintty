@@ -98,6 +98,7 @@ pub fn build(b: *std.Build) !void {
 
     // Ghostty webdata
     const webdata = try buildpkg.GhosttyWebdata.init(b, &deps);
+    webdata.addStep();
     if (config.emit_webdata) webdata.install();
 
     // Ghostty bench tools
