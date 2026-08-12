@@ -47,7 +47,7 @@
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
-                        <ComboBoxItem Tag="ghostty">
+                        <ComboBoxItem Tag="wintty">
                             <StackPanel>
                                 <!-- Text set in code-behind from AppIdentity.ProductName. -->
                                 <TextBlock x:Name="WindowThemeProductLabel"
