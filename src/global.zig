@@ -99,8 +99,9 @@ pub fn init(opts: InitOpts) !void {
     // dir, orphan the command line the args iterator borrows, and re-run
     // process-global setup that nothing undoes: `oni.init` is documented
     // once-per-process everywhere, and on POSIX `crash.init` asserts sentry's
-    // init thread starts exactly once while `ResourceLimits.init` snapshots
-    // the limit it later restores (both no-ops on Windows).
+    // init thread starts exactly once while `crash.deinit` joins it without
+    // clearing the handle, and `ResourceLimits.init` snapshots the limit it
+    // later restores (both no-ops on Windows).
     //
     // An error rather than an assertion: `quirks.inlineAssert` is
     // `unreachable`, which ReleaseFast and ReleaseSmall do not check, so it
@@ -108,9 +109,10 @@ pub fn init(opts: InitOpts) !void {
     // to diagnose. Returning here leaves any live state untouched.
     if (state != .uninitialized) return error.AlreadyInitialized;
 
-    // Initialize ourself to nothing so we don't have any extra state.
-    // Assign before any log output: `logging` falls back to defaults without
-    // a state, so an earlier log ignores whatever `GHOSTTY_LOG` asks for.
+    // Initialize ourself to nothing so we don't have any extra state. The log
+    // calls below do not depend on this: with no state `logging` returns the
+    // same defaults assigned here, and `GHOSTTY_LOG` is not read until much
+    // further down.
     state = .{
         .initialized = .{
             // Not `undefined`: the errdefer below arms before the real
@@ -469,15 +471,15 @@ pub fn action() ?cli.ghostty.Action {
 /// Write a human-readable explanation of an `init` failure to stderr.
 ///
 /// `init` reports a failure by returning an error, leaving `std.log` as the
-/// only other sink, and libghostty silences that one: `Logging.stderr` above
-/// defaults to false whenever `app_runtime` is `none`, before the args are
-/// even parsed. Writing to the file directly is what gets a message to an
+/// only other sink, and libghostty silences that one: `GlobalState.Logging`
+/// defaults `stderr` to false whenever `app_runtime` is `none`, before the
+/// args are even parsed. Writing to the file directly is what gets a message to an
 /// embedder that would otherwise have nothing but an exit code.
 ///
-/// Every failure gets text, not just the argument-parsing ones. The rest
-/// reach only an embedder that registered a `ghostty_log_set_callback`, and
-/// that registration typically comes after the init it is trying to get
-/// through.
+/// Every failure gets text, not just the argument-parsing ones. Left to
+/// `std.log.err`, the rest would reach only an embedder that registered a
+/// `ghostty_log_set_callback`, and that registration typically comes after
+/// the init it is trying to get through.
 ///
 /// The exe routes through here too. It touches no global state by design:
 /// `init` can fail before `io_impl` exists, so the caller may have nothing
@@ -595,8 +597,8 @@ test "a failed init leaves no usable state and is not retryable" {
     }
     state = .uninitialized;
 
-    // An unknown `+action` fails in `detectArgs`, the earliest error `init`
-    // can return, so this never stands up signal handlers, oniguruma or the
+    // An unknown `+action` fails in `detectArgs`, the earliest error a caller
+    // can provoke, so this never stands up signal handlers, oniguruma or the
     // resources dir. The args vector is platform-typed, so build it under a
     // comptime `if` that leaves the other branch unanalyzed.
     const vector: std.process.Args.Vector = if (comptime builtin.os.tag == .windows)
