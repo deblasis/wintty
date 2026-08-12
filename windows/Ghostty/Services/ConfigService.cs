@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -303,23 +302,28 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     {
         _dispatcher = dispatcher;
 
-        // A failed ghostty_init leaves the global state tagged unavailable,
-        // and the accessors trip on that tag rather than reading through it.
-        // ConfigNew allocates from the global allocator, so reaching here
-        // without a successful init is a native trap in Debug and ReleaseSafe
-        // and undefined behavior in ReleaseFast, which is the build where it
-        // would surface as a crash with no managed stack.
+        // ConfigNew allocates from libghostty's global allocator. A failed
+        // ghostty_init leaves the global state in place but torn down, so the
+        // allocator reached here would be a deinitialized one: no trap, in any
+        // build mode, just a corrupted heap and a crash somewhere later with
+        // no managed stack and nothing pointing back here.
         //
-        // Program.MainImpl owns that call and makes it before starting WinUI,
-        // so by the time this constructor runs the decision is already made
-        // and this only has to state the precondition. Initializing from here
-        // would put a process-lifetime decision partway down the object graph,
-        // and its exit-on-failure would run inside Application.Start's
-        // initialization callback where StartGui's catch cannot see it.
-        Debug.Assert(
-            Program.IsGhosttyInitialized,
-            "ghostty_init must run at the composition root before any " +
-            "libghostty export that touches global state.");
+        // That makes this check the only one there is, which is why it throws
+        // rather than asserting. Debug.Assert compiles out of Release, and
+        // Release is where an unexplained native crash costs the most.
+        //
+        // Program.MainImpl owns the init call and makes it before starting
+        // WinUI, so this states a precondition rather than enforcing a policy.
+        // Initializing from here would put a process-lifetime decision partway
+        // down the object graph, and its exit-on-failure would run inside
+        // Application.Start's initialization callback where StartGui's catch
+        // cannot see it.
+        if (!Program.IsGhosttyInitialized)
+        {
+            throw new InvalidOperationException(
+                "ghostty_init must run at the composition root before any " +
+                "libghostty export that touches global state.");
+        }
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
