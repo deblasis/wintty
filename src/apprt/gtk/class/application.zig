@@ -959,8 +959,8 @@ pub const Application = extern struct {
         const headerbar_background = config.@"window-titlebar-background" orelse config.background;
         const headerbar_foreground = config.@"window-titlebar-foreground" orelse config.foreground;
 
-        switch (window_theme) {
-            .ghostty => try writer.print(
+        if (window_theme.usesTerminalColors()) {
+            try writer.print(
                 \\windowhandle {{
                 \\  background-color: rgb({d},{d},{d});
                 \\  color: rgb({d},{d},{d});
@@ -979,8 +979,7 @@ pub const Application = extern struct {
                 headerbar_background.r,
                 headerbar_background.g,
                 headerbar_background.b,
-            }),
-            else => {},
+            });
         }
     }
 
@@ -1082,8 +1081,8 @@ pub const Application = extern struct {
             \\
         );
 
-        switch (window_theme) {
-            .ghostty => try writer.print(
+        if (window_theme.usesTerminalColors()) {
+            try writer.print(
                 \\:root {{
                 \\  --ghostty-fg: rgb({d},{d},{d});
                 \\  --ghostty-bg: rgb({d},{d},{d});
@@ -1111,8 +1110,7 @@ pub const Application = extern struct {
                 headerbar_background.r,
                 headerbar_background.g,
                 headerbar_background.b,
-            }),
-            else => {},
+            });
         }
     }
 
@@ -1434,7 +1432,7 @@ pub const Application = extern struct {
         // Setup our initial light/dark
         const style = self.as(adw.Application).getStyleManager();
         style.setColorScheme(switch (config.@"window-theme") {
-            .auto, .ghostty => auto: {
+            .auto, .wintty, .ghostty => auto: {
                 const lum = config.background.toTerminalRGB().perceivedLuminance();
                 break :auto if (lum > 0.5)
                     .prefer_light
