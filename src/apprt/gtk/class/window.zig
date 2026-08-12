@@ -720,13 +720,13 @@ pub const Window = extern struct {
             config.@"background-opacity" >= 1,
         );
 
-        // Apply class to color headerbar if window-theme is set to `ghostty` and
-        // GTK version is before 4.16. The conditional is because above 4.16
-        // we use GTK CSS color variables.
+        // Apply class to color headerbar if window-theme is set to `wintty`
+        // (or its `ghostty` alias) and GTK version is before 4.16. The
+        // conditional is because above 4.16 we use GTK CSS color variables.
         self.toggleCssClass(
             "window-theme-ghostty",
             !gtk_version.atLeast(4, 16, 0) and
-                config.@"window-theme" == .ghostty,
+                config.@"window-theme".usesTerminalColors(),
         );
 
         // Move the tab bar to the proper location.

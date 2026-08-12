@@ -1581,7 +1581,7 @@ class: ?[:0]const u8 = null,
 /// This controls the instance name field of the `WM_CLASS` X11 property when
 /// running under X11. It has no effect otherwise.
 ///
-/// The default is `ghostty`.
+/// The default is `wintty`.
 ///
 /// This only affects GTK builds.
 @"x11-instance-name": ?[:0]const u8 = null,
@@ -2204,8 +2204,10 @@ keybind: Keybinds = .{},
 ///   * `system` - Use the system theme.
 ///   * `light` - Use the light theme regardless of system theme.
 ///   * `dark` - Use the dark theme regardless of system theme.
-///   * `ghostty` - Use the background and foreground colors specified in the
-///     Ghostty configuration. This is only supported on Linux builds.
+///   * `wintty` - Use the background and foreground colors specified in the
+///     Wintty configuration. This is only supported on Linux builds.
+///   * `ghostty` - Deprecated alias for `wintty`, kept so configurations
+///     written for upstream Ghostty keep working. Prefer `wintty`.
 ///
 /// On macOS, if `macos-titlebar-style` is `tabs` or `transparent`, the window theme will be
 /// automatically set based on the luminosity of the terminal background color.
@@ -2352,14 +2354,14 @@ keybind: Keybinds = .{},
 @"window-show-tab-bar": WindowShowTabBar = .auto,
 
 /// Background color for the window titlebar. This only takes effect if
-/// window-theme is set to ghostty. Currently only supported in the GTK app
+/// window-theme is set to wintty. Currently only supported in the GTK app
 /// runtime.
 ///
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"window-titlebar-background": ?Color = null,
 
 /// Foreground color for the window titlebar. This only takes effect if
-/// window-theme is set to ghostty. Currently only supported in the GTK app
+/// window-theme is set to wintty. Currently only supported in the GTK app
 /// runtime.
 ///
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
@@ -9407,7 +9409,27 @@ pub const WindowTheme = enum {
     system,
     light,
     dark,
+    wintty,
+
+    /// Deprecated alias for `wintty`. Kept as a real tag rather than
+    /// canonicalized at parse time so that a config written against upstream
+    /// Ghostty keeps round-tripping through `+show-config` and the C API
+    /// unchanged. Never compare against this tag directly; use
+    /// `usesTerminalColors` so both spellings stay in lockstep.
     ghostty,
+
+    /// True when the window chrome takes its colors from the configured
+    /// terminal background/foreground instead of a light/dark system theme.
+    ///
+    /// This exists so the `wintty`/`ghostty` pair is spelled out in exactly
+    /// one exhaustive switch. Call sites that compared against a single tag
+    /// would silently stop matching the other spelling.
+    pub fn usesTerminalColors(self: WindowTheme) bool {
+        return switch (self) {
+            .wintty, .ghostty => true,
+            .auto, .system, .light, .dark => false,
+        };
+    }
 };
 
 /// See window-colorspace
@@ -11308,6 +11330,36 @@ test "theme loading correct light/dark" {
             .g = 0xEE,
             .b = 0xEE,
         }, new.background);
+    }
+}
+
+test "window-theme accepts ghostty as an alias for wintty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--window-theme=wintty"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+
+        try testing.expect(cfg.@"window-theme" == .wintty);
+        try testing.expect(cfg.@"window-theme".usesTerminalColors());
+    }
+
+    // The pre-rename spelling has to keep parsing and has to drive the same
+    // palette-derived chrome, otherwise upgrading silently changes the theme
+    // of anyone still carrying an upstream Ghostty config.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--window-theme=ghostty"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+
+        try testing.expect(cfg.@"window-theme" == .ghostty);
+        try testing.expect(cfg.@"window-theme".usesTerminalColors());
     }
 }
 

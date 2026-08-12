@@ -100,8 +100,9 @@ public interface IConfigService : IDisposable
 
     /// <summary>
     /// Window theme from config: "light", "dark", "system", "auto", or
-    /// "ghostty" (palette-derived chrome). Controls both the XAML
-    /// ElementTheme and the DWM title bar chrome.
+    /// "wintty" (palette-derived chrome; "ghostty" is a deprecated alias
+    /// libghostty still accepts). Controls both the XAML ElementTheme and
+    /// the DWM title bar chrome.
     /// </summary>
     string WindowTheme { get; }
 
