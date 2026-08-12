@@ -117,13 +117,3 @@ pub fn install(self: *const GhosttyWebdata) void {
     const b = self.steps[0].owner;
     for (self.steps) |step| b.getInstallStep().dependOn(step);
 }
-
-/// Expose the webdata generation as its own top-level step. The website only
-/// needs these three .mdx files, and depending on the full install step drags
-/// in the whole app build (libghostty, harfbuzz, the GUI) just to regenerate
-/// documentation. `zig build webdata` builds only the generators.
-pub fn addStep(self: *const GhosttyWebdata) void {
-    const b = self.steps[0].owner;
-    const webdata_step = b.step("webdata", "Generate website reference data");
-    for (self.steps) |s| webdata_step.dependOn(s);
-}
