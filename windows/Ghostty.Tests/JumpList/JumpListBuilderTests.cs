@@ -8,7 +8,7 @@ namespace Ghostty.Tests.JumpList;
 public class JumpListBuilderTests
 {
     private const string TestExe = @"C:\fake\Wintty.exe";
-    private const string TestAppId = "com.deblasis.ghostty";
+    private const string TestAppId = "com.deblasis.wintty";
 
     [Fact]
     public void Build_sets_app_id()
