@@ -367,7 +367,7 @@ public partial class App : Application
         // Set the explicit AppUserModelID. This MUST happen before
         // any shell interop call (jump list registration, taskbar
         // icon operations, toast notifications).
-        const string AppUserModelId = "com.deblasis.ghostty";
+        const string AppUserModelId = Ghostty.Core.AppIdentity.AumId;
         try
         {
             Windows.Win32.PInvoke.SetCurrentProcessExplicitAppUserModelID(AppUserModelId)
