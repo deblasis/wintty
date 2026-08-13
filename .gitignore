@@ -1,6 +1,10 @@
 *~
 .*.swp
 .swp
+# Merge/rebase artefacts. The licenses/ glob is unconditional, so a stray
+# .orig left by a tier rebase would otherwise ship to users.
+*.orig
+*.rej
 *.log
 .DS_Store
 .vscode/
