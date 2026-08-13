@@ -38,6 +38,11 @@ internal sealed class LaunchIconCoordinator
     private DispatcherQueueTimer? _deferred;
     private Storyboard? _fade;
     private bool _armed;
+    // True once the compositor has produced a frame, which is the first
+    // moment the icon is actually on screen. Until then the clocks are
+    // not running and a ready signal is held rather than acted on.
+    private bool _onScreenYet;
+    private bool _readyWhileHidden;
 
     public LaunchIconCoordinator(
         Microsoft.UI.Xaml.Controls.Image icon, DispatcherQueue dispatcher)
@@ -47,9 +52,9 @@ internal sealed class LaunchIconCoordinator
     }
 
     /// <summary>
-    /// Show the icon and start both clocks. Idempotent: a second call is
-    /// ignored, so re-entrancy during window construction cannot restart
-    /// the minimum-visible window.
+    /// Show the icon and wait for the compositor to put it on screen.
+    /// Idempotent: a second call is ignored, so re-entrancy during
+    /// window construction cannot restart the timing.
     /// </summary>
     public void Arm()
     {
@@ -65,20 +70,45 @@ internal sealed class LaunchIconCoordinator
         // soften the window's own entrance.
         _icon.Opacity = 1;
         _icon.Visibility = Visibility.Visible;
-        _onScreen.Start();
 
-        _watchdog = RunAfter(LaunchIconPolicy.WatchdogMs, () => Apply(_policy.Timeout()));
+        // Arm() runs during the window constructor, and WinUI shows the
+        // HWND well before it composes a first XAML frame -- measured at
+        // roughly two seconds on a cold Debug start. Counting the dwell
+        // and the watchdog from here would spend most of both budgets
+        // while the icon is not yet on screen, so the icon could fade
+        // out before the user ever saw it. Start the clocks on the first
+        // composed frame instead, which is the first moment the icon is
+        // genuinely visible.
+        CompositionTarget.Rendering += OnFirstComposedFrame;
     }
 
     /// <summary>
     /// The first surface reported that it has rendered. Safe to call
-    /// before <see cref="Arm"/> (does nothing) and more than once (the
-    /// policy latches).
+    /// before <see cref="Arm"/> (does nothing), before the icon is on
+    /// screen (held until it is), and more than once (the policy
+    /// latches).
     /// </summary>
     public void NotifyReady()
     {
         if (!_armed) return;
+        if (!_onScreenYet)
+        {
+            _readyWhileHidden = true;
+            return;
+        }
         Apply(_policy.Ready((int)_onScreen.ElapsedMilliseconds));
+    }
+
+    private void OnFirstComposedFrame(object? sender, object e)
+    {
+        CompositionTarget.Rendering -= OnFirstComposedFrame;
+        _onScreenYet = true;
+        _onScreen.Start();
+        _watchdog = RunAfter(LaunchIconPolicy.WatchdogMs, () => Apply(_policy.Timeout()));
+
+        // The surface beat us to the compositor. Zero elapsed, so the
+        // policy grants the full minimum dwell from this frame.
+        if (_readyWhileHidden) Apply(_policy.Ready(0));
     }
 
     private void Apply(LaunchIconDecision decision)
