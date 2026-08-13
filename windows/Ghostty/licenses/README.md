@@ -5,53 +5,87 @@ Every file in this directory is copied into the application payload next to
 both take the publish folder wholesale, so anything added here reaches users
 without a packaging change.
 
-This is a hand-maintained set, not a generated one. It covers the components
-we redistribute as binaries and the fonts compiled into `ghostty.dll`. It does
-**not** yet cover the full managed dependency graph — see "Known gaps" below.
+This is a hand-maintained set describing what the **Windows** build ships.
+Each file starts with an `Applies to:` line naming the components it covers,
+because several components share one licence text and reproducing it per
+component would be noise.
 
-## What covers what
+## Coverage
 
-| File | Component | Licence |
-|---|---|---|
-| `Wintty-LICENSE.txt` | Wintty itself, and Ghostty which it is based on | MIT |
-| `WindowsTerminal-LICENSE.txt` | `conpty.dll`, `OpenConsole.exe` | MIT |
-| `DirectXShaderCompiler-LICENSE-LLVM.txt` | `dxcompiler.dll` | LLVM / University of Illinois NCSA |
-| `DirectXShaderCompiler-LICENSE-MS.txt` | `dxcompiler.dll` redistribution grant | Microsoft |
-| `Skia-LICENSE.txt` | Skia, compiled into `libSkiaSharp.dll` | BSD-3-Clause |
-| `SkiaSharp-LICENSE.txt` | the SkiaSharp binding itself | MIT |
-| `HarfBuzz-COPYING.txt` | HarfBuzz, compiled into `libHarfBuzzSharp.dll` | "Old MIT" |
-| `HarfBuzzSharp-LICENSE.txt` | the HarfBuzzSharp binding itself | MIT |
-| `Fonts-OFL-1.1.txt` | JetBrains Mono, Nerd Fonts Symbols, Noto Emoji | SIL OFL 1.1 |
-| `Fonts-MIT.txt` | MIT-licensed embedded fonts | MIT |
-| `Fonts-BSD-2-Clause.txt` | BSD-licensed embedded fonts | BSD-2-Clause |
+**Wintty itself** — `Wintty-LICENSE.txt` (MIT), covering Wintty and Ghostty,
+which it is based on.
 
-The binding libraries and the native libraries inside them are listed
-separately on purpose. `SkiaSharp-LICENSE.txt` is the MIT text for the C#
-binding; it does not cover Skia, which is BSD-3-Clause and carries its own
-notice requirement. The same split applies to HarfBuzz. Shipping only the
-binding licence would under-report what is actually in the DLL.
+**Binaries we redistribute unmodified.** `WindowsTerminal-LICENSE.txt` covers
+`conpty.dll` and `OpenConsole.exe`. `DirectXShaderCompiler-LICENSE-LLVM.txt`
+and `-LICENSE-MS.txt` cover `dxcompiler.dll`; those two are staged straight
+from the pinned `Microsoft.Direct3D.DXC` package rather than vendored here, so
+they cannot drift from the binary they cover.
 
-The two DXC files are staged directly from the pinned
-`Microsoft.Direct3D.DXC` package rather than checked in here, so they cannot
-drift from the binary they cover. Everything else is vendored, because the
-upstream package either ships no licence text at all or ships only the
-binding's.
+**Managed dependencies** resolved through NuGet — the Windows App SDK family,
+the `Microsoft.Extensions.*` and `System.*` set, WebView2, the Svg.Skia family
+and ExCSS. Where a package ships its own licence text that text is used
+verbatim; where it declares only an SPDX expression, the body is paired with
+the package's own copyright line, since the copyright is the part a notice is
+actually required to carry.
 
-Fonts are grouped by licence rather than by font because the mapping from
-font to licence already lives in `src/font/res/README.md`, which names each
-embedded font with its copyright line. OFL 1.1 requires the licence travel
-with the font, and the upstream JetBrains Mono archive we fetch carries none,
-which is why these are vendored here.
+**Code compiled into `ghostty.dll`** — freetype, harfbuzz, zlib, libpng,
+oniguruma, highway, wuffs, imgui, libxev, uucode, vaxis, zigimg, zf, z2d,
+simdutf, and the zioshade cross-compiler with its two dependencies. These have
+no package-manager entry in the .NET build; most come from the resolved Zig
+dependency cache, but several are missing from it because their upstream
+`paths` excludes the licence from the published tarball, and `simdutf` is
+vendored in-tree with no package entry at all. Those were taken from the
+projects themselves.
 
-## Known gaps
+**Third-party code inside binaries we ship.** A top-level licence usually
+covers only that project's own code, not what it statically links. These
+enumerate the rest:
 
-Managed dependencies resolved through NuGet are not covered yet. Most declare
-an SPDX expression and ship no licence text, so collecting them means pairing
-each package's `<copyright>` with the SPDX body — mechanical, but more than a
-file copy. The same applies to the C libraries statically linked into
-`ghostty.dll` (freetype, zlib, libpng, oniguruma, libxml2, simdutf, highway,
-fontconfig, wuffs) and to the Zig package graph.
+- `WindowsAppSDK-NOTICE.txt` — inside the Windows App SDK runtime binaries
+- `WindowsML-ThirdPartyNotices.txt` — inside `onnxruntime.dll`, `DirectML.dll`
+- `SkiaSharp-HarfBuzzSharp-native-THIRD-PARTY-NOTICES.txt` — inside
+  `libSkiaSharp.dll` and `libHarfBuzzSharp.dll`
+- `WinUI-NOTICE.txt`, `WebView2-NOTICE.txt` — inside their respective binaries
+- `uucode-sublicence-*.txt` — the two licences uucode's own notice refers to
 
-Adding a component here is the right move whenever we start redistributing a
-new binary. Adding one to the payload without a licence file is the failure
-mode this directory exists to prevent.
+`Skia-LICENSE.txt` and `harfbuzz-LICENSE.txt` cover those projects' own code;
+what they statically link is in the native notices file above.
+`HarfBuzzSharp-and-4-more-LICENSE.txt` is the MIT text for the C# bindings and
+covers neither.
+
+**Fonts.** `jetbrains_mono-LICENSE.txt` and
+`nerd_fonts_symbols_only-LICENSE.txt` cover the fonts embedded in
+`ghostty.dll`. `Fonts-OFL-1.1.txt`, `Fonts-MIT.txt` and
+`Fonts-BSD-2-Clause.txt` cover the OFL, MIT and BSD fonts that live in
+`src/font/res` as test fixtures; Noto Emoji is included there because it is
+embedded on other platforms even though the Windows build guards it out. OFL
+and MIT both require the copyright line specifically, so each of those files
+carries the holders, which the bare upstream templates do not.
+
+## What this does not cover
+
+Tier-specific dependencies added by the release repo's overlays — the Pro
+tier's speech and compression packages among them — are not here, because this
+directory lives in the base repo and never sees them. They need the same
+treatment in their own overlay.
+
+Build-time-only components are absent: the compiler toolchain, source
+generators, metadata packages, and Zig graph entries reached only by the build
+machine or by tests. The NativeAOT compiler is the exception worth naming —
+its output is not redistributed but the .NET runtime it links into
+`Wintty.exe` is, which is why the runtime is named on the
+`Microsoft.Extensions.*` file rather than given one of its own.
+
+## Adding to this
+
+Adding a component to the payload without adding its licence here is the
+failure this directory exists to prevent.
+
+Two traps, both of which have already bitten this set. A package's published
+tarball may exclude its own licence file, so the dependency cache is not a
+reliable source — check the project. And a project's top-level licence
+frequently does not cover what it statically links; look for a `NOTICE` or
+`THIRD-PARTY-NOTICES` file beside it. If a component declares only an SPDX
+expression, pair the body with the package's own copyright line, and prefer
+the project's real licence file over a template — a notice that names no
+copyright holder is worse than no notice.

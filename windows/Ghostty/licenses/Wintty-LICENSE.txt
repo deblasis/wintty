@@ -1,3 +1,6 @@
+Applies to: Wintty, and Ghostty which it is based on
+----------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors

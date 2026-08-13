@@ -1,3 +1,6 @@
+Applies to: HarfBuzzSharp, HarfBuzzSharp.NativeAssets.Win32, SkiaSharp, SkiaSharp.HarfBuzz, SkiaSharp.NativeAssets.Win32
+----------------------------------------------------------------------
+
 Copyright (c) 2015-2016 Xamarin, Inc.
 Copyright (c) 2017-2018 Microsoft Corporation.
 

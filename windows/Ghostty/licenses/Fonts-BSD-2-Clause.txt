@@ -1,3 +1,6 @@
+Applies to: BSD-licensed fonts in src/font/res (test fixtures, not embedded in the binary)
+----------------------------------------------------------------------
+
 Copyright (c) 2018-2024, Frederic Cambus
 All rights reserved.
 
