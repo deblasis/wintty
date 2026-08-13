@@ -56,39 +56,6 @@ public sealed class LaunchIconPolicyTests
     }
 
     [Fact]
-    public void Timeout_fades_immediately()
-    {
-        var policy = new LaunchIconPolicy();
-
-        var decision = policy.Timeout();
-
-        Assert.Equal(LaunchIconOutcome.FadeNow, decision.Outcome);
-        Assert.Equal(0, decision.DelayMs);
-    }
-
-    [Fact]
-    public void Ready_after_timeout_is_ignored()
-    {
-        var policy = new LaunchIconPolicy();
-        policy.Timeout();
-
-        var decision = policy.Ready(elapsedMs: 5000);
-
-        Assert.Equal(LaunchIconOutcome.Ignore, decision.Outcome);
-    }
-
-    [Fact]
-    public void Timeout_after_ready_is_ignored()
-    {
-        var policy = new LaunchIconPolicy();
-        policy.Ready(elapsedMs: 800);
-
-        var decision = policy.Timeout();
-
-        Assert.Equal(LaunchIconOutcome.Ignore, decision.Outcome);
-    }
-
-    [Fact]
     public void Second_ready_is_ignored()
     {
         var policy = new LaunchIconPolicy();
@@ -97,13 +64,5 @@ public sealed class LaunchIconPolicyTests
         var decision = policy.Ready(elapsedMs: 60);
 
         Assert.Equal(LaunchIconOutcome.Ignore, decision.Outcome);
-    }
-
-    [Fact]
-    public void Watchdog_is_longer_than_the_minimum_visible_time()
-    {
-        // Otherwise the watchdog could fire while the deferred fade is
-        // still pending and the two would race.
-        Assert.True(LaunchIconPolicy.WatchdogMs > LaunchIconPolicy.MinVisibleMs);
     }
 }

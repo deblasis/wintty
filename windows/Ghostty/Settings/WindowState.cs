@@ -36,6 +36,14 @@ internal sealed class WindowState
     public int? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }
 
+    // Last resolved terminal background, RGB. Written on close purely so
+    // the next cold start's pre-XAML splash can fill the window rect with
+    // the right colour. The splash runs before libghostty is initialized
+    // and so before any theme has been resolved, and reading it back from
+    // here is what stops the launch flashing a mismatched surface. Null
+    // until the first close; the splash falls back to the config default.
+    public uint? BackgroundRgb { get; set; }
+
     // User-resized height of the quake / drop-down window, remembered
     // per-user so a manual resize survives restarts. Null until the user
     // first resizes. Distinct from WindowHeight (regular window placement);

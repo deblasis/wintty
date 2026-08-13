@@ -849,6 +849,15 @@ public static partial class Program
             WinRT.ComWrappersSupport.InitializeComWrappers();
             WriteStderr($"{AppIdentity.LogTag} ComWrappers initialized");
 
+            // Put the launch splash up before WinUI starts. Everything
+            // below this line -- Application.Start, App's ctor, config
+            // load, libghostty init, the first XAML frame -- is seconds of
+            // dead time on a cold start during which the main window's
+            // HWND exists and paints black. The splash covers that rect
+            // until there is real content to reveal. It runs on its own
+            // thread, so none of that work delays it.
+            Ghostty.Shell.SplashWindow.Show();
+
             Microsoft.UI.Xaml.Application.Start(p =>
             {
                 WriteStderr($"{AppIdentity.LogTag} Application.Start callback entered");

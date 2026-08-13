@@ -190,34 +190,5 @@
                       FontSize="14"/>
         </ToggleButton>
 
-        <!--
-            Cold-start launch icon. Declared last so it paints above the
-            two tab hosts (which are inserted at ZIndex -1) and the rest
-            of the chrome, matching the way a packaged app's splash
-            covers the whole frame. Spans both rows and columns so it is
-            centred on the window, not on the terminal area.
-
-            No background of its own: RootGrid.Background is already
-            painted from the resolved theme and backdrop before the
-            window is activated, so a bare icon inherits the correct
-            surface, including Mica/Acrylic. An opaque scrim would
-            blank that out for the duration of the splash.
-
-            Source is assigned in code-behind (LaunchIconCoordinator.Arm)
-            rather than here, so a warm window never decodes the bitmap.
-            Raw accessibility view because it is pure decoration and is
-            gone within a second.
-        -->
-        <Image x:Name="LaunchIcon"
-               Grid.Row="0" Grid.RowSpan="2"
-               Grid.Column="0" Grid.ColumnSpan="2"
-               Width="96" Height="96"
-               HorizontalAlignment="Center"
-               VerticalAlignment="Center"
-               Opacity="0"
-               IsHitTestVisible="False"
-               Visibility="Collapsed"
-               AutomationProperties.AccessibilityView="Raw"/>
-
     </Grid>
 </Window>

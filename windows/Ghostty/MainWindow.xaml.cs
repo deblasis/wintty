@@ -595,19 +595,30 @@ public sealed partial class MainWindow : Window
         }
         SwapActivePane();
 
-        // Cold start: cover the frame with the app icon until the seed
-        // surface has something on screen. Armed before the surface is
-        // created so the icon is up for the whole wait, and dismissed
-        // from libghostty's first_render via the seed tab's terminal.
+        // Cold start: the pre-XAML splash is already covering this window's
+        // rect. It comes down on our first composed frame, which is when
+        // this window stops painting black and has something real to show.
         if (showLaunchIcon)
         {
-            _launchIcon = new Shell.LaunchIconCoordinator(LaunchIcon, DispatcherQueue);
+            _launchIcon = new Shell.LaunchIconCoordinator(DispatcherQueue);
             _launchIcon.Arm();
 
             if (_tabManager.Tabs.Count > 0
                 && _tabManager.Tabs[0].PaneHost is Panes.PaneHost seedHost)
             {
                 seedHost.ActiveLeaf.Terminal().FirstRender += OnLaunchSurfaceFirstRender;
+            }
+
+            // Record the resolved background for the next launch's splash
+            // now, rather than only on close. A session that is force-killed
+            // or crashes never runs the close path, and the splash would
+            // then keep falling back to the built-in default and flash a
+            // mismatched colour on every subsequent start.
+            var splashBackground = _configService.BackgroundColor & 0x00FFFFFFu;
+            if (_windowState.BackgroundRgb != splashBackground)
+            {
+                _windowState.BackgroundRgb = splashBackground;
+                _windowState.Save();
             }
         }
 
@@ -1227,6 +1238,10 @@ public sealed partial class MainWindow : Window
             _windowState.WindowY = g.Y;
             _windowState.WindowWidth = g.Width;
             _windowState.WindowHeight = g.Height;
+            // Carried purely for the next cold start's splash, which runs
+            // before any theme has been resolved and would otherwise have
+            // to guess this colour.
+            _windowState.BackgroundRgb = _configService.BackgroundColor & 0x00FFFFFFu;
             _windowState.Save();
         }
 
@@ -2784,9 +2799,9 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// The cold-start seed surface has rendered its first frame, so the
-    /// launch icon can go. One-shot: later renders in the same surface
-    /// are irrelevant, and the policy latches anyway.
+    /// The cold-start seed surface has presented its first frame, so the
+    /// splash can go once WinUI has also composed. One-shot: later renders
+    /// are irrelevant, and the coordinator latches anyway.
     /// </summary>
     private void OnLaunchSurfaceFirstRender(object? sender, EventArgs e)
     {

@@ -12,11 +12,8 @@ internal static class AppIconSource
     public static Uri Current { get; } =
         new Uri("ms-appx:///Assets/AppIcon.png");
 
-    /// <summary>
-    /// Launch icon (96 DIP ladder) faded over a cold-start window.
-    /// A separate asset because <see cref="Current"/> tops out at
-    /// 160 px and would upscale at this size.
-    /// </summary>
-    public static Uri Splash { get; } =
-        new Uri("ms-appx:///Assets/SplashIcon.png");
+    // The launch splash deliberately does NOT resolve its icon through
+    // here. It runs before WinUI is initialized, so ms-appx:/// cannot be
+    // resolved at all; SplashWindow loads the SplashIcon.scale-*.png
+    // assets from disk next to the executable instead.
 }

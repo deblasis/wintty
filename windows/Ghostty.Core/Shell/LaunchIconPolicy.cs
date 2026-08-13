@@ -18,34 +18,32 @@ public enum LaunchIconOutcome
 public readonly record struct LaunchIconDecision(LaunchIconOutcome Outcome, int DelayMs);
 
 /// <summary>
-/// Decides when the cold-start launch icon leaves the screen. Pure: the
-/// caller owns the clock and the timers and passes elapsed time in, so
-/// every branch here is directly testable.
+/// Decides when the cold-start launch splash leaves the screen. Pure:
+/// the caller owns the clock and the timers and passes elapsed time in,
+/// so every branch here is directly testable.
 ///
-/// Two signals can dismiss the icon -- the first surface reporting that
-/// it has rendered, and a watchdog for the case where it never does.
-/// Whichever arrives first latches, so the two can never both fade.
+/// The only thing this arbitrates is the minimum dwell. The hard
+/// timeout lives with the splash window itself, which is the thing that
+/// must never get stuck on screen, and so is the thing that should own
+/// its own escape hatch.
 /// </summary>
 public sealed class LaunchIconPolicy
 {
     /// <summary>
-    /// Shortest time the icon stays up. On a warm disk the first render
-    /// can land in well under 100 ms; without a floor the icon would
-    /// flash for a frame or two and read as a glitch rather than a beat.
+    /// Shortest time the splash stays up. On a fast start the window can
+    /// have content in well under 100 ms; without a floor the splash
+    /// would flash for a frame or two and read as a glitch rather than a
+    /// beat.
     /// </summary>
     public const int MinVisibleMs = 400;
 
-    /// <summary>
-    /// Longest the icon stays up with no first-render signal at all
-    /// (surface creation failed, the shell wedged). Without this the
-    /// window would sit behind the icon forever.
-    /// </summary>
-    public const int WatchdogMs = 3000;
-
     private bool _dismissed;
 
-    /// <summary>The first surface reported that it has rendered.</summary>
-    /// <param name="elapsedMs">Milliseconds the icon has been on screen.</param>
+    /// <summary>
+    /// The window has content worth revealing. Latches, so a second call
+    /// cannot start a second dismissal.
+    /// </summary>
+    /// <param name="elapsedMs">Milliseconds the splash has been on screen.</param>
     public LaunchIconDecision Ready(int elapsedMs)
     {
         if (_dismissed) return new LaunchIconDecision(LaunchIconOutcome.Ignore, 0);
@@ -56,13 +54,5 @@ public sealed class LaunchIconPolicy
             return new LaunchIconDecision(LaunchIconOutcome.FadeNow, 0);
 
         return new LaunchIconDecision(LaunchIconOutcome.FadeAfter, MinVisibleMs - shown);
-    }
-
-    /// <summary>The watchdog expired with no first-render signal.</summary>
-    public LaunchIconDecision Timeout()
-    {
-        if (_dismissed) return new LaunchIconDecision(LaunchIconOutcome.Ignore, 0);
-        _dismissed = true;
-        return new LaunchIconDecision(LaunchIconOutcome.FadeNow, 0);
     }
 }
