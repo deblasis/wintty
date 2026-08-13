@@ -292,4 +292,40 @@ public class ThemeParserTests
         Assert.False(ThemeParser.TryParseHexRgb("#xyz", out _));
         Assert.False(ThemeParser.TryParseHexRgb("#1234", out _)); // wrong length
     }
+
+    [Theory]
+    [InlineData("light:Day,dark:Night", false, "Day")]
+    [InlineData("light:Day,dark:Night", true, "Night")]
+    [InlineData("dark:Night,light:Day", true, "Night")]
+    public void Pair_theme_selects_the_side_for_the_scheme(
+        string theme, bool isOsDark, string expected)
+    {
+        Assert.Equal(expected, ThemeParser.SelectForScheme(theme, isOsDark));
+    }
+
+    [Theory]
+    [InlineData("Catppuccin Mocha")]
+    [InlineData("3024 Night")]
+    public void Single_theme_is_scheme_independent(string theme)
+    {
+        Assert.Equal(theme, ThemeParser.SelectForScheme(theme, isOsDark: false));
+        Assert.Equal(theme, ThemeParser.SelectForScheme(theme, isOsDark: true));
+    }
+
+    [Theory]
+    [InlineData("light:Day")]
+    [InlineData("dark:Night")]
+    public void Partial_pair_is_left_alone_for_the_zig_parser_to_reject(string theme)
+    {
+        // ParseThemePair reports (null, null) for these because Zig treats
+        // them as InvalidValue; selecting a side would invent a resolution
+        // libghostty never makes.
+        Assert.Equal(theme, ThemeParser.SelectForScheme(theme, isOsDark: true));
+    }
+
+    [Fact]
+    public void Empty_theme_stays_empty()
+    {
+        Assert.Equal("", ThemeParser.SelectForScheme("", isOsDark: true));
+    }
 }
