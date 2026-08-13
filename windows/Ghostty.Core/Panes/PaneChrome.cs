@@ -1,5 +1,3 @@
-using System;
-
 namespace Ghostty.Core.Panes;
 
 /// <summary>
@@ -21,7 +19,7 @@ namespace Ghostty.Core.Panes;
 /// would resize the terminal grid -- and reflow the shell -- on every
 /// focus change.
 /// </summary>
-public static class PaneChrome
+internal static class PaneChrome
 {
     /// <summary>Stroke thickness of the active-pane focus border.</summary>
     public const double ActiveBorderThickness = 1.5;
@@ -43,19 +41,6 @@ public static class PaneChrome
         Math.Ceiling(Math.Max(ActiveBorderThickness, DividerThickness));
 
     /// <summary>
-    /// The terminal surface extent along one axis for a pane of the given
-    /// extent, with the gutter removed from both edges.
-    /// </summary>
-    /// <remarks>
-    /// Clamped at zero: a pane briefly narrower than its two gutters
-    /// (mid-drag, or a split of an already tiny pane) would otherwise
-    /// yield a negative extent, which wraps to an enormous value once
-    /// cast to the unsigned pixel size libghostty takes.
-    /// </remarks>
-    public static double SurfaceExtent(double paneExtent)
-        => Math.Max(0.0, paneExtent - SurfaceInset * 2);
-
-    /// <summary>
     /// Packed ARGB to fill the gutter with: the terminal background at
     /// the effective background opacity.
     /// </summary>
@@ -63,10 +48,10 @@ public static class PaneChrome
     /// The gutter falls outside the terminal surface, so nothing paints
     /// it unless we do -- it would otherwise show the bare window
     /// backdrop and read as a differently tinted frame around every
-    /// pane. Carrying the opacity through (rather than filling opaque)
-    /// is what makes it match: libghostty composites its own window
-    /// padding the same way, so at any opacity the gutter and the
-    /// padding just inside it resolve to the same pixel.
+    /// pane. The opacity has to be carried through rather than filled
+    /// opaque because libghostty composites its own window padding the
+    /// same way; measured across a pane edge at opacity 0.75, gutter and
+    /// surface resolve to the same pixel.
     /// </remarks>
     /// <param name="backgroundRgb">Packed 0xRRGGBB background colour.</param>
     /// <param name="backgroundOpacity">Effective opacity, clamped to 0..1.</param>

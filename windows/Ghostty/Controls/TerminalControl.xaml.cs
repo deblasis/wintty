@@ -587,18 +587,27 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // surface into the gutter. The scrollbar tracks the grid's right
         // edge and the resize pill positions itself within the grid, so
         // leaving either on the pane bounds would float it over the
-        // border stroke. The bell flash and the URL banner deliberately
-        // stay on the pane bounds -- both are pane-edge chrome.
+        // border stroke. The other three stay on the pane bounds: the
+        // bell flash and the URL banner are pane-edge chrome themselves,
+        // and the SearchBar already floats on its own inset margin.
         VerticalScrollBar.Margin = gutter;
         ResizeOverlay.Margin = gutter;
 
         ApplyGutterBrush();
     }
 
+    // Last gutter colour written to SurfaceRoot, so a repaint that
+    // resolves to the same value neither allocates a brush nor dirties
+    // the pane's visual. Reloads are frequent (Ctrl+Shift+Wheel walks
+    // background-opacity one step per notch) and every leaf of every tab
+    // is repainted on each one. Mirrors ApplyRootGridBackground.
+    private uint? _lastGutterArgb;
+
     /// <summary>
     /// Repaint the gutter to match the terminal background. Called at
-    /// construction and again by MainWindow on every config reload, so a
-    /// theme change does not strand a stale frame around each pane.
+    /// construction, and by MainWindow whenever the backdrop is recomputed,
+    /// so a theme change or a power-saver transition does not strand a
+    /// stale frame around each pane.
     /// </summary>
     internal void ApplyGutterBrush()
     {
@@ -612,6 +621,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var opacity = lowPower ? 1.0 : cfg.BackgroundOpacity;
 
         var argb = Core.Panes.PaneChrome.GutterArgb(cfg.BackgroundColor, opacity);
+        if (_lastGutterArgb == argb) return;
+        _lastGutterArgb = argb;
+
         SurfaceRoot.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
                 (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
@@ -1154,8 +1166,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         UrlHoverBanner.Visibility = Visibility.Visible;
     }
 
+    // The pointer handlers are attached to both Panel and SurfaceRoot so
+    // the chrome gutter around the panel still routes into the terminal.
+    // On the SurfaceRoot copy, take only events that landed on the gutter
+    // itself: the ScrollBar and SearchBar are siblings of the panel, so
+    // their pointer events bubble through here and must stay theirs.
+    private bool NotOurs(object sender, RoutedEventArgs e)
+        => ReferenceEquals(sender, SurfaceRoot)
+           && !ReferenceEquals(e.OriginalSource, SurfaceRoot);
+
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        if (NotOurs(sender, e)) return;
+
         // Take focus on the UserControl, not the panel. Guard with the
         // current focus state to avoid generating a Lost+Got pair when
         // we already have focus.
@@ -1210,6 +1233,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (NotOurs(sender, e)) return;
+
         // Complete the suppressed right-click on its matching right-release,
         // opening the menu so it feels like a normal Windows right-click. We
         // consume the flag ONLY on the right-release: an unrelated release (or
@@ -1232,6 +1257,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
+        if (NotOurs(sender, args)) return;
+
         // ContextRequested fires for both right-click and keyboard. The
         // pointer path (OnPointerPressed/Released) already handles right-click
         // with the mouse-capture gate, so here we only act on keyboard
@@ -1245,6 +1272,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (NotOurs(sender, e)) return;
         if (_surface.Handle == IntPtr.Zero) return;
         // ghostty_surface_mouse_pos expects unscaled coordinates (DIPs):
         // src/apprt/embedded.zig cursorPosCallback runs the input through
@@ -1282,6 +1310,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
+        if (NotOurs(sender, e)) return;
         if (_surface.Handle == IntPtr.Zero) return;
         var pt = e.GetCurrentPoint(Panel);
         var rawDelta = pt.Properties.MouseWheelDelta;

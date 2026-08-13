@@ -256,13 +256,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
-    /// Repaint every leaf's chrome gutter after a config reload. New
-    /// leaves pick the brush up themselves at construction, so this only
-    /// has to catch the ones already mounted.
+    /// Repaint every leaf's chrome gutter after the backdrop is
+    /// recomputed. New leaves pick the brush up themselves at
+    /// construction, so this only has to catch the ones already mounted.
     /// </summary>
     public void RefreshGutterBrush()
     {
-        foreach (var leaf in PaneTree.Leaves(_root))
+        // Once the last leaf is closed _root still references it, and
+        // walking it here would touch a terminal that CloseLeaf has
+        // already torn down. Same invariant DisposeAllLeaves honors.
+        if (_allLeavesClosed) return;
+
+        foreach (var leaf in Core.Panes.PaneTree.Leaves(_root))
             leaf.Terminal().ApplyGutterBrush();
     }
 
