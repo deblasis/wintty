@@ -441,6 +441,15 @@ public sealed partial class MainWindow : Window
                     : Ghostty.Interop.GhosttyColorScheme.Light;
                 Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
                 _host.NotifyColorSchemeChanged(scheme);
+
+                // The two calls above move libghostty onto the new scheme,
+                // so the surfaces repaint. Anything the C# chrome derives
+                // from a conditional theme is still resolved against the
+                // outgoing one until this runs, which is what would leave
+                // window chrome on the old palette beside a repainted
+                // terminal. Self-guarding, so the per-window duplicates of
+                // this handler collapse to one refresh.
+                _configService.RefreshForOsColorScheme();
             });
         };
 

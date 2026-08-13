@@ -293,6 +293,16 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     private Dictionary<string, List<string>>? _activeThemeFileCache;
 
     /// <summary>
+    /// OS colour scheme the cached themed values were resolved against.
+    /// A conditional <c>theme = light:X,dark:Y</c> picks its file from
+    /// this at reload time, so every colour read out of
+    /// <see cref="_activeThemeFileCache"/> is only valid while the OS
+    /// scheme still matches. Written by <see cref="ReadFlags"/>, compared
+    /// by <see cref="RefreshForOsColorScheme"/>.
+    /// </summary>
+    private bool _themedValuesAreForDarkOs;
+
+    /// <summary>
     /// The current config handle. Passed to <see cref="GhosttyHost"/>
     /// so it can create the app with the loaded config.
     /// </summary>
@@ -475,6 +485,47 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     }
 
     /// <summary>
+    /// Re-resolve the config values that depend on the OS colour scheme,
+    /// and notify if any could have moved.
+    ///
+    /// A conditional <c>theme = light:X,dark:Y</c> picks its file when the
+    /// config is read, so an OS light/dark flip leaves every colour in the
+    /// theme cache pointing at the wrong palette. libghostty handles its
+    /// own side of the flip -- <c>AppSetColorScheme</c> moves the
+    /// conditional state and the surfaces repaint -- but the C# chrome
+    /// reads these cached values, so without this it keeps painting the
+    /// outgoing palette next to freshly repainted terminals.
+    ///
+    /// Deliberately not a <see cref="Reload"/>: the config file has not
+    /// changed, so re-parsing it would push a redundant AppUpdateConfig
+    /// through to the renderer. Only the file-derived caches are rebuilt.
+    /// </summary>
+    /// <returns>True when the scheme moved and subscribers were notified.</returns>
+    public bool RefreshForOsColorScheme()
+    {
+        // Same teardown fences as Reload: ConfigChanged subscribers touch
+        // XAML and libghostty surfaces, neither of which survives shutdown.
+        if (_shuttingDown) return false;
+        if (_app.Handle == IntPtr.Zero) return false;
+
+        // Every window observes ColorValuesChanged, so this runs once per
+        // window per flip. Only the first call finds a difference; the
+        // rest are a bool compare. Also filters the ColorValuesChanged
+        // firings that carry no scheme change at all -- accent colour
+        // edits and High Contrast toggles raise the same event.
+        if (_themedValuesAreForDarkOs == IsOsDark()) return false;
+
+        ReadFlags();
+
+        _dispatcher.TryEnqueue(() =>
+        {
+            ConfigChanged?.Invoke(this);
+            ProfileConfigChanged?.Invoke();
+        });
+        return true;
+    }
+
+    /// <summary>
     /// Enumerate the compiled default keybinds only (no user config files),
     /// for the default-vs-user source diff in the keybindings settings page.
     /// Deliberately skips <c>ConfigLoadDefaultFiles</c> so the user's file
@@ -587,6 +638,9 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // these caches, so the whole reload is bounded by at most two
         // File.ReadLines calls regardless of how many keys we probe.
         _configFileCache = LoadIniFile(ConfigFilePath);
+        // Record the scheme the theme file is chosen against, so an OS
+        // flip afterwards is detectable without re-reading the files.
+        _themedValuesAreForDarkOs = IsOsDark();
         var activeTheme = ResolveActiveThemeName();
         var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
         _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
