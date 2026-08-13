@@ -134,6 +134,43 @@
                       Version="1.25.260427001-preview"
                       GeneratePathProperty="true"
                       ExcludeAssets="all" />
+
+    <!--
+      DirectX Shader Compiler redistributable. The DX12 renderer compiles
+      user custom shaders at runtime via LoadLibraryW("dxcompiler.dll")
+      (src/renderer/directx12/d3d12.zig, DxcLibrary.load). Without it the
+      custom-shader setting silently does nothing, which is what shipped
+      until now: the DLL is not an in-box Windows component, so the feature
+      only ever worked for people who happened to have a copy on PATH from
+      an unrelated install.
+
+      We deliberately ship dxcompiler.dll ALONE, without the dxil.dll
+      validator that older guidance pairs with it. DXC 1.8.2502 stopped
+      requiring the external validator to sign shaders and 1.8.2505 stopped
+      looking for it at all, using an internal validator that writes a real
+      hash every D3D12 runtime accepts. This pin is past both, and a custom
+      shader was verified to compile and render with dxil.dll absent from
+      the app directory and from PATH. Shipping it would add 1.5 MB of dead
+      weight, and it is the one closed-source binary in the package.
+
+      Pinned to 1.9.2602.24 rather than the newer 1.9.2607.13 because
+      1.9.2602.24 still carries distributable_files.txt, the in-package
+      manifest that LICENSE-MS.txt's redistribution grant refers to by name,
+      and that manifest names dxcompiler.dll. 1.9.2607.13 dropped the
+      manifest while still shipping the license that points at it, which
+      leaves the grant referring to a list that is not there.
+
+      ExcludeAssets="all" is load-bearing: the package's own
+      build/native/Microsoft.Direct3D.DXC.targets copies dxcompiler.pdb and
+      dxil.pdb alongside the DLLs, and those symbols are 34 MB on x64, more
+      than the binaries themselves. We stage the one DLL we need explicitly
+      below. GeneratePathProperty exposes $(PkgMicrosoft_Direct3D_DXC).
+    -->
+    <PackageReference Include="Microsoft.Direct3D.DXC"
+                      Version="1.9.2602.24"
+                      GeneratePathProperty="true"
+                      ExcludeAssets="all"
+                      Condition="'$(WinttyShipDxc)' != 'false'" />
   </ItemGroup>
 
   <!--
@@ -212,6 +249,86 @@
            Text="Bundled conpty.dll missing for x86 from the Microsoft.Windows.Console.ConPTY package." />
     <Error Condition="'$(Platform)' == 'x86' and !Exists('$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x86\OpenConsole.exe')"
            Text="Bundled OpenConsole.exe missing for x86 from the Microsoft.Windows.Console.ConPTY package; without it conpty.dll silently falls back to in-box conhost." />
+  </Target>
+
+  <!--
+    Deploy dxcompiler.dll for the build platform alongside Wintty.exe.
+    NOT into native\: LoadLibraryW with a bare name searches the directory
+    the *application* loaded from, never the directory of the calling DLL.
+    In Release the DX12 code is statically linked into Wintty.exe anyway
+    (DirectPInvoke + ghostty-static.lib); in Debug it lives in
+    native\ghostty.dll. The exe folder is the one location that works for
+    both.
+
+    Same longhand-per-RID shape as the ConPTY block above, and for the same
+    MSBuild reason. Package arch folders are lowercase x86/x64/arm64 while
+    $(Platform) is x86/x64/ARM64.
+  -->
+  <ItemGroup Condition="'$(WinttyShipDxc)' != 'false'">
+    <None Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\dxcompiler.dll"
+          Condition="'$(Platform)' == 'x64' and Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\dxcompiler.dll')">
+      <Link>dxcompiler.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\arm64\dxcompiler.dll"
+          Condition="'$(Platform)' == 'ARM64' and Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\arm64\dxcompiler.dll')">
+      <Link>dxcompiler.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x86\dxcompiler.dll"
+          Condition="'$(Platform)' == 'x86' and Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x86\dxcompiler.dll')">
+      <Link>dxcompiler.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
+    Ship the licences that govern the redistributed binary. The LLVM/NCSA
+    licence dxcompiler.dll is published under requires a binary redistributor
+    to reproduce its copyright notice and disclaimer in the materials provided
+    with the distribution, so this is an obligation rather than a courtesy.
+    LICENSE-MS.txt is the Microsoft redistribution grant that permits shipping
+    the binary at all. Both are referenced from the pinned package rather than
+    vendored into the repo, so they cannot drift from the binary they cover.
+
+    LICENCE-MIT.txt from the package is deliberately not shipped: it covers
+    d3d12shader.h, a header we do not redistribute.
+
+    These land in licenses/ in the publish output, which the MSI harvest
+    (Files Include="$(var.PublishDir)\**") and the Velopack pack step both
+    pick up with no packaging change.
+  -->
+  <ItemGroup Condition="'$(WinttyShipDxc)' != 'false'">
+    <None Include="$(PkgMicrosoft_Direct3D_DXC)\LICENSE-LLVM.txt"
+          Condition="Exists('$(PkgMicrosoft_Direct3D_DXC)\LICENSE-LLVM.txt')">
+      <Link>licenses\DirectXShaderCompiler-LICENSE-LLVM.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(PkgMicrosoft_Direct3D_DXC)\LICENSE-MS.txt"
+          Condition="Exists('$(PkgMicrosoft_Direct3D_DXC)\LICENSE-MS.txt')">
+      <Link>licenses\DirectXShaderCompiler-LICENSE-MS.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
+    Fail the build if dxcompiler.dll is missing. Its absence is invisible in
+    a build log and only shows up as the custom-shader setting quietly doing
+    nothing at runtime, which is the failure this whole change exists to
+    remove. One Error per platform (the project Platforms are x86;x64;ARM64).
+  -->
+  <Target Name="ErrorIfDxcRedistMissing" BeforeTargets="Build" Condition="'$(WinttyShipDxc)' != 'false'">
+    <Error Condition="'$(Platform)' == 'x64' and !Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\dxcompiler.dll')"
+           Text="dxcompiler.dll missing for x64 from the Microsoft.Direct3D.DXC package. Custom shaders cannot compile without it, so the custom-shader setting would be silently ignored. Restore the package or fix the version pin." />
+    <Error Condition="'$(Platform)' == 'ARM64' and !Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\arm64\dxcompiler.dll')"
+           Text="dxcompiler.dll missing for ARM64 from the Microsoft.Direct3D.DXC package. Custom shaders cannot compile without it, so the custom-shader setting would be silently ignored. Restore the package or fix the version pin." />
+    <Error Condition="'$(Platform)' == 'x86' and !Exists('$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x86\dxcompiler.dll')"
+           Text="dxcompiler.dll missing for x86 from the Microsoft.Direct3D.DXC package. Custom shaders cannot compile without it, so the custom-shader setting would be silently ignored. Restore the package or fix the version pin." />
   </Target>
 
   <ItemGroup>
