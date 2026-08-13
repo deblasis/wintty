@@ -1778,8 +1778,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // The resource/PSO null checks are DX12-specific (descriptor heaps
             // can be exhausted, PSOs can be defunct after re-init); Metal and
             // OpenGL fail at allocation so any state we reach here is valid.
-            const use_custom_shader = use_custom_shader: {
-                const state = frame.custom_shader_state orelse break :use_custom_shader false;
+            //
+            // This block only answers "are the resources we have valid"; it
+            // says nothing about whether we have any pipelines at all, because
+            // the loop below has nothing to reject when the list is empty.
+            // `customShaderUsable` owns that half of the decision.
+            const resources_valid = resources_valid: {
+                const state = frame.custom_shader_state orelse break :resources_valid false;
                 if (comptime @hasField(Texture, "resource")) {
                     if (state.front_texture.resource == null or
                         state.back_texture.resource == null or
@@ -1788,7 +1793,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         state.front_texture.srv.gpu.ptr == 0 or
                         state.back_texture.srv.gpu.ptr == 0)
                     {
-                        break :use_custom_shader false;
+                        break :resources_valid false;
                     }
                 }
                 // Verify post-process pipelines have valid PSOs (DX12-only
@@ -1797,12 +1802,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     for (self.shaders.post_pipelines, 0..) |pipeline, i| {
                         if (pipeline.pso == null or pipeline.root_signature == null) {
                             log.warn("post-process pipeline {} has null PSO/root_sig, falling back", .{i});
-                            break :use_custom_shader false;
+                            break :resources_valid false;
                         }
                     }
                 }
-                break :use_custom_shader true;
+                break :resources_valid true;
             };
+            const use_custom_shader = customShaderUsable(
+                frame.custom_shader_state != null,
+                resources_valid,
+                self.shaders.post_pipelines.len,
+            );
 
             {
                 var pass = frame_ctx.renderPass(&.{.{
@@ -3625,4 +3635,67 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+/// Whether the post-process custom shader path can be used for a frame.
+///
+/// `resources_valid` carries the backend-specific texture/PSO null checks
+/// done at the call site (they need the concrete `Texture` / `Pipeline`
+/// types, so they can't move in here). What this function owns is the
+/// backend-independent precondition that has to hold for the retarget to
+/// be safe at all.
+///
+/// `post_pipeline_count` is the load-bearing one, and it is easy to miss:
+/// taking this path retargets the frame to `custom_shader_state.back_texture`,
+/// and the only code that blits back to `frame.target` is the loop over
+/// `post_pipelines`. With an empty list the retarget still happens but the
+/// blit loop never runs, so `frame.target` is presented having never been
+/// written -- the terminal renders as a transparent hole instead of falling
+/// back to an unshaded terminal. An empty list is therefore "cannot use",
+/// not "nothing to validate".
+///
+/// That list is empty whenever every configured shader failed to build: on
+/// DX12, dxcompiler.dll missing at runtime, DXC rejecting the generated
+/// HLSL, or pipeline creation failing. All are recoverable -- the terminal
+/// just renders unshaded -- but only if we refuse the path here.
+fn customShaderUsable(
+    has_state: bool,
+    resources_valid: bool,
+    post_pipeline_count: usize,
+) bool {
+    if (!has_state) return false;
+    if (post_pipeline_count == 0) return false;
+    return resources_valid;
+}
+
+test "customShaderUsable: no custom shader state means no custom shader path" {
+    try std.testing.expect(!customShaderUsable(false, true, 1));
+}
+
+test "customShaderUsable: empty post_pipelines must not take the path" {
+    // Regression: an empty pipeline list used to pass validation
+    // vacuously (the validity loop had nothing to reject), the frame was
+    // retargeted to the offscreen texture, and the blit loop that would
+    // have copied it back never ran -- presenting an unwritten surface.
+    try std.testing.expect(!customShaderUsable(true, true, 0));
+}
+
+test "customShaderUsable: invalid resources fall back even with pipelines" {
+    try std.testing.expect(!customShaderUsable(true, false, 1));
+}
+
+test "customShaderUsable: valid state, resources and pipelines uses the path" {
+    try std.testing.expect(customShaderUsable(true, true, 1));
+    try std.testing.expect(customShaderUsable(true, true, 3));
+}
+
+test "customShaderUsable: empty pipelines lose to every other input" {
+    // The empty-list guard must not be reachable-around: no combination
+    // of the other two inputs may re-enable the path when there is
+    // nothing to blit the offscreen texture back with.
+    for ([_]bool{ true, false }) |has_state| {
+        for ([_]bool{ true, false }) |resources_valid| {
+            try std.testing.expect(!customShaderUsable(has_state, resources_valid, 0));
+        }
+    }
 }
