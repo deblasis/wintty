@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const com = @import("com.zig");
 
 const d3d12 = @import("d3d12.zig");
+const renderer = @import("../../renderer.zig");
 const gpu_data = @import("gpu_data.zig");
 const Pipeline = @import("Pipeline.zig");
 
@@ -351,6 +352,14 @@ pub const Shaders = struct {
     post_root_signature: ?*d3d12.ID3D12RootSignature = null,
     pipelines: Pipelines = .{},
     post_pipelines: []const Pipeline = &.{},
+    /// Why `post_pipelines` is empty despite shaders having been requested.
+    /// Null when none were requested, or when at least one built.
+    ///
+    /// An empty slice on its own cannot distinguish "the user configured no
+    /// shaders" from "every shader the user configured failed to build",
+    /// which is exactly what made this failure silent. The generic renderer
+    /// reads this to raise a user-facing notice.
+    post_failure: ?renderer.CustomShaderFailure = null,
     defunct: bool = false,
 
     pub const Pipelines = struct {
@@ -451,6 +460,28 @@ pub const Shaders = struct {
             return .{
                 .root_signature = root_sig,
                 .pipelines = pipelines,
+                // Reaching here with shaders requested means the post root
+                // signature failed to serialize, which is a pipeline-object
+                // failure rather than anything to do with the shader source.
+                .post_failure = if (custom_shaders.len > 0) .pipeline_failed else null,
+            };
+        }
+
+        // Probe for the compiler once, up front. `compileHlslToDxil` loads
+        // the DLL itself per shader, but the reason the post pipelines come
+        // out empty has to be distinguishable: "this build cannot compile
+        // shaders at all" is a packaging defect we own, while "your shader
+        // did not compile" is something the user can fix. Both produce an
+        // identical empty slice.
+        if (d3d12.DxcLibrary.load()) |probe| {
+            probe.deinit();
+        } else {
+            log.warn("dxcompiler.dll not found, cannot compile custom shader", .{});
+            return .{
+                .root_signature = root_sig,
+                .post_root_signature = post_root_sig,
+                .pipelines = pipelines,
+                .post_failure = .compiler_unavailable,
             };
         }
 
@@ -463,14 +494,26 @@ pub const Shaders = struct {
                 .post_root_signature = post_root_sig,
                 .pipelines = pipelines,
                 .post_pipelines = &.{},
+                .post_failure = .compile_failed,
             };
         };
         defer std.heap.c_allocator.free(entry_point_w);
 
         const custom_root_sig = post_root_sig orelse root_sig;
 
+        // Why individual shaders dropped out, so an all-empty result can name
+        // a cause. First failure wins: the notice names one reason and the
+        // per-shader detail is already in the log.
+        var loop_failure: ?renderer.CustomShaderFailure = null;
+
         for (custom_shaders) |source| {
-            const dxil = compileHlslToDxil(alloc, source, entry_point_w) catch continue orelse continue;
+            const dxil = compileHlslToDxil(alloc, source, entry_point_w) catch {
+                if (loop_failure == null) loop_failure = .compile_failed;
+                continue;
+            } orelse {
+                if (loop_failure == null) loop_failure = .compile_failed;
+                continue;
+            };
             // D3D12 copies bytecode into the PSO during CreateGraphicsPipelineState,
             // so the allocation can be freed immediately after PSO creation.
             defer alloc.free(dxil);
@@ -483,6 +526,7 @@ pub const Shaders = struct {
                 .blend = .none,
             }) catch |err| {
                 log.warn("custom shader PSO creation failed: {}", .{err});
+                if (loop_failure == null) loop_failure = .pipeline_failed;
                 continue;
             };
 
@@ -496,6 +540,10 @@ pub const Shaders = struct {
             .post_root_signature = post_root_sig,
             .pipelines = pipelines,
             .post_pipelines = post_pipelines,
+            // Only report a failure when nothing built at all. If some
+            // shaders compiled the chain still runs, so a partial failure
+            // belongs in the log rather than in a banner.
+            .post_failure = if (post_pipelines.len == 0) loop_failure else null,
         };
     }
 
@@ -570,6 +618,20 @@ test "Shaders.init returns default on null device" {
     try std.testing.expect(s.root_signature == null);
     try std.testing.expect(s.pipelines.bg_color.pso == null);
     try std.testing.expect(s.pipelines.cell_text.pso == null);
+}
+
+test "Shaders default reports no custom shader failure" {
+    const s: Shaders = .{};
+    try std.testing.expect(s.post_failure == null);
+}
+
+test "Shaders.init reports no failure when no shaders were requested" {
+    // "Nothing configured" must never look like a failure -- that is the
+    // distinction post_failure exists to draw, and an empty post_pipelines
+    // slice alone cannot make it.
+    const s = try Shaders.init(null, std.testing.allocator, &.{});
+    try std.testing.expect(s.post_pipelines.len == 0);
+    try std.testing.expect(s.post_failure == null);
 }
 
 test "Pipelines has all 5 fields" {

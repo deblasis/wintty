@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Ghostty.Core.Interop;
+using Ghostty.Core.Renderer;
 using Xunit;
 
 namespace Ghostty.Tests.Interop;
@@ -40,6 +41,7 @@ public class GhosttyActionsLayoutTests
     [InlineData((int)GhosttyActionTag.SearchSelected, 64)]
     [InlineData((int)GhosttyActionTag.PromptReady, 68)]
     [InlineData((int)GhosttyActionTag.FirstRender, 69)]
+    [InlineData((int)GhosttyActionTag.CustomShaderFailed, 70)]
     [InlineData((int)GhosttyActionTag.ToggleVisibility, 12)]
     [InlineData((int)GhosttyActionTag.ToggleBackgroundOpacity, 13)]
     [InlineData((int)GhosttyActionTag.GotoWindow, 17)]
@@ -64,6 +66,19 @@ public class GhosttyActionsLayoutTests
     public void ProgressState_Ordinal_Matches_Upstream(int state, int expected)
     {
         Assert.Equal(expected, state);
+    }
+
+    // ghostty_action_custom_shader_failure_e. These ordinals arrive as a raw
+    // int in the action payload, so a reorder upstream would silently show the
+    // user the wrong reason rather than failing to compile.
+    [Theory]
+    [InlineData((int)CustomShaderFailure.LoadFailed, 0)]
+    [InlineData((int)CustomShaderFailure.CompilerUnavailable, 1)]
+    [InlineData((int)CustomShaderFailure.CompileFailed, 2)]
+    [InlineData((int)CustomShaderFailure.PipelineFailed, 3)]
+    public void CustomShaderFailure_Ordinal_Matches_Upstream(int failure, int expected)
+    {
+        Assert.Equal(expected, failure);
     }
 
     [Fact]
