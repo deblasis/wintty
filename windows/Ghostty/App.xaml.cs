@@ -726,7 +726,8 @@ public partial class App : Application
             foreach (var ws in restoreState.Windows)
             {
                 var restored = new MainWindow(
-                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws);
+                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws,
+                    showLaunchIcon: true);
                 restored.Closed += OnAnyWindowClosedInternal;
                 _sessionManager.Track(restored);
                 restored.Activate();
@@ -734,7 +735,9 @@ public partial class App : Application
         }
         else
         {
-            var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
+            var window = new MainWindow(
+                _configService, _bootstrapHost, _lifetimeSupervisor, factory,
+                showLaunchIcon: true);
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();

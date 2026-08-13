@@ -198,6 +198,10 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
+    // Cold-start launch icon. Null on every window that was not opened
+    // by App.OnLaunched -- a warm-process window reaches first render
+    // fast enough that a splash would read as invented latency.
+    private Shell.LaunchIconCoordinator? _launchIcon;
 #if DEMO
     private Ghostty.Demo.DemoPlayer? _demoPlayer;
     private Ghostty.Demo.DemoOverlay? _demoOverlay;
@@ -271,8 +275,10 @@ public sealed partial class MainWindow : Window
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
-        bool isQuickTerminal = false)
-        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null, isQuickTerminal)
+        bool isQuickTerminal = false,
+        bool showLaunchIcon = false)
+        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null,
+               isQuickTerminal, showLaunchIcon: showLaunchIcon)
     {
     }
 
@@ -286,9 +292,11 @@ public sealed partial class MainWindow : Window
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
-        Ghostty.Core.Session.WindowSession restore)
+        Ghostty.Core.Session.WindowSession restore,
+        bool showLaunchIcon = false)
         : this(configService, bootstrapHost, supervisor, loggerFactory,
-               seedTab: null, isQuickTerminal: false, restore: restore)
+               seedTab: null, isQuickTerminal: false, restore: restore,
+               showLaunchIcon: showLaunchIcon)
     {
     }
 
@@ -312,7 +320,8 @@ public sealed partial class MainWindow : Window
         ILoggerFactory loggerFactory,
         TabModel? seedTab,
         bool isQuickTerminal = false,
-        Ghostty.Core.Session.WindowSession? restore = null)
+        Ghostty.Core.Session.WindowSession? restore = null,
+        bool showLaunchIcon = false)
     {
         InitializeComponent();
 
@@ -585,6 +594,23 @@ public sealed partial class MainWindow : Window
             AttachProcessTracking(t);
         }
         SwapActivePane();
+
+        // Cold start: cover the frame with the app icon until the seed
+        // surface has something on screen. Armed before the surface is
+        // created so the icon is up for the whole wait, and dismissed
+        // from libghostty's first_render via the seed tab's terminal.
+        if (showLaunchIcon)
+        {
+            _launchIcon = new Shell.LaunchIconCoordinator(LaunchIcon, DispatcherQueue);
+            _launchIcon.Arm();
+
+            if (_tabManager.Tabs.Count > 0
+                && _tabManager.Tabs[0].PaneHost is Panes.PaneHost seedHost)
+            {
+                seedHost.ActiveLeaf.Terminal().FirstRender += OnLaunchSurfaceFirstRender;
+            }
+        }
+
         _tabManager.TabAdded += (_, t) =>
         {
             AddPaneHost(t);
@@ -2755,6 +2781,18 @@ public sealed partial class MainWindow : Window
             else
                 control.SetUserTitleOverride(result);
         }
+    }
+
+    /// <summary>
+    /// The cold-start seed surface has rendered its first frame, so the
+    /// launch icon can go. One-shot: later renders in the same surface
+    /// are irrelevant, and the policy latches anyway.
+    /// </summary>
+    private void OnLaunchSurfaceFirstRender(object? sender, EventArgs e)
+    {
+        if (sender is Controls.TerminalControl terminal)
+            terminal.FirstRender -= OnLaunchSurfaceFirstRender;
+        _launchIcon?.NotifyReady();
     }
 
     /// <summary>
