@@ -16,10 +16,29 @@ internal static class PngWriter
         ("AppIcon.scale-400.png", 160),
     };
 
+    // Second ladder for the launch icon the shell fades over a cold-start
+    // window. That one is painted at 96 DIP, so reusing the 40 DIP ladder
+    // above would upscale even its largest rung and look soft. The masters
+    // reach 2048 px, so every rung here is still a downsample.
+    private static readonly (string Name, int Px)[] SplashTargets =
+    {
+        ("SplashIcon.scale-100.png", 96),
+        ("SplashIcon.scale-150.png", 144),
+        ("SplashIcon.scale-200.png", 192),
+        ("SplashIcon.scale-400.png", 384),
+    };
+
     public static void WriteScalePngs(MasterRasters masters, string outDir)
     {
         Directory.CreateDirectory(outDir);
-        foreach (var (name, px) in ScaleTargets)
+        WriteLadder(masters, outDir, ScaleTargets);
+        WriteLadder(masters, outDir, SplashTargets);
+    }
+
+    private static void WriteLadder(
+        MasterRasters masters, string outDir, (string Name, int Px)[] targets)
+    {
+        foreach (var (name, px) in targets)
         {
             using var resized = Resize(masters, px);
             resized.Save(Path.Combine(outDir, name), ImageFormat.Png);

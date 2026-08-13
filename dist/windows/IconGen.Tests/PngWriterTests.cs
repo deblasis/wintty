@@ -36,6 +36,37 @@ public class PngWriterTests
         Assert.Equal(expectedPx, img.Width);
         Assert.Equal(expectedPx, img.Height);
     }
+
+    [Fact]
+    public void WritesAllFourSplashPngs()
+    {
+        using var tempDir = new TempDir();
+        using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
+
+        PngWriter.WriteScalePngs(masters, tempDir.Path);
+
+        Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-100.png")));
+        Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-150.png")));
+        Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-200.png")));
+        Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-400.png")));
+    }
+
+    [Theory]
+    [InlineData("SplashIcon.scale-100.png", 96)]
+    [InlineData("SplashIcon.scale-150.png", 144)]
+    [InlineData("SplashIcon.scale-200.png", 192)]
+    [InlineData("SplashIcon.scale-400.png", 384)]
+    public void EachSplashPngHasExpectedDimensions(string fileName, int expectedPx)
+    {
+        using var tempDir = new TempDir();
+        using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
+
+        PngWriter.WriteScalePngs(masters, tempDir.Path);
+
+        using var img = new Bitmap(Path.Combine(tempDir.Path, fileName));
+        Assert.Equal(expectedPx, img.Width);
+        Assert.Equal(expectedPx, img.Height);
+    }
 }
 
 internal sealed class TempDir : IDisposable
