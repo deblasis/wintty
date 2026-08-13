@@ -68,6 +68,25 @@ internal static unsafe partial class SplashWindow
     private static readonly ManualResetEventSlim _dismissed = new(false);
     private static int _started;
     private static long _shownAtTicks;
+    private static nint _trackedHwnd;
+
+    // Current splash geometry, owned by the splash thread. Mutable
+    // because the splash follows the main window, which the user can move
+    // or resize while it is still up.
+    private static int _width;
+    private static int _height;
+    private static uint _background;
+    private static double _scale = 1.0;
+
+    /// <summary>
+    /// Follow <paramref name="hwnd"/> from now on. Called once the main
+    /// window exists, so that moving or resizing it while the splash is
+    /// still up keeps the two together instead of leaving the icon
+    /// stranded where the window used to be. The alternative -- pinning
+    /// the window in place until the splash goes -- would take a
+    /// legitimate action away from the user to keep a decoration tidy.
+    /// </summary>
+    public static void Track(nint hwnd) => Volatile.Write(ref _trackedHwnd, hwnd);
 
     /// <summary>
     /// Milliseconds the splash has been on screen, or 0 if it was never
@@ -132,7 +151,9 @@ internal static unsafe partial class SplashWindow
     private static void RunSplash()
     {
         var (x, y, width, height) = ResolveRect();
-        var background = ResolveBackgroundRgb();
+        _width = width;
+        _height = height;
+        _background = ResolveBackgroundRgb();
 
         if (!RegisterWindowClass()) return;
 
@@ -160,16 +181,14 @@ internal static unsafe partial class SplashWindow
             // assigned it to a monitor.
             var dpi = GetDpiForWindow(_hwnd);
             if (dpi == 0) dpi = 96;
-            var scale = dpi / 96.0;
-            var iconPx = (int)Math.Round(
-                LaunchIconMetrics.Resolve(width / scale, height / scale) * scale);
+            _scale = dpi / 96.0;
 
-            if (!Paint(width, height, background, iconPx, 255)) return;
+            if (!Paint(255)) return;
             ShowWindow(_hwnd, SW_SHOWNA);
             Volatile.Write(ref _shownAtTicks, Environment.TickCount64);
 
             PumpUntilDismissed();
-            FadeOut(width, height, background, iconPx);
+            FadeOut();
         }
         finally
         {
@@ -208,6 +227,12 @@ internal static unsafe partial class SplashWindow
                 nextTopmostNudge = now + TopmostNudgeIntervalMs;
             }
 
+            // Checked every tick, not throttled: this one tracks a drag,
+            // so anything slower shows the splash lagging behind the
+            // window. It is a GetWindowRect and, only on an actual
+            // change, a SetWindowPos.
+            FollowTrackedWindow();
+
             while (PeekMessageW(out var msg, 0, 0, 0, PM_REMOVE) != 0)
             {
                 TranslateMessage(ref msg);
@@ -219,13 +244,48 @@ internal static unsafe partial class SplashWindow
         }
     }
 
-    private static void FadeOut(int width, int height, uint background, int iconPx)
+    /// <summary>
+    /// Keep the splash glued to the window it is covering. Without this,
+    /// moving the window during startup slides it out from under the
+    /// splash, leaving the icon floating over the desktop and the black
+    /// gap exposed.
+    /// </summary>
+    private static void FollowTrackedWindow()
+    {
+        var tracked = Volatile.Read(ref _trackedHwnd);
+        if (tracked == 0) return;
+        if (GetWindowRect(tracked, out var r) == 0) return;
+
+        var width = r.right - r.left;
+        var height = r.bottom - r.top;
+        if (width <= 0 || height <= 0) return;
+
+        if (GetWindowRect(_hwnd, out var mine) != 0
+            && mine.left == r.left && mine.top == r.top
+            && mine.right - mine.left == width && mine.bottom - mine.top == height)
+        {
+            return;
+        }
+
+        var resized = width != _width || height != _height;
+        _width = width;
+        _height = height;
+
+        SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height, SWP_NOACTIVATE);
+
+        // A move alone keeps the existing layered bitmap; a resize needs a
+        // new one, both because the surface is a different size and
+        // because the icon rescales with the window.
+        if (resized) Paint(255);
+    }
+
+    private static void FadeOut()
     {
         var steps = Math.Max(1, FadeDurationMs / FadeStepMs);
         for (var i = steps - 1; i >= 0; i--)
         {
             var alpha = (byte)(255 * i / steps);
-            if (!Paint(width, height, background, iconPx, alpha)) break;
+            if (!Paint(alpha)) break;
             Thread.Sleep(FadeStepMs);
         }
     }
@@ -236,8 +296,14 @@ internal static unsafe partial class SplashWindow
     /// <paramref name="alpha"/> alone drives the fade and there is no
     /// premultiplied alpha to get wrong.
     /// </summary>
-    private static bool Paint(int width, int height, uint background, int iconPx, byte alpha)
+    private static bool Paint(byte alpha)
     {
+        var width = _width;
+        var height = _height;
+        var background = _background;
+        var iconPx = (int)Math.Round(
+            LaunchIconMetrics.Resolve(width / _scale, height / _scale) * _scale);
+
         var screenDc = GetDC(0);
         if (screenDc == 0) return false;
 
@@ -514,6 +580,9 @@ internal static unsafe partial class SplashWindow
     private struct SIZE { public int cx; public int cy; }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int left; public int top; public int right; public int bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -569,6 +638,9 @@ internal static unsafe partial class SplashWindow
 
     [LibraryImport("user32.dll")]
     private static partial void PostQuitMessage(int exitCode);
+
+    [LibraryImport("user32.dll")]
+    private static partial int GetWindowRect(nint hwnd, out RECT rect);
 
     [LibraryImport("user32.dll")]
     private static partial nint LoadCursorW(nint instance, nint cursorName);

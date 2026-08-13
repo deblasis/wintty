@@ -603,6 +603,12 @@ public sealed partial class MainWindow : Window
             _launchIcon = new Shell.LaunchIconCoordinator(DispatcherQueue);
             _launchIcon.Arm();
 
+            // Let the splash follow this window. It was positioned from the
+            // saved window state before this window existed, so this both
+            // corrects any mismatch and keeps the two together if the user
+            // drags or resizes the window before the splash comes down.
+            Shell.SplashWindow.Track(WindowNative.GetWindowHandle(this));
+
             if (_tabManager.Tabs.Count > 0
                 && _tabManager.Tabs[0].PaneHost is Panes.PaneHost seedHost)
             {
