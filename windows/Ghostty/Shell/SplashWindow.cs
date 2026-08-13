@@ -53,6 +53,11 @@ internal static unsafe partial class SplashWindow
     private const int FadeDurationMs = 220;
     private const int FadeStepMs = 16;
 
+    // How often to re-assert topmost while waiting. Frequent enough that a
+    // main window appearing underneath is covered again within a frame or
+    // two, rare enough not to load the window manager during startup.
+    private const int TopmostNudgeIntervalMs = 250;
+
     // Hard stop. If the main window never reports content the splash must
     // still go away rather than sit on top of the user's desktop forever.
     private const int WatchdogMs = 10_000;
@@ -133,8 +138,16 @@ internal static unsafe partial class SplashWindow
 
         fixed (char* className = ClassName)
         {
+            // WS_EX_TRANSPARENT is what keeps the app usable underneath.
+            // Without it this window is a solid input target sitting over
+            // the whole main window, so every click during the splash --
+            // including any spent waiting for a surface that is already
+            // ready -- lands here and does nothing, which reads as the app
+            // being frozen. With it, hit-testing skips this window
+            // entirely and input goes straight to the real one.
             _hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                 className, null, WS_POPUP,
                 x, y, width, height,
                 0, 0, GetModuleHandleW(0), 0);
@@ -173,17 +186,27 @@ internal static unsafe partial class SplashWindow
     private static void PumpUntilDismissed()
     {
         var deadline = Environment.TickCount64 + WatchdogMs;
+        var nextTopmostNudge = 0L;
+
         while (!_dismissed.IsSet && Environment.TickCount64 < deadline)
         {
             // Re-assert topmost. Creating the window with WS_EX_TOPMOST is
             // not enough: when WinUI shows and activates the main window,
             // the splash ends up behind it and the black gap it is meant
-            // to be covering shows through. Nudging the z-order on every
-            // tick is cheap and keeps the splash on top for the handful of
-            // seconds it exists. SWP_NOACTIVATE so this never steals focus
-            // from the window coming up behind it.
-            SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            // to be covering shows through. SWP_NOACTIVATE so this never
+            // steals focus from the window coming up behind it.
+            //
+            // Throttled rather than done every pump tick. At tick rate this
+            // reorders the z-order sixty times a second while the main
+            // thread is still initializing, and the resulting window-manager
+            // and DWM work slows down the very startup we are waiting on.
+            var now = Environment.TickCount64;
+            if (now >= nextTopmostNudge)
+            {
+                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                nextTopmostNudge = now + TopmostNudgeIntervalMs;
+            }
 
             while (PeekMessageW(out var msg, 0, 0, 0, PM_REMOVE) != 0)
             {
@@ -396,6 +419,13 @@ internal static unsafe partial class SplashWindow
                 cbSize = (uint)sizeof(WNDCLASSEXW),
                 lpfnWndProc = &WndProc,
                 hInstance = GetModuleHandleW(0),
+                // A class with no cursor leaves whatever the OS was last
+                // showing in place, which during process start is the
+                // app-starting hourglass. WS_EX_TRANSPARENT means
+                // hit-testing should never reach us, so this is belt and
+                // braces -- but a null class cursor is a latent defect
+                // rather than a deliberate choice.
+                hCursor = LoadCursorW(0, IDC_ARROW),
                 lpszClassName = name,
             };
             // Show() guarantees one registration per process, so a zero
@@ -420,6 +450,7 @@ internal static unsafe partial class SplashWindow
 
     private const uint WS_POPUP = 0x80000000;
     private const uint WS_EX_LAYERED = 0x00080000;
+    private const uint WS_EX_TRANSPARENT = 0x00000020;
     private const uint WS_EX_TOOLWINDOW = 0x00000080;
     private const uint WS_EX_NOACTIVATE = 0x08000000;
     private const uint WS_EX_TOPMOST = 0x00000008;
@@ -433,6 +464,7 @@ internal static unsafe partial class SplashWindow
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
+    private static readonly nint IDC_ARROW = 32512;
     private const int InterpolationModeHighQualityBicubic = 7;
     private const int PixelOffsetModeHighQuality = 4;
 
@@ -537,6 +569,9 @@ internal static unsafe partial class SplashWindow
 
     [LibraryImport("user32.dll")]
     private static partial void PostQuitMessage(int exitCode);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint LoadCursorW(nint instance, nint cursorName);
 
     [LibraryImport("user32.dll")]
     private static partial nint GetDC(nint hwnd);
