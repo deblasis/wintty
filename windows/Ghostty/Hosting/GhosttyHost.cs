@@ -155,6 +155,12 @@ internal sealed class GhosttyHost : IDisposable
     // focus-regain clear forwarded by their controls.
     private readonly Ghostty.Core.Notifications.IToastNotifier _toasts;
 
+    // One-time gate plus copy for the "custom-shader configured but not
+    // applied" notice. Lives on the host because that is the singleton every
+    // surface's action lands on, so one gate sees the whole process rather
+    // than one banner per pane. Only touched from the UI-thread lambda below.
+    private readonly Ghostty.Core.Renderer.CustomShaderNoticeSource _customShaderNotices = new();
+
     public GhosttyApp App => _app;
 
     /// <summary>
@@ -909,6 +915,25 @@ internal sealed class GhosttyHost : IDisposable
                     {
                         if (TryResolveControl(surfaceHandle, out var c) && c is not null)
                             c.RaiseFirstRender();
+                    });
+                    return 1;
+                }
+
+                case GhosttyActionTag.CustomShaderFailed:
+                {
+                    // The renderer has already fallen back to drawing straight
+                    // to the target, so nothing here is a recovery step -- this
+                    // is purely the signal that the user's shader silently did
+                    // nothing. Raised app-level rather than per-surface because
+                    // it explains a config problem, not something about this
+                    // one pane.
+                    var failure = (Ghostty.Core.Renderer.CustomShaderFailure)
+                        Marshal.ReadInt32(actionPtr, 8);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (Ghostty.App.NotificationService is not { } notifications) return;
+                        if (_customShaderNotices.Resolve(failure) is { } notice)
+                            notifications.Show(notice);
                     });
                     return 1;
                 }
