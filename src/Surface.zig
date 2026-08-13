@@ -1218,6 +1218,16 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .custom_shader_failed => |reason| {
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .custom_shader_failed,
+                reason,
+            ) catch |err| {
+                log.warn("apprt failed to notify custom shader failure={}", .{err});
+            };
+        },
+
         .search_total => |v| {
             _ = try self.rt_app.performAction(
                 .{ .surface = self },

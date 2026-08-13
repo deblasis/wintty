@@ -108,6 +108,10 @@ pub const Message = union(enum) {
     /// `first_render` action.
     first_render,
 
+    /// The renderer could not apply the configured `custom-shader`.
+    /// Forwarded to the apprt as the `custom_shader_failed` action.
+    custom_shader_failed: renderer.CustomShaderFailure,
+
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,
 

@@ -812,6 +812,14 @@ typedef enum {
   GHOSTTY_RENDERER_HEALTH_UNHEALTHY,
 } ghostty_action_renderer_health_e;
 
+// renderer.CustomShaderFailure
+typedef enum {
+  GHOSTTY_CUSTOM_SHADER_FAILURE_LOAD_FAILED,
+  GHOSTTY_CUSTOM_SHADER_FAILURE_COMPILER_UNAVAILABLE,
+  GHOSTTY_CUSTOM_SHADER_FAILURE_COMPILE_FAILED,
+  GHOSTTY_CUSTOM_SHADER_FAILURE_PIPELINE_FAILED,
+} ghostty_action_custom_shader_failure_e;
+
 // apprt.action.KeySequence
 typedef struct {
   bool active;
@@ -1011,6 +1019,7 @@ typedef enum {
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_PROMPT_READY,
   GHOSTTY_ACTION_FIRST_RENDER,
+  GHOSTTY_ACTION_CUSTOM_SHADER_FAILED,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1036,6 +1045,7 @@ typedef union {
   ghostty_action_mouse_visibility_e mouse_visibility;
   ghostty_action_mouse_over_link_s mouse_over_link;
   ghostty_action_renderer_health_e renderer_health;
+  ghostty_action_custom_shader_failure_e custom_shader_failed;
   ghostty_action_quit_timer_e quit_timer;
   ghostty_action_float_window_e float_window;
   ghostty_action_secure_input_e secure_input;
