@@ -22,6 +22,27 @@ public static class ThemeParser
         SearchValues.Create(":=");
 
     /// <summary>
+    /// Resolve a theme config value to the name that applies under the
+    /// given OS colour scheme. A pair yields its light or dark side; a
+    /// single theme, a partial pair, or empty input yields the value
+    /// unchanged, since only a complete pair is scheme-dependent.
+    /// </summary>
+    /// <remarks>
+    /// Separated from the caller because which side is picked decides
+    /// which file the themed-colour caches are built from, and therefore
+    /// when those caches go stale.
+    /// </remarks>
+    public static string SelectForScheme(string theme, bool isOsDark)
+    {
+        if (string.IsNullOrEmpty(theme)) return theme;
+
+        var (light, dark) = ParseThemePair(theme);
+        if (light is null || dark is null) return theme;
+
+        return isOsDark ? dark : light;
+    }
+
+    /// <summary>
     /// Parse a theme config value into light/dark components.
     /// Handles single ("ThemeName") and pair ("light:X,dark:Y") forms.
     /// Returns (null, null) for single themes or empty input. Both
