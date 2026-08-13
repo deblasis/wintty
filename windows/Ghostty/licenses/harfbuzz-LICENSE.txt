@@ -1,3 +1,6 @@
+Applies to: HarfBuzz - both the copy inside libHarfBuzzSharp.dll and the copy compiled into ghostty.dll
+----------------------------------------------------------------------
+
 HarfBuzz is licensed under the so-called "Old MIT" license.  Details follow.
 For parts of HarfBuzz that are licensed under different licenses see individual
 files names COPYING in subdirectories where applicable.

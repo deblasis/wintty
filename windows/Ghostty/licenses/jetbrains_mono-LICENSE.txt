@@ -1,27 +1,11 @@
-Applies to: Noto Emoji, and the OFL-licensed fonts in src/font/res used as test fixtures
+Applies to: jetbrains_mono
 ----------------------------------------------------------------------
 
-Copyright holders of the fonts this licence covers:
-
-  Noto Emoji                Copyright 2013 Google LLC
-  Code New Roman            Copyright (c) 2015, Abdullah Arif
-  Geist Mono                Copyright (c) 2023 Vercel, in collaboration with basement.studio
-  Inconsolata               Copyright 2006 The Inconsolata Project Authors
-  JuliaMono                 Copyright (c) 2020 - 2023, cormullion
-  Kawkab Mono               Copyright (c) 2015, Abdullah Arif
-  Lilex                     Copyright 2019 The Lilex Project Authors
-  Monaspace Neon            Copyright (c) 2023, GitHub
-  Terminus TTF              Copyright (c) 2010-2020 Dimitar Toshkov Zhekov,
-                            Copyright (c) 2011-2023 Tilman Blumenbach
-
-JetBrains Mono and Nerd Fonts Symbols are embedded in the binary and carry
-their own files in this directory.
-
-----------------------------------------------------------------------
+Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
-https://openfontlicense.org
+https://scripts.sil.org/OFL
 
 
 -----------------------------------------------------------
@@ -37,7 +21,7 @@ with others.
 
 The OFL allows the licensed fonts to be used, studied, modified and
 redistributed freely as long as they are not sold by themselves. The
-fonts, including any derivative works, can be bundled, embedded,
+fonts, including any derivative works, can be bundled, embedded, 
 redistributed and/or sold with any software provided that any reserved
 names are not used by derivative works. The fonts and derivatives,
 however, cannot be released under any other type of license. The

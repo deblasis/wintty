@@ -300,10 +300,19 @@
     redistributing something new, and a list is one more place to forget.
     licenses/README.md documents what covers what and is shipped with them
     deliberately, so the payload explains itself.
+
+    Update rather than Include: EnableDefaultNoneItems is on, so the SDK's
+    default glob already picks these up and an Include would add a second
+    item for every file. That builds today only because the copy targets
+    dedupe by target path - it is the shape NETSDK1022 exists to flag, and
+    it would become a hard error the day the SDK stops tolerating it.
+    Update attaches the metadata to the items that already exist.
+
+    No Link either: these live inside the project cone, so their relative
+    path is preserved in the output on its own.
   -->
   <ItemGroup>
-    <None Include="licenses\**\*">
-      <Link>licenses\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    <None Update="licenses\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
