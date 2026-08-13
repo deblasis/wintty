@@ -63,6 +63,7 @@ internal enum GhosttyActionTag
     SearchSelected = 64,
     PromptReady    = 68,
     FirstRender    = 69,
+    CustomShaderFailed = 70,
 }
 
 // ghostty_action_scrollbar_s:

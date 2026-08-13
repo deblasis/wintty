@@ -55,6 +55,37 @@ pub const Health = enum(c_int) {
     }
 };
 
+/// Why a configured `custom-shader` is not being applied. Like `Health`,
+/// this is shared across all renderers even though not every variant is
+/// reachable on every one, so API users get a single enum.
+///
+/// A failure here is not fatal: the renderer falls back to drawing straight
+/// to the target, so the terminal looks entirely normal and the user has no
+/// way to tell their shader silently did nothing. That is what this reason
+/// exists to report.
+pub const CustomShaderFailure = enum(c_int) {
+    /// The shader file could not be read, or could not be translated into
+    /// the backend's shading language.
+    load_failed,
+
+    /// The backend has no shader compiler available at runtime. On DX12
+    /// this means dxcompiler.dll was not found next to the executable.
+    compiler_unavailable,
+
+    /// The compiler ran and rejected the shader source.
+    compile_failed,
+
+    /// The shader compiled but no GPU pipeline could be built from it.
+    pipeline_failed,
+
+    test "ghostty.h CustomShaderFailure" {
+        try lib.checkGhosttyHEnum(
+            CustomShaderFailure,
+            "GHOSTTY_CUSTOM_SHADER_FAILURE_",
+        );
+    }
+};
+
 test {
     // Our comptime-chosen renderer
     _ = Renderer;

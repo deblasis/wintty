@@ -169,6 +169,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// only after a frame that actually paints content is presented.
         first_render_sent: bool = false,
 
+        /// A custom-shader failure waiting to be pushed to the surface. Set
+        /// by `initShaders` when the user configured a shader the backend
+        /// could not apply, cleared once `drawFrame` has pushed it.
+        ///
+        /// Pushed from the draw path rather than from `initShaders` itself
+        /// because at renderer-init time the apprt has not necessarily
+        /// registered the surface yet, so an action raised there can be
+        /// dropped. `.first_render` above takes the same route.
+        custom_shader_failure: ?renderer.CustomShaderFailure = null,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -869,7 +879,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .swap_chain = swap_chain,
             };
 
-            try result.initShaders();
+            try result.initShaders(.startup);
 
             // Ensure our undefined values above are correctly initialized.
             result.updateFontGridUniforms();
@@ -927,10 +937,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.shaders.deinit(self.alloc);
         }
 
-        fn initShaders(self: *Self) !void {
+        /// Why shaders are being (re)built. Only `startup` and
+        /// `config_reload` arm the user-facing custom-shader notice: a
+        /// display realize rebuilds GPU resources for something the user did
+        /// not ask for, and must not re-raise a failure they have already
+        /// been told about.
+        const ShaderInitCause = enum { startup, config_reload, display_realized };
+
+        fn initShaders(self: *Self, cause: ShaderInitCause) !void {
             var arena = ArenaAllocator.init(self.alloc);
             defer arena.deinit();
             const arena_alloc = arena.allocator();
+
+            // Whether the user asked for post-process shaders at all. Read
+            // from config rather than from the load result below, because the
+            // whole point is to tell "configured but not applied" apart from
+            // "not configured" -- `has_custom_shaders` is false in both.
+            const configured = self.config.custom_shaders.value.items.len > 0;
 
             // Load our custom shaders
             const custom_shaders: []const [:0]const u8 = shadertoy.loadFromFiles(
@@ -952,6 +975,29 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             self.shaders = shaders;
             self.has_custom_shaders = has_custom_shaders;
+
+            // Arm the notice if the user configured a shader that ended up
+            // doing nothing. Two distinct silent paths land here: the load or
+            // translation above failing, and the backend building zero post
+            // pipelines. Both leave the terminal rendering normally, so a
+            // `log.warn` nobody reads is otherwise the only trace.
+            if (cause != .display_realized and configured) {
+                if (!has_custom_shaders) {
+                    self.custom_shader_failure = .load_failed;
+                } else if (shaders.post_pipelines.len == 0) {
+                    // Backends that can say why record it on their Shaders
+                    // struct; everyone else gets the generic pipeline
+                    // failure. Same comptime-probe idiom as the
+                    // `@hasField(Pipeline, "pso")` guard in drawFrame.
+                    self.custom_shader_failure = if (comptime @hasField(
+                        @TypeOf(shaders),
+                        "post_failure",
+                    ))
+                        shaders.post_failure orelse .pipeline_failed
+                    else
+                        .pipeline_failed;
+                }
+            }
         }
 
         /// This is called early right after surface creation.
@@ -1046,7 +1092,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             assert(self.swap_chain.defunct);
 
             // We reinitialize our shaders and our swap chain.
-            try self.initShaders();
+            try self.initShaders(.display_realized);
             self.swap_chain = try SwapChain.init(
                 self.alloc,
                 self.api,
@@ -1623,6 +1669,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.first_render_sent = true;
             };
 
+            // Emit any pending custom-shader failure on the same mailbox path
+            // as `.first_render` above. A defer so it also catches a failure
+            // armed by the shader re-init further down this same frame.
+            // `.instant` so a momentarily full mailbox delays the signal to
+            // the next frame rather than blocking the render thread; clearing
+            // the field only on a successful push is what makes this fire
+            // exactly once per shader initialization.
+            defer if (self.custom_shader_failure) |reason| {
+                if (self.surface_mailbox.push(
+                    .{ .custom_shader_failed = reason },
+                    .instant,
+                ) > 0) self.custom_shader_failure = null;
+            };
+
             // Let our graphics API do any bookkeeping, etc.
             // that it needs to do before / after `drawFrame`.
             self.api.drawFrameStart();
@@ -1674,7 +1734,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.reinitialize_shaders = false;
                 self.api.waitGpu();
                 self.shaders.deinit(self.alloc);
-                try self.initShaders();
+                try self.initShaders(.config_reload);
             }
 
             // Our shaders should not be defunct at this point.

@@ -364,6 +364,12 @@ pub const Action = union(Key) {
     /// apprt consumers.
     first_render,
 
+    /// A configured `custom-shader` is not being applied because the
+    /// renderer could not load, compile, or build a pipeline for it. The
+    /// terminal keeps rendering normally without the shader, so this is
+    /// the only signal that the setting silently did nothing.
+    custom_shader_failed: renderer.CustomShaderFailure,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +442,7 @@ pub const Action = union(Key) {
         move_tab_to_new_window,
         prompt_ready,
         first_render,
+        custom_shader_failed,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
