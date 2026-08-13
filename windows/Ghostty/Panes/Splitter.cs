@@ -10,12 +10,12 @@ using Windows.Foundation;
 namespace Ghostty.Panes;
 
 /// <summary>
-/// A 1-pixel draggable Grid that updates a <see cref="SplitPane.Ratio"/>
+/// A hairline draggable Grid that updates a <see cref="SplitPane.Ratio"/>
 /// from pointer drag deltas relative to its parent's rendered size.
 ///
 /// Why hand-rolled and not the CommunityToolkit GridSplitter:
 ///   - Avoids pulling a NuGet dependency for ~80 lines of behavior.
-///   - We can size it as a true 1px line; GridSplitter has a minimum
+///   - We can size it as a true hairline; GridSplitter has a minimum
 ///     hit-test thickness that looks heavy on a terminal.
 ///   - We can route the ratio change directly to our model without an
 ///     intermediate VisualState/Behavior abstraction.
@@ -44,7 +44,7 @@ internal sealed partial class Splitter : Grid
         _split = split;
         _onRatioChanged = onRatioChanged;
 
-        // 1px line in a neutral terminal-chrome color. The dark grey
+        // Hairline in a neutral terminal-chrome color. The dark grey
         // matches typical terminal panel chrome and stays visible
         // against both #0C0C0C backgrounds and Mica. TODO: source from
         // a theme resource once the config layer exists.
@@ -53,14 +53,14 @@ internal sealed partial class Splitter : Grid
         if (split.Orientation == PaneOrientation.Vertical)
         {
             // Vertical splitter LINE between left/right panes.
-            Width = 1;
+            Width = PaneChrome.DividerThickness;
             HorizontalAlignment = HorizontalAlignment.Stretch;
             VerticalAlignment = VerticalAlignment.Stretch;
             ChangeCursor(InputSystemCursorShape.SizeWestEast);
         }
         else
         {
-            Height = 1;
+            Height = PaneChrome.DividerThickness;
             HorizontalAlignment = HorizontalAlignment.Stretch;
             VerticalAlignment = VerticalAlignment.Stretch;
             ChangeCursor(InputSystemCursorShape.SizeNorthSouth);

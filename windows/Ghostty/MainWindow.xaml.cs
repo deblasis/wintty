@@ -2113,6 +2113,23 @@ public sealed partial class MainWindow : Window
         UpdateCursorAccentColors();
         ApplyShellTheme();
         ApplyRootGridBackground();
+        RefreshPaneGutters();
+    }
+
+    /// <summary>
+    /// Repaint the chrome gutter around every pane. Owns exactly that one
+    /// piece of chrome state.
+    ///
+    /// Belongs on the config-reload path only: the gutter is filled from
+    /// background and background-opacity, both of which change only on a
+    /// reload. It deliberately does not ride the power-saver path, which
+    /// reworks the window backdrop without touching what libghostty
+    /// renders -- the gutter tracks the surface, not the backdrop.
+    /// </summary>
+    private void RefreshPaneGutters()
+    {
+        foreach (var t in _tabManager.Tabs)
+            ((PaneHost)t.PaneHost).RefreshGutterBrush();
     }
 
     /// <summary>
