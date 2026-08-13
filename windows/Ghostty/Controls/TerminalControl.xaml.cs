@@ -565,16 +565,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// glow.</summary>
     public event EventHandler? FirstRender;
 
+    // Distance the search bar floats from the terminal's top-right, on
+    // top of whatever gutter the pane chrome reserves.
+    private const double SearchBarInset = 8;
+
     public TerminalControl()
     {
         InitializeComponent();
 
-        // Hold the terminal surface off the pane's edges by the width of
-        // the chrome PaneHost draws over it (the active-pane focus stroke
-        // and the split divider, both overlays that reserve no layout
-        // space of their own). Without this the surface fills the pane
-        // rect, PushSurfaceSize hands libghostty that full rect, and the
-        // outermost cells render underneath the chrome.
+        // Hold the terminal surface off the pane's edges so the chrome
+        // PaneHost overlays there does not paint over live cells -- see
+        // PaneChrome for why the gutter exists and how it is sized.
+        // PushSurfaceSize reads Panel.ActualWidth, so insetting the panel
+        // is also what keeps libghostty's grid matched to what is visible.
         //
         // Applied here rather than in XAML so PaneChrome stays the single
         // source of truth for the thicknesses, and set before the first
@@ -593,11 +596,21 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // both are pane-edge chrome themselves.
         VerticalScrollBar.Margin = gutter;
         ResizeOverlay.Margin = gutter;
+        // Assigned outright rather than added to a XAML margin: every
+        // other line here is idempotent, and this block is one refactor
+        // away from being re-run on attach the way ApplyGutterBrush now
+        // is. Accumulating would walk the search bar inward every time.
         SearchBar.Margin = new Thickness(
-            SearchBar.Margin.Left + gutter.Left,
-            SearchBar.Margin.Top + gutter.Top,
-            SearchBar.Margin.Right + gutter.Right,
-            SearchBar.Margin.Bottom + gutter.Bottom);
+            0,
+            SearchBarInset + gutter.Top,
+            SearchBarInset + gutter.Right,
+            0);
+
+        // Bell flash spans the pane bounds, so its stroke is what fills
+        // the gutter while it is up. Sized from the gutter for that
+        // reason -- a thicker chrome would otherwise leave it painting
+        // over live cells again.
+        BellOverlay.BorderThickness = gutter;
 
         ApplyGutterBrush();
     }
@@ -606,14 +619,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // resolves to the same value neither allocates a brush nor dirties
     // the pane's visual. Reloads are frequent (Ctrl+Shift+Wheel walks
     // background-opacity one step per notch) and every leaf of every tab
-    // is repainted on each one. Mirrors ApplyRootGridBackground.
+    // is repainted on each one, plus every leaf repaints on attach.
     private uint? _lastGutterArgb;
 
     /// <summary>
-    /// Repaint the gutter to match the terminal background. Called at
-    /// construction, and by MainWindow whenever the backdrop is recomputed,
-    /// so a theme change or a power-saver transition does not strand a
-    /// stale frame around each pane.
+    /// Repaint the gutter to match the terminal background. Called when
+    /// the control is built, on every attach, and by MainWindow on a
+    /// config reload -- the three ways this leaf's fill can fall behind
+    /// the surface it abuts.
     /// </summary>
     internal void ApplyGutterBrush()
     {
@@ -631,11 +644,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             cfg.BackgroundColor, cfg.BackgroundOpacity);
         if (_lastGutterArgb == argb) return;
 
-        // Commit the cache only after the write lands. XAML property sets
-        // on this path can throw against a tearing-down visual tree (see
-        // the catch in MainWindow.OnLowPowerChanged); recording first
-        // would leave the leaf believing it had painted a colour it never
-        // did, and every later repaint of that value would early-out.
+        // Commit the cache only after the write lands. A config reload
+        // can reach a leaf whose visual tree is tearing down, and the
+        // property set throws there; recording first would leave the leaf
+        // believing it had painted a colour it never did, and every later
+        // repaint of that value would early-out. PaneHost.RefreshGutterBrush
+        // swallows that throw per leaf, so without this ordering the miss
+        // would also be silent. Note ApplyRootGridBackground commits
+        // first -- same hazard, not yet addressed there.
         SurfaceRoot.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
                 (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
@@ -1187,29 +1203,27 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         UrlHoverBanner.Visibility = Visibility.Visible;
     }
 
-    // The pointer handlers are attached to both Panel and SurfaceRoot so
-    // the chrome gutter around the panel still routes into the terminal.
-    // On the SurfaceRoot copy, take only events that landed on the gutter
-    // itself: the ScrollBar and SearchBar are siblings of the panel, so
-    // their pointer events bubble through here and must stay theirs.
+    // True for the SurfaceRoot copy of an event that started somewhere
+    // below it -- on the panel, or on a sibling overlay that owns it. See
+    // the dual-attachment rationale in the XAML.
     //
     // Source-based rather than Handled-based on purpose, so it holds for
     // the handlers that return early without marking the event (the
     // motion threshold in OnPointerMoved, the null-surface guards).
     //
-    // Events that do come from the gutter carry Panel-relative
-    // coordinates slightly outside the surface. That is intended:
-    // libghostty clamps them to the edge cell, which is what makes a
-    // click on a pane's edge behave as a click on its outermost cell.
-    // It does mean an app running mouse=a sees button reports attributed
-    // to the edge cell for clicks a few DIPs outside the grid.
-    private bool NotOurs(object sender, RoutedEventArgs e)
+    // Events that survive it came from the gutter and carry Panel-relative
+    // coordinates just outside the surface. That is intended: libghostty
+    // clamps them to the edge cell, which is what makes a click on a
+    // pane's edge behave as a click on its outermost cell. It does mean
+    // an app running mouse=a sees button reports attributed to the edge
+    // cell for clicks a few DIPs outside the grid.
+    private bool BubbledFromChild(object sender, RoutedEventArgs e)
         => ReferenceEquals(sender, SurfaceRoot)
            && !ReferenceEquals(e.OriginalSource, SurfaceRoot);
 
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (NotOurs(sender, e)) return;
+        if (BubbledFromChild(sender, e)) return;
 
         // Take focus on the UserControl, not the panel. Guard with the
         // current focus state to avoid generating a Lost+Got pair when
@@ -1265,7 +1279,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (NotOurs(sender, e)) return;
+        if (BubbledFromChild(sender, e)) return;
 
         // Complete the suppressed right-click on its matching right-release,
         // opening the menu so it feels like a normal Windows right-click. We
@@ -1289,7 +1303,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
-        if (NotOurs(sender, args)) return;
+        if (BubbledFromChild(sender, args)) return;
 
         // ContextRequested fires for both right-click and keyboard. The
         // pointer path (OnPointerPressed/Released) already handles right-click
@@ -1304,7 +1318,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (NotOurs(sender, e)) return;
+        if (BubbledFromChild(sender, e)) return;
         if (_surface.Handle == IntPtr.Zero) return;
         // ghostty_surface_mouse_pos expects unscaled coordinates (DIPs):
         // src/apprt/embedded.zig cursorPosCallback runs the input through
@@ -1342,7 +1356,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        if (NotOurs(sender, e)) return;
+        if (BubbledFromChild(sender, e)) return;
         if (_surface.Handle == IntPtr.Zero) return;
         var pt = e.GetCurrentPoint(Panel);
         var rawDelta = pt.Properties.MouseWheelDelta;

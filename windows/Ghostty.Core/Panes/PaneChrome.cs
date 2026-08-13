@@ -31,9 +31,9 @@ internal static class PaneChrome
     /// Gutter reserved between a pane's bounds and its terminal surface.
     ///
     /// Sized to the thickest chrome that can land on a single edge (the
-    /// divider rides the boundary between two leaves, so it draws into
-    /// one gutter or the other, never both), rounded up to a whole DIP so
-    /// the surface starts on a device-pixel boundary at 100% scale.
+    /// divider is pinned to the leading leaf's trailing edge, so it draws
+    /// into that leaf's gutter alone), rounded up to a whole DIP so the
+    /// surface starts on a device-pixel boundary at 100% scale.
     /// Derived rather than hardcoded so bumping a thickness above cannot
     /// silently reintroduce chrome drawing over terminal content.
     /// </summary>
@@ -50,8 +50,8 @@ internal static class PaneChrome
     /// backdrop and read as a differently tinted frame around every
     /// pane. The opacity has to be carried through rather than filled
     /// opaque because libghostty composites its own window padding the
-    /// same way; measured across a pane edge at opacity 0.75, gutter and
-    /// surface resolve to the same pixel.
+    /// same way, and the gutter's job is to be indistinguishable from
+    /// the surface it abuts.
     /// </remarks>
     /// <param name="backgroundRgb">Packed 0xRRGGBB background colour.</param>
     /// <param name="backgroundOpacity">Effective opacity, clamped to 0..1.</param>

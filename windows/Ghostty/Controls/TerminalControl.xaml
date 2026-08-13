@@ -56,15 +56,15 @@
         for free without a custom Storyboard.
     -->
     <!--
-        SurfaceRoot Background fills the gutter this control holds around
-        the SwapChainPanel for the pane chrome (see PaneChrome). Set from
-        the terminal background in code-behind rather than a ThemeResource
-        so it tracks the config theme, not the system one.
+        SurfaceRoot fills the gutter this control holds around the
+        SwapChainPanel for the pane chrome (see PaneChrome). Its fill is
+        set from the terminal background in code-behind rather than a
+        ThemeResource so it tracks the config theme, not the system one.
 
         It repeats the panel's pointer handlers because the gutter sits
         outside the panel: without them the gutter band would swallow
         clicks, so clicking a pane's edge would neither focus it nor reach
-        libghostty. Each handler ignores the bubbled copy of an event a
+        libghostty. Each handler drops the bubbled copy of an event a
         child overlay already owns - the ScrollBar is a sibling of the
         panel, so its drags would otherwise reach the terminal too.
 
@@ -174,7 +174,6 @@
             VerticalAlignment="Top"
             HorizontalAlignment="Right"
             MaxWidth="480"
-            Margin="0,8,8,0"
             Visibility="Collapsed"
             Closed="OnSearchClosed" />
 

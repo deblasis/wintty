@@ -256,9 +256,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     /// <summary>
-    /// Repaint every leaf's chrome gutter after the backdrop is
-    /// recomputed. New leaves pick the brush up themselves at
-    /// construction, so this only has to catch the ones already mounted.
+    /// Repaint every mounted leaf's chrome gutter for the current
+    /// terminal background. Leaves repaint themselves when constructed
+    /// and on every attach, so this only has to catch the ones already
+    /// sitting in the tree when the config changes.
     /// </summary>
     public void RefreshGutterBrush()
     {
@@ -268,7 +269,24 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         if (_allLeavesClosed) return;
 
         foreach (var leaf in Core.Panes.PaneTree.Leaves(_root))
-            leaf.Terminal().ApplyGutterBrush();
+        {
+            // Per leaf, not around the loop: a config reload can land
+            // while a window is tearing down or a tab is mid-detach, and
+            // a XAML write against a dying leaf must not strand the rest
+            // of the tree on the old fill. Letting it escape would be
+            // worse still -- this runs from OnConfigReloadedChrome, one
+            // subscriber of many on ConfigChanged, so a throw here stops
+            // every later subscriber from seeing the reload at all.
+            try
+            {
+                leaf.Terminal().ApplyGutterBrush();
+            }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
+                                    or InvalidOperationException
+                                    or NullReferenceException)
+            {
+            }
+        }
     }
 
     public int PaneCount
