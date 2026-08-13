@@ -22,14 +22,6 @@ public static class ThemeParser
         SearchValues.Create(":=");
 
     /// <summary>
-    /// Parse a theme config value into light/dark components.
-    /// Handles single ("ThemeName") and pair ("light:X,dark:Y") forms.
-    /// Returns (null, null) for single themes or empty input. Both
-    /// light and dark must be present for a pair; partial pairs (only
-    /// light: or only dark:) return (null, null) to match the Zig
-    /// parser which treats those as InvalidValue errors.
-    /// </summary>
-    /// <summary>
     /// Resolve a theme config value to the name that applies under the
     /// given OS colour scheme. A pair yields its light or dark side; a
     /// single theme, a partial pair, or empty input yields the value
@@ -50,6 +42,14 @@ public static class ThemeParser
         return isOsDark ? dark : light;
     }
 
+    /// <summary>
+    /// Parse a theme config value into light/dark components.
+    /// Handles single ("ThemeName") and pair ("light:X,dark:Y") forms.
+    /// Returns (null, null) for single themes or empty input. Both
+    /// light and dark must be present for a pair; partial pairs (only
+    /// light: or only dark:) return (null, null) to match the Zig
+    /// parser which treats those as InvalidValue errors.
+    /// </summary>
     public static (string? light, string? dark) ParseThemePair(string theme)
     {
         if (string.IsNullOrWhiteSpace(theme))

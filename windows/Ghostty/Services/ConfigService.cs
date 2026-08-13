@@ -549,9 +549,15 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             // agree, so the palette is either wholly the old one or wholly
             // the new one and the next flip is still able to move it.
             StaticLoggers.ConfigService.LogThemeRefreshFailed(ex);
-            return;
         }
 
+        // Notified even when the read above threw. A failure partway can
+        // still leave the caches holding the incoming palette, and since
+        // the flag advances with them the guard would decline every retry
+        // -- so staying quiet here is what would strand the chrome, not
+        // what protects it. On the legs where nothing moved, subscribers
+        // re-read the values they already had.
+        //
         // Deferred rather than invoked inline so the fan-out does not run
         // on top of the ColorValuesChanged dispatcher frame, and to match
         // the shape Reload already uses. The caches have finished settling
