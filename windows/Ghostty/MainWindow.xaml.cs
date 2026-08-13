@@ -1807,7 +1807,10 @@ public sealed partial class MainWindow : Window
         var brush = new SolidColorBrush(muiColor);
 
         foreach (var t in _tabManager.Tabs)
+        {
             ((PaneHost)t.PaneHost).SetActiveBorderBrush(brush);
+            ((PaneHost)t.PaneHost).RefreshGutterBrush();
+        }
 
         var bg = _configService.BackgroundColor;
         var fg = _configService.ForegroundColor;

@@ -55,7 +55,14 @@
         hover/pointer-leave, so we get the native Windows 11 auto-fade
         for free without a custom Storyboard.
     -->
+    <!--
+        Root Background fills the gutter TerminalControl holds around the
+        SwapChainPanel for the pane chrome (see PaneChrome). Set from the
+        terminal background in code-behind rather than a ThemeResource so
+        it tracks the config theme, not the system one.
+    -->
     <Grid
+        x:Name="SurfaceRoot"
         HorizontalAlignment="Stretch"
         VerticalAlignment="Stretch">
         <SwapChainPanel

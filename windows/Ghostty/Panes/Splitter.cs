@@ -10,7 +10,7 @@ using Windows.Foundation;
 namespace Ghostty.Panes;
 
 /// <summary>
-/// A 1-pixel draggable Grid that updates a <see cref="SplitPane.Ratio"/>
+/// A hairline draggable Grid that updates a <see cref="SplitPane.Ratio"/>
 /// from pointer drag deltas relative to its parent's rendered size.
 ///
 /// Why hand-rolled and not the CommunityToolkit GridSplitter:
@@ -53,14 +53,14 @@ internal sealed partial class Splitter : Grid
         if (split.Orientation == PaneOrientation.Vertical)
         {
             // Vertical splitter LINE between left/right panes.
-            Width = 1;
+            Width = PaneChrome.DividerThickness;
             HorizontalAlignment = HorizontalAlignment.Stretch;
             VerticalAlignment = VerticalAlignment.Stretch;
             ChangeCursor(InputSystemCursorShape.SizeWestEast);
         }
         else
         {
-            Height = 1;
+            Height = PaneChrome.DividerThickness;
             HorizontalAlignment = HorizontalAlignment.Stretch;
             VerticalAlignment = VerticalAlignment.Stretch;
             ChangeCursor(InputSystemCursorShape.SizeNorthSouth);

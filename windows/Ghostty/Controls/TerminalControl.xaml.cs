@@ -568,6 +568,53 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public TerminalControl()
     {
         InitializeComponent();
+
+        // Hold the terminal surface off the pane's edges by the width of
+        // the chrome PaneHost draws over it (the active-pane focus stroke
+        // and the split divider, both overlays that reserve no layout
+        // space of their own). Without this the surface fills the pane
+        // rect, PushSurfaceSize hands libghostty that full rect, and the
+        // outermost cells render underneath the chrome.
+        //
+        // Applied here rather than in XAML so PaneChrome stays the single
+        // source of truth for the thicknesses, and set before the first
+        // measure so the surface is never sized to the full rect even for
+        // one layout pass.
+        var gutter = new Thickness(Core.Panes.PaneChrome.SurfaceInset);
+        Panel.Margin = gutter;
+
+        // Overlays that read as part of the terminal content follow the
+        // surface into the gutter. The scrollbar tracks the grid's right
+        // edge and the resize pill positions itself within the grid, so
+        // leaving either on the pane bounds would float it over the
+        // border stroke. The bell flash and the URL banner deliberately
+        // stay on the pane bounds -- both are pane-edge chrome.
+        VerticalScrollBar.Margin = gutter;
+        ResizeOverlay.Margin = gutter;
+
+        ApplyGutterBrush();
+    }
+
+    /// <summary>
+    /// Repaint the gutter to match the terminal background. Called at
+    /// construction and again by MainWindow on every config reload, so a
+    /// theme change does not strand a stale frame around each pane.
+    /// </summary>
+    internal void ApplyGutterBrush()
+    {
+        var cfg = App.ConfigService;
+        if (cfg is null) return;
+
+        // Mirror ApplyBackdropStyle: low power flattens opacity to 1.0,
+        // and the gutter has to follow or it goes translucent over an
+        // already-opaque backdrop.
+        var lowPower = Ghostty.App.PowerStateMonitor?.IsLowPowerActive ?? false;
+        var opacity = lowPower ? 1.0 : cfg.BackgroundOpacity;
+
+        var argb = Core.Panes.PaneChrome.GutterArgb(cfg.BackgroundColor, opacity);
+        SurfaceRoot.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+            Microsoft.UI.ColorHelper.FromArgb(
+                (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
     }
 
     // Lifecycle ----------------------------------------------------------

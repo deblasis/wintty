@@ -52,8 +52,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // Pane highlight system, rendered as an overlay Canvas above the
     // split tree. Two layers of chrome:
     //
-    //   - _activeBorderRect: a 1.5px accent-colored border tracking
-    //     the active leaf's bounds. Positioned via TransformToVisual.
+    //   - _activeBorderRect: an accent-colored border tracking the
+    //     active leaf's bounds. Positioned via TransformToVisual.
     //   - _dimRects: one semi-transparent dark rectangle per INACTIVE
     //     leaf, positioned over each inactive leaf's bounds. Gives
     //     the visual effect of the active pane being "brighter" than
@@ -64,6 +64,13 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // a parent Grid is not a sibling of a leaf's chrome and cannot
     // be defeated with Canvas.ZIndex. The overlay sits above
     // everything and is tracked via TransformToVisual on each layout.
+    //
+    // Because it is an overlay it reserves no layout space, so each
+    // leaf holds its own terminal surface off its edges by
+    // PaneChrome.SurfaceInset (applied inside TerminalControl, below
+    // the leaf root, so the layout-slot chain this overlay walks is
+    // unaffected). That gutter is what keeps this chrome from painting
+    // over live cells.
     // Assigned once in BuildChrome() (called from every ctor), never
     // reassigned. Not readonly because BuildChrome is a shared helper
     // rather than the ctor body itself.
@@ -248,6 +255,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _activeBorderRect.Stroke = brush ?? DefaultActiveBorderBrush;
     }
 
+    /// <summary>
+    /// Repaint every leaf's chrome gutter after a config reload. New
+    /// leaves pick the brush up themselves at construction, so this only
+    /// has to catch the ones already mounted.
+    /// </summary>
+    public void RefreshGutterBrush()
+    {
+        foreach (var leaf in PaneTree.Leaves(_root))
+            leaf.Terminal().ApplyGutterBrush();
+    }
+
     public int PaneCount
     {
         get
@@ -391,7 +409,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _activeBorderRect = new Rectangle
         {
             Stroke = DefaultActiveBorderBrush,
-            StrokeThickness = 1.5,
+            StrokeThickness = Core.Panes.PaneChrome.ActiveBorderThickness,
             Fill = null,
             IsHitTestVisible = false,
         };
@@ -1337,9 +1355,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
         var bounds = new Rect(bx, by, ctl.ActualWidth, ctl.ActualHeight);
         // For the stroked active border, inset by half the stroke
-        // thickness so the 1.5px stroke draws entirely INSIDE the
-        // leaf bounds. For dim fills, use the full rect.
-        var inset = insetForStroke ? 0.75 : 0.0;
+        // thickness so the stroke draws entirely INSIDE the leaf bounds
+        // (and so within the gutter each leaf reserves for it -- see
+        // PaneChrome). For dim fills, use the full rect.
+        var inset = insetForStroke ? Core.Panes.PaneChrome.ActiveBorderThickness / 2 : 0.0;
         Canvas.SetLeft(rect, bounds.X + inset);
         Canvas.SetTop(rect, bounds.Y + inset);
         rect.Width = Math.Max(0, bounds.Width - inset * 2);
@@ -1462,7 +1481,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             Grid.SetColumn(splitter, 0);
             splitter.HorizontalAlignment = HorizontalAlignment.Right;
             splitter.VerticalAlignment = VerticalAlignment.Stretch;
-            splitter.Width = 1;
+            splitter.Width = Core.Panes.PaneChrome.DividerThickness;
             // Keep the splitter above the panes regardless of later child
             // order. Operations that re-add a leaf via Children.Add -- unzoom
             // (ToggleSplitZoom) splicing the floated leaf back, and an in-place
@@ -1494,7 +1513,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             Grid.SetRow(splitter, 0);
             splitter.VerticalAlignment = VerticalAlignment.Bottom;
             splitter.HorizontalAlignment = HorizontalAlignment.Stretch;
-            splitter.Height = 1;
+            splitter.Height = Core.Panes.PaneChrome.DividerThickness;
             // Pin above the panes so a later Children.Add (unzoom / cell-0
             // split) can't occlude the divider. See the vertical case above.
             Canvas.SetZIndex(splitter, 1);
