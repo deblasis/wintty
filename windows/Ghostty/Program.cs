@@ -90,6 +90,9 @@ public static partial class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(IntPtr hObject);
 
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial void OutputDebugStringW(string lpOutputString);
+
     private static readonly IntPtr InvalidHandleValue = new(-1);
 
     private const int STD_ERROR_HANDLE = -12;
@@ -182,10 +185,9 @@ public static partial class Program
             {
                 // Console.Error is still the terminal here, so say so rather
                 // than losing every diagnostic and the tee in silence.
-                Console.Error.WriteLine(
+                WriteStderr(
                     $"{AppIdentity.LogTag} could not open {GpuLogPath}: " +
                     Marshal.GetPInvokeErrorMessage(Marshal.GetLastPInvokeError()));
-                Console.Error.Flush();
                 return;
             }
 
@@ -227,14 +229,63 @@ public static partial class Program
             { AutoFlush = true };
             Console.SetError(writer);
 
-            Console.Error.WriteLine(
+            WriteStderr(
                 $"=== {AppIdentity.ProductName} GPU log started {DateTime.UtcNow:O} ===");
-            Console.Error.WriteLine($"Log file: {GpuLogPath}");
-            Console.Error.Flush();
+            WriteStderr($"Log file: {GpuLogPath}");
         }
         catch
         {
             // Best effort -- if we can't redirect, we still run normally.
+        }
+    }
+
+    /// <summary>
+    /// Write one line to <see cref="Console.Error"/> without letting a refused
+    /// write decide the exit code. See <see cref="WriteConsole"/>.
+    /// </summary>
+    private static void WriteStderr(string message) => WriteConsole(Console.Error, message);
+
+    /// <summary>
+    /// Write to a console stream, tolerating a handle that refuses the write.
+    /// </summary>
+    /// <remarks>
+    /// A launcher can hand this process a stdout or stderr it is not allowed
+    /// to write to; a sandboxed Start-Process with no redirection does. .NET
+    /// absorbs only the obvious half of that: ConsolePal probes the handle
+    /// with a zero-byte WriteFile and substitutes <see cref="Stream.Null"/>
+    /// when the probe fails, so a handle that denies everything writes nothing
+    /// and throws nothing. A handle that passes the zero-byte probe and then
+    /// fails the real write throws on the first line anyone logs. That is why
+    /// this catches instead of testing writability at startup: the only test
+    /// available is the one .NET already ran, and it does not predict this.
+    ///
+    /// Every caller is on a path where that exception decides the exit code.
+    /// <see cref="StartGui"/>'s catch turns one into
+    /// <see cref="ExitCode.ManagedUnhandled"/>, which let a diagnostic line
+    /// nobody was reading kill the process before a window existed.
+    /// <see cref="RedirectStderrToFile"/> normally moves these writes to the
+    /// GPU log and the question never comes up, but it can fail (a second
+    /// instance holds that log against writers), and then they are back on
+    /// the inherited handle.
+    /// </remarks>
+    private static void WriteConsole(TextWriter target, string text, bool appendNewLine = true)
+    {
+        try
+        {
+            if (appendNewLine) target.WriteLine(text);
+            else target.Write(text);
+            target.Flush();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A handle this process may not write to, a pipe with no reader, a
+            // locked log file, a console handle FreeConsole invalidated.
+            //
+            // Not dropped on the floor: when the console refuses writes and the
+            // GPU log is unavailable too, a debugger is the only channel left,
+            // and it is already where the DX12 debug layer reports. Silence
+            // here would blind exactly the launch someone is debugging.
+            OutputDebugStringW($"{text}{Environment.NewLine}");
         }
     }
 
@@ -285,10 +336,14 @@ public static partial class Program
     {
         var message = $"{AppIdentity.LogTag} FATAL: {ex}";
 
+        WriteStderr(message);
+
+        // Its own try, not one shared with the write above: a stderr that
+        // refuses writes is exactly when the terminal tee is the only copy
+        // anyone sees, and sharing a try would drop it along with the write
+        // that failed. Same reasoning as InitGhostty's two-sink report.
         try
         {
-            Console.Error.WriteLine(message);
-            Console.Error.Flush();
             _preRedirectStderr?.WriteLine(message);
             _preRedirectStderr?.Flush();
         }
@@ -360,8 +415,10 @@ public static partial class Program
         // src/config/Config.zig, and explains `open -na Ghostty.app`.
         if (Ghostty.Core.Cli.CliAliases.IsHelpRequest(args, isAlias))
         {
-            Console.Out.Write(Ghostty.Core.Cli.CliAliases.RenderHelp(ProgramName()));
-            Console.Out.Flush();
+            WriteConsole(
+                Console.Out,
+                Ghostty.Core.Cli.CliAliases.RenderHelp(ProgramName()),
+                appendNewLine: false);
             Environment.Exit(0);
         }
 
@@ -430,10 +487,9 @@ public static partial class Program
             !args[0].StartsWith('+') &&
             Ghostty.Core.Cli.CliAliases.LooksLikeCommand(args[0]))
         {
-            Console.Error.WriteLine(
+            WriteStderr(
                 $"unknown command '{args[0]}'. " +
                 $"Run '{ProgramName()} --help' for a list of commands.");
-            Console.Error.Flush();
             Environment.Exit((int)ExitCode.UsageError);
         }
 
@@ -613,12 +669,7 @@ public static partial class Program
             }
             catch { /* reporting must not change the exit code */ }
 
-            try
-            {
-                Console.Error.WriteLine(message);
-                Console.Error.Flush();
-            }
-            catch { /* as above */ }
+            WriteStderr(message);
 
             // Inside the lock deliberately: this never returns, so a caller
             // queued on InitLock stays queued instead of waking to an unset
@@ -773,9 +824,7 @@ public static partial class Program
             if (NativeLibrary.TryLoad(candidate, out var handle))
                 return handle;
 
-            Console.Error.WriteLine(
-                $"{AppIdentity.LogTag} FATAL: could not load {candidate}");
-            Console.Error.Flush();
+            WriteStderr($"{AppIdentity.LogTag} FATAL: could not load {candidate}");
             return IntPtr.Zero;
         }
 
@@ -795,29 +844,24 @@ public static partial class Program
     {
         try
         {
-            Console.Error.WriteLine($"{AppIdentity.LogTag} Program.Main entered");
-            Console.Error.Flush();
+            WriteStderr($"{AppIdentity.LogTag} Program.Main entered");
 
             WinRT.ComWrappersSupport.InitializeComWrappers();
-            Console.Error.WriteLine($"{AppIdentity.LogTag} ComWrappers initialized");
-            Console.Error.Flush();
+            WriteStderr($"{AppIdentity.LogTag} ComWrappers initialized");
 
             Microsoft.UI.Xaml.Application.Start(p =>
             {
-                Console.Error.WriteLine($"{AppIdentity.LogTag} Application.Start callback entered");
-                Console.Error.Flush();
+                WriteStderr($"{AppIdentity.LogTag} Application.Start callback entered");
 
                 var context = new Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext(
                     Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
                 System.Threading.SynchronizationContext.SetSynchronizationContext(context);
 
-                Console.Error.WriteLine($"{AppIdentity.LogTag} Creating App instance");
-                Console.Error.Flush();
+                WriteStderr($"{AppIdentity.LogTag} Creating App instance");
 
                 new App();
 
-                Console.Error.WriteLine($"{AppIdentity.LogTag} App instance created");
-                Console.Error.Flush();
+                WriteStderr($"{AppIdentity.LogTag} App instance created");
             });
 
             return 0;
