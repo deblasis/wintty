@@ -15,7 +15,7 @@ namespace Ghostty.Panes;
 ///
 /// Why hand-rolled and not the CommunityToolkit GridSplitter:
 ///   - Avoids pulling a NuGet dependency for ~80 lines of behavior.
-///   - We can size it as a true 1px line; GridSplitter has a minimum
+///   - We can size it as a true hairline; GridSplitter has a minimum
 ///     hit-test thickness that looks heavy on a terminal.
 ///   - We can route the ratio change directly to our model without an
 ///     intermediate VisualState/Behavior abstraction.
@@ -44,7 +44,7 @@ internal sealed partial class Splitter : Grid
         _split = split;
         _onRatioChanged = onRatioChanged;
 
-        // 1px line in a neutral terminal-chrome color. The dark grey
+        // Hairline in a neutral terminal-chrome color. The dark grey
         // matches typical terminal panel chrome and stays visible
         // against both #0C0C0C backgrounds and Mica. TODO: source from
         // a theme resource once the config layer exists.

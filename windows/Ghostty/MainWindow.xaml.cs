@@ -1940,7 +1940,6 @@ public sealed partial class MainWindow : Window
                 UpdateAcrylicTuning();
                 ApplyGradientTint();
                 ApplyRootGridBackground();
-                RefreshPaneGutters();
                 RefreshPowerSaverIcon();
             }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
@@ -2119,11 +2118,13 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Repaint the chrome gutter around every pane. Owns exactly that one
-    /// piece of chrome state, and sits alongside ApplyRootGridBackground
-    /// on both paths that recompute the backdrop: the gutter is filled
-    /// from the background colour and the effective opacity, so a reload
-    /// or a power-saver transition that flattens one has to flatten the
-    /// other or the panes keep a mismatched frame.
+    /// piece of chrome state.
+    ///
+    /// Belongs on the config-reload path only: the gutter is filled from
+    /// background and background-opacity, both of which change only on a
+    /// reload. It deliberately does not ride the power-saver path, which
+    /// reworks the window backdrop without touching what libghostty
+    /// renders -- the gutter tracks the surface, not the backdrop.
     /// </summary>
     private void RefreshPaneGutters()
     {

@@ -584,14 +584,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         Panel.Margin = gutter;
 
         // Overlays that read as part of the terminal content follow the
-        // surface into the gutter. The scrollbar tracks the grid's right
-        // edge and the resize pill positions itself within the grid, so
-        // leaving either on the pane bounds would float it over the
-        // border stroke. The other three stay on the pane bounds: the
-        // bell flash and the URL banner are pane-edge chrome themselves,
-        // and the SearchBar already floats on its own inset margin.
+        // surface into the gutter: the scrollbar tracks the grid's right
+        // edge, the resize pill positions itself within the grid, and the
+        // search bar floats over it. Leaving any of them on the pane
+        // bounds would sit them over the border stroke, and for the
+        // search bar would quietly shrink its own inset by the gutter.
+        // The bell flash and the URL banner stay on the pane bounds --
+        // both are pane-edge chrome themselves.
         VerticalScrollBar.Margin = gutter;
         ResizeOverlay.Margin = gutter;
+        SearchBar.Margin = new Thickness(
+            SearchBar.Margin.Left + gutter.Left,
+            SearchBar.Margin.Top + gutter.Top,
+            SearchBar.Margin.Right + gutter.Right,
+            SearchBar.Margin.Bottom + gutter.Bottom);
 
         ApplyGutterBrush();
     }
@@ -614,19 +620,26 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var cfg = App.ConfigService;
         if (cfg is null) return;
 
-        // Mirror ApplyBackdropStyle: low power flattens opacity to 1.0,
-        // and the gutter has to follow or it goes translucent over an
-        // already-opaque backdrop.
-        var lowPower = Ghostty.App.PowerStateMonitor?.IsLowPowerActive ?? false;
-        var opacity = lowPower ? 1.0 : cfg.BackgroundOpacity;
-
-        var argb = Core.Panes.PaneChrome.GutterArgb(cfg.BackgroundColor, opacity);
+        // Deliberately NOT flattened under low power the way
+        // ApplyBackdropStyle flattens the window backdrop. The gutter's
+        // peer is the surface it abuts, not the backdrop behind it, and
+        // nothing pushes a power-state opacity override into libghostty --
+        // the surface keeps clearing at background-opacity whatever the
+        // power state. Following the backdrop here would produce the
+        // saturated frame this fill exists to avoid.
+        var argb = Core.Panes.PaneChrome.GutterArgb(
+            cfg.BackgroundColor, cfg.BackgroundOpacity);
         if (_lastGutterArgb == argb) return;
-        _lastGutterArgb = argb;
 
+        // Commit the cache only after the write lands. XAML property sets
+        // on this path can throw against a tearing-down visual tree (see
+        // the catch in MainWindow.OnLowPowerChanged); recording first
+        // would leave the leaf believing it had painted a colour it never
+        // did, and every later repaint of that value would early-out.
         SurfaceRoot.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
                 (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
+        _lastGutterArgb = argb;
     }
 
     // Lifecycle ----------------------------------------------------------
@@ -640,6 +653,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         Panel.LayoutUpdated -= OnFirstLayoutUpdated;
         Panel.LayoutUpdated += OnFirstLayoutUpdated;
         DisableAncestorScrollViewerTabStop();
+
+        // Repaint the gutter on every attach, not just at construction.
+        // A leaf can be off the tree while the config changes -- retained
+        // by the undo stack after a soft close, or mid-flight in a
+        // cross-window tab detach -- and would otherwise come back
+        // wearing the pre-change fill. Cheap: the colour cache makes the
+        // steady-state call a comparison.
+        ApplyGutterBrush();
 
         // SearchBar lifetime matches the control's; wiring `this` as the
         // host is idempotent so doing it on every Loaded is safe and
@@ -1171,6 +1192,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // On the SurfaceRoot copy, take only events that landed on the gutter
     // itself: the ScrollBar and SearchBar are siblings of the panel, so
     // their pointer events bubble through here and must stay theirs.
+    //
+    // Source-based rather than Handled-based on purpose, so it holds for
+    // the handlers that return early without marking the event (the
+    // motion threshold in OnPointerMoved, the null-surface guards).
+    //
+    // Events that do come from the gutter carry Panel-relative
+    // coordinates slightly outside the surface. That is intended:
+    // libghostty clamps them to the edge cell, which is what makes a
+    // click on a pane's edge behave as a click on its outermost cell.
+    // It does mean an app running mouse=a sees button reports attributed
+    // to the edge cell for clicks a few DIPs outside the grid.
     private bool NotOurs(object sender, RoutedEventArgs e)
         => ReferenceEquals(sender, SurfaceRoot)
            && !ReferenceEquals(e.OriginalSource, SurfaceRoot);
