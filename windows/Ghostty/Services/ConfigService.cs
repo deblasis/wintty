@@ -23,7 +23,10 @@ internal readonly record struct GradientPoint(
 /// Owns the libghostty config lifecycle: init, load from disk,
 /// reload, and file-system watching (behind <c>auto-reload-config</c>).
 /// Fires <see cref="ConfigChanged"/> on the UI thread after every
-/// successful reload so consumers can re-read values they depend on.
+/// successful reload so consumers can re-read values they depend on, and
+/// also after an OS light/dark flip has moved the values a conditional
+/// theme resolves to (see <see cref="RefreshForOsColorScheme"/>) -- the
+/// file has not changed there, but what it resolves to has.
 /// </summary>
 internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
 {
@@ -496,33 +499,55 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// reads these cached values, so without this it keeps painting the
     /// outgoing palette next to freshly repainted terminals.
     ///
-    /// Deliberately not a <see cref="Reload"/>: the config file has not
-    /// changed, so re-parsing it would push a redundant AppUpdateConfig
-    /// through to the renderer. Only the file-derived caches are rebuilt.
+    /// This itself does no reloading: the config file has not changed, so
+    /// re-parsing it would push a redundant AppUpdateConfig through to the
+    /// renderer, and only the file-derived caches are rebuilt. Note that a
+    /// subscriber can still reload downstream -- under High Contrast,
+    /// HighContrastMonitor rebuilds its override from system colours,
+    /// which do move on a flip, and hands it back through
+    /// SetHighContrastOverride.
     /// </summary>
-    /// <returns>True when the scheme moved and subscribers were notified.</returns>
-    public bool RefreshForOsColorScheme()
+    /// <param name="isOsDark">
+    /// The scheme the caller observed. Passed in rather than sampled here
+    /// so the value that drove <c>AppSetColorScheme</c> is the same one
+    /// the caches are rebuilt against; sampling again could disagree with
+    /// it and leave the two sides describing different schemes.
+    /// </param>
+    public void RefreshForOsColorScheme(bool isOsDark)
     {
-        // Same teardown fences as Reload: ConfigChanged subscribers touch
-        // XAML and libghostty surfaces, neither of which survives shutdown.
-        if (_shuttingDown) return false;
-        if (_app.Handle == IntPtr.Zero) return false;
+        // Only the shutdown fence applies here. Unlike Reload this makes no
+        // native call, so there is no freed-app hazard to guard; what it
+        // does do is invoke ConfigChanged, and those subscribers touch XAML
+        // that does not survive teardown.
+        if (_shuttingDown) return;
 
         // Every window observes ColorValuesChanged, so this runs once per
-        // window per flip. Only the first call finds a difference; the
-        // rest are a bool compare. Also filters the ColorValuesChanged
-        // firings that carry no scheme change at all -- accent colour
-        // edits and High Contrast toggles raise the same event.
-        if (_themedValuesAreForDarkOs == IsOsDark()) return false;
+        // window per flip and only the first call finds a difference. Also
+        // filters the ColorValuesChanged firings that carry no scheme
+        // change at all -- accent colour edits and High Contrast toggles
+        // raise the same event.
+        if (_themedValuesAreForDarkOs == isOsDark) return;
 
-        ReadFlags();
-
-        _dispatcher.TryEnqueue(() =>
+        try
         {
-            ConfigChanged?.Invoke(this);
-            ProfileConfigChanged?.Invoke();
-        });
-        return true;
+            ReadFlags(isOsDark);
+        }
+        catch (Exception ex)
+        {
+            // ReadFlags reads two files. Windows fires this event
+            // unattended on the auto light/dark schedule, and this runs
+            // inside a dispatcher lambda, so letting an IO failure escape
+            // would take the process down with every session in it. The
+            // scheme flag is only advanced once the caches actually moved,
+            // so bailing here leaves the next flip able to retry.
+            StaticLoggers.ConfigService.LogReloadFailed(ex);
+            return;
+        }
+
+        // Deferred rather than invoked inline even though we are already on
+        // the UI thread: a subscriber that writes config would otherwise
+        // re-enter the service while these caches are still settling.
+        _dispatcher.TryEnqueue(() => ConfigChanged?.Invoke(this));
     }
 
     /// <summary>
@@ -630,7 +655,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         }
     }
 
-    private void ReadFlags()
+    private void ReadFlags() => ReadFlags(IsOsDark());
+
+    /// <param name="isOsDark">
+    /// Scheme to resolve a conditional theme against. Sampled once by the
+    /// caller and threaded through, so the theme file that gets loaded and
+    /// the scheme recorded for it cannot come from two different reads.
+    /// </param>
+    private void ReadFlags(bool isOsDark)
     {
         // Snapshot the config file once up front, and the active theme
         // file once after we know which one to read. Everything below
@@ -638,10 +670,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // these caches, so the whole reload is bounded by at most two
         // File.ReadLines calls regardless of how many keys we probe.
         _configFileCache = LoadIniFile(ConfigFilePath);
-        // Record the scheme the theme file is chosen against, so an OS
-        // flip afterwards is detectable without re-reading the files.
-        _themedValuesAreForDarkOs = IsOsDark();
-        var activeTheme = ResolveActiveThemeName();
+        var activeTheme = ResolveActiveThemeName(isOsDark);
         var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
         _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
 
@@ -653,6 +682,13 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // fallback. Each reload overwrites both fields at the top of ReadFlags,
         // so memory cost stays bounded (~few KB per reload, no accumulation).
         ReadFlagsCore();
+
+        // Last, so it certifies work that actually happened. Recording it
+        // up front would mean a throw from either LoadIniFile above left
+        // the service claiming to be resolved for a scheme whose theme it
+        // never loaded -- and RefreshForOsColorScheme would then decline
+        // every retry, making a transient file error permanent.
+        _themedValuesAreForDarkOs = isOsDark;
     }
 
     private void ReadFlagsCore()
@@ -1041,7 +1077,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// conditional theme (light:X,dark:Y), picks X or Y based on the
     /// current OS color scheme. For a single theme, returns it as-is.
     /// </summary>
-    private string ResolveActiveThemeName()
+    private string ResolveActiveThemeName(bool isOsDark)
     {
         var raw = GetFileValue("theme", "");
         if (string.IsNullOrEmpty(raw)) return "";
@@ -1049,7 +1085,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         var (light, dark) = ThemeParser.ParseThemePair(raw);
         if (light is null || dark is null) return raw;
 
-        return IsOsDark() ? dark : light;
+        return isOsDark ? dark : light;
     }
 
     /// <summary>

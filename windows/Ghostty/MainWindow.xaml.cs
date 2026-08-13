@@ -448,8 +448,10 @@ public sealed partial class MainWindow : Window
                 // outgoing one until this runs, which is what would leave
                 // window chrome on the old palette beside a repainted
                 // terminal. Self-guarding, so the per-window duplicates of
-                // this handler collapse to one refresh.
-                _configService.RefreshForOsColorScheme();
+                // this handler collapse to one refresh. Handed the same
+                // `dark` that drove the two calls above, so libghostty and
+                // the config caches cannot describe different schemes.
+                _configService.RefreshForOsColorScheme(dark);
             });
         };
 
