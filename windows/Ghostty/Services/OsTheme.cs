@@ -11,14 +11,22 @@ namespace Ghostty.Services;
 internal static class OsTheme
 {
     /// <summary>
-    /// True when the OS is currently in dark mode.
+    /// True when the OS is currently in dark mode. Activates a
+    /// <see cref="UISettings"/> to ask; callers holding one already
+    /// should use the overload.
+    /// </summary>
+    public static bool IsDark() => IsDark(new UISettings());
+
+    /// <summary>
+    /// True when the given settings snapshot reports dark mode.
     /// UISettings.Foreground is white (R greater than 128) in dark
     /// mode (light text on dark background) and black in light mode.
     /// </summary>
-    public static bool IsDark()
-    {
-        var ui = new UISettings();
-        var fg = ui.GetColorValue(UIColorType.Foreground);
-        return fg.R > 128;
-    }
+    /// <remarks>
+    /// Takes the instance so a ColorValuesChanged handler can classify
+    /// the event's own sender rather than activating a second one, which
+    /// could answer for a different moment.
+    /// </remarks>
+    public static bool IsDark(UISettings settings)
+        => settings.GetColorValue(UIColorType.Foreground).R > 128;
 }

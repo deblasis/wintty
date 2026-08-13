@@ -24,9 +24,9 @@ internal readonly record struct GradientPoint(
 /// reload, and file-system watching (behind <c>auto-reload-config</c>).
 /// Fires <see cref="ConfigChanged"/> on the UI thread after every
 /// successful reload so consumers can re-read values they depend on, and
-/// also after an OS light/dark flip has moved the values a conditional
-/// theme resolves to (see <see cref="RefreshForOsColorScheme"/>) -- the
-/// file has not changed there, but what it resolves to has.
+/// again on an OS light/dark flip (see
+/// <see cref="RefreshForOsColorScheme"/>) -- the file has not changed
+/// there, but what a conditional theme resolves to may have.
 /// </summary>
 internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
 {
@@ -276,7 +276,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
     /// <summary>
     /// Snapshot of the config file's key/value lines, populated at the
-    /// top of <see cref="ReadFlags"/> and replaced on each subsequent reload.
+    /// top of <see cref="ReadFlags(bool)"/> and replaced on each subsequent reload.
     /// Survives between reloads so live readers (IsConfiguredInFile,
     /// GetRawFileValue, GetFileValue) see the last-loaded state.
     /// Keys are case-insensitive; each maps to the list of raw values in
@@ -288,7 +288,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// Snapshot of the active theme file's key/value lines. The theme is
     /// resolved via ResolveActiveThemeName / ResolveThemePath, accounting
     /// for the light:X,dark:Y split on the OS color scheme. Populated at
-    /// the top of <see cref="ReadFlags"/> whenever a theme is active,
+    /// the top of <see cref="ReadFlags(bool)"/> whenever a theme is active,
     /// replaced on each subsequent reload, and survives between reloads so
     /// theme-color readers can consult it from any call into the service.
     /// Null when there is no active theme or the theme file is missing.
@@ -300,7 +300,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// A conditional <c>theme = light:X,dark:Y</c> picks its file from
     /// this at reload time, so every colour read out of
     /// <see cref="_activeThemeFileCache"/> is only valid while the OS
-    /// scheme still matches. Written by <see cref="ReadFlags"/>, compared
+    /// scheme still matches. Written by <see cref="ReadFlags(bool)"/>, compared
     /// by <see cref="RefreshForOsColorScheme"/>.
     /// </summary>
     private bool _themedValuesAreForDarkOs;
@@ -352,7 +352,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
         SeedConfigIfEmpty();
         CacheDiagnostics();
-        ReadFlags();
+        ReadFlags(OsTheme.IsDark());
     }
 
     /// <summary>
@@ -472,7 +472,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
         _config = newConfig;
         CacheDiagnostics();
-        ReadFlags();
+        ReadFlags(OsTheme.IsDark());
 
         if (oldConfig.Handle != IntPtr.Zero)
             NativeMethods.ConfigFree(oldConfig);
@@ -489,7 +489,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
 
     /// <summary>
     /// Re-resolve the config values that depend on the OS colour scheme,
-    /// and notify if any could have moved.
+    /// and notify. The guard is on the scheme itself, not on whether a
+    /// conditional theme is configured, so a plain theme refreshes to the
+    /// same values and notifies anyway -- a flip is rare enough that the
+    /// redundant fan-out is cheaper than a second thing to keep in sync.
     ///
     /// A conditional <c>theme = light:X,dark:Y</c> picks its file when the
     /// config is read, so an OS light/dark flip leaves every colour in the
@@ -515,10 +518,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// </param>
     public void RefreshForOsColorScheme(bool isOsDark)
     {
-        // Only the shutdown fence applies here. Unlike Reload this makes no
-        // native call, so there is no freed-app hazard to guard; what it
-        // does do is invoke ConfigChanged, and those subscribers touch XAML
-        // that does not survive teardown.
+        // Only the shutdown fence applies. Reload's second guard is about
+        // the pre-creation window before SetApp; by the time a window can
+        // observe a scheme change the app exists, so it would never fire.
+        // _shuttingDown is what actually matters: ReadFlagsCore reads the
+        // config handle, and ConfigChanged subscribers touch XAML, neither
+        // of which survives teardown.
         if (_shuttingDown) return;
 
         // Every window observes ColorValuesChanged, so this runs once per
@@ -534,19 +539,23 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         }
         catch (Exception ex)
         {
-            // ReadFlags reads two files. Windows fires this event
+            // ReadFlags reads three files (the config, the theme, and the
+            // config again for the profile pass). Windows fires this event
             // unattended on the auto light/dark schedule, and this runs
             // inside a dispatcher lambda, so letting an IO failure escape
-            // would take the process down with every session in it. The
-            // scheme flag is only advanced once the caches actually moved,
-            // so bailing here leaves the next flip able to retry.
-            StaticLoggers.ConfigService.LogReloadFailed(ex);
+            // would take the process down with every session in it.
+            //
+            // Whichever read failed, the scheme flag and the theme cache
+            // agree, so the palette is either wholly the old one or wholly
+            // the new one and the next flip is still able to move it.
+            StaticLoggers.ConfigService.LogThemeRefreshFailed(ex);
             return;
         }
 
-        // Deferred rather than invoked inline even though we are already on
-        // the UI thread: a subscriber that writes config would otherwise
-        // re-enter the service while these caches are still settling.
+        // Deferred rather than invoked inline so the fan-out does not run
+        // on top of the ColorValuesChanged dispatcher frame, and to match
+        // the shape Reload already uses. The caches have finished settling
+        // either way -- ReadFlags is synchronous and has returned.
         _dispatcher.TryEnqueue(() => ConfigChanged?.Invoke(this));
     }
 
@@ -655,12 +664,14 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         }
     }
 
-    private void ReadFlags() => ReadFlags(IsOsDark());
-
+    /// <summary>
+    /// Rebuild the file-derived caches and re-read every flag from them.
+    /// </summary>
     /// <param name="isOsDark">
-    /// Scheme to resolve a conditional theme against. Sampled once by the
-    /// caller and threaded through, so the theme file that gets loaded and
-    /// the scheme recorded for it cannot come from two different reads.
+    /// Scheme to resolve a conditional theme against. Taken as a parameter
+    /// rather than sampled here so each caller names where its value came
+    /// from, and so the theme file that gets loaded and the scheme recorded
+    /// for it cannot come from two different reads.
     /// </param>
     private void ReadFlags(bool isOsDark)
     {
@@ -674,6 +685,16 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
         _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
 
+        // Immediately after the assignment it certifies, so the two cannot
+        // disagree. Both failure legs then stay consistent: a throw from
+        // either LoadIniFile above leaves stale flag and stale caches, which
+        // the next flip retries; a throw from ReadFlagsCore below leaves
+        // fresh flag and fresh caches, which is the right palette. Recording
+        // it at either end of this method instead lets one leg strand the
+        // service claiming a scheme its caches do not hold, and the guard in
+        // RefreshForOsColorScheme would then decline every retry.
+        _themedValuesAreForDarkOs = isOsDark;
+
         // _configFileCache and _activeThemeFileCache deliberately survive
         // past ReadFlagsCore. Live readers (IsConfiguredInFile, GetRawFileValue,
         // GetFileValue) are consulted from UI page constructors and event
@@ -682,13 +703,6 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // fallback. Each reload overwrites both fields at the top of ReadFlags,
         // so memory cost stays bounded (~few KB per reload, no accumulation).
         ReadFlagsCore();
-
-        // Last, so it certifies work that actually happened. Recording it
-        // up front would mean a throw from either LoadIniFile above left
-        // the service claiming to be resolved for a scheme whose theme it
-        // never loaded -- and RefreshForOsColorScheme would then decline
-        // every retry, making a transient file error permanent.
-        _themedValuesAreForDarkOs = isOsDark;
     }
 
     private void ReadFlagsCore()
@@ -1075,18 +1089,11 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// <summary>
     /// Resolve the active theme name from the config file. For a
     /// conditional theme (light:X,dark:Y), picks X or Y based on the
-    /// current OS color scheme. For a single theme, returns it as-is.
+    /// supplied scheme. For a single theme, returns it as-is.
     /// </summary>
+    /// <param name="isOsDark">Scheme to pick the dark side for.</param>
     private string ResolveActiveThemeName(bool isOsDark)
-    {
-        var raw = GetFileValue("theme", "");
-        if (string.IsNullOrEmpty(raw)) return "";
-
-        var (light, dark) = ThemeParser.ParseThemePair(raw);
-        if (light is null || dark is null) return raw;
-
-        return isOsDark ? dark : light;
-    }
+        => ThemeParser.SelectForScheme(GetFileValue("theme", ""), isOsDark);
 
     /// <summary>
     /// Find the theme file on disk by name. Looks in the user themes
@@ -1126,16 +1133,9 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     }
 
     /// <summary>
-    /// Detect OS dark mode via the shared <see cref="OsTheme"/> helper
-    /// so this and <see cref="WindowThemeManager"/> can't drift on the
-    /// "which byte means dark" heuristic.
-    /// </summary>
-    private static bool IsOsDark() => OsTheme.IsDark();
-
-    /// <summary>
     /// Read the first non-empty value for a Windows-only config key
     /// from the cached snapshot of the config file populated by
-    /// <see cref="ReadFlags"/>. Keys not in the Zig config schema
+    /// <see cref="ReadFlags(bool)"/>. Keys not in the Zig config schema
     /// cannot be read via <c>ghostty_config_get</c>, so we parse the
     /// file ourselves.
     /// </summary>
@@ -1447,6 +1447,15 @@ internal static partial class ConfigServiceLogExtensions
                    Level = LogLevel.Warning,
                    Message = "[ConfigService] Could not seed comment header into empty config file")]
     internal static partial void LogSeedFailed(
+        this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Error, matching LogReloadFailed: the themed values keep resolving
+    // against the outgoing scheme, so window chrome stays on the wrong
+    // palette until something else moves it.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ThemeRefreshFailed,
+                   Level = LogLevel.Error,
+                   Message = "[ConfigService] Failed to re-resolve themed values after an OS colour scheme change")]
+    internal static partial void LogThemeRefreshFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
 
     // Surfaces each warning string returned by

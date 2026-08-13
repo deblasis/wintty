@@ -412,16 +412,21 @@ public sealed partial class MainWindow : Window
 
         // Detect initial system theme and notify libghostty so conditional
         // config blocks (e.g. palette dark/light) take effect immediately.
-        // UISettings.Foreground is white in dark mode and black in light mode,
-        // so R > 128 reliably distinguishes the two without needing the UWP
-        // ApplicationTheme enum (which isn't available outside a UWP package).
+        // The light/dark test itself lives in OsTheme so it cannot drift
+        // between the callers that depend on it.
         _systemUiSettings = new Windows.UI.ViewManagement.UISettings();
-        var initialFg = _systemUiSettings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
-        var initialDark = initialFg.R > 128;
+        var initialDark = Ghostty.Services.OsTheme.IsDark(_systemUiSettings);
         var initialScheme = initialDark
             ? Ghostty.Interop.GhosttyColorScheme.Dark
             : Ghostty.Interop.GhosttyColorScheme.Light;
         Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, initialScheme);
+        // Closes the gap between ConfigService seeding its themed values in
+        // its constructor and this window reading the scheme: a flip in
+        // between would leave libghostty on the new scheme and the config
+        // caches on the old one, with nothing to reconcile them until the
+        // next flip. A no-op in the common case, since the service guards
+        // on the scheme actually having moved.
+        _configService.RefreshForOsColorScheme(initialDark);
         // NotifyColorSchemeChanged is not called here because no surfaces
         // exist yet at window construction time. Each surface picks up the
         // app-level scheme when it initializes. The runtime handler below
@@ -432,8 +437,9 @@ public sealed partial class MainWindow : Window
         // into libghostty (which expects UI-thread callers for App-level ops).
         _systemUiSettings.ColorValuesChanged += (s, _) =>
         {
-            var fg = s.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
-            var dark = fg.R > 128;
+            // Classify the event's own sender rather than activating a
+            // second UISettings, which could answer for a later moment.
+            var dark = Ghostty.Services.OsTheme.IsDark(s);
             DispatcherQueue.TryEnqueue(() =>
             {
                 var scheme = dark
