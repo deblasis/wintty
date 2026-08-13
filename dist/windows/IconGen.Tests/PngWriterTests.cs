@@ -52,10 +52,10 @@ public class PngWriterTests
     }
 
     [Theory]
-    [InlineData("SplashIcon.scale-100.png", 96)]
-    [InlineData("SplashIcon.scale-150.png", 144)]
-    [InlineData("SplashIcon.scale-200.png", 192)]
-    [InlineData("SplashIcon.scale-400.png", 384)]
+    [InlineData("SplashIcon.scale-100.png", 160)]
+    [InlineData("SplashIcon.scale-150.png", 240)]
+    [InlineData("SplashIcon.scale-200.png", 320)]
+    [InlineData("SplashIcon.scale-400.png", 640)]
     public void EachSplashPngHasExpectedDimensions(string fileName, int expectedPx)
     {
         using var tempDir = new TempDir();
