@@ -286,6 +286,30 @@
   </ItemGroup>
 
   <!--
+    Ship the vendored third-party licences. These cover the binaries we
+    redistribute (ConPTY, Skia, HarfBuzz) and the fonts compiled into
+    ghostty.dll, none of which arrive with usable licence text: the NuGet
+    packages either ship none at all or ship only the C# binding's MIT,
+    which does not cover the native library inside the DLL.
+
+    Vendored rather than referenced from a package for exactly that reason -
+    there is no package path to point at. The DXC pair below is the
+    exception and stays package-referenced.
+
+    A glob rather than a per-file list: this set grows whenever we start
+    redistributing something new, and a list is one more place to forget.
+    licenses/README.md documents what covers what and is shipped with them
+    deliberately, so the payload explains itself.
+  -->
+  <ItemGroup>
+    <None Include="licenses\**\*">
+      <Link>licenses\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <!--
     Ship the licences that govern the redistributed binary. The LLVM/NCSA
     licence dxcompiler.dll is published under requires a binary redistributor
     to reproduce its copyright notice and disclaimer in the materials provided
