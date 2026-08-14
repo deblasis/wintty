@@ -555,6 +555,16 @@ public sealed partial class MainWindow : Window
         else
             RestoreWindowPlacement();
 
+        // Hand the splash this window's real rect the moment it has one,
+        // rather than after the panes are built. Up to here the splash is on
+        // a rect it resolved from disk before this process had a window at
+        // all, and only this window knows which of the two saved sources
+        // actually won -- or that both were rejected and the OS placed it.
+        // Tracking from here also keeps the two together if the user drags or
+        // resizes the window before the splash comes down.
+        if (showLaunchIcon)
+            Shell.SplashWindow.Track(WindowNative.GetWindowHandle(this));
+
         _horizontalTabHost = new TabHost(_tabManager, _router, _dialogs);
         _horizontalTabHost.AttachOwner(this);
         _verticalTabHost = new VerticalTabHost(_tabManager, _router, _dialogs, _host);
@@ -619,12 +629,6 @@ public sealed partial class MainWindow : Window
         {
             _launchIcon = new Shell.LaunchIconCoordinator(DispatcherQueue);
             _launchIcon.Arm();
-
-            // Let the splash follow this window. It was positioned from the
-            // saved window state before this window existed, so this both
-            // corrects any mismatch and keeps the two together if the user
-            // drags or resizes the window before the splash comes down.
-            Shell.SplashWindow.Track(WindowNative.GetWindowHandle(this));
 
             // The active tab, not tab zero: a restored session can make any
             // tab active, and a background tab never presents, so waiting on
@@ -2610,31 +2614,30 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyGeometry(Ghostty.Core.Session.WindowGeometry geometry)
     {
-        var w = geometry.Width;
-        var h = geometry.Height;
-        if (w is null || h is null || w < 200 || h < 150) return;
-
-        var x = geometry.X ?? 0;
-        var y = geometry.Y ?? 0;
+        // Shared with the pre-XAML splash, which sizes itself to cover this
+        // window and must accept and reject exactly the same saved rects.
+        if (!Ghostty.Core.Session.WindowGeometryGate.TryNormalize(geometry, out var rect))
+            return;
+        var (x, y, width, height) = rect;
 
         // Ensure the window's top-left quadrant is on a live monitor.
         // DisplayArea.GetFromPoint returns the nearest display if the
         // point is off-screen, but we check explicitly so we don't
         // place the window somewhere invisible.
         var checkPoint = new Windows.Graphics.PointInt32(
-            x + Math.Min(100, w.Value / 2),
-            y + Math.Min(50, h.Value / 2));
+            x + Math.Min(100, width / 2),
+            y + Math.Min(50, height / 2));
         var display = Microsoft.UI.Windowing.DisplayArea.GetFromPoint(
             checkPoint, Microsoft.UI.Windowing.DisplayAreaFallback.Nearest);
 
         // If the saved position is completely outside any display's
         // work area, let the OS pick a default position.
         var work = display.WorkArea;
-        if (x + w.Value < work.X || x > work.X + work.Width ||
-            y + h.Value < work.Y || y > work.Y + work.Height)
+        if (x + width < work.X || x > work.X + work.Width ||
+            y + height < work.Y || y > work.Y + work.Height)
             return;
 
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(w.Value, h.Value));
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(width, height));
         AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
 
         if (geometry.Maximized)
