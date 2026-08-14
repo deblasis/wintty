@@ -42,14 +42,6 @@ public interface IConfigService : IDisposable
     bool CommandPaletteGroupCommands { get; }
 
     /// <summary>
-    /// Windows-only: true when opt-in single-instance mode is active. A
-    /// second launch forwards its working directory and argv to the
-    /// already-running instance (which opens a new window) and then exits.
-    /// Default false. Backed by the "windows-single-instance" key.
-    /// </summary>
-    bool WindowsSingleInstance { get; }
-
-    /// <summary>
     /// Windows-only: default true. Backed by the "windows-high-contrast"
     /// key. When true, the terminal surface follows the OS High Contrast
     /// theme; false keeps the user's configured colors regardless of OS
@@ -74,7 +66,7 @@ public interface IConfigService : IDisposable
 
     /// <summary>
     /// Windows-only: how Wintty reacts to a <c>NO_COLOR</c> value inherited
-    /// from the launching environment. One of "notify" (default — honor
+    /// from the launching environment. One of "notify" (default -- honor
     /// NO_COLOR but show a one-time notice offering to enable color), "strip"
     /// (enable color by removing NO_COLOR from spawned shells), or "keep"
     /// (honor NO_COLOR silently). Backed by the "no-color-override" key.

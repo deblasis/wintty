@@ -62,6 +62,11 @@ internal static unsafe partial class SplashWindow
     // still go away rather than sit on top of the user's desktop forever.
     private const int WatchdogMs = 10_000;
 
+    // How long HideNow waits for the splash thread to unwind. Long enough
+    // to cover a pump tick and the teardown behind it, short enough that a
+    // wedged splash thread cannot noticeably delay an exit.
+    private const int HideJoinMs = 250;
+
     private const string ClassName = "WinttySplash";
 
     private static nint _hwnd;
@@ -69,6 +74,19 @@ internal static unsafe partial class SplashWindow
     private static int _started;
     private static long _shownAtTicks;
     private static nint _trackedHwnd;
+
+    // The splash thread, so HideNow can wait for it rather than leaving it to
+    // be cut down wherever it happens to be. Volatile like the other fields
+    // HideNow touches: it now runs from the unhandled-exception handlers,
+    // which fire on whatever thread threw. Assigned before Start, so a HideNow
+    // early enough to read null is also early enough that there is nothing yet
+    // to wait for.
+    private static Thread? _thread;
+
+    // Set by HideNow to skip the fade. A fade is a courtesy on the normal
+    // reveal; on the paths HideNow serves the process is about to end, and
+    // 220ms of animation is 220ms of holding a window over the desktop.
+    private static bool _skipFade;
 
     // Current splash geometry, owned by the splash thread. Mutable
     // because the splash follows the main window, which the user can move
@@ -144,6 +162,7 @@ internal static unsafe partial class SplashWindow
             Name = "wintty-splash",
         };
         thread.SetApartmentState(ApartmentState.STA);
+        Volatile.Write(ref _thread, thread);
         thread.Start();
     }
 
@@ -158,6 +177,50 @@ internal static unsafe partial class SplashWindow
         // latching here means a dismissal that races Show can never be
         // dropped and leave the splash up until the watchdog.
         _dismissed.Set();
+    }
+
+    /// <summary>
+    /// Take the splash off the screen before returning, for callers whose
+    /// next move is to end the process.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Dismiss"/> is not enough there. It signals an event and the
+    /// splash thread then fades over 220ms, so a caller that dismisses and
+    /// exits is racing its own teardown: the window is still up when the
+    /// process dies, and the splash thread is cut down wherever it happens to
+    /// be, which can be inside GDI+.
+    ///
+    /// So this waits, and the wait is the whole mechanism. The window is taken
+    /// down by the splash thread's own <c>DestroyWindow</c>, not from here:
+    /// hiding another thread's window is a blocking inter-thread send, and
+    /// posting it asynchronously instead only defers to a thread that has by
+    /// then stopped pumping. Either way it is the splash thread that has to
+    /// act, so the honest thing is to ask it to stop and wait a bounded time
+    /// for it to finish. A wedged splash thread costs the deadline, never the
+    /// caller's exit.
+    ///
+    /// Safe when no splash was shown and safe to call repeatedly.
+    /// </remarks>
+    public static void HideNow()
+    {
+        // Before the signal: a thread waking on the event must see the flag,
+        // or it fades for 220ms while the caller waits on the join.
+        Volatile.Write(ref _skipFade, true);
+        _dismissed.Set();
+
+        try
+        {
+            // Never join ourselves. Diag runs on the splash thread and could in
+            // principle route back here; a self-join would hang the very exit
+            // this method exists to make prompt.
+            if (Volatile.Read(ref _thread) is { } thread && thread != Thread.CurrentThread)
+                thread.Join(HideJoinMs);
+        }
+        catch
+        {
+            // A join that cannot be waited on is not a reason to fail an exit
+            // path.
+        }
     }
 
     /// <summary>
@@ -208,6 +271,12 @@ internal static unsafe partial class SplashWindow
             return;
         }
 
+        // Do not build a window for a splash that has already been called
+        // off. Show and HideNow can race on a startup that fails early, and
+        // creating one here would put a window on screen after the caller
+        // was told it was gone.
+        if (_dismissed.IsSet) return;
+
         fixed (char* className = ClassName)
         {
             // WS_EX_TRANSPARENT is what keeps the app usable underneath.
@@ -241,6 +310,11 @@ internal static unsafe partial class SplashWindow
                 Diag("first paint failed; no splash this launch");
                 return;
             }
+            // A dismissal may have landed since the check above. Narrows the
+            // flash; HideNow's join is what actually closes it, by holding the
+            // caller until the finally below destroys the window.
+            if (_dismissed.IsSet) return;
+
             ShowWindow(_hwnd, SW_SHOWNA);
             Volatile.Write(ref _shownAtTicks, Environment.TickCount64);
 
@@ -416,6 +490,11 @@ internal static unsafe partial class SplashWindow
     /// </summary>
     private static void FadeOut()
     {
+        // HideNow has already taken the window off screen and its caller is
+        // ending the process. Fading a hidden window would only keep this
+        // thread alive through a teardown that is waiting on it.
+        if (Volatile.Read(ref _skipFade)) return;
+
         var steps = Math.Max(1, FadeDurationMs / FadeStepMs);
         for (var i = steps - 1; i >= 0; i--)
         {

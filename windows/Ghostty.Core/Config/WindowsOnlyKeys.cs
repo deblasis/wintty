@@ -56,7 +56,7 @@ public static class WindowsOnlyKeys
         new("no-color-override",
             "How Wintty reacts to a NO_COLOR value inherited from the environment: notify (default -- honor NO_COLOR but show a one-time notice offering to enable color), strip (enable color by removing NO_COLOR from spawned shells), or keep (honor NO_COLOR silently)."),
         new("windows-single-instance",
-            "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process."),
+            "When true, a second launch is routed into the already-running instance (opens a new window) instead of starting a separate process. Read once at startup, so a change takes effect on the next launch."),
         new("windows-high-contrast",
             "When true (default), the terminal surface follows the Windows High Contrast theme automatically; set false to keep your configured colors even in High Contrast mode."),
         new("quick-terminal-key",
