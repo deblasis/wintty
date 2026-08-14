@@ -589,20 +589,16 @@ internal static unsafe partial class SplashWindow
     private static string? IconPathForSize(int iconPx)
     {
         var dir = Path.Combine(AppContext.BaseDirectory, "Assets");
+        var rungs = LaunchIconAssets.Rungs;
 
-        // Pixel size of each rung paired with the scale suffix it ships
-        // under. Keep in sync with PngWriter.SplashTargets.
-        ReadOnlySpan<int> rungPixels = [160, 240, 320, 640];
-        ReadOnlySpan<int> rungScales = [100, 150, 200, 400];
-
-        for (var i = 0; i < rungPixels.Length; i++)
+        for (var i = 0; i < rungs.Count; i++)
         {
-            if (rungPixels[i] < iconPx) continue;
-            var candidate = Path.Combine(dir, $"SplashIcon.scale-{rungScales[i]}.png");
+            if (rungs[i].Pixels < iconPx) continue;
+            var candidate = Path.Combine(dir, rungs[i].FileName);
             if (File.Exists(candidate)) return candidate;
         }
 
-        var largest = Path.Combine(dir, "SplashIcon.scale-400.png");
+        var largest = Path.Combine(dir, rungs[^1].FileName);
         return File.Exists(largest) ? largest : null;
     }
 

@@ -116,6 +116,42 @@
     <EmbeddedResource Include="..\Ghostty\Settings\Pages\**\*.xaml"
                       Link="Settings\Pages\%(Filename)%(Extension)"
                       LogicalName="Ghostty.Tests.Settings.Pages.%(Filename)%(Extension)" />
+    <!--
+      The shell project file, for LaunchIconAssetsTests. It carries the one
+      copy of the launch-icon ladder that no C# type can share: an explicit
+      <Content Include> list of the generated PNG rungs.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Ghostty.csproj"
+                      Link="Shell\Ghostty.csproj"
+                      LogicalName="Ghostty.Tests.Shell.Ghostty.csproj" />
+    <!--
+      Every C# source in the two assemblies that set
+      [assembly: DisableRuntimeMarshalling], for MarshalComplianceTests.
+      A wildcard rather than a file list, because the interop surface is
+      not confined to Interop\: it also lives in Shell\, Hosting\,
+      Accessibility\ and Program.cs, and a hand-maintained list is exactly
+      how a new P/Invoke file escapes the scan. The test picks the files
+      that declare a native import out of this corpus.
+
+      LogicalName keeps %(RecursiveDir) so two files sharing a name in
+      different folders (Ghostty.Core has two IFileSystem.cs) stay
+      distinct instead of colliding as a duplicate resource. The test
+      treats the tail as an opaque label, so the path separator the host
+      substitutes does not matter.
+
+      The two files already embedded under Interop\Imports above are
+      excluded here: the same file twice is a duplicate-item error, not
+      two resources. MarshalComplianceTests reads both prefixes, so they
+      are still scanned.
+    -->
+    <EmbeddedResource Include="..\Ghostty\**\*.cs"
+                      Exclude="..\Ghostty\obj\**\*.cs;..\Ghostty\bin\**\*.cs;..\Ghostty\Interop\NativeMethods.cs"
+                      Link="Interop\Sources\Ghostty\%(RecursiveDir)%(Filename)%(Extension)"
+                      LogicalName="Ghostty.Tests.Interop.Sources.Ghostty.%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\Ghostty.Core\**\*.cs"
+                      Exclude="..\Ghostty.Core\obj\**\*.cs;..\Ghostty.Core\bin\**\*.cs;..\Ghostty.Core\Version\LibGhosttyBuildInfo.cs"
+                      Link="Interop\Sources\Ghostty.Core\%(RecursiveDir)%(Filename)%(Extension)"
+                      LogicalName="Ghostty.Tests.Interop.Sources.Ghostty.Core.%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
