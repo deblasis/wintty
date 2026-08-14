@@ -30,16 +30,24 @@ pub const Mailbox = union(enum) {
     /// Write messages to a SPSC queue for multi-threaded applications.
     spsc: struct {
         queue: *Queue,
-        wakeup: xev.Async,
+
+        /// Heap-allocated so that copying this union never forks the
+        /// wakeup. Several libxev backends (IOCP, wasi_poll) store the
+        /// wait registration inside the Async itself, so arming a wait on
+        /// one instance and notifying another silently drops the wakeup.
+        /// This value travels from Surface.init through termio.Options
+        /// into Termio, so it is copied more than once.
+        wakeup: *xev.Async,
     },
 
     /// Init the SPSC writer.
     pub fn initSPSC(alloc: Allocator) !Mailbox {
-        var queue = try Queue.create(alloc);
+        const queue = try Queue.create(alloc);
         errdefer queue.destroy(alloc);
 
-        var wakeup = try xev.Async.init();
-        errdefer wakeup.deinit();
+        const wakeup = try alloc.create(xev.Async);
+        errdefer alloc.destroy(wakeup);
+        wakeup.* = try .init();
 
         return .{ .spsc = .{ .queue = queue, .wakeup = wakeup } };
     }
@@ -50,6 +58,7 @@ pub const Mailbox = union(enum) {
                 while (v.queue.pop(global.io())) |msg| msg.deinit();
                 v.queue.destroy(alloc);
                 v.wakeup.deinit();
+                alloc.destroy(v.wakeup);
             },
         }
     }
@@ -107,3 +116,17 @@ pub const Mailbox = union(enum) {
         }
     }
 };
+
+test "spsc copies share one wakeup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mailbox = try Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    // termio.Thread arms its wait on whichever copy reached Termio, while
+    // producers notify through their own. Both must name one Async.
+    const copy = mailbox;
+    try testing.expectEqual(mailbox.spsc.wakeup, copy.spsc.wakeup);
+    try testing.expectEqual(mailbox.spsc.queue, copy.spsc.queue);
+}
