@@ -552,37 +552,12 @@ pub fn init(
         break :size size;
     };
 
-    // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
-    var renderer_impl = try Renderer.init(alloc, .{
-        .config = try .init(alloc, config),
-        .font_grid = font_grid,
-        .size = size,
-        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
-        .rt_surface = rt_surface,
-        .thread = &self.renderer_thread,
-    });
-    errdefer renderer_impl.deinit();
 
     // The mutex used to protect our renderer state.
     const mutex = try alloc.create(std.Io.Mutex);
     mutex.* = .init;
     errdefer alloc.destroy(mutex);
-
-    // Create the renderer thread
-    var render_thread = try rendererpkg.Thread.init(
-        alloc,
-        config,
-        rt_surface,
-        &self.renderer,
-        &self.renderer_state,
-        app_mailbox,
-    );
-    errdefer render_thread.deinit();
-
-    // Create the IO thread
-    var io_thread = try termio.Thread.init(alloc);
-    errdefer io_thread.deinit();
 
     self.* = .{
         .id = id: {
@@ -604,8 +579,8 @@ pub fn init(
         .font_size = font_size,
         .font_size_adjusted = false,
         .font_metrics = font_grid.metrics,
-        .renderer = renderer_impl,
-        .renderer_thread = render_thread,
+        .renderer = undefined,
+        .renderer_thread = undefined,
         .renderer_state = .{
             .mutex = mutex,
             .terminal = &self.io.terminal,
@@ -614,7 +589,7 @@ pub fn init(
         .mouse = .{},
         .keyboard = .{},
         .io = undefined,
-        .io_thread = io_thread,
+        .io_thread = undefined,
         .io_thr = undefined,
         .size = size,
         .config = derived_config,
@@ -623,6 +598,33 @@ pub fn init(
         // lets us get the most likely correct color theme and so on.
         .config_conditional_state = app.config_conditional_state,
     };
+
+    // Assigned into their fields before anything can fail, so the errdefers
+    // below clean up the values `self` actually keeps rather than a copy,
+    // and so `&self.renderer` and `&self.renderer_state` are handed out
+    // pointing at initialized memory.
+    self.renderer = try Renderer.init(alloc, .{
+        .config = try .init(alloc, config),
+        .font_grid = font_grid,
+        .size = size,
+        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+        .rt_surface = rt_surface,
+        .thread = &self.renderer_thread,
+    });
+    errdefer self.renderer.deinit();
+
+    self.renderer_thread = try rendererpkg.Thread.init(
+        alloc,
+        config,
+        rt_surface,
+        &self.renderer,
+        &self.renderer_state,
+        app_mailbox,
+    );
+    errdefer self.renderer_thread.deinit();
+
+    self.io_thread = try termio.Thread.init(alloc);
+    errdefer self.io_thread.deinit();
 
     // The command we're going to execute
     const command: ?configpkg.Command = command: {
@@ -684,11 +686,10 @@ pub fn init(
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
-            // Must be our own field, not `render_thread`: the renderer arms
-            // its wait on `self.renderer_thread.wakeup` and only that
-            // instance is notified.
+            // The renderer arms its wait on `self.renderer_thread.wakeup`,
+            // so only that instance may be notified.
             .renderer_wakeup = &self.renderer_thread.wakeup,
-            .renderer_mailbox = render_thread.mailbox,
+            .renderer_mailbox = self.renderer_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
         });
     }
@@ -724,7 +725,7 @@ pub fn init(
 
     // Give the renderer one more opportunity to finalize any surface
     // setup on the main thread prior to spinning up the rendering thread.
-    try renderer_impl.finalizeSurfaceInit(rt_surface);
+    try self.renderer.finalizeSurfaceInit(rt_surface);
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
@@ -755,12 +756,16 @@ pub fn init(
         log.warn("unable to set initial window size: {}", .{err});
     };
 
+    // Both worker threads are running by now, so these must not propagate:
+    // unwinding past this point would deinit state the threads are still
+    // reading. Failing to set a title shouldn't stop the terminal working,
+    // same reasoning as the initial size above.
+    //
+    // The io thread spawn above is the one remaining exception. Handling it
+    // needs a stop-notify and a join rather than a plain errdefer, which is
+    // a larger change than this.
     if (config.title) |title| {
-        _ = try rt_app.performAction(
-            .{ .surface = self },
-            .set_title,
-            .{ .title = title },
-        );
+        setInitialTitle(self, title);
     } else if ((comptime builtin.os.tag == .linux) and
         config.@"_xdg-terminal-exec")
     xdg: {
@@ -776,20 +781,12 @@ pub fn init(
             break :xdg;
         };
         defer alloc.free(title);
-        _ = try rt_app.performAction(
-            .{ .surface = self },
-            .set_title,
-            .{ .title = title },
-        );
+        setInitialTitle(self, title);
     } else if (command) |cmd| switch (cmd) {
         // If a user specifies a command it is appropriate to set the title as argv[0]
         // we know in the case of a direct command it has been supplied by the user
         .direct => |cmd_str| if (cmd_str.len != 0) {
-            _ = try rt_app.performAction(
-                .{ .surface = self },
-                .set_title,
-                .{ .title = cmd_str[0] },
-            );
+            setInitialTitle(self, cmd_str[0]);
         },
 
         // We won't set the title in the case the shell expands the command
@@ -800,6 +797,20 @@ pub fn init(
 
     // We are no longer the first surface
     app.first = false;
+}
+
+/// Set the title a surface starts with. Errors are logged rather than
+/// returned: this runs after the render and IO threads are spawned, where
+/// unwinding would tear down state those threads are still using.
+fn setInitialTitle(self: *Surface, title: [:0]const u8) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .set_title,
+        .{ .title = title },
+    ) catch |err| {
+        log.warn("error setting initial title err={}", .{err});
+        return;
+    };
 }
 
 pub fn deinit(self: *Surface) void {
@@ -2590,7 +2601,6 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
 
     // Mail the IO thread
     self.queueIo(.{ .resize = self.size }, .unlocked);
-
 }
 
 /// Recalculate the balanced padding if needed.
