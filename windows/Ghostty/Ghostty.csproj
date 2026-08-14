@@ -85,14 +85,33 @@
     <Channel Condition="'$(Channel)' == '' and '$(Configuration)' == 'Debug'">Nightly</Channel>
     <Channel Condition="'$(Channel)' == ''">Stable</Channel>
     <!--
-      Channel is part of the path so switching variants (e.g.
-      -p:Channel=Nightly after a Stable build) regenerates the icon
-      instead of reusing the stale one. MSBuild only skips the
-      GenerateBrandingAssets target when its declared Output already
-      exists AND is newer than its Inputs; keeping each channel in
-      its own directory makes "does wintty.ico exist?" channel-aware.
+      Channel is part of the path so a switch (e.g. -p:Channel=Nightly
+      after a Stable build) cannot serve the stale variant from the
+      previous build: MSBuild only skips GenerateBrandingAssets when its
+      declared Outputs exist AND are newer than its Inputs, and keeping
+      each channel in its own directory makes "does wintty.ico exist?"
+      channel-aware.
+
+      That is not enough on its own, because the two consumers of these
+      files are timestamp-driven and have no channel in their own paths.
+      <Content> copies to bin\Assets\ with PreserveNewest, and
+      ApplicationIcon is compiled into the exe. Switching back to a
+      channel built earlier leaves that channel's files older than the
+      copies the other channel already made, so both consumers would
+      keep the wrong icon. So the split is what keeps the two channels
+      from overwriting each other's files; StampBrandingInvocation below
+      is what forces the regeneration when the channel changes.
     -->
-    <GeneratedBrandingDir>$(BaseIntermediateOutputPath)$(Platform)\$(Configuration)\$(TargetFramework)\Branding\$(Channel)\</GeneratedBrandingDir>
+    <GeneratedBrandingRoot>$(BaseIntermediateOutputPath)$(Platform)\$(Configuration)\$(TargetFramework)\Branding\</GeneratedBrandingRoot>
+    <GeneratedBrandingDir>$(GeneratedBrandingRoot)$(Channel)\</GeneratedBrandingDir>
+    <BrandingStamp>$(GeneratedBrandingRoot)last-invocation.txt</BrandingStamp>
+    <!--
+      One definition, used to run the tool and to stamp what was run.
+      Stamping the whole command rather than just the channel keeps the
+      guard honest: any future argument that changes what IconGen writes
+      changes the stamp too, without anyone having to remember.
+    -->
+    <IconGenCommand>dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out "$(GeneratedBrandingDir.TrimEnd('\'))"</IconGenCommand>
     <ApplicationIcon>$(GeneratedBrandingDir)wintty.ico</ApplicationIcon>
   </PropertyGroup>
 
@@ -460,14 +479,64 @@
   </Target>
 
   <!--
+    IconGen's sources and the master rasters become items at evaluation
+    time because MSBuild does not expand wildcards inside an Inputs
+    attribute: it takes the literal path, finds no such file, and rebuilds
+    the target completely on every build, so each shell build paid a full
+    icon regeneration. Items are globbed during evaluation, so the same
+    patterns work there.
+
+    Exclude obj and bin: the `dotnet run` below builds IconGen, and that
+    build writes generated .cs (AssemblyInfo, GlobalUsings) under obj.
+    Those are byproducts of the tool, not sources of it, so anything that
+    touches them - a restore, a Debug run of IconGen, its test project -
+    would make the icons look stale and regenerate them for nothing.
+  -->
+  <ItemGroup>
+    <IconGenSource Include="..\..\dist\windows\IconGen\**\*.cs"
+                   Exclude="..\..\dist\windows\IconGen\obj\**\*.cs;..\..\dist\windows\IconGen\bin\**\*.cs" />
+    <!--
+      The project file decides what the tool is as much as its sources
+      do: the package versions it renders with, and the list of files it
+      links out of Ghostty.Core. Linking a third shared file would
+      otherwise change the icons with nothing in Inputs to notice.
+    -->
+    <IconGenSource Include="..\..\dist\windows\IconGen\IconGen.csproj" />
+    <IconGenMaster Include="..\..\images\icons\icon_*.png" />
+  </ItemGroup>
+
+  <!--
+    Record the invocation the branding directory was last built with.
+    One stamp is shared by every channel, which is why it sits above the
+    per-channel directories: a channel change rewrites it and leaves it
+    newer than the outputs that channel built earlier, forcing the
+    regeneration the copy to bin\Assets\ and the icon embedded in the
+    exe both need. WriteOnlyWhenDifferent leaves the timestamp alone
+    when nothing moved, so the ordinary build still skips. This is the
+    same trick the .NET SDK uses to make a property change break
+    incrementality.
+
+    Deliberately not registered in @(FileWrites), because the branding
+    outputs are not either: Clean leaves the stamp and the icons alone
+    together, so a build after Clean still skips generation and only
+    re-copies. Registering the stamp on its own would have Clean delete
+    it, and rewriting it on the next build would put it ahead of the
+    surviving icons - a full regeneration after every Clean. Register
+    both or neither.
+  -->
+  <Target Name="StampBrandingInvocation" BeforeTargets="GenerateBrandingAssets">
+    <WriteLinesToFile File="$(BrandingStamp)" Lines="$(IconGenCommand)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
+  <!--
     Build-time generation of the app icon (.ico) and scaled PNG assets.
     Inputs are the macOS-style master rasters under images/icons/ and
     the IconGen source files. Outputs go to obj/.../Branding/ and are
     picked up by the <Content> item group below so WinUI 3 resolves
     ms-appx:///Assets/AppIcon.scale-xxx.png at runtime. The .ico is
     embedded in the exe automatically via <ApplicationIcon>.
-  -->
-  <!--
+
     Outputs names every file the tool writes, not just the .icos. The
     PNG rungs are copied by unconditional <Content> items below, so a
     state where MSBuild thinks this target is up to date while a PNG is
@@ -478,11 +547,10 @@
   -->
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
-          Inputs="..\..\dist\windows\IconGen\**\*.cs;..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;..\..\images\icons\icon_*.png"
+          Inputs="@(IconGenSource);..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;@(IconGenMaster);$(BrandingStamp)"
           Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico;$(GeneratedBrandingDir)AppIcon.scale-100.png;$(GeneratedBrandingDir)AppIcon.scale-150.png;$(GeneratedBrandingDir)AppIcon.scale-200.png;$(GeneratedBrandingDir)AppIcon.scale-400.png;$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
-    <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
-          WorkingDirectory="$(MSBuildThisFileDirectory)" />
+    <Exec Command="$(IconGenCommand)" WorkingDirectory="$(MSBuildThisFileDirectory)" />
   </Target>
 
   <!--
