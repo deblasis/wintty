@@ -32,7 +32,11 @@ renderer_state: *renderer.State,
 
 /// A handle to wake up the renderer. This hints to the renderer that
 /// a repaint should happen.
-renderer_wakeup: xev.Async,
+///
+/// This must point to the exact instance the renderer thread waits on.
+/// Some xev backends (IOCP) store the wait registration in the struct
+/// itself, so notifying a copy does nothing.
+renderer_wakeup: *xev.Async,
 
 /// The mailbox for renderer messages.
 renderer_mailbox: *renderer.Thread.Mailbox,
