@@ -95,6 +95,12 @@ _test-examples-cmake:
 build-dll:
     zig build -Dapp-runtime=none
 
+# Build libghostty DLL optimized. Much slower to compile; the only build
+# worth drawing timing conclusions from, since a Debug DLL is several times
+# slower at runtime.
+build-dll-release:
+    zig build -Dapp-runtime=none -Doptimize=ReleaseFast
+
 # === WinUI 3 app shell ===
 
 # Build the WinUI 3 app shell (expects ghostty.dll at zig-out/bin/).
@@ -107,10 +113,23 @@ build-win:
 # bash shebang to `exec` the .exe, which forced git-bash on Windows for no
 # reason - launching a Windows .exe works fine from pwsh.
 
+# Build the WinUI 3 app shell in Release.
+[windows]
+build-win-release:
+    dotnet build windows/Ghostty.sln /p:Platform=x64 /p:Configuration=Release
+
 # Build the DLL and the shell, then launch it.
 [windows]
 run-win: build-dll build-win
     ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
+
+# Same, optimized on both sides. Startup timings taken from `run-win` are
+# Debug timings and are not the ones users see: the C# shell carries no
+# optimization and libghostty is a Debug build. Use this before concluding
+# anything about how long startup, the launch splash, or a frame takes.
+[windows]
+run-win-release: build-dll-release build-win-release
+    ./windows/Ghostty/bin/x64/Release/net10.0-windows10.0.19041.0/Wintty.exe
 
 # Run the C# test suites. Ghostty.Tests is pure logic and cross-platform;
 # Ghostty.Tests.Windows holds the tests that need real Windows semantics
