@@ -30,6 +30,12 @@
       architecture-specific evaluation in front of icon generation.
       GenerateBrandingAssets in Ghostty.csproj lists both files as Inputs
       so editing the ladder still regenerates the icons.
+
+      Consequence to know about: these public types now exist in both
+      Ghostty.IconGen and Ghostty.Core. Nothing references both today. If
+      something ever needs to, the CS0433 ambiguity is the link, not a
+      stray package: give the referencing project an extern alias, or
+      promote the shared files to their own dependency-free assembly.
     -->
     <Compile Include="..\..\..\windows\Ghostty.Core\Shell\LaunchIconAssets.cs"
              Link="Shared\LaunchIconAssets.cs" />

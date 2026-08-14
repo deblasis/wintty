@@ -125,13 +125,18 @@
                       Link="Shell\Ghostty.csproj"
                       LogicalName="Ghostty.Tests.Shell.Ghostty.csproj" />
     <!--
-      Every C# source in the two assemblies that set
+      Every C# source under the two project directories that set
       [assembly: DisableRuntimeMarshalling], for MarshalComplianceTests.
       A wildcard rather than a file list, because the interop surface is
       not confined to Interop\: it also lives in Shell\, Hosting\,
       Accessibility\ and Program.cs, and a hand-maintained list is exactly
       how a new P/Invoke file escapes the scan. The test picks the files
-      that declare a native import out of this corpus.
+      that declare a native import or an interop struct out of this corpus.
+
+      Directories, not assemblies: Ghostty\Demo is <Compile Remove>d from
+      non-demo builds but is embedded and scanned unconditionally. It is
+      real code in every Debug build, so scanning it always is the cheaper
+      side of that mismatch.
 
       LogicalName keeps %(RecursiveDir) so two files sharing a name in
       different folders (Ghostty.Core has two IFileSystem.cs) stay

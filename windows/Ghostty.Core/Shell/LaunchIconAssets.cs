@@ -30,7 +30,9 @@ public static class LaunchIconAssets
     // (LaunchIconMetrics.MaxSizeDips) so every on-screen size is a
     // downsample, which stays sharp; the 40 DIP AppIcon ladder would
     // have to upscale even its largest rung. Derived rather than
-    // listed so the ladder follows if that clamp ever moves.
+    // listed so the ladder follows if that clamp ever moves -- pick a
+    // clamp every scale divides cleanly, since the truncation here is
+    // silent and only the tests' expected pixel sizes would notice.
     private static readonly int[] ScalePercents = [100, 150, 200, 400];
 
     /// <summary>
