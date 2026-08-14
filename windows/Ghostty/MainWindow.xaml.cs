@@ -198,6 +198,10 @@ public sealed partial class MainWindow : Window
     private CommandPaletteViewModel? _commandPaletteVm;
     private FrecencyStore? _frecencyStore;
     private Controls.TerminalControl? _previousFocusSurface;
+    // Cold-start launch icon. Null on every window that was not opened
+    // by App.OnLaunched -- a warm-process window reaches first render
+    // fast enough that a splash would read as invented latency.
+    private Shell.LaunchIconCoordinator? _launchIcon;
 #if DEMO
     private Ghostty.Demo.DemoPlayer? _demoPlayer;
     private Ghostty.Demo.DemoOverlay? _demoOverlay;
@@ -271,8 +275,10 @@ public sealed partial class MainWindow : Window
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
-        bool isQuickTerminal = false)
-        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null, isQuickTerminal)
+        bool isQuickTerminal = false,
+        bool showLaunchIcon = false)
+        : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null,
+               isQuickTerminal, showLaunchIcon: showLaunchIcon)
     {
     }
 
@@ -286,9 +292,11 @@ public sealed partial class MainWindow : Window
         GhosttyHost bootstrapHost,
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
-        Ghostty.Core.Session.WindowSession restore)
+        Ghostty.Core.Session.WindowSession restore,
+        bool showLaunchIcon = false)
         : this(configService, bootstrapHost, supervisor, loggerFactory,
-               seedTab: null, isQuickTerminal: false, restore: restore)
+               seedTab: null, isQuickTerminal: false, restore: restore,
+               showLaunchIcon: showLaunchIcon)
     {
     }
 
@@ -312,7 +320,8 @@ public sealed partial class MainWindow : Window
         ILoggerFactory loggerFactory,
         TabModel? seedTab,
         bool isQuickTerminal = false,
-        Ghostty.Core.Session.WindowSession? restore = null)
+        Ghostty.Core.Session.WindowSession? restore = null,
+        bool showLaunchIcon = false)
     {
         InitializeComponent();
 
@@ -602,6 +611,43 @@ public sealed partial class MainWindow : Window
             AttachProcessTracking(t);
         }
         SwapActivePane();
+
+        // Cold start: the pre-XAML splash is already covering this window's
+        // rect. It comes down on our first composed frame, which is when
+        // this window stops painting black and has something real to show.
+        if (showLaunchIcon)
+        {
+            _launchIcon = new Shell.LaunchIconCoordinator(DispatcherQueue);
+            _launchIcon.Arm();
+
+            // Let the splash follow this window. It was positioned from the
+            // saved window state before this window existed, so this both
+            // corrects any mismatch and keeps the two together if the user
+            // drags or resizes the window before the splash comes down.
+            Shell.SplashWindow.Track(WindowNative.GetWindowHandle(this));
+
+            // The active tab, not tab zero: a restored session can make any
+            // tab active, and a background tab never presents, so waiting on
+            // tab zero's surface would mean waiting for a first render that
+            // does not arrive until the user switches to it.
+            if (_tabManager.ActiveTab.PaneHost is Panes.PaneHost seedHost)
+            {
+                seedHost.ActiveLeaf.Terminal().FirstRender += OnLaunchSurfaceFirstRender;
+            }
+
+            // Record the resolved background for the next launch's splash
+            // now, rather than only on close. A session that is force-killed
+            // or crashes never runs the close path, and the splash would
+            // then keep falling back to the built-in default and flash a
+            // mismatched colour on every subsequent start.
+            var splashBackground = _configService.BackgroundColor & 0x00FFFFFFu;
+            if (_windowState.BackgroundRgb != splashBackground)
+            {
+                _windowState.BackgroundRgb = splashBackground;
+                _windowState.Save();
+            }
+        }
+
         _tabManager.TabAdded += (_, t) =>
         {
             AddPaneHost(t);
@@ -1186,6 +1232,11 @@ public sealed partial class MainWindow : Window
         _configService.ConfigChanged -= OnConfigReloaded;
         _configService.ConfigChanged -= OnConfigReloadedChrome;
         _shellTheme.ThemeChanged -= OnShellThemeChanged;
+
+        // CompositionTarget.Rendering is static, so a window closed before
+        // its first composed frame would otherwise stay subscribed.
+        _launchIcon?.Cancel();
+        _launchIcon = null;
         if (Ghostty.App.PowerStateMonitor is { } powerMonitor)
         {
             powerMonitor.LowPowerChanged -= OnLowPowerChanged;
@@ -1218,6 +1269,10 @@ public sealed partial class MainWindow : Window
             _windowState.WindowY = g.Y;
             _windowState.WindowWidth = g.Width;
             _windowState.WindowHeight = g.Height;
+            // Carried purely for the next cold start's splash, which runs
+            // before any theme has been resolved and would otherwise have
+            // to guess this colour.
+            _windowState.BackgroundRgb = _configService.BackgroundColor & 0x00FFFFFFu;
             _windowState.Save();
         }
 
@@ -2772,6 +2827,18 @@ public sealed partial class MainWindow : Window
             else
                 control.SetUserTitleOverride(result);
         }
+    }
+
+    /// <summary>
+    /// The cold-start seed surface has presented its first frame, so the
+    /// splash can go once WinUI has also composed. One-shot: later renders
+    /// are irrelevant, and the coordinator latches anyway.
+    /// </summary>
+    private void OnLaunchSurfaceFirstRender(object? sender, EventArgs e)
+    {
+        if (sender is Controls.TerminalControl terminal)
+            terminal.FirstRender -= OnLaunchSurfaceFirstRender;
+        _launchIcon?.NotifyReady();
     }
 
     /// <summary>
