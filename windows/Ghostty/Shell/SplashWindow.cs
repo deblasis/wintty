@@ -19,11 +19,11 @@ namespace Ghostty.Shell;
 /// with its own message pump, up within a few hundred milliseconds of
 /// process start and owing nothing to the WinUI stack.</para>
 ///
-/// <para>It covers the rect the main window is about to restore to (from
-/// <see cref="Ghostty.Settings.WindowState"/>) and fills it with the
-/// terminal background colour, so the black gap is never visible. When
-/// the main window reports content, the splash fades and closes,
-/// revealing the real window underneath.</para>
+/// <para>It covers the rect the main window is about to restore to --
+/// resolved from the saved session or, failing that, the saved window
+/// placement -- and fills it with the terminal background colour, so the
+/// black gap is never visible. When the main window reports content, the
+/// splash fades and closes, revealing the real window underneath.</para>
 ///
 /// <para>Interop here is hand-written rather than CsWin32-generated for
 /// the same reason <c>NativeMethods.txt</c> already documents for
@@ -49,12 +49,6 @@ internal static unsafe partial class SplashWindow
     // lands where the window will.
     private const int FallbackWidth = 1200;
     private const int FallbackHeight = 800;
-
-    // Smallest saved rect worth believing. Matches MainWindow.ApplyGeometry,
-    // which discards anything smaller, so the splash and the window agree on
-    // when saved geometry is junk.
-    private const int MinPlausibleWidth = 200;
-    private const int MinPlausibleHeight = 150;
 
     private const int FadeDurationMs = 220;
     private const int FadeStepMs = 16;
@@ -82,7 +76,17 @@ internal static unsafe partial class SplashWindow
     private static int _width;
     private static int _height;
     private static uint _background;
-    private static double _scale = 1.0;
+
+    // DPI of the monitor the splash is currently on. Mutable for the same
+    // reason as the geometry above: the splash follows the main window, and
+    // a window dragged onto a monitor at a different scale changes what a
+    // pixel means without necessarily changing the rect.
+    private static uint _dpi = 96;
+
+    // Alpha of the last blend, so a repaint forced by something other than
+    // the fade -- a resize, a scale change -- redraws at the opacity the
+    // fade has reached rather than snapping back to fully opaque.
+    private static byte _alpha = 255;
 
     // The composed splash bitmap, kept alive between blends. Building it
     // costs a full-window DIB, a per-pixel fill and a PNG decode, none of
@@ -95,6 +99,7 @@ internal static unsafe partial class SplashWindow
     private static nint _surfaceOldBitmap;
     private static int _surfaceWidth;
     private static int _surfaceHeight;
+    private static uint _surfaceDpi;
 
     /// <summary>
     /// Follow <paramref name="hwnd"/> from now on. Called once the main
@@ -229,9 +234,7 @@ internal static unsafe partial class SplashWindow
         {
             // DPI is only knowable once the window exists and the OS has
             // assigned it to a monitor.
-            var dpi = GetDpiForWindow(_hwnd);
-            if (dpi == 0) dpi = 96;
-            _scale = dpi / 96.0;
+            AdoptDpi(GetDpiForWindow(_hwnd));
 
             if (!Paint(255))
             {
@@ -246,9 +249,15 @@ internal static unsafe partial class SplashWindow
         }
         finally
         {
-            ReleaseSurface();
-            DestroyWindow(_hwnd);
+            // Clear the handle first. It is what WndProc matches on, and
+            // DestroyWindow dispatches the messages the system has sent this
+            // window -- so a WM_DPICHANGED arriving inside that call would
+            // otherwise pass the guard and rebuild a full-window surface that
+            // nothing is left to free. Zeroing first turns that into a no-op.
+            var hwnd = _hwnd;
             _hwnd = 0;
+            ReleaseSurface();
+            DestroyWindow(hwnd);
         }
     }
 
@@ -327,6 +336,14 @@ internal static unsafe partial class SplashWindow
         var tracked = Volatile.Read(ref _trackedHwnd);
         if (tracked == 0) return true;
 
+        // A tracked window that has not been shown yet is still ours. The
+        // splash is handed the window as soon as its geometry is applied,
+        // which is well before Activate, and until then the foreground window
+        // is whatever launched the app -- so testing the foreground alone
+        // would stop re-asserting topmost for the whole of that stretch,
+        // exactly while the window behind is about to appear painting black.
+        if (IsWindowVisible(tracked) == 0) return true;
+
         var foreground = GetForegroundWindow();
         return foreground == 0 || foreground == tracked || foreground == _hwnd;
     }
@@ -360,10 +377,35 @@ internal static unsafe partial class SplashWindow
 
         SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height, SWP_NOACTIVATE);
 
-        // A move alone keeps the existing layered bitmap; a resize needs a
-        // new one, both because the surface is a different size and
-        // because the icon rescales with the window.
-        if (resized) Paint(255);
+        // Belt and braces. A move across a DPI boundary normally arrives as
+        // WM_DPICHANGED sent synchronously from inside the SetWindowPos above,
+        // so by this line WndProc has usually adopted the new scale already
+        // and this call is a no-op. It stays because the whole feature turns
+        // on that message: the icon would silently keep the launch monitor's
+        // size if it ever went undelivered, and one GetDpiForWindow per moved
+        // frame is not a cost worth trading for that.
+        var rescaled = AdoptDpi(GetDpiForWindow(_hwnd));
+
+        // A move alone keeps the existing layered bitmap; a resize or a scale
+        // change needs a new one, both because the surface is a different size
+        // and because the icon rescales with the window.
+        if (resized || rescaled) Paint(_alpha);
+    }
+
+    /// <summary>
+    /// Adopt <paramref name="dpi"/> as the scale the splash draws at.
+    /// Returns true when it actually changed, which means the composed
+    /// bitmap is stale and the caller owes a repaint.
+    /// </summary>
+    private static bool AdoptDpi(uint dpi)
+    {
+        // GetDpiForWindow returns zero for an invalid window. Treating that
+        // as 100% keeps a failure looking like an unscaled display rather
+        // than collapsing the icon to nothing.
+        if (dpi == 0) dpi = 96;
+        if (dpi == _dpi) return false;
+        _dpi = dpi;
+        return true;
     }
 
     /// <summary>
@@ -395,6 +437,8 @@ internal static unsafe partial class SplashWindow
     {
         if (!EnsureSurface()) return false;
 
+        _alpha = alpha;
+
         var size = new SIZE { cx = _surfaceWidth, cy = _surfaceHeight };
         var srcPoint = new POINT { x = 0, y = 0 };
         var blend = new BLENDFUNCTION
@@ -424,7 +468,11 @@ internal static unsafe partial class SplashWindow
         var height = _height;
         if (width <= 0 || height <= 0) return false;
 
-        if (_surfaceDib != 0 && _surfaceWidth == width && _surfaceHeight == height)
+        // The DPI is part of the key, not just the size: the icon is sized
+        // from it, so a same-size move onto a monitor at a different scale
+        // leaves a bitmap that is the right shape and the wrong drawing.
+        if (_surfaceDib != 0 && _surfaceWidth == width && _surfaceHeight == height
+            && _surfaceDpi == _dpi)
         {
             return true;
         }
@@ -432,8 +480,10 @@ internal static unsafe partial class SplashWindow
         ReleaseSurface();
 
         var background = _background;
+        var dpi = _dpi;
+        var scale = dpi / 96.0;
         var iconPx = (int)Math.Round(
-            LaunchIconMetrics.Resolve(width / _scale, height / _scale) * _scale);
+            LaunchIconMetrics.Resolve(width / scale, height / scale) * scale);
 
         var screenDc = GetDC(0);
         if (screenDc == 0)
@@ -483,6 +533,7 @@ internal static unsafe partial class SplashWindow
         _surfaceOldBitmap = oldBitmap;
         _surfaceWidth = width;
         _surfaceHeight = height;
+        _surfaceDpi = dpi;
 
         FillOpaque(bits, width, height, background);
         DrawIcon(memDc, width, height, iconPx);
@@ -509,6 +560,7 @@ internal static unsafe partial class SplashWindow
         _surfaceOldBitmap = 0;
         _surfaceWidth = 0;
         _surfaceHeight = 0;
+        _surfaceDpi = 0;
     }
 
     /// <summary>
@@ -630,39 +682,124 @@ internal static unsafe partial class SplashWindow
     /// Where the main window is about to appear, in physical pixels.
     /// </summary>
     /// <remarks>
-    /// Applies the same plausibility rules as
-    /// <c>MainWindow.ApplyGeometry</c>, which decides where the window
-    /// really goes. A saved rect the window would reject is one the splash
-    /// must reject too: closing while minimized saves a 160x31 rect at
-    /// (-32000,-32000), and honouring that puts the splash off-screen for
-    /// the whole cold start, which is a silent no-op of the feature.
-    /// The window's own check uses WinUI's DisplayArea, which does not
-    /// exist yet on this thread, so this uses the virtual screen instead.
+    /// <para>Two sources, most specific first. A restored session places its
+    /// first window from that session's saved geometry; every other launch
+    /// places its window from window-state.json. Reading only the latter is
+    /// wrong for any multi-window session, because window-state.json is
+    /// written by whichever window closed last while the window being
+    /// covered is the first one restored -- so the splash would sit on a
+    /// different window's rect for exactly the gap it exists to cover.</para>
+    ///
+    /// <para>A best guess rather than a mirror of the window's own decision.
+    /// The window consults exactly one of the two, and when it rejects that
+    /// one it lets the OS place it instead of trying the other. The guess
+    /// only has to hold until <see cref="Track"/> hands over the real rect.</para>
+    ///
+    /// <para>Both sources go through <c>WindowGeometryGate</c>, which is the
+    /// same size and position check <c>MainWindow.ApplyGeometry</c> applies:
+    /// a rect the window would reject is one the splash must reject too. The
+    /// on-screen test is not shared, because the window's uses WinUI's
+    /// DisplayArea and nothing WinUI exists yet on this thread.</para>
     /// </remarks>
     private static (int X, int Y, int Width, int Height) ResolveRect(
         Ghostty.Settings.WindowState? state)
     {
-        if (state is not null
-            && state.WindowWidth is int w and >= MinPlausibleWidth
-            && state.WindowHeight is int h and >= MinPlausibleHeight
-            && state.WindowX is int x
-            && state.WindowY is int y
-            && IntersectsLiveMonitor(x, y, w, h))
-        {
-            // A maximized window comes up filling its monitor's work area,
-            // not the restored rect that was saved alongside the flag.
-            if (state.WindowMaximized && TryGetWorkArea(x, y, w, h, out var work))
-            {
-                return work;
-            }
-            return (x, y, w, h);
-        }
+        if (TryResolveGeometry(LoadSessionGeometry(), out var rect)) return rect;
+        if (TryResolveGeometry(ToGeometry(state), out rect)) return rect;
 
         var screenWidth = GetSystemMetrics(SM_CXSCREEN);
         var screenHeight = GetSystemMetrics(SM_CYSCREEN);
         var width = Math.Min(FallbackWidth, screenWidth);
         var height = Math.Min(FallbackHeight, screenHeight);
         return ((screenWidth - width) / 2, (screenHeight - height) / 2, width, height);
+    }
+
+    /// <summary>
+    /// Turn a saved geometry into the physical rect the window will occupy,
+    /// or fail when the window itself would refuse to use it.
+    /// </summary>
+    private static bool TryResolveGeometry(
+        Ghostty.Core.Session.WindowGeometry? geometry,
+        out (int X, int Y, int Width, int Height) rect)
+    {
+        rect = default;
+        if (geometry is null) return false;
+        if (!Ghostty.Core.Session.WindowGeometryGate.TryNormalize(geometry, out var r))
+        {
+            return false;
+        }
+
+        var (x, y, w, h) = r;
+        if (!IntersectsLiveMonitor(x, y, w, h)) return false;
+
+        // A maximized window comes up filling its monitor's work area, not
+        // the restored rect that was saved alongside the flag.
+        if (geometry.Maximized && TryGetWorkArea(x, y, w, h, out var work))
+        {
+            rect = work;
+            return true;
+        }
+
+        rect = r;
+        return true;
+    }
+
+    /// <summary>
+    /// The window-state.json placement in the shape ApplyGeometry consumes.
+    /// Mirrors <c>MainWindow.RestoreWindowPlacement</c>, which builds the
+    /// same geometry from the same fields for the non-restore path.
+    /// </summary>
+    private static Ghostty.Core.Session.WindowGeometry? ToGeometry(
+        Ghostty.Settings.WindowState? state) =>
+        state is null ? null : new Ghostty.Core.Session.WindowGeometry
+        {
+            X = state.WindowX,
+            Y = state.WindowY,
+            Width = state.WindowWidth,
+            Height = state.WindowHeight,
+            Maximized = state.WindowMaximized,
+        };
+
+    /// <summary>
+    /// Geometry of the first window a session restore would rebuild, or null
+    /// when there is no session to restore from.
+    /// </summary>
+    /// <remarks>
+    /// <para>Approximates <c>SessionManager.LoadForRestore</c>. The real gate
+    /// also consults <c>window-save-state</c>, which lives in the Wintty
+    /// config and so behind a libghostty load -- seconds of work on the one
+    /// path whose whole job is to be on screen first. The clean-shutdown flag
+    /// is in the session file itself and is what the default policy turns on,
+    /// so it is read here and the config key is not.</para>
+    ///
+    /// <para>That buys the common case at the cost of two rare ones, both of
+    /// which end with the splash on a rect the window does not use:
+    /// <c>always</c> after an unclean exit, where the window restores and
+    /// this declines; and the single launch after a switch to <c>never</c>,
+    /// where a stale clean file is still on disk, this honours it and the
+    /// window discards it. Neither is silent for long -- <see cref="Track"/>
+    /// hands over the real rect as soon as the window has one.</para>
+    /// </remarks>
+    private static Ghostty.Core.Session.WindowGeometry? LoadSessionGeometry()
+    {
+        try
+        {
+            var session = Ghostty.Session.SessionStore.ReadFile();
+            if (session is null || !session.CleanShutdown) return null;
+            if (session.Windows.Count == 0) return null;
+
+            // A window with no tabs is one the restore will not rebuild, and
+            // MainWindow then falls back to window-state.json for its
+            // placement. Following it here would reintroduce the very
+            // mismatch this method exists to remove.
+            var first = session.Windows[0];
+            return first.Tabs.Count > 0 ? first.Geometry : null;
+        }
+        catch (Exception ex)
+        {
+            Diag($"could not read the saved session: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -674,7 +811,21 @@ internal static unsafe partial class SplashWindow
     /// </summary>
     private static bool IntersectsLiveMonitor(int x, int y, int w, int h)
     {
-        var rect = new RECT { left = x, top = y, right = x + w, bottom = y + h };
+        // Grown by a pixel on every side before the test. MonitorFromRect
+        // wants a real overlap, so a rect whose right edge is exactly a
+        // monitor's left edge reads as off-screen -- while ApplyGeometry,
+        // whose bounds test is a strict inequality, would still place the
+        // window there. This only reconciles that touching-edge case; the two
+        // tests are not otherwise equivalent, since ApplyGeometry measures
+        // against one nearest display's work area and this measures against
+        // the bounds of every live monitor.
+        var rect = new RECT
+        {
+            left = x - 1,
+            top = y - 1,
+            right = x + w + 1,
+            bottom = y + h + 1,
+        };
         return MonitorFromRect(ref rect, MONITOR_DEFAULTTONULL) != 0;
     }
 
@@ -741,6 +892,30 @@ internal static unsafe partial class SplashWindow
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static nint WndProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
+        // How the splash learns its scale changed under it: the user drags
+        // the covered window onto a monitor at a different scale, or edits
+        // the display's scale factor in Settings while the splash is up.
+        // DefWindowProc does nothing with this for a layered window, so
+        // without the case the icon keeps the launch monitor's physical size
+        // for the rest of the splash -- half or double what it should be.
+        //
+        // The DPI comes from wParam because that is what the message carries
+        // and it is authoritative for the move that raised it. The suggested
+        // rect in lParam is ignored: that is advice for a window that owns
+        // its placement, and this one takes its rect from the window it
+        // covers.
+        //
+        // Guarded on the handle because the splash is a singleton addressed
+        // through a static. WndProc runs for messages sent during
+        // CreateWindowExW, before _hwnd is assigned, and for messages
+        // dispatched by DestroyWindow, after it is cleared; neither should
+        // touch a surface.
+        if (msg == WM_DPICHANGED && hwnd == _hwnd)
+        {
+            if (AdoptDpi((uint)wParam & 0xFFFF)) Paint(_alpha);
+            return 0;
+        }
+
         // Layered content is supplied wholesale by UpdateLayeredWindow, so
         // there is no WM_PAINT work and no background to erase.
         if (msg == WM_DESTROY)
@@ -760,6 +935,7 @@ internal static unsafe partial class SplashWindow
     private const int SW_SHOWNA = 8;
     private const uint PM_REMOVE = 0x0001;
     private const uint WM_DESTROY = 0x0002;
+    private const uint WM_DPICHANGED = 0x02E0;
     private const uint ULW_ALPHA = 0x00000002;
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
@@ -906,6 +1082,9 @@ internal static unsafe partial class SplashWindow
 
     [LibraryImport("user32.dll")]
     private static partial nint GetForegroundWindow();
+
+    [LibraryImport("user32.dll")]
+    private static partial int IsWindowVisible(nint hwnd);
 
     [LibraryImport("user32.dll")]
     private static partial nint MonitorFromPoint(POINT pt, uint flags);
