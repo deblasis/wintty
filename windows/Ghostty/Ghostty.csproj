@@ -632,5 +632,25 @@
     <Content Include="Assets\bell.wav">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+
+    <!--
+      The launch splash's texture sheet, as a white-on-transparent mask
+      which the splash tints to the ink colour it derives from the
+      background. The splash shows one turned crop of it and nothing else,
+      so everything expensive about it was done before the build.
+
+      A wildcard rather than a name, and optional at run time: a build
+      without it draws a plain splash instead of failing. MSBuild treats a
+      named Content item that is missing as an error and a wildcard that
+      matches nothing as nothing, which is the difference between the two
+      spellings.
+
+      A committed source asset rather than a build output. It is generated,
+      but by a tool that is not part of this build, so there is no
+      generation target here and regenerating it is a commit like any other.
+    -->
+    <Content Include="Assets\Splash-*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>
