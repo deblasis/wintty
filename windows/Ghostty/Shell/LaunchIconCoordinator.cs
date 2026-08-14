@@ -1,5 +1,4 @@
 using System;
-using Ghostty.Core.Shell;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml.Media;
 
@@ -44,12 +43,12 @@ internal sealed class LaunchIconCoordinator
     private const int SurfaceGraceMs = 2500;
 
     private readonly DispatcherQueue _dispatcher;
-    private readonly LaunchIconPolicy _policy = new();
 
     private DispatcherQueueTimer? _timer;
     private bool _armed;
     private bool _composed;
     private bool _surfacePresented;
+    private bool _dismissed;
 
     public LaunchIconCoordinator(DispatcherQueue dispatcher)
     {
@@ -98,9 +97,16 @@ internal sealed class LaunchIconCoordinator
     /// </summary>
     public void NotifyReady()
     {
-        if (!_armed) return;
+        // Recorded whether or not this is armed yet, so the two signals are
+        // order-independent as the summary above promises. Arming happens
+        // first today and nothing enforces it; the cost of getting that
+        // wrong is a full grace period spent over a window that already has
+        // content.
         _surfacePresented = true;
-        if (_composed) DismissNow();
+        // No _armed check: composition can only have been observed through
+        // a subscription this made, and the one path that disarms latches
+        // the dismissal first.
+        if (_composed) Dismiss();
     }
 
     private void OnFirstComposedFrame(object? sender, object e)
@@ -110,42 +116,30 @@ internal sealed class LaunchIconCoordinator
 
         if (_surfacePresented)
         {
-            DismissNow();
+            Dismiss();
             return;
         }
 
-        _timer = RunAfter(SurfaceGraceMs, DismissNow);
+        _timer = RunAfter(SurfaceGraceMs, Dismiss);
     }
 
-    private void DismissNow()
-    {
-        // Elapsed is measured from when the splash went up, not from this
-        // window's construction. On a cold start it has been on screen for
-        // seconds by now, so the minimum-dwell clause is already satisfied
-        // and dismissal is immediate. That clause only bites on a startup
-        // fast enough that the splash would otherwise flash.
-        Apply(_policy.Ready(SplashWindow.VisibleForMs));
-    }
-
-    private void Apply(LaunchIconDecision decision)
-    {
-        switch (decision.Outcome)
-        {
-            case LaunchIconOutcome.FadeNow:
-                Dismiss();
-                break;
-            case LaunchIconOutcome.FadeAfter:
-                StopTimer();
-                _timer = RunAfter(decision.DelayMs, Dismiss);
-                break;
-            case LaunchIconOutcome.Ignore:
-            default:
-                break;
-        }
-    }
-
+    /// <summary>
+    /// Take the splash down, from any of the three things that end it: the
+    /// terminal reported content, the grace expired waiting for content
+    /// that is not coming, or the window it was covering is going away.
+    ///
+    /// <para>Nothing is held back on the way out. The splash exists to
+    /// cover a black window, and once the reason for it has resolved --
+    /// either way -- every further millisecond it stays up is spent
+    /// covering the app the user is waiting for.</para>
+    /// </summary>
     private void Dismiss()
     {
+        // Latches: composition and the surface can both resolve in the same
+        // frame, and Cancel can arrive on top of either.
+        if (_dismissed) return;
+        _dismissed = true;
+
         StopTimer();
         SplashWindow.Dismiss();
     }
