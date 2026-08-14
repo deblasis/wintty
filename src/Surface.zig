@@ -765,7 +765,7 @@ pub fn init(
     // needs a stop-notify and a join rather than a plain errdefer, which is
     // a larger change than this.
     if (config.title) |title| {
-        setInitialTitle(rt_app, self, title);
+        setInitialTitle(self, title);
     } else if ((comptime builtin.os.tag == .linux) and
         config.@"_xdg-terminal-exec")
     xdg: {
@@ -781,12 +781,12 @@ pub fn init(
             break :xdg;
         };
         defer alloc.free(title);
-        setInitialTitle(rt_app, self, title);
+        setInitialTitle(self, title);
     } else if (command) |cmd| switch (cmd) {
         // If a user specifies a command it is appropriate to set the title as argv[0]
         // we know in the case of a direct command it has been supplied by the user
         .direct => |cmd_str| if (cmd_str.len != 0) {
-            setInitialTitle(rt_app, self, cmd_str[0]);
+            setInitialTitle(self, cmd_str[0]);
         },
 
         // We won't set the title in the case the shell expands the command
