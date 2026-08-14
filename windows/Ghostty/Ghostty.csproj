@@ -460,6 +460,26 @@
   </Target>
 
   <!--
+    IconGen's sources and the master rasters become items at evaluation
+    time because MSBuild does not expand wildcards inside an Inputs
+    attribute: it takes the literal path, finds no such file, and rebuilds
+    the target completely on every build, so each shell build paid a full
+    icon regeneration. Items are globbed during evaluation, so the same
+    patterns work there.
+
+    Exclude obj and bin: the `dotnet run` below builds IconGen, and that
+    build writes generated .cs (AssemblyInfo, GlobalUsings) under obj.
+    Those are byproducts of the tool, not sources of it, so anything that
+    touches them - a restore, a Debug run of IconGen, its test project -
+    would make the icons look stale and regenerate them for nothing.
+  -->
+  <ItemGroup>
+    <IconGenSource Include="..\..\dist\windows\IconGen\**\*.cs"
+                   Exclude="..\..\dist\windows\IconGen\obj\**\*.cs;..\..\dist\windows\IconGen\bin\**\*.cs" />
+    <IconGenMaster Include="..\..\images\icons\icon_*.png" />
+  </ItemGroup>
+
+  <!--
     Build-time generation of the app icon (.ico) and scaled PNG assets.
     Inputs are the macOS-style master rasters under images/icons/ and
     the IconGen source files. Outputs go to obj/.../Branding/ and are
@@ -478,7 +498,7 @@
   -->
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
-          Inputs="..\..\dist\windows\IconGen\**\*.cs;..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;..\..\images\icons\icon_*.png"
+          Inputs="@(IconGenSource);..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;@(IconGenMaster)"
           Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico;$(GeneratedBrandingDir)AppIcon.scale-100.png;$(GeneratedBrandingDir)AppIcon.scale-150.png;$(GeneratedBrandingDir)AppIcon.scale-200.png;$(GeneratedBrandingDir)AppIcon.scale-400.png;$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
     <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
