@@ -496,6 +496,17 @@
       <Visible>false</Visible>
     </Content>
     <!--
+      Launch-icon ladder, sized for a 160 DIP icon. Listed explicitly for the
+      same reason as the AppIcon rungs above: a wildcard evaluates
+      before GenerateBrandingAssets produces the files. Keep in sync
+      with PngWriter.SplashTargets in dist/windows/IconGen/PngWriter.cs.
+    -->
+    <Content Include="$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <!--
       Deploy the generated .ico alongside the runtime PNGs. ApplicationIcon
       already embeds this same file as the exe resource (which Explorer and
       the default-fallback path use), but AppWindow.SetIcon needs a real
