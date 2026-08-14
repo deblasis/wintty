@@ -30,15 +30,24 @@ pub const Mailbox = union(enum) {
     /// Write messages to a SPSC queue for multi-threaded applications.
     spsc: struct {
         queue: *Queue,
-        wakeup: xev.Async,
+
+        /// There must be exactly one Async per mailbox. This union is a
+        /// value type that gets copied on its way to its owner (Surface.init
+        /// builds it, termio.Options carries it, Termio takes it), and the
+        /// IOCP backend keeps its wait registration and a mutex inline in
+        /// the Async, so it cannot survive living here by value. Boxing it
+        /// makes an accidental copy harmless rather than silent.
+        wakeup: *xev.Async,
     },
 
     /// Init the SPSC writer.
     pub fn initSPSC(alloc: Allocator) !Mailbox {
-        var queue = try Queue.create(alloc);
+        const queue = try Queue.create(alloc);
         errdefer queue.destroy(alloc);
 
-        var wakeup = try xev.Async.init();
+        const wakeup = try alloc.create(xev.Async);
+        errdefer alloc.destroy(wakeup);
+        wakeup.* = try .init();
         errdefer wakeup.deinit();
 
         return .{ .spsc = .{ .queue = queue, .wakeup = wakeup } };
@@ -50,8 +59,14 @@ pub const Mailbox = union(enum) {
                 while (v.queue.pop(global.io())) |msg| msg.deinit();
                 v.queue.destroy(alloc);
                 v.wakeup.deinit();
+                alloc.destroy(v.wakeup);
             },
         }
+
+        // Poison in safe builds so a second deinit crashes near the fault
+        // instead of silently double-freeing. This does not protect the
+        // other copies of the union, only the one being torn down.
+        self.* = undefined;
     }
 
     /// Sends the given message without notifying there are messages.
@@ -107,3 +122,45 @@ pub const Mailbox = union(enum) {
         }
     }
 };
+
+test "Mailbox: spsc wakeup survives copying the union" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var mailbox = try Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+
+    // This assert is what actually guards the invariant: boxing makes the
+    // wait/notify below share one Async by construction, so only a revert
+    // to a by-value field can fail, and it fails here rather than hanging
+    // on a notify that went to a different instance.
+    try testing.expectEqual(*xev.Async, @TypeOf(mailbox.spsc.wakeup));
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    // Exercise the wiring end to end. Only meaningful on backends that keep
+    // the registration inline in the Async; the test backend on Linux is
+    // epoll, whose Async is a bare eventfd and is copy-safe either way.
+    var consumer = mailbox;
+    var producer = mailbox;
+
+    var fired: bool = false;
+    var c: xev.Completion = .{};
+    consumer.spsc.wakeup.wait(&loop, &c, bool, &fired, (struct {
+        fn callback(
+            ud: ?*bool,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch return .disarm;
+            ud.?.* = true;
+            return .disarm;
+        }
+    }).callback);
+
+    producer.notify();
+    try loop.run(.until_done);
+    try testing.expect(fired);
+}
