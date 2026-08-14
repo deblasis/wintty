@@ -471,6 +471,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         NativeMethods.AppUpdateConfig(_app, newConfig);
 
         _config = newConfig;
+        var snapshotRefreshed = true;
         try
         {
             CacheDiagnostics();
@@ -479,37 +480,43 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         catch (Exception ex)
         {
             // ReadFlags reads files, so this is reachable on a locked or
-            // half-written config. Reload runs inside a dispatcher lambda
-            // (the watcher marshals through one), where an escape is an
-            // unhandled UI-thread exception rather than a failed reload.
+            // half-written config -- most likely right after a save, while
+            // the editor still holds the file. Reload runs inside a
+            // dispatcher lambda (the watcher marshals through one), where
+            // an escape is an unhandled UI-thread exception rather than a
+            // failed reload, so it is caught broadly rather than by type.
             //
             // Swallowed rather than rethrown because the native swap above
             // already succeeded: libghostty is on the new config and the
-            // surfaces will repaint from it. What is left stale is the C#
-            // snapshot, which the next reload rebuilds. Bailing out here
-            // would leave those two disagreeing with no way back.
-            StaticLoggers.ConfigService.LogReloadFailed(ex);
+            // surfaces will repaint from it. What is left stale, or torn
+            // partway, is the C# snapshot -- so the caller is told the
+            // reload did not complete even though the terminal moved.
+            snapshotRefreshed = false;
+            StaticLoggers.ConfigService.LogSnapshotRefreshFailed(ex);
         }
         finally
         {
-            // Both of these have to happen even on the throw path. Leaking
-            // oldConfig leaks the libghostty config for the process
-            // lifetime, and leaving _suppressWatcher latched would make
-            // OnFileChanged return early on every subsequent edit --
-            // auto-reload-config would silently stop working for the rest
-            // of the session, with nothing logged.
+            // Restored first: leaving _suppressWatcher latched makes
+            // OnFileChanged return early on every subsequent edit, so
+            // auto-reload-config silently stops working for the rest of
+            // the session with nothing logged. Freeing oldConfig matters
+            // too -- it is leaked for the process lifetime otherwise --
+            // but a fault there must not cost us the latch.
+            _suppressWatcher = wasSuppressed;
+
             if (oldConfig.Handle != IntPtr.Zero)
                 NativeMethods.ConfigFree(oldConfig);
-
-            _suppressWatcher = wasSuppressed;
         }
 
+        // Fired even when the snapshot failed: libghostty has moved, so
+        // suppressing this would leave the chrome painting against a
+        // terminal that already repainted.
         _dispatcher.TryEnqueue(() =>
         {
             ConfigChanged?.Invoke(this);
             ProfileConfigChanged?.Invoke();
         });
-        return true;
+        return snapshotRefreshed;
     }
 
     /// <summary>
@@ -1131,39 +1138,30 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// in the same order as libghostty. Returns null if not found.
     /// </summary>
     /// <remarks>
-    /// This has to agree with src/config/theme.zig, because the two read
-    /// the same theme for different purposes: libghostty renders the
-    /// terminal from it, this reads it for the window chrome. Where they
-    /// disagree, a themed pane ends up framed in chrome from a different
-    /// palette. Deriving the directory from the config file's own location
-    /// is what used to make them disagree -- an install can hold its
-    /// config under the pre-rename name and its themes under the current
-    /// one, or the reverse.
+    /// Search order and name rules live in
+    /// <see cref="ThemeSearchPath"/>, which documents why they have to
+    /// track theme.zig. The resources directory theme.zig searches last is
+    /// not probed: those themes reach the chrome through libghostty's own
+    /// resolved values instead. The one case that would miss -- a
+    /// conditional light:/dark: pair in dark mode, where libghostty's
+    /// handle is finalized light -- is unreachable while the Windows build
+    /// ships no resources themes (emit_themes defaults off), and would
+    /// need this list extended if that changes.
     /// </remarks>
     private string? ResolveThemePath(string themeName)
     {
-        foreach (var dir in UserThemeDirectories())
+        if (!ThemeSearchPath.IsSearchableName(themeName)) return null;
+
+        var dirs = ThemeSearchPath.UserDirectories(
+            Path.GetDirectoryName(ConfigFilePath),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+
+        foreach (var dir in dirs)
         {
             var themePath = Path.Combine(dir, themeName);
             if (File.Exists(themePath)) return themePath;
         }
         return null;
-    }
-
-    /// <summary>
-    /// User theme directories, most current first. Mirrors the `user` and
-    /// `user_ghostty` entries of theme.zig's Location enum; the resources
-    /// directory it searches last has no chrome-visible values, so it is
-    /// deliberately not probed here.
-    /// </summary>
-    private static IEnumerable<string> UserThemeDirectories()
-    {
-        // xdg.config resolves to %APPDATA% on Windows (src/os/xdg.zig).
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        if (string.IsNullOrEmpty(appData)) yield break;
-
-        yield return Path.Combine(appData, "wintty", "themes");
-        yield return Path.Combine(appData, "ghostty", "themes");
     }
 
     /// <summary>
@@ -1515,6 +1513,16 @@ internal static partial class ConfigServiceLogExtensions
                    Level = LogLevel.Error,
                    Message = "[ConfigService] Failed to re-resolve themed values after an OS colour scheme change")]
     internal static partial void LogThemeRefreshFailed(
+        this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Distinct from LogReloadFailed: there the config was never built and
+    // nothing changed, here it was built and pushed and only the C#
+    // snapshot is behind. The two want opposite triage, so they must not
+    // share a message.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.SnapshotRefreshFailed,
+                   Level = LogLevel.Error,
+                   Message = "[ConfigService] Config applied natively but the C# snapshot failed to refresh")]
+    internal static partial void LogSnapshotRefreshFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
 
     // Surfaces each warning string returned by

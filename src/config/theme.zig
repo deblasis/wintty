@@ -50,7 +50,7 @@ pub const Location = enum {
         arena_alloc: Allocator,
         environ_map: *const std.process.Environ.Map,
         app_dir: []const u8,
-    ) error{ OutOfMemory, Unexpected }!?[]const u8 {
+    ) error{OutOfMemory}!?[]const u8 {
         const subdir = std.fs.path.join(arena_alloc, &.{
             app_dir, "themes",
         }) catch return error.OutOfMemory;
@@ -294,4 +294,14 @@ pub fn openAbsolute(
 
         return null;
     };
+}
+
+test "theme search order prefers the current config dir over the pre-rename one" {
+    const testing = std.testing;
+
+    // Priority is positional: LocationIterator walks the enum in
+    // declaration order, so an install that has migrated must reach its
+    // themes before one that has not, and both before the bundled ones.
+    try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
+    try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
 }
