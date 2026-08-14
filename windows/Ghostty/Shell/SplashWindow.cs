@@ -50,7 +50,10 @@ internal static unsafe partial class SplashWindow
     private const int FallbackWidth = 1200;
     private const int FallbackHeight = 800;
 
-    private const int FadeDurationMs = 220;
+    // The fade is the only thing still covering the window once the
+    // terminal has content, so it is short: long enough to read as a
+    // reveal rather than a cut, short enough that nobody waits on it.
+    private const int FadeDurationMs = 120;
     private const int FadeStepMs = 16;
 
     // How often to re-assert topmost while waiting. Frequent enough that a
@@ -72,7 +75,6 @@ internal static unsafe partial class SplashWindow
     private static nint _hwnd;
     private static readonly ManualResetEventSlim _dismissed = new(false);
     private static int _started;
-    private static long _shownAtTicks;
     private static nint _trackedHwnd;
 
     // The splash thread, so HideNow can wait for it rather than leaving it to
@@ -85,7 +87,7 @@ internal static unsafe partial class SplashWindow
 
     // Set by HideNow to skip the fade. A fade is a courtesy on the normal
     // reveal; on the paths HideNow serves the process is about to end, and
-    // 220ms of animation is 220ms of holding a window over the desktop.
+    // any animation at all is time spent holding a window over the desktop.
     private static bool _skipFade;
 
     // Current splash geometry, owned by the splash thread. Mutable
@@ -128,24 +130,6 @@ internal static unsafe partial class SplashWindow
     /// legitimate action away from the user to keep a decoration tidy.
     /// </summary>
     public static void Track(nint hwnd) => Volatile.Write(ref _trackedHwnd, hwnd);
-
-    /// <summary>
-    /// Milliseconds the splash has been on screen, or 0 if it was never
-    /// shown. The dwell clause in <see cref="LaunchIconPolicy"/> is
-    /// measured against this rather than against main-window
-    /// construction, which happens seconds later.
-    /// </summary>
-    public static int VisibleForMs
-    {
-        get
-        {
-            var shown = Volatile.Read(ref _shownAtTicks);
-            if (shown == 0) return 0;
-            var elapsed = Environment.TickCount64 - shown;
-            if (elapsed <= 0) return 0;
-            return elapsed > int.MaxValue ? int.MaxValue : (int)elapsed;
-        }
-    }
 
     /// <summary>
     /// Put the splash on screen. Returns immediately; the window lives on
@@ -316,7 +300,6 @@ internal static unsafe partial class SplashWindow
             if (_dismissed.IsSet) return;
 
             ShowWindow(_hwnd, SW_SHOWNA);
-            Volatile.Write(ref _shownAtTicks, Environment.TickCount64);
 
             PumpUntilDismissed();
             FadeOut();
