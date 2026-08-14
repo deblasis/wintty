@@ -105,13 +105,20 @@ pub fn createRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSignat
             .ShaderVisibility = .ALL,
         },
         // [1] Descriptor table for SRVs.
+        //
+        // PIXEL, not ALL: visibility is what decides the resource state the
+        // debug layer demands at bind. ALL means any stage could read the
+        // table, so it requires NON_PIXEL_SHADER_RESOURCE |
+        // PIXEL_SHADER_RESOURCE, while these textures are only sampled from a
+        // pixel shader (CellTextPS, ImagePS, BgImagePS) and so sit in
+        // PIXEL_SHADER_RESOURCE alone.
         .{
             .ParameterType = .DESCRIPTOR_TABLE,
             .u = .{ .DescriptorTable = .{
                 .NumDescriptorRanges = 1,
                 .pDescriptorRanges = @ptrCast(&srv_range),
             } },
-            .ShaderVisibility = .ALL,
+            .ShaderVisibility = .PIXEL,
         },
         // [2] Descriptor table for samplers.
         .{
@@ -223,13 +230,15 @@ pub fn createPostRootSignature(device: *d3d12.ID3D12Device) !*d3d12.ID3D12RootSi
             .ShaderVisibility = .ALL,
         },
         // [1] Descriptor table: 1 SRV at t0 (source texture).
+        // PIXEL for the same reason: only the post shader's pixel stage
+        // samples t0, which endPass leaves in PIXEL_SHADER_RESOURCE.
         .{
             .ParameterType = .DESCRIPTOR_TABLE,
             .u = .{ .DescriptorTable = .{
                 .NumDescriptorRanges = 1,
                 .pDescriptorRanges = @ptrCast(&srv_range),
             } },
-            .ShaderVisibility = .ALL,
+            .ShaderVisibility = .PIXEL,
         },
         // [2] Descriptor table: 1 sampler at s0.
         .{
