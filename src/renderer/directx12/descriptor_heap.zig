@@ -35,6 +35,12 @@ pub const Descriptor = struct {
     index: u32,
 };
 
+/// Create a descriptor heap with a linear allocator over its slots.
+///
+/// A shader-visible CBV/SRV/UAV heap comes back with every slot already
+/// holding a null SRV, so binding a descriptor table that reaches past the
+/// slots handed out so far is defined rather than a validation error. See
+/// the null_srv block below.
 pub fn init(
     device: *d3d12.ID3D12Device,
     heap_type: d3d12.D3D12_DESCRIPTOR_HEAP_TYPE,
@@ -68,7 +74,7 @@ pub fn init(
 
     const increment_size = device.GetDescriptorHandleIncrementSize(heap_type);
 
-    return .{
+    const self: DescriptorHeap = .{
         .heap = h,
         .cpu_start = cpu_start,
         .gpu_start = gpu_start,
@@ -76,6 +82,36 @@ pub fn init(
         .capacity = count,
         .allocated = 0,
     };
+
+    // D3D12 requires every descriptor in a range that is not
+    // DESCRIPTORS_VOLATILE to be initialized before the table is set, not
+    // just the ones a shader samples. RenderPass binds the srv_table_size
+    // table from a single texture's slot, so the slots behind it hold
+    // whatever was allocated next, which is nothing at all when that texture
+    // is the most recent one created, and every such bind failed validation
+    // with INVALID_DESCRIPTOR_HANDLE.
+    //
+    // Filling here rather than in allocate() is the point: the slots that
+    // were failing are the ones no texture ever claims. A null SRV reads as
+    // zeros, so an unused slot is defined rather than merely quiet.
+    if (shader_visible and heap_type == .CBV_SRV_UAV) {
+        const null_srv = d3d12.D3D12_SHADER_RESOURCE_VIEW_DESC{
+            .Format = .R8G8B8A8_UNORM,
+            .ViewDimension = .TEXTURE2D,
+            .Shader4ComponentMapping = d3d12.D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            .u = .{ .Texture2D = .{
+                .MostDetailedMip = 0,
+                .MipLevels = 1,
+                .PlaneSlice = 0,
+                .ResourceMinLODClamp = 0.0,
+            } },
+        };
+        for (0..count) |i| {
+            device.CreateShaderResourceView(null, &null_srv, self.cpuHandle(@intCast(i)));
+        }
+    }
+
+    return self;
 }
 
 pub fn deinit(self: *DescriptorHeap) void {
