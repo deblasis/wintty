@@ -233,6 +233,10 @@ pub const StreamHandler = struct {
             .print_slice => {
                 @branchHint(.likely);
                 try self.terminal.printSlice(value.cps);
+                if (!self.first_content_flagged) {
+                    self.first_content_flagged = true;
+                    self.renderer_state.first_content = true;
+                }
             },
             .print_repeat => try self.terminal.printRepeat(value),
             .bell => self.bell(),
