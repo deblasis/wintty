@@ -11,11 +11,11 @@ internal static class LogEvents
     // 1000-1099: Config
     internal static class Config
     {
-        public const int ReloadFailed       = 1000;
-        public const int WriteSchedulerErr  = 1001;
-        public const int TimerDisposeSlow   = 1002;
-        public const int SeedFailed         = 1003;
-        public const int SettingsWriteErr   = 1004;
+        public const int ReloadFailed          = 1000;
+        public const int WriteSchedulerErr     = 1001;
+        public const int TimerDisposeSlow      = 1002;
+        public const int SeedFailed            = 1003;
+        public const int SettingsWriteErr      = 1004;
         public const int ThemeRefreshFailed    = 1005;
         public const int SnapshotRefreshFailed = 1006;
     }

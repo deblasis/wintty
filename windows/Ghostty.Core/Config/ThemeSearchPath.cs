@@ -56,7 +56,9 @@ public static class ThemeSearchPath
         // alone. Falling back to appData only when there is no root to
         // derive keeps this from probing directories libghostty would
         // never look at.
-        var root = configRoot ?? appData;
+        // GetDirectoryName gives null for a root and "" for a bare
+        // segment; neither is a usable root, so both fall back.
+        var root = string.IsNullOrEmpty(configRoot) ? appData : configRoot;
         if (string.IsNullOrEmpty(root)) yield break;
 
         foreach (var app in AppDirectoryNames)
@@ -77,6 +79,25 @@ public static class ThemeSearchPath
     /// </summary>
     public static bool IsSearchableName(string themeName)
         => !string.IsNullOrEmpty(themeName)
-           && !Path.IsPathRooted(themeName)
+           && !IsAbsolute(themeName)
            && string.Equals(themeName, Path.GetFileName(themeName), StringComparison.Ordinal);
+
+    /// <summary>
+    /// True when a theme value is an absolute path, by the same rule
+    /// std.fs.path.isAbsoluteWindows uses: a leading separator, or a drive
+    /// letter followed by one.
+    /// </summary>
+    /// <remarks>
+    /// Path.IsPathRooted alone is wider than that rule. It also accepts
+    /// the drive-relative form with no separator, <c>C:mocha</c>, which
+    /// libghostty treats as a plain name, finds a directory component in,
+    /// and rejects. Taking it as absolute here would theme the chrome from
+    /// a file the terminal refused.
+    /// </remarks>
+    public static bool IsAbsolute(string themeName)
+    {
+        if (string.IsNullOrEmpty(themeName)) return false;
+        if (themeName[0] is '\\' or '/') return true;
+        return Path.IsPathFullyQualified(themeName);
+    }
 }

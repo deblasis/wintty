@@ -10,14 +10,6 @@ public class ThemeSearchPathTests
     private const string AppData = @"C:\Users\u\AppData\Roaming";
 
     [Fact]
-    public void Config_directory_is_searched_first()
-    {
-        var dirs = ThemeSearchPath.UserDirectories(@"D:\dotfiles\wintty", AppData).ToList();
-
-        Assert.Equal(Path.Combine(@"D:\dotfiles\wintty", "themes"), dirs[0]);
-    }
-
-    [Fact]
     public void Sibling_name_is_searched_under_the_config_root_not_app_data()
     {
         // With XDG_CONFIG_HOME set, libghostty's two user locations are both
@@ -35,7 +27,6 @@ public class ThemeSearchPathTests
                 Path.Combine(@"D:\dotfiles", "ghostty", "themes"),
             },
             dirs);
-        Assert.DoesNotContain(dirs, d => d.Contains("AppData"));
     }
 
     [Fact]
@@ -109,7 +100,6 @@ public class ThemeSearchPathTests
     [InlineData(@"..\..\secrets.ini")]
     [InlineData("sub/theme")]
     [InlineData(@"sub\theme")]
-    [InlineData("")]
     public void Relative_names_with_a_directory_component_are_not_searchable(string name)
     {
         // theme.zig rejects these outright, so resolving one here would
@@ -118,11 +108,41 @@ public class ThemeSearchPathTests
     }
 
     [Fact]
-    public void Absolute_names_are_not_searched_because_they_are_used_as_is()
+    public void Empty_name_is_not_searchable()
     {
-        // theme.zig routes an absolute theme through openAbsolute rather
-        // than the search directories, and so does the caller here. This
-        // is not a rejection.
-        Assert.False(ThemeSearchPath.IsSearchableName(@"C:\themes\Mocha"));
+        Assert.False(ThemeSearchPath.IsSearchableName(""));
+    }
+
+    [Theory]
+    [InlineData(@"C:\themes\Mocha")]
+    [InlineData(@"\themes\Mocha")]
+    [InlineData("/themes/Mocha")]
+    [InlineData(@"\\server\share\Mocha")]
+    public void Absolute_names_are_used_as_is_not_searched(string name)
+    {
+        // theme.zig routes these through openAbsolute rather than the
+        // search directories, and so does ResolveThemePath.
+        Assert.True(ThemeSearchPath.IsAbsolute(name));
+        Assert.False(ThemeSearchPath.IsSearchableName(name));
+    }
+
+    [Theory]
+    [InlineData("C:mocha")]
+    [InlineData("C:")]
+    public void Drive_relative_names_are_not_absolute(string name)
+    {
+        // Path.IsPathRooted accepts these, std.fs.path.isAbsoluteWindows
+        // does not. Treating them as absolute would theme the chrome from
+        // a file resolved against the drive's working directory, while
+        // libghostty finds a directory component and refuses the theme.
+        Assert.False(ThemeSearchPath.IsAbsolute(name));
+    }
+
+    [Theory]
+    [InlineData("Catppuccin Mocha")]
+    [InlineData("3024 Night")]
+    public void Plain_names_are_not_absolute(string name)
+    {
+        Assert.False(ThemeSearchPath.IsAbsolute(name));
     }
 }

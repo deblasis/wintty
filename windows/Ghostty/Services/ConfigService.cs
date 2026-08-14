@@ -1158,7 +1158,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // An absolute theme is used as-is, mirroring theme.zig's own
         // openAbsolute branch. Dropping it here would leave the terminal
         // themed and the chrome on defaults.
-        if (Path.IsPathRooted(themeName))
+        if (ThemeSearchPath.IsAbsolute(themeName))
             return File.Exists(themeName) ? themeName : null;
 
         if (!ThemeSearchPath.IsSearchableName(themeName)) return null;
