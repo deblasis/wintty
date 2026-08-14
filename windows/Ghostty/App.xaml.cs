@@ -723,10 +723,18 @@ public partial class App : Application
         var restoreState = _sessionManager.LoadForRestore();
         if (restoreState is { Windows.Count: > 0 })
         {
+            // Only the first restored window drives the splash. There is one
+            // splash per process, so arming every window would have them
+            // fight over it: each Track would drag it onto the newest
+            // window, uncovering the earlier ones, and whichever window
+            // rendered first would dismiss it for all of them.
+            var isFirstWindow = true;
             foreach (var ws in restoreState.Windows)
             {
                 var restored = new MainWindow(
-                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws);
+                    _configService, _bootstrapHost, _lifetimeSupervisor, factory, ws,
+                    showLaunchIcon: isFirstWindow);
+                isFirstWindow = false;
                 restored.Closed += OnAnyWindowClosedInternal;
                 _sessionManager.Track(restored);
                 restored.Activate();
@@ -734,7 +742,9 @@ public partial class App : Application
         }
         else
         {
-            var window = new MainWindow(_configService, _bootstrapHost, _lifetimeSupervisor, factory);
+            var window = new MainWindow(
+                _configService, _bootstrapHost, _lifetimeSupervisor, factory,
+                showLaunchIcon: true);
             window.Closed += OnAnyWindowClosedInternal;
             _sessionManager.Track(window);
             window.Activate();
