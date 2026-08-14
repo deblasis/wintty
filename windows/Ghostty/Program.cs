@@ -246,6 +246,14 @@ public static partial class Program
     private static void WriteStderr(string message) => WriteConsole(Console.Error, message);
 
     /// <summary>
+    /// Report a diagnostic from code that runs before the logger exists.
+    /// Startup work that happens ahead of the logging bootstrap has nowhere
+    /// else to report a failure, and stays silent in the field otherwise.
+    /// </summary>
+    internal static void WriteStartupDiagnostic(string message) =>
+        WriteStderr($"{AppIdentity.LogTag} {message}");
+
+    /// <summary>
     /// Write to a console stream, tolerating a handle that refuses the write.
     /// </summary>
     /// <remarks>
@@ -856,7 +864,10 @@ public static partial class Program
             // HWND exists and paints black. The splash covers that rect
             // until there is real content to reveal. It runs on its own
             // thread, so none of that work delays it.
-            Ghostty.Shell.SplashWindow.Show();
+            if (!AnotherInstanceOwnsTheSession())
+            {
+                Ghostty.Shell.SplashWindow.Show();
+            }
 
             Microsoft.UI.Xaml.Application.Start(p =>
             {
@@ -877,9 +888,51 @@ public static partial class Program
         }
         catch (Exception ex)
         {
+            // Take the splash down before reporting. Startup that dies before
+            // any window exists leaves nothing else to dismiss it, and an
+            // opaque topmost rectangle sitting over the desktop is the worst
+            // possible time to be hiding a crash report.
+            Ghostty.Shell.SplashWindow.Dismiss();
+
             // Same reporting as an escape from MainImpl, so the GUI path also
             // gets the terminal tee instead of only the log.
             return ReportFatal(ex);
+        }
+    }
+
+    /// <summary>
+    /// True when a single-instance primary is already running, so this
+    /// process is about to forward its launch and exit.
+    /// </summary>
+    /// <remarks>
+    /// The mutex is only ever created when <c>windows-single-instance</c> is
+    /// on, so its presence answers both questions at once: the feature is
+    /// enabled and somebody already owns the session. Without this check the
+    /// secondary paints a full-size opaque splash over the primary's window
+    /// -- the user's actual terminal -- for as long as it takes to reach the
+    /// gate, and is then killed by Environment.Exit mid-GDI+.
+    ///
+    /// Opened, never acquired: taking ownership here would make this process
+    /// look like the primary to the real gate in App.OnLaunched.
+    /// </remarks>
+    private static bool AnotherInstanceOwnsTheSession()
+    {
+        try
+        {
+            var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(
+                Environment.ProcessPath ?? string.Empty);
+            if (!System.Threading.Mutex.TryOpenExisting(names.Mutex, out var existing))
+            {
+                return false;
+            }
+            existing.Dispose();
+            return true;
+        }
+        catch
+        {
+            // Probing is best effort. A splash we should have skipped is a
+            // far smaller problem than a launch we blocked.
+            return false;
         }
     }
 }

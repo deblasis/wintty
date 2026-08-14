@@ -50,6 +50,12 @@ internal static unsafe partial class SplashWindow
     private const int FallbackWidth = 1200;
     private const int FallbackHeight = 800;
 
+    // Smallest saved rect worth believing. Matches MainWindow.ApplyGeometry,
+    // which discards anything smaller, so the splash and the window agree on
+    // when saved geometry is junk.
+    private const int MinPlausibleWidth = 200;
+    private const int MinPlausibleHeight = 150;
+
     private const int FadeDurationMs = 220;
     private const int FadeStepMs = 16;
 
@@ -77,6 +83,18 @@ internal static unsafe partial class SplashWindow
     private static int _height;
     private static uint _background;
     private static double _scale = 1.0;
+
+    // The composed splash bitmap, kept alive between blends. Building it
+    // costs a full-window DIB, a per-pixel fill and a PNG decode, none of
+    // which change while only the alpha does, so the fade re-blends this
+    // instead of rebuilding it every frame. Owned by the splash thread and
+    // released in RunSplash's finally.
+    private static nint _surfaceScreenDc;
+    private static nint _surfaceMemDc;
+    private static nint _surfaceDib;
+    private static nint _surfaceOldBitmap;
+    private static int _surfaceWidth;
+    private static int _surfaceHeight;
 
     /// <summary>
     /// Follow <paramref name="hwnd"/> from now on. Called once the main
@@ -130,9 +148,21 @@ internal static unsafe partial class SplashWindow
     /// </summary>
     public static void Dismiss()
     {
-        if (Volatile.Read(ref _started) == 0) return;
+        // Set unconditionally rather than bailing when nothing has started
+        // yet. RunSplash handles an already-signalled event correctly, so
+        // latching here means a dismissal that races Show can never be
+        // dropped and leave the splash up until the watchdog.
         _dismissed.Set();
     }
+
+    /// <summary>
+    /// Report a splash failure on the only channel that exists this early.
+    /// Nothing here is worth failing the launch over, but a splash that
+    /// silently does nothing -- or paints a bare rectangle because its
+    /// icon is missing -- is otherwise invisible in the field.
+    /// </summary>
+    private static void Diag(string message) =>
+        Program.WriteStartupDiagnostic($"splash: {message}");
 
     private static void ThreadMain()
     {
@@ -140,22 +170,27 @@ internal static unsafe partial class SplashWindow
         {
             RunSplash();
         }
-        catch
+        catch (Exception ex)
         {
             // A splash is decoration. Nothing it can do is worth taking the
-            // process down before the real window exists, and there is no
-            // logger wired up this early in startup.
+            // process down before the real window exists.
+            Diag($"aborted: {ex}");
         }
     }
 
     private static void RunSplash()
     {
-        var (x, y, width, height) = ResolveRect();
+        var state = LoadState();
+        var (x, y, width, height) = ResolveRect(state);
         _width = width;
         _height = height;
-        _background = ResolveBackgroundRgb();
+        _background = ResolveBackgroundRgb(state);
 
-        if (!RegisterWindowClass()) return;
+        if (!RegisterWindowClass())
+        {
+            Diag("could not register the window class");
+            return;
+        }
 
         fixed (char* className = ClassName)
         {
@@ -173,7 +208,11 @@ internal static unsafe partial class SplashWindow
                 x, y, width, height,
                 0, 0, GetModuleHandleW(0), 0);
         }
-        if (_hwnd == 0) return;
+        if (_hwnd == 0)
+        {
+            Diag($"CreateWindowExW failed for {width}x{height} at ({x},{y})");
+            return;
+        }
 
         try
         {
@@ -192,6 +231,7 @@ internal static unsafe partial class SplashWindow
         }
         finally
         {
+            ReleaseSurface();
             DestroyWindow(_hwnd);
             _hwnd = 0;
         }
@@ -219,11 +259,19 @@ internal static unsafe partial class SplashWindow
             // reorders the z-order sixty times a second while the main
             // thread is still initializing, and the resulting window-manager
             // and DWM work slows down the very startup we are waiting on.
+            //
+            // Skipped once the user has switched to another app. The splash
+            // has no taskbar button, no Alt-Tab entry and no close affordance,
+            // so re-asserting topmost over whatever they switched to would
+            // leave them looking at something they cannot dismiss.
             var now = Environment.TickCount64;
             if (now >= nextTopmostNudge)
             {
-                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if (CoversForegroundWindow())
+                {
+                    SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                }
                 nextTopmostNudge = now + TopmostNudgeIntervalMs;
             }
 
@@ -233,15 +281,39 @@ internal static unsafe partial class SplashWindow
             // change, a SetWindowPos.
             FollowTrackedWindow();
 
-            while (PeekMessageW(out var msg, 0, 0, 0, PM_REMOVE) != 0)
-            {
-                TranslateMessage(ref msg);
-                DispatchMessageW(ref msg);
-            }
+            PumpMessages();
             // Waits on the dismiss signal rather than sleeping blindly, so
             // the fade starts the moment the window reports content.
             _dismissed.Wait(FadeStepMs);
         }
+    }
+
+    /// <summary>
+    /// Drain the message queue. A window whose thread stops pumping is
+    /// marked unresponsive by the OS and painted as a ghost.
+    /// </summary>
+    private static void PumpMessages()
+    {
+        while (PeekMessageW(out var msg, 0, 0, 0, PM_REMOVE) != 0)
+        {
+            TranslateMessage(ref msg);
+            DispatchMessageW(ref msg);
+        }
+    }
+
+    /// <summary>
+    /// True while the splash is still covering for this app rather than
+    /// sitting over something the user deliberately switched to. Treats an
+    /// untracked splash as ours, since before the main window exists there
+    /// is nothing else it could be covering.
+    /// </summary>
+    private static bool CoversForegroundWindow()
+    {
+        var tracked = Volatile.Read(ref _trackedHwnd);
+        if (tracked == 0) return true;
+
+        var foreground = GetForegroundWindow();
+        return foreground == 0 || foreground == tracked || foreground == _hwnd;
     }
 
     /// <summary>
@@ -271,7 +343,8 @@ internal static unsafe partial class SplashWindow
         _width = width;
         _height = height;
 
-        SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height, SWP_NOACTIVATE);
+        SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height,
+            SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 
         // A move alone keeps the existing layered bitmap; a resize needs a
         // new one, both because the surface is a different size and
@@ -279,37 +352,86 @@ internal static unsafe partial class SplashWindow
         if (resized) Paint(255);
     }
 
+    /// <summary>
+    /// Fade the splash out. Keeps servicing the message queue and tracking
+    /// the window while it does: this is a top-level window, so a thread
+    /// that stops pumping stalls any process broadcasting a message to it,
+    /// and a drag during the fade would otherwise detach the splash.
+    /// </summary>
     private static void FadeOut()
     {
         var steps = Math.Max(1, FadeDurationMs / FadeStepMs);
         for (var i = steps - 1; i >= 0; i--)
         {
             var alpha = (byte)(255 * i / steps);
+            FollowTrackedWindow();
             if (!Paint(alpha)) break;
+            PumpMessages();
             Thread.Sleep(FadeStepMs);
         }
     }
 
     /// <summary>
-    /// Render the splash into a 32bpp DIB and hand it to
-    /// UpdateLayeredWindow. The content is fully opaque, so
-    /// <paramref name="alpha"/> alone drives the fade and there is no
-    /// premultiplied alpha to get wrong.
+    /// Show the splash at <paramref name="alpha"/>, composing the bitmap
+    /// first if there is not already one at the current size. The content
+    /// is fully opaque, so <paramref name="alpha"/> alone drives the fade
+    /// and there is no premultiplied alpha to get wrong.
     /// </summary>
     private static bool Paint(byte alpha)
     {
+        if (!EnsureSurface()) return false;
+
+        var size = new SIZE { cx = _surfaceWidth, cy = _surfaceHeight };
+        var srcPoint = new POINT { x = 0, y = 0 };
+        var blend = new BLENDFUNCTION
+        {
+            BlendOp = 0,                      // AC_SRC_OVER
+            BlendFlags = 0,
+            SourceConstantAlpha = alpha,
+            AlphaFormat = 0,                  // opaque source, constant alpha only
+        };
+
+        return UpdateLayeredWindow(
+            _hwnd, _surfaceScreenDc, 0, ref size, _surfaceMemDc,
+            ref srcPoint, 0, ref blend, ULW_ALPHA) != 0;
+    }
+
+    /// <summary>
+    /// Compose the splash bitmap into a 32bpp DIB, reusing the existing one
+    /// when it already matches the current size. Kept apart from the blend
+    /// because composing costs a full-window allocation, a per-pixel fill
+    /// and a PNG decode, and the fade changes only the alpha: rebuilding it
+    /// per frame turned a 220ms fade into a stutter that delayed the very
+    /// reveal it was smoothing.
+    /// </summary>
+    private static bool EnsureSurface()
+    {
         var width = _width;
         var height = _height;
+        if (width <= 0 || height <= 0) return false;
+
+        if (_surfaceDib != 0 && _surfaceWidth == width && _surfaceHeight == height)
+        {
+            return true;
+        }
+
+        ReleaseSurface();
+
         var background = _background;
         var iconPx = (int)Math.Round(
             LaunchIconMetrics.Resolve(width / _scale, height / _scale) * _scale);
 
         var screenDc = GetDC(0);
-        if (screenDc == 0) return false;
+        if (screenDc == 0)
+        {
+            Diag("GetDC failed; no splash this launch");
+            return false;
+        }
 
         var memDc = CreateCompatibleDC(screenDc);
         if (memDc == 0)
         {
+            Diag("CreateCompatibleDC failed; no splash this launch");
             ReleaseDC(0, screenDc);
             return false;
         }
@@ -329,33 +451,44 @@ internal static unsafe partial class SplashWindow
         var dib = CreateDIBSection(memDc, ref header, 0, out var bits, 0, 0);
         if (dib == 0)
         {
+            Diag($"CreateDIBSection failed for {width}x{height}; no splash this launch");
             DeleteDC(memDc);
             ReleaseDC(0, screenDc);
             return false;
         }
 
-        var oldBitmap = SelectObject(memDc, dib);
+        _surfaceOldBitmap = SelectObject(memDc, dib);
         FillOpaque(bits, width, height, background);
         DrawIcon(memDc, width, height, iconPx);
 
-        var size = new SIZE { cx = width, cy = height };
-        var srcPoint = new POINT { x = 0, y = 0 };
-        var blend = new BLENDFUNCTION
+        _surfaceScreenDc = screenDc;
+        _surfaceMemDc = memDc;
+        _surfaceDib = dib;
+        _surfaceWidth = width;
+        _surfaceHeight = height;
+        return true;
+    }
+
+    /// <summary>
+    /// Drop the composed bitmap and every GDI object behind it. Safe to
+    /// call when there is nothing to release.
+    /// </summary>
+    private static void ReleaseSurface()
+    {
+        if (_surfaceMemDc != 0)
         {
-            BlendOp = 0,                      // AC_SRC_OVER
-            BlendFlags = 0,
-            SourceConstantAlpha = alpha,
-            AlphaFormat = 0,                  // opaque source, constant alpha only
-        };
+            if (_surfaceOldBitmap != 0) SelectObject(_surfaceMemDc, _surfaceOldBitmap);
+            DeleteDC(_surfaceMemDc);
+        }
+        if (_surfaceDib != 0) DeleteObject(_surfaceDib);
+        if (_surfaceScreenDc != 0) ReleaseDC(0, _surfaceScreenDc);
 
-        var ok = UpdateLayeredWindow(
-            _hwnd, screenDc, 0, ref size, memDc, ref srcPoint, 0, ref blend, ULW_ALPHA) != 0;
-
-        SelectObject(memDc, oldBitmap);
-        DeleteObject(dib);
-        DeleteDC(memDc);
-        ReleaseDC(0, screenDc);
-        return ok;
+        _surfaceScreenDc = 0;
+        _surfaceMemDc = 0;
+        _surfaceDib = 0;
+        _surfaceOldBitmap = 0;
+        _surfaceWidth = 0;
+        _surfaceHeight = 0;
     }
 
     /// <summary>
@@ -375,10 +508,21 @@ internal static unsafe partial class SplashWindow
     private static void DrawIcon(nint memDc, int width, int height, int iconPx)
     {
         var path = IconPathForSize(iconPx);
-        if (path is null) return;
+        if (path is null)
+        {
+            // Without this the splash still paints, as a bare rectangle in
+            // the terminal background colour, which reads as a rendering
+            // bug rather than as missing assets.
+            Diag($"no SplashIcon asset for {iconPx}px in {AppContext.BaseDirectory}Assets");
+            return;
+        }
 
         var startup = new GdiplusStartupInput { GdiplusVersion = 1 };
-        if (GdiplusStartup(out var token, ref startup, 0) != 0) return;
+        if (GdiplusStartup(out var token, ref startup, 0) != 0)
+        {
+            Diag("GdiplusStartup failed; drawing without the icon");
+            return;
+        }
 
         try
         {
@@ -432,27 +576,55 @@ internal static unsafe partial class SplashWindow
     }
 
     /// <summary>
-    /// Where the main window is about to appear, in physical pixels. Read
-    /// straight from the saved window state because that is what the
-    /// window itself restores from; anything else would put the splash
-    /// somewhere the black gap is not.
+    /// Read the saved window state once, or null if there is none to read.
+    /// Loaded once and shared: each call is a directory create plus a file
+    /// read plus a deserialize, on the path whose whole purpose is to get
+    /// something on screen quickly, and two reads can disagree because the
+    /// main window rewrites this file while it is starting up.
     /// </summary>
-    private static (int X, int Y, int Width, int Height) ResolveRect()
+    private static Ghostty.Settings.WindowState? LoadState()
     {
         try
         {
-            var state = Ghostty.Settings.WindowState.Load();
-            if (state.WindowWidth is int w and > 0
-                && state.WindowHeight is int h and > 0
-                && state.WindowX is int x
-                && state.WindowY is int y)
-            {
-                return (x, y, w, h);
-            }
+            return Ghostty.Settings.WindowState.Load();
         }
-        catch
+        catch (Exception ex)
         {
-            // Unreadable state file. Fall through to the centred default.
+            Diag($"could not read the saved window state: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Where the main window is about to appear, in physical pixels.
+    /// </summary>
+    /// <remarks>
+    /// Applies the same plausibility rules as
+    /// <c>MainWindow.ApplyGeometry</c>, which decides where the window
+    /// really goes. A saved rect the window would reject is one the splash
+    /// must reject too: closing while minimized saves a 160x31 rect at
+    /// (-32000,-32000), and honouring that puts the splash off-screen for
+    /// the whole cold start, which is a silent no-op of the feature.
+    /// The window's own check uses WinUI's DisplayArea, which does not
+    /// exist yet on this thread, so this uses the virtual screen instead.
+    /// </remarks>
+    private static (int X, int Y, int Width, int Height) ResolveRect(
+        Ghostty.Settings.WindowState? state)
+    {
+        if (state is not null
+            && state.WindowWidth is int w and >= MinPlausibleWidth
+            && state.WindowHeight is int h and >= MinPlausibleHeight
+            && state.WindowX is int x
+            && state.WindowY is int y
+            && IntersectsVirtualScreen(x, y, w, h))
+        {
+            // A maximized window comes up filling its monitor's work area,
+            // not the restored rect that was saved alongside the flag.
+            if (state.WindowMaximized && TryGetWorkArea(x, y, w, h, out var work))
+            {
+                return work;
+            }
+            return (x, y, w, h);
         }
 
         var screenWidth = GetSystemMetrics(SM_CXSCREEN);
@@ -462,17 +634,47 @@ internal static unsafe partial class SplashWindow
         return ((screenWidth - width) / 2, (screenHeight - height) / 2, width, height);
     }
 
-    private static uint ResolveBackgroundRgb()
+    /// <summary>
+    /// True when any part of the rect lands on a live monitor. Guards
+    /// against a saved position on a display that is no longer attached.
+    /// </summary>
+    private static bool IntersectsVirtualScreen(int x, int y, int w, int h)
     {
-        try
-        {
-            if (Ghostty.Settings.WindowState.Load().BackgroundRgb is uint saved)
-                return saved & 0x00FFFFFFu;
-        }
-        catch
-        {
-            // Unreadable state file. Fall through to the default.
-        }
+        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vw <= 0 || vh <= 0) return true; // Nothing to check against.
+
+        return x < vx + vw && x + w > vx && y < vy + vh && y + h > vy;
+    }
+
+    /// <summary>
+    /// Work area of the monitor holding the centre of the given rect.
+    /// </summary>
+    private static bool TryGetWorkArea(
+        int x, int y, int w, int h, out (int X, int Y, int Width, int Height) area)
+    {
+        area = default;
+
+        var centre = new POINT { x = x + (w / 2), y = y + (h / 2) };
+        var monitor = MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST);
+        if (monitor == 0) return false;
+
+        var info = new MONITORINFO { cbSize = (uint)sizeof(MONITORINFO) };
+        if (GetMonitorInfoW(monitor, ref info) == 0) return false;
+
+        var width = info.rcWork.right - info.rcWork.left;
+        var height = info.rcWork.bottom - info.rcWork.top;
+        if (width <= 0 || height <= 0) return false;
+
+        area = (info.rcWork.left, info.rcWork.top, width, height);
+        return true;
+    }
+
+    private static uint ResolveBackgroundRgb(Ghostty.Settings.WindowState? state)
+    {
+        if (state?.BackgroundRgb is uint saved) return saved & 0x00FFFFFFu;
         return DefaultBackgroundRgb;
     }
 
@@ -526,10 +728,21 @@ internal static unsafe partial class SplashWindow
     private const uint ULW_ALPHA = 0x00000002;
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     private static readonly nint HWND_TOPMOST = -1;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
+
+    // Post the z-order change instead of waiting on it. SetWindowPos
+    // otherwise notifies other top-level windows synchronously, and the
+    // thread it would be waiting on is the UI thread that is busy doing
+    // the startup work this splash exists to cover.
+    private const uint SWP_ASYNCWINDOWPOS = 0x4000;
     private static readonly nint IDC_ARROW = 32512;
     private const int InterpolationModeHighQualityBicubic = 7;
     private const int PixelOffsetModeHighQuality = 4;
@@ -584,6 +797,15 @@ internal static unsafe partial class SplashWindow
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MSG
@@ -653,6 +875,15 @@ internal static unsafe partial class SplashWindow
 
     [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(nint hwnd);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint GetForegroundWindow();
+
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromPoint(POINT pt, uint flags);
+
+    [LibraryImport("user32.dll")]
+    private static partial int GetMonitorInfoW(nint monitor, ref MONITORINFO info);
 
     [LibraryImport("user32.dll")]
     private static partial int GetSystemMetrics(int index);

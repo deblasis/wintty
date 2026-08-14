@@ -68,6 +68,21 @@ internal sealed class LaunchIconCoordinator
     }
 
     /// <summary>
+    /// Stop watching, without dismissing. For a window that closes before
+    /// it ever composed a frame: <see cref="CompositionTarget.Rendering"/>
+    /// is a static event, so an armed coordinator that is never torn down
+    /// keeps this object and its window alive, and later fires against some
+    /// other window's frame and schedules work on a dead dispatcher.
+    /// </summary>
+    public void Cancel()
+    {
+        if (!_armed) return;
+        _armed = false;
+        CompositionTarget.Rendering -= OnFirstComposedFrame;
+        StopTimer();
+    }
+
+    /// <summary>
     /// The seed surface reported its first render. Safe before
     /// <see cref="Arm"/>, safe before composition, and safe more than
     /// once.

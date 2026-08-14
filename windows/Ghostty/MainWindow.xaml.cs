@@ -609,8 +609,11 @@ public sealed partial class MainWindow : Window
             // drags or resizes the window before the splash comes down.
             Shell.SplashWindow.Track(WindowNative.GetWindowHandle(this));
 
-            if (_tabManager.Tabs.Count > 0
-                && _tabManager.Tabs[0].PaneHost is Panes.PaneHost seedHost)
+            // The active tab, not tab zero: a restored session can make any
+            // tab active, and a background tab never presents, so waiting on
+            // tab zero's surface would mean waiting for a first render that
+            // does not arrive until the user switches to it.
+            if (_tabManager.ActiveTab.PaneHost is Panes.PaneHost seedHost)
             {
                 seedHost.ActiveLeaf.Terminal().FirstRender += OnLaunchSurfaceFirstRender;
             }
@@ -1212,6 +1215,11 @@ public sealed partial class MainWindow : Window
         _configService.ConfigChanged -= OnConfigReloaded;
         _configService.ConfigChanged -= OnConfigReloadedChrome;
         _shellTheme.ThemeChanged -= OnShellThemeChanged;
+
+        // CompositionTarget.Rendering is static, so a window closed before
+        // its first composed frame would otherwise stay subscribed.
+        _launchIcon?.Cancel();
+        _launchIcon = null;
         if (Ghostty.App.PowerStateMonitor is { } powerMonitor)
         {
             powerMonitor.LowPowerChanged -= OnLowPowerChanged;
