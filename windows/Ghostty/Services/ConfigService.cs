@@ -471,7 +471,6 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         NativeMethods.AppUpdateConfig(_app, newConfig);
 
         _config = newConfig;
-        var snapshotRefreshed = true;
         try
         {
             CacheDiagnostics();
@@ -489,9 +488,15 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             // Swallowed rather than rethrown because the native swap above
             // already succeeded: libghostty is on the new config and the
             // surfaces will repaint from it. What is left stale, or torn
-            // partway, is the C# snapshot -- so the caller is told the
-            // reload did not complete even though the terminal moved.
-            snapshotRefreshed = false;
+            // partway, is the C# snapshot, which the next reload rebuilds.
+            //
+            // Deliberately not reported through the return value. Callers
+            // read that as "a reload happened, so expect the ConfigChanged
+            // echo" -- AppearancePage counts on it to skip re-seeding its
+            // own editors, and every other false leg returns before the
+            // event fires. Returning false here while still firing would
+            // tear an open picker down mid-drag. The distinct log message
+            // is where this failure is reported.
             StaticLoggers.ConfigService.LogSnapshotRefreshFailed(ex);
         }
         finally
@@ -516,7 +521,7 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             ConfigChanged?.Invoke(this);
             ProfileConfigChanged?.Invoke();
         });
-        return snapshotRefreshed;
+        return true;
     }
 
     /// <summary>
@@ -1150,6 +1155,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// </remarks>
     private string? ResolveThemePath(string themeName)
     {
+        // An absolute theme is used as-is, mirroring theme.zig's own
+        // openAbsolute branch. Dropping it here would leave the terminal
+        // themed and the chrome on defaults.
+        if (Path.IsPathRooted(themeName))
+            return File.Exists(themeName) ? themeName : null;
+
         if (!ThemeSearchPath.IsSearchableName(themeName)) return null;
 
         var dirs = ThemeSearchPath.UserDirectories(

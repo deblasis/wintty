@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 
@@ -24,50 +25,58 @@ public static class ThemeSearchPath
     /// Directories to search, most current first, without duplicates.
     /// </summary>
     /// <param name="configDirectory">
-    /// Directory holding the config file libghostty actually loaded.
-    /// Probed first because libghostty resolved it, so it already accounts
-    /// for XDG_CONFIG_HOME and for an APPDATA that a portable launcher has
-    /// redirected -- neither of which the fallbacks below can see.
+    /// Directory holding the config file libghostty resolved for editing.
+    /// Its parent is the config root, which is where the sibling names
+    /// below are looked for -- that root already accounts for
+    /// XDG_CONFIG_HOME and for an APPDATA a portable launcher redirected,
+    /// neither of which <paramref name="appData"/> can see.
     /// </param>
-    /// <param name="appData">Roaming application data directory.</param>
+    /// <param name="appData">
+    /// Roaming application data directory, used only when there is no
+    /// config directory to derive a root from.
+    /// </param>
     public static IEnumerable<string> UserDirectories(string? configDirectory, string? appData)
     {
-        var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        string? configRoot = null;
         if (!string.IsNullOrEmpty(configDirectory))
         {
-            var fromConfig = Path.Combine(configDirectory, "themes");
+            var trimmed = Path.TrimEndingDirectorySeparator(configDirectory);
+            configRoot = Path.GetDirectoryName(trimmed);
+
+            var fromConfig = Path.Combine(trimmed, "themes");
             if (seen.Add(fromConfig)) yield return fromConfig;
         }
 
-        if (string.IsNullOrEmpty(appData)) yield break;
+        // Both application directory names under the config root, current
+        // first, matching theme.zig's two xdgThemesDir calls. An install
+        // can hold its config under one name and its themes under the
+        // other, so the sibling is not reachable from configDirectory
+        // alone. Falling back to appData only when there is no root to
+        // derive keeps this from probing directories libghostty would
+        // never look at.
+        var root = configRoot ?? appData;
+        if (string.IsNullOrEmpty(root)) yield break;
 
-        // The two application directory names, current first, matching the
-        // `user` and `user_ghostty` entries of theme.zig's Location enum.
-        // An install can hold its config under one name and its themes
-        // under the other, so neither is reachable from configDirectory
-        // alone.
-        foreach (var app in new[] { "wintty", "ghostty" })
+        foreach (var app in AppDirectoryNames)
         {
-            var dir = Path.Combine(appData, app, "themes");
+            var dir = Path.Combine(root, app, "themes");
             if (seen.Add(dir)) yield return dir;
         }
     }
 
+    private static readonly string[] AppDirectoryNames = ["wintty", "ghostty"];
+
     /// <summary>
-    /// True when a theme value names a file to look up in the search
-    /// directories, rather than an absolute path or something with a
-    /// directory component.
+    /// True when a theme value is a bare file name to look up in the
+    /// search directories. False for an absolute path, which is used
+    /// as-is, and for a relative name with a directory component, which
+    /// theme.zig refuses outright with a diagnostic -- resolving one here
+    /// would load a theme the terminal never applied.
     /// </summary>
-    /// <remarks>
-    /// theme.zig rejects a relative name containing a path separator
-    /// outright, with a diagnostic. Accepting one here would resolve a
-    /// theme libghostty refuses, which is the same disagreement by another
-    /// route -- the terminal falls back to defaults while the chrome loads
-    /// whatever the traversal reached.
-    /// </remarks>
     public static bool IsSearchableName(string themeName)
         => !string.IsNullOrEmpty(themeName)
            && !Path.IsPathRooted(themeName)
-           && string.Equals(themeName, Path.GetFileName(themeName), System.StringComparison.Ordinal);
+           && string.Equals(themeName, Path.GetFileName(themeName), StringComparison.Ordinal);
 }

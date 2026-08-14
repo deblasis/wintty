@@ -296,12 +296,15 @@ pub fn openAbsolute(
     };
 }
 
-test "theme search order prefers the current config dir over the pre-rename one" {
+test "theme: search order prefers the current config dir over the pre-rename one" {
     const testing = std.testing;
 
-    // Priority is positional: LocationIterator walks the enum in
-    // declaration order, so an install that has migrated must reach its
-    // themes before one that has not, and both before the bundled ones.
+    // A change detector, deliberately. LocationIterator walks the enum by
+    // ordinal, so the declaration order in this file *is* the priority,
+    // and a reorder that looked harmless would silently make an unmigrated
+    // install shadow a migrated one. Driving the iterator instead would
+    // only assert against whatever directories the test machine happens to
+    // have.
     try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
     try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
 }
