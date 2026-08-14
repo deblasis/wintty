@@ -80,14 +80,12 @@ public partial class App : Application
     // repeat press would otherwise stack a second menu on top.
     private bool _systemMenuOpen;
 
-    // Single-instance mode (opt-in via windows-single-instance). When this
-    // process is the primary it holds the mutex for the whole process
-    // lifetime, so the GC must not collect it -- hence the field. Null when
-    // single-instance is off, or when mutex acquisition threw (we then fall
-    // back to launching as a normal independent process). The server runs
-    // the forwarding pipe and only exists on the primary.
-    private System.Threading.Mutex? _singleInstanceMutex;
+    // Single-instance mode (opt-in via windows-single-instance). The election
+    // itself lives in Program, which holds it in a static for the process
+    // lifetime -- that static is what keeps the primary's mutex off the GC.
+    // This field is the forwarding pipe server, which only a primary runs.
     private Ghostty.Hosting.SingleInstanceServer? _singleInstanceServer;
+
 
     // The quake chord comes from the quick-terminal-key config value
     // (read via ConfigService.QuickTerminalKeyChord). QuickTerminalKeyChord.Default
@@ -278,7 +276,7 @@ public partial class App : Application
             // Unhandled-exception handlers aren't wired up yet (done
             // below), so Debug.WriteLine is the most signal we can
             // surface to a devenv-attached run without taking the app
-            // down. A packaged Release launch will lose this — that's
+            // down. A packaged Release launch will lose this -- that's
             // acceptable for a one-frame cosmetic flash.
             System.Diagnostics.Debug.WriteLine(
                 $"{AppIdentity.LogTag} OsTheme.IsDark() threw during App ctor; falling back to Dark. {ex.GetType().Name}: {ex.Message}");
@@ -298,6 +296,11 @@ public partial class App : Application
         // needs to attach logs to a bug report.
         UnhandledException += (s, e) =>
         {
+            // Before the log, not after: this tears the process down without
+            // unwinding back through Application.Start, so StartGui's catch
+            // never runs and this is the only chance to take the splash down.
+            // An exception in OnLaunched is exactly when a splash is still up.
+            Ghostty.Shell.SplashWindow.HideNow();
             LogUnhandled("UI-THREAD UNHANDLED", e.Exception.ToString());
             // Leave Handled=false so the runtime still tears the app
             // down -- we just wanted to record the exception first.
@@ -305,6 +308,7 @@ public partial class App : Application
 
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
         {
+            Ghostty.Shell.SplashWindow.HideNow();
             LogUnhandled("APPDOMAIN UNHANDLED", e.ExceptionObject?.ToString() ?? "(null)");
         };
 
@@ -508,18 +512,12 @@ public partial class App : Application
             if (noColorNotice is not null) _notificationService.Show(noColorNotice);
         }
 
-        // Single-instance gate. Decided here -- after ConfigService gives us
-        // the value and the logger factory exists (so failures are visible
-        // in Release), but before the bootstrap host, window, and DX12
-        // renderer are created -- so a secondary process forwards its launch
-        // and exits without ever creating a window or paying for the
-        // renderer. Off by default: the call is a no-op and this stays a
-        // normal independent process. Returns normally when this process
-        // should keep launching (primary, or a forward that failed and falls
-        // back); calls Environment.Exit(0) itself when it was a secondary
-        // that handed its launch to the primary.
-        if (_configService.WindowsSingleInstance)
-            HandleSingleInstanceGate();
+        // Single-instance gate. Acted on here -- after the logger factory
+        // exists (so failures are visible in Release), but before the
+        // bootstrap host, window, and DX12 renderer are created -- so a
+        // secondary process forwards its launch and exits without ever
+        // creating a window or paying for the renderer.
+        HandleSingleInstanceGate(Program.SingleInstance);
 
         // Power-saving monitor. Reads power-saver-mode from config every
         // time it resolves (Func thunk decouples it from ConfigService
@@ -631,7 +629,7 @@ public partial class App : Application
         // Cache the UI dispatcher up front: the active-process tracker
         // fires Changed from a Timer threadpool callback, and the handler
         // touches TabIconViewModel which raises PropertyChanged consumed
-        // by WinUI bindings — those need the UI thread.
+        // by WinUI bindings -- those need the UI thread.
         _uiDispatcher = uiDispatcher;
         _activeProcessTracker = new Ghostty.Core.Profiles.Tracking.WindowsActiveProcessTracker();
         _activeProcessTracker.Changed += OnActiveProcessChanged;
@@ -791,45 +789,57 @@ public partial class App : Application
 
         // Start the single-instance forwarding server last, once the UI
         // dispatcher and logger factory exist. No-op unless this process is
-        // the single-instance primary (it holds the mutex).
+        // the single-instance primary.
         StartSingleInstanceServer();
     }
 
     /// <summary>
-    /// Acquire the single-instance mutex. If we win it, keep it (this
-    /// process is the primary) and let OnLaunched continue. If another
-    /// process already holds it, forward our launch over the named pipe
-    /// and exit. Any failure on the secondary path falls back to a normal
-    /// independent launch so the user never loses a window.
+    /// Act on the single-instance election Program held before
+    /// <c>Application.Start</c>. A secondary hands its launch to the running
+    /// primary and exits; every other role continues into a normal launch.
     /// </summary>
-    private void HandleSingleInstanceGate()
+    private void HandleSingleInstanceGate(
+        Ghostty.Core.SingleInstance.SingleInstanceElection? election)
     {
-        var exePath = Environment.ProcessPath ?? string.Empty;
-        var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(exePath);
+        // Null only on a path that never ran Program.StartGui, which OnLaunched
+        // is not reachable from. Treated as "off", the degradation that cannot
+        // cost the user a window.
+        if (election is null) return;
 
-        bool createdNew;
-        try
+        // Every role spelled out, including the two that do nothing: a role
+        // added later should be a visible gap here rather than a silent
+        // fallthrough into "launch normally".
+        switch (election.Role)
         {
-            _singleInstanceMutex = new System.Threading.Mutex(
-                initiallyOwned: true, name: names.Mutex, out createdNew);
-        }
-        catch (Exception ex)
-        {
-            // Could not create the coordination primitive at all. Do not
-            // block the launch: behave as a normal single window.
-            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceMutexFailed(ex);
-            _singleInstanceMutex = null;
-            return;
-        }
+            case Ghostty.Core.SingleInstance.SingleInstanceRole.Disabled:
+                break;
 
-        if (createdNew)
-        {
-            // Primary. The server is started later in OnLaunched once the
-            // UI dispatcher exists (see StartSingleInstanceServer()).
-            return;
-        }
+            case Ghostty.Core.SingleInstance.SingleInstanceRole.Primary:
+                // The server starts at the end of OnLaunched, once the UI
+                // dispatcher exists (see StartSingleInstanceServer).
+                break;
 
-        // Secondary: a primary is already running. Forward and exit.
+            case Ghostty.Core.SingleInstance.SingleInstanceRole.Failed:
+                // Reported here rather than where it happened: the election
+                // runs before there is a logger factory. Launching normally is
+                // worse coordination, never a lost window.
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceMutexFailed(
+                    election.Failure!);
+                break;
+
+            case Ghostty.Core.SingleInstance.SingleInstanceRole.Secondary:
+                ForwardLaunchToPrimary(election.Names.Pipe);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Hand this launch to the running primary and exit the process. Returns
+    /// normally instead when the forward failed, so the caller continues into
+    /// an ordinary independent launch rather than dropping the user's launch.
+    /// </summary>
+    private void ForwardLaunchToPrimary(string pipeName)
+    {
         var request = new Ghostty.Core.SingleInstance.LaunchRequest(
             Environment.CurrentDirectory,
             Environment.GetCommandLineArgs());
@@ -837,51 +847,51 @@ public partial class App : Application
         try
         {
             using var client = new System.IO.Pipes.NamedPipeClientStream(
-                ".", names.Pipe, System.IO.Pipes.PipeDirection.Out);
+                ".", pipeName, System.IO.Pipes.PipeDirection.Out);
             client.Connect(2000); // 2s: primary should answer promptly
             using var writer = new System.IO.StreamWriter(client) { AutoFlush = true };
             writer.Write(request.Serialize());
             writer.Flush();
             client.WaitForPipeDrain();
-
-            // The primary owns the launch now. Release everything this
-            // throwaway process holds -- the config service (and its file
-            // watcher + native config handle) and the mutex handle (we never
-            // owned it) -- then exit deterministically rather than leaving
-            // the OS to reclaim them at teardown.
-            _configService?.Dispose();
-            _singleInstanceMutex.Dispose();
-            _singleInstanceMutex = null;
-            Environment.Exit(0);
         }
         catch (Exception ex)
         {
-            // Primary may be mid-shutdown or the pipe is wedged. Fall back
-            // to launching normally rather than dropping the user's launch.
-            // Drop the mutex handle first: we did not create it, and a new
-            // primary election is irrelevant now that we are becoming a
-            // standalone window.
+            // Primary may be mid-shutdown or the pipe is wedged. Fall back to
+            // launching normally rather than dropping the user's launch. This
+            // process does not take the session over; it did not create the
+            // mutex, and the next launch elects a primary again.
             Ghostty.Logging.StaticLoggers.App.LogSingleInstanceForwardFailed(ex);
-            try { _singleInstanceMutex?.Dispose(); } catch { /* ignore */ }
-            _singleInstanceMutex = null;
+            return;
         }
+
+        // Deliberately outside the try above. Once the drain returns, the
+        // primary has the request and will act on it, so nothing here may
+        // divert back into a normal startup: a throw from Dispose inside that
+        // try used to log a forward failure and open a second window for a
+        // launch already on its way.
+        //
+        // Dispose rather than leaving it to teardown, so the config file
+        // watcher and the native config handle go now.
+        _configService?.Dispose();
+        Environment.Exit(0);
     }
 
     /// <summary>
     /// Start the forwarding pipe server. Called near the end of OnLaunched
-    /// (after _uiDispatcher is set) only when this process is the
-    /// single-instance primary (it holds the mutex).
+    /// (after _uiDispatcher is set) and only on the single-instance primary.
     /// </summary>
     private void StartSingleInstanceServer()
     {
-        if (_singleInstanceMutex is null || _loggerFactory is null) return;
+        // The election's own name, not a fresh derivation of it. Deriving it
+        // twice is how the identity gets two answers.
+        if (Program.SingleInstance is not
+            { Role: Ghostty.Core.SingleInstance.SingleInstanceRole.Primary } election) return;
+        if (_loggerFactory is null) return;
 
-        var exePath = Environment.ProcessPath ?? string.Empty;
-        var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(exePath);
         try
         {
             _singleInstanceServer = new Ghostty.Hosting.SingleInstanceServer(
-                names.Pipe,
+                election.Names.Pipe,
                 req => _uiDispatcher?.TryEnqueue(() => OpenWindowFromLaunch(req)),
                 _loggerFactory.CreateLogger<Ghostty.Hosting.SingleInstanceServer>());
             _singleInstanceServer.Start();
@@ -1371,10 +1381,15 @@ public partial class App : Application
                 LoggerFactory = null;
 
                 _singleInstanceServer = null;
-                // Release the single-instance mutex last so a relaunch can
-                // become the new primary immediately after we exit.
-                try { _singleInstanceMutex?.Dispose(); } catch { /* ignore */ }
-                _singleInstanceMutex = null;
+                // Release the single-instance mutex so a relaunch can become
+                // the new primary immediately after we exit.
+                try { Program.SingleInstance?.Dispose(); } catch { /* ignore */ }
+
+                // The message loop is about to end, which abandons background
+                // threads. A launch whose first frame never arrived can still
+                // have the splash up inside its watchdog, and that thread can
+                // be inside GDI+.
+                Ghostty.Shell.SplashWindow.HideNow();
 
                 Exit();
             }

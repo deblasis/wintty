@@ -4,6 +4,8 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ghostty.Core;
+using Ghostty.Core.Config;
+using Ghostty.Core.SingleInstance;
 using Ghostty.Interop;
 
 namespace Ghostty;
@@ -857,6 +859,14 @@ public static partial class Program
             WinRT.ComWrappersSupport.InitializeComWrappers();
             WriteStderr($"{AppIdentity.LogTag} ComWrappers initialized");
 
+            // Hold the single-instance election here, before anything is on
+            // screen and before WinUI exists. App.OnLaunched acts on the result
+            // much later; deciding it there and asking a cheaper question here
+            // would be two decisions that can disagree.
+            _singleInstance = SingleInstanceElection.Run(
+                ReadSingleInstanceSetting(),
+                Environment.ProcessPath ?? string.Empty);
+
             // Put the launch splash up before WinUI starts. Everything
             // below this line -- Application.Start, App's ctor, config
             // load, libghostty init, the first XAML frame -- is seconds of
@@ -864,7 +874,7 @@ public static partial class Program
             // HWND exists and paints black. The splash covers that rect
             // until there is real content to reveal. It runs on its own
             // thread, so none of that work delays it.
-            if (!AnotherInstanceOwnsTheSession())
+            if (_singleInstance.ShouldShowLaunchSplash)
             {
                 Ghostty.Shell.SplashWindow.Show();
             }
@@ -888,11 +898,12 @@ public static partial class Program
         }
         catch (Exception ex)
         {
-            // Take the splash down before reporting. Startup that dies before
-            // any window exists leaves nothing else to dismiss it, and an
-            // opaque topmost rectangle sitting over the desktop is the worst
-            // possible time to be hiding a crash report.
-            Ghostty.Shell.SplashWindow.Dismiss();
+            // Take the splash down before reporting, and synchronously:
+            // startup that dies before any window exists leaves nothing else
+            // to dismiss it, this method returns straight into process
+            // teardown, and an opaque topmost rectangle sitting over the
+            // desktop is the worst possible time to be hiding a crash report.
+            Ghostty.Shell.SplashWindow.HideNow();
 
             // Same reporting as an escape from MainImpl, so the GUI path also
             // gets the terminal tee instead of only the log.
@@ -900,38 +911,58 @@ public static partial class Program
         }
     }
 
+    private static SingleInstanceElection? _singleInstance;
+
     /// <summary>
-    /// True when a single-instance primary is already running, so this
-    /// process is about to forward its launch and exit.
+    /// This process's single-instance election, or null on a path that never
+    /// starts the GUI. Decided here because it has to happen before
+    /// <c>Application.Start</c>, and because the launch splash and the gate in
+    /// <c>App.OnLaunched</c> have to act on the same answer.
+    /// </summary>
+    internal static SingleInstanceElection? SingleInstance => _singleInstance;
+
+    /// <summary>
+    /// Read <c>windows-single-instance</c> straight from the config file.
     /// </summary>
     /// <remarks>
-    /// The mutex is only ever created when <c>windows-single-instance</c> is
-    /// on, so its presence answers both questions at once: the feature is
-    /// enabled and somebody already owns the session. Without this check the
-    /// secondary paints a full-size opaque splash over the primary's window
-    /// -- the user's actual terminal -- for as long as it takes to reach the
-    /// gate, and is then killed by Environment.Exit mid-GDI+.
+    /// ConfigService is the usual reader for Windows-only keys, but it needs a
+    /// DispatcherQueue and so cannot exist before <c>Application.Start</c>,
+    /// which is where this decision has to be made. Both go through
+    /// <see cref="ConfigIniFile"/> over the same path for the same key.
     ///
-    /// Opened, never acquired: taking ownership here would make this process
-    /// look like the primary to the real gate in App.OnLaunched.
+    /// They are still two reads at two times, and only this one tolerates
+    /// failure. A config file locked by an editor for just this read leaves
+    /// the launch uncoordinated but running; a lock that outlasts both reads
+    /// takes ConfigService's constructor down with it, which is the
+    /// pre-existing behaviour and not something to paper over here.
+    ///
+    /// <c>ghostty_config_open_path</c> resolves (and creates) the path without
+    /// a config handle; it needs only the init <see cref="MainImpl"/> has
+    /// already done. The returned string is deliberately not freed, matching
+    /// ConfigService's call.
     /// </remarks>
-    private static bool AnotherInstanceOwnsTheSession()
+    private static bool ReadSingleInstanceSetting()
     {
         try
         {
-            var names = Ghostty.Core.SingleInstance.SingleInstanceNames.For(
-                Environment.ProcessPath ?? string.Empty);
-            if (!System.Threading.Mutex.TryOpenExisting(names.Mutex, out var existing))
-            {
-                return false;
-            }
-            existing.Dispose();
-            return true;
+            var pathStr = NativeMethods.ConfigOpenPath();
+            var rawPath = pathStr.Ptr != IntPtr.Zero
+                ? Marshal.PtrToStringUTF8(pathStr.Ptr, (int)pathStr.Len) ?? string.Empty
+                : string.Empty;
+            var path = rawPath.Length == 0 ? null : Path.GetFullPath(rawPath);
+
+            var configFile = ConfigIniFile.Load(path);
+            return WindowsOnlyKeyParsers.ParseBool(
+                ConfigIniFile.First(configFile, "windows-single-instance"),
+                defaultValue: false);
         }
-        catch
+        catch (Exception ex)
         {
-            // Probing is best effort. A splash we should have skipped is a
-            // far smaller problem than a launch we blocked.
+            // Off never routes a launch into a process that is not there, so it
+            // is the safe reading. Worth a line: the symptom otherwise is
+            // single-instance silently not working.
+            WriteStartupDiagnostic(
+                $"could not read windows-single-instance ({ex.Message}); treating it as off");
             return false;
         }
     }
