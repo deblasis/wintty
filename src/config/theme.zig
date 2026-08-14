@@ -9,6 +9,7 @@ const global = @import("../global.zig");
 /// defines the priority of theme search (from top to bottom).
 pub const Location = enum {
     user, // XDG config dir
+    user_ghostty, // XDG config dir from before the rename
     resources, // Ghostty resources dir
 
     /// Returns the directory for the given theme based on this location type.
@@ -27,41 +28,56 @@ pub const Location = enum {
         var environ_map = try global.environMap();
         defer environ_map.deinit();
         return switch (self) {
-            .user => user: {
-                const subdir = std.fs.path.join(arena_alloc, &.{
-                    "wintty", "themes",
-                }) catch return error.OutOfMemory;
-
-                break :user internal_os.xdg.config(
-                    global.io(),
-                    arena_alloc,
-                    &environ_map,
-                    .{ .subdir = subdir },
-                ) catch |err| {
-                    // We need to do some comptime tricks to get the right
-                    // error set since some platforms don't support some
-                    // error types.
-                    const Error = @TypeOf(err) || switch (builtin.os.tag) {
-                        .ios => error{BufferTooSmall},
-                        else => error{},
-                    };
-
-                    switch (@as(Error, err)) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.BufferTooSmall => return error.OutOfMemory,
-
-                        // Any other error we treat as the XDG directory not
-                        // existing. Windows in particularly can return a LOT
-                        // of errors here.
-                        else => return null,
-                    }
-                };
-            },
+            .user => try xdgThemesDir(arena_alloc, &environ_map, "wintty"),
+            .user_ghostty => try xdgThemesDir(arena_alloc, &environ_map, "ghostty"),
 
             .resources => try std.fs.path.join(arena_alloc, &.{
                 global.resourcesDir().app() orelse return null,
                 "themes",
             }),
+        };
+    }
+
+    /// The `themes` subdirectory of an XDG config directory, for the given
+    /// application directory name.
+    ///
+    /// Two names are searched because the config file itself is searched
+    /// under both (see config/file_load.zig): an install that predates the
+    /// rename keeps its config, and therefore its themes, under the old
+    /// name. Without the second name such an install silently falls back to
+    /// the built-in defaults for every theme it has.
+    fn xdgThemesDir(
+        arena_alloc: Allocator,
+        environ_map: *const std.process.Environ.Map,
+        app_dir: []const u8,
+    ) error{OutOfMemory}!?[]const u8 {
+        const subdir = std.fs.path.join(arena_alloc, &.{
+            app_dir, "themes",
+        }) catch return error.OutOfMemory;
+
+        return internal_os.xdg.config(
+            global.io(),
+            arena_alloc,
+            environ_map,
+            .{ .subdir = subdir },
+        ) catch |err| {
+            // We need to do some comptime tricks to get the right
+            // error set since some platforms don't support some
+            // error types.
+            const Error = @TypeOf(err) || switch (builtin.os.tag) {
+                .ios => error{BufferTooSmall},
+                else => error{},
+            };
+
+            switch (@as(Error, err)) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.BufferTooSmall => return error.OutOfMemory,
+
+                // Any other error we treat as the XDG directory not
+                // existing. Windows in particularly can return a LOT
+                // of errors here.
+                else => return null,
+            }
         };
     }
 };
@@ -278,4 +294,17 @@ pub fn openAbsolute(
 
         return null;
     };
+}
+
+test "theme: search order prefers the current config dir over the pre-rename one" {
+    const testing = std.testing;
+
+    // A change detector, deliberately. LocationIterator walks the enum by
+    // ordinal, so the declaration order in this file *is* the priority,
+    // and a reorder that looked harmless would silently make an unmigrated
+    // install shadow a migrated one. Driving the iterator instead would
+    // only assert against whatever directories the test machine happens to
+    // have.
+    try testing.expect(@intFromEnum(Location.user) < @intFromEnum(Location.user_ghostty));
+    try testing.expect(@intFromEnum(Location.user_ghostty) < @intFromEnum(Location.resources));
 }

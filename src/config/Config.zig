@@ -560,7 +560,12 @@ language: ?[:0]const u8 = null,
 /// configuration directory. This is `$XDG_CONFIG_HOME/wintty/themes` or
 /// `~/.config/wintty/themes`.
 ///
-/// The second directory is the `themes` subdirectory of the Ghostty resources
+/// The second directory is the same subdirectory under the pre-rename
+/// configuration directory, `ghostty` in place of `wintty`. It is searched
+/// so an install that predates the rename keeps its themes, matching how
+/// the configuration file itself is searched under both names.
+///
+/// The third directory is the `themes` subdirectory of the Ghostty resources
 /// directory. Ghostty ships with a multitude of themes that will be installed
 /// into this directory. On macOS, this list is in the
 /// `Ghostty.app/Contents/Resources/ghostty/themes` directory. On Linux, this
