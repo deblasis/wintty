@@ -46,8 +46,8 @@ pub const StreamHandler = struct {
     renderer_mailbox: *renderer.Thread.Mailbox,
 
     /// A handle to wake up the renderer. This hints to the renderer that
-    /// a repaint should happen.
-    renderer_wakeup: xev.Async,
+    /// a repaint should happen. See termio.Options for why this is a pointer.
+    renderer_wakeup: *xev.Async,
 
     /// The response to use for ENQ requests. The memory is owned by
     /// whoever owns StreamHandler.
