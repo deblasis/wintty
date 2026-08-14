@@ -552,37 +552,12 @@ pub fn init(
         break :size size;
     };
 
-    // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
-    var renderer_impl = try Renderer.init(alloc, .{
-        .config = try .init(alloc, config),
-        .font_grid = font_grid,
-        .size = size,
-        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
-        .rt_surface = rt_surface,
-        .thread = &self.renderer_thread,
-    });
-    errdefer renderer_impl.deinit();
 
     // The mutex used to protect our renderer state.
     const mutex = try alloc.create(std.Io.Mutex);
     mutex.* = .init;
     errdefer alloc.destroy(mutex);
-
-    // Create the renderer thread
-    var render_thread = try rendererpkg.Thread.init(
-        alloc,
-        config,
-        rt_surface,
-        &self.renderer,
-        &self.renderer_state,
-        app_mailbox,
-    );
-    errdefer render_thread.deinit();
-
-    // Create the IO thread
-    var io_thread = try termio.Thread.init(alloc);
-    errdefer io_thread.deinit();
 
     self.* = .{
         .id = id: {
@@ -604,8 +579,8 @@ pub fn init(
         .font_size = font_size,
         .font_size_adjusted = false,
         .font_metrics = font_grid.metrics,
-        .renderer = renderer_impl,
-        .renderer_thread = render_thread,
+        .renderer = undefined,
+        .renderer_thread = undefined,
         .renderer_state = .{
             .mutex = mutex,
             .terminal = &self.io.terminal,
@@ -614,7 +589,7 @@ pub fn init(
         .mouse = .{},
         .keyboard = .{},
         .io = undefined,
-        .io_thread = io_thread,
+        .io_thread = undefined,
         .io_thr = undefined,
         .size = size,
         .config = derived_config,
@@ -623,6 +598,33 @@ pub fn init(
         // lets us get the most likely correct color theme and so on.
         .config_conditional_state = app.config_conditional_state,
     };
+
+    // The renderer and both threads are built directly into their fields
+    // rather than into locals we copy in above. Constructing them into
+    // locals would leave the errdefers below pointing at stale copies once
+    // the assignment above moved the real values into `self`.
+    self.renderer = try Renderer.init(alloc, .{
+        .config = try .init(alloc, config),
+        .font_grid = font_grid,
+        .size = size,
+        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+        .rt_surface = rt_surface,
+        .thread = &self.renderer_thread,
+    });
+    errdefer self.renderer.deinit();
+
+    self.renderer_thread = try rendererpkg.Thread.init(
+        alloc,
+        config,
+        rt_surface,
+        &self.renderer,
+        &self.renderer_state,
+        app_mailbox,
+    );
+    errdefer self.renderer_thread.deinit();
+
+    self.io_thread = try termio.Thread.init(alloc);
+    errdefer self.io_thread.deinit();
 
     // The command we're going to execute
     const command: ?configpkg.Command = command: {
@@ -684,11 +686,10 @@ pub fn init(
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
-            // Must be our own field, not `render_thread`: the renderer arms
-            // its wait on `self.renderer_thread.wakeup` and only that
-            // instance is notified.
+            // The renderer arms its wait on `self.renderer_thread.wakeup`,
+            // so only that instance may be notified.
             .renderer_wakeup = &self.renderer_thread.wakeup,
-            .renderer_mailbox = render_thread.mailbox,
+            .renderer_mailbox = self.renderer_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
         });
     }
@@ -724,7 +725,7 @@ pub fn init(
 
     // Give the renderer one more opportunity to finalize any surface
     // setup on the main thread prior to spinning up the rendering thread.
-    try renderer_impl.finalizeSurfaceInit(rt_surface);
+    try self.renderer.finalizeSurfaceInit(rt_surface);
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
@@ -2590,7 +2591,6 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
 
     // Mail the IO thread
     self.queueIo(.{ .resize = self.size }, .unlocked);
-
 }
 
 /// Recalculate the balanced padding if needed.
