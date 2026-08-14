@@ -467,10 +467,19 @@
     ms-appx:///Assets/AppIcon.scale-xxx.png at runtime. The .ico is
     embedded in the exe automatically via <ApplicationIcon>.
   -->
+  <!--
+    Outputs names every file the tool writes, not just the .icos. The
+    PNG rungs are copied by unconditional <Content> items below, so a
+    state where MSBuild thinks this target is up to date while a PNG is
+    absent is not a graceful skip: it is an MSB3030 copy failure that
+    fails the build. The linked ladder files from Ghostty.Core are
+    Inputs for the same reason as IconGen's own sources: IconGen
+    compiles them, so editing one changes what it writes.
+  -->
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
-          Inputs="..\..\dist\windows\IconGen\**\*.cs;..\..\images\icons\icon_*.png"
-          Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico">
+          Inputs="..\..\dist\windows\IconGen\**\*.cs;..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;..\..\images\icons\icon_*.png"
+          Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico;$(GeneratedBrandingDir)AppIcon.scale-100.png;$(GeneratedBrandingDir)AppIcon.scale-150.png;$(GeneratedBrandingDir)AppIcon.scale-200.png;$(GeneratedBrandingDir)AppIcon.scale-400.png;$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
     <Exec Command="dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out &quot;$(GeneratedBrandingDir.TrimEnd('\'))&quot;"
           WorkingDirectory="$(MSBuildThisFileDirectory)" />
@@ -498,8 +507,10 @@
     <!--
       Launch-icon ladder, sized for a 160 DIP icon. Listed explicitly for the
       same reason as the AppIcon rungs above: a wildcard evaluates
-      before GenerateBrandingAssets produces the files. Keep in sync
-      with PngWriter.SplashTargets in dist/windows/IconGen/PngWriter.cs.
+      before GenerateBrandingAssets produces the files. MSBuild cannot read
+      the shared ladder in Ghostty.Core.Shell.LaunchIconAssets, so this list
+      is a third copy of it; LaunchIconAssetsTests scans this file and fails
+      if the two disagree.
     -->
     <Content Include="$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
       <Link>Assets\%(Filename)%(Extension)</Link>
