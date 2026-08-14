@@ -61,7 +61,6 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     // optimization.
     public bool VerticalTabs { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
-    public bool WindowsSingleInstance { get; private set; }
     public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
@@ -774,9 +773,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         CommandPaletteGroupCommands = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("command-palette-group-commands", ""),
             defaultValue: false);
-        WindowsSingleInstance = WindowsOnlyKeyParsers.ParseBool(
-            GetFileValue("windows-single-instance", ""),
-            defaultValue: false);
+        // No windows-single-instance here on purpose. It is read once, before
+        // Application.Start, by the election in Program: a value that can be
+        // re-read on every reload would let this service disagree with the role
+        // the process is actually running under.
         WindowsHighContrast = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("windows-high-contrast", ""),
             defaultValue: true);
@@ -1251,37 +1251,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
             : Array.Empty<string>();
 
     /// <summary>
-    /// Load a ghostty-style ini file into a key/value dictionary. Empty
-    /// lines and #-prefixed comments are skipped, empty values are
-    /// ignored entirely (matching the old per-key scanners), and keys
-    /// are matched case-insensitively. Returns an empty dictionary if
-    /// the path is missing or unreadable.
+    /// Load a ghostty-style ini file into a key/value dictionary.
     /// </summary>
     private static Dictionary<string, List<string>> LoadIniFile(string? path)
-    {
-        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrEmpty(path) || !File.Exists(path))
-            return dict;
-
-        foreach (var line in File.ReadLines(path))
-        {
-            var trimmed = line.TrimStart();
-            if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;
-            var eqIndex = trimmed.IndexOf('=');
-            if (eqIndex < 0) continue;
-            var k = trimmed[..eqIndex].Trim();
-            if (k.Length == 0) continue;
-            var v = trimmed[(eqIndex + 1)..].Trim();
-            if (v.Length == 0) continue;
-            if (!dict.TryGetValue(k, out var list))
-            {
-                list = new List<string>(1);
-                dict[k] = list;
-            }
-            list.Add(v);
-        }
-        return dict;
-    }
+        => Ghostty.Core.Config.ConfigIniFile.Load(path);
 
     /// <summary>
     /// Read a color config value. libghostty returns colors as

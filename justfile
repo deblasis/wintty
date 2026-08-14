@@ -112,6 +112,22 @@ build-win:
 run-win: build-dll build-win
     ./windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe
 
+# Run the C# test suites. Ghostty.Tests is pure logic and cross-platform;
+# Ghostty.Tests.Windows holds the tests that need real Windows semantics
+# (named mutexes, file sharing, the registry).
+[windows]
+test-win:
+    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj
+    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64
+
+# Launch two instances a few hundred ms apart and watch for a launch splash
+# owned by the one that should be forwarding itself to the other. Opens real
+# windows, so it needs an interactive desktop and no Wintty already running.
+# Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
+[windows]
+splash-race args="": build-win
+    pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}
+
 # === Upstream Sync ===
 
 # Pinned to bash via shebang so the POSIX `[` branch test below works
