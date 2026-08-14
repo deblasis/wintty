@@ -161,8 +161,19 @@ internal static unsafe partial class SplashWindow
     /// silently does nothing -- or paints a bare rectangle because its
     /// icon is missing -- is otherwise invisible in the field.
     /// </summary>
-    private static void Diag(string message) =>
-        Program.WriteStartupDiagnostic($"splash: {message}");
+    private static void Diag(string message)
+    {
+        try
+        {
+            Program.WriteStartupDiagnostic($"splash: {message}");
+        }
+        catch
+        {
+            // A last-chance reporter that can throw is worse than one that
+            // says nothing: this runs on a background thread, where an
+            // escape would take the process down over a decoration.
+        }
+    }
 
     private static void ThreadMain()
     {
@@ -222,7 +233,11 @@ internal static unsafe partial class SplashWindow
             if (dpi == 0) dpi = 96;
             _scale = dpi / 96.0;
 
-            if (!Paint(255)) return;
+            if (!Paint(255))
+            {
+                Diag("first paint failed; no splash this launch");
+                return;
+            }
             ShowWindow(_hwnd, SW_SHOWNA);
             Volatile.Write(ref _shownAtTicks, Environment.TickCount64);
 
@@ -270,7 +285,7 @@ internal static unsafe partial class SplashWindow
                 if (CoversForegroundWindow())
                 {
                     SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
                 nextTopmostNudge = now + TopmostNudgeIntervalMs;
             }
@@ -343,8 +358,7 @@ internal static unsafe partial class SplashWindow
         _width = width;
         _height = height;
 
-        SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height,
-            SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height, SWP_NOACTIVATE);
 
         // A move alone keeps the existing layered bitmap; a resize needs a
         // new one, both because the surface is a different size and
@@ -457,15 +471,21 @@ internal static unsafe partial class SplashWindow
             return false;
         }
 
-        _surfaceOldBitmap = SelectObject(memDc, dib);
-        FillOpaque(bits, width, height, background);
-        DrawIcon(memDc, width, height, iconPx);
+        var oldBitmap = SelectObject(memDc, dib);
 
+        // Publish all of it or none of it. ReleaseSurface only frees what
+        // these fields point at, so committing the bitmap handle before the
+        // compose below could leak both DCs and the DIB if anything in it
+        // threw.
         _surfaceScreenDc = screenDc;
         _surfaceMemDc = memDc;
         _surfaceDib = dib;
+        _surfaceOldBitmap = oldBitmap;
         _surfaceWidth = width;
         _surfaceHeight = height;
+
+        FillOpaque(bits, width, height, background);
+        DrawIcon(memDc, width, height, iconPx);
         return true;
     }
 
@@ -529,12 +549,23 @@ internal static unsafe partial class SplashWindow
             nint image;
             fixed (char* file = path)
             {
-                if (GdipCreateBitmapFromFile(file, out image) != 0 || image == 0) return;
+                if (GdipCreateBitmapFromFile(file, out image) != 0 || image == 0)
+                {
+                    // Present but unreadable: truncated, corrupt, or locked.
+                    // Same bare-rectangle result as a missing file, so it
+                    // needs the same signal.
+                    Diag($"could not decode {path}; drawing without the icon");
+                    return;
+                }
             }
 
             try
             {
-                if (GdipCreateFromHDC(memDc, out var graphics) != 0 || graphics == 0) return;
+                if (GdipCreateFromHDC(memDc, out var graphics) != 0 || graphics == 0)
+                {
+                    Diag("GdipCreateFromHDC failed; drawing without the icon");
+                    return;
+                }
                 try
                 {
                     GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
@@ -616,7 +647,7 @@ internal static unsafe partial class SplashWindow
             && state.WindowHeight is int h and >= MinPlausibleHeight
             && state.WindowX is int x
             && state.WindowY is int y
-            && IntersectsVirtualScreen(x, y, w, h))
+            && IntersectsLiveMonitor(x, y, w, h))
         {
             // A maximized window comes up filling its monitor's work area,
             // not the restored rect that was saved alongside the flag.
@@ -637,16 +668,14 @@ internal static unsafe partial class SplashWindow
     /// <summary>
     /// True when any part of the rect lands on a live monitor. Guards
     /// against a saved position on a display that is no longer attached.
+    /// Asks the window manager rather than testing the virtual-screen
+    /// bounding box, which on an L-shaped arrangement contains dead space
+    /// that belongs to no monitor.
     /// </summary>
-    private static bool IntersectsVirtualScreen(int x, int y, int w, int h)
+    private static bool IntersectsLiveMonitor(int x, int y, int w, int h)
     {
-        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (vw <= 0 || vh <= 0) return true; // Nothing to check against.
-
-        return x < vx + vw && x + w > vx && y < vy + vh && y + h > vy;
+        var rect = new RECT { left = x, top = y, right = x + w, bottom = y + h };
+        return MonitorFromRect(ref rect, MONITOR_DEFAULTTONULL) != 0;
     }
 
     /// <summary>
@@ -664,11 +693,17 @@ internal static unsafe partial class SplashWindow
         var info = new MONITORINFO { cbSize = (uint)sizeof(MONITORINFO) };
         if (GetMonitorInfoW(monitor, ref info) == 0) return false;
 
-        var width = info.rcWork.right - info.rcWork.left;
-        var height = info.rcWork.bottom - info.rcWork.top;
+        // A maximized window's rect is the work area grown by the invisible
+        // resize border, not the work area itself. Matching it exactly keeps
+        // a black frame from showing around the splash for the whole gap.
+        var border = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        var left = info.rcWork.left - border;
+        var top = info.rcWork.top - border;
+        var width = (info.rcWork.right - info.rcWork.left) + (border * 2);
+        var height = (info.rcWork.bottom - info.rcWork.top) + (border * 2);
         if (width <= 0 || height <= 0) return false;
 
-        area = (info.rcWork.left, info.rcWork.top, width, height);
+        area = (left, top, width, height);
         return true;
     }
 
@@ -728,21 +763,14 @@ internal static unsafe partial class SplashWindow
     private const uint ULW_ALPHA = 0x00000002;
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
-    private const int SM_XVIRTUALSCREEN = 76;
-    private const int SM_YVIRTUALSCREEN = 77;
-    private const int SM_CXVIRTUALSCREEN = 78;
-    private const int SM_CYVIRTUALSCREEN = 79;
+    private const int SM_CXSIZEFRAME = 32;
+    private const int SM_CXPADDEDBORDER = 92;
+    private const uint MONITOR_DEFAULTTONULL = 0x00000000;
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     private static readonly nint HWND_TOPMOST = -1;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
-
-    // Post the z-order change instead of waiting on it. SetWindowPos
-    // otherwise notifies other top-level windows synchronously, and the
-    // thread it would be waiting on is the UI thread that is busy doing
-    // the startup work this splash exists to cover.
-    private const uint SWP_ASYNCWINDOWPOS = 0x4000;
     private static readonly nint IDC_ARROW = 32512;
     private const int InterpolationModeHighQualityBicubic = 7;
     private const int PixelOffsetModeHighQuality = 4;
@@ -881,6 +909,9 @@ internal static unsafe partial class SplashWindow
 
     [LibraryImport("user32.dll")]
     private static partial nint MonitorFromPoint(POINT pt, uint flags);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint MonitorFromRect(ref RECT rect, uint flags);
 
     [LibraryImport("user32.dll")]
     private static partial int GetMonitorInfoW(nint monitor, ref MONITORINFO info);

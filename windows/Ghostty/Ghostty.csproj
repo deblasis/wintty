@@ -496,7 +496,7 @@
       <Visible>false</Visible>
     </Content>
     <!--
-      Launch-icon ladder, sized for 96 DIP. Listed explicitly for the
+      Launch-icon ladder, sized for a 160 DIP icon. Listed explicitly for the
       same reason as the AppIcon rungs above: a wildcard evaluates
       before GenerateBrandingAssets produces the files. Keep in sync
       with PngWriter.SplashTargets in dist/windows/IconGen/PngWriter.cs.

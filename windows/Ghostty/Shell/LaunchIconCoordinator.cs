@@ -68,18 +68,27 @@ internal sealed class LaunchIconCoordinator
     }
 
     /// <summary>
-    /// Stop watching, without dismissing. For a window that closes before
-    /// it ever composed a frame: <see cref="CompositionTarget.Rendering"/>
-    /// is a static event, so an armed coordinator that is never torn down
-    /// keeps this object and its window alive, and later fires against some
-    /// other window's frame and schedules work on a dead dispatcher.
+    /// Stop watching, because the window this was arming for is going away.
     /// </summary>
+    /// <remarks>
+    /// Unsubscribing matters because <see cref="CompositionTarget.Rendering"/>
+    /// is a static event: an armed coordinator that is never torn down keeps
+    /// this object and its window alive, later fires against some other
+    /// window's frame, and schedules work on a dead dispatcher.
+    ///
+    /// It dismisses on the way out rather than just unsubscribing. This
+    /// coordinator is the only thing that can take the splash down, so
+    /// dropping a pending dismissal without taking it down would strand an
+    /// opaque topmost window over the remaining windows until the watchdog
+    /// fires seconds later.
+    /// </remarks>
     public void Cancel()
     {
         if (!_armed) return;
         _armed = false;
         CompositionTarget.Rendering -= OnFirstComposedFrame;
         StopTimer();
+        Dismiss();
     }
 
     /// <summary>
