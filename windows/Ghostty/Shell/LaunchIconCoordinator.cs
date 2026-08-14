@@ -97,12 +97,16 @@ internal sealed class LaunchIconCoordinator
     /// </summary>
     public void NotifyReady()
     {
-        // Recorded even before Arm. The subscription currently happens
-        // first, but a signal that arrived early used to be dropped rather
-        // than remembered, and the cost of that is the full grace period
-        // spent covering a window that already has content.
+        // Recorded whether or not this is armed yet, so the two signals are
+        // order-independent as the summary above promises. Arming happens
+        // first today and nothing enforces it; the cost of getting that
+        // wrong is a full grace period spent over a window that already has
+        // content.
         _surfacePresented = true;
-        if (_armed && _composed) Dismiss();
+        // No _armed check: composition can only have been observed through
+        // a subscription this made, and the one path that disarms latches
+        // the dismissal first.
+        if (_composed) Dismiss();
     }
 
     private void OnFirstComposedFrame(object? sender, object e)
@@ -120,11 +124,14 @@ internal sealed class LaunchIconCoordinator
     }
 
     /// <summary>
-    /// Take the splash down. Nothing is held back once the terminal has
-    /// content on screen: the splash exists to cover a black window, and
-    /// from the moment there is something behind it, every further
-    /// millisecond it stays up is a millisecond spent covering the app the
-    /// user is waiting for.
+    /// Take the splash down, from any of the three things that end it: the
+    /// terminal reported content, the grace expired waiting for content
+    /// that is not coming, or the window it was covering is going away.
+    ///
+    /// <para>Nothing is held back on the way out. The splash exists to
+    /// cover a black window, and once the reason for it has resolved --
+    /// either way -- every further millisecond it stays up is spent
+    /// covering the app the user is waiting for.</para>
     /// </summary>
     private void Dismiss()
     {

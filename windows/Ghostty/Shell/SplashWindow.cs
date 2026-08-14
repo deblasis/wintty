@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -50,11 +51,20 @@ internal static unsafe partial class SplashWindow
     private const int FallbackWidth = 1200;
     private const int FallbackHeight = 800;
 
+    // How long each loop below parks before doing its next bit of work.
+    // Not a frame: Thread.Sleep and a timed Wait both expire on the first
+    // clock interrupt at or after the timeout, and Windows' default timer
+    // resolution is ~15.6ms, so a 16ms park really costs two ticks unless
+    // something else in the process has raised the resolution. Nothing
+    // here may derive a duration from it for that reason.
+    private const int LoopParkMs = 16;
+
     // The fade is the only thing still covering the window once the
     // terminal has content, so it is short: long enough to read as a
     // reveal rather than a cut, short enough that nobody waits on it.
+    // Held to by the clock rather than by counting parks, so it lasts
+    // this long whatever the ambient timer resolution turns out to be.
     private const int FadeDurationMs = 120;
-    private const int FadeStepMs = 16;
 
     // How often to re-assert topmost while waiting. Frequent enough that a
     // main window appearing underneath is covered again within a frame or
@@ -169,8 +179,8 @@ internal static unsafe partial class SplashWindow
     /// </summary>
     /// <remarks>
     /// <see cref="Dismiss"/> is not enough there. It signals an event and the
-    /// splash thread then fades over 220ms, so a caller that dismisses and
-    /// exits is racing its own teardown: the window is still up when the
+    /// splash thread then fades, so a caller that dismisses and exits is
+    /// racing its own teardown: the window is still up when the
     /// process dies, and the splash thread is cut down wherever it happens to
     /// be, which can be inside GDI+.
     ///
@@ -188,7 +198,7 @@ internal static unsafe partial class SplashWindow
     public static void HideNow()
     {
         // Before the signal: a thread waking on the event must see the flag,
-        // or it fades for 220ms while the caller waits on the join.
+        // or it starts a fade the caller then waits out on the join.
         Volatile.Write(ref _skipFade, true);
         _dismissed.Set();
 
@@ -356,8 +366,8 @@ internal static unsafe partial class SplashWindow
                 nextTopmostNudge = now + TopmostNudgeIntervalMs;
             }
 
-            // Checked every tick, not throttled: this one tracks a drag,
-            // so anything slower shows the splash lagging behind the
+            // Checked every time round, not throttled: this one tracks a
+            // drag, so anything slower shows the splash lagging behind the
             // window. It is a GetWindowRect and, only on an actual
             // change, a SetWindowPos.
             FollowTrackedWindow();
@@ -365,7 +375,7 @@ internal static unsafe partial class SplashWindow
             PumpMessages();
             // Waits on the dismiss signal rather than sleeping blindly, so
             // the fade starts the moment the window reports content.
-            _dismissed.Wait(FadeStepMs);
+            _dismissed.Wait(LoopParkMs);
         }
     }
 
@@ -473,20 +483,42 @@ internal static unsafe partial class SplashWindow
     /// </summary>
     private static void FadeOut()
     {
-        // HideNow has already taken the window off screen and its caller is
-        // ending the process. Fading a hidden window would only keep this
-        // thread alive through a teardown that is waiting on it.
-        if (Volatile.Read(ref _skipFade)) return;
-
-        var steps = Math.Max(1, FadeDurationMs / FadeStepMs);
-        for (var i = steps - 1; i >= 0; i--)
+        // Alpha comes off the clock rather than off a step counter, so the
+        // fade takes the time it says it does. A counter multiplies the
+        // park granularity: at the default timer resolution a 16ms park is
+        // really ~31ms, which turned a nominal 120ms fade into most of a
+        // fifth of a second of window still held over the app.
+        var fade = Stopwatch.StartNew();
+        while (true)
         {
-            var alpha = (byte)(255 * i / steps);
+            // Re-read per step, not just on entry: a HideNow that lands
+            // mid-fade has a caller already waiting on the join, and the
+            // rest of the fade would be spent inside GDI+ while it waits.
+            // The window is still up at this point -- HideNow deliberately
+            // does not touch another thread's window -- so what makes
+            // returning right is RunSplash's finally, one statement away.
+            if (Volatile.Read(ref _skipFade)) return;
+
+            var elapsed = fade.ElapsedMilliseconds;
+            if (elapsed >= FadeDurationMs) break;
+
+            var alpha = (byte)(255 * (FadeDurationMs - elapsed) / FadeDurationMs);
             FollowTrackedWindow();
-            if (!Paint(alpha)) break;
+            // The window is already opaque on the first pass, and a park is
+            // long enough that this fade only gets a handful of frames.
+            // Spending one of them on a blit that changes no pixel makes the
+            // rest of the ramp coarser for nothing.
+            if (alpha != _alpha && !Paint(alpha)) return;
             PumpMessages();
-            Thread.Sleep(FadeStepMs);
+            Thread.Sleep(LoopParkMs);
         }
+
+        // No final blend at zero. The destroy in RunSplash's finally lands
+        // within a millisecond, well inside one compose, so a zero-alpha
+        // frame would never reach the screen -- and the drop it would be
+        // covering is one step of this ramp, not a pop: the loop leaves off
+        // roughly one park short of the deadline, at roughly one step of
+        // alpha.
     }
 
     /// <summary>
@@ -521,7 +553,7 @@ internal static unsafe partial class SplashWindow
     /// when it already matches the current size. Kept apart from the blend
     /// because composing costs a full-window allocation, a per-pixel fill
     /// and a PNG decode, and the fade changes only the alpha: rebuilding it
-    /// per frame turned a 220ms fade into a stutter that delayed the very
+    /// per frame turned the fade into a stutter that delayed the very
     /// reveal it was smoothing.
     /// </summary>
     private static bool EnsureSurface()
