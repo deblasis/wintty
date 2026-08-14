@@ -471,13 +471,38 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         NativeMethods.AppUpdateConfig(_app, newConfig);
 
         _config = newConfig;
-        CacheDiagnostics();
-        ReadFlags(OsTheme.IsDark());
+        try
+        {
+            CacheDiagnostics();
+            ReadFlags(OsTheme.IsDark());
+        }
+        catch (Exception ex)
+        {
+            // ReadFlags reads files, so this is reachable on a locked or
+            // half-written config. Reload runs inside a dispatcher lambda
+            // (the watcher marshals through one), where an escape is an
+            // unhandled UI-thread exception rather than a failed reload.
+            //
+            // Swallowed rather than rethrown because the native swap above
+            // already succeeded: libghostty is on the new config and the
+            // surfaces will repaint from it. What is left stale is the C#
+            // snapshot, which the next reload rebuilds. Bailing out here
+            // would leave those two disagreeing with no way back.
+            StaticLoggers.ConfigService.LogReloadFailed(ex);
+        }
+        finally
+        {
+            // Both of these have to happen even on the throw path. Leaking
+            // oldConfig leaks the libghostty config for the process
+            // lifetime, and leaving _suppressWatcher latched would make
+            // OnFileChanged return early on every subsequent edit --
+            // auto-reload-config would silently stop working for the rest
+            // of the session, with nothing logged.
+            if (oldConfig.Handle != IntPtr.Zero)
+                NativeMethods.ConfigFree(oldConfig);
 
-        if (oldConfig.Handle != IntPtr.Zero)
-            NativeMethods.ConfigFree(oldConfig);
-
-        _suppressWatcher = wasSuppressed;
+            _suppressWatcher = wasSuppressed;
+        }
 
         _dispatcher.TryEnqueue(() =>
         {
@@ -1102,15 +1127,43 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         => ThemeParser.SelectForScheme(GetFileValue("theme", ""), isOsDark);
 
     /// <summary>
-    /// Find the theme file on disk by name. Looks in the user themes
-    /// directory next to the config file. Returns null if not found.
+    /// Find the theme file on disk by name, searching the same directories
+    /// in the same order as libghostty. Returns null if not found.
     /// </summary>
+    /// <remarks>
+    /// This has to agree with src/config/theme.zig, because the two read
+    /// the same theme for different purposes: libghostty renders the
+    /// terminal from it, this reads it for the window chrome. Where they
+    /// disagree, a themed pane ends up framed in chrome from a different
+    /// palette. Deriving the directory from the config file's own location
+    /// is what used to make them disagree -- an install can hold its
+    /// config under the pre-rename name and its themes under the current
+    /// one, or the reverse.
+    /// </remarks>
     private string? ResolveThemePath(string themeName)
     {
-        var configDir = Path.GetDirectoryName(ConfigFilePath);
-        if (string.IsNullOrEmpty(configDir)) return null;
-        var themePath = Path.Combine(configDir, "themes", themeName);
-        return File.Exists(themePath) ? themePath : null;
+        foreach (var dir in UserThemeDirectories())
+        {
+            var themePath = Path.Combine(dir, themeName);
+            if (File.Exists(themePath)) return themePath;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// User theme directories, most current first. Mirrors the `user` and
+    /// `user_ghostty` entries of theme.zig's Location enum; the resources
+    /// directory it searches last has no chrome-visible values, so it is
+    /// deliberately not probed here.
+    /// </summary>
+    private static IEnumerable<string> UserThemeDirectories()
+    {
+        // xdg.config resolves to %APPDATA% on Windows (src/os/xdg.zig).
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrEmpty(appData)) yield break;
+
+        yield return Path.Combine(appData, "wintty", "themes");
+        yield return Path.Combine(appData, "ghostty", "themes");
     }
 
     /// <summary>
