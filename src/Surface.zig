@@ -599,10 +599,10 @@ pub fn init(
         .config_conditional_state = app.config_conditional_state,
     };
 
-    // The renderer and both threads are built directly into their fields
-    // rather than into locals we copy in above. Constructing them into
-    // locals would leave the errdefers below pointing at stale copies once
-    // the assignment above moved the real values into `self`.
+    // Assigned into their fields before anything can fail, so the errdefers
+    // below clean up the values `self` actually keeps rather than a copy,
+    // and so `&self.renderer` and `&self.renderer_state` are handed out
+    // pointing at initialized memory.
     self.renderer = try Renderer.init(alloc, .{
         .config = try .init(alloc, config),
         .font_grid = font_grid,
@@ -756,12 +756,16 @@ pub fn init(
         log.warn("unable to set initial window size: {}", .{err});
     };
 
+    // Both worker threads are running by now, so these must not propagate:
+    // unwinding past this point would deinit state the threads are still
+    // reading. Failing to set a title shouldn't stop the terminal working,
+    // same reasoning as the initial size above.
+    //
+    // The io thread spawn above is the one remaining exception. Handling it
+    // needs a stop-notify and a join rather than a plain errdefer, which is
+    // a larger change than this.
     if (config.title) |title| {
-        _ = try rt_app.performAction(
-            .{ .surface = self },
-            .set_title,
-            .{ .title = title },
-        );
+        setInitialTitle(rt_app, self, title);
     } else if ((comptime builtin.os.tag == .linux) and
         config.@"_xdg-terminal-exec")
     xdg: {
@@ -777,20 +781,12 @@ pub fn init(
             break :xdg;
         };
         defer alloc.free(title);
-        _ = try rt_app.performAction(
-            .{ .surface = self },
-            .set_title,
-            .{ .title = title },
-        );
+        setInitialTitle(rt_app, self, title);
     } else if (command) |cmd| switch (cmd) {
         // If a user specifies a command it is appropriate to set the title as argv[0]
         // we know in the case of a direct command it has been supplied by the user
         .direct => |cmd_str| if (cmd_str.len != 0) {
-            _ = try rt_app.performAction(
-                .{ .surface = self },
-                .set_title,
-                .{ .title = cmd_str[0] },
-            );
+            setInitialTitle(rt_app, self, cmd_str[0]);
         },
 
         // We won't set the title in the case the shell expands the command
@@ -801,6 +797,20 @@ pub fn init(
 
     // We are no longer the first surface
     app.first = false;
+}
+
+/// Set the title a surface starts with. Errors are logged rather than
+/// returned: this runs after the render and IO threads are spawned, where
+/// unwinding would tear down state those threads are still using.
+fn setInitialTitle(self: *Surface, title: [:0]const u8) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .set_title,
+        .{ .title = title },
+    ) catch |err| {
+        log.warn("error setting initial title err={}", .{err});
+        return;
+    };
 }
 
 pub fn deinit(self: *Surface) void {
