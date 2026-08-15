@@ -1,3 +1,5 @@
+using System.IO;
+using System.Linq;
 using Ghostty.Core;
 using Ghostty.Core.Version;
 using Xunit;
@@ -9,6 +11,9 @@ namespace Ghostty.Tests;
 /// of whatever the build produced rather than one fixed string. Only the
 /// OSS default is pinned to an exact value, guarded on the edition, so a
 /// wintty-release build overriding it does not have to patch this file.
+/// StateDirName is guarded the same way, since the shared tiering patch
+/// sets Edition per tier and is expected to make the state dir per-flavour
+/// too.
 /// </summary>
 public sealed class AppIdentityTests
 {
@@ -48,6 +53,34 @@ public sealed class AppIdentityTests
         if (BuildInfo.Edition == Edition.Oss)
         {
             Assert.Equal("com.deblasis.wintty", AppIdentity.AumId);
+        }
+    }
+
+    [Fact]
+    public void StateDirName_IsNotEmpty()
+    {
+        Assert.False(string.IsNullOrWhiteSpace(AppIdentity.StateDirName));
+    }
+
+    [Fact]
+    public void StateDirName_HasNoInvalidFileNameChars()
+    {
+        // What actually matters once callers build directory paths from
+        // this: whitespace and length are fine in a folder name, invalid
+        // path characters are not.
+        Assert.DoesNotContain(AppIdentity.StateDirName, c => Path.GetInvalidFileNameChars().Contains(c));
+    }
+
+    [Fact]
+    public void StateDirName_DefaultsToWinttyInAnOssBuild()
+    {
+        // Guarded the same way as AumId_DefaultsToTheUnsuffixedIdInAnOssBuild:
+        // the shared tiering patch sets Edition per tier, and is expected to
+        // make StateDirName per-flavour along with it, so this assertion
+        // must not run for a non-OSS build.
+        if (BuildInfo.Edition == Edition.Oss)
+        {
+            Assert.Equal("Wintty", AppIdentity.StateDirName);
         }
     }
 }

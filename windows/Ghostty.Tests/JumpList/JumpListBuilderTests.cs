@@ -8,7 +8,10 @@ namespace Ghostty.Tests.JumpList;
 public class JumpListBuilderTests
 {
     private const string TestExe = @"C:\fake\Wintty.exe";
-    private const string TestAppId = "com.deblasis.wintty";
+
+    // References the real constant instead of duplicating it, so a future
+    // AUMID change cannot leave this fixture silently out of sync.
+    private const string TestAppId = Ghostty.Core.AppIdentity.AumId;
 
     [Fact]
     public void Build_sets_app_id()

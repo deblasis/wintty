@@ -75,4 +75,16 @@ internal static class AppIdentity
     /// brand.
     /// </summary>
     public const string LogTag = $"[{ProductName}]";
+
+    /// <summary>
+    /// Folder name for this build's per-user state, under both
+    /// <c>LocalApplicationData</c> (logs, crash log, caches) and
+    /// <c>ApplicationData</c> (session restore).
+    ///
+    /// Separate from <see cref="ProductName"/> even though the two agree
+    /// here: one is a display string and the other is a path component,
+    /// and they stop agreeing as soon as a build wants a distinct state
+    /// directory without renaming itself on screen.
+    /// </summary>
+    public const string StateDirName = "Wintty";
 }
