@@ -49,10 +49,10 @@ internal static class AppIdentity
     /// <list type="bullet">
     /// <item>the shell's own <c>%APPDATA%\Wintty</c> (session, window
     /// state, command frecency) and <c>%LOCALAPPDATA%\Wintty</c> (logs,
-    /// crash.log, gpu.log, icon cache), spelled out at each call site
-    /// rather than read from here. Unlike the libghostty caches above
-    /// this is state the user would notice losing, with nothing left to
-    /// migrate it;</item>
+    /// crash.log, gpu.log, icon cache), which read <see cref="StateDirName"/>
+    /// rather than this constant. Unlike the libghostty caches above this
+    /// is state the user would notice losing, with nothing left to migrate
+    /// it;</item>
     /// <item>the assembly name, which <c>InternalsVisibleTo</c> and
     /// <c>Process.GetProcessesByName</c> have to match;</item>
     /// <item>kernel object and window class names, which single-instance

@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Ghostty.Core;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
 
@@ -56,7 +57,7 @@ internal sealed class WindowState
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Wintty");
+                AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             return dir;
         }
