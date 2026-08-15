@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -132,6 +133,13 @@ internal static unsafe partial class SplashWindow
     private static uint _surfaceDpi;
 
     /// <summary>
+    /// Fixes which piece of the texture this splash shows. Drawn once when
+    /// the splash starts, so that repainting for a resize or a DPI change
+    /// redraws the same texture rather than dealing a new one.
+    /// </summary>
+    private static int _textureSeed;
+
+    /// <summary>
     /// Follow <paramref name="hwnd"/> from now on. Called once the main
     /// window exists, so that moving or resizing it while the splash is
     /// still up keeps the two together instead of leaving the icon
@@ -255,6 +263,7 @@ internal static unsafe partial class SplashWindow
     {
         var state = LoadState();
         var (x, y, width, height) = ResolveRect(state);
+        _textureSeed = Environment.TickCount;
         _width = width;
         _height = height;
         _background = ResolveBackgroundRgb(state);
@@ -630,7 +639,7 @@ internal static unsafe partial class SplashWindow
         _surfaceDpi = dpi;
 
         FillOpaque(bits, width, height, background);
-        DrawIcon(memDc, width, height, iconPx);
+        DrawContent(memDc, width, height, iconPx, background);
         return true;
     }
 
@@ -671,7 +680,249 @@ internal static unsafe partial class SplashWindow
         for (long i = 0; i < count; i++) p[i] = pixel;
     }
 
-    private static void DrawIcon(nint memDc, int width, int height, int iconPx)
+    /// <summary>
+    /// Draw everything that is not the flat background: the stave, then
+    /// the icon over the middle of it.
+    /// </summary>
+    /// <remarks>
+    /// One GDI+ session and one Graphics for both. Starting GDI+ loads and
+    /// initialises a module and is the most expensive thing on this path,
+    /// which is the one path whose whole job is to be on screen before the
+    /// app is; doing it twice to draw two things would be a poor trade.
+    /// </remarks>
+    private static void DrawContent(
+        nint memDc, int width, int height, int iconPx, uint background)
+    {
+        var startup = new GdiplusStartupInput { GdiplusVersion = 1 };
+        if (GdiplusStartup(out var token, ref startup, 0) != 0)
+        {
+            Diag("GdiplusStartup failed; drawing the background only");
+            return;
+        }
+
+        try
+        {
+            if (GdipCreateFromHDC(memDc, out var graphics) != 0 || graphics == 0)
+            {
+                Diag("GdipCreateFromHDC failed; drawing the background only");
+                return;
+            }
+
+            try
+            {
+                DrawTexture(graphics, width, height, background);
+                DrawIcon(graphics, width, height, iconPx);
+            }
+            finally { GdipDeleteGraphics(graphics); }
+        }
+        finally { GdiplusShutdown(token); }
+    }
+
+    /// <summary>
+    /// Draw the texture the background is grained with: one crop of one
+    /// sheet, turned, in one blit. Silent when there is no sheet or it
+    /// cannot be decoded -- this is decoration behind decoration, and a
+    /// splash without it is the splash we shipped before it existed.
+    /// </summary>
+    private static void DrawTexture(nint graphics, int width, int height, uint background)
+    {
+        // The user's own texture wins if they have supplied one. Absent is
+        // not a fault either way: a build with no sheet at all gets a plain
+        // splash rather than a diagnostic on every launch.
+        var source = LaunchTextureSource.Resolve(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            AppContext.BaseDirectory,
+            File.Exists);
+        if (source is not { } texture) return;
+
+        var path = texture.Path;
+
+        nint image;
+        fixed (char* file = path)
+        {
+            if (GdipCreateBitmapFromFile(file, out image) != 0 || image == 0)
+            {
+                // Worth saying for a file the user put there deliberately,
+                // and not for one we shipped: the first is a mistake they can
+                // fix, the second would repeat on every launch of a build
+                // nobody can change.
+                if (texture.IsUserSupplied) Diag($"could not decode {path}; ignoring it");
+                return;
+            }
+        }
+
+        try
+        {
+            if (GdipGetImageWidth(image, out var sheetWidth) != 0
+                || GdipGetImageHeight(image, out var sheetHeight) != 0)
+            {
+                return;
+            }
+
+            // Seeded once per splash rather than per paint. The surface is
+            // rebuilt whenever the window is resized or changes monitor, and
+            // reading the clock here would deal a different crop at a
+            // different angle each time -- the texture would jump about
+            // while the window settled instead of moving with it.
+            var resolved = LaunchTexture.Resolve(
+                _textureSeed, width, height, (int)sheetWidth, (int)sheetHeight);
+            if (resolved is not { } placement) return;
+
+            // The sheet is a white-on-nothing mask, so its colour is decided
+            // here. Rather than blend it over the background, the matrix maps
+            // the mask straight onto the two colours: where the sheet is
+            // empty the pixel comes out the background colour, where it is
+            // solid it comes out the ink, and in between it lands between
+            // them.
+            //
+            // Row 3 is the alpha input and row 4 the constant term, so
+            // together they are that interpolation. Alpha out is pinned to 1
+            // by the constant and cut from the input: UpdateLayeredWindow is
+            // called with an opaque source, so every pixel of the DIB has to
+            // keep its alpha at 0xFF, and nothing here is allowed to depend
+            // on GDI+ blending having preserved it.
+            var ink = LaunchTexture.ResolveInkRgb(background);
+
+            var backR = ((background >> 16) & 0xFF) / 255f;
+            var backG = ((background >> 8) & 0xFF) / 255f;
+            var backB = (background & 0xFF) / 255f;
+
+            var reachR = (((ink >> 16) & 0xFF) / 255f) - backR;
+            var reachG = (((ink >> 8) & 0xFF) / 255f) - backG;
+            var reachB = ((ink & 0xFF) / 255f) - backB;
+
+            // Cleared rather than trusted to be zero. Most of the matrix is
+            // left unassigned by whichever branch runs below, and a project
+            // that ever turns on SkipLocalsInit would fill it with whatever
+            // was on the stack -- a splash painted in garbage with nothing
+            // pointing back here.
+            var matrix = stackalloc float[25];
+            new Span<float>(matrix, 25).Clear();
+
+            // Which channel says how far towards the ink a pixel goes. The
+            // shipped sheet is a white-on-nothing mask, so it is alpha. A
+            // picture a user drops in is usually opaque, and reading it
+            // through alpha would make every pixel fully inked -- one flat
+            // slab, the feature silently doing nothing -- so for those it is
+            // brightness instead: light parts ink, dark parts background.
+            //
+            // The pixel format cannot answer this. PNG's RGBA colour type is
+            // what every image editor exports by default whether or not
+            // anything is transparent, and the shipped sheet is itself RGBA,
+            // so "has an alpha channel" is true of both cases and separates
+            // neither. What matters is whether anything in that channel
+            // varies, which only the pixels know.
+            if (!AlphaCarriesTheTexture(image, sheetWidth, sheetHeight, texture.IsUserSupplied))
+            {
+                // Rec. 601 again, spread over the three input rows so the
+                // three outputs each receive the same weighted sum.
+                matrix[0] = 0.299f * reachR;
+                matrix[5] = 0.587f * reachR;
+                matrix[10] = 0.114f * reachR;
+                matrix[1] = 0.299f * reachG;
+                matrix[6] = 0.587f * reachG;
+                matrix[11] = 0.114f * reachG;
+                matrix[2] = 0.299f * reachB;
+                matrix[7] = 0.587f * reachB;
+                matrix[12] = 0.114f * reachB;
+            }
+            else
+            {
+                matrix[15] = reachR;
+                matrix[16] = reachG;
+                matrix[17] = reachB;
+            }
+
+            matrix[18] = 0f;
+            matrix[20] = backR;
+            matrix[21] = backG;
+            matrix[22] = backB;
+            matrix[23] = 1f;
+            matrix[24] = 1f;
+
+            if (GdipCreateImageAttributes(out var attributes) != 0 || attributes == 0) return;
+
+            try
+            {
+                if (GdipSetImageAttributesColorMatrix(
+                        attributes, ColorAdjustTypeDefault, 1, matrix, null,
+                        ColorMatrixFlagsDefault) != 0)
+                {
+                    return;
+                }
+
+                GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBilinear);
+                GdipSetPixelOffsetMode(graphics, PixelOffsetModeHighQuality);
+
+                // Turned about the window's centre, which is why the
+                // destination is centred on the origin here. Saved and
+                // restored because the icon is drawn straight afterwards and
+                // must not inherit the angle.
+                if (GdipSaveGraphics(graphics, out var state) != 0) return;
+
+                try
+                {
+                    GdipTranslateWorldTransform(
+                        graphics, width / 2f, height / 2f, MatrixOrderPrepend);
+                    GdipRotateWorldTransform(
+                        graphics, placement.AngleDegrees, MatrixOrderPrepend);
+
+                    GdipDrawImageRectRect(
+                        graphics, image,
+                        -placement.DestinationWidth / 2f, -placement.DestinationHeight / 2f,
+                        placement.DestinationWidth, placement.DestinationHeight,
+                        placement.SourceX, placement.SourceY,
+                        placement.SourceWidth, placement.SourceHeight,
+                        UnitPixel, attributes, 0, 0);
+                }
+                finally { GdipRestoreGraphics(graphics, state); }
+            }
+            finally { GdipDisposeImageAttributes(attributes); }
+        }
+        finally { GdipDisposeImage(image); }
+    }
+
+    /// <summary>
+    /// True when the image's alpha channel is what says where the ink goes,
+    /// false when it is uniformly opaque and brightness has to say instead.
+    /// </summary>
+    /// <remarks>
+    /// A sparse grid rather than a full scan. This runs before the app is on
+    /// screen, and reading four million pixels to answer a yes-or-no
+    /// question would cost more than everything else the splash does. A
+    /// thousand samples is plenty: a mask is mostly empty, so the first
+    /// transparent pixel usually turns up within a few of them and the loop
+    /// leaves early, while an opaque picture has to be sampled all the way
+    /// through to be sure -- which is the cheap case to be wrong about
+    /// nowhere near as often.
+    /// </remarks>
+    private static bool AlphaCarriesTheTexture(
+        nint image, uint width, uint height, bool userSupplied)
+    {
+        const int Samples = 32;
+
+        if (width == 0 || height == 0) return !userSupplied;
+
+        for (var row = 0; row < Samples; row++)
+        {
+            for (var column = 0; column < Samples; column++)
+            {
+                var x = (int)((column * (long)width) / Samples);
+                var y = (int)((row * (long)height) / Samples);
+
+                // A probe that will not read is no evidence either way, so
+                // fall back on where the image came from: ours is a mask,
+                // and anything a user supplied is more likely a picture.
+                if (GdipBitmapGetPixel(image, x, y, out var argb) != 0) return !userSupplied;
+
+                if ((argb >> 24) != 0xFF) return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void DrawIcon(nint graphics, int width, int height, int iconPx)
     {
         var path = IconPathForSize(iconPx);
         if (path is null)
@@ -683,48 +934,28 @@ internal static unsafe partial class SplashWindow
             return;
         }
 
-        var startup = new GdiplusStartupInput { GdiplusVersion = 1 };
-        if (GdiplusStartup(out var token, ref startup, 0) != 0)
+        nint image;
+        fixed (char* file = path)
         {
-            Diag("GdiplusStartup failed; drawing without the icon");
-            return;
+            if (GdipCreateBitmapFromFile(file, out image) != 0 || image == 0)
+            {
+                // Present but unreadable: truncated, corrupt, or locked.
+                // Same bare-rectangle result as a missing file, so it
+                // needs the same signal.
+                Diag($"could not decode {path}; drawing without the icon");
+                return;
+            }
         }
 
         try
         {
-            nint image;
-            fixed (char* file = path)
-            {
-                if (GdipCreateBitmapFromFile(file, out image) != 0 || image == 0)
-                {
-                    // Present but unreadable: truncated, corrupt, or locked.
-                    // Same bare-rectangle result as a missing file, so it
-                    // needs the same signal.
-                    Diag($"could not decode {path}; drawing without the icon");
-                    return;
-                }
-            }
-
-            try
-            {
-                if (GdipCreateFromHDC(memDc, out var graphics) != 0 || graphics == 0)
-                {
-                    Diag("GdipCreateFromHDC failed; drawing without the icon");
-                    return;
-                }
-                try
-                {
-                    GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
-                    GdipSetPixelOffsetMode(graphics, PixelOffsetModeHighQuality);
-                    GdipDrawImageRectI(
-                        graphics, image,
-                        (width - iconPx) / 2, (height - iconPx) / 2, iconPx, iconPx);
-                }
-                finally { GdipDeleteGraphics(graphics); }
-            }
-            finally { GdipDisposeImage(image); }
+            GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
+            GdipSetPixelOffsetMode(graphics, PixelOffsetModeHighQuality);
+            GdipDrawImageRectI(
+                graphics, image,
+                (width - iconPx) / 2, (height - iconPx) / 2, iconPx, iconPx);
         }
-        finally { GdiplusShutdown(token); }
+        finally { GdipDisposeImage(image); }
     }
 
     /// <summary>
@@ -1039,7 +1270,19 @@ internal static unsafe partial class SplashWindow
     private const uint SWP_NOACTIVATE = 0x0010;
     private static readonly nint IDC_ARROW = 32512;
     private const int InterpolationModeHighQualityBicubic = 7;
+
+    /// <summary>
+    /// Used for the texture rather than bicubic. Sixteen-tap reconstruction
+    /// buys detail that cannot survive being drawn a few percent away from
+    /// the background; the icon over it still gets bicubic, where it shows.
+    /// </summary>
+    private const int InterpolationModeHighQualityBilinear = 6;
     private const int PixelOffsetModeHighQuality = 4;
+    private const int MatrixOrderPrepend = 0;
+    private const int ColorAdjustTypeDefault = 0;
+    private const int ColorMatrixFlagsDefault = 0;
+    private const int UnitPixel = 2;
+
 
     [StructLayout(LayoutKind.Sequential)]
     private struct WNDCLASSEXW
@@ -1240,4 +1483,51 @@ internal static unsafe partial class SplashWindow
     [LibraryImport("gdiplus.dll")]
     private static partial int GdipDrawImageRectI(
         nint graphics, nint image, int x, int y, int width, int height);
+
+
+
+
+
+
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipSaveGraphics(nint graphics, out uint state);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipRestoreGraphics(nint graphics, uint state);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipTranslateWorldTransform(
+        nint graphics, float dx, float dy, int order);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipRotateWorldTransform(
+        nint graphics, float angle, int order);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipGetImageWidth(nint image, out uint width);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipBitmapGetPixel(nint bitmap, int x, int y, out uint argb);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipGetImageHeight(nint image, out uint height);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipCreateImageAttributes(out nint attributes);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipDisposeImageAttributes(nint attributes);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipSetImageAttributesColorMatrix(
+        nint attributes, int type, int enableFlag,
+        float* colorMatrix, float* grayMatrix, int flags);
+
+    [LibraryImport("gdiplus.dll")]
+    private static partial int GdipDrawImageRectRect(
+        nint graphics, nint image,
+        float dstX, float dstY, float dstWidth, float dstHeight,
+        float srcX, float srcY, float srcWidth, float srcHeight,
+        int srcUnit, nint attributes, nint callback, nint callbackData);
 }
