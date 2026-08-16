@@ -217,6 +217,6 @@ internal sealed class WindowsIconResolver(IFileSystem fs) : IIconResolver
     private string? CachePathFor(string sha)
     {
         var local = fs.GetKnownFolder(KnownFolderId.LocalAppData);
-        return local is null ? null : Path.Combine(local, "Wintty", "IconCache", sha + ".png");
+        return local is null ? null : Path.Combine(local, AppIdentity.StateDirName, "IconCache", sha + ".png");
     }
 }
