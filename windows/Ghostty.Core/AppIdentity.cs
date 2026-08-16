@@ -49,10 +49,10 @@ internal static class AppIdentity
     /// <list type="bullet">
     /// <item>the shell's own <c>%APPDATA%\Wintty</c> (session, window
     /// state, command frecency) and <c>%LOCALAPPDATA%\Wintty</c> (logs,
-    /// crash.log, gpu.log, icon cache), spelled out at each call site
-    /// rather than read from here. Unlike the libghostty caches above
-    /// this is state the user would notice losing, with nothing left to
-    /// migrate it;</item>
+    /// crash.log, gpu.log, icon cache), which read <see cref="StateDirName"/>
+    /// rather than this constant. Unlike the libghostty caches above this
+    /// is state the user would notice losing, with nothing left to migrate
+    /// it;</item>
     /// <item>the assembly name, which <c>InternalsVisibleTo</c> and
     /// <c>Process.GetProcessesByName</c> have to match;</item>
     /// <item>kernel object and window class names, which single-instance
@@ -75,4 +75,16 @@ internal static class AppIdentity
     /// brand.
     /// </summary>
     public const string LogTag = $"[{ProductName}]";
+
+    /// <summary>
+    /// Folder name for this build's per-user state, under both
+    /// <c>LocalApplicationData</c> (logs, crash log, caches) and
+    /// <c>ApplicationData</c> (session restore).
+    ///
+    /// Separate from <see cref="ProductName"/> even though the two agree
+    /// here: one is a display string and the other is a path component,
+    /// and they stop agreeing as soon as a build wants a distinct state
+    /// directory without renaming itself on screen.
+    /// </summary>
+    public const string StateDirName = "Wintty";
 }
