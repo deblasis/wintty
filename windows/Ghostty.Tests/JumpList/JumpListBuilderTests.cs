@@ -9,9 +9,9 @@ public class JumpListBuilderTests
 {
     private const string TestExe = @"C:\fake\Wintty.exe";
 
-    // References the real constant instead of duplicating it, so a future
-    // AUMID change cannot leave this fixture silently out of sync.
-    private const string TestAppId = Ghostty.Core.AppIdentity.AumId;
+    // A synthetic id keeps the fixture from duplicating the real identity
+    // without coupling it to a build-generated constant.
+    private const string TestAppId = "com.example.jumplist-test";
 
     [Fact]
     public void Build_sets_app_id()

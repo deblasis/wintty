@@ -1,5 +1,3 @@
-using System.IO;
-using System.Linq;
 using Ghostty.Core;
 using Ghostty.Core.Version;
 using Xunit;
@@ -63,21 +61,17 @@ public sealed class AppIdentityTests
     }
 
     [Fact]
-    public void StateDirName_HasNoInvalidFileNameChars()
+    public void StateDirName_SurvivesWin32PathNormalization()
     {
-        // What actually matters once callers build directory paths from
-        // this: whitespace and length are fine in a folder name, invalid
-        // path characters are not.
-        Assert.DoesNotContain(AppIdentity.StateDirName, c => Path.GetInvalidFileNameChars().Contains(c));
+        // A state directory name has to survive Win32 path normalisation:
+        // invalid characters are rejected outright, and a trailing space or
+        // dot is silently stripped, which would collide two flavours.
+        Assert.Matches(@"^[A-Za-z0-9._-]*[A-Za-z0-9_-]$", AppIdentity.StateDirName);
     }
 
     [Fact]
     public void StateDirName_DefaultsToWinttyInAnOssBuild()
     {
-        // Guarded the same way as AumId_DefaultsToTheUnsuffixedIdInAnOssBuild:
-        // the shared tiering patch sets Edition per tier, and is expected to
-        // make StateDirName per-flavour along with it, so this assertion
-        // must not run for a non-OSS build.
         if (BuildInfo.Edition == Edition.Oss)
         {
             Assert.Equal("Wintty", AppIdentity.StateDirName);
