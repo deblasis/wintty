@@ -9,6 +9,9 @@ namespace Ghostty.Tests;
 /// of whatever the build produced rather than one fixed string. Only the
 /// OSS default is pinned to an exact value, guarded on the edition, so a
 /// wintty-release build overriding it does not have to patch this file.
+/// StateDirName is guarded the same way, since the shared tiering patch
+/// sets Edition per tier and is expected to make the state dir per-flavour
+/// too.
 /// </summary>
 public sealed class AppIdentityTests
 {
@@ -48,6 +51,30 @@ public sealed class AppIdentityTests
         if (BuildInfo.Edition == Edition.Oss)
         {
             Assert.Equal("com.deblasis.wintty", AppIdentity.AumId);
+        }
+    }
+
+    [Fact]
+    public void StateDirName_IsNotEmpty()
+    {
+        Assert.False(string.IsNullOrWhiteSpace(AppIdentity.StateDirName));
+    }
+
+    [Fact]
+    public void StateDirName_SurvivesWin32PathNormalization()
+    {
+        // A state directory name has to survive Win32 path normalisation:
+        // invalid characters are rejected outright, and a trailing space or
+        // dot is silently stripped, which would collide two flavours.
+        Assert.Matches(@"^[A-Za-z0-9._-]*[A-Za-z0-9_-]$", AppIdentity.StateDirName);
+    }
+
+    [Fact]
+    public void StateDirName_DefaultsToWinttyInAnOssBuild()
+    {
+        if (BuildInfo.Edition == Edition.Oss)
+        {
+            Assert.Equal("Wintty", AppIdentity.StateDirName);
         }
     }
 }
