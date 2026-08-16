@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Security;
+using Ghostty.Core;
 
 namespace Ghostty.Accessibility;
 
@@ -23,7 +24,7 @@ internal static class HighContrastOverrideFile
         {
             var dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Wintty");
+                AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "high-contrast.conf");
             File.WriteAllText(path, body);

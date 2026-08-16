@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Ghostty.Core;
 using Ghostty.Core.Logging;
 using Microsoft.Extensions.Logging;
 
@@ -63,7 +64,7 @@ internal sealed partial class FrecencyStore
 
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Wintty",
+        AppIdentity.StateDirName,
         "command-frecency.json");
 
     public static FrecencyStore Load()

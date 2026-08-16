@@ -351,7 +351,7 @@ public partial class App : Application
         {
             var localAppData = Environment.GetFolderPath(
                 Environment.SpecialFolder.LocalApplicationData);
-            var dir = Path.Combine(localAppData, "Wintty");
+            var dir = Path.Combine(localAppData, AppIdentity.StateDirName);
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, "crash.log");
             lock (_crashLogLock)
@@ -433,7 +433,7 @@ public partial class App : Application
         // one folder to attach.
         var logDir = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "Wintty", "logs");
+            Ghostty.Core.AppIdentity.StateDirName, "logs");
         var (factory, fileSink, filters) = Ghostty.Core.Logging.LoggingBootstrap.Build(
             logLevel: _configService.LogLevel,
             logFilter: _configService.LogFilter,
@@ -592,7 +592,7 @@ public partial class App : Application
         // file again.
         var discoveryCachePath = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "Wintty", "DiscoveryCache", "v2.json");
+            Ghostty.Core.AppIdentity.StateDirName, "DiscoveryCache", "v2.json");
         var winttyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "dev";
 
         var processRunner = new Ghostty.Core.Profiles.WindowsProcessRunner();

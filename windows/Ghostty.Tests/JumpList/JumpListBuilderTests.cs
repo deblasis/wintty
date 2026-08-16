@@ -8,7 +8,10 @@ namespace Ghostty.Tests.JumpList;
 public class JumpListBuilderTests
 {
     private const string TestExe = @"C:\fake\Wintty.exe";
-    private const string TestAppId = "com.deblasis.wintty";
+
+    // A synthetic id keeps the fixture from duplicating the real identity
+    // without coupling it to a build-generated constant.
+    private const string TestAppId = "com.example.jumplist-test";
 
     [Fact]
     public void Build_sets_app_id()

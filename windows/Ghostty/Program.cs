@@ -118,7 +118,7 @@ public static partial class Program
     /// </summary>
     private static readonly string GpuLogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Wintty", "gpu.log");
+        AppIdentity.StateDirName, "gpu.log");
 
     /// <summary>
     /// Set to any value to force the <see cref="GpuLogPath"/> redirect on for

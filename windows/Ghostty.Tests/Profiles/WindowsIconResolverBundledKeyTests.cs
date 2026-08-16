@@ -1,4 +1,5 @@
 using System.Threading;
+using Ghostty.Core;
 using Ghostty.Core.Profiles;
 using Ghostty.Tests.Profiles.Fakes;
 using Xunit;
@@ -61,7 +62,7 @@ public sealed class WindowsIconResolverBundledKeyTests
         // under IconCache\<sha>.png so subsequent resolves can short-circuit.
         var cacheFile = System.Linq.Enumerable.Single(
             fs.EnumerateKeys(),
-            k => k.StartsWith(@"C:\cache\Wintty\IconCache\", System.StringComparison.Ordinal));
+            k => k.StartsWith($@"C:\cache\{AppIdentity.StateDirName}\IconCache\", System.StringComparison.Ordinal));
         Assert.Equal(bytes, fs.ReadAllBytesSync(cacheFile));
     }
 
@@ -77,7 +78,7 @@ public sealed class WindowsIconResolverBundledKeyTests
         _ = await first.ResolveAsync(new IconSpec.BundledKey("cmd"), CancellationToken.None);
         var cachePath = System.Linq.Enumerable.Single(
             fs.EnumerateKeys(),
-            k => k.StartsWith(@"C:\cache\Wintty\IconCache\", System.StringComparison.Ordinal));
+            k => k.StartsWith($@"C:\cache\{AppIdentity.StateDirName}\IconCache\", System.StringComparison.Ordinal));
 
         var sentinel = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0xAA, 0xBB, 0xCC, 0xDD };
         fs.AddFile(cachePath, sentinel);
