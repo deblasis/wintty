@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Ghostty.Core;
 using Ghostty.Core.Session;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -24,7 +25,7 @@ internal sealed class SessionStore
     // directory, because writing is the only operation that needs one.
     private static string Dir => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Wintty");
+        AppIdentity.StateDirName);
 
     internal static string FilePath => Path.Combine(Dir, "session.json");
 
