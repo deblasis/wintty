@@ -6,25 +6,13 @@ using Ghostty.Core.Input;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Ghostty.Services;
+using Ghostty.Settings;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 
 namespace Ghostty.Settings.Pages;
-
-/// <summary>Picks header vs entry template by row type (AOT-safe, no reflection).</summary>
-internal sealed class KeybindRowTemplateSelector : DataTemplateSelector
-{
-    public DataTemplate? HeaderTemplate { get; set; }
-    public DataTemplate? EntryTemplate { get; set; }
-
-    protected override DataTemplate? SelectTemplateCore(object item)
-        => item is KeybindCategoryHeader ? HeaderTemplate : EntryTemplate;
-
-    protected override DataTemplate? SelectTemplateCore(object item, DependencyObject container)
-        => SelectTemplateCore(item);
-}
 
 internal sealed partial class KeybindingsPage : Page
 {
@@ -102,16 +90,26 @@ internal sealed partial class KeybindingsPage : Page
     private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
         if (args.InRecycleQueue) return;
-        var root = args.ItemContainer.ContentTemplateRoot;
+        if (args.ItemContainer.ContentTemplateRoot is not Grid root) return;
+        var headerText = root.FindName("HeaderText") as TextBlock;
+        var entry = root.FindName("EntryGrid") as Grid;
         switch (args.Item)
         {
-            case KeybindCategoryHeader header when root is TextBlock headerText:
-                headerText.Text = header.Name;
+            case KeybindCategoryHeader header:
+                if (headerText is not null)
+                {
+                    headerText.Text = header.Name;
+                    headerText.Visibility = Visibility.Visible;
+                }
+                if (entry is not null) entry.Visibility = Visibility.Collapsed;
                 break;
-            case KeybindListItem item when root is Grid grid:
-                if (grid.FindName("FriendlyText") is TextBlock f) f.Text = item.Friendly;
-                if (grid.FindName("LabelText") is TextBlock l) l.Text = item.Label;
-                if (grid.FindName("ConflictIcon") is FontIcon icon)
+            case KeybindListItem item:
+                if (headerText is not null) headerText.Visibility = Visibility.Collapsed;
+                if (entry is null) break;
+                entry.Visibility = Visibility.Visible;
+                if (entry.FindName("FriendlyText") is TextBlock f) f.Text = item.Friendly;
+                if (entry.FindName("LabelText") is TextBlock l) l.Text = item.Label;
+                if (entry.FindName("ConflictIcon") is FontIcon icon)
                 {
                     if (item.Conflict.HasConflict)
                     {
@@ -124,7 +122,7 @@ internal sealed partial class KeybindingsPage : Page
                         ToolTipService.SetToolTip(icon, null);
                     }
                 }
-                if (grid.FindName("UserTag") is FrameworkElement tag)
+                if (entry.FindName("UserTag") is FrameworkElement tag)
                     tag.Visibility = item.Source == KeybindSource.User
                         ? Visibility.Visible
                         : Visibility.Collapsed;
@@ -133,9 +131,9 @@ internal sealed partial class KeybindingsPage : Page
                 // can resolve the right-clicked row. Containers are recycled,
                 // so refresh the Tag every realize. RightTapped is wired with
                 // -=/+= so the recycled container never accumulates handlers.
-                grid.Tag = item;
-                grid.RightTapped -= Row_RightTapped;
-                grid.RightTapped += Row_RightTapped;
+                entry.Tag = item;
+                entry.RightTapped -= Row_RightTapped;
+                entry.RightTapped += Row_RightTapped;
                 break;
         }
     }
@@ -213,7 +211,9 @@ internal sealed partial class KeybindingsPage : Page
     private void ConflictsToggle_Toggled(object sender, RoutedEventArgs e) => ApplyFilter();
 
     private void ApplyFilter()
-        => BindingsList.ItemsSource = _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true);
+        => WinUiList.ReplaceItems(
+            BindingsList.Items,
+            _catalog.Filter(SearchBox.Text, ConflictsToggle.IsChecked == true));
 
     private void ViewBar_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
     {

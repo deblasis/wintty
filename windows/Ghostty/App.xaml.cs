@@ -108,6 +108,15 @@ public partial class App : Application
     /// </summary>
     internal static IEnumerable<MainWindow> AllWindows => WindowsByRoot.Values;
 
+    /// <summary>
+    /// Last regular (non-quake) window that received activation.
+    /// Jump-list "New Tab in Current Window" lands here.
+    /// </summary>
+    internal static MainWindow? LastRegularWindow { get; private set; }
+
+    internal static void NoteRegularWindowActivated(MainWindow window)
+        => LastRegularWindow = window;
+
     // How many recently-closed tabs / windows the reopen stacks retain.
     private const int ClosedItemCapacity = 25;
 
@@ -389,26 +398,9 @@ public partial class App : Application
             Ghostty.Logging.StaticLoggers.App.LogAumidFailed(ex);
         }
 
-        // Build the jump list once at startup.
-        try
-        {
-            var exePath = System.Environment.ProcessPath ?? string.Empty;
-            if (!string.IsNullOrEmpty(exePath))
-            {
-                var facade = new Ghostty.JumpList.CustomDestinationListFacade();
-                var builder = new Ghostty.Core.JumpList.JumpListBuilder(
-                    facade,
-                    profilesProvider: () => System.Array.Empty<Ghostty.Core.JumpList.ProfileEntry>(),
-                    exePath: exePath,
-                    appId: AppUserModelId);
-                builder.Build();
-            }
-        }
-        catch (System.Exception ex)
-        {
-            // See AumidFailed above: NullLogger until factory builds.
-            Ghostty.Logging.StaticLoggers.App.LogJumpListFailed(ex);
-        }
+        // Tasks first so the list exists before windows; rebuilt again
+        // once ProfileRegistry is live so pinned profiles appear.
+        RebuildJumpList();
 
         // Register for toast notifications. Unpackaged apps must call
         // Register() so AppNotificationManager wires up the COM activator
@@ -641,6 +633,8 @@ public partial class App : Application
             dispatcher: action => uiDispatcher.TryEnqueue(() => action()),
             log: factory.CreateLogger<Ghostty.Core.Profiles.ProfileRegistry>());
         ProfileRegistry = _profileRegistry;
+        _profileRegistry.ProfilesChanged += OnProfilesChangedRebuildJumpList;
+        RebuildJumpList();
 
         // One-shot migration of the legacy ui-settings.json into the
         // real config + a placement-only window-state.json. Runs
@@ -718,7 +712,14 @@ public partial class App : Application
             () => AllWindows);
         SessionManager = _sessionManager;
 
-        var restoreState = _sessionManager.LoadForRestore();
+        // Jump-list argv on cold start (app not running) and on a
+        // secondary forward failure both land here. Session restore must
+        // not win over an explicit task/profile click.
+        var coldLaunch = Ghostty.Core.JumpList.JumpListLaunch.Parse(
+            Environment.GetCommandLineArgs());
+        var honorJumpList = coldLaunch.Action != Ghostty.Core.JumpList.JumpListAction.None;
+
+        var restoreState = honorJumpList ? null : _sessionManager.LoadForRestore();
         if (restoreState is { Windows.Count: > 0 })
         {
             // Only the first restored window drives the splash. There is one
@@ -737,6 +738,10 @@ public partial class App : Application
                 _sessionManager.Track(restored);
                 restored.Activate();
             }
+        }
+        else if (honorJumpList)
+        {
+            HandleColdStartJumpList(coldLaunch);
         }
         else
         {
@@ -907,9 +912,10 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Open a new top-level window for a launch forwarded from a secondary
-    /// instance, seeded with the forwarded working directory. Runs on the
-    /// UI thread. Mirrors MainWindow.OpenInNewWindow's wiring.
+    /// Open a new top-level window or tab for a launch forwarded from a
+    /// secondary instance (single-instance mode) or a jump-list click.
+    /// Seeded with the forwarded working directory. Runs on the UI thread.
+    /// Mirrors MainWindow.OpenInNewWindow's wiring, including session Track.
     /// </summary>
     internal void OpenWindowFromLaunch(Ghostty.Core.SingleInstance.LaunchRequest req)
     {
@@ -917,21 +923,102 @@ public partial class App : Application
             || _lifetimeSupervisor is null || _loggerFactory is null)
             return;
 
+        HandleJumpListLaunch(
+            Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args),
+            req.WorkingDirectory);
+    }
+
+    /// <summary>
+    /// Cold-start path for jump-list argv when this process is the primary
+    /// (or a secondary whose forward to the primary failed).
+    /// </summary>
+    private void HandleColdStartJumpList(Ghostty.Core.JumpList.JumpListLaunch launch)
+        => HandleJumpListLaunch(launch, workingDirectory: "");
+
+    private void HandleJumpListLaunch(
+        Ghostty.Core.JumpList.JumpListLaunch launch,
+        string workingDirectory)
+    {
+        var action = launch.Action == Ghostty.Core.JumpList.JumpListAction.None
+            ? Ghostty.Core.JumpList.JumpListAction.NewWindow
+            : launch.Action;
+
+        if (action == Ghostty.Core.JumpList.JumpListAction.NewTab
+            && TryOpenJumpListTab(launch.ProfileId))
+            return;
+
+        OpenJumpListWindow(launch.ProfileId, workingDirectory);
+    }
+
+    private bool TryOpenJumpListTab(string? profileId)
+    {
+        var window = LastRegularWindow is { IsQuickTerminal: false } last
+            ? last
+            : System.Linq.Enumerable.FirstOrDefault(
+                AllWindows, w => !w.IsQuickTerminal);
+        if (window is null) return false;
+
+        // A live window is enough. Missing DefaultProfileId used to
+        // return false here and OpenWindowFromLaunch fell through to
+        // OpenJumpListWindow -- jump-list New Tab opened a window.
+        window.OpenJumpListTab(profileId);
+        window.Activate();
+        return true;
+    }
+
+    private void OpenJumpListWindow(string? profileId, string workingDirectory)
+    {
         Ghostty.Core.Profiles.ProfileSnapshot? snapshot = null;
         var registry = ProfileRegistry;
-        if (registry?.DefaultProfileId is { } defaultId
-            && registry.Resolve(defaultId) is { } resolved)
+        var id = profileId ?? registry?.DefaultProfileId;
+        if (id is not null && registry?.Resolve(id) is { } resolved)
         {
             snapshot = Ghostty.Core.Profiles.ProfileSnapshotStore.From(
                 resolved, registry.Version);
-            if (!string.IsNullOrEmpty(req.WorkingDirectory))
-                snapshot = snapshot with { WorkingDirectory = req.WorkingDirectory };
+            if (!string.IsNullOrEmpty(workingDirectory))
+                snapshot = snapshot with { WorkingDirectory = workingDirectory };
         }
 
         var window = MainWindow.CreateForNewTab(
-            _configService, _bootstrapHost, _lifetimeSupervisor, _loggerFactory, snapshot);
+            _configService!, _bootstrapHost!, _lifetimeSupervisor!, _loggerFactory!, snapshot);
         window.Closed += OnAnyWindowClosedInternal;
+        _sessionManager?.Track(window);
+        _sessionManager?.RequestPersist();
         window.Activate();
+    }
+
+    private static void OnProfilesChangedRebuildJumpList(
+        Ghostty.Core.Profiles.IProfileRegistry _)
+        => RebuildJumpList();
+
+    /// <summary>
+    /// Rebuild the taskbar jump list from the current profile registry.
+    /// Safe to call before the registry exists (tasks only) and after
+    /// every ProfilesChanged. COM failures are swallowed: a missing
+    /// jump list is worse UX than a crash.
+    /// </summary>
+    private static void RebuildJumpList()
+    {
+        try
+        {
+            var exePath = System.Environment.ProcessPath ?? string.Empty;
+            if (string.IsNullOrEmpty(exePath)) return;
+
+            var facade = new Ghostty.JumpList.CustomDestinationListFacade();
+            var builder = new Ghostty.Core.JumpList.JumpListBuilder(
+                facade,
+                profilesProvider: () => Ghostty.Core.JumpList.JumpListProfiles.From(
+                    ProfileRegistry?.Profiles
+                    ?? System.Array.Empty<Ghostty.Core.Profiles.ResolvedProfile>()),
+                exePath: exePath,
+                appId: Ghostty.Core.AppIdentity.AumId);
+            builder.Build();
+        }
+        catch (System.Exception ex)
+        {
+            // See AumidFailed: NullLogger until the factory builds.
+            Ghostty.Logging.StaticLoggers.App.LogJumpListFailed(ex);
+        }
     }
 
     /// <summary>
@@ -1207,6 +1294,10 @@ public partial class App : Application
         if (closing is { RegisteredRoot: { } root })
             WindowsByRoot.Remove(root);
 
+        if (ReferenceEquals(LastRegularWindow, closing))
+            LastRegularWindow = System.Linq.Enumerable.FirstOrDefault(
+                AllWindows, w => !w.IsQuickTerminal);
+
         // Detach this window's session-persistence subscriptions.
         if (closing is not null)
             _sessionManager?.Untrack(closing);
@@ -1252,7 +1343,11 @@ public partial class App : Application
                 // _configService's ProfileConfigChanged event. The
                 // DiscoveryService holds no unmanaged resources, so
                 // we just drop the ref and let GC claim it.
-                _profileRegistry?.Dispose();
+                if (_profileRegistry is not null)
+                {
+                    _profileRegistry.ProfilesChanged -= OnProfilesChangedRebuildJumpList;
+                    _profileRegistry.Dispose();
+                }
 
                 // Flush any pending debounced writes before the editor
                 // is gone. Dispose waits for an in-flight timer

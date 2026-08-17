@@ -32,6 +32,44 @@
                 </ctrl:SettingsCard>
 
                 <ctrl:SettingsCard
+                    Header="Vertical tab width"
+                    Description="Expanded sidebar width in pixels when vertical tabs are pinned. 80–600, default 220."
+                    ctrl:SettingsCard.ConfigKey="vertical-tabs-width">
+                    <NumberBox
+                        x:Name="VerticalTabsWidthBox"
+                        Value="220"
+                        Minimum="80"
+                        Maximum="600"
+                        SmallChange="10"
+                        LargeChange="40"
+                        SpinButtonPlacementMode="Compact"
+                        MinWidth="160"
+                        ValueChanged="VerticalTabsWidth_ValueChanged" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Pin vertical tabs expanded"
+                    Description="Start the vertical sidebar expanded. The chevron still toggles at runtime."
+                    ctrl:SettingsCard.ConfigKey="vertical-tabs-pinned">
+                    <ToggleSwitch
+                        x:Name="VerticalTabsPinnedToggle"
+                        OffContent="Icon rail"
+                        OnContent="Pinned expanded"
+                        Toggled="VerticalTabsPinnedToggle_Toggled" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Expand vertical tabs on hover"
+                    Description="Hovering the collapsed rail expands the sidebar. Leave it to collapse again unless pinned."
+                    ctrl:SettingsCard.ConfigKey="vertical-tabs-hover-expand">
+                    <ToggleSwitch
+                        x:Name="VerticalTabsHoverToggle"
+                        OffContent="Click chevron to expand"
+                        OnContent="Expand on hover"
+                        Toggled="VerticalTabsHoverToggle_Toggled" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
                     Header="Undo timeout (ms)"
                     Description="How long a pane split, close, resize, or zoom can be undone (Ctrl+Shift+Z), in milliseconds. Set to 0 to disable undo. Ghostty default is 5000 (5 seconds)."
                     ctrl:SettingsCard.ConfigKey="undo-timeout">
@@ -52,12 +90,50 @@
                         ValueChanged="UndoTimeout_ValueChanged" />
                 </ctrl:SettingsCard>
 
+                <ctrl:SettingsCard
+                    Header="Confirm close"
+                    Description="When to confirm closing a tab: never, when the tab has multiple panes, or always."
+                    ctrl:SettingsCard.ConfigKey="confirm-close-surface">
+                    <ComboBox x:Name="ConfirmCloseCombo" MinWidth="180"
+                              SelectionChanged="ConfirmClose_SelectionChanged">
+                        <ComboBoxItem Tag="false" Content="Never" />
+                        <ComboBoxItem Tag="true" Content="Multiple panes" />
+                        <ComboBoxItem Tag="always" Content="Always" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+
                 <ctrl:SettingsCard Header="Configuration"
                                    Description="Reload from disk or open the config file in your default editor.">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button Content="Reload" Click="ReloadButton_Click" />
                         <Button Content="Open File" Click="OpenFileButton_Click" />
                     </StackPanel>
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup Header="Command Palette"
+                                Description="Look and grouping of the command palette overlay.">
+                <ctrl:SettingsCard
+                    Header="Command palette backdrop"
+                    Description="Backdrop material for the command palette overlay (acrylic, mica, or opaque)."
+                    ctrl:SettingsCard.ConfigKey="command-palette-background">
+                    <ComboBox x:Name="PaletteBackgroundCombo" MinWidth="180"
+                              SelectionChanged="PaletteBackground_SelectionChanged">
+                        <ComboBoxItem Tag="acrylic" Content="Acrylic" />
+                        <ComboBoxItem Tag="mica" Content="Mica" />
+                        <ComboBoxItem Tag="opaque" Content="Opaque" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Group palette commands by category"
+                    Description="Group entries in the command palette by category instead of listing them flat."
+                    ctrl:SettingsCard.ConfigKey="command-palette-group-commands">
+                    <ToggleSwitch
+                        x:Name="PaletteGroupToggle"
+                        OffContent="Flat list"
+                        OnContent="Grouped by category"
+                        Toggled="PaletteGroupToggle_Toggled" />
                 </ctrl:SettingsCard>
             </ctrl:SettingsGroup>
         </StackPanel>

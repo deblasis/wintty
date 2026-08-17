@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
+using Microsoft.UI.Xaml.Automation;
 
 namespace Ghostty.Tabs;
 
@@ -114,7 +115,9 @@ internal sealed partial class TabColorPalettePicker : UserControl
             Child = content,
         };
 
-        ToolTipService.SetToolTip(border, TabColorPalette.LocalizedName(color));
+        var label = TabColorPalette.LocalizedName(color);
+        ToolTipService.SetToolTip(border, label);
+        AutomationProperties.SetName(border, label);
         border.Tapped += (_, e) =>
         {
             e.Handled = true;

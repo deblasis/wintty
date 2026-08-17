@@ -11,19 +11,6 @@ using WinClipboard = Windows.ApplicationModel.DataTransfer.Clipboard;
 
 namespace Ghostty.Settings;
 
-/// <summary>Picks header vs entry template by row type (AOT-safe, no reflection).</summary>
-internal sealed class CheatRowTemplateSelector : DataTemplateSelector
-{
-    public DataTemplate? HeaderTemplate { get; set; }
-    public DataTemplate? EntryTemplate { get; set; }
-
-    protected override DataTemplate? SelectTemplateCore(object item)
-        => item is KeybindCategoryHeader ? HeaderTemplate : EntryTemplate;
-
-    protected override DataTemplate? SelectTemplateCore(object item, DependencyObject container)
-        => SelectTemplateCore(item);
-}
-
 internal sealed partial class CheatSheetDialog : ContentDialog
 {
     private readonly KeybindCatalog _catalog;
@@ -38,7 +25,8 @@ internal sealed partial class CheatSheetDialog : ContentDialog
         ApplyFilter();
     }
 
-    private void ApplyFilter() => RowsList.ItemsSource = _catalog.Filter(SearchBox.Text);
+    private void ApplyFilter()
+        => WinUiList.ReplaceItems(RowsList.Items, _catalog.Filter(SearchBox.Text));
 
     private void SearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
@@ -49,15 +37,27 @@ internal sealed partial class CheatSheetDialog : ContentDialog
     private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
         if (args.InRecycleQueue) return;
-        var root = args.ItemContainer.ContentTemplateRoot;
+        if (args.ItemContainer.ContentTemplateRoot is not Grid root) return;
+        var header = root.FindName("HeaderText") as TextBlock;
+        var entry = root.FindName("EntryGrid") as Grid;
         switch (args.Item)
         {
-            case KeybindCategoryHeader header when root is TextBlock headerText:
-                headerText.Text = header.Name;
+            case KeybindCategoryHeader h:
+                if (header is not null)
+                {
+                    header.Text = h.Name;
+                    header.Visibility = Visibility.Visible;
+                }
+                if (entry is not null) entry.Visibility = Visibility.Collapsed;
                 break;
-            case KeybindListItem item when root is Grid grid:
-                if (grid.FindName("FriendlyText") is TextBlock f) f.Text = item.Friendly;
-                if (grid.FindName("LabelText") is TextBlock l) l.Text = item.Label;
+            case KeybindListItem item:
+                if (header is not null) header.Visibility = Visibility.Collapsed;
+                if (entry is not null)
+                {
+                    entry.Visibility = Visibility.Visible;
+                    if (entry.FindName("FriendlyText") is TextBlock f) f.Text = item.Friendly;
+                    if (entry.FindName("LabelText") is TextBlock l) l.Text = item.Label;
+                }
                 break;
         }
     }

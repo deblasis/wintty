@@ -45,8 +45,8 @@ public class JumpListBuilderTests
         builder.Build();
 
         Assert.Equal(2, fake.Tasks.Count);
-        Assert.Contains(fake.Tasks, t => t.title == "New Window");
-        Assert.Contains(fake.Tasks, t => t.title == "New Tab in Current Window");
+        Assert.Contains(fake.Tasks, t => t.title == "New Window" && t.args == "--jumplist-action=new-window");
+        Assert.Contains(fake.Tasks, t => t.title == "New Tab in Current Window" && t.args == "--jumplist-action=new-tab");
         Assert.All(fake.Tasks, t => Assert.Equal(TestExe, t.exe));
     }
 
@@ -78,7 +78,7 @@ public class JumpListBuilderTests
         var (categoryName, entries) = fake.Categories[0];
         Assert.Equal("Pinned Profiles", categoryName);
         Assert.Equal(2, entries.Count);
-        Assert.Contains(entries, e => e.title == "PowerShell");
-        Assert.Contains(entries, e => e.title == "Command Prompt");
+        Assert.Contains(entries, e => e.title == "PowerShell" && e.args == "--jumplist-profile=pwsh");
+        Assert.Contains(entries, e => e.title == "Command Prompt" && e.args == "--jumplist-profile=cmd");
     }
 }

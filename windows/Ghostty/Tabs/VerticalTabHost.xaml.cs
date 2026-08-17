@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using Ghostty.Core.Config;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
 using Ghostty.Hosting;
@@ -43,13 +44,11 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     public FrameworkElement IconBadge => IconBadgeHost;
 
-    // TODO(config): vertical-tabs-width (int px, default 220)
-    private const double ExpandedWidth = 220;
-    // TODO(config): vertical-tabs-pinned (bool, default false)
-    private bool _pinnedExpanded = false;
-
-    // TODO(config): vertical-tabs-hover-expand (bool, default false)
-    private const bool HoverExpandEnabled = false;
+    private double _expandedWidth = WindowsOnlyKeyParsers.VerticalTabsWidthDefault;
+    private bool _pinnedExpanded;
+    private bool _hoverExpandEnabled;
+    private bool _hoverHooksAttached;
+    private bool _pointerOverStrip;
     private const int HoverEnterDelayMs = 200;
     private const int HoverLeaveDelayMs = 400;
     private const int TypingSuppressionMs = 1500;
@@ -70,6 +69,16 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// RootGrid.ColumnDefinitions[0]) and animates it in response.
     /// </summary>
     public event EventHandler<double>? StripWidthChangeRequested;
+
+    /// <summary>
+    /// Outer strip column target for the current pin state. LayoutCoordinator
+    /// Snap/Animate use this so a pinned-expanded config does not get
+    /// smashed back to the icon-rail width on every layout snap.
+    /// </summary>
+    internal double CurrentStripTarget =>
+        _pinnedExpanded
+            ? _expandedWidth
+            : Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth;
 
     public VerticalTabHost(TabManager manager, PaneActionRouter router, DialogTracker dialogs, GhosttyHost? host = null)
     {
@@ -102,23 +111,12 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
         // spans the whole strip vertically.
         HandleHost.SizeChanged += (_, e) => _dragHandle.Height = e.NewSize.Height;
 
-        // Hover-expand pointer hooks. The state machine is gated
-        // behind HoverExpandEnabled so flipping the constant is
-        // the only thing needed to test it. The constant makes one
-        // branch of the if statically unreachable; suppress CS0162
-        // here specifically because the whole point of this gate
-        // is to be toggled for manual testing.
-#pragma warning disable CS0162
-        if (HoverExpandEnabled)
+        ApplyFromConfig(App.ConfigService);
+        if (App.ConfigService is { } cfg)
         {
-            StripHost.PointerEntered += OnStripPointerEntered;
-            StripHost.PointerExited += OnStripPointerExited;
+            cfg.ConfigChanged += OnConfigChanged;
+            Unloaded += (_, _) => cfg.ConfigChanged -= OnConfigChanged;
         }
-#pragma warning restore CS0162
-
-        // PaneHost parenting and visibility are owned by MainWindow
-        // via a shared container (see #171). Same for the title-bar
-        // TextBlock that used to live in this UserControl.
 
         // The new-tab button is the composite NewTabSplitButton;
         // it routes Click / Alt+Click / Shift+Click through
@@ -143,21 +141,115 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     internal void AttachOwner(MainWindow owner) => _strip.AttachOwner(owner);
 
+    private void OnConfigChanged(IConfigService cfg) => ApplyFromConfig(cfg);
+
+    private void ApplyFromConfig(IConfigService? cfg)
+    {
+        _expandedWidth = cfg?.VerticalTabsWidth
+            ?? WindowsOnlyKeyParsers.VerticalTabsWidthDefault;
+        var wantPinned = cfg?.VerticalTabsPinned ?? false;
+        _hoverExpandEnabled = cfg?.VerticalTabsHoverExpand ?? false;
+        SyncHoverHooks();
+
+        // Cold start: honor pinned without firing the tween (LayoutCoordinator
+        // has not subscribed yet). Reloads go through ApplyPinned so the
+        // outer column actually moves.
+        if (StripWidthChangeRequested is null)
+        {
+            _pinnedExpanded = wantPinned;
+            _state = wantPinned
+                ? VerticalTabStripState.PinnedExpanded
+                : VerticalTabStripState.Collapsed;
+            _strip.IsExpanded = _pinnedExpanded;
+            _dragHandle.Visibility = _pinnedExpanded
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            return;
+        }
+
+        ApplyPinned(wantPinned);
+        if (!_pinnedExpanded
+            && _state is VerticalTabStripState.HoverExpanded
+                or VerticalTabStripState.HoverExpanding)
+        {
+            StripHost.Width = _expandedWidth;
+        }
+    }
+
+    private void SyncHoverHooks()
+    {
+        if (_hoverExpandEnabled == _hoverHooksAttached) return;
+        if (_hoverExpandEnabled)
+        {
+            // StripHost is a ContentPresenter: pointer hits land on
+            // _strip, and PointerEntered does not bubble, so hooking
+            // the presenter never fires.
+            _strip.PointerEntered += OnStripPointerEntered;
+            _strip.PointerExited += OnStripPointerExited;
+            _hoverHooksAttached = true;
+        }
+        else
+        {
+            _strip.PointerEntered -= OnStripPointerEntered;
+            _strip.PointerExited -= OnStripPointerExited;
+            _hoverHooksAttached = false;
+            _hoverEnterTimer?.Stop();
+            _hoverLeaveTimer?.Stop();
+            if (_state is VerticalTabStripState.HoverExpanded
+                or VerticalTabStripState.HoverExpanding
+                or VerticalTabStripState.HoverCollapsing)
+            {
+                BeginHoverCollapse();
+            }
+        }
+    }
+
     private void OnSwitchLayoutClick(object sender, RoutedEventArgs e)
         => _router.RequestToggleTabLayout();
 
-    private void TogglePinned()
+    private void TogglePinned() => ApplyPinned(!_pinnedExpanded);
+
+    private void ApplyPinned(bool pinned)
     {
-        _pinnedExpanded = !_pinnedExpanded;
+        if (_pinnedExpanded == pinned)
+        {
+            if (pinned)
+                StripWidthChangeRequested?.Invoke(this, _expandedWidth);
+            return;
+        }
+
+        _pinnedExpanded = pinned;
         _strip.IsExpanded = _pinnedExpanded;
-        var target = _pinnedExpanded
-            ? ExpandedWidth
-            : Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth;
-        // MainWindow listens on this event and tweens both its
-        // RootGrid outer strip column AND our internal column in
-        // lockstep so the sidebar actually grows on-screen.
-        StripWidthChangeRequested?.Invoke(this, target);
         _dragHandle.Visibility = _pinnedExpanded ? Visibility.Visible : Visibility.Collapsed;
+        if (pinned)
+        {
+            // Pin owns the column width; drop any hover overlay so the
+            // two expand modes cannot fight.
+            ClearHoverOverlay();
+            _state = VerticalTabStripState.PinnedExpanded;
+        }
+        else
+        {
+            _state = VerticalTabStripState.Collapsed;
+        }
+        StripWidthChangeRequested?.Invoke(this, CurrentStripTarget);
+
+        // Chevron-collapse leaves the pointer on the rail, so
+        // PointerEntered never fires again. Resume hover from the
+        // current pointer position.
+        if (!pinned && _hoverExpandEnabled && _pointerOverStrip)
+        {
+            EnsureHoverEnterTimer();
+            _hoverEnterTimer!.Start();
+        }
+    }
+
+    private void ClearHoverOverlay()
+    {
+        _hoverEnterTimer?.Stop();
+        _hoverLeaveTimer?.Stop();
+        StripHost.Width = double.NaN;
+        Canvas.SetZIndex(StripHost, 0);
     }
 
     /// <summary>
@@ -181,6 +273,7 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     private void OnStripPointerEntered(object sender, PointerRoutedEventArgs e)
     {
+        _pointerOverStrip = true;
         if (_state != VerticalTabStripState.Collapsed) return;
         if (_pinnedExpanded) return;
         if (IsUserCurrentlyTyping()) return;
@@ -206,12 +299,15 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     {
         sender.Stop();
         if (_state != VerticalTabStripState.Collapsed) return;
+        if (_pinnedExpanded) return;
         BeginHoverExpand();
     }
 
     private void OnStripPointerExited(object sender, PointerRoutedEventArgs e)
     {
+        _pointerOverStrip = false;
         _hoverEnterTimer?.Stop();
+        if (_pinnedExpanded) return;
         if (_state != VerticalTabStripState.HoverExpanded) return;
 
         EnsureHoverLeaveTimer();
@@ -244,15 +340,13 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     private void BeginHoverExpand()
     {
-        // Render the strip as an overlay: raise its Z-order and
-        // give it an explicit Width so it floats over the terminal
-        // column. The ColumnDefinition is NOT resized, so the
-        // terminal content does not reflow — that's the key
-        // difference from pinned-expanded.
+        // After #171 the host lives in RootGrid column 0. An in-host
+        // overlay (StripHost.Width) is clipped to that column, so hover
+        // has to tween the outer strip column. Leave-collapse tweens it
+        // back. Not pinned: no drag handle.
         _state = VerticalTabStripState.HoverExpanding;
         _strip.IsExpanded = true;
-        Canvas.SetZIndex(StripHost, 100);
-        StripHost.Width = ExpandedWidth;
+        StripWidthChangeRequested?.Invoke(this, _expandedWidth);
         _state = VerticalTabStripState.HoverExpanded;
     }
 
@@ -260,8 +354,8 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     {
         _state = VerticalTabStripState.HoverCollapsing;
         _strip.IsExpanded = false;
-        StripHost.Width = double.NaN;
-        Canvas.SetZIndex(StripHost, 0);
+        StripWidthChangeRequested?.Invoke(
+            this, Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth);
         _state = VerticalTabStripState.Collapsed;
     }
 
@@ -270,16 +364,34 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     private void OnStripContextRequested(
         UIElement sender, ContextRequestedEventArgs e)
     {
-        // If the right-click landed on a ListViewItem (a tab), leave it
-        // to whatever per-item flyout exists (or to future per-tab menu
-        // work). Strip menu is only for empty sidebar space.
         var source = e.OriginalSource as DependencyObject;
-        if (VisualTreeHelperEx.FindAncestor<ListViewItem>(source) is not null)
+        var row = VisualTreeHelperEx.FindAncestor<ListViewItem>(source);
+        if (row is not null)
+        {
+            // Per-tab menu on the row. There is no TabViewItem.ContextFlyout
+            // in the vertical strip; swallowing this used to show nothing.
+            var tab = row.Content as TabModel ?? row.DataContext as TabModel;
+            if (tab is null) return;
+            var tabFlyout = TabContextMenuBuilder.Build(
+                _manager,
+                tab,
+                RequestCloseTabAsync,
+                requestDetachToNewWindow: t => TabWindowActions.DetachToNewWindow(XamlRoot, t),
+                _dialogs,
+                toggleTabLayout: () => _router.RequestToggleTabLayout(),
+                isVertical: true,
+                getSnapSource: () => TabWindowActions.GetSnapSource(XamlRoot),
+                detachWithZone: (t, z) => TabWindowActions.DetachWithZone(XamlRoot, t, z));
+            var tabAnchor = (FrameworkElement)sender;
+            if (e.TryGetPosition(tabAnchor, out Point tabPos))
+                tabFlyout.ShowAt(tabAnchor, new FlyoutShowOptions { Position = tabPos });
+            else
+                tabFlyout.ShowAt(row);
+            e.Handled = true;
             return;
+        }
 
-        // Collapsed == not pinned. If pinned, the sidebar is expanded;
-        // if unpinned, it's collapsed.
-        bool collapsed = !_pinnedExpanded;
+        bool collapsed = !_pinnedExpanded; // not pinned → icon rail
 
         var flyout = StripContextMenuBuilder.Build(
             _manager,
@@ -301,30 +413,7 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     /// <inheritdoc/>
     public async Task RequestCloseTabAsync(TabModel tab)
-    {
-        // TODO(config): confirm-close-multi-pane (bool, default true)
-        const bool confirmCloseMultiPane = true;
-
-        var paneCount = tab.PaneHost.PaneCount;
-        if (confirmCloseMultiPane && paneCount > 1)
-        {
-            var dlg = new ContentDialog
-            {
-                Title = "Close tab?",
-                Content = $"This tab has {paneCount} panes. Close all of them?",
-                PrimaryButtonText = "Close all",
-                SecondaryButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Secondary,
-                XamlRoot = XamlRoot,
-            };
-            using (_dialogs.Track(dlg))
-            {
-                var res = await dlg.ShowAsync();
-                if (res != ContentDialogResult.Primary) return;
-            }
-        }
-        _manager.CloseTab(tab);
-    }
+        => await TabCloseConfirmation.RequestAsync(_manager, tab, XamlRoot, _dialogs);
 
     /// <summary>
     /// Apply palette-derived colors to the vertical tab strip.

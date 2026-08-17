@@ -94,6 +94,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // requiring CharacterReceived to re-derive the original VirtualKey.
     private bool _suppressNextCharacter;
 
+    // High surrogate held across CharacterReceived events. WinUI delivers
+    // supplementary-plane scalars as two events; see WmCharUtf8.
+    private char _pendingWmCharHigh;
+
     // Set while RaiseScrollbarChanged is writing into VerticalScrollBar.
     // Prevents the resulting Scroll event from round-tripping back into
     // libghostty as a "scroll_to_row" binding action (feedback loop).
@@ -1138,6 +1142,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     private void SetFocusState(bool focused)
     {
+        if (!focused)
+            _pendingWmCharHigh = '\0';
+
         if (_focused == focused) return;
         // Don't flip _focused before we know we can actually push the new
         // state to the surface: otherwise the next focus change after the
@@ -1683,14 +1690,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
-        // Forward WM_CHAR unchanged. The embedded apprt's key+text combining
-        // handles C0 control filtering on its side: the preceding key event
-        // already produced Ctrl+C / Backspace / etc via the key encoder, and
-        // the apprt drops the duplicated WM_CHAR text. Filtering here would
-        // also clobber legitimate U+007F / U+001B text the core might want.
-        var ch = e.Character;
+        // Forward WM_CHAR unchanged, but assemble surrogate pairs first.
+        // WinUI 3 raises CharacterReceived once per UTF-16 unit; encoding
+        // each unit with new Rune(ch) throws on D800–DFFF and kills the
+        // UI thread. C0 filtering stays in libghostty (see above).
         Span<byte> buf = stackalloc byte[4];
-        var len = new Rune(ch).EncodeToUtf8(buf);
+        if (!WmCharUtf8.TryEncode(e.Character, ref _pendingWmCharHigh, buf, out var len))
+            return;
         unsafe
         {
             fixed (byte* p = buf)

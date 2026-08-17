@@ -13,7 +13,11 @@ public class SettingsIndexTests
         // General
         "auto-reload-config",
         "undo-timeout",
+        "confirm-close-surface",
         "vertical-tabs",
+        "vertical-tabs-width",
+        "vertical-tabs-pinned",
+        "vertical-tabs-hover-expand",
         "command-palette-background",
         "command-palette-group-commands",
         // Appearance
@@ -46,6 +50,12 @@ public class SettingsIndexTests
         "cursor-style",
         "cursor-style-blink",
         "mouse-hide-while-typing",
+        // Advanced
+        "windows-single-instance",
+        "windows-high-contrast",
+        "quick-terminal-key",
+        "log-level",
+        "log-filter",
     };
 
     [Fact]

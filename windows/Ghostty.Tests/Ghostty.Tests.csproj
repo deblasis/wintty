@@ -116,6 +116,18 @@
     <EmbeddedResource Include="..\Ghostty\Settings\Pages\**\*.xaml"
                       Link="Settings\Pages\%(Filename)%(Extension)"
                       LogicalName="Ghostty.Tests.Settings.Pages.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\Ghostty\Controls\Settings\SettingsCard.xaml"
+                      Link="Settings\Controls\SettingsCard.xaml"
+                      LogicalName="Ghostty.Tests.Settings.Controls.SettingsCard.xaml" />
+    <EmbeddedResource Include="..\Ghostty\Controls\Search\SearchBarControl.xaml"
+                      Link="Search\SearchBarControl.xaml"
+                      LogicalName="Ghostty.Tests.Search.SearchBarControl.xaml" />
+    <EmbeddedResource Include="..\Ghostty\Settings\CheatSheetDialog.xaml"
+                      Link="Settings\CheatSheetDialog.xaml"
+                      LogicalName="Ghostty.Tests.Settings.CheatSheetDialog.xaml" />
+    <EmbeddedResource Include="..\Ghostty\Tabs\VerticalTabStrip.xaml"
+                      Link="Tabs\VerticalTabStrip.xaml"
+                      LogicalName="Ghostty.Tests.Tabs.VerticalTabStrip.xaml" />
     <!--
       The shell project file, for LaunchIconAssetsTests. It carries the one
       copy of the launch-icon ladder that no C# type can share: an explicit

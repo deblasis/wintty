@@ -163,6 +163,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 RequestCloseTabAsync,
                 requestDetachToNewWindow: RequestDetachToNewWindow,
                 _dialogs,
+                toggleTabLayout: () => _router.RequestToggleTabLayout(),
                 getSnapSource: GetSnapSource,
                 detachWithZone: DetachWithZone),
             DataContext = tab,
@@ -294,40 +295,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// is keyed by <see cref="XamlRoot"/>, so the lookup is O(1).
     /// </summary>
     private void RequestDetachToNewWindow(TabModel tab)
-    {
-        var xamlRoot = XamlRoot;
-        if (xamlRoot is null) return;
+        => TabWindowActions.DetachToNewWindow(XamlRoot, tab);
 
-        if (App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
-            main.DetachTabToNewWindow(tab);
-    }
-
-    /// <summary>
-    /// Resolve the source window's current monitor work area for the
-    /// snap zone picker miniature.
-    /// </summary>
     private SnapZoneSource GetSnapSource()
-    {
-        var xamlRoot = XamlRoot;
-        if (xamlRoot is not null && App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
-        {
-            var display = SnapPlacement.ResolveDisplayFor(main.AppWindow);
-            var w = display.WorkArea;
-            return new SnapZoneSource(w.Width, w.Height);
-        }
-        // Fallback: standard 1080p.
-        return new SnapZoneSource(1920, 1080);
-    }
+        => TabWindowActions.GetSnapSource(XamlRoot);
 
-    /// <summary>
-    /// Detach a tab into a new window snapped to the chosen zone.
-    /// </summary>
     private void DetachWithZone(TabModel tab, Ghostty.Core.Tabs.SnapZone zone)
-    {
-        var xamlRoot = XamlRoot;
-        if (xamlRoot is not null && App.WindowsByRoot.TryGetValue(xamlRoot, out var main))
-            main.DetachTabToZone(tab, zone);
-    }
+        => TabWindowActions.DetachWithZone(XamlRoot, tab, zone);
 
     /// <summary>
     /// Wire the owning window into <see cref="NewTabButton"/> so its
@@ -362,30 +336,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// here keeps every close path consistent.
     /// </summary>
     public async Task RequestCloseTabAsync(TabModel tab)
-    {
-        // TODO(config): confirm-close-multi-pane (bool, default true)
-        const bool confirmCloseMultiPane = true;
-
-        var paneCount = tab.PaneHost.PaneCount;
-        if (confirmCloseMultiPane && paneCount > 1)
-        {
-            var dlg = new ContentDialog
-            {
-                Title = "Close tab?",
-                Content = $"This tab has {paneCount} panes. Close all of them?",
-                PrimaryButtonText = "Close all",
-                SecondaryButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Secondary,
-                XamlRoot = XamlRoot,
-            };
-            using (_dialogs.Track(dlg))
-            {
-                var res = await dlg.ShowAsync();
-                if (res != ContentDialogResult.Primary) return;
-            }
-        }
-        _manager.CloseTab(tab);
-    }
+        => await TabCloseConfirmation.RequestAsync(_manager, tab, XamlRoot, _dialogs);
 
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
