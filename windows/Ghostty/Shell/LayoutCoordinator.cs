@@ -110,10 +110,11 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void Snap(bool verticalTabs)
     {
-        var w = verticalTabs ? VerticalStripCollapsedWidth : 0;
+        var w = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
         _stripColumn.Width = new GridLength(w);
         _titleBarStripMirror.Width = new GridLength(w);
-        _verticalTabHost.SetInternalStripWidth(VerticalStripCollapsedWidth);
+        _verticalTabHost.SetInternalStripWidth(
+            verticalTabs ? _verticalTabHost.CurrentStripTarget : VerticalStripCollapsedWidth);
 
         _verticalHost.Opacity = verticalTabs ? 1 : 0;
         _verticalHost.Visibility = verticalTabs ? Visibility.Visible : Visibility.Collapsed;
@@ -198,7 +199,7 @@ internal sealed class LayoutCoordinator
         if (_switching) return;
         _switching = true;
 
-        var targetColWidth = verticalTabs ? VerticalStripCollapsedWidth : 0;
+        var targetColWidth = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
 
         if (!_verticalTitleBarSuppressed)
             _verticalTitleBar.Visibility = Visibility.Visible;
@@ -264,7 +265,8 @@ internal sealed class LayoutCoordinator
         // hides the jump; see the Animate summary for rationale.
         _stripColumn.Width = new GridLength(targetColWidth);
         _titleBarStripMirror.Width = new GridLength(targetColWidth);
-        _verticalTabHost.SetInternalStripWidth(VerticalStripCollapsedWidth);
+        _verticalTabHost.SetInternalStripWidth(
+            verticalTabs ? _verticalTabHost.CurrentStripTarget : VerticalStripCollapsedWidth);
 
         sb.Completed += (_, _) =>
         {

@@ -42,11 +42,10 @@ public class SettingsCardConfigKeyParityTests
     // Indexed so search can surface them, but not editable from any settings
     // page yet. Search hits for these navigate to the page without scrolling
     // to anything, which is a gap in the UI, not a broken key. Delete an
-    // entry here when its control lands.
+    // entry here when its control lands. Keep the array (even empty) so the
+    // stale-exemption test still compiles.
     private static readonly string[] KeysWithNoControlYet =
     {
-        "command-palette-background",
-        "command-palette-group-commands",
     };
 
     [Fact]
