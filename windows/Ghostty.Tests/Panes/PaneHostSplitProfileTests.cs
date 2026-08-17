@@ -36,4 +36,24 @@ public class PaneHostSplitProfileTests
         // FakePaneHost starts at PaneCount=1; Split increments to 2.
         Assert.Equal(2, host.PaneCount);
     }
+
+    [Fact]
+    public void PaneHost_NoArgSplit_InheritsActiveLeafSnapshot()
+    {
+        var src = ReadEmbedded(@"Panes\PaneHost.cs");
+        Assert.Contains("snapshot: _activeLeaf.Snapshot", src);
+        Assert.DoesNotContain("Legacy keyboard-Split path; no profile", src);
+    }
+
+    private static string ReadEmbedded(string suffix)
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        var name = System.Linq.Enumerable.Single(
+            asm.GetManifestResourceNames(),
+            n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+        using var stream = asm.GetManifestResourceStream(name);
+        Assert.NotNull(stream);
+        using var reader = new System.IO.StreamReader(stream!);
+        return reader.ReadToEnd();
+    }
 }

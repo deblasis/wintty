@@ -34,8 +34,9 @@ internal static class StripContextMenuBuilder
         flyout.Items.Add(new MenuFlyoutSeparator());
 
         // Label flips to match the destination state so users see
-        // where they will end up; matches TabContextMenuBuilder's
-        // pattern.
+        // where they will end up. The per-tab menu (TabContextMenuBuilder)
+        // offers the same switch because a filled tab bar has no empty
+        // strip chrome to right-click.
         var switchLayout = new MenuFlyoutItem
         {
             Text = isVertical ? "Switch to horizontal tabs" : "Switch to vertical tabs",

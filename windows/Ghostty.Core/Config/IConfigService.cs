@@ -35,6 +35,27 @@ public interface IConfigService : IDisposable
     bool VerticalTabs { get; }
 
     /// <summary>
+    /// Windows-only: expanded vertical-strip width in pixels.
+    /// Clamped to 80–600, default 220. Backed by
+    /// <c>vertical-tabs-width</c>.
+    /// </summary>
+    int VerticalTabsWidth { get; }
+
+    /// <summary>
+    /// Windows-only: true when the vertical strip starts pinned
+    /// expanded. Default false. Backed by
+    /// <c>vertical-tabs-pinned</c>.
+    /// </summary>
+    bool VerticalTabsPinned { get; }
+
+    /// <summary>
+    /// Windows-only: true when hovering the collapsed vertical
+    /// rail expands the sidebar. Default false. Backed by
+    /// <c>vertical-tabs-hover-expand</c>.
+    /// </summary>
+    bool VerticalTabsHoverExpand { get; }
+
+    /// <summary>
     /// Windows-only: true when the command palette groups entries
     /// by category. Default false. Backed by the
     /// "command-palette-group-commands" key.
@@ -114,6 +135,13 @@ public interface IConfigService : IDisposable
     /// <see cref="Ghostty.Core.Panes.UndoPolicy.FromConfigMilliseconds"/>.
     /// </summary>
     int UndoTimeoutMs { get; }
+
+    /// <summary>
+    /// Upstream <c>confirm-close-surface</c>: <c>false</c>, <c>true</c>
+    /// (default), or <c>always</c>. Tab close uses
+    /// <see cref="ConfirmCloseSurfaceParser"/>.
+    /// </summary>
+    string ConfirmCloseSurface { get; }
 
     /// <summary>Decoded <c>bell-features</c> packed struct from config.</summary>
     Ghostty.Core.Bell.BellFeatures BellFeatures { get; }
