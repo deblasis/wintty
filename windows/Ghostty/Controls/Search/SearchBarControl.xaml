@@ -44,6 +44,7 @@
             -->
             <TextBox x:Name="NeedleBox"
                      Grid.Column="0"
+                     AutomationProperties.Name="Search scrollback"
                      PlaceholderText="Search scrollback"
                      AcceptsReturn="False"
                      VerticalAlignment="Center"
@@ -91,6 +92,7 @@
                         Padding="6,4"
                         Background="Transparent"
                         BorderThickness="0"
+                        AutomationProperties.Name="Close search"
                         ToolTipService.ToolTip="Close (Esc)"
                         Click="OnCloseClick">
                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"

@@ -1,15 +1,82 @@
 <Page
     x:Class="Ghostty.Settings.Pages.AdvancedPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="8" MaxWidth="600">
-            <TextBlock Text="Advanced" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,16" />
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="Advanced" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,20" />
+
+            <ctrl:SettingsGroup Header="Windows"
+                                Description="Windows-only process and accessibility knobs.">
+                <ctrl:SettingsCard
+                    Header="Single instance"
+                    Description="Route a second launch into the already-running instance instead of starting a separate process. Takes effect on the next launch. Needed for jump-list New Tab to land in this window."
+                    ctrl:SettingsCard.ConfigKey="windows-single-instance">
+                    <ToggleSwitch
+                        x:Name="SingleInstanceToggle"
+                        OffContent="Separate processes"
+                        OnContent="One instance"
+                        Toggled="SingleInstanceToggle_Toggled" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Follow High Contrast"
+                    Description="When Windows High Contrast is on, restyle the terminal surface to match. Off keeps your configured colors."
+                    ctrl:SettingsCard.ConfigKey="windows-high-contrast">
+                    <ToggleSwitch
+                        x:Name="HighContrastToggle"
+                        OffContent="Keep configured colors"
+                        OnContent="Follow Windows"
+                        Toggled="HighContrastToggle_Toggled" />
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Quake terminal hotkey"
+                    Description="Global hotkey that toggles the drop-down terminal. Example: ctrl+backquote, alt+f12. Unparseable values fall back to ctrl+backquote."
+                    ctrl:SettingsCard.ConfigKey="quick-terminal-key">
+                    <TextBox
+                        x:Name="QuakeKeyBox"
+                        MinWidth="220"
+                        PlaceholderText="ctrl+backquote"
+                        LostFocus="QuakeKeyBox_LostFocus" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
+
+            <ctrl:SettingsGroup Header="Logging"
+                                Description="App log verbosity. Takes effect on the next launch.">
+                <ctrl:SettingsCard
+                    Header="Log level"
+                    Description="Minimum severity written to the app log."
+                    ctrl:SettingsCard.ConfigKey="log-level">
+                    <ComboBox x:Name="LogLevelCombo" MinWidth="160"
+                              SelectionChanged="LogLevel_SelectionChanged">
+                        <ComboBoxItem Tag="trace" Content="Trace" />
+                        <ComboBoxItem Tag="debug" Content="Debug" />
+                        <ComboBoxItem Tag="info" Content="Info" />
+                        <ComboBoxItem Tag="warn" Content="Warn" />
+                        <ComboBoxItem Tag="error" Content="Error" />
+                        <ComboBoxItem Tag="off" Content="Off" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
+
+                <ctrl:SettingsCard
+                    Header="Log filter"
+                    Description="Comma-separated CATEGORY=LEVEL pairs overriding log-level per component."
+                    ctrl:SettingsCard.ConfigKey="log-filter">
+                    <TextBox
+                        x:Name="LogFilterBox"
+                        MinWidth="280"
+                        PlaceholderText="Ghostty.Host=debug"
+                        LostFocus="LogFilterBox_LostFocus" />
+                </ctrl:SettingsCard>
+            </ctrl:SettingsGroup>
 
             <TextBlock
-                Text="Advanced settings property grid will be built once config key enumeration is available from libghostty."
+                Text="Remaining Ghostty config keys will land here once libghostty exposes key enumeration."
                 TextWrapping="Wrap"
+                Margin="0,16,0,0"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
     </ScrollViewer>

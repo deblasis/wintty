@@ -60,6 +60,10 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     // no longer required for correctness, only for the no-lookup-per-read
     // optimization.
     public bool VerticalTabs { get; private set; }
+    public int VerticalTabsWidth { get; private set; }
+        = Ghostty.Core.Config.WindowsOnlyKeyParsers.VerticalTabsWidthDefault;
+    public bool VerticalTabsPinned { get; private set; }
+    public bool VerticalTabsHoverExpand { get; private set; }
     public bool CommandPaletteGroupCommands { get; private set; }
     public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
@@ -173,6 +177,12 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
     /// </summary>
     public int UndoTimeoutMs =>
         GetDurationMs("undo-timeout", (int)Ghostty.Core.Panes.UndoPolicy.Default.Window.TotalMilliseconds);
+
+    /// <summary>
+    /// Upstream <c>confirm-close-surface</c>. Enums come back as
+    /// UTF-8 strings from <c>ghostty_config_get</c>.
+    /// </summary>
+    public string ConfirmCloseSurface => GetString("confirm-close-surface", "true");
 
     /// <summary>
     /// Size of the quake window on each axis. Either axis can be
@@ -769,6 +779,17 @@ internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IPro
         // correctness requirement.
         VerticalTabs = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("vertical-tabs", ""),
+            defaultValue: false);
+        VerticalTabsWidth = WindowsOnlyKeyParsers.ParseIntClamped(
+            GetFileValue("vertical-tabs-width", ""),
+            fallback: WindowsOnlyKeyParsers.VerticalTabsWidthDefault,
+            min: WindowsOnlyKeyParsers.VerticalTabsWidthMin,
+            max: WindowsOnlyKeyParsers.VerticalTabsWidthMax);
+        VerticalTabsPinned = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("vertical-tabs-pinned", ""),
+            defaultValue: false);
+        VerticalTabsHoverExpand = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("vertical-tabs-hover-expand", ""),
             defaultValue: false);
         CommandPaletteGroupCommands = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("command-palette-group-commands", ""),

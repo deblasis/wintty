@@ -43,6 +43,14 @@ test "IDXGIFactory2 IID" {
     try std.testing.expectEqualSlices(u8, &iid.data4, &[_]u8{ 0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0 });
 }
 
+test "ISwapChainPanelNative2 IID" {
+    const iid = dxgi.ISwapChainPanelNative2.IID;
+    try std.testing.expectEqual(iid.data1, 0x88fd8248);
+    try std.testing.expectEqual(iid.data2, 0x10da);
+    try std.testing.expectEqual(iid.data3, 0x4810);
+    try std.testing.expectEqualSlices(u8, &iid.data4, &[_]u8{ 0xbb, 0x4c, 0x01, 0x0d, 0xd2, 0x7f, 0xae, 0xa9 });
+}
+
 test "ISwapChainPanelNative IID" {
     const iid = dxgi.ISwapChainPanelNative.IID;
     try std.testing.expectEqual(iid.data1, 0xf92f19d2);

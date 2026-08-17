@@ -56,6 +56,24 @@ public class TabManagerProfileSnapshotTests
     }
 
     [Fact]
+    public void Ctor_InitialSnapshot_PassesToFactoryAndAttaches()
+    {
+        ProfileSnapshot? captured = null;
+        var snapshot = SampleSnapshot();
+        var mgr = new TabManager(
+            snap =>
+            {
+                captured = snap;
+                return new FakePaneHost();
+            },
+            initialSnapshot: snapshot);
+
+        Assert.Same(snapshot, captured);
+        Assert.Same(snapshot, mgr.ActiveTab.ProfileSnapshot);
+        Assert.Single(mgr.Tabs);
+    }
+
+    [Fact]
     public void NewTab_WithSnapshot_PassesSnapshotToFactory()
     {
         ProfileSnapshot? capturedSnapshot = null;

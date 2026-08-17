@@ -2,6 +2,7 @@ using System;
 using Ghostty.Core;
 using Ghostty.Core.Tabs;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Ghostty.Tabs;
@@ -49,6 +50,9 @@ internal sealed partial class VerticalTabStrip : UserControl
             // the next click: right (E76C) when collapsed, left
             // (E76B) when expanded.
             ChevronIcon.Glyph = value ? "\uE76B" : "\uE76C";
+            var label = value ? "Collapse sidebar" : "Expand sidebar";
+            AutomationProperties.SetName(ChevronButton, label);
+            ToolTipService.SetToolTip(ChevronButton, label);
         }
     }
 

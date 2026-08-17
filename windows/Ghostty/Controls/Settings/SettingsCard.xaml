@@ -22,7 +22,13 @@
         Margin="0,0,0,6">
         <Grid ColumnSpacing="16" VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
+                <!--
+                  MinWidth keeps the label readable when Control is a wide
+                  Auto stack (profile rows: icon picker + two ToggleSwitches).
+                  Without it the star column collapses to ~1ch and wraps
+                  the header vertically.
+                -->
+                <ColumnDefinition Width="*" MinWidth="200" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 

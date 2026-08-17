@@ -45,4 +45,19 @@ public class WindowsOnlyKeyParsersTests
             defaultValue: "acrylic");
         Assert.Equal(expected, result);
     }
+
+    [Theory]
+    [InlineData(null, 220, 80, 600, 220)]
+    [InlineData("", 220, 80, 600, 220)]
+    [InlineData("300", 220, 80, 600, 300)]
+    [InlineData(" 180 ", 220, 80, 600, 180)]
+    [InlineData("10", 220, 80, 600, 80)]
+    [InlineData("9999", 220, 80, 600, 600)]
+    [InlineData("nope", 220, 80, 600, 220)]
+    [InlineData("220px", 220, 80, 600, 220)]
+    public void ParseIntClamped_Normalizes(
+        string? raw, int fallback, int min, int max, int expected)
+    {
+        Assert.Equal(expected, WindowsOnlyKeyParsers.ParseIntClamped(raw, fallback, min, max));
+    }
 }

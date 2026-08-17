@@ -276,9 +276,10 @@ public sealed partial class MainWindow : Window
         HostLifetimeSupervisor supervisor,
         ILoggerFactory loggerFactory,
         bool isQuickTerminal = false,
-        bool showLaunchIcon = false)
+        bool showLaunchIcon = false,
+        ProfileSnapshot? initialSnapshot = null)
         : this(configService, bootstrapHost, supervisor, loggerFactory, seedTab: null,
-               isQuickTerminal, showLaunchIcon: showLaunchIcon)
+               isQuickTerminal, showLaunchIcon: showLaunchIcon, initialSnapshot: initialSnapshot)
     {
     }
 
@@ -321,7 +322,8 @@ public sealed partial class MainWindow : Window
         TabModel? seedTab,
         bool isQuickTerminal = false,
         Ghostty.Core.Session.WindowSession? restore = null,
-        bool showLaunchIcon = false)
+        bool showLaunchIcon = false,
+        ProfileSnapshot? initialSnapshot = null)
     {
         InitializeComponent();
 
@@ -417,6 +419,15 @@ public sealed partial class MainWindow : Window
                     App.WindowsByRoot[RegisteredRoot] = this;
                 }
             }
+        }
+
+        if (!IsQuickTerminal)
+        {
+            Activated += (_, args) =>
+            {
+                if (args.WindowActivationState != Microsoft.UI.Xaml.WindowActivationState.Deactivated)
+                    App.NoteRegularWindowActivated(this);
+            };
         }
 
         // Detect initial system theme and notify libghostty so conditional
@@ -537,10 +548,20 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            // Fresh window (no restore, no adopted tab): honor an
+            // explicit snapshot (jump-list new window) or default-profile.
+            // Must reach TabManager's factory -- attaching after spawn
+            // does not update TerminalControl.Snapshot before OnLoaded.
+            var snap = seedTab is null
+                ? (initialSnapshot
+                    ?? Ghostty.Core.Session.SessionProfileResolver.ResolveDefault(
+                        App.ProfileRegistry))
+                : null;
             _tabManager = new TabManager(
                 snapshot => _factory.Create(snapshot),
                 seed: seedTab,
-                closedTabs: ClosedTabsStore);
+                closedTabs: ClosedTabsStore,
+                initialSnapshot: snap);
         }
         _router = new PaneActionRouter(
             _tabManager,
@@ -976,11 +997,8 @@ public sealed partial class MainWindow : Window
     {
         var window = new MainWindow(
             configService, bootstrapHost, supervisor, loggerFactory,
-            isQuickTerminal: false);
-        if (initialSnapshot is not null)
-        {
-            window._tabManager.ActiveTab.AttachProfileSnapshot(initialSnapshot);
-        }
+            isQuickTerminal: false,
+            initialSnapshot: initialSnapshot);
         return window;
     }
 
@@ -991,6 +1009,29 @@ public sealed partial class MainWindow : Window
     /// wrong origin. Call this once placement is done.
     /// </summary>
     internal void ActivateAfterPlacement() => Activate();
+
+    /// <summary>
+    /// Jump-list / single-instance "New Tab". Resolves
+    /// <paramref name="profileId"/> (or the registry default) when
+    /// possible; otherwise opens a tab with no snapshot. Must never
+    /// no-op: the caller already decided a tab belongs on this window.
+    /// </summary>
+    internal void OpenJumpListTab(string? profileId)
+    {
+        var registry = App.ProfileRegistry;
+        var id = profileId ?? registry?.DefaultProfileId;
+        if (id is not null && registry is not null
+            && (registry.Resolve(id)
+                ?? (registry.DefaultProfileId is { } d
+                    ? registry.Resolve(d)
+                    : null)) is not null)
+        {
+            OpenProfile(id, ProfileLaunchTarget.NewTab);
+            return;
+        }
+
+        _tabManager.NewTab();
+    }
 
     /// <summary>
     /// Single funnel for the new-tab split button and the
@@ -3013,7 +3054,11 @@ public sealed partial class MainWindow : Window
         // ghostty_surface_inspector lazily creates the inspector and can return
         // null; don't open a window we can't drive.
         var inspector = NativeMethods.SurfaceInspector(new GhosttySurface(surfaceHandle));
-        if (inspector.Handle == IntPtr.Zero) return;
+        if (inspector.Handle == IntPtr.Zero)
+        {
+            App.NotificationService?.Show(Ghostty.Core.Inspector.InspectorNotice.Dx12Unimplemented());
+            return;
+        }
 
         var window = new InspectorWindow(
             inspector, App.LoggerFactory?.CreateLogger<InspectorWindow>());
