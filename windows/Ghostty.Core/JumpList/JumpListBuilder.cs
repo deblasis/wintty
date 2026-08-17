@@ -13,11 +13,11 @@ namespace Ghostty.Core.JumpList;
 /// and always present.
 ///
 /// Pinned profiles: sourced from the <see cref="_profilesProvider"/>
-/// factory, which is currently always empty behind a
-/// <c>TODO(config)</c> marker. When profiles exist, each becomes
+/// factory (App maps <c>IProfileRegistry.Profiles</c> through
+/// <see cref="JumpListProfiles"/>). When profiles exist, each becomes
 /// an entry in a "Pinned Profiles" custom category with the
-/// profile's display name as the title and its shell command as
-/// the invocation argument.
+/// profile's display name as the title and <c>--jumplist-profile=id</c>
+/// as the invocation argument.
 /// </summary>
 internal sealed class JumpListBuilder
 {
@@ -43,14 +43,13 @@ internal sealed class JumpListBuilder
         _facade.SetAppId(_appId);
         _facade.BeginList();
 
-        // Static tasks. These always appear. The CLI argument shape
-        // is a placeholder: real wiring happens when libghostty's
-        // --action / --jumplist-action plumbing is defined.
-        // TODO(jumplist): finalise the CLI arg contract with libghostty
+        // Static tasks. These always appear. App.OpenWindowFromLaunch
+        // (and a single-instance forward) parse the same argv via
+        // JumpListLaunch.
         _facade.AddTask(_exePath, "--jumplist-action=new-window", "New Window");
         _facade.AddTask(_exePath, "--jumplist-action=new-tab", "New Tab in Current Window");
 
-        // Pinned profiles category. Empty today; TODO(config): profiles
+        // Pinned profiles category. Empty when the registry has none.
         var profiles = _profilesProvider();
         if (profiles.Count > 0)
         {

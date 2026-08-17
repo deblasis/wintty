@@ -90,6 +90,8 @@
                         BorderThickness="0"
                         VerticalAlignment="Center"
                         HorizontalAlignment="Right"
+                        AutomationProperties.Name="Close tab"
+                        ToolTipService.ToolTip="Close tab"
                         Click="OnRowCloseClick">
                     <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}"
                               Glyph="&#xE894;"
@@ -204,6 +206,8 @@
                 Padding="0"
                 Background="Transparent"
                 BorderThickness="0"
+                AutomationProperties.Name="Expand sidebar"
+                ToolTipService.ToolTip="Expand sidebar"
                 Click="OnChevronClick">
             <FontIcon x:Name="ChevronIcon"
                       FontFamily="{StaticResource SymbolThemeFontFamily}"

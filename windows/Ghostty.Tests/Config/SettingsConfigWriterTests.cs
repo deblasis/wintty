@@ -129,6 +129,9 @@ public class SettingsConfigWriterTests
         public bool SettingsUiEnabled => false;
         public double BackgroundOpacity => 1.0;
         public bool VerticalTabs => false;
+        public int VerticalTabsWidth => 220;
+        public bool VerticalTabsPinned => false;
+        public bool VerticalTabsHoverExpand => false;
         public bool CommandPaletteGroupCommands => false;
         public bool WindowsHighContrast => false;
         public void SetHighContrastOverride(string? body) { }
@@ -139,6 +142,7 @@ public class SettingsConfigWriterTests
         public string WindowTheme => "auto";
         public uint BackgroundColor => 0;
         public int UndoTimeoutMs => 5000;
+        public string ConfirmCloseSurface => "true";
         public Ghostty.Core.Bell.BellFeatures BellFeatures => default;
         public string? BellAudioPath => null;
         public double BellAudioVolume => 0.5;

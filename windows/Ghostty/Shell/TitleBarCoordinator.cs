@@ -44,6 +44,7 @@ internal sealed class TitleBarCoordinator
     private readonly Func<bool> _isVerticalMode;
 
     private TabModel? _boundTab;
+    private TabModel? _titleHookedTab;
     private LeafPane? _activeLeaf;
 
     // Quake window: borderless, no OS caption buttons, so the reserved
@@ -114,7 +115,11 @@ internal sealed class TitleBarCoordinator
             var scale = (_window.Content as FrameworkElement)?.XamlRoot?.RasterizationScale ?? 1.0;
             var dip = scale > 0 ? inset / scale : inset;
             if (dip > 0)
+            {
                 _captionInset.Width = new GridLength(dip);
+                if (_horizontalTabHost.DragRegion is FrameworkElement drag)
+                    drag.MinWidth = dip;
+            }
         }
         catch
         {
@@ -169,17 +174,19 @@ internal sealed class TitleBarCoordinator
     /// </summary>
     private void HookActiveTabTitle()
     {
+        if (_titleHookedTab is { } previousTab)
+            previousTab.PaneHost.LeafFocused -= OnActiveTabLeafFocused;
         if (_activeLeaf is { } previous)
             previous.Terminal().TitleChanged -= OnLiveTitleChanged;
 
         var tab = _tabs.ActiveTab;
+        _titleHookedTab = tab;
         var leaf = tab.PaneHost.ActiveLeaf;
         _activeLeaf = leaf;
         leaf.Terminal().TitleChanged += OnLiveTitleChanged;
         tab.ShellReportedTitle = leaf.Terminal().CurrentTitle;
         _window.Title = tab.EffectiveTitle;
 
-        tab.PaneHost.LeafFocused -= OnActiveTabLeafFocused;
         tab.PaneHost.LeafFocused += OnActiveTabLeafFocused;
     }
 
@@ -194,8 +201,7 @@ internal sealed class TitleBarCoordinator
 
     private void OnLiveTitleChanged(object? sender, string title)
     {
-        // TabManager raises WindowTitleChanged in response, which
-        // sets Window.Title via the constructor's subscription.
+        if (!LiveTitleGuard.Accepts(sender, _activeLeaf?.Terminal())) return;
         _tabs.ActiveTab.ShellReportedTitle = title;
     }
 }
