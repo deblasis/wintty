@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using Ghostty.Core.Notifications;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Ghostty.Controls.Notifications;
@@ -98,6 +99,9 @@ public sealed partial class NotificationHost : UserControl
             IsClosable = notice.IsClosable,
             IsOpen = true,
         };
+        // Title is visual-only on InfoBar; UIA Name stays empty unless set,
+        // so a harness/narrator looking for the notice title would miss it.
+        AutomationProperties.SetName(bar, notice.Title);
 
         if (notice.Actions.Count == 1)
         {

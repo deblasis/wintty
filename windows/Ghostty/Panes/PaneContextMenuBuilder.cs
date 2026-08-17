@@ -23,7 +23,13 @@ internal static class PaneContextMenuBuilder
         Action promptTabTitle,
         Action promptTerminalTitle)
     {
-        var flyout = new MenuFlyout();
+        var flyout = new MenuFlyout
+        {
+            // Default true clips the menu to the 580px-tall window so
+            // Change Tab Title / Close Pane fall off the bottom. Let it
+            // overflow the hwnd; the OS still keeps it on-screen.
+            ShouldConstrainToRootBounds = false,
+        };
 
         // Populate on each open so Copy's enabled state and the Zoom icon
         // reflect current selection/zoom. Opening fires before the flyout is

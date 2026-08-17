@@ -26,6 +26,10 @@ const dx12_imgui = if (builtin.os.tag == .windows)
     @import("../renderer/directx12/imgui.zig")
 else
     struct {};
+const dx12_inspector_surface = if (builtin.os.tag == .windows)
+    @import("../renderer/directx12/inspector_surface.zig")
+else
+    struct {};
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
@@ -1198,6 +1202,10 @@ pub const Inspector = struct {
     dx12_heap: if (builtin.os.tag == .windows) ?dx12_imgui.SrvHeap else void =
         if (builtin.os.tag == .windows) null else {},
 
+    /// Owned DX12 swap chain + present loop for the inspector window.
+    dx12_surface: if (builtin.os.tag == .windows) ?*dx12_inspector_surface.State else void =
+        if (builtin.os.tag == .windows) null else {},
+
     const Backend = enum {
         metal,
         directx12,
@@ -1232,6 +1240,7 @@ pub const Inspector = struct {
     pub fn deinit(self: *Inspector) void {
         self.surface.core_surface.deactivateInspector();
         cimgui.c.ImGui_SetCurrentContext(self.ig_ctx);
+        self.shutdownDirectX12Surface();
         if (self.backend) |v| v.deinit();
         self.deinitDx12Heap();
         cimgui.c.ImGui_DestroyContext(self.ig_ctx);
@@ -1386,6 +1395,98 @@ pub const Inspector = struct {
             @as(*d3d12.ID3D12GraphicsCommandList, @ptrCast(@alignCast(command_list))),
             &self.dx12_heap.?,
         );
+    }
+
+    /// Initialize the inspector's owned DX12 swap chain bound to a WinUI
+    /// SwapChainPanel. Returns false on failure.
+    pub fn initDirectX12Surface(
+        self: *Inspector,
+        panel: *anyopaque,
+        width: u32,
+        height: u32,
+    ) bool {
+        if (comptime builtin.os.tag != .windows) return false;
+
+        self.shutdownDirectX12Surface();
+
+        const dxgi = @import("../renderer/directx12/dxgi.zig");
+        const panel_native: *dxgi.ISwapChainPanelNative = @ptrCast(@alignCast(panel));
+
+        var surface = dx12_inspector_surface.State.init(
+            panel_native,
+            width,
+            height,
+        ) catch |err| {
+            log.warn("inspector dx12 surface init failed: {}", .{err});
+            return false;
+        };
+
+        const alloc = self.surface.app.core_app.alloc;
+        const ptr = alloc.create(dx12_inspector_surface.State) catch {
+            surface.deinit();
+            return false;
+        };
+        ptr.* = surface;
+        self.dx12_surface = ptr;
+
+        const dev = &ptr.dev;
+        const rtv_format: u32 = @intFromEnum(dxgi.DXGI_FORMAT.B8G8R8A8_UNORM);
+        if (!self.initDirectX12(
+            @ptrCast(dev.device),
+            @ptrCast(dev.command_queue),
+            @import("../renderer/directx12/device.zig").frame_count,
+            rtv_format,
+        )) {
+            self.shutdownDirectX12Surface();
+            return false;
+        }
+
+        log.debug("initialized inspector dx12 surface backend", .{});
+        return true;
+    }
+
+    pub fn presentDirectX12Surface(self: *Inspector) void {
+        if (comptime builtin.os.tag != .windows) return;
+        const surface = self.dx12_surface orelse return;
+        if (self.backend != .directx12) return;
+
+        const frame = surface.beginPresentFrame() catch |err| {
+            log.err("inspector beginPresentFrame failed: {}", .{err});
+            return;
+        };
+
+        self.renderDirectX12(@ptrCast(frame.command_list)) catch |err| {
+            log.err("error rendering inspector err={}", .{err});
+            // Still end the frame so the back buffer returns to PRESENT.
+        };
+
+        var target = frame.target;
+        surface.endPresentFrame(frame.frame_idx, &target, frame.command_list) catch |err| {
+            log.err("inspector endPresentFrame failed: {}", .{err});
+        };
+    }
+
+    pub fn resizeDirectX12Surface(self: *Inspector, width: u32, height: u32) void {
+        if (comptime builtin.os.tag != .windows) return;
+        const surface = self.dx12_surface orelse return;
+        surface.resize(width, height) catch |err| {
+            log.err("inspector dx12 surface resize failed: {}", .{err});
+        };
+    }
+
+    pub fn shutdownDirectX12Surface(self: *Inspector) void {
+        if (comptime builtin.os.tag != .windows) return;
+        const surface = self.dx12_surface orelse return;
+
+        if (self.backend) |v| {
+            v.deinit();
+            self.backend = null;
+        }
+        self.deinitDx12Heap();
+
+        surface.deinit();
+        self.surface.app.core_app.alloc.destroy(surface);
+        self.dx12_surface = null;
     }
 
     pub fn updateContentScale(self: *Inspector, x: f64, y: f64) void {
@@ -3033,23 +3134,28 @@ pub const CAPI = struct {
         // a swap chain that was never created.
 
         export fn ghostty_inspector_directx12_surface_init(
-            _: *Inspector,
-            _: ?*anyopaque,
-            _: u32,
-            _: u32,
+            ptr: *Inspector,
+            panel: ?*anyopaque,
+            width: u32,
+            height: u32,
         ) bool {
-            log.warn("directx12 inspector surface backend is not implemented", .{});
-            return false;
+            return ptr.initDirectX12Surface(panel orelse return false, width, height);
         }
 
-        export fn ghostty_inspector_directx12_surface_present(_: *Inspector) void {}
+        export fn ghostty_inspector_directx12_surface_present(ptr: *Inspector) void {
+            ptr.presentDirectX12Surface();
+        }
 
         export fn ghostty_inspector_directx12_surface_resize(
-            _: *Inspector,
-            _: u32,
-            _: u32,
-        ) void {}
+            ptr: *Inspector,
+            width: u32,
+            height: u32,
+        ) void {
+            ptr.resizeDirectX12Surface(width, height);
+        }
 
-        export fn ghostty_inspector_directx12_surface_shutdown(_: *Inspector) void {}
+        export fn ghostty_inspector_directx12_surface_shutdown(ptr: *Inspector) void {
+            ptr.shutdownDirectX12Surface();
+        }
     };
 };

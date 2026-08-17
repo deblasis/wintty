@@ -222,10 +222,13 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Mode label: "Search" or "Command" -->
+                <!-- Mode label: "Search" or "Command". Accessible name is
+                     distinct so it cannot steal UIA Find-Name from a command
+                     titled Search. -->
                 <TextBlock x:Name="ModeLabel"
                            Grid.Column="0"
                            Text="Search"
+                           AutomationProperties.Name="Palette mode"
                            FontSize="{StaticResource CaptionTextBlockFontSize}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            VerticalAlignment="Center"/>

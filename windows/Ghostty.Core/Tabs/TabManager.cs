@@ -81,6 +81,9 @@ internal sealed class TabManager
     /// <summary>
     /// Non-null <paramref name="seed"/> is adopted as the initial tab
     /// (factory call is skipped); null falls through to the factory.
+    /// <paramref name="initialSnapshot"/> is passed to the factory for
+    /// that first tab (cold-start default profile / jump-list new
+    /// window). Ignored when <paramref name="seed"/> is non-null.
     /// <paramref name="closedTabs"/> is the (app-shared) bounded store that
     /// <see cref="CloseTab"/> pushes a snapshot to before tearing a tab down;
     /// null disables capture (tests / non-reopen contexts).
@@ -101,13 +104,16 @@ internal sealed class TabManager
     public TabManager(
         Func<ProfileSnapshot?, IPaneHost> paneHostFactory,
         TabModel? seed = null,
-        ClosedStack<TabSession>? closedTabs = null)
+        ClosedStack<TabSession>? closedTabs = null,
+        ProfileSnapshot? initialSnapshot = null)
     {
         _paneHostFactory = paneHostFactory;
         _closedTabs = closedTabs;
         if (seed is null)
         {
-            var first = CreateTab(snapshot: null);
+            var first = CreateTab(initialSnapshot);
+            if (initialSnapshot is not null)
+                first.AttachProfileSnapshot(initialSnapshot);
             _tabs.Add(first);
             _activeTab = first;
             _mru.Touch(first);

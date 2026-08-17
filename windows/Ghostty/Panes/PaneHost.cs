@@ -520,11 +520,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
-    /// becomes the active leaf. Legacy keyboard-Split path; no profile
-    /// snapshot is attached to the new leaf.
+    /// becomes the active leaf. Inherits the active leaf's profile
+    /// snapshot so a split of a pwsh tab does not spawn cmd.exe.
     /// </summary>
     public void Split(PaneOrientation orientation)
-        => Split(orientation, snapshot: null);
+        => Split(orientation, snapshot: _activeLeaf.Snapshot);
 
     /// <summary>
     /// Split the active leaf with the given orientation. The new leaf
