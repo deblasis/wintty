@@ -85,10 +85,9 @@
                                             Margin="4,0,4,0"/>
                     <!-- Cell 1: drag-only spacer. Owns the title-bar
                          passthrough so the empty strip area still drags
-                         the window. MinWidth reserves room for the OS
-                         caption buttons (min/max/close) at 100% scale.
-                         TODO(titlebar): bind MinWidth to
-                         AppWindow.TitleBar.RightInset / RasterizationScale. -->
+                         the window. MinWidth is the 100%-scale fallback;
+                         TitleBarCoordinator.SyncCaptionInset overwrites
+                         it from AppWindow.TitleBar.RightInset / DPI. -->
                     <Grid x:Name="CustomDragRegion"
                           Grid.Column="1"
                           MinWidth="146"

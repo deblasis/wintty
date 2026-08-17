@@ -36,10 +36,16 @@ internal sealed partial class GeneralPage : Page
     {
         AutoReloadToggle.IsOn = _configService.AutoReloadEnabled;
         VerticalTabsToggle.IsOn = _configService.VerticalTabs;
+        VerticalTabsWidthBox.Value = _configService.VerticalTabsWidth;
+        VerticalTabsPinnedToggle.IsOn = _configService.VerticalTabsPinned;
+        VerticalTabsHoverToggle.IsOn = _configService.VerticalTabsHoverExpand;
         // undo-timeout is a Duration stored as milliseconds; present it
         // directly in ms (its native granularity) so a sub-second value is
         // never lost to a seconds round-trip.
         UndoTimeoutBox.Value = _configService.UndoTimeoutMs;
+        SelectComboByTag(ConfirmCloseCombo, _configService.ConfirmCloseSurface);
+        PaletteGroupToggle.IsOn = _configService.CommandPaletteGroupCommands;
+        SelectComboByTag(PaletteBackgroundCombo, _configService.CommandPaletteBackground);
     }
 
     private void AutoReloadToggle_Toggled(object sender, RoutedEventArgs e)
@@ -64,6 +70,33 @@ internal sealed partial class GeneralPage : Page
         VerticalTabsToggled?.Invoke(on);
     }
 
+    private void VerticalTabsWidth_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_loading) return;
+        if (double.IsNaN(sender.Value)) return;
+        var px = Math.Clamp(
+            (int)Math.Round(sender.Value),
+            WindowsOnlyKeyParsers.VerticalTabsWidthMin,
+            WindowsOnlyKeyParsers.VerticalTabsWidthMax);
+        Ghostty.App.ConfigWriteScheduler?.Schedule("vertical-tabs-width", px.ToString());
+    }
+
+    private void VerticalTabsPinnedToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        Ghostty.App.ConfigWriteScheduler?.Schedule(
+            "vertical-tabs-pinned",
+            VerticalTabsPinnedToggle.IsOn ? "true" : "false");
+    }
+
+    private void VerticalTabsHoverToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        Ghostty.App.ConfigWriteScheduler?.Schedule(
+            "vertical-tabs-hover-expand",
+            VerticalTabsHoverToggle.IsOn ? "true" : "false");
+    }
+
     private void UndoTimeout_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
         if (_loading) return;
@@ -79,6 +112,45 @@ internal sealed partial class GeneralPage : Page
         // vertical-tabs toggle. "<n>ms" is a valid Duration unit; "0ms"
         // round-trips to a disabled undo policy.
         Ghostty.App.ConfigWriteScheduler?.Schedule("undo-timeout", ms + "ms");
+    }
+
+    private void ConfirmClose_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender is not ComboBox combo || combo.SelectedItem is not ComboBoxItem item)
+            return;
+        var tag = item.Tag?.ToString() ?? "true";
+        Ghostty.App.ConfigWriteScheduler?.Schedule("confirm-close-surface", tag);
+    }
+
+    private void PaletteBackground_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender is not ComboBox combo || combo.SelectedItem is not ComboBoxItem item)
+            return;
+        var tag = item.Tag?.ToString() ?? "acrylic";
+        Ghostty.App.ConfigWriteScheduler?.Schedule("command-palette-background", tag);
+    }
+
+    private void PaletteGroupToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        Ghostty.App.ConfigWriteScheduler?.Schedule(
+            "command-palette-group-commands",
+            PaletteGroupToggle.IsOn ? "true" : "false");
+    }
+
+    private static void SelectComboByTag(ComboBox combo, string tag)
+    {
+        foreach (ComboBoxItem item in combo.Items)
+        {
+            if (string.Equals(item.Tag?.ToString(), tag, StringComparison.OrdinalIgnoreCase))
+            {
+                combo.SelectedItem = item;
+                return;
+            }
+        }
+        combo.SelectedIndex = 0;
     }
 
     private void ReloadButton_Click(object sender, RoutedEventArgs e)

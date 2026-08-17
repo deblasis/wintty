@@ -25,6 +25,14 @@ internal static class SessionProfileResolver
     }
 
     /// <summary>
+    /// Cold-start default: the registry's <c>default-profile</c> if it
+    /// still resolves, else null (legacy no-profile path -- the host
+    /// spawns the platform default shell).
+    /// </summary>
+    public static ProfileSnapshot? ResolveDefault(IProfileRegistry? registry)
+        => ResolveById(registry, registry?.DefaultProfileId);
+
+    /// <summary>
     /// Per-leaf resolution: the leaf's profile if it still exists, else the
     /// saved fallback command, else null (legacy no-profile leaf -- the host
     /// spawns the default shell).

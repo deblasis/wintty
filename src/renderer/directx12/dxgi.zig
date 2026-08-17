@@ -691,6 +691,38 @@ pub const ISwapChainPanelNative = extern struct {
     }
 };
 
+// ISwapChainPanelNative2 -- adds SetSwapChainHandle for DirectComposition
+// surface handles (used by SwapChainPanel and the inspector window).
+pub const ISwapChainPanelNative2 = extern struct {
+    vtable: *const VTable,
+
+    pub const IID = GUID{
+        .data1 = 0x88fd8248,
+        .data2 = 0x10da,
+        .data3 = 0x4810,
+        .data4 = .{ 0xbb, 0x4c, 0x01, 0x0d, 0xd2, 0x7f, 0xae, 0xa9 },
+    };
+
+    pub const VTable = extern struct {
+        // IUnknown
+        QueryInterface: *const fn (*ISwapChainPanelNative2, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+        AddRef: *const fn (*ISwapChainPanelNative2) callconv(.winapi) u32,
+        Release: *const fn (*ISwapChainPanelNative2) callconv(.winapi) u32,
+        // ISwapChainPanelNative
+        SetSwapChain: *const fn (*ISwapChainPanelNative2, ?*IDXGISwapChain) callconv(.winapi) HRESULT,
+        // ISwapChainPanelNative2
+        SetSwapChainHandle: *const fn (*ISwapChainPanelNative2, std.os.windows.HANDLE) callconv(.winapi) HRESULT,
+    };
+
+    pub inline fn SetSwapChainHandle(self: *ISwapChainPanelNative2, handle: std.os.windows.HANDLE) HRESULT {
+        return self.vtable.SetSwapChainHandle(self, handle);
+    }
+
+    pub inline fn Release(self: *ISwapChainPanelNative2) u32 {
+        return self.vtable.Release(self);
+    }
+};
+
 // --- DXGI factory creation flags ---
 
 pub const DXGI_CREATE_FACTORY_DEBUG: u32 = 0x01;
