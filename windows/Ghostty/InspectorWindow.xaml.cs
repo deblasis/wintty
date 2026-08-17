@@ -118,6 +118,7 @@ internal sealed partial class InspectorWindow : Window
         // contain.
         if (!_initialized)
         {
+            App.NotificationService?.Show(Ghostty.Core.Inspector.InspectorNotice.Dx12Unimplemented());
             DispatcherQueue.TryEnqueue(Close);
             return;
         }

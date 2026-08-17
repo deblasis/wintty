@@ -70,6 +70,29 @@ public class SessionProfileResolverTests
     }
 
     [Fact]
+    public void ResolveDefault_UsesDefaultProfileId()
+    {
+        var reg = new FakeProfileRegistry { DefaultProfileId = "pwsh" };
+        reg.Add(Profile("cmd", "cmd.exe"));
+        reg.Add(Profile("pwsh", "pwsh.exe"));
+
+        var snap = SessionProfileResolver.ResolveDefault(reg);
+
+        Assert.NotNull(snap);
+        Assert.Equal("pwsh", snap!.ProfileId);
+        Assert.Equal("pwsh.exe", snap.ResolvedCommand);
+    }
+
+    [Fact]
+    public void ResolveDefault_MissingDefault_ReturnsNull()
+    {
+        var reg = new FakeProfileRegistry { DefaultProfileId = "gone" };
+        Assert.Null(SessionProfileResolver.ResolveDefault(reg));
+        Assert.Null(SessionProfileResolver.ResolveDefault(null));
+        Assert.Null(SessionProfileResolver.ResolveDefault(new FakeProfileRegistry()));
+    }
+
+    [Fact]
     public void ResolveLeaf_RemovedProfile_FallsBackToSavedCommand_NotDefault()
     {
         var reg = new FakeProfileRegistry { DefaultProfileId = "pwsh" };

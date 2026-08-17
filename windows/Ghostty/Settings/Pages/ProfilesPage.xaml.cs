@@ -156,12 +156,11 @@ internal sealed partial class ProfilesPage : Page
     private const string TracksToggleTag = "tracks-foreground";
 
     // Builds one SettingsCard with the icon picker, tracks-foreground
-    // toggle, and hidden toggle laid out left-to-right. SettingsCard.Control
-    // is a single UIElement slot, so we wrap them into a horizontal
-    // StackPanel. The hidden toggle's Tag carries the profile id; the
-    // picker and tracks toggle recover their id via the shared
-    // StackPanel.Tag walked through FindPicker / FindTracksToggle in
-    // Rebind.
+    // toggle, and hidden toggle stacked top-to-bottom. SettingsCard.Control
+    // is a single UIElement slot. Horizontal layout truncated the
+    // "Track foreground process" label once the header column gained
+    // MinWidth; vertical keeps the labels intact and grows the card
+    // instead of the Auto column.
     private SettingsCard BuildRow(ResolvedProfile profile, bool isHidden)
     {
         var picker = new ProfileIconPickerControl
@@ -194,8 +193,8 @@ internal sealed partial class ProfilesPage : Page
 
         var panel = new StackPanel
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 12,
+            Orientation = Orientation.Vertical,
+            Spacing = 8,
             VerticalAlignment = VerticalAlignment.Center,
             // Stash the profile id on the panel so the picker and
             // tracks-toggle handlers can recover it from their parent
@@ -215,8 +214,8 @@ internal sealed partial class ProfilesPage : Page
         };
     }
 
-    // The SettingsCard.Control slot is a horizontal StackPanel
-    // (picker + tracks toggle + hidden toggle), so finding any child
+    // The SettingsCard.Control slot is a vertical StackPanel
+    // (picker, tracks toggle, hidden toggle), so finding any child
     // means walking the panel's Children rather than pattern-matching
     // the slot directly. Two ToggleSwitch instances share the panel,
     // so the hidden toggle is identified as "any ToggleSwitch whose

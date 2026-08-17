@@ -31,6 +31,8 @@ internal static class TabContextMenuBuilder
         Func<TabModel, Task> requestClose,
         Action<TabModel> requestDetachToNewWindow,
         DialogTracker dialogs,
+        Action toggleTabLayout,
+        bool isVertical = false,
         Func<SnapZoneSource>? getSnapSource = null,
         Action<TabModel, SnapZone>? detachWithZone = null)
     {
@@ -124,6 +126,18 @@ internal static class TabContextMenuBuilder
             if (moveToZone is not null)
                 moveToZone.IsEnabled = manager.Tabs.Count > 1;
         };
+
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
+        // Same switch as StripContextMenuBuilder. Empty-strip right-click
+        // vanishes once tabs fill the bar; the per-tab menu has to carry it.
+        var switchLayout = new MenuFlyoutItem
+        {
+            Text = isVertical ? "Switch to horizontal tabs" : "Switch to vertical tabs",
+            KeyboardAcceleratorTextOverride = "Ctrl+Shift+,",
+        };
+        switchLayout.Click += (_, _) => toggleTabLayout();
+        flyout.Items.Add(switchLayout);
 
         flyout.Items.Add(new MenuFlyoutSeparator());
 
