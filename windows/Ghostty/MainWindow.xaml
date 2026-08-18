@@ -3,6 +3,7 @@
     x:Class="Ghostty.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:branding="using:Ghostty.Branding"
     xmlns:cmdpalette="using:Ghostty.Controls.CommandPalette"
     xmlns:notifications="using:Ghostty.Controls.Notifications"
     xmlns:tabs="using:Ghostty.Tabs">
@@ -21,7 +22,7 @@
         handoff stays intact across tab switches and layout switches.
 
         Column 0 is the vertical strip lane: 0 px wide in horizontal
-        mode, 40 px (collapsed) / 220 px (pinned) wide in vertical
+        mode, 48 px (collapsed) / 220 px (pinned) wide in vertical
         mode. Width is animated from code-behind because WinUI 3 has
         no native GridLengthAnimation and converting to Star units
         would force the horizontal strip into a separate row.
@@ -62,13 +63,19 @@
             area with the window title. Col 2 reserves room for the
             OS caption buttons.
 
-            No Background on the outer Grid so clicks in Col 0 pass
-            through to the VerticalTabHost (chevron) below.
+            Col 0 uses a non-hit-testable fill so the strip-lane band
+            matches the tab bar while clicks still reach the icon /
+            chevron in VerticalTabHost below. A fixed-width icon lane
+            at the left stays unpainted so the wintty badge in the
+            strip (z-order below) remains visible. Col 1 is the draggable
+            title region, painted from the terminal palette in code.
         -->
         <!-- Height matches the horizontal TabView strip so the wintty
              icon and the terminal top edge stay put when toggling
              between the two layouts. Keep in sync with the slide
              distance in LayoutCoordinator.Animate. -->
+        <!-- Height/Margin are design-time defaults; MainWindow assigns
+             them from TabChromeMetrics at construction. -->
         <Grid x:Name="VerticalTitleBar"
               Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"
               Height="34"
@@ -78,6 +85,18 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition x:Name="VerticalCaptionInset" Width="146"/>
             </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0">
+                <!-- Full strip-column mirror (icon lane + remainder) so
+                     transparent pixels under the badge don't show the
+                     strip content peeking through from below. -->
+                <Border x:Name="VerticalTitleStripMirrorFill"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Stretch"
+                        IsHitTestVisible="False"/>
+
+                <branding:AppIconBadge x:Name="VerticalIconBadgeHost"/>
+            </Grid>
 
             <Grid x:Name="VerticalTitleDragRegion"
                   Grid.Column="1"
@@ -91,7 +110,25 @@
                            TextTrimming="CharacterEllipsis"
                            IsHitTestVisible="False"/>
             </Grid>
+
+            <!-- Caption-button column: same opaque fill as the drag
+                 region so Mica does not bleed through under min/max/close. -->
+            <Border x:Name="VerticalTitleCaptionFill"
+                    Grid.Column="2"
+                    IsHitTestVisible="False"/>
         </Grid>
+
+        <!-- Masks the pane top stroke under the OS caption buttons only. -->
+        <Border x:Name="VerticalCaptionSeamCover"
+                Grid.Row="0" Grid.RowSpan="2"
+                Grid.Column="0" Grid.ColumnSpan="2"
+                Width="146"
+                Height="3"
+                Margin="0,32,0,0"
+                VerticalAlignment="Top"
+                HorizontalAlignment="Right"
+                IsHitTestVisible="False"
+                Visibility="Collapsed"/>
 
         <!--
             Shared PaneHostContainer: every PaneHost lives here as a
