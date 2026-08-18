@@ -31,6 +31,7 @@ internal sealed class ToastActivationRelay
     private readonly Action<Exception>? _onHandlerFailed;
     private ToastActivation? _pending;
     private Action<ToastActivation>? _handlers;
+    private bool _launchActivationNoted;
 
     /// <param name="onHandlerFailed">
     /// Where a throw from a handler goes. A replayed activation runs the
@@ -95,13 +96,47 @@ internal sealed class ToastActivationRelay
         // Outside the lock deliberately: a handler activates windows and can
         // re-enter the relay, and holding the gate across it would let one
         // slow handler block every other thread reading Pending.
-        Invoke(handlers, activation);
+        //
+        // Target by target rather than invoking the multicast delegate whole.
+        // A single call propagates the first exception immediately and never
+        // reaches the targets behind it, so one throwing subscriber would
+        // silently cost every later one its click.
+        foreach (var target in handlers.GetInvocationList())
+            Invoke((Action<ToastActivation>)target, activation);
     }
 
     /// <summary>
-    /// Drop every handler and any latched activation. For teardown: the relay
-    /// outlives the objects that subscribe to it, so leaving handlers attached
-    /// roots them for the life of the process.
+    /// Record the activation this PROCESS WAS LAUNCHED FOR, at most once.
+    /// Returns false when it was already recorded and nothing was done.
+    ///
+    /// The launch click can reach the app twice: once off the activation
+    /// arguments the shell hands the process, and once through the
+    /// notification callback, describing the same click. Which arrives first
+    /// is not documented, so both callers come through here and whichever gets
+    /// here first wins. Without it the surface is focused twice for one click
+    /// -- a redundant activation, focus churn, and for the quick terminal a
+    /// second run through its reveal animation.
+    /// </summary>
+    public bool TryNoteLaunchActivation(ToastActivation activation)
+    {
+        lock (_gate)
+        {
+            if (_launchActivationNoted) return false;
+            _launchActivationNoted = true;
+        }
+
+        Note(activation);
+        return true;
+    }
+
+    /// <summary>
+    /// Drop every handler, any latched activation, and the launch-activation
+    /// record. For teardown: the relay outlives the objects that subscribe to
+    /// it, so leaving handlers attached roots them for the life of the process.
+    ///
+    /// Does NOT stop a fan-out already in flight: <see cref="Note"/> snapshots
+    /// the handlers before it starts invoking them, deliberately, so that a
+    /// handler which unsubscribes cannot mutate the list being walked.
     /// </summary>
     public void Reset()
     {
@@ -109,6 +144,7 @@ internal sealed class ToastActivationRelay
         {
             _handlers = null;
             _pending = null;
+            _launchActivationNoted = false;
         }
     }
 
@@ -121,7 +157,13 @@ internal sealed class ToastActivationRelay
         catch (Exception ex)
         {
             if (_onHandlerFailed is null) throw;
-            _onHandlerFailed(ex);
+
+            // The failure sink is caller-supplied and reached from inside a
+            // catch: a throw from it would escape Note or Subscribe, which is
+            // the failure this whole guard exists to prevent. There is nowhere
+            // left to report to, so it is dropped.
+            try { _onHandlerFailed(ex); }
+            catch { /* reporting a failure must not become one */ }
         }
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Activation;
@@ -173,6 +174,89 @@ public sealed class ToastActivationRelayTests
         relay.Note(new ToastActivation("abc"));
 
         Assert.Equal("boom", Assert.Single(failures).Message);
+    }
+
+    // The intersection nothing else covered: Note_ReachesEverySubscriber uses
+    // only well-behaved handlers, and ThrowingHandler_..._OnNote uses only one
+    // subscriber. Invoking the multicast delegate as a single call propagates
+    // the first exception immediately, so every target behind the thrower is
+    // silently skipped.
+    [Fact]
+    public void Note_ThrowingFirstHandler_StillReachesTheSecond()
+    {
+        var failures = new List<Exception>();
+        var relay = new ToastActivationRelay(failures.Add);
+        var second = new List<ToastActivation>();
+
+        relay.Subscribe(_ => throw new InvalidOperationException("boom"));
+        relay.Subscribe(second.Add);
+
+        relay.Note(new ToastActivation("abc"));
+
+        Assert.Equal("abc", Assert.Single(second).SurfaceKey);
+        Assert.Single(failures);
+    }
+
+    // The failure sink is caller-supplied and is called from inside a catch.
+    // A throw from it would escape the very call the guard exists to protect.
+    [Fact]
+    public void ThrowingFailureSink_DoesNotEscapeNote()
+    {
+        var relay = new ToastActivationRelay(_ => throw new InvalidOperationException("sink"));
+        relay.Subscribe(_ => throw new InvalidOperationException("boom"));
+
+        relay.Note(new ToastActivation("abc"));
+    }
+
+    // The launch click can arrive twice, from the activation arguments and
+    // from the notification callback, describing the same click. Only the
+    // first record may act.
+    [Fact]
+    public void TryNoteLaunchActivation_OnlyTheFirstCallDelivers()
+    {
+        var relay = new ToastActivationRelay();
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
+
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+        Assert.False(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+
+        Assert.Equal("abc", Assert.Single(seen).SurfaceKey);
+    }
+
+    // Deduping the launch click must not dedupe the warm ones behind it.
+    [Fact]
+    public void TryNoteLaunchActivation_DoesNotSuppressLaterWarmClicks()
+    {
+        var relay = new ToastActivationRelay();
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
+
+        relay.TryNoteLaunchActivation(new ToastActivation("launch"));
+        relay.Note(new ToastActivation("warm"));
+
+        Assert.Equal(["launch", "warm"], seen.Select(a => a.SurfaceKey));
+    }
+
+    [Fact]
+    public void TryNoteLaunchActivation_LatchesWhenNobodyIsListening()
+    {
+        var relay = new ToastActivationRelay();
+
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+
+        Assert.Equal("abc", relay.Pending.SurfaceKey);
+    }
+
+    [Fact]
+    public void Reset_ClearsTheLaunchActivationRecord()
+    {
+        var relay = new ToastActivationRelay();
+        relay.TryNoteLaunchActivation(new ToastActivation("abc"));
+
+        relay.Reset();
+
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
     }
 
     // Handlers activate windows and can re-enter the relay. Holding the gate

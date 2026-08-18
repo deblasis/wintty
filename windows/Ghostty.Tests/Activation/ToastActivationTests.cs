@@ -76,24 +76,39 @@ public sealed class ToastActivationTests
         Assert.False(ToastActivation.FromForwardedArgs(argv).HasSurface);
     }
 
-    // A user can type the marker. Without the strip, the primary would read a
-    // fabricated click, focus nothing, and eat the real launch.
+    // The trailing slot is reserved for the forwarder, so a marker the user
+    // typed there is dropped: otherwise a command line fabricates a click, the
+    // primary focuses nothing, and the real launch is eaten.
     [Fact]
-    public void ForwardedArgv_StripsAMarkerTheUserTyped()
+    public void ForwardedArgv_DropsATrailingMarkerTheUserTyped()
     {
         var argv = ToastActivation.ForwardedArgv(
-            ["wintty.exe", "--toast-surface=typed", "-e", "sometool"],
+            ["wintty.exe", "-e", "sometool", "--toast-surface=typed"],
             ToastActivation.None);
 
         Assert.Equal(["wintty.exe", "-e", "sometool"], argv);
         Assert.False(ToastActivation.FromForwardedArgs(argv).HasSurface);
     }
 
+    // Anywhere else it is the user's own argument. It cannot be mistaken for a
+    // forwarded one, and deleting it would hand the primary a command line the
+    // user never typed.
     [Fact]
-    public void ForwardedArgv_RealActivationSurvivesTheStrip()
+    public void ForwardedArgv_KeepsAMarkerThatIsNotTrailing()
     {
         var argv = ToastActivation.ForwardedArgv(
             ["wintty.exe", "--toast-surface=typed", "-e", "sometool"],
+            ToastActivation.None);
+
+        Assert.Equal(["wintty.exe", "--toast-surface=typed", "-e", "sometool"], argv);
+        Assert.False(ToastActivation.FromForwardedArgs(argv).HasSurface);
+    }
+
+    [Fact]
+    public void ForwardedArgv_RealActivationReplacesATrailingMarker()
+    {
+        var argv = ToastActivation.ForwardedArgv(
+            ["wintty.exe", "-e", "sometool", "--toast-surface=typed"],
             new ToastActivation("real"));
 
         Assert.Equal(["wintty.exe", "-e", "sometool", "--toast-surface=real"], argv);

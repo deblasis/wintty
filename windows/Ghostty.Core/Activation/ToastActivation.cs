@@ -53,14 +53,18 @@ internal readonly record struct ToastActivation(string? SurfaceKey)
 
     /// <summary>
     /// The argv a secondary forwards to the primary: the caller's own command
-    /// line with any pre-existing marker stripped, then this activation
-    /// appended when there is one.
+    /// line, with a TRAILING marker dropped, then this activation appended
+    /// when there is one.
     ///
-    /// Stripping matters. The marker is a plain argument, so a user can type
-    /// it -- <c>wintty -e sometool --toast-surface=x</c> -- and without this
-    /// the primary would read a fabricated click, focus nothing, and drop the
-    /// real launch. After this the marker in the final position can only be
-    /// one the forwarder put there.
+    /// The final position is reserved for the forwarder, and that is the only
+    /// position <see cref="FromForwardedArgs"/> reads. Dropping a trailing one
+    /// is what stops a user's own command line fabricating a click -- typing
+    /// <c>wintty -e sometool --toast-surface=x</c> must not make the primary
+    /// focus a surface and swallow the launch.
+    ///
+    /// An occurrence anywhere EARLIER is left alone. It is the user's
+    /// argument, it cannot be mistaken for a forwarded one, and the primary
+    /// has to receive the command line that was actually typed.
     /// </summary>
     public static List<string> ForwardedArgv(
         IReadOnlyList<string> args, ToastActivation activation)
@@ -68,10 +72,10 @@ internal readonly record struct ToastActivation(string? SurfaceKey)
         ArgumentNullException.ThrowIfNull(args);
 
         var result = new List<string>(args.Count + 1);
-        foreach (var arg in args)
-        {
-            if (!IsForwardedFlag(arg)) result.Add(arg);
-        }
+        result.AddRange(args);
+
+        if (result.Count > 0 && IsForwardedFlag(result[result.Count - 1]))
+            result.RemoveAt(result.Count - 1);
 
         if (activation.SurfaceKey is { Length: > 0 } key)
             result.Add(ForwardedFlagPrefix + key);

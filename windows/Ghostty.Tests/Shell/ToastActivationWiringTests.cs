@@ -11,13 +11,22 @@ namespace Ghostty.Tests.Shell;
 /// text, the way <c>TrayIconWiringTests</c> does. This project deliberately
 /// does not reference Ghostty.csproj (it would drag the WinAppSDK MRT/PRI
 /// targets into a plain net10.0 assembly), so the decision logic lives in
-/// Ghostty.Core and is unit-tested there -- but the wiring that connects it to
-/// WinRT cannot be, and unguarded wiring is how the whole feature silently
-/// stops working while every unit test stays green.
+/// Ghostty.Core and is unit-tested there -- while the wiring that connects it
+/// to WinRT cannot be, and unguarded wiring is how a feature silently stops
+/// working with every unit test still green.
 ///
-/// These assertions are deliberately few and are about ORDER and PRESENCE of
-/// facts that are load-bearing and non-obvious. They are not a substitute for
-/// exercising a real toast click on a packaged build.
+/// What these can catch: a call deleted, or two calls whose ORDER is
+/// load-bearing swapped. That is the whole of it.
+///
+/// What they cannot catch: whether any of it works. They do not run WinRT, do
+/// not construct a window, and do not observe a click. A change that keeps the
+/// shape and breaks the behaviour passes every one of them. Only a toast click
+/// on a packaged, installed build tests that.
+///
+/// Every assertion reads source that has been through
+/// <see cref="CSharpSourceText.Strip"/>. Assertions against raw file text are
+/// defeatable by a comment or a diagnostic string that quotes the very
+/// statement under test, and the comments in these methods do quote them.
 /// </summary>
 public class ToastActivationWiringTests
 {
@@ -26,19 +35,19 @@ public class ToastActivationWiringTests
     // from whether a handler exists at that instant -- registering single-use
     // when none does, which makes a click spawn a second process instead of
     // reaching the running one. Neither failure is visible at compile time and
-    // neither reproduces without a packaged install, so the order is pinned
-    // here.
+    // neither reproduces without a packaged install, so the order is pinned.
     [Fact]
     public void NotificationInvoked_IsSubscribedBeforeRegister()
     {
-        var app = ReadEmbedded("App.xaml.cs");
+        var launched = OnLaunched();
 
-        var subscribe = app.IndexOf("NotificationInvoked +=", StringComparison.Ordinal);
-        var register = app.IndexOf(
-            "AppNotificationManager.Default.Register()", StringComparison.Ordinal);
+        var subscribe = CSharpSourceText.RequireIndex(
+            launched, "NotificationInvoked +=",
+            "OnLaunched no longer subscribes to NotificationInvoked");
+        var register = CSharpSourceText.RequireIndex(
+            launched, "AppNotificationManager.Default.Register()",
+            "OnLaunched no longer registers for toast notifications");
 
-        Assert.True(subscribe >= 0, "no NotificationInvoked subscription in App.xaml.cs");
-        Assert.True(register >= 0, "no AppNotificationManager.Default.Register() in App.xaml.cs");
         Assert.True(
             subscribe < register,
             "NotificationInvoked must be subscribed before Register(): a late subscribe "
@@ -50,27 +59,27 @@ public class ToastActivationWiringTests
     [Fact]
     public void Register_IsCalledExactlyOnce()
     {
-        var app = ReadEmbedded("App.xaml.cs");
+        var app = Stripped("App.xaml.cs");
 
-        var occurrences = CountOccurrences(app, "AppNotificationManager.Default.Register()");
-
-        Assert.Equal(1, occurrences);
+        Assert.Equal(1, CSharpSourceText.Count(app, "AppNotificationManager.Default.Register()"));
     }
 
-    // The activation probe has to run before the single-instance gate, because
-    // a secondary forwards its launch and exits there: anything read after it
-    // never reaches a secondary at all, and the click degrades to a bare
-    // window.
+    // The probe has to run before the single-instance gate, because a
+    // secondary forwards its launch and exits there: anything read after the
+    // gate never reaches a secondary at all, and its click degrades to a bare
+    // window. Scoped to OnLaunched so these are the two CALL sites -- an
+    // unscoped search finds the ProbeActivation declaration too, and would go
+    // on passing after a reorder that broke the real thing.
     [Fact]
     public void ActivationIsProbedBeforeTheSingleInstanceGate()
     {
-        var app = ReadEmbedded("App.xaml.cs");
+        var launched = OnLaunched();
 
-        var probe = app.IndexOf("ProbeActivation()", StringComparison.Ordinal);
-        var gate = app.IndexOf("HandleSingleInstanceGate(", StringComparison.Ordinal);
+        var probe = CSharpSourceText.RequireIndex(
+            launched, "ProbeActivation()", "OnLaunched no longer probes the activation");
+        var gate = CSharpSourceText.RequireIndex(
+            launched, "HandleSingleInstanceGate(", "OnLaunched no longer runs the single-instance gate");
 
-        Assert.True(probe >= 0, "OnLaunched no longer probes the activation");
-        Assert.True(gate >= 0, "OnLaunched no longer runs the single-instance gate");
         Assert.True(
             probe < gate,
             "the activation probe must run before the single-instance gate, or a "
@@ -78,34 +87,39 @@ public class ToastActivationWiringTests
     }
 
     // Reading the AppNotification kind off GetActivatedEventArgs is what makes
-    // the forward independent of when WinAppSDK chooses to dispatch
-    // NotificationInvoked. Losing it reintroduces a timing assumption that
-    // cannot be verified without a packaged build.
+    // the forward independent of when WinAppSDK dispatches NotificationInvoked.
+    // Losing it reintroduces a timing assumption that cannot be verified
+    // without a packaged build.
     [Fact]
     public void ProbeReadsBothProtocolAndAppNotificationKinds()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var probe = Section(app, "private static Uri? ProbeActivation()");
+        var probe = Member("App.xaml.cs", "private static Uri? ProbeActivation()");
 
-        Assert.Contains("ExtendedActivationKind.Protocol", probe);
-        Assert.Contains("ExtendedActivationKind.AppNotification", probe);
-        Assert.Contains("ToastActivations.Note(", probe);
+        var protocol = CSharpSourceText.RequireIndex(
+            probe, "ExtendedActivationKind.Protocol", "the probe no longer reads protocol activation");
+        var appNotification = CSharpSourceText.RequireIndex(
+            probe, "ExtendedActivationKind.AppNotification",
+            "the probe no longer reads the toast activation kind, which is what makes the "
+            + "forward independent of WinAppSDK dispatch timing");
+        var note = CSharpSourceText.RequireIndex(
+            probe, "TryNoteLaunchActivation(", "the probe reads the toast kind but records nothing");
+
+        Assert.True(protocol < appNotification, "the protocol branch is expected first");
+        Assert.True(note > appNotification, "the record must belong to the toast branch");
     }
 
     // The argv scan is the fallback for a probe that THREW, so it cannot live
-    // inside the probe's try block. Pinned by requiring the resolve to come
-    // after the catch.
+    // inside the probe's try block.
     [Fact]
     public void UriFallbackRunsAfterTheProbeCatch()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var probe = Section(app, "private static Uri? ProbeActivation()");
+        var probe = Member("App.xaml.cs", "private static Uri? ProbeActivation()");
 
-        var catchBlock = probe.IndexOf("catch (Exception ex)", StringComparison.Ordinal);
-        var resolve = probe.IndexOf("ProtocolLaunch.Resolve(", StringComparison.Ordinal);
+        var catchBlock = CSharpSourceText.RequireIndex(
+            probe, "catch (Exception ex)", "the probe no longer guards GetActivatedEventArgs");
+        var resolve = CSharpSourceText.RequireIndex(
+            probe, "ProtocolLaunch.Resolve(", "the probe no longer resolves the --uri fallback");
 
-        Assert.True(catchBlock >= 0, "the probe no longer guards GetActivatedEventArgs");
-        Assert.True(resolve >= 0, "the probe no longer resolves the --uri fallback");
         Assert.True(
             resolve > catchBlock,
             "the --uri fallback must run after the probe's catch: nested inside the try "
@@ -113,63 +127,109 @@ public class ToastActivationWiringTests
             + "case it exists to cover.");
     }
 
+    // Both the probe and the first callback describe the same launch click.
+    // Routing both through TryNoteLaunchActivation is what stops one click
+    // being acted on twice, whichever of them WinAppSDK delivers first.
+    [Fact]
+    public void LaunchActivationIsRecordedThroughTheDedupe()
+    {
+        var callback = Member("App.xaml.cs", "private void OnToastNotificationInvoked(");
+
+        var first = CSharpSourceText.RequireIndex(
+            callback, "_toastCallbackIsFirst",
+            "the callback no longer distinguishes the launch click from a warm one");
+        var dedupe = CSharpSourceText.RequireIndex(
+            callback, "TryNoteLaunchActivation(",
+            "the launch click no longer goes through the dedupe and can be acted on twice");
+        var warm = CSharpSourceText.RequireIndex(
+            callback, "ToastActivations.Note(", "warm clicks are no longer delivered");
+
+        Assert.True(first < dedupe, "the dedupe belongs to the first callback only");
+        Assert.True(dedupe < warm, "a warm click must not go through the launch dedupe");
+    }
+
     // The forward is the only record a secondary leaves before exiting, and
-    // ForwardedArgv is what strips a marker a user typed so a command line
-    // cannot fabricate a click.
+    // ForwardedArgv is what keeps the reserved trailing slot honest.
     [Fact]
     public void ForwardCarriesTheLatchedActivationThroughForwardedArgv()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var forward = Section(app, "private void ForwardLaunchToPrimary(string pipeName)");
+        var forward = Member("App.xaml.cs", "private void ForwardLaunchToPrimary(string pipeName)");
 
-        Assert.Contains("ToastActivation.ForwardedArgv(", forward);
-        Assert.Contains("ToastActivations.Pending", forward);
+        var build = CSharpSourceText.RequireIndex(
+            forward, "ToastActivation.ForwardedArgv(",
+            "the forward no longer builds its argv through ForwardedArgv");
+        var pending = CSharpSourceText.RequireIndex(
+            forward, "ToastActivations.Pending", "the forward no longer reads the latched activation");
+        var request = CSharpSourceText.RequireIndex(
+            forward, "new Ghostty.Core.SingleInstance.LaunchRequest(",
+            "the forward no longer builds a LaunchRequest");
+
+        Assert.True(build < request, "argv must be built before the request that carries it");
+        Assert.True(pending < request);
     }
 
-    // A forwarded marker naming a surface that is not here must fall through to
-    // an ordinary launch, or the user loses the window (and any jump-list
+    // A forwarded marker naming a surface that is not here must fall through
+    // to an ordinary launch, or the user loses the window (and any jump-list
     // action) they actually asked for.
     [Fact]
     public void ForwardedLaunchChecksLivenessAndFallsThrough()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var open = Section(app, "internal void OpenWindowFromLaunch(");
+        var open = Member("App.xaml.cs", "internal void OpenWindowFromLaunch(");
 
-        var liveness = open.IndexOf("AnyWindowHasToastSurface(", StringComparison.Ordinal);
-        var fallthrough = open.IndexOf("HandleJumpListLaunch(", StringComparison.Ordinal);
+        var liveness = CSharpSourceText.RequireIndex(
+            open, "AnyWindowHasToastSurface(",
+            "a forwarded activation is honoured without checking it can be");
+        var note = CSharpSourceText.RequireIndex(
+            open, "ToastActivations.Note(", "a forwarded activation is no longer delivered");
+        var fallthrough = CSharpSourceText.RequireIndex(
+            open, "HandleJumpListLaunch(",
+            "a forwarded launch no longer falls through to an ordinary launch");
 
-        Assert.True(liveness >= 0, "a forwarded activation is honoured without checking it can be");
-        Assert.True(fallthrough >= 0, "a forwarded launch no longer falls through to a normal launch");
-        Assert.True(liveness < fallthrough);
+        Assert.True(liveness < note, "liveness must be decided before the click is honoured");
+        Assert.True(note < fallthrough, "the ordinary launch must be the fall-through, not the first choice");
     }
 
     // The promise a notification click makes is that the app comes forward.
-    // The fallback therefore has to sit outside the try that wraps the scan,
-    // so a throwing scan does not swallow it too.
+    // The fallback therefore sits outside the try that wraps the scan, so a
+    // throwing scan does not swallow it too.
     [Fact]
     public void ToastConsumerFallsBackToPlainActivationOutsideTheScanTry()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var consumer = Section(app, "private void OnToastActivated(");
+        var consumer = Member("App.xaml.cs", "private void OnToastActivated(");
 
-        var scan = consumer.IndexOf("TryFocusToastSurface(", StringComparison.Ordinal);
-        var guard = consumer.IndexOf("if (focused) return;", StringComparison.Ordinal);
-        var fallback = consumer.IndexOf("ShowOrFocusWindowsFromTray()", StringComparison.Ordinal);
+        var scan = CSharpSourceText.RequireIndex(
+            consumer, "TryFocusToastSurface(", "the toast consumer no longer looks for the surface");
+        var guard = CSharpSourceText.RequireIndex(
+            consumer, "if (focused) return;",
+            "the toast consumer no longer separates the scan from its fallback");
+        var fallback = CSharpSourceText.RequireIndex(
+            consumer, "ShowOrFocusWindowsFromTray()", "the toast consumer no longer falls back at all");
 
-        Assert.True(scan >= 0, "the toast consumer no longer looks for the surface");
-        Assert.True(guard >= 0, "the toast consumer no longer separates the scan from its fallback");
+        Assert.True(scan < guard);
         Assert.True(fallback > guard, "the fallback must run after, and outside, the scan's try");
     }
 
     // Both handles are process-lifetime singletons, so a subscription left
-    // attached roots App for the life of the process.
+    // attached roots App for the life of the process. Anchored between two
+    // neighbours so a deletion cannot pass by leaving the names elsewhere.
     [Fact]
     public void TeardownDetachesBothToastSubscriptions()
     {
-        var app = ReadEmbedded("App.xaml.cs");
+        var teardown = Member(
+            "App.xaml.cs", "internal void OnAnyWindowClosedInternal(object sender, WindowEventArgs args)");
 
-        Assert.Contains("NotificationInvoked -= OnToastNotificationInvoked", app);
-        Assert.Contains("ToastActivations.Reset()", app);
+        var tray = CSharpSourceText.RequireIndex(
+            teardown, "_trayIconService = null;", "the teardown no longer drops the tray icon");
+        var detach = CSharpSourceText.RequireIndex(
+            teardown, "NotificationInvoked -= OnToastNotificationInvoked",
+            "the teardown no longer detaches the WinRT toast handler");
+        var reset = CSharpSourceText.RequireIndex(
+            teardown, "ToastActivations.Reset()", "the teardown no longer resets the relay");
+        var host = CSharpSourceText.RequireIndex(
+            teardown, "_bootstrapHost?.Dispose()", "the teardown no longer disposes the bootstrap host");
+
+        Assert.True(detach > tray && detach < host, "the detach must sit in the teardown sequence");
+        Assert.True(reset > tray && reset < host, "the relay reset must sit in the teardown sequence");
     }
 
     // Without an argument the activation callback sees only "the app was
@@ -177,10 +237,21 @@ public class ToastActivationWiringTests
     [Fact]
     public void ToastCarriesTheSurfaceAsALaunchArgument()
     {
-        var notifier = ReadEmbedded("AppNotificationToastNotifier.cs");
+        var show = Member("AppNotificationToastNotifier.cs", "public void Show(ToastRequest request)");
 
-        Assert.Contains("AddArgument(", notifier);
-        Assert.Contains("ToastActivation.SurfaceArgumentKey", notifier);
+        var body = CSharpSourceText.RequireIndex(
+            show, "builder.AddText(request.Body)", "the toast no longer carries its body");
+        var argument = CSharpSourceText.RequireIndex(
+            show, "builder.AddArgument(", "the toast no longer carries a launch argument");
+        var key = CSharpSourceText.RequireIndex(
+            show, "ToastActivation.SurfaceArgumentKey",
+            "the launch argument is no longer keyed to the surface");
+        var build = CSharpSourceText.RequireIndex(
+            show, "builder.BuildNotification()", "the toast is no longer built");
+
+        Assert.True(argument > body, "the argument is added to the builder");
+        Assert.True(key > argument);
+        Assert.True(argument < build, "the argument must be added before the notification is built");
     }
 
     // The quick terminal's only legal reveal is its own Show(), which
@@ -190,15 +261,16 @@ public class ToastActivationWiringTests
     [Fact]
     public void QuickTerminalIsRevealedThroughItsOwnShowPath()
     {
-        var window = ReadEmbedded("MainWindow.xaml.cs");
-        var reveal = Section(window, "private void RevealForActivation()");
+        var reveal = Member("MainWindow.xaml.cs", "private void RevealForActivation()");
 
-        var quakeBranch = reveal.IndexOf("IsQuickTerminal", StringComparison.Ordinal);
-        var quakeShow = reveal.IndexOf("Show();", StringComparison.Ordinal);
-        var plainShow = reveal.IndexOf("AppWindow.Show()", StringComparison.Ordinal);
+        var quakeBranch = CSharpSourceText.RequireIndex(
+            reveal, "IsQuickTerminal", "the reveal no longer distinguishes the quick terminal");
+        var quakeShow = CSharpSourceText.RequireIndex(
+            reveal, "Show();", "the quick terminal is no longer revealed through Show()");
+        var plainShow = CSharpSourceText.RequireIndex(
+            reveal, "AppWindow.Show()", "the ordinary window is no longer shown");
 
-        Assert.True(quakeBranch >= 0, "the reveal no longer distinguishes the quick terminal");
-        Assert.True(quakeShow >= 0, "the quick terminal is no longer revealed through Show()");
+        Assert.True(quakeBranch < quakeShow);
         Assert.True(
             quakeShow < plainShow,
             "the quick terminal branch must be taken before the bare AppWindow.Show().");
@@ -210,12 +282,18 @@ public class ToastActivationWiringTests
     [Fact]
     public void ToastFocusIsDeferredAfterTheTabSwap()
     {
-        var window = ReadEmbedded("MainWindow.xaml.cs");
-        var focus = Section(window, "internal bool TryFocusToastSurface(string surfaceKey)");
+        var focus = Member("MainWindow.xaml.cs", "internal bool TryFocusToastSurface(string surfaceKey)");
 
-        Assert.Contains("_tabManager.Activate(", focus);
-        Assert.Contains("RevealForActivation()", focus);
-        Assert.Contains("DispatcherQueue.TryEnqueue(", focus);
+        var tab = CSharpSourceText.RequireIndex(
+            focus, "_tabManager.Activate(", "the toast focus no longer selects the surface's tab");
+        var reveal = CSharpSourceText.RequireIndex(
+            focus, "RevealForActivation()", "the toast focus no longer reveals the window");
+        var defer = CSharpSourceText.RequireIndex(
+            focus, "DispatcherQueue.TryEnqueue(",
+            "the pane focus is applied inline again, before the visual tree is realized");
+
+        Assert.True(tab < reveal, "the tab is selected before the window is revealed");
+        Assert.True(defer > reveal, "the focus is deferred after the reveal, not before it");
     }
 
     // Something other than the toggle put a window back on screen, so the
@@ -224,89 +302,62 @@ public class ToastActivationWiringTests
     [Fact]
     public void RevealingAWindowForAToastUpdatesTheVisibilityToggleBookkeeping()
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var scan = Section(app, "private bool TryFocusToastSurface(string surfaceKey)");
+        var scan = Member("App.xaml.cs", "private bool TryFocusToastSurface(string surfaceKey)");
+        CSharpSourceText.RequireIndex(
+            scan, "NoteWindowRevealed(", "a toast reveal no longer tells the toggle bookkeeping");
 
-        Assert.Contains("NoteWindowRevealed(", scan);
+        var note = Member("App.xaml.cs", "private void NoteWindowRevealed(MainWindow window)");
+        var remove = CSharpSourceText.RequireIndex(
+            note, "_hiddenByVisibilityToggle.Remove(", "the revealed window is not dropped from the hidden set");
+        var clear = CSharpSourceText.RequireIndex(
+            note, "_windowsHiddenByVisibilityToggle = false", "the hidden flag is never cleared");
 
-        var note = Section(app, "private void NoteWindowRevealed(MainWindow window)");
-        Assert.Contains("_hiddenByVisibilityToggle.Remove(", note);
-        Assert.Contains("_windowsHiddenByVisibilityToggle = false", note);
+        Assert.True(remove < clear, "the flag is cleared only once the set has drained");
     }
 
-    // One window mid-teardown throws RO_E_CLOSED out of AppWindow. Unguarded,
-    // it ends the scan before a live window behind it is reached.
-    [Fact]
-    public void WindowScanIsGuardedPerWindow()
+    // One window mid-teardown throws out of its own state. Unguarded, it ends
+    // the scan before a live window behind it is reached. Both scans walk the
+    // same state and both need it.
+    [Theory]
+    [InlineData("private bool TryFocusToastSurface(string surfaceKey)")]
+    [InlineData("private static bool AnyWindowHasToastSurface(string surfaceKey)")]
+    public void WindowScansAreGuardedPerWindow(string declaration)
     {
-        var app = ReadEmbedded("App.xaml.cs");
-        var scan = Section(app, "private bool TryFocusToastSurface(string surfaceKey)");
+        var scan = Member("App.xaml.cs", declaration);
 
-        var loop = scan.IndexOf("foreach (var window", StringComparison.Ordinal);
-        var guard = scan.IndexOf("catch (System.Exception", StringComparison.Ordinal);
-        var carryOn = scan.IndexOf("continue;", guard < 0 ? 0 : guard, StringComparison.Ordinal);
+        var loop = CSharpSourceText.RequireIndex(scan, "foreach (var window", "the scan no longer walks the windows");
+        var guard = CSharpSourceText.RequireIndex(
+            scan, "catch (System.Exception", "one dead window can end this scan and take the caller with it");
+        var close = CSharpSourceText.RequireIndex(scan, "return false;", "the scan no longer reports a miss");
 
-        Assert.True(loop >= 0, "the scan no longer walks the windows");
         Assert.True(guard > loop, "the guard must be inside the loop, not around it");
-        Assert.True(carryOn > guard, "a dead window must be skipped, not end the scan");
+        Assert.True(guard < close, "the guard must be inside the loop, not after it");
     }
 
-    // Reads a member's body by brace matching, with comments stripped. Scoping
-    // keeps each assertion about the method it names rather than passing on a
-    // match somewhere else in a 1700-line file; stripping keeps prose from
-    // satisfying an assertion about code, which matters here because these
-    // methods are commented heavily enough to quote the very calls under test.
-    private static string Section(string source, string declaration)
+    // Enqueued from a pipe thread onto the UI thread, where nothing above
+    // catches: an escape takes the process down.
+    [Fact]
+    public void InboundForwardedLaunchIsGuarded()
     {
-        var start = source.IndexOf(declaration, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"'{declaration}' is gone from the source");
+        var start = Member("App.xaml.cs", "private void StartSingleInstanceServer()");
 
-        var open = source.IndexOf('{', start);
-        Assert.True(open >= 0, $"no body found for '{declaration}'");
+        var enqueue = CSharpSourceText.RequireIndex(
+            start, "OpenWindowFromLaunch(req)", "the server no longer hands forwarded launches to the app");
+        var guard = CSharpSourceText.RequireIndex(
+            start, "LogInboundLaunchFailed(",
+            "a throwing forwarded launch is an unhandled UI-thread exception again");
 
-        var depth = 0;
-        for (var i = open; i < source.Length; i++)
-        {
-            if (source[i] == '{') depth++;
-            else if (source[i] == '}')
-            {
-                depth--;
-                if (depth == 0) return StripComments(source[start..(i + 1)]);
-            }
-        }
-
-        Assert.Fail($"unbalanced braces reading the body of '{declaration}'");
-        return string.Empty;
+        Assert.True(guard > enqueue, "the guard wraps the call");
     }
 
-    // Drops whole comment lines, and a trailing comment only on lines with no
-    // string literal -- a "//" inside a literal (a URL, say) is code, and
-    // telling the two apart properly would need a lexer this does not warrant.
-    private static string StripComments(string body)
-    {
-        var kept = body.Split('\n').Select(line =>
-        {
-            if (line.TrimStart().StartsWith("//", StringComparison.Ordinal)) return string.Empty;
-            if (line.Contains('"')) return line;
-            var at = line.IndexOf("//", StringComparison.Ordinal);
-            return at < 0 ? line : line[..at];
-        });
+    private static string OnLaunched()
+        => Member("App.xaml.cs", "protected override void OnLaunched(LaunchActivatedEventArgs args)");
 
-        return string.Join('\n', kept);
-    }
+    private static string Member(string fileSuffix, string declaration)
+        => CSharpSourceText.Member(ReadEmbedded(fileSuffix), declaration);
 
-    private static int CountOccurrences(string haystack, string needle)
-    {
-        var count = 0;
-        var at = 0;
-        while ((at = haystack.IndexOf(needle, at, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            at += needle.Length;
-        }
-
-        return count;
-    }
+    private static string Stripped(string fileSuffix)
+        => CSharpSourceText.Strip(ReadEmbedded(fileSuffix));
 
     private static string ReadEmbedded(string suffix)
     {
