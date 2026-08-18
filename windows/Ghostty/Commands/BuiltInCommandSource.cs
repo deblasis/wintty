@@ -12,6 +12,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
     private readonly Action<int>? _opacityAction;
     private readonly Func<bool>? _canUndo;
     private readonly Func<bool>? _canRedo;
+    private readonly Func<bool>? _isVerticalTabLayout;
     private List<CommandItem>? _cache;
 
     public BuiltInCommandSource(
@@ -19,13 +20,15 @@ internal sealed class BuiltInCommandSource : ICommandSource
         Func<string, Action<CommandItem>> bindingActionFactory,
         Action<int>? opacityAction = null,
         Func<bool>? canUndo = null,
-        Func<bool>? canRedo = null)
+        Func<bool>? canRedo = null,
+        Func<bool>? isVerticalTabLayout = null)
     {
         _paneActionFactory = paneActionFactory;
         _bindingActionFactory = bindingActionFactory;
         _opacityAction = opacityAction;
         _canUndo = canUndo;
         _canRedo = canRedo;
+        _isVerticalTabLayout = isVerticalTabLayout;
     }
 
     public IReadOnlyList<CommandItem> GetCommands()
@@ -63,7 +66,7 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.MoveTabRight, "Move Tab Right", "Move the active tab one position right", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.MoveTabLeft, "Move Tab Left", "Move the active tab one position left", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.ToggleVerticalTabsPinned, "Toggle Vertical Tabs Pinned", "Pin or unpin the vertical tab sidebar", CommandCategory.Tab);
-        AddPaneCommand(commands, PaneAction.ToggleTabLayout, "Toggle Tab Layout", "Switch between horizontal and vertical tab layout", CommandCategory.Tab, "\uE8AB");
+        AddTabLayoutSwitchCommand(commands);
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal, icon: null, pathKey: "quake");
         AddPaneCommand(commands, PaneAction.ShowKeybindCheatsheet, "Keyboard Shortcuts", "Show the keyboard shortcuts cheat sheet", CommandCategory.Terminal, "");
         AddPaneCommand(commands, PaneAction.ShowAbout, "About", "Show app version, links, and license", CommandCategory.About, "");
@@ -133,6 +136,31 @@ internal sealed class BuiltInCommandSource : ICommandSource
         }
 
         return commands;
+    }
+
+    private void AddTabLayoutSwitchCommand(List<CommandItem> list)
+    {
+        var toVertical = !(_isVerticalTabLayout?.Invoke() ?? false);
+        var title = toVertical ? "Switch to Vertical Tabs" : "Switch to Horizontal Tabs";
+        var description = toVertical
+            ? "Move tabs to a left sidebar (vertical tab bar)"
+            : "Move tabs to the top bar (horizontal tab bar)";
+        var shortcut = FindShortcut(PaneAction.ToggleTabLayout);
+        list.Add(new CommandItem
+        {
+            // One stable id for both directions: frecency is keyed on Id, so
+            // flipping the id every toggle resets the command's rank each
+            // time it is used, which is the opposite of what frecency is for.
+            Id = "pane:ToggleTabLayout",
+            Title = title,
+            Description = description,
+            Subtitle = "vertical tabs, tab layout",
+            ActionKey = PaneAction.ToggleTabLayout.ToString().ToLowerInvariant(),
+            Category = CommandCategory.Tab,
+            LeadingIcon = "\uE8AB",
+            Shortcut = shortcut,
+            Execute = _paneActionFactory(PaneAction.ToggleTabLayout),
+        });
     }
 
     private void AddPaneCommand(List<CommandItem> list, PaneAction action, string title,
