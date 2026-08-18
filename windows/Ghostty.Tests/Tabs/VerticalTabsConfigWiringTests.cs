@@ -7,8 +7,10 @@ using Xunit;
 namespace Ghostty.Tests.Tabs;
 
 /// <summary>
-/// VerticalTabHost used to hardcode width/pin/hover behind TODOs.
-/// Those must stay wired to the Windows-only config keys.
+/// VerticalTabHost used to hardcode width and pin state. Those must stay
+/// wired to config: the Settings UI and WindowsOnlyKeys still offer
+/// vertical-tabs-width and vertical-tabs-pinned, so a host that ignores
+/// them turns shipped settings into no-ops with no other symptom.
 /// </summary>
 public class VerticalTabsConfigWiringTests
 {
@@ -18,26 +20,39 @@ public class VerticalTabsConfigWiringTests
         var host = ReadEmbedded("VerticalTabHost.xaml.cs");
 
         Assert.DoesNotContain("const double ExpandedWidth", host);
-        Assert.DoesNotContain("const bool HoverExpandEnabled", host);
-        Assert.DoesNotContain("TODO(config): vertical-tabs-width", host);
-        Assert.DoesNotContain("TODO(config): vertical-tabs-pinned", host);
-        Assert.DoesNotContain("TODO(config): vertical-tabs-hover-expand", host);
         Assert.Contains("VerticalTabsWidth", host);
         Assert.Contains("VerticalTabsPinned", host);
-        Assert.Contains("VerticalTabsHoverExpand", host);
-        // Chevron-collapse while the pointer is still on the rail does
-        // not fire PointerEntered again. Resume hover from IsPointerOver.
-        Assert.Contains("_pointerOverStrip", host);
-        Assert.Contains("_strip.PointerEntered", host);
-        Assert.Contains("BeginHoverExpand", host);
-        // Overlay Width is clipped by the RootGrid strip column; hover
-        // must tween the outer column instead.
-        var expand = host[host.IndexOf("private void BeginHoverExpand")..];
-        Assert.Contains("StripWidthChangeRequested", expand);
-        Assert.Contains("VerticalTabStripState.PinnedExpanded", host);
-        Assert.Contains("vertical-tabs-width", ReadEmbedded(@"Config\WindowsOnlyKeys.cs"));
-        Assert.Contains("vertical-tabs-pinned", ReadEmbedded(@"Config\WindowsOnlyKeys.cs"));
-        Assert.Contains("vertical-tabs-hover-expand", ReadEmbedded(@"Config\WindowsOnlyKeys.cs"));
+        Assert.Contains("ConfigChanged", host);
+    }
+
+    [Fact]
+    public void Host_UnsubscribesConfigChangedOnUnload()
+    {
+        var host = ReadEmbedded("VerticalTabHost.xaml.cs");
+        Assert.Contains("cfg.ConfigChanged -= OnConfigChanged", host);
+    }
+
+    /// <summary>
+    /// Cold start has no LayoutCoordinator subscriber yet, so a pinned
+    /// sidebar must be applied directly rather than through the tween
+    /// event, which would be dropped.
+    /// </summary>
+    [Fact]
+    public void Host_AppliesPinnedOnColdStart()
+    {
+        var host = ReadEmbedded("VerticalTabHost.xaml.cs");
+        Assert.Contains("StripWidthChangeRequested is null", host);
+    }
+
+    [Fact]
+    public void Strip_UsesNavigationViewNotLegacyChevronState()
+    {
+        var host = ReadEmbedded("VerticalTabHost.xaml.cs");
+        var strip = ReadEmbedded("VerticalTabStrip.xaml.cs");
+        Assert.Contains("_strip.OpenPaneLength", host);
+        Assert.Contains("PaneDisplayMode=\"LeftCompact\"", ReadEmbedded("VerticalTabStrip.xaml"));
+        Assert.DoesNotContain("ChevronToggled", strip);
+        Assert.DoesNotContain("VerticalTabStripState", host);
     }
 
     private static string ReadEmbedded(string suffix)

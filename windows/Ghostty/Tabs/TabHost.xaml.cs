@@ -22,8 +22,9 @@ namespace Ghostty.Tabs;
 /// per-tab progress indicator is rendered here as a 2px ProgressBar
 /// in the tab header template.
 ///
-/// Vertical tabs are out of scope for this PR — they come in plan 2
-/// as a sibling user control sharing this same TabManager.
+/// The vertical layout is a sibling user control, VerticalTabHost,
+/// sharing this same TabManager; LayoutCoordinator cross-fades between
+/// the two.
 /// </summary>
 internal sealed partial class TabHost : UserControl, ITabHost
 {
@@ -146,13 +147,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
         headerPanel.Children.Add(iconRow);
         headerPanel.Children.Add(headerBar);
 
-        // Tab color tint. We paint headerPanel.Background, not
-        // TabViewItem.Background: the WinUI 3 TabView template layers
-        // its own brushes over the item background and the tint gets
-        // composited away on 1.6. The header panel is our own XAML so
-        // we own the paint surface outright.
-        ApplyTabColor(headerPanel, tab.Color, selected: false);
-
         var item = new TabViewItem
         {
             Header = headerPanel,
@@ -188,8 +182,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             }
             else if (e.PropertyName == nameof(TabModel.Color))
             {
-                var selected = ReferenceEquals(_manager.ActiveTab, tab);
-                ApplyTabColor(headerPanel, tab.Color, selected);
+                RefreshTabColors();
             }
             else if (e.PropertyName == nameof(TabModel.BellRinging))
             {
@@ -201,6 +194,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _itemByModel[tab] = item;
         _headerTextByModel[tab] = headerText;
         TabViewControl.TabItems.Add(item);
+        ApplyTabChrome(item, headerPanel, tab, selected: false);
     }
 
     private void RemoveItem(TabModel tab)
@@ -228,15 +222,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // selection.
         if (!_itemByModel.TryGetValue(_manager.ActiveTab, out var item)) return;
 
-        // Re-apply tab color tints so the selected tab gets the
-        // stronger alpha (0.6) and the others get 0.35. The previous
-        // selected tab's header will flip from 0.6 to 0.35 here.
+        // Re-apply tab header fills for selection and preset colors.
         foreach (var (model, viewItem) in _itemByModel)
         {
             if (viewItem.Header is StackPanel headerPanel)
             {
                 var isSelected = ReferenceEquals(model, _manager.ActiveTab);
-                ApplyTabColor(headerPanel, model.Color, isSelected);
+                ApplyTabChrome(viewItem, headerPanel, model, isSelected);
             }
         }
 
@@ -251,29 +243,164 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _suppressSelectionEvent = false;
     }
 
-    // Tab color alpha values. Selected tabs use a stronger tint so
-    // the color is clearly visible; unselected tabs use a lighter
-    // tint so Mica/acrylic shows through and text stays readable.
-    private const byte SelectedTabAlpha = 153;   // ~0.6 of 255
-    private const byte UnselectedTabAlpha = 89;  // ~0.35 of 255
+    private static readonly SolidColorBrush TransparentHeaderSelected =
+        new(Microsoft.UI.Colors.Transparent);
+
+    private SolidColorBrush? _selectedTabFillBrush;
+    private uint _stripBackdropPacked = 0x0C0C0C;
 
     /// <summary>
-    /// Paint the tab header background from a <see cref="TabColor"/>.
-    /// None clears to transparent. Non-None uses fixed sRGB at alpha
-    /// 0.35 unselected / 0.6 selected so Mica/acrylic shows through
-    /// and the text foreground stays readable on both themes.
+    /// Re-apply every tab header background after a preset-color or
+    /// selected-fill change.
     /// </summary>
-    private static void ApplyTabColor(StackPanel headerPanel, TabColor color, bool selected)
+    internal void RefreshTabColors()
     {
-        if (color == TabColor.None)
+        TabViewItem? selectedItem = null;
+        foreach (var (model, viewItem) in _itemByModel)
         {
-            headerPanel.Background = null;
-            return;
+            if (viewItem.Header is StackPanel headerPanel)
+                ApplyTabChrome(viewItem, headerPanel, model, ReferenceEquals(model, _manager.ActiveTab));
+            if (ReferenceEquals(model, _manager.ActiveTab))
+                selectedItem = viewItem;
         }
-        var drawing = TabColorPalette.Colors[color];
-        var alpha = selected ? SelectedTabAlpha : UnselectedTabAlpha;
-        headerPanel.Background = new SolidColorBrush(
-            Windows.UI.Color.FromArgb(alpha, drawing.R, drawing.G, drawing.B));
+        RecolorTabText();
+        RefreshTabViewTheme();
+        if (selectedItem is not null)
+            NudgeTabViewItemVisual(selectedItem);
+    }
+
+    /// <summary>Force MUXC to re-read TabView/item header resources.</summary>
+    private void RefreshTabViewTheme()
+    {
+        var theme = TabViewControl.RequestedTheme;
+        TabViewControl.RequestedTheme = theme == ElementTheme.Light
+            ? ElementTheme.Dark
+            : ElementTheme.Light;
+        TabViewControl.RequestedTheme = theme;
+    }
+
+    private static readonly string[] TabViewItemHeaderNormalKeys =
+    [
+        "TabViewItemHeaderBackground",
+        "TabViewItemHeaderBackgroundPointerOver",
+        "TabViewItemHeaderBackgroundPressed",
+    ];
+
+    private static readonly string[] TabViewItemHeaderSelectedKeys =
+    [
+        "TabViewItemHeaderBackgroundSelected",
+        "TabViewItemHeaderBackgroundSelectedPointerOver",
+        "TabViewItemHeaderBackgroundSelectedPressed",
+    ];
+
+    /// <summary>
+    /// Paint the full TabViewItem handle via per-item header resources.
+    /// The inner header panel stays transparent so the pill, close
+    /// button chrome, and progress bar share one surface.
+    /// </summary>
+    private void ApplyTabChrome(
+        TabViewItem viewItem, StackPanel headerPanel, TabModel tab, bool selected)
+    {
+        SolidColorBrush? normalHandle = null;
+        SolidColorBrush? selectedHandle = null;
+
+        if (tab.Color != TabColor.None)
+        {
+            normalHandle = DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: false));
+            selectedHandle = DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: true));
+        }
+        else if (selected && _selectedTabFillBrush is not null)
+        {
+            selectedHandle = _selectedTabFillBrush;
+        }
+
+        ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, selectedHandle);
+        headerPanel.Background = TransparentHeaderSelected;
+    }
+
+    private static void ApplyTabViewItemHeaderBrushes(
+        TabViewItem item, SolidColorBrush? normal, SolidColorBrush? selected)
+    {
+        foreach (var key in TabViewItemHeaderNormalKeys)
+            SetItemHeaderBrush(item, key, normal);
+        foreach (var key in TabViewItemHeaderSelectedKeys)
+            SetItemHeaderBrush(item, key, selected);
+    }
+
+    private static void SetItemHeaderBrush(TabViewItem item, string key, SolidColorBrush? brush)
+    {
+        if (brush is not null)
+            item.Resources[key] = brush;
+        else
+            item.Resources.Remove(key);
+    }
+
+    /// <summary>
+    /// MUXC caches TabViewItem header brushes until selection toggles.
+    /// </summary>
+    private void NudgeTabViewItemVisual(TabViewItem item)
+    {
+        if (!ReferenceEquals(TabViewControl.SelectedItem, item)) return;
+        _suppressSelectionEvent = true;
+        try
+        {
+            TabViewControl.SelectedItem = null;
+            TabViewControl.SelectedItem = item;
+        }
+        finally { _suppressSelectionEvent = false; }
+    }
+
+    private static SolidColorBrush DrawingColorBrush(System.Drawing.Color drawing)
+        => new(Windows.UI.Color.FromArgb(
+            drawing.A, drawing.R, drawing.G, drawing.B));
+
+    private SolidColorBrush TabColorForegroundBrush(TabModel tab, bool selected)
+    {
+        var packed = TabColorPalette.ForegroundRgb(
+            tab.Color, selected, _stripBackdropPacked);
+        return new SolidColorBrush(UnpackColor(packed));
+    }
+
+    private static void ApplyHeaderRowForeground(StackPanel iconRow, SolidColorBrush fg)
+    {
+        foreach (var child in iconRow.Children)
+        {
+            switch (child)
+            {
+                case TextBlock tb:
+                    tb.Foreground = fg;
+                    break;
+                case FontIcon fi:
+                    fi.Foreground = fg;
+                    break;
+                case TabIconPresenter presenter:
+                    presenter.Foreground = fg;
+                    if (presenter.Content is FontIcon glyph)
+                        glyph.Foreground = fg;
+                    break;
+            }
+        }
+    }
+
+    private static void ClearHeaderRowForeground(StackPanel iconRow)
+    {
+        foreach (var child in iconRow.Children)
+        {
+            switch (child)
+            {
+                case TextBlock tb:
+                    tb.ClearValue(TextBlock.ForegroundProperty);
+                    break;
+                case FontIcon fi:
+                    fi.ClearValue(FontIcon.ForegroundProperty);
+                    break;
+                case TabIconPresenter presenter:
+                    presenter.ClearValue(ForegroundProperty);
+                    if (presenter.Content is FontIcon glyph)
+                        glyph.ClearValue(FontIcon.ForegroundProperty);
+                    break;
+            }
+        }
     }
 
     /// <summary>
@@ -404,10 +531,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
         var accentBrush = new SolidColorBrush(theme.AccentColor);
         var tabBgBrush = new SolidColorBrush(theme.TabBarBackground);
+        _selectedTabFillBrush = accentBrush;
+        _stripBackdropPacked = PackColor(theme.TabBarBackground);
 
         // Background resources on TabViewControl work with a theme toggle.
         TabViewControl.Resources["TabViewBackground"] = tabBgBrush;
-        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = accentBrush;
+        // Selected fill is painted on the header panel so preset tab colors
+        // can replace the accent per tab.
+        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = TransparentHeaderSelected;
 
         // Toggle theme to force WinUI to re-read background resources.
         TabViewControl.RequestedTheme = ElementTheme.Light;
@@ -442,7 +573,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ? Windows.UI.Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)  // white @ ~70%
             : Windows.UI.Color.FromArgb(0xB3, 0x00, 0x00, 0x00); // black @ ~70%
         _shellInactiveTextBrush = new SolidColorBrush(inactiveColor);
-        RecolorTabText();
+        RefreshTabColors();
     }
 
     private SolidColorBrush? _shellActiveTextBrush;
@@ -472,6 +603,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
         foreach (var (model, tb) in _headerTextByModel)
         {
             bool active = ReferenceEquals(model, _manager.ActiveTab);
+            _itemByModel.TryGetValue(model, out var viewItem);
+            var iconRow = viewItem?.Header is StackPanel headerPanel
+                && headerPanel.Children.Count > 0
+                && headerPanel.Children[0] is StackPanel row
+                ? row
+                : null;
+
+            if (model.Color != TabColor.None)
+            {
+                var fg = TabColorForegroundBrush(model, active);
+                tb.Foreground = fg;
+                if (iconRow is not null)
+                    ApplyHeaderRowForeground(iconRow, fg);
+                continue;
+            }
+
+            if (iconRow is not null)
+                ClearHeaderRowForeground(iconRow);
+
             if (shell)
                 tb.Foreground = active ? _shellActiveTextBrush! : _shellInactiveTextBrush!;
             else if (active && _defaultActiveTextBrush is not null)
@@ -511,13 +661,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // wrong background. Falls back to removal only before
         // SetSelectedTabColors has ever run (first ClearShellTheme at startup).
         if (_accentBrush is not null)
-            TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = _accentBrush;
+        {
+            _selectedTabFillBrush = _accentBrush;
+            TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
+                TransparentHeaderSelected;
+        }
         else
+        {
+            _selectedTabFillBrush = null;
             TabViewControl.Resources.Remove("TabViewItemHeaderBackgroundSelected");
+        }
 
-        // Recolor titles for the default path: the active tab gets the
-        // contrast-safe brush, the rest revert to the inherited theme brush.
-        RecolorTabText();
+        RefreshTabColors();
 
         // Toggle theme to force WinUI to re-read the background resources.
         // Foregrounds don't need this — RecolorTabText above is immediate.
@@ -552,13 +707,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
             ThemeResolution.EnsureReadableForeground(
                 PackColor(background), PackColor(foreground))));
 
+        // Preset tint foregrounds blend against the tab-bar backdrop, which
+        // ApplyShellTheme sets from TabBarBackground -- not terminal bg.
+        if (_shellActiveTextBrush is null)
+            _stripBackdropPacked = PackColor(background);
+
         // When a shell theme is active it owns the selected-tab background
         // and the active title (ApplyShellTheme). Don't fight it here; keep
         // the cache warm for the moment the shell theme is turned off.
         if (_shellActiveTextBrush is not null) return;
 
-        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = _accentBrush;
-        RecolorTabText();
+        _selectedTabFillBrush = _accentBrush;
+        TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] =
+            TransparentHeaderSelected;
+        RefreshTabColors();
 
         // Force re-apply by toggling selection so the TabView picks
         // up the new brush. Suppress the event to avoid side effects.
