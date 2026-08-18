@@ -57,12 +57,59 @@ public sealed class ToastActivationTests
     }
 
     [Fact]
-    public void ForwardedArg_RoundTripsThroughArgv()
+    public void ForwardedArgv_RoundTripsThroughArgv()
     {
-        var arg = ToastActivation.ForwardedArg("abc-123");
-        var activation = ToastActivation.FromForwardedArgs(["wintty.exe", arg]);
+        var argv = ToastActivation.ForwardedArgv(
+            ["wintty.exe"], new ToastActivation("abc-123"));
 
-        Assert.Equal("abc-123", activation.SurfaceKey);
+        Assert.Equal(["wintty.exe", "--toast-surface=abc-123"], argv);
+        Assert.Equal("abc-123", ToastActivation.FromForwardedArgs(argv).SurfaceKey);
+    }
+
+    [Fact]
+    public void ForwardedArgv_NoActivation_AppendsNothing()
+    {
+        var argv = ToastActivation.ForwardedArgv(
+            ["wintty.exe", "--jumplist-action=new-tab"], ToastActivation.None);
+
+        Assert.Equal(["wintty.exe", "--jumplist-action=new-tab"], argv);
+        Assert.False(ToastActivation.FromForwardedArgs(argv).HasSurface);
+    }
+
+    // A user can type the marker. Without the strip, the primary would read a
+    // fabricated click, focus nothing, and eat the real launch.
+    [Fact]
+    public void ForwardedArgv_StripsAMarkerTheUserTyped()
+    {
+        var argv = ToastActivation.ForwardedArgv(
+            ["wintty.exe", "--toast-surface=typed", "-e", "sometool"],
+            ToastActivation.None);
+
+        Assert.Equal(["wintty.exe", "-e", "sometool"], argv);
+        Assert.False(ToastActivation.FromForwardedArgs(argv).HasSurface);
+    }
+
+    [Fact]
+    public void ForwardedArgv_RealActivationSurvivesTheStrip()
+    {
+        var argv = ToastActivation.ForwardedArgv(
+            ["wintty.exe", "--toast-surface=typed", "-e", "sometool"],
+            new ToastActivation("real"));
+
+        Assert.Equal(["wintty.exe", "-e", "sometool", "--toast-surface=real"], argv);
+        Assert.Equal("real", ToastActivation.FromForwardedArgs(argv).SurfaceKey);
+    }
+
+    // Only the final element counts: that is the one position the forwarder
+    // controls, because it appends there after stripping.
+    [Fact]
+    public void FromForwardedArgs_MarkerNotInFinalPosition_IsIgnored()
+    {
+        var activation = ToastActivation.FromForwardedArgs(
+            ["wintty.exe", "--toast-surface=typed", "-e", "sometool"]);
+
+        Assert.False(activation.HasSurface);
+        Assert.Null(activation.SurfaceKey);
     }
 
     [Fact]
@@ -71,8 +118,11 @@ public sealed class ToastActivationTests
             .FromForwardedArgs(["wintty.exe", "--jumplist-action=new-tab"]).HasSurface);
 
     [Fact]
-    public void FromForwardedArgs_NullArgs_IsNone()
-        => Assert.False(ToastActivation.FromForwardedArgs(null).HasSurface);
+    public void FromForwardedArgs_NullOrEmptyArgs_IsNone()
+    {
+        Assert.False(ToastActivation.FromForwardedArgs(null).HasSurface);
+        Assert.False(ToastActivation.FromForwardedArgs([]).HasSurface);
+    }
 
     [Fact]
     public void FromForwardedArgs_EmptyValue_IsNone()
@@ -81,18 +131,5 @@ public sealed class ToastActivationTests
 
         Assert.False(activation.HasSurface);
         Assert.Null(activation.SurfaceKey);
-    }
-
-    [Fact]
-    public void FromForwardedArgs_LastMarkerWins()
-    {
-        var activation = ToastActivation.FromForwardedArgs(
-        [
-            "wintty.exe",
-            ToastActivation.ForwardedArg("typed-by-the-user"),
-            ToastActivation.ForwardedArg("appended-by-the-forwarder"),
-        ]);
-
-        Assert.Equal("appended-by-the-forwarder", activation.SurfaceKey);
     }
 }

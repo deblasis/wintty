@@ -1048,6 +1048,14 @@ public sealed partial class MainWindow : Window
     internal void ActivateAfterPlacement() => Activate();
 
     /// <summary>
+    /// Whether a pane in this window carries <paramref name="surfaceKey"/>.
+    /// Read-only, so a caller can decide whether a toast click is honourable
+    /// here before committing to honouring it. UI-thread only.
+    /// </summary>
+    internal bool HasToastSurface(string surfaceKey)
+        => FindToastSurface(surfaceKey) is not null;
+
+    /// <summary>
     /// Bring the surface a toast was raised for back in front of the user.
     /// Returns false when no pane in this window carries
     /// <paramref name="surfaceKey"/>, so the caller can try the next window
@@ -1061,28 +1069,58 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal bool TryFocusToastSurface(string surfaceKey)
     {
+        if (FindToastSurface(surfaceKey) is not { } found) return false;
+
+        _tabManager.Activate(found.Tab);
+        RevealForActivation();
+        Activate();
+
+        // Deferred, not inline. The tab swap and the activation both rebuild
+        // the visual tree, and the target control is not guaranteed to be
+        // realized in this turn -- Focus on an unrealized element silently
+        // does nothing and the user gets a window with no keyboard target.
+        // Every other focus-after-layout site in this window defers for the
+        // same reason.
+        DispatcherQueue.TryEnqueue(
+            () => found.Terminal.Focus(FocusState.Programmatic));
+        return true;
+    }
+
+    private (TabModel Tab, TerminalControl Terminal)? FindToastSurface(string surfaceKey)
+    {
         foreach (var tab in _tabManager.Tabs)
         {
-            var paneHost = (PaneHost)tab.PaneHost;
-            foreach (var leaf in PaneTree.Leaves(paneHost.RootNode))
+            foreach (var leaf in PaneTree.Leaves(tab.PaneHost.RootNode))
             {
                 var terminal = leaf.Terminal();
-                if (!string.Equals(terminal.ToastSurfaceKey, surfaceKey, StringComparison.Ordinal))
-                    continue;
-
-                // Tab first, then window, then pane: selecting the tab after
-                // activating would show the user the old tab for a frame, and
-                // focusing the pane before its tab is on screen puts focus on
-                // a collapsed PaneHost.
-                _tabManager.Activate(tab);
-                if (!AppWindow.IsVisible) AppWindow.Show();
-                Activate();
-                terminal.Focus(FocusState.Programmatic);
-                return true;
+                if (string.Equals(terminal.ToastSurfaceKey, surfaceKey, StringComparison.Ordinal))
+                    return (tab, terminal);
             }
         }
 
-        return false;
+        return null;
+    }
+
+    /// <summary>
+    /// Put this window on screen for something other than a user gesture.
+    /// </summary>
+    private void RevealForActivation()
+    {
+        if (IsQuickTerminal)
+        {
+            // Show() is the quick terminal's only legal reveal: it re-derives
+            // the position for the current monitor, seeds and runs the
+            // clip/slide reveal, and arms autohide. A bare AppWindow.Show()
+            // leaves the last animation frame applied -- fully clipped, or at
+            // opacity 0 -- so the window would take keyboard focus while the
+            // user sees nothing and types into an invisible terminal. Skipped
+            // when it is already shown and not sliding out, where the reveal
+            // would only re-run its animation over itself.
+            if (!AppWindow.IsVisible || _hiding) Show();
+            return;
+        }
+
+        if (!AppWindow.IsVisible) AppWindow.Show();
     }
 
     /// <summary>

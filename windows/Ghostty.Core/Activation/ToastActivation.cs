@@ -52,30 +52,53 @@ internal readonly record struct ToastActivation(string? SurfaceKey)
     }
 
     /// <summary>
-    /// Spell this activation as one extra argv entry for the forward to the
-    /// single-instance primary.
+    /// The argv a secondary forwards to the primary: the caller's own command
+    /// line with any pre-existing marker stripped, then this activation
+    /// appended when there is one.
+    ///
+    /// Stripping matters. The marker is a plain argument, so a user can type
+    /// it -- <c>wintty -e sometool --toast-surface=x</c> -- and without this
+    /// the primary would read a fabricated click, focus nothing, and drop the
+    /// real launch. After this the marker in the final position can only be
+    /// one the forwarder put there.
     /// </summary>
-    public static string ForwardedArg(string surfaceKey)
-        => ForwardedFlagPrefix + surfaceKey;
-
-    /// <summary>
-    /// Recover an activation a secondary process forwarded through argv.
-    /// Last one wins, matching how <c>JumpListLaunch.Parse</c> reads the same
-    /// vector, so the entry the forwarder appended beats anything the user
-    /// happened to type. An empty value degrades to <see cref="None"/>.
-    /// </summary>
-    public static ToastActivation FromForwardedArgs(IReadOnlyList<string>? args)
+    public static List<string> ForwardedArgv(
+        IReadOnlyList<string> args, ToastActivation activation)
     {
-        if (args is null) return None;
+        ArgumentNullException.ThrowIfNull(args);
 
-        var result = None;
+        var result = new List<string>(args.Count + 1);
         foreach (var arg in args)
         {
-            if (!arg.StartsWith(ForwardedFlagPrefix, StringComparison.Ordinal)) continue;
-            var key = arg[ForwardedFlagPrefix.Length..];
-            result = key.Length == 0 ? None : new ToastActivation(key);
+            if (!IsForwardedFlag(arg)) result.Add(arg);
         }
+
+        if (activation.SurfaceKey is { Length: > 0 } key)
+            result.Add(ForwardedFlagPrefix + key);
 
         return result;
     }
+
+    /// <summary>
+    /// Recover an activation a secondary forwarded through argv.
+    ///
+    /// Only the FINAL element counts, because that is the one position the
+    /// forwarder controls: it appends there after stripping. An occurrence
+    /// anywhere else is something the user typed, and honouring it would let a
+    /// command line fabricate a click. An empty value degrades to
+    /// <see cref="None"/>.
+    /// </summary>
+    public static ToastActivation FromForwardedArgs(IReadOnlyList<string>? args)
+    {
+        if (args is null || args.Count == 0) return None;
+
+        var last = args[args.Count - 1];
+        if (!IsForwardedFlag(last)) return None;
+
+        var key = last[ForwardedFlagPrefix.Length..];
+        return key.Length == 0 ? None : new ToastActivation(key);
+    }
+
+    private static bool IsForwardedFlag(string arg)
+        => arg.StartsWith(ForwardedFlagPrefix, StringComparison.Ordinal);
 }
