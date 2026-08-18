@@ -203,5 +203,25 @@
             Visibility="Collapsed"
             HorizontalAlignment="Stretch"
             VerticalAlignment="Stretch" />
+
+        <!--
+            IME sink. WinUI surfaces composition only on TextBox /
+            RichEditBox, not on UserControl. Zero-size and non-interactive;
+            OnGotFocus routes keyboard input here so SurfacePreedit can
+            drive the block cursor while committed text still reaches
+            libghostty via TextChanged / CharacterReceived.
+        -->
+        <TextBox
+            x:Name="ImeSink"
+            Width="1"
+            Height="1"
+            Opacity="0"
+            IsTabStop="False"
+            IsHitTestVisible="False"
+            BorderThickness="0"
+            TextCompositionStarted="OnImeCompositionStarted"
+            TextCompositionChanged="OnImeCompositionChanged"
+            TextCompositionEnded="OnImeCompositionEnded"
+            TextChanged="OnImeSinkTextChanged" />
     </Grid>
 </UserControl>
