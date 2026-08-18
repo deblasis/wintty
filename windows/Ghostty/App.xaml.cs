@@ -673,34 +673,29 @@ public partial class App : Application
         _highContrastMonitor = new Ghostty.Accessibility.HighContrastMonitor(
             _configService, DispatcherQueue.GetForCurrentThread());
 
-        Uri? activationUri = null;
+        Uri? protocolUri = null;
         try
         {
             var activated = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
             if (activated.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.Protocol
                 && activated.Data is Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs proto)
             {
-                activationUri = proto.Uri;
-            }
-            else
-            {
-                // Unpackaged fallback: command line --uri <url>.
-                var argv = Environment.GetCommandLineArgs();
-                for (int i = 0; i < argv.Length - 1; i++)
-                {
-                    if (string.Equals(argv[i], "--uri", StringComparison.Ordinal)
-                        && Uri.TryCreate(argv[i + 1], UriKind.Absolute, out var u))
-                    {
-                        activationUri = u;
-                        break;
-                    }
-                }
+                protocolUri = proto.Uri;
             }
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[app] protocol activation probe failed: {ex.Message}");
         }
+
+        // The unpackaged fallback runs OUTSIDE the try above, deliberately.
+        // GetActivatedEventArgs is the half that throws on an unpackaged
+        // build, which is the exact case the --uri scan exists to cover:
+        // nested inside that try it was unreachable precisely when it was
+        // needed. Resolve keeps the precedence rule in one testable place --
+        // a real protocol activation still beats anything in argv.
+        Uri? activationUri = Ghostty.Core.Activation.ProtocolLaunch.Resolve(
+            protocolUri, Environment.GetCommandLineArgs());
 
         // Session manager: owns restore decision + debounced persistence.
         // Constructed before window creation so we can decide whether to
