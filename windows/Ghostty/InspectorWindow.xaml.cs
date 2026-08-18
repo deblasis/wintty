@@ -212,6 +212,23 @@ internal sealed partial class InspectorWindow : Window
     {
         if (!_initialized) return;
         var point = e.GetCurrentPoint(Panel);
+
+        var ctrl = (InputKeyboardSource.GetKeyStateForCurrentThread(
+            Windows.System.VirtualKey.Control) &
+            Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+        if (ctrl)
+        {
+            // Ctrl+wheel zooms the inspector UI (same step as Ctrl+/−).
+            var notch = point.Properties.MouseWheelDelta / 120.0;
+            if (notch != 0.0)
+            {
+                NativeMethods.InspectorZoomBy(
+                    _inspector, notch > 0 ? 1.1 : 1.0 / 1.1);
+            }
+            e.Handled = true;
+            return;
+        }
+
         // Wheel delta is +/-120 per notch; ImGui expects ~1.0 per notch.
         var delta = point.Properties.MouseWheelDelta / 120.0;
         var horizontal = point.Properties.IsHorizontalMouseWheel;
