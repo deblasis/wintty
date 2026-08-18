@@ -52,7 +52,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // Pane highlight system, rendered as an overlay Canvas above the
     // split tree. Two layers of chrome:
     //
-    //   - _activeBorderRect: an accent-colored border tracking the
+    //   - _activeBorderFrame: an accent-colored border tracking the
     //     active leaf's bounds. Positioned via TransformToVisual.
     //   - _dimRects: one semi-transparent dark rectangle per INACTIVE
     //     leaf, positioned over each inactive leaf's bounds. Gives
@@ -75,7 +75,9 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // reassigned. Not readonly because BuildChrome is a shared helper
     // rather than the ctor body itself.
     private Canvas _highlightOverlay = null!;
-    private Rectangle _activeBorderRect = null!;
+    private Border _activeBorderFrame = null!;
+    // Vertical-tab title row sits above the pane; hide the active
+    // border's top stroke so it does not read as a line under caption buttons.
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
@@ -252,7 +254,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void SetActiveBorderBrush(Brush? brush)
     {
-        _activeBorderRect.Stroke = brush ?? DefaultActiveBorderBrush;
+        _activeBorderFrame.BorderBrush = brush ?? DefaultActiveBorderBrush;
     }
 
     /// <summary>
@@ -429,18 +431,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     private void BuildChrome()
     {
-        _activeBorderRect = new Rectangle
+        var t = Core.Panes.PaneChrome.ActiveBorderThickness;
+        _activeBorderFrame = new Border
         {
-            Stroke = DefaultActiveBorderBrush,
-            StrokeThickness = Core.Panes.PaneChrome.ActiveBorderThickness,
-            Fill = null,
+            BorderBrush = DefaultActiveBorderBrush,
+            BorderThickness = new Thickness(t),
+            Background = null,
             IsHitTestVisible = false,
         };
         _highlightOverlay = new Canvas
         {
             IsHitTestVisible = false,
         };
-        _highlightOverlay.Children.Add(_activeBorderRect);
+        _highlightOverlay.Children.Add(_activeBorderFrame);
         // Force the overlay above any sibling in the host Grid so
         // the chrome never gets composited under the terminal.
         Canvas.SetZIndex(_highlightOverlay, 999);
@@ -1298,7 +1301,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void UpdateHighlightPosition()
     {
         // Active border.
-        PositionOverlayOverLeaf(_activeBorderRect, _activeLeaf, insetForStroke: true);
+        PositionActiveBorderOverLeaf(_activeLeaf);
 
         // Dim rects: walk every current leaf. Active leaf's dim rect
         // (if any) is hidden; every other leaf gets its dim rect
@@ -1341,6 +1344,40 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
     }
 
+    private void PositionActiveBorderOverLeaf(LeafPane leaf)
+    {
+        var ctl = leaf.Terminal();
+        if (ctl.ActualWidth <= 0 || ctl.ActualHeight <= 0)
+        {
+            _activeBorderFrame.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var bounds = LeafLayoutBounds(ctl);
+        var t = Core.Panes.PaneChrome.ActiveBorderThickness;
+        _activeBorderFrame.BorderThickness = new Thickness(t);
+        Canvas.SetLeft(_activeBorderFrame, bounds.X);
+        Canvas.SetTop(_activeBorderFrame, bounds.Y);
+        _activeBorderFrame.Width = bounds.Width;
+        _activeBorderFrame.Height = bounds.Height;
+        _activeBorderFrame.Visibility = Visibility.Visible;
+    }
+
+    private static Rect LeafLayoutBounds(FrameworkElement ctl)
+    {
+        double bx = 0, by = 0;
+        for (FrameworkElement? fe = ctl; fe is not null;
+             fe = VisualTreeHelper.GetParent(fe) as FrameworkElement)
+        {
+            if (fe is PaneHost) break;
+            var slot = Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(fe);
+            bx += slot.X;
+            by += slot.Y;
+        }
+
+        return new Rect(bx, by, ctl.ActualWidth, ctl.ActualHeight);
+    }
+
     private void PositionOverlayOverLeaf(Rectangle rect, LeafPane leaf, bool insetForStroke)
     {
         var ctl = leaf.Terminal();
@@ -1349,34 +1386,8 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             rect.Visibility = Visibility.Collapsed;
             return;
         }
-        // Position from the LAYOUT-slot chain rather than TransformToVisual.
-        // TransformToVisual reflects the render-thread transform, which the
-        // (idle) compositor does not commit until ~750ms after an unzoom
-        // unparks the tree -- stranding this chrome at the parked offset (the
-        // "borders/dimming apply late" delay). Layout slots are resolved
-        // synchronously by the arrange pass, so the rect tracks the pane's
-        // true position immediately. The only transform a pane ever carries is
-        // the zoom park, and the chrome is hidden while parked, so ignoring
-        // transforms here is correct. In steady state this exactly matches
-        // TransformToVisual.
-        //
-        // INVARIANT: every element from the leaf up to the host Grid -- the
-        // leaf root (TerminalControl), each split Grid and _treeRoot built by
-        // BuildVisual, and the host Grid -- must keep Margin=0 and Stretch
-        // alignment, so each arrange slot equals the rendered rect and the
-        // summed offsets equal the position relative to PaneHost. Adding a
-        // Margin/Padding, a non-Stretch alignment, or a (non-park)
-        // RenderTransform to any of them would offset this chrome; keep panes
-        // wrapper-free at the build site (BuildVisual).
-        double bx = 0, by = 0;
-        for (FrameworkElement? fe = ctl; fe is not null && !ReferenceEquals(fe, this);
-             fe = VisualTreeHelper.GetParent(fe) as FrameworkElement)
-        {
-            var slot = Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(fe);
-            bx += slot.X;
-            by += slot.Y;
-        }
-        var bounds = new Rect(bx, by, ctl.ActualWidth, ctl.ActualHeight);
+
+        var bounds = LeafLayoutBounds(ctl);
         // For the stroked active border, inset by half the stroke
         // thickness so the stroke draws entirely INSIDE the leaf bounds
         // (and so within the gutter each leaf reserves for it -- see

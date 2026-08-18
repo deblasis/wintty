@@ -19,6 +19,14 @@ namespace Ghostty;
 public static partial class Program
 {
     /// <summary>
+    /// The directory the process was launched from, captured before the
+    /// cwd is pinned to the install folder for WinAppSDK resource
+    /// resolution. This is what a forwarded launch should open in.
+    /// </summary>
+    public static string LaunchWorkingDirectory { get; private set; } =
+        Environment.CurrentDirectory;
+
+    /// <summary>
     /// Exit codes for Wintty.exe. Distinct values let callers
     /// (launchers, tests, CI, <c>just run-win</c>) tell apart "refused
     /// to start" from "crashed mid-run". CLI actions
@@ -395,6 +403,20 @@ public static partial class Program
         _terminalStderr = Console.Error;
 
         RegisterNativeResolver();
+
+        // `just run-win` launches from the repo root; WinAppSDK self-contained
+        // PRI/resource DLLs resolve relative to the process cwd. Pin cwd to
+        // the exe folder so dev launches match double-click / Start Menu.
+        //
+        // Capture the shell's directory first: it is the user's "open a
+        // terminal here" intent, and single-instance forwards it to the
+        // primary as the new tab's working directory. Reading
+        // Environment.CurrentDirectory after this point yields the install
+        // folder instead.
+        LaunchWorkingDirectory = Environment.CurrentDirectory;
+        var appDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrEmpty(appDir))
+            Directory.SetCurrentDirectory(appDir);
 
         // +version is intercepted here, before the libghostty CLI
         // dispatcher. The renderer lives in C# so it can also drive the
