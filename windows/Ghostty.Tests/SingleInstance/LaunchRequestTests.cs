@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Ghostty.Core.Activation;
 using Ghostty.Core.SingleInstance;
 using Xunit;
 
@@ -33,6 +34,44 @@ public sealed class LaunchRequestTests
         Assert.True(LaunchRequest.TryParse(req.Serialize(), out var back));
         Assert.Equal(req.WorkingDirectory, back!.WorkingDirectory);
         Assert.Equal(req.Args, back.Args);
+    }
+
+    // Defect-4 wire: the toast activation rides as one more argv entry, so it
+    // survives Serialize/TryParse unchanged and a primary that predates it
+    // simply does not recognize the argument.
+    [Fact]
+    public void RoundTrips_ForwardedToastActivation()
+    {
+        var req = new LaunchRequest(
+            @"C:\dir",
+            ["wintty.exe", ToastActivation.ForwardedArg("abc-123")]);
+
+        Assert.True(LaunchRequest.TryParse(req.Serialize(), out var back));
+        Assert.Equal("abc-123", ToastActivation.FromForwardedArgs(back!.Args).SurfaceKey);
+    }
+
+    // The other half of the upgrade window: an older secondary forwards argv
+    // with no activation in it. The payload must parse and read as a plain
+    // launch rather than as a surface nobody can find.
+    [Fact]
+    public void RoundTrips_WithoutActivation_ReadsAsPlainLaunch()
+    {
+        var req = new LaunchRequest(@"C:\dir", ["wintty.exe", "--jumplist-action=new-tab"]);
+
+        Assert.True(LaunchRequest.TryParse(req.Serialize(), out var back));
+        Assert.False(ToastActivation.FromForwardedArgs(back!.Args).HasSurface);
+    }
+
+    // A field a future build adds the same way must not cost the launch: an
+    // unrecognized argument round-trips and is ignored, leaving a plain launch.
+    [Fact]
+    public void RoundTrips_UnknownArgument_IsIgnoredNotRejected()
+    {
+        var req = new LaunchRequest(@"C:\dir", ["wintty.exe", "--something-a-newer-build-sends=7"]);
+
+        Assert.True(LaunchRequest.TryParse(req.Serialize(), out var back));
+        Assert.Equal(req.Args, back!.Args);
+        Assert.False(ToastActivation.FromForwardedArgs(back.Args).HasSurface);
     }
 
     [Theory]

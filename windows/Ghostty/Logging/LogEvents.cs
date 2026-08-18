@@ -75,8 +75,9 @@ internal static class LogEvents
     // 2700-2799: Notifications
     internal static class Notifications
     {
-        public const int ShowFailed  = 2701;
-        public const int ClearFailed = 2702;
+        public const int ShowFailed       = 2701;
+        public const int ClearFailed      = 2702;
+        public const int ActivationFailed = 2703;
     }
 
     // 2800-2899: Session restoration

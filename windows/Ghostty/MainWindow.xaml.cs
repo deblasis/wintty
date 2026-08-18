@@ -1048,6 +1048,44 @@ public sealed partial class MainWindow : Window
     internal void ActivateAfterPlacement() => Activate();
 
     /// <summary>
+    /// Bring the surface a toast was raised for back in front of the user.
+    /// Returns false when no pane in this window carries
+    /// <paramref name="surfaceKey"/>, so the caller can try the next window
+    /// and ultimately fall back to plain activation.
+    ///
+    /// Keyed on <see cref="TerminalControl.ToastSurfaceKey"/> -- the same key
+    /// the toast was grouped under and the same one focus-regain clears by --
+    /// rather than the native surface handle, which can be recycled onto a
+    /// different surface between raising a toast and clicking it.
+    /// UI-thread only.
+    /// </summary>
+    internal bool TryFocusToastSurface(string surfaceKey)
+    {
+        foreach (var tab in _tabManager.Tabs)
+        {
+            var paneHost = (PaneHost)tab.PaneHost;
+            foreach (var leaf in PaneTree.Leaves(paneHost.RootNode))
+            {
+                var terminal = leaf.Terminal();
+                if (!string.Equals(terminal.ToastSurfaceKey, surfaceKey, StringComparison.Ordinal))
+                    continue;
+
+                // Tab first, then window, then pane: selecting the tab after
+                // activating would show the user the old tab for a frame, and
+                // focusing the pane before its tab is on screen puts focus on
+                // a collapsed PaneHost.
+                _tabManager.Activate(tab);
+                if (!AppWindow.IsVisible) AppWindow.Show();
+                Activate();
+                terminal.Focus(FocusState.Programmatic);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Jump-list / single-instance "New Tab". Resolves
     /// <paramref name="profileId"/> (or the registry default) when
     /// possible; otherwise opens a tab with no snapshot. Must never
