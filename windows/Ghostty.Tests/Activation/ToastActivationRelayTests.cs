@@ -248,15 +248,75 @@ public sealed class ToastActivationRelayTests
         Assert.Equal("abc", relay.Pending.SurfaceKey);
     }
 
+    // The shell may hand the launch click over ONE way only, in which case no
+    // second call ever arrives -- and the next call is a person clicking a new
+    // toast. Deduping on ordinal position instead of identity swallowed it:
+    // the click did nothing at all, not even bring the app forward.
     [Fact]
-    public void Reset_ClearsTheLaunchActivationRecord()
+    public void TryNoteLaunchActivation_ADifferentActivationIsNotADuplicate()
+    {
+        var relay = new ToastActivationRelay();
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
+
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("launch")));
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("clicked-later")));
+
+        Assert.Equal(["launch", "clicked-later"], seen.Select(a => a.SurfaceKey));
+    }
+
+    // The remaining ambiguity: a real click on the SAME surface the launch
+    // click named. Indistinguishable from a redelivery until startup declares
+    // itself over.
+    [Fact]
+    public void TryNoteLaunchActivation_SameActivationIsADuplicateUntilTheWindowCloses()
+    {
+        var relay = new ToastActivationRelay();
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
+
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+        Assert.False(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+
+        relay.CloseLaunchWindow();
+        Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+
+        Assert.Equal(["abc", "abc"], seen.Select(a => a.SurfaceKey));
+    }
+
+    [Fact]
+    public void CloseLaunchWindow_LetsAnyLaterClickThrough()
+    {
+        var relay = new ToastActivationRelay();
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
+        relay.TryNoteLaunchActivation(new ToastActivation("abc"));
+        relay.CloseLaunchWindow();
+
+        relay.TryNoteLaunchActivation(new ToastActivation("abc"));
+        relay.TryNoteLaunchActivation(new ToastActivation("abc"));
+
+        Assert.Equal(3, seen.Count);
+    }
+
+    // Reset exists to make the relay reusable, so it has to restore the WHOLE
+    // launch gate. Leaving half of it set (the record cleared, the window
+    // closed) is how a second startup delivers the launch click twice.
+    [Fact]
+    public void Reset_RestoresTheWholeLaunchGate()
     {
         var relay = new ToastActivationRelay();
         relay.TryNoteLaunchActivation(new ToastActivation("abc"));
+        relay.CloseLaunchWindow();
 
         relay.Reset();
 
+        var seen = new List<ToastActivation>();
+        relay.Subscribe(seen.Add);
         Assert.True(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+        Assert.False(relay.TryNoteLaunchActivation(new ToastActivation("abc")));
+
+        Assert.Single(seen);
     }
 
     // Handlers activate windows and can re-enter the relay. Holding the gate

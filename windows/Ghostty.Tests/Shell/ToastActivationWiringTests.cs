@@ -127,25 +127,39 @@ public class ToastActivationWiringTests
             + "case it exists to cover.");
     }
 
-    // Both the probe and the first callback describe the same launch click.
-    // Routing both through TryNoteLaunchActivation is what stops one click
-    // being acted on twice, whichever of them WinAppSDK delivers first.
+    // Both the probe and the notification callback can describe the same
+    // launch click. Both go through TryNoteLaunchActivation so the relay can
+    // dedupe on what the click IS -- the callback must not keep its own idea
+    // of which one is the launch, because ordinal position is not identity and
+    // guessing it swallowed real clicks.
     [Fact]
     public void LaunchActivationIsRecordedThroughTheDedupe()
     {
         var callback = Member("App.xaml.cs", "private void OnToastNotificationInvoked(");
 
-        var first = CSharpSourceText.RequireIndex(
-            callback, "_toastCallbackIsFirst",
-            "the callback no longer distinguishes the launch click from a warm one");
-        var dedupe = CSharpSourceText.RequireIndex(
-            callback, "TryNoteLaunchActivation(",
-            "the launch click no longer goes through the dedupe and can be acted on twice");
-        var warm = CSharpSourceText.RequireIndex(
-            callback, "ToastActivations.Note(", "warm clicks are no longer delivered");
+        CSharpSourceText.RequireIndex(
+            callback, "ToastActivations.TryNoteLaunchActivation(",
+            "the callback no longer routes through the dedupe and a click can be acted on twice");
+        Assert.Equal(0, CSharpSourceText.Count(callback, "ToastActivations.Note("));
+    }
 
-        Assert.True(first < dedupe, "the dedupe belongs to the first callback only");
-        Assert.True(dedupe < warm, "a warm click must not go through the launch dedupe");
+    // The launch window has to be closed once startup is over, or a real click
+    // on the same surface the launch click named is dropped as a duplicate.
+    // After the first subscriber, because that is when the launch click has
+    // been acted on.
+    [Fact]
+    public void LaunchWindowIsClosedAfterTheFirstSubscriber()
+    {
+        var launched = OnLaunched();
+
+        var subscribe = CSharpSourceText.RequireIndex(
+            launched, "ToastActivations.Subscribe(", "OnLaunched no longer subscribes to toast clicks");
+        var close = CSharpSourceText.RequireIndex(
+            launched, "ToastActivations.CloseLaunchWindow()",
+            "startup never declares the launch window over, so a click on the launch surface "
+            + "is dropped as a duplicate");
+
+        Assert.True(close > subscribe, "the window closes only once the launch click can be acted on");
     }
 
     // The forward is the only record a secondary leaves before exiting, and

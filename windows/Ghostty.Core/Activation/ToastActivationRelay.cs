@@ -31,7 +31,9 @@ internal sealed class ToastActivationRelay
     private readonly Action<Exception>? _onHandlerFailed;
     private ToastActivation? _pending;
     private Action<ToastActivation>? _handlers;
+    private bool _launchWindowOpen = true;
     private bool _launchActivationNoted;
+    private ToastActivation _launchActivation;
 
     /// <param name="onHandlerFailed">
     /// Where a throw from a handler goes. A replayed activation runs the
@@ -106,27 +108,57 @@ internal sealed class ToastActivationRelay
     }
 
     /// <summary>
-    /// Record the activation this PROCESS WAS LAUNCHED FOR, at most once.
-    /// Returns false when it was already recorded and nothing was done.
+    /// Record a click that MAY be the activation this process was launched
+    /// for. Returns false when it was recognised as a repeat and dropped.
     ///
     /// The launch click can reach the app twice: once off the activation
     /// arguments the shell hands the process, and once through the
     /// notification callback, describing the same click. Which arrives first
-    /// is not documented, so both callers come through here and whichever gets
-    /// here first wins. Without it the surface is focused twice for one click
-    /// -- a redundant activation, focus churn, and for the quick terminal a
-    /// second run through its reveal animation.
+    /// is not documented, and either may not arrive at all, so both callers
+    /// come through here and the second one carrying the same activation is
+    /// dropped. Without that the surface is focused twice for one click -- a
+    /// redundant activation, focus churn, and for the quick terminal a second
+    /// run through its reveal animation.
+    ///
+    /// A DIFFERENT activation is never a repeat and is always delivered: the
+    /// shell handing the launch click over one way only must not cost the user
+    /// their next real click. See <see cref="CloseLaunchWindow"/> for the
+    /// remaining case, a real click on the same surface as the launch one.
     /// </summary>
     public bool TryNoteLaunchActivation(ToastActivation activation)
     {
         lock (_gate)
         {
-            if (_launchActivationNoted) return false;
+            // Identity, not ordinal position. An earlier version dropped
+            // whichever call happened to be second, which meant that when the
+            // shell delivered the launch click only ONE way, the next genuine
+            // click a person made was swallowed as if it were the duplicate.
+            // Only a repeat of the SAME activation is a duplicate.
+            if (_launchWindowOpen && _launchActivationNoted && _launchActivation == activation)
+                return false;
+
             _launchActivationNoted = true;
+            _launchActivation = activation;
         }
 
         Note(activation);
         return true;
+    }
+
+    /// <summary>
+    /// Declare startup over: from here on nothing can be the launch click
+    /// arriving a second time, so every activation is delivered, including one
+    /// naming the same surface the launch click did.
+    ///
+    /// Without this, a person whose first click after launching happened to be
+    /// on a toast for the SAME surface would see it swallowed as a duplicate.
+    /// Call it once the first subscriber is wired: by then the launch click
+    /// has been acted on, and anything later is a person clicking a new toast
+    /// rather than the shell re-announcing an old one.
+    /// </summary>
+    public void CloseLaunchWindow()
+    {
+        lock (_gate) _launchWindowOpen = false;
     }
 
     /// <summary>
@@ -144,7 +176,9 @@ internal sealed class ToastActivationRelay
         {
             _handlers = null;
             _pending = null;
+            _launchWindowOpen = true;
             _launchActivationNoted = false;
+            _launchActivation = default;
         }
     }
 

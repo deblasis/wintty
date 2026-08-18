@@ -817,6 +817,11 @@ public partial class App : Application
         // would swallow every cold-launch click.
         ToastActivations.Subscribe(OnToastActivated);
 
+        // Startup is over and the launch click, if there was one, has been
+        // acted on. Anything arriving from here is a person clicking a new
+        // toast, so it must be delivered even when it names the same surface.
+        ToastActivations.CloseLaunchWindow();
+
         // Start the single-instance forwarding server last, once the UI
         // dispatcher and logger factory exist. No-op unless this process is
         // the single-instance primary.
@@ -1053,31 +1058,22 @@ public partial class App : Application
             protocolUri, Environment.GetCommandLineArgs());
     }
 
-    // Cleared by the first NotificationInvoked callback this process receives.
-    // That first one is the launch click, which the activation probe may
-    // already have recorded off the same launch; every later one is a warm
-    // click and always goes through.
-    private static int _toastCallbackIsFirst = 1;
-
     private void OnToastNotificationInvoked(
         Microsoft.Windows.AppNotifications.AppNotificationManager sender,
         Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs args)
     {
         try
         {
-            var activation = Ghostty.Core.Activation.ToastActivation
-                .FromNotificationArguments(args.Arguments);
-
-            // Interlocked because this runs on a WinRT callback thread while
-            // the probe runs on the startup thread, and the whole point is
-            // that their order is not knowable.
-            if (System.Threading.Interlocked.Exchange(ref _toastCallbackIsFirst, 0) == 1)
-            {
-                ToastActivations.TryNoteLaunchActivation(activation);
-                return;
-            }
-
-            ToastActivations.Note(activation);
+            // Every callback goes through the same door as the probe, and the
+            // relay decides. This one used to keep its own "is this the first
+            // callback" flag, which encoded ordinal position rather than
+            // identity: when the shell handed the launch click over only via
+            // the activation arguments, the user's next real click was the
+            // first callback and got swallowed. The relay dedupes on what the
+            // click IS, and nothing here needs to guess.
+            ToastActivations.TryNoteLaunchActivation(
+                Ghostty.Core.Activation.ToastActivation.FromNotificationArguments(
+                    args.Arguments));
         }
         catch (System.Exception ex)
         {

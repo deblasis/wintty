@@ -13,10 +13,20 @@ namespace Ghostty.Tests.Shell;
 /// App.xaml.cs do exactly that -- so a raw-text search finds the prose and
 /// passes while the code says the opposite. A string literal can do the same:
 /// a diagnostic message naming the API it reports on satisfies any assertion
-/// looking for that API.
+/// looking for that API. An interpolation hole is code inside a literal, so a
+/// nested literal inside one has to be skipped as a literal in its own right,
+/// or its contents leak back into the text an assertion reads.
 ///
-/// Literals are replaced by an empty literal of the same kind rather than
-/// deleted, so the surrounding code keeps its shape and offsets stay ordered.
+/// Literals are replaced by an empty literal rather than deleted, so the
+/// surrounding code keeps its shape and offsets stay ordered.
+///
+/// KNOWN LIMIT: raw string literals are not parsed. Their content can hold an
+/// unbalanced number of quotes, which would desynchronise this scanner and
+/// make it swallow real code silently -- the worst failure a helper that
+/// fourteen assertions depend on could have. One is therefore refused loudly
+/// via <see cref="NotSupportedException"/>. There is not one in the scanned
+/// corpus today; a source file that grows one gets a diagnostic naming this
+/// class, not a quiet false green.
 /// </summary>
 internal static class CSharpSourceText
 {
@@ -43,26 +53,17 @@ internal static class CSharpSourceText
                 continue;
             }
 
-            // Verbatim, in any of its prefix spellings: @"", $@"", @$"".
-            var verbatim = VerbatimBodyStart(source, i);
-            if (verbatim > 0)
-            {
-                i = SkipVerbatim(source, verbatim);
-                sb.Append("\"\"");
-                continue;
-            }
-
-            if (c == '"' || (c == '$' && Next(source, i) == '"'))
-            {
-                i = SkipRegular(source, c == '$' ? i + 2 : i + 1);
-                sb.Append("\"\"");
-                continue;
-            }
-
             if (c == '\'')
             {
                 i = SkipRegular(source, i + 1, terminator: '\'');
                 sb.Append("''");
+                continue;
+            }
+
+            if (TryReadLiteral(source, i, out var end))
+            {
+                sb.Append("\"\"");
+                i = end;
                 continue;
             }
 
@@ -130,14 +131,53 @@ internal static class CSharpSourceText
 
     private static char Next(string s, int i) => i + 1 < s.Length ? s[i + 1] : '\0';
 
-    // Returns the index just past the opening quote of a verbatim literal
-    // starting at i, or 0 when there is not one there.
-    private static int VerbatimBodyStart(string s, int i)
+    /// <summary>
+    /// If a string literal starts at <paramref name="i"/> -- including its
+    /// <c>@</c> / <c>$</c> prefixes in either order -- reports the index just
+    /// past its closing quote.
+    /// </summary>
+    private static bool TryReadLiteral(string s, int i, out int end)
     {
-        if (s[i] == '@' && Next(s, i) == '"') return i + 2;
-        if (s[i] == '@' && Next(s, i) == '$' && i + 2 < s.Length && s[i + 2] == '"') return i + 3;
-        if (s[i] == '$' && Next(s, i) == '@' && i + 2 < s.Length && s[i + 2] == '"') return i + 3;
-        return 0;
+        end = 0;
+
+        var j = i;
+        var verbatim = false;
+        var interpolated = false;
+        while (j < s.Length && (s[j] == '@' || s[j] == '$'))
+        {
+            if (s[j] == '@') verbatim = true; else interpolated = true;
+            j++;
+        }
+
+        // A prefix character only IS a prefix when a quote follows it;
+        // otherwise it was an identifier sigil and this is not a literal.
+        if (j >= s.Length || s[j] != '"') return false;
+
+        var quotes = 0;
+        while (j + quotes < s.Length && s[j + quotes] == '"') quotes++;
+
+        // Three or more opening quotes is a raw string -- unless the literal is
+        // verbatim, where a run just means it opens with escaped quotes.
+        if (!verbatim && quotes >= 3)
+        {
+            throw new NotSupportedException(
+                "CSharpSourceText cannot read raw string literals. One has appeared in a "
+                + "scanned source file. Parsing it wrongly would silently delete code from "
+                + "the text the wiring assertions read, so it is refused instead. Teach this "
+                + "class the raw-string forms before scanning that file.");
+        }
+
+        // An empty regular literal: nothing to skip past.
+        if (!verbatim && quotes == 2)
+        {
+            end = j + 2;
+            return true;
+        }
+
+        end = interpolated
+            ? SkipInterpolated(s, j + 1, verbatim)
+            : verbatim ? SkipVerbatim(s, j + 1) : SkipRegular(s, j + 1);
+        return true;
     }
 
     // In a verbatim literal a doubled quote is an escaped quote; a lone one
@@ -160,6 +200,62 @@ internal static class CSharpSourceText
         {
             if (s[i] == '\\') { i += 2; continue; }
             if (s[i] == terminator) return i + 1;
+            i++;
+        }
+
+        return i;
+    }
+
+    // An interpolated literal is text with holes of real code in it. Only a
+    // quote at brace depth zero closes it; inside a hole a quote opens a
+    // nested literal, which has to be skipped as one or its contents surface
+    // in the stripped text and satisfy assertions they have nothing to do with.
+    private static int SkipInterpolated(string s, int i, bool verbatim)
+    {
+        var depth = 0;
+
+        while (i < s.Length)
+        {
+            var c = s[i];
+
+            if (!verbatim && c == '\\' && depth == 0) { i += 2; continue; }
+
+            if (c == '{')
+            {
+                if (Next(s, i) == '{' && depth == 0) { i += 2; continue; }
+                depth++;
+                i++;
+                continue;
+            }
+
+            if (c == '}')
+            {
+                if (depth == 0)
+                {
+                    if (Next(s, i) == '}') { i += 2; continue; }
+                    i++;
+                    continue;
+                }
+
+                depth--;
+                i++;
+                continue;
+            }
+
+            if (depth > 0)
+            {
+                if (TryReadLiteral(s, i, out var nested)) { i = nested; continue; }
+                if (c == '\'') { i = SkipRegular(s, i + 1, terminator: '\''); continue; }
+                i++;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                if (verbatim && Next(s, i) == '"') { i += 2; continue; }
+                return i + 1;
+            }
+
             i++;
         }
 
