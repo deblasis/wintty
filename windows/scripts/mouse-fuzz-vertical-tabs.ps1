@@ -1,5 +1,5 @@
 #requires -Version 7
-# Isolated XDG: vertical-tabs pinned+width+hover-expand. Mouse/UIA only.
+# Isolated XDG: vertical-tabs pinned+width via NavigationView pane. Mouse/UIA only.
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
@@ -173,20 +173,26 @@ function Find-Name($root, [string]$name) {
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
-function Find-TabList($root) {
+function Find-NavPane($root) {
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'TabList')
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
-function Get-TabListWidth($root) {
-    $list = Find-TabList $root
-    if ($null -eq $list) { return 0 }
-    return [int]$list.Current.BoundingRectangle.Width
+function Get-NavPaneWidth($root) {
+    $nav = Find-NavPane $root
+    if ($null -eq $nav) { return 0 }
+    return [int]$nav.Current.BoundingRectangle.Width
 }
 
-function Find-StripChevron($root) {
-    foreach ($n in @('Collapse sidebar', 'Expand sidebar')) {
+function Find-PaneToggle($root) {
+    $idCond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'PaneToggleButton')
+    $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $idCond)
+    if ($null -ne $el) { return $el }
+    foreach ($n in @(
+            'Expand sidebar', 'Collapse sidebar', 'Toggle sidebar',
+            'Toggle navigation pane', 'Close navigation pane', 'Open navigation pane')) {
         $el = Find-Name $root $n
         if ($null -ne $el) { return $el }
     }
@@ -222,18 +228,17 @@ windows-single-instance = true
 window-save-state = never
 windows-settings-ui = true
 vertical-tabs = true
-vertical-tabs-pinned = true
-vertical-tabs-width = 280
-vertical-tabs-hover-expand = true
+window-theme = wintty
+theme = Catppuccin Mocha
+# Pin/width are session state (PaneToggleButton), not config keys yet.
+vertical-tabs-hover-expand = false
 "@)
 
 $proc = $null
 $pinnedWide = $false
 $collapsedNarrow = $false
-$hoverExpanded = $false
 $widthPinned = 0
 $widthCollapsed = 0
-$widthHover = 0
 
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
@@ -246,40 +251,44 @@ try {
     $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
     $hwnd64 = [int64]$main.Hwnd64
     Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
-    Shot $hwnd64 '00-launch-pinned'
+    Shot $hwnd64 '00-launch-collapsed'
 
     $root = Get-UiaRoot $hwnd64
-    $widthPinned = Get-TabListWidth $root
-    $pinnedWide = $widthPinned -ge 200
-    Write-Host "widthPinned=$widthPinned pinnedWide=$pinnedWide"
-    if (-not $pinnedWide) { throw "PRODUCT_FAIL: pinned strip width $widthPinned (want >=200 for 280px config)" }
-
-    $chev = Find-StripChevron $root
-    if ($null -eq $chev) { throw "HARVEST_MISS: strip chevron" }
-    Invoke-El $chev $pid32 'Collapse sidebar'
-    Start-Sleep -Milliseconds 400
-    $root = Get-UiaRoot $hwnd64
-    $widthCollapsed = Get-TabListWidth $root
+    $widthCollapsed = Get-NavPaneWidth $root
     $collapsedNarrow = $widthCollapsed -gt 0 -and $widthCollapsed -lt 90
     Write-Host "widthCollapsed=$widthCollapsed collapsedNarrow=$collapsedNarrow"
-    Shot $hwnd64 '01-collapsed'
+    if (-not $collapsedNarrow) { throw "PRODUCT_FAIL: launch strip width $widthCollapsed (want <90)" }
+
+    $toggle = Find-PaneToggle $root
+    if ($null -eq $toggle) { throw "HARVEST_MISS: pane toggle (Expand sidebar)" }
+    Invoke-El $toggle $pid32 'Expand sidebar'
+    Start-Sleep -Milliseconds 500
+    $root = Get-UiaRoot $hwnd64
+    $widthPinned = Get-NavPaneWidth $root
+    $pinnedWide = $widthPinned -ge 200
+    Write-Host "widthPinned=$widthPinned pinnedWide=$pinnedWide"
+    Shot $hwnd64 '01-expanded'
+    if (-not $pinnedWide) { throw "PRODUCT_FAIL: expanded strip width $widthPinned (want >=200)" }
+
+    $toggle = Find-PaneToggle $root
+    if ($null -eq $toggle) { throw "HARVEST_MISS: pane toggle (Collapse sidebar)" }
+    Invoke-El $toggle $pid32 'Collapse sidebar'
+    Start-Sleep -Milliseconds 400
+    $root = Get-UiaRoot $hwnd64
+    $widthCollapsed = Get-NavPaneWidth $root
+    $collapsedNarrow = $widthCollapsed -gt 0 -and $widthCollapsed -lt 90
+    Write-Host "widthCollapsed=$widthCollapsed collapsedNarrow=$collapsedNarrow"
+    Shot $hwnd64 '02-collapsed'
     if (-not $collapsedNarrow) { throw "PRODUCT_FAIL: collapsed strip width $widthCollapsed (want <90)" }
 
-    $rc = [MzVT]::RectOf($hwnd64)
-    $leave = [MzVT]::HoverScreen($pid32, $hwnd64, $rc.L + 400, $rc.T + 280)
-    if (-not $leave.Ok) { throw "HARVEST_MISS: leave-strip $($leave.Why)" }
-    Start-Sleep -Milliseconds 200
-    $list = Find-TabList (Get-UiaRoot $hwnd64)
-    $r = $list.Current.BoundingRectangle
-    $hx = [int]($r.X + 12); $hy = [int]($r.Y + 80)
-    $hit = [MzVT]::HoverScreen($pid32, $hwnd64, $hx, $hy)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: hover $($hit.Why)" }
-    Start-Sleep -Milliseconds 700
+    $toggle = Find-PaneToggle $root
+    if ($null -eq $toggle) { throw "HARVEST_MISS: pane toggle (Expand sidebar again)" }
+    Invoke-El $toggle $pid32 'Expand sidebar'
+    Start-Sleep -Milliseconds 400
     $root = Get-UiaRoot $hwnd64
-    $widthHover = Get-TabListWidth $root
-    $hoverExpanded = $widthHover -ge 200
-    Write-Host "widthHover=$widthHover hoverExpanded=$hoverExpanded"
-    Shot $hwnd64 '02-hover-expand'
+    $widthReopen = Get-NavPaneWidth $root
+    Write-Host "widthReopen=$widthReopen"
+    Shot $hwnd64 '03-reopened'
 }
 finally {
     if ($null -ne $proc) {
@@ -296,13 +305,10 @@ $result = @{
     crashGrew = $crashGrew
     pinnedWide = $pinnedWide
     collapsedNarrow = $collapsedNarrow
-    hoverExpanded = $hoverExpanded
     widthPinned = $widthPinned
     widthCollapsed = $widthCollapsed
-    widthHover = $widthHover
 }
 $result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 if ($crashGrew -or -not $pinnedWide -or -not $collapsedNarrow) { exit 2 }
-if (-not $hoverExpanded) { Write-Host 'HOVER_UNVERIFIED: WinUI PointerEntered not driven by synthesized mouse' }
 exit 0

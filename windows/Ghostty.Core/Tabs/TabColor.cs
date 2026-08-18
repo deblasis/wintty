@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Drawing;
+using Ghostty.Core.Windows;
 
 namespace Ghostty.Core.Tabs;
 
@@ -94,4 +96,59 @@ internal static class TabColorPalette
         TabColor.Graphite => "Graphite",
         _                 => "None",
     };
+
+    /// <summary>Selected tab/header fill uses the full preset color.</summary>
+    public const byte SelectedBackgroundAlpha = 255;
+
+    /// <summary>Inactive tabs stay translucent so the strip chrome shows through.</summary>
+    public const byte UnselectedBackgroundAlpha = 89;
+
+    /// <summary>
+    /// Tab strip background for a preset color. <see cref="TabColor.None"/> is invalid.
+    /// </summary>
+    public static Color Background(TabColor color, bool selected)
+    {
+        var rgb = Colors[color];
+        var alpha = selected ? SelectedBackgroundAlpha : UnselectedBackgroundAlpha;
+        return Color.FromArgb(alpha, rgb.R, rgb.G, rgb.B);
+    }
+
+    /// <summary>Opaque preset color for the active pane border.</summary>
+    public static Color Border(TabColor color) => Colors[color];
+
+    /// <summary>
+    /// sRGB backdrop after compositing a preset tint over the strip fill.
+    /// Selected rows use the full preset; inactive rows alpha-blend over
+    /// <paramref name="stripBackdropRgb"/> (0x00RRGGBB).
+    /// </summary>
+    public static uint EffectiveBackgroundRgb(
+        TabColor color, bool selected, uint stripBackdropRgb)
+    {
+        var preset = Colors[color];
+        if (selected)
+            return PackRgb(preset.R, preset.G, preset.B);
+
+        var alpha = UnselectedBackgroundAlpha / 255.0;
+        var inv = 1.0 - alpha;
+        var br = (stripBackdropRgb >> 16) & 0xFF;
+        var bg = (stripBackdropRgb >> 8) & 0xFF;
+        var bb = stripBackdropRgb & 0xFF;
+        return PackRgb(
+            (byte)Math.Clamp(preset.R * alpha + br * inv, 0, 255),
+            (byte)Math.Clamp(preset.G * alpha + bg * inv, 0, 255),
+            (byte)Math.Clamp(preset.B * alpha + bb * inv, 0, 255));
+    }
+
+    /// <summary>
+    /// Foreground sRGB (0x00RRGGBB) readable on the effective tab tint.
+    /// </summary>
+    public static uint ForegroundRgb(
+        TabColor color, bool selected, uint stripBackdropRgb)
+    {
+        var bg = EffectiveBackgroundRgb(color, selected, stripBackdropRgb);
+        return ThemeResolution.EnsureReadableForeground(bg, bg);
+    }
+
+    private static uint PackRgb(byte r, byte g, byte b)
+        => ((uint)r << 16) | ((uint)g << 8) | b;
 }

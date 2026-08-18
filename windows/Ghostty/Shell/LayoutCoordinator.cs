@@ -30,14 +30,25 @@ internal sealed class LayoutCoordinator
     // vertically in this mode (Orientation=Vertical on
     // NewTabSplitButton), so the column can stay narrow. Must stay
     // in sync with the StripColumn Width in VerticalTabHost.xaml.
-    public const double VerticalStripCollapsedWidth = 40;
-    public const int SwitchDurationMs = 220;
+    // NavigationView LeftCompact default; keep in sync with
+    // VerticalTabStrip NavigationView.CompactPaneLength.
+    public const double VerticalStripCollapsedWidth = 48;
+    public const int SwitchDurationMs = 340;
 
     // Vertical-mode title bar height. The horizontal host slides this
     // far vertically during the cross-fade so the swap feels like the
     // strip lifting away. Must match VerticalTitleBar.Height in
     // MainWindow.xaml.
-    private const double VerticalTitleBarHeight = 34;
+    public const double VerticalTitleBarHeight = TabChromeMetrics.TitleRowHeight;
+
+    private static readonly TimeSpan SwitchDuration =
+        TimeSpan.FromMilliseconds(SwitchDurationMs);
+
+    // Stagger: outgoing fades first, incoming follows so the morph reads
+    // as one continuous motion instead of a flat dissolve.
+    private const double IncomingFadeDelay = 0.16;
+    private const double OutgoingFadeEnd = 0.78;
+    private const double TitleBarSlideDistance = 10;
 
     // Feel constants for the icon spin/pop, tuned by eye. The spin is one
     // full turn; the pop dips the scale partway through and springs back
@@ -89,14 +100,10 @@ internal sealed class LayoutCoordinator
         _horizontalIcon = horizontalIcon;
         _verticalIcon = verticalTabHost.IconBadge;
 
-        // The chevron toggle inside VerticalTabHost asks the outer
-        // shell to widen the strip column. Forward through the same
-        // tween path so chevron + layout switch can never race.
+        // Pin toggle snaps immediately -- NavView needs the full column width
+        // before IsPaneOpen sticks; a tween left MUXC auto-closing the pane.
         _verticalTabHost.StripWidthChangeRequested += (_, width) =>
-        {
-            TweenStripColumn(_stripColumn.Width.Value, width,
-                onTick: v => _verticalTabHost.SetInternalStripWidth(v));
-        };
+            SnapStripColumn(width);
     }
 
     public bool IsSwitching => _switching;
@@ -148,6 +155,18 @@ internal sealed class LayoutCoordinator
         ResetIconTransform(_horizontalIcon);
         ResetIconTransform(_verticalIcon);
 
+        if (!_verticalTitleBarSuppressed)
+        {
+            GetOrCreateTranslate(_verticalTitleBar).X = 0;
+            GetOrCreateTranslate(_verticalTitleBar).Y = 0;
+        }
+
+        if (verticalTabs)
+            _verticalTabHost.ConfigureTitleBarIconMode(_verticalTitleBarSuppressed);
+
+        if (verticalTabs)
+            _verticalTabHost.SyncSelectionFromManager();
+
         if (_stripHidden)
         {
             // Collapse everything in the strip/title row + column,
@@ -181,12 +200,9 @@ internal sealed class LayoutCoordinator
 
     /// <summary>
     /// Cross-fade + slide animation between horizontal and vertical
-    /// layouts. Runs the chrome transforms (Opacity, RenderTransform)
-    /// inside a <see cref="Storyboard"/> while snapping the strip
-    /// column width immediately. WinUI 3 has no native
-    /// GridLengthAnimation, and custom DependencyObjects not in the
-    /// visual tree are rejected by Storyboard.Begin, so the column
-    /// width is set directly — the crossfade hides the snap.
+    /// layouts. Chrome transforms run in a compositor <see cref="Storyboard"/>;
+    /// strip column width tweens in parallel because WinUI 3 has no native
+    /// GridLengthAnimation.
     /// </summary>
     public void Animate(bool verticalTabs, Action? onCompleted = null)
     {
@@ -200,6 +216,10 @@ internal sealed class LayoutCoordinator
         _switching = true;
 
         var targetColWidth = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
+        var fromColWidth = _stripColumn.Width.Value;
+
+        if (verticalTabs)
+            _verticalTabHost.ConfigureTitleBarIconMode(_verticalTitleBarSuppressed);
 
         if (!_verticalTitleBarSuppressed)
             _verticalTitleBar.Visibility = Visibility.Visible;
@@ -216,68 +236,80 @@ internal sealed class LayoutCoordinator
             : new Windows.Foundation.Point(-VerticalStripCollapsedWidth, 0);
 
         incoming.IsHitTestVisible = true;
+        outgoing.IsHitTestVisible = false;
         var incomingTx = GetOrCreateTranslate(incoming);
         incomingTx.X = incomingOffset.X;
         incomingTx.Y = incomingOffset.Y;
         incoming.Opacity = 0;
 
-        // Cancel any in-flight column tween from a previous chevron
-        // click so the layout switch owns the column width.
         _columnTimer?.Stop();
         _columnTimer = null;
 
         var sb = new Storyboard();
-        sb.Children.Add(MakeDoubleAnim(incoming, "Opacity", 0, 1));
-        sb.Children.Add(MakeDoubleAnim(outgoing, "Opacity", outgoing.Opacity, 0));
+        sb.Children.Add(MakeStaggeredFadeIn(incoming));
+        sb.Children.Add(MakeStaggeredFadeOut(outgoing, outgoing.Opacity));
+
         if (!_verticalTitleBarSuppressed)
-            sb.Children.Add(MakeDoubleAnim(_verticalTitleBar, "Opacity",
-                verticalTabs ? 0 : 1, verticalTabs ? 1 : 0));
+            AddTitleBarAnimations(sb, verticalTabs);
 
-        sb.Children.Add(MakeTransformAnim(incoming, "X", incomingTx.X, 0));
-        sb.Children.Add(MakeTransformAnim(incoming, "Y", incomingTx.Y, 0));
+        sb.Children.Add(MakeIncomingSlideAnim(incoming, "X", incomingTx.X, 0));
+        sb.Children.Add(MakeIncomingSlideAnim(incoming, "Y", incomingTx.Y, 0));
         var outgoingTx = GetOrCreateTranslate(outgoing);
-        sb.Children.Add(MakeTransformAnim(outgoing, "X", outgoingTx.X, outgoingOffset.X));
-        sb.Children.Add(MakeTransformAnim(outgoing, "Y", outgoingTx.Y, outgoingOffset.Y));
+        sb.Children.Add(MakeOutgoingSlideAnim(outgoing, "X", outgoingTx.X, outgoingOffset.X));
+        sb.Children.Add(MakeOutgoingSlideAnim(outgoing, "Y", outgoingTx.Y, outgoingOffset.Y));
 
-        // Spin + pop the wintty icon while keeping it pinned in place.
-        // Each icon counter-translates its own host's slide, so it stays
-        // glued to the same anchor point while the strip/title-bar chrome
-        // slides around it -- the icon reads as a fixed pivot the layout
-        // rotates about, not something that flies in with the rest. This
-        // only cancels because the icon is a child of its host: the two
-        // translates compose, so equal-and-opposite nets to zero.
-        //
-        // Both icons spin the same way so the cross-fade between them
-        // (one per layout, sitting at the same spot) looks like a single
-        // steady, turning ghost. Direction follows the chrome sweep:
-        // going vertical (top bar -> left rail) is counter-clockwise,
-        // going horizontal (left rail -> top bar) clockwise. One full
-        // turn lands it upright.
         var spin = verticalTabs ? -360.0 : 360.0;
         var incomingIcon = verticalTabs ? _verticalIcon : _horizontalIcon;
         var outgoingIcon = verticalTabs ? _horizontalIcon : _verticalIcon;
         SpinIconInPlace(sb, incomingIcon, spin,
-            -incomingOffset.X, -incomingOffset.Y, 0, 0);
+            -incomingOffset.X, -incomingOffset.Y, 0, 0, incoming: true);
         SpinIconInPlace(sb, outgoingIcon, spin,
-            0, 0, -outgoingOffset.X, -outgoingOffset.Y);
+            0, 0, -outgoingOffset.X, -outgoingOffset.Y, incoming: false);
 
-        // Snap the strip column width immediately. The crossfade
-        // hides the jump; see the Animate summary for rationale.
-        _stripColumn.Width = new GridLength(targetColWidth);
-        _titleBarStripMirror.Width = new GridLength(targetColWidth);
-        _verticalTabHost.SetInternalStripWidth(
-            verticalTabs ? _verticalTabHost.CurrentStripTarget : VerticalStripCollapsedWidth);
-
-        sb.Completed += (_, _) =>
+        TweenStripColumn(fromColWidth, targetColWidth, onTick: w =>
         {
-            // Snap returns the icons to identity (360 lands them upright
-            // anyway; this just stops the angle accumulating across
-            // switches) along with the rest of the end state.
-            Snap(verticalTabs);
-            _switching = false;
-            onCompleted?.Invoke();
-        };
-        sb.Begin();
+            if (w > 0.5)
+                _verticalTabHost.SetInternalStripWidth(w);
+        });
+
+        sb.Completed += (_, _) => FinishSwitch(verticalTabs, onCompleted);
+
+        // If Begin throws, Completed never fires and _switching stays
+        // latched -- every later layout toggle (keybind, palette, settings)
+        // would silently no-op for the life of the window. Land the switch
+        // without the animation instead.
+        try
+        {
+            sb.Begin();
+        }
+        catch (Exception)
+        {
+            FinishSwitch(verticalTabs, onCompleted);
+        }
+    }
+
+    private void FinishSwitch(bool verticalTabs, Action? onCompleted)
+    {
+        if (!_switching) return;
+        _columnTimer?.Stop();
+        _columnTimer = null;
+        Snap(verticalTabs);
+        _switching = false;
+        onCompleted?.Invoke();
+    }
+
+    /// <summary>
+    /// Snap the vertical strip column to <paramref name="width"/> with no
+    /// animation. Used by the pane-toggle button so NavigationView and the
+    /// outer shell stay in lockstep.
+    /// </summary>
+    public void SnapStripColumn(double width)
+    {
+        _columnTimer?.Stop();
+        _columnTimer = null;
+        _stripColumn.Width = new GridLength(width);
+        _titleBarStripMirror.Width = new GridLength(width);
+        _verticalTabHost.SetInternalStripWidth(width);
     }
 
     /// <summary>
@@ -299,8 +331,7 @@ internal sealed class LayoutCoordinator
         timer.Tick += (_, _) =>
         {
             var t = Math.Min(sw.Elapsed / duration, 1.0);
-            // Quadratic ease-out: 1 - (1 - t)^2
-            var eased = 1.0 - (1.0 - t) * (1.0 - t);
+            var eased = EaseInOutCubic(t);
             var value = from + (to - from) * eased;
             _stripColumn.Width = new GridLength(value);
             _titleBarStripMirror.Width = new GridLength(value);
@@ -330,7 +361,8 @@ internal sealed class LayoutCoordinator
     // leaving only the in-place rotate and scale visible.
     private static void SpinIconInPlace(
         Storyboard sb, FrameworkElement? icon, double spin,
-        double fromX, double fromY, double toX, double toY)
+        double fromX, double fromY, double toX, double toY,
+        bool incoming)
     {
         if (icon is null) return;
         var (scale, rotate, translate) = EnsureIconTransform(icon);
@@ -342,11 +374,8 @@ internal sealed class LayoutCoordinator
         sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
         sb.Children.Add(MakePopAnim(scale, "ScaleX"));
         sb.Children.Add(MakePopAnim(scale, "ScaleY"));
-        // Same easing + duration helper as the host slide, so the
-        // counter-translate cancels it frame for frame, not just at the
-        // endpoints.
-        sb.Children.Add(MakeDoubleAnim(translate, "X", fromX, toX));
-        sb.Children.Add(MakeDoubleAnim(translate, "Y", fromY, toY));
+        sb.Children.Add(MakeIconCounterSlideAnim(translate, "X", fromX, toX, incoming));
+        sb.Children.Add(MakeIconCounterSlideAnim(translate, "Y", fromY, toY, incoming));
     }
 
     // Give the icon a Scale+Rotate+Translate group: scale and rotate
@@ -384,6 +413,80 @@ internal sealed class LayoutCoordinator
         translate.Y = 0;
     }
 
+    private void AddTitleBarAnimations(Storyboard sb, bool verticalTabs)
+    {
+        var titleTx = GetOrCreateTranslate(_verticalTitleBar);
+        if (verticalTabs)
+        {
+            _verticalTitleBar.Opacity = 0;
+            titleTx.Y = -TitleBarSlideDistance;
+            sb.Children.Add(MakeStaggeredFadeIn(_verticalTitleBar));
+            sb.Children.Add(MakeIncomingSlideAnim(_verticalTitleBar, "Y", titleTx.Y, 0));
+        }
+        else
+        {
+            sb.Children.Add(MakeStaggeredFadeOut(_verticalTitleBar, _verticalTitleBar.Opacity));
+            sb.Children.Add(MakeOutgoingSlideAnim(
+                _verticalTitleBar, "Y", titleTx.Y, -TitleBarSlideDistance));
+        }
+    }
+
+    private static double EaseInOutCubic(double t)
+        => t < 0.5
+            ? 4.0 * t * t * t
+            : 1.0 - Math.Pow(-2.0 * t + 2.0, 3.0) / 2.0;
+
+    private static DoubleAnimationUsingKeyFrames MakeStaggeredFadeIn(FrameworkElement target)
+    {
+        var anim = new DoubleAnimationUsingKeyFrames();
+        anim.KeyFrames.Add(new LinearDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
+            Value = 0,
+        });
+        anim.KeyFrames.Add(new LinearDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(
+                TimeSpan.FromMilliseconds(SwitchDurationMs * IncomingFadeDelay)),
+            Value = 0,
+        });
+        anim.KeyFrames.Add(new EasingDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
+            Value = 1,
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        });
+        Storyboard.SetTarget(anim, target);
+        Storyboard.SetTargetProperty(anim, "Opacity");
+        return anim;
+    }
+
+    private static DoubleAnimationUsingKeyFrames MakeStaggeredFadeOut(
+        FrameworkElement target, double fromOpacity)
+    {
+        var anim = new DoubleAnimationUsingKeyFrames();
+        anim.KeyFrames.Add(new LinearDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(TimeSpan.Zero),
+            Value = fromOpacity,
+        });
+        anim.KeyFrames.Add(new EasingDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(
+                TimeSpan.FromMilliseconds(SwitchDurationMs * OutgoingFadeEnd)),
+            Value = 0,
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn },
+        });
+        anim.KeyFrames.Add(new LinearDoubleKeyFrame
+        {
+            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
+            Value = 0,
+        });
+        Storyboard.SetTarget(anim, target);
+        Storyboard.SetTargetProperty(anim, "Opacity");
+        return anim;
+    }
+
     private static DoubleAnimation MakeRotateAnim(RotateTransform target, double from, double to)
     {
         // A touch of back-ease overshoot at the end sells the "shoved
@@ -392,7 +495,7 @@ internal sealed class LayoutCoordinator
         {
             From = from,
             To = to,
-            Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
+            Duration = new Duration(SwitchDuration),
             EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconSpinOvershoot },
         };
         Storyboard.SetTarget(anim, target);
@@ -418,7 +521,7 @@ internal sealed class LayoutCoordinator
         });
         anim.KeyFrames.Add(new EasingDoubleKeyFrame
         {
-            KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(SwitchDurationMs)),
+            KeyTime = KeyTime.FromTimeSpan(SwitchDuration),
             Value = 1.0,
             EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = IconPopOvershoot },
         });
@@ -427,28 +530,47 @@ internal sealed class LayoutCoordinator
         return anim;
     }
 
-    private static DoubleAnimation MakeDoubleAnim(DependencyObject target, string path, double from, double to)
+    private static DoubleAnimation MakeIconCounterSlideAnim(
+        TranslateTransform target, string axis, double from, double to, bool incoming)
     {
         var anim = new DoubleAnimation
         {
             From = from,
             To = to,
-            Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+            Duration = new Duration(SwitchDuration),
+            EasingFunction = incoming
+                ? new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 }
+                : new CubicEase { EasingMode = EasingMode.EaseIn },
         };
         Storyboard.SetTarget(anim, target);
-        Storyboard.SetTargetProperty(anim, path);
+        Storyboard.SetTargetProperty(anim, axis);
         return anim;
     }
 
-    private static DoubleAnimation MakeTransformAnim(FrameworkElement target, string axis, double from, double to)
+    private static DoubleAnimation MakeIncomingSlideAnim(
+        FrameworkElement target, string axis, double from, double to)
     {
         var anim = new DoubleAnimation
         {
             From = from,
             To = to,
-            Duration = new Duration(TimeSpan.FromMilliseconds(SwitchDurationMs)),
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+            Duration = new Duration(SwitchDuration),
+            EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.12 },
+        };
+        Storyboard.SetTarget(anim, target.RenderTransform);
+        Storyboard.SetTargetProperty(anim, axis);
+        return anim;
+    }
+
+    private static DoubleAnimation MakeOutgoingSlideAnim(
+        FrameworkElement target, string axis, double from, double to)
+    {
+        var anim = new DoubleAnimation
+        {
+            From = from,
+            To = to,
+            Duration = new Duration(SwitchDuration),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn },
         };
         Storyboard.SetTarget(anim, target.RenderTransform);
         Storyboard.SetTargetProperty(anim, axis);
