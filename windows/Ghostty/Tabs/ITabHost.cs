@@ -35,6 +35,13 @@ internal interface ITabHost
     UIElement DragRegion { get; }
 
     /// <summary>
+    /// The element rendering <paramref name="tab"/> in this host, or null
+    /// if the host has no row for it yet. LayoutCoordinator measures this
+    /// on both hosts to morph the active tab across a layout switch.
+    /// </summary>
+    FrameworkElement? TabElement(TabModel tab);
+
+    /// <summary>
     /// Single entry point for closing a tab. Shows the multi-pane
     /// confirmation dialog if needed and only then closes.
     /// </summary>

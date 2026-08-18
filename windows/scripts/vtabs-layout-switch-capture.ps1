@@ -83,6 +83,7 @@ $cfgDir = Join-Path $tempXdg 'wintty'
 New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
 @'
 vertical-tabs = true
+windows-single-instance = false
 window-theme = wintty
 theme = Catppuccin Mocha
 '@ | Set-Content -Path (Join-Path $cfgDir 'config.wintty') -Encoding utf8

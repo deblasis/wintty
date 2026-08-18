@@ -59,6 +59,14 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     private bool _shellThemeActive;
 
     public FrameworkElement HostElement => this;
+
+    public FrameworkElement? TabElement(TabModel tab) => _strip.TabElement(tab);
+
+    internal void SetSelectionRowSuppressed(bool suppressed)
+        => _strip.SetSelectionRowSuppressed(suppressed);
+
+    internal (SolidColorBrush Fill, SolidColorBrush Foreground) ActiveRowChrome(TabModel tab)
+        => _strip.ActiveRowChrome(tab);
     public UIElement DragRegion => this;
 
     public event EventHandler<double>? StripWidthChangeRequested;
