@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -164,6 +165,13 @@ public sealed partial class MainWindow : Window
     // is the single source of truth for that property; this cache
     // skips allocating a new SolidColorBrush when nothing changed.
     private Windows.UI.Color? _lastRootBackground;
+
+    // Vertical-mode title row: opaque fills over Mica so the top bar
+    // matches the terminal palette instead of Fluent grey.
+    private Windows.UI.Color? _lastVerticalTitleDragBg;
+    private Windows.UI.Color? _lastVerticalTitleStripMirrorBg;
+    private Windows.UI.Color? _lastVerticalTitleCaptionBg;
+    private readonly Dictionary<TabModel, PropertyChangedEventHandler> _tabColorWired = new();
 
     // Last structural gradient config (points, blend, static opacity).
     // ApplyGradientTint rebuilds the SpriteVisual only when these
@@ -590,6 +598,7 @@ public sealed partial class MainWindow : Window
         _horizontalTabHost.AttachOwner(this);
         _verticalTabHost = new VerticalTabHost(_tabManager, _router, _dialogs, _host);
         _verticalTabHost.AttachOwner(this);
+        _verticalTabHost.SetPrimaryIconBadge(VerticalIconBadgeHost);
 
         // Place both tab hosts in their RootGrid slots. The
         // horizontal host spans both columns in row 0 so its TabView
@@ -675,24 +684,39 @@ public sealed partial class MainWindow : Window
 
         _tabManager.TabAdded += (_, t) =>
         {
+            WireTabColor(t);
             AddPaneHost(t);
             AttachProcessTracking(t);
             SwapActivePane();
-            // Apply current cursor color to new tabs' pane borders.
-            UpdateCursorAccentColors();
+            ApplyPerTabChrome();
         };
         _tabManager.TabRemoved += (_, t) =>
         {
+            UnwireTabColor(t);
             DetachProcessTracking(t);
             RemovePaneHost(t);
         };
-        _tabManager.ActiveTabChanged += (_, _) => SwapActivePane();
+        _tabManager.ActiveTabChanged += (_, _) =>
+        {
+            SwapActivePane();
+            ApplyPerTabChrome();
+        };
 
-        // Apply initial cursor-color-derived pane border.
-        UpdateCursorAccentColors();
+        foreach (var tab in _tabManager.Tabs)
+            WireTabColor(tab);
+
+        // Apply initial cursor-color-derived pane border + tab chrome.
+        ApplyPerTabChrome();
 
         _verticalTabsVisible = _configService.VerticalTabs;
         _tabHost = _verticalTabsVisible ? _verticalTabHost : _horizontalTabHost;
+
+        // Make TabChromeMetrics authoritative rather than aspirational: the
+        // XAML values are design-time defaults, and a comment claiming they
+        // match the constant is exactly how the two drift apart.
+        VerticalTitleBar.Height = Shell.TabChromeMetrics.TitleRowHeight;
+        VerticalCaptionSeamCover.Margin = new Thickness(
+            0, Shell.TabChromeMetrics.TitleRowHeight - 2, 0, 0);
 
         _layout = new LayoutCoordinator(
             StripColumn,
@@ -702,6 +726,10 @@ public sealed partial class MainWindow : Window
             VerticalTitleBar,
             _horizontalTabHost.IconBadge);
         _layout.Snap(_verticalTabsVisible);
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+        if (_verticalTabsVisible)
+            _verticalTabHost.SyncSelectionFromManager();
 
         _titleBar = new TitleBarCoordinator(
             this,
@@ -711,6 +739,7 @@ public sealed partial class MainWindow : Window
             VerticalTitleDragRegion,
             VerticalTitleText,
             VerticalCaptionInset,
+            VerticalCaptionSeamCover,
             isVerticalMode: () => _tabHost is VerticalTabHost);
         _titleBar.ApplyForCurrentMode();
         _titleBar.SyncCaptionInset();
@@ -945,8 +974,16 @@ public sealed partial class MainWindow : Window
         if (_layout.IsSwitching) return;
         _verticalTabsVisible = vertical;
         _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
+        // Paint caption/title chrome before the cross-fade so the OS
+        // buttons and drag row do not flash stale horizontal colors.
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+        _titleBar.ApplyForCurrentMode();
         _layout.Animate(vertical, onCompleted: () =>
         {
+            RefreshTabHostChrome();
+            if (vertical)
+                _verticalTabHost.SyncSelectionFromManager();
             _titleBar.ApplyForCurrentMode();
             var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
             if (leaf is not null)
@@ -1826,6 +1863,8 @@ public sealed partial class MainWindow : Window
             _horizontalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
             _verticalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
         }
+
+        ApplyCaptionButtonChrome();
     }
 
     /// <summary>
@@ -1849,22 +1888,13 @@ public sealed partial class MainWindow : Window
 
             _horizontalTabHost.ClearShellTheme();
             _verticalTabHost.ClearShellTheme();
+            ApplyVerticalTitleBarChrome();
+            ApplyCaptionButtonChrome();
             return;
         }
 
-        // Transparent backgrounds let the caption buttons blend
-        // with whatever backdrop (Mica/Acrylic) is behind them.
-        var fg = _shellTheme.TitleBarForeground;
-        var fgInactive = Windows.UI.Color.FromArgb(128, fg.R, fg.G, fg.B);
-        ApplyButtonColors(
-            bg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
-            fg: fg,
-            inactiveBg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
-            inactiveFg: fgInactive,
-            hoverBg: _shellTheme.TabBarBackground,
-            hoverFg: fg,
-            pressedBg: _shellTheme.TabBarBackground,
-            pressedFg: fg);
+        // Caption buttons: transparent in horizontal mode, opaque in
+        // vertical -- see ApplyCaptionButtonChrome().
 
         VerticalTitleText.Foreground = new SolidColorBrush(
             Microsoft.UI.ColorHelper.FromArgb(
@@ -1877,6 +1907,153 @@ public sealed partial class MainWindow : Window
         // by ApplyRootGridBackground and refreshed by the caller.
         _horizontalTabHost.ApplyShellTheme(_shellTheme);
         _verticalTabHost.ApplyShellTheme(_shellTheme);
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+    }
+
+    /// <summary>
+    /// Opaque title-row fills for vertical-tab mode. Without this the
+    /// transparent drag region shows Mica grey over the terminal palette.
+    /// </summary>
+    private void ApplyVerticalTitleBarChrome()
+    {
+        Windows.UI.Color dragBg;
+        Windows.UI.Color stripMirrorBg;
+        if (_shellTheme.IsEnabled)
+        {
+            dragBg = _shellTheme.TitleBarBackground;
+            stripMirrorBg = _shellTheme.TabBarBackground;
+        }
+        else
+        {
+            dragBg = UnpackTerminalColor(_configService.BackgroundColor);
+            stripMirrorBg = dragBg;
+        }
+
+        if (_lastVerticalTitleDragBg != dragBg)
+        {
+            _lastVerticalTitleDragBg = dragBg;
+            VerticalTitleDragRegion.Background = new SolidColorBrush(dragBg);
+        }
+
+        if (_lastVerticalTitleStripMirrorBg != stripMirrorBg)
+        {
+            _lastVerticalTitleStripMirrorBg = stripMirrorBg;
+            VerticalTitleStripMirrorFill.Background = new SolidColorBrush(stripMirrorBg);
+        }
+
+        if (_lastVerticalTitleCaptionBg != dragBg)
+        {
+            _lastVerticalTitleCaptionBg = dragBg;
+            var captionBrush = new SolidColorBrush(dragBg);
+            VerticalTitleCaptionFill.Background = captionBrush;
+            VerticalCaptionSeamCover.Background = captionBrush;
+        }
+
+        VerticalCaptionSeamCover.Visibility =
+            VerticalTitleBar.Visibility == Visibility.Visible
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Caption min/max/close colors. Vertical mode uses the same opaque
+    /// title-bar fill as the drag region; horizontal keeps transparent
+    /// buttons over the tab strip or Mica.
+    /// </summary>
+    private void ApplyCaptionButtonChrome()
+    {
+        // ApplyTheme() runs before _shellTheme exists; ApplyShellTheme and
+        // the post-layout refresh below re-apply once wiring is complete.
+        if (_shellTheme is null) return;
+
+        if (_verticalTabsVisible)
+        {
+            Windows.UI.Color titleBg;
+            Windows.UI.Color fg;
+            Windows.UI.Color hoverBg;
+            Windows.UI.Color pressedBg;
+            if (_shellTheme.IsEnabled)
+            {
+                titleBg = _shellTheme.TitleBarBackground;
+                fg = _shellTheme.TitleBarForeground;
+                hoverBg = _shellTheme.TabBarBackground;
+                pressedBg = _shellTheme.TabBarBackground;
+            }
+            else
+            {
+                titleBg = UnpackTerminalColor(_configService.BackgroundColor);
+                var dark = ThemeResolution.PreferLightForeground(
+                    _configService.BackgroundColor);
+                fg = dark
+                    ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+                    : Windows.UI.Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+                hoverBg = dark
+                    ? Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)
+                    : Windows.UI.Color.FromArgb(0x33, 0x00, 0x00, 0x00);
+                pressedBg = dark
+                    ? Windows.UI.Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)
+                    : Windows.UI.Color.FromArgb(0x22, 0x00, 0x00, 0x00);
+            }
+
+            var fgInactive = Windows.UI.Color.FromArgb(128, fg.R, fg.G, fg.B);
+            ApplyButtonColors(
+                bg: titleBg,
+                fg: fg,
+                inactiveBg: titleBg,
+                inactiveFg: fgInactive,
+                hoverBg: hoverBg,
+                hoverFg: fg,
+                pressedBg: pressedBg,
+                pressedFg: fg);
+            return;
+        }
+
+        if (!_shellTheme.IsEnabled) return;
+
+        var shellFg = _shellTheme.TitleBarForeground;
+        var shellFgInactive = Windows.UI.Color.FromArgb(
+            128, shellFg.R, shellFg.G, shellFg.B);
+        ApplyButtonColors(
+            bg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            fg: shellFg,
+            inactiveBg: Windows.UI.Color.FromArgb(0, 0, 0, 0),
+            inactiveFg: shellFgInactive,
+            hoverBg: _shellTheme.TabBarBackground,
+            hoverFg: shellFg,
+            pressedBg: _shellTheme.TabBarBackground,
+            pressedFg: shellFg);
+    }
+
+    private static Windows.UI.Color UnpackTerminalColor(uint packed)
+        => Windows.UI.Color.FromArgb(0xFF,
+            (byte)(packed >> 16),
+            (byte)(packed >> 8),
+            (byte)packed);
+
+    /// <summary>
+    /// Re-apply tab-host chrome after a horizontal/vertical layout switch.
+    /// Both hosts stay alive; the incoming one must not keep stale MUXC
+    /// resources from a prior visibility cycle.
+    /// </summary>
+    internal void RefreshTabHostChrome()
+    {
+        if (_shellTheme.IsEnabled)
+        {
+            _horizontalTabHost.ApplyShellTheme(_shellTheme);
+            _verticalTabHost.ApplyShellTheme(_shellTheme);
+        }
+        else
+        {
+            _horizontalTabHost.ClearShellTheme();
+            _verticalTabHost.ClearShellTheme();
+            _horizontalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
+            _verticalTabHost.SetRequestedTheme(_themeManager.ElementTheme);
+        }
+
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+        ApplyPerTabChrome();
     }
 
     /// <summary>
@@ -1916,16 +2093,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateCursorAccentColors()
     {
-        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
-        var wuiColor = Windows.UI.Color.FromArgb(0xFF,
-            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
-        var muiColor = Microsoft.UI.ColorHelper.FromArgb(0xFF,
-            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
-        var brush = new SolidColorBrush(muiColor);
-
-        foreach (var t in _tabManager.Tabs)
-            ((PaneHost)t.PaneHost).SetActiveBorderBrush(brush);
-
         var bg = _configService.BackgroundColor;
         var fg = _configService.ForegroundColor;
         var bgColor = Windows.UI.Color.FromArgb(0xFF,
@@ -1934,7 +2101,71 @@ public sealed partial class MainWindow : Window
             (byte)(fg >> 16), (byte)(fg >> 8), (byte)fg);
 
         _horizontalTabHost.SetSelectedTabColors(bgColor, fgColor);
+        _verticalTabHost.SetSelectedTabColors(bgColor, fgColor);
+
+        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
+        var wuiColor = Windows.UI.Color.FromArgb(0xFF,
+            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
         _verticalTabHost.SetAccentColor(wuiColor);
+
+        ApplyPerTabChrome();
+    }
+
+    /// <summary>
+    /// Pane borders follow the active tab's preset color when set; tab strip
+    /// backgrounds refresh in both orientations.
+    /// </summary>
+    private void ApplyPerTabChrome()
+    {
+        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
+        var defaultBorder = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(0xFF,
+            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc));
+
+        var active = _tabManager.ActiveTab;
+        foreach (var tab in _tabManager.Tabs)
+        {
+            SolidColorBrush borderBrush;
+            if (ReferenceEquals(tab, active) && tab.Color != TabColor.None)
+            {
+                var preset = TabColorPalette.Border(tab.Color);
+                borderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(
+                    0xFF, preset.R, preset.G, preset.B));
+            }
+            else
+            {
+                borderBrush = defaultBorder;
+            }
+
+            ((PaneHost)tab.PaneHost).SetActiveBorderBrush(borderBrush);
+        }
+
+        _horizontalTabHost.RefreshTabColors();
+        _verticalTabHost.RefreshTabColors();
+    }
+
+    private void WireTabColor(TabModel tab)
+    {
+        if (_tabColorWired.ContainsKey(tab)) return;
+
+        // Named handler, not a lambda literal: TabModel instances outlive
+        // this window (DetachTab hands the same instance to another
+        // window's TabManager), so an unremovable subscription keeps the
+        // dead window alive and fires ApplyPerTabChrome on its torn-down
+        // XamlRoot. Same hazard the ConfigChanged/ThemeChanged unhooks
+        // in CleanupWindowSubscriptions guard against.
+        PropertyChangedEventHandler handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(TabModel.Color))
+                ApplyPerTabChrome();
+        };
+        ((INotifyPropertyChanged)tab).PropertyChanged += handler;
+        _tabColorWired[tab] = handler;
+    }
+
+    private void UnwireTabColor(TabModel tab)
+    {
+        if (_tabColorWired.Remove(tab, out var handler))
+            ((INotifyPropertyChanged)tab).PropertyChanged -= handler;
     }
 
     /// <summary>
@@ -2277,6 +2508,7 @@ public sealed partial class MainWindow : Window
         if (_lastRootBackground == next) return;
         _lastRootBackground = next;
         RootGrid.Background = new SolidColorBrush(next);
+        ApplyVerticalTitleBarChrome();
     }
 
     /// <summary>
@@ -2966,7 +3198,8 @@ public sealed partial class MainWindow : Window
             bindingActionFactory: actionKey => _ => DispatcherQueue.TryEnqueue(() => ExecuteBindingAction(actionKey)),
             opacityAction: direction => DispatcherQueue.TryEnqueue(() => AdjustOpacity(direction)),
             canUndo: () => (_tabManager.ActiveTab?.PaneHost as Panes.PaneHost)?.CanUndo ?? false,
-            canRedo: () => (_tabManager.ActiveTab?.PaneHost as Panes.PaneHost)?.CanRedo ?? false);
+            canRedo: () => (_tabManager.ActiveTab?.PaneHost as Panes.PaneHost)?.CanRedo ?? false,
+            isVerticalTabLayout: () => _tabHost is VerticalTabHost);
 
         var jump = new JumpCommandSource(
             _tabManager,

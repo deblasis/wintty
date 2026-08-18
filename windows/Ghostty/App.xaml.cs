@@ -859,7 +859,7 @@ public partial class App : Application
     private void ForwardLaunchToPrimary(string pipeName)
     {
         var request = new Ghostty.Core.SingleInstance.LaunchRequest(
-            Environment.CurrentDirectory,
+            Program.LaunchWorkingDirectory,
             Environment.GetCommandLineArgs());
 
         try

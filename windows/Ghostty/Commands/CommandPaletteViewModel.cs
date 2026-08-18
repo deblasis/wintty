@@ -215,6 +215,7 @@ internal class CommandPaletteViewModel : INotifyPropertyChanged
         {
             filtered = _allCommands.Where(c =>
                 c.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                c.Description.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                 (c.Subtitle?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
                 (c.ActionKey?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false));
         }

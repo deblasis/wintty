@@ -21,6 +21,9 @@ public sealed partial class AppIconBadge : UserControl
     public AppIconBadge()
     {
         InitializeComponent();
+        HorizontalAlignment = HorizontalAlignment.Left;
+        VerticalAlignment = VerticalAlignment.Top;
+        Margin = Shell.TabChromeMetrics.AppIconMargin;
     }
 
     private void OnClick(object sender, RoutedEventArgs e)
