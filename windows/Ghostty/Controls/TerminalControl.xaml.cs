@@ -98,6 +98,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // supplementary-plane scalars as two events; see WmCharUtf8.
     private char _pendingWmCharHigh;
 
+    // True while WinUI is driving an IME composition session. Preedit
+    // updates go through SurfacePreedit; committed text still arrives
+    // via CharacterReceived after TextCompositionEnded.
+    private bool _imeComposing;
+
     // Set while RaiseScrollbarChanged is writing into VerticalScrollBar.
     // Prevents the resulting Scroll event from round-tripping back into
     // libghostty as a "scroll_to_row" binding action (feedback loop).
@@ -901,6 +906,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
         if (_surface.Handle != IntPtr.Zero)
         {
+            _imeComposing = false;
+            UpdateSurfacePreedit(null);
             Host?.Unregister(_surface);
             NativeMethods.SurfaceFree(_surface);
         }
@@ -1136,9 +1143,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _lastFocusGainedTick = Environment.TickCount64;
         SetFocusState(true);
         AcknowledgeBell();
+        // Route IME to the hidden TextBox sink (see TerminalControl.xaml).
+        if (!SearchBar.ContainsFocus)
+            ImeSink.Focus(FocusState.Programmatic);
     }
 
-    private void OnLostFocus(object sender, RoutedEventArgs e) => SetFocusState(false);
+    private void OnLostFocus(object sender, RoutedEventArgs e)
+    {
+        ClearImeComposition();
+        SetFocusState(false);
+    }
 
     private void SetFocusState(bool focused)
     {
@@ -1664,7 +1678,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             Keycode = scancode,
             Text = IntPtr.Zero,
             UnshiftedCodepoint = 0,
-            Composing = 0,
+            Composing = (byte)(_imeComposing ? 1 : 0),
         };
         var handled = NativeMethods.SurfaceKey(_surface, key);
         if (handled) e.Handled = true;
@@ -1678,6 +1692,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // so typed characters edit the needle only and never reach
         // libghostty as terminal text. See the matching guard in OnKeyDown.
         if (SearchBar.ContainsFocus) return;
+
+        // During IME composition, partial code units arrive as
+        // CharacterReceived on some layouts. Preedit is driven by
+        // TextCompositionChanged; drop stray chars until commit.
+        if (_imeComposing) return;
 
         // If the matching OnKeyDown short-circuited a bound chord, drop
         // the WM_CHAR that follows. WinUI 3 raises CharacterReceived
@@ -1703,6 +1722,77 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             {
                 NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)len);
             }
+        }
+    }
+
+    // IME composition (ImeSink TextBox, wired in XAML) -----------------
+
+    private void OnImeCompositionStarted(object sender, TextCompositionStartedEventArgs e)
+    {
+        if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        _imeComposing = true;
+    }
+
+    private void OnImeCompositionChanged(object sender, TextCompositionChangedEventArgs e)
+    {
+        if (_surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        var text = ImeSink.Text;
+        if (e.StartIndex >= 0 && e.Length > 0 && e.StartIndex + e.Length <= text.Length)
+            UpdateSurfacePreedit(text.Substring(e.StartIndex, e.Length));
+        else
+            UpdateSurfacePreedit(text);
+    }
+
+    private void OnImeCompositionEnded(object sender, TextCompositionEndedEventArgs e)
+    {
+        if (_surface.Handle == IntPtr.Zero) return;
+        ClearImeComposition();
+    }
+
+    /// <summary>Clears WinUI IME state and the libghostty preedit overlay.</summary>
+    private void ClearImeComposition()
+    {
+        _imeComposing = false;
+        if (_surface.Handle == IntPtr.Zero) return;
+        UpdateSurfacePreedit(null);
+        ImeSink.Text = string.Empty;
+    }
+
+    private void OnImeSinkTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_imeComposing || _surface.Handle == IntPtr.Zero || SearchBar.ContainsFocus) return;
+        var text = ImeSink.Text;
+        if (string.IsNullOrEmpty(text)) return;
+
+        Span<byte> buf = stackalloc byte[4];
+        foreach (var ch in text)
+        {
+            if (!WmCharUtf8.TryEncode(ch, ref _pendingWmCharHigh, buf, out var len))
+                continue;
+            unsafe
+            {
+                fixed (byte* p = buf)
+                    NativeMethods.SurfaceText(_surface, (IntPtr)p, (UIntPtr)len);
+            }
+        }
+
+        ImeSink.Text = string.Empty;
+    }
+
+    private void UpdateSurfacePreedit(string? text)
+    {
+        if (_surface.Handle == IntPtr.Zero) return;
+        if (string.IsNullOrEmpty(text))
+        {
+            NativeMethods.SurfacePreedit(_surface, IntPtr.Zero, UIntPtr.Zero);
+            return;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(text);
+        unsafe
+        {
+            fixed (byte* p = bytes)
+                NativeMethods.SurfacePreedit(_surface, (IntPtr)p, (UIntPtr)bytes.Length);
         }
     }
 
@@ -1746,6 +1836,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal void OpenSearch()
     {
+        // Drop any in-flight IME preedit before the needle box takes focus.
+        ClearImeComposition();
         SearchBar.State.IsOpen = true;
         SearchBar.Visibility = Visibility.Visible;
         SearchBar.FocusNeedle();
