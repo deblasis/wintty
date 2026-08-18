@@ -1,59 +1,100 @@
 using System;
+using System.Collections.Generic;
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Linq;
+using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Tabs;
+using Ghostty.Core.Windows;
+using Ghostty.Services;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
+using Windows.UI;
 
 namespace Ghostty.Tabs;
 
 /// <summary>
-/// The icon rail / row list visual for vertical tabs. Binds directly
-/// to <see cref="TabManager.Tabs"/> via <c>ItemsSource</c> so WinUI
-/// drives add/remove/move automatically, and syncs selection both
-/// ways against <see cref="TabManager.ActiveTab"/>.
-///
-/// All row visuals live in XAML templates (see <c>VerticalTabStrip.xaml</c>).
-/// The container style drives hover/selected backgrounds and the
-/// selected-row accent bar through the standard ListViewItem visual
-/// states — no LayoutUpdated polling, no Canvas overlay.
+/// Fluent <see cref="NavigationView"/> vertical tab pane. Replaces the
+/// ListView rail + chevron toggle.
 /// </summary>
 internal sealed partial class VerticalTabStrip : UserControl
 {
+    private const double RowInsetLeft = 4;
+    private const double RowInsetVertical = 2;
+
     private readonly TabManager _manager;
+    private readonly Dictionary<TabModel, NavigationViewItem> _items = new();
+    private readonly Dictionary<TabModel, TabHooks> _hooks = new();
     private bool _syncing;
+    private bool _shellThemeActive;
+    private ElementTheme _elementTheme = ElementTheme.Default;
+    private SolidColorBrush? _defaultSelectedTabBgBrush;
+    private SolidColorBrush? _selectedTabFillBrush;
+    private SolidColorBrush? _shellActiveTextBrush;
+    private SolidColorBrush? _shellInactiveTextBrush;
+    private SolidColorBrush? _defaultActiveTextBrush;
+    private bool _selectionRefreshScheduled;
+    private uint _stripBackdropPacked = 0x0C0C0C;
 
-    /// <summary>Raised when the user clicks the chevron toggle.</summary>
-    public event EventHandler? ChevronToggled;
-
-    /// <summary>Raised when a row's close button is clicked. The
-    /// consuming <see cref="VerticalTabHost"/> routes this through its
-    /// shared <c>RequestCloseTabAsync</c>.</summary>
-    public event Func<TabModel, System.Threading.Tasks.Task>? CloseRequestedFromRow;
+    private static readonly SolidColorBrush TransparentBrush =
+        new(Microsoft.UI.Colors.Transparent);
 
     /// <summary>
-    /// Toggle between collapsed (40x40 icon-only) and expanded
-    /// (32px, icon + title + close) row templates. Swapping
-    /// <c>ItemTemplate</c> is the clean way to change row layout at
-    /// runtime without rebuilding containers imperatively.
+    /// Per-row subscriptions. Held together so a row teardown cannot
+    /// release one and leak the others.
     /// </summary>
-    public bool IsExpanded
+    private sealed record TabHooks(
+        AotBinding Text,
+        AotBinding Color,
+        TabIconViewModel IconVm,
+        PropertyChangedEventHandler IconHandler)
     {
-        get;
-        set
+        public void Dispose()
         {
-            if (field == value) return;
-            field = value;
-            TabList.ItemTemplate = (DataTemplate)Resources[
-                value ? "ExpandedRowTemplate" : "CollapsedRowTemplate"];
-            // Chevron points in the direction the strip will go on
-            // the next click: right (E76C) when collapsed, left
-            // (E76B) when expanded.
-            ChevronIcon.Glyph = value ? "\uE76B" : "\uE76C";
-            var label = value ? "Collapse sidebar" : "Expand sidebar";
-            AutomationProperties.SetName(ChevronButton, label);
-            ToolTipService.SetToolTip(ChevronButton, label);
+            Text.Dispose();
+            Color.Dispose();
+            IconVm.PropertyChanged -= IconHandler;
         }
+    }
+
+    /// <summary>Raised when a row close button is clicked.</summary>
+    public event Func<TabModel, Task>? CloseRequestedFromRow;
+
+    public double OpenPaneLength
+    {
+        get => NavView.OpenPaneLength;
+        set => NavView.OpenPaneLength = value;
+    }
+
+    /// <summary>
+    /// Sync MUXC pane mode with the outer strip column width. Terminal
+    /// content is external -- never leave NavView in LeftCompact+open.
+    /// </summary>
+    internal void ApplyPaneLayout(bool expanded, double width)
+    {
+        NavView.Width = width;
+        NavView.MaxWidth = width;
+        NavView.OpenPaneLength = width;
+
+        if (expanded)
+        {
+            // Pane fills the strip column; no content frame beside it.
+            NavView.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
+            NavView.IsPaneOpen = true;
+        }
+        else
+        {
+            NavView.IsPaneOpen = false;
+            NavView.PaneDisplayMode = NavigationViewPaneDisplayMode.LeftCompact;
+            NavView.CompactPaneLength =
+                Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth;
+        }
+
+        RefreshSelectionChrome();
     }
 
     public VerticalTabStrip(TabManager manager)
@@ -61,145 +102,648 @@ internal sealed partial class VerticalTabStrip : UserControl
         InitializeComponent();
         _manager = manager;
 
-        TabList.ItemsSource = _manager.Tabs;
+        RebuildAllItems();
         SyncSelectionFromManager();
 
+        ApplyNavItemSpacing();
+        Canvas.SetZIndex(SelectionRowHost, 0);
+        Canvas.SetZIndex(NavView, 1);
+        // Deliberately not LayoutUpdated: it fires for every layout pass
+        // anywhere in the window, and UpdateSelectionRow allocates a brush
+        // per call for colored tabs. SizeChanged plus the explicit refresh
+        // on selection/pane changes covers every case that moves the row.
+        SizeChanged += (_, _) => UpdateSelectionRow();
+        NavView.SizeChanged += (_, _) => UpdateSelectionRow();
+        NavView.Loaded += (_, _) => RefreshSelectionChrome();
+        Loaded += (_, _) => RefreshSelectionChrome();
+
+        _manager.Tabs.CollectionChanged += OnTabsCollectionChanged;
         _manager.ActiveTabChanged += (_, _) => SyncSelectionFromManager();
     }
 
-    private void SyncSelectionFromManager()
+    internal SolidColorBrush AccentBrush =>
+        Resources.TryGetValue("StripAccentBrush", out var res) && res is SolidColorBrush b
+            ? b
+            : new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
+
+    /// <summary>
+    /// Opaque pane chrome from the terminal palette when window-theme=wintty.
+    /// </summary>
+    internal void ApplyShellChrome(ShellThemeService theme, SolidColorBrush paneBg)
     {
-        // Guard against the bounce: our handler for SelectionChanged
-        // calls Activate, which fires ActiveTabChanged, which calls
-        // back into here. The _syncing flag breaks the loop.
-        if (_syncing) return;
-        _syncing = true;
-        try
+        _shellThemeActive = true;
+        Background = paneBg;
+        _stripBackdropPacked = PackColor(theme.TabBarBackground);
+        ApplyTransparentNavPaneSurface();
+
+        // Match horizontal TabHost: accent fill on the selected row.
+        var accent = new SolidColorBrush(theme.AccentColor);
+        _selectedTabFillBrush = accent;
+        HideMuxcSelectedBackground();
+
+        SetNavResource("NavigationViewSelectionIndicatorForeground", TransparentBrush);
+
+        uint accentPacked = PackColor(theme.AccentColor);
+        uint activePacked = PackColor(theme.ActiveTabText);
+        _shellActiveTextBrush = new SolidColorBrush(UnpackColor(
+            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked)));
+
+        uint tabBgPacked = PackColor(theme.TabBarBackground);
+        _shellInactiveTextBrush = new SolidColorBrush(
+            ThemeResolution.PreferLightForeground(tabBgPacked)
+                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+
+        ApplySelectedForegroundResources(_shellActiveTextBrush);
+        ApplyInactiveForegroundResources(_shellInactiveTextBrush);
+
+        var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
+        var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
+        SetNavResource("NavigationViewItemBackgroundPointerOver", hoverBg);
+        SetNavResource("NavigationViewItemBackgroundPressed", pressedBg);
+
+        RefreshNavViewTheme();
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    /// <summary>
+    /// Fluent defaults with opaque pane fill -- no acrylic/light-gray seam.
+    /// </summary>
+    internal void ApplyDefaultPaneChrome(ElementTheme theme)
+    {
+        _shellThemeActive = false;
+        _elementTheme = theme;
+        // Drive the subtree's theme for real. Every {ThemeResource} inside
+        // the NavigationView template resolves against this, which is what
+        // actually makes the strip honor window-theme.
+        RequestedTheme = theme;
+        _shellActiveTextBrush = null;
+        _shellInactiveTextBrush = null;
+
+        var paneBg = ResolveThemeBrush("LayerFillColorDefaultBrush");
+        Background = paneBg;
+        _stripBackdropPacked = PackColor(paneBg.Color);
+        ApplyTransparentNavPaneSurface();
+
+        ApplyDefaultSelectedTabResources();
+
+        ClearNavResource("NavigationViewItemForeground");
+        ClearNavResource("NavigationViewItemForegroundPointerOver");
+        ClearNavResource("NavigationViewItemForegroundSelected");
+        ClearNavResource("NavigationViewItemForegroundSelectedPointerOver");
+
+        RefreshNavViewTheme();
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    /// <summary>
+    /// Default-path selected row = terminal background, matching horizontal
+    /// TabHost.SetSelectedTabColors. Shell theme owns the brushes while active.
+    /// </summary>
+    internal void SetSelectedTabColors(Windows.UI.Color background, Windows.UI.Color foreground)
+    {
+        _defaultSelectedTabBgBrush = new SolidColorBrush(
+            Windows.UI.Color.FromArgb(0xFF, background.R, background.G, background.B));
+        _defaultActiveTextBrush = new SolidColorBrush(UnpackColor(
+            ThemeResolution.EnsureReadableForeground(
+                PackColor(background), PackColor(foreground))));
+
+        // Tab-bar backdrop for preset tint blending is owned by
+        // ApplyShellChrome / ApplyDefaultPaneChrome. Terminal bg != tab bar.
+        if (!_shellThemeActive)
+            _stripBackdropPacked = PackColor(background);
+
+        if (!_shellThemeActive)
         {
-            TabList.SelectedItem = _manager.ActiveTab;
+            _selectedTabFillBrush = _defaultSelectedTabBgBrush;
+            HideMuxcSelectedBackground();
+            SetNavResource("NavigationViewSelectionIndicatorForeground", TransparentBrush);
+            ApplySelectedForegroundResources(_defaultActiveTextBrush);
+            RefreshNavViewTheme();
         }
-        finally
+
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    private void ApplyDefaultSelectedTabResources()
+    {
+        var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
+        var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
+        SetNavResource("NavigationViewItemBackgroundPointerOver", hoverBg);
+        SetNavResource("NavigationViewItemBackgroundPressed", pressedBg);
+        SetNavResource("NavigationViewSelectionIndicatorForeground", TransparentBrush);
+        HideMuxcSelectedBackground();
+
+        if (_defaultSelectedTabBgBrush is not null)
         {
-            _syncing = false;
+            _selectedTabFillBrush = _defaultSelectedTabBgBrush;
+            if (_defaultActiveTextBrush is not null)
+                ApplySelectedForegroundResources(_defaultActiveTextBrush);
+        }
+        else
+        {
+            _selectedTabFillBrush = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
         }
     }
 
-    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void HideMuxcSelectedBackground()
     {
-        if (_syncing) return;
-        if (TabList.SelectedItem is not TabModel tab) return;
-        _syncing = true;
-        try
-        {
-            _manager.Activate(tab);
-        }
-        finally
-        {
-            _syncing = false;
-        }
+        SetNavResource("NavigationViewItemBackgroundSelected", TransparentBrush);
+        SetNavResource("NavigationViewItemBackgroundSelectedPointerOver", TransparentBrush);
+        SetNavResource("NavigationViewItemBackgroundSelectedPressed", TransparentBrush);
     }
 
-    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    /// <summary>
+    /// SelectionRow sits on a canvas behind NavView; opaque MUXC pane
+    /// fills would hide the custom selected-row overlay.
+    /// </summary>
+    private void ApplyTransparentNavPaneSurface()
     {
-        // Detach previous binding when the container recycles.
-        (args.ItemContainer.Tag as AotBinding)?.Dispose();
+        NavView.Background = TransparentBrush;
+        SetNavResource("NavigationViewDefaultPaneBackground", TransparentBrush);
+        SetNavResource("NavigationViewExpandedPaneBackground", TransparentBrush);
+        SetNavResource("NavigationViewCompactPaneBackground", TransparentBrush);
+    }
 
-        if (args.InRecycleQueue || args.Item is not TabModel tab)
+    private void ApplySelectedForegroundResources(SolidColorBrush selectedFg)
+    {
+        SetNavResource("NavigationViewItemForegroundSelected", selectedFg);
+        SetNavResource("NavigationViewItemForegroundSelectedPointerOver", selectedFg);
+    }
+
+    private void ApplyInactiveForegroundResources(SolidColorBrush inactiveFg)
+    {
+        SetNavResource("NavigationViewItemForeground", inactiveFg);
+        SetNavResource("NavigationViewItemForegroundPointerOver", inactiveFg);
+    }
+
+    private void ApplyNavItemSpacing()
+    {
+        var margin = new Thickness(RowInsetLeft, RowInsetVertical, 0, RowInsetVertical);
+        NavView.Resources["NavigationViewItemContentMargin"] = margin;
+        NavView.Resources["TopNavigationViewItemContentMargin"] = margin;
+        NavView.Resources["NavigationViewCompactPanelMargin"] = new Thickness(0);
+        NavView.Resources["NavigationViewItemCornerRadius"] = new CornerRadius(0);
+    }
+
+    /// <summary>
+    /// Paint one straight selected row from the strip inset to the pane edge.
+    /// MUXC's rounded pill is hidden; this overlay is the sole selection fill.
+    /// </summary>
+    private void UpdateSelectionRow()
+    {
+        if (_manager.ActiveTab is null
+            || !_items.TryGetValue(_manager.ActiveTab, out var item)
+            || item.ActualWidth <= 0
+            || item.ActualHeight <= 0
+            || ActualWidth <= 0)
         {
-            args.ItemContainer.Tag = null;
-            // Clear the icon presenter on recycle so the next item
-            // doesn't briefly flash the previous tab's glyph.
-            if (args.ItemContainer.ContentTemplateRoot is Grid recycledGrid)
-            {
-                var oldPresenter = FindFirstChild<TabIconPresenter>(recycledGrid);
-                oldPresenter?.Attach(null);
-            }
+            SelectionRow.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var root = args.ItemContainer.ContentTemplateRoot as Grid;
+        var topLeft = item.TransformToVisual(this)
+            .TransformPoint(new Windows.Foundation.Point(0, 0));
+        var rowHeight = Math.Max(0, item.ActualHeight - RowInsetVertical * 2);
+        var rowWidth = Math.Max(0, ActualWidth - RowInsetLeft);
 
-        // Icon presenter is the first TabIconPresenter in either template
-        // (collapsed: sole child of the 40x40 grid; expanded: Grid.Column=0).
-        // Wired up imperatively because {Binding TabIcon} on the Core type
-        // would require [WinRT.GeneratedBindableCustomProperty] (see
-        // TabIconPresenter.cs comment).
-        if (root is not null)
+        SelectionRow.Width = rowWidth;
+        SelectionRow.Height = rowHeight;
+        Canvas.SetLeft(SelectionRow, RowInsetLeft);
+        Canvas.SetTop(SelectionRow, topLeft.Y + RowInsetVertical);
+        SelectionRow.CornerRadius = new CornerRadius(0);
+        SelectionRow.Background = ResolveSelectionRowFill(_manager.ActiveTab);
+        SelectionRow.Visibility = Visibility.Visible;
+    }
+
+    private SolidColorBrush ResolveSelectionRowFill(TabModel tab)
+    {
+        if (tab.Color != TabColor.None)
+            return DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: true));
+
+        // Mirror horizontal TabHost: shell theme paints accent on the selected
+        // handle; default path uses terminal background so the row meets the pane.
+        if (_shellThemeActive && _selectedTabFillBrush is not null)
+            return _selectedTabFillBrush;
+        if (_defaultSelectedTabBgBrush is not null)
+            return _defaultSelectedTabBgBrush;
+        return _selectedTabFillBrush ?? AccentBrush;
+    }
+
+    /// <summary>
+    /// Re-apply preset tab colors on every row and the active selection fill.
+    /// </summary>
+    internal void RefreshTabColors()
+    {
+        ApplyAllItemTabColors();
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    private void ApplyAllItemTabColors()
+    {
+        foreach (var (model, item) in _items)
+            ApplyItemTabColor(item, model);
+    }
+
+    private void ApplyItemTabColor(NavigationViewItem item, TabModel tab)
+    {
+        var selected = ReferenceEquals(tab, _manager.ActiveTab);
+        if (tab.Color != TabColor.None)
         {
-            var presenter = FindFirstChild<TabIconPresenter>(root);
-            presenter?.Attach(tab.TabIcon);
+            // Active row fill is SelectionRow (full strip width). Item bg
+            // only tints inactive rows so we do not double-paint selected.
+            if (selected)
+                item.ClearValue(Control.BackgroundProperty);
+            else
+            {
+                item.Background = DrawingColorBrush(
+                    TabColorPalette.Background(tab.Color, selected: false));
+            }
+        }
+        else
+            item.ClearValue(Control.BackgroundProperty);
+
+        // MUXC can ignore NavView-level overrides until item resources are set.
+        item.Resources["NavigationViewItemBackgroundSelected"] = TransparentBrush;
+        item.Resources["NavigationViewItemBackgroundSelectedPointerOver"] = TransparentBrush;
+        item.Resources["NavigationViewItemBackgroundSelectedPressed"] = TransparentBrush;
+    }
+
+    private SolidColorBrush ResolveInactiveTextBrush()
+    {
+        if (_shellInactiveTextBrush is not null)
+            return _shellInactiveTextBrush;
+        return new SolidColorBrush(
+            ThemeResolution.PreferLightForeground(_stripBackdropPacked)
+                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+    }
+
+    private static SolidColorBrush DrawingColorBrush(System.Drawing.Color drawing)
+        => new(Windows.UI.Color.FromArgb(
+            drawing.A, drawing.R, drawing.G, drawing.B));
+
+    private static readonly string[] NavItemForegroundKeys =
+    [
+        "NavigationViewItemForeground",
+        "NavigationViewItemForegroundPointerOver",
+        "NavigationViewItemForegroundSelected",
+        "NavigationViewItemForegroundSelectedPointerOver",
+    ];
+
+    /// <summary>
+    /// MUXC template bindings miss some icon-only rows; mirror TabHost's
+    /// explicit title recolor for FontIcon glyphs.
+    /// </summary>
+    private void RecolorNavItems()
+    {
+        foreach (var (model, item) in _items)
+        {
+            var active = ReferenceEquals(model, _manager.ActiveTab);
+            if (model.Color != TabColor.None)
+            {
+                var fg = new SolidColorBrush(UnpackColor(
+                    TabColorPalette.ForegroundRgb(
+                        model.Color, active, _stripBackdropPacked)));
+                ApplyItemForeground(item, fg, active);
+                ApplyItemTabColor(item, model);
+                continue;
+            }
+
+            if (active)
+            {
+                var rowFill = ResolveSelectionRowFill(model).Color;
+                var rowPacked = PackColor(rowFill);
+                uint preferred = _shellActiveTextBrush is not null
+                    ? PackColor(_shellActiveTextBrush.Color)
+                    : _defaultActiveTextBrush is not null
+                        ? PackColor(_defaultActiveTextBrush.Color)
+                        : rowPacked;
+                var fg = new SolidColorBrush(UnpackColor(
+                    ThemeResolution.EnsureReadableForeground(rowPacked, preferred)));
+                ApplyItemForeground(item, fg, active: true);
+            }
+            else
+                ApplyItemForeground(item, ResolveInactiveTextBrush(), active: false);
+
+            ApplyItemTabColor(item, model);
+        }
+    }
+
+    private static void ApplyItemForeground(NavigationViewItem item, Brush? fg, bool active)
+    {
+        item.ClearValue(NavigationViewItem.ForegroundProperty);
+        foreach (var key in NavItemForegroundKeys)
+            item.Resources.Remove(key);
+
+        if (fg is not null)
+        {
+            item.Foreground = fg;
+            if (active)
+            {
+                item.Resources["NavigationViewItemForegroundSelected"] = fg;
+                item.Resources["NavigationViewItemForegroundSelectedPointerOver"] = fg;
+            }
+            else
+            {
+                item.Resources["NavigationViewItemForeground"] = fg;
+                item.Resources["NavigationViewItemForegroundPointerOver"] = fg;
+            }
         }
 
-        // Bind: update the row's visual elements from the model.
-        // Works for both collapsed (tooltip only) and expanded
-        // (title text + close button Tag + tooltip) templates.
-        // Only fires for title-related property changes.
-        args.ItemContainer.Tag = AotBinding.Create(tab, item =>
+        if (item.Icon is FontIcon fi)
         {
-            var t = (TabModel)item;
-            var refreshRoot = args.ItemContainer.ContentTemplateRoot as FrameworkElement;
-            if (refreshRoot is null) return;
+            if (fg is not null)
+                fi.Foreground = fg;
+            else
+                fi.ClearValue(FontIcon.ForegroundProperty);
+        }
+    }
 
-            // Tooltip on the outermost grid (both templates).
-            ToolTipService.SetToolTip(refreshRoot, t.EffectiveTitle);
+    /// <summary>
+    /// Defer selection-row layout until NavView/item bounds are non-zero.
+    /// First vertical load and post-switch refresh share this path.
+    /// </summary>
+    internal void RefreshSelectionChrome() => ScheduleSelectionLayoutPass(retryIfZeroBounds: true);
 
-            // Bell indicator: present in both templates, looked up by name
-            // so we don't depend on child ordering.
-            if (refreshRoot.FindName("BellBadge") is FontIcon bellBadge)
-                bellBadge.Visibility = t.BellRinging
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
+    private void ScheduleSelectionLayoutPass(bool retryIfZeroBounds)
+    {
+        UpdateSelectionRow();
 
-            // Expanded template: title TextBlock in column 1, close button in column 2.
-            if (refreshRoot is Grid grid && grid.Children.Count >= 3)
+        if (_selectionRefreshScheduled) return;
+        _selectionRefreshScheduled = true;
+
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
+        {
+            _selectionRefreshScheduled = false;
+            EnsureActiveItemVisible();
+            UpdateSelectionRow();
+            RecolorNavItems();
+
+            // MUXC often reports zero item bounds on the first frame after
+            // the strip host becomes Visible (horizontal→vertical switch).
+            if (!retryIfZeroBounds
+                || _manager.ActiveTab is null
+                || !_items.TryGetValue(_manager.ActiveTab, out var item)
+                || (item.ActualWidth > 0 && item.ActualHeight > 0)
+                || ActualWidth <= 0)
             {
-                // Children are ordered: [TabIconPresenter, TextBlock, Button, ...].
-                if (grid.Children[1] is TextBlock titleBlock)
-                    titleBlock.Text = t.EffectiveTitle;
-                // Close button Tag -> TabModel for OnRowCloseClick.
-                foreach (var child in grid.Children)
-                    if (child is Button closeBtn)
-                    {
-                        closeBtn.Tag = t;
-                        break;
-                    }
+                return;
             }
+
+            if (_selectionRefreshScheduled) return;
+            _selectionRefreshScheduled = true;
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                _selectionRefreshScheduled = false;
+                EnsureActiveItemVisible();
+                UpdateSelectionRow();
+                RecolorNavItems();
+            });
+        });
+    }
+
+    /// <summary>
+    /// Keep the manager's active tab selected and scrolled into view.
+    /// Required after horizontal→vertical switches while the strip was
+    /// Collapsed -- MUXC can drop <see cref="NavigationView.SelectedItem"/>
+    /// and leave the active row off-screen in the pane scroller.
+    /// </summary>
+    internal void SyncSelectionFromManager()
+    {
+        if (_syncing) return;
+        if (_manager.ActiveTab is null) return;
+        if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
+
+        _syncing = true;
+        try { NavView.SelectedItem = item; }
+        finally { _syncing = false; }
+
+        ApplyAllItemTabColors();
+        RecolorNavItems();
+        EnsureActiveItemVisible();
+        ScheduleSelectionLayoutPass(retryIfZeroBounds: true);
+    }
+
+    private void EnsureActiveItemVisible()
+    {
+        if (_manager.ActiveTab is null) return;
+        if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
+
+        item.StartBringIntoView(new BringIntoViewOptions
+        {
+            AnimationDesired = false,
+            VerticalAlignmentRatio = 0.5,
+        });
+    }
+
+    private void SetNavResource(string key, Brush brush) => NavView.Resources[key] = brush;
+
+    private void ClearNavResource(string key) => NavView.Resources.Remove(key);
+
+    private SolidColorBrush ResolveThemeBrush(string key)
+    {
+        var theme = _elementTheme == ElementTheme.Default
+            ? ElementTheme.Dark
+            : _elementTheme;
+
+        // Element-scoped first: a FrameworkElement's resource walk honors
+        // ThemeDictionaries against its ActualTheme, so this picks up the
+        // strip's theme. Application.Current.Resources does NOT -- it
+        // always resolves at the app theme, so it is only the fallback.
+        if (TryFindBrush(NavView.Resources, key, out var scoped)
+            || TryFindBrush(Resources, key, out scoped))
+        {
+            // Copy so MUXC resource overrides never alias theme-dict brushes.
+            return new SolidColorBrush(scoped);
+        }
+
+        if (Application.Current.Resources.TryGetValue(key, out var obj)
+            && obj is SolidColorBrush src)
+        {
+            // App-theme'd. Correct whenever the strip theme matches the app
+            // theme; the explicit overrides in ApplyShellChrome cover the
+            // window-theme-differs case.
+            return new SolidColorBrush(src.Color);
+        }
+
+        return new SolidColorBrush(
+            theme == ElementTheme.Light
+                ? Microsoft.UI.Colors.White
+                : Microsoft.UI.Colors.Black);
+    }
+
+    private static bool TryFindBrush(ResourceDictionary dict, string key, out Color color)
+    {
+        if (dict.TryGetValue(key, out var obj) && obj is SolidColorBrush b)
+        {
+            color = b.Color;
+            return true;
+        }
+        color = default;
+        return false;
+    }
+
+    /// <summary>Force MUXC to re-read overridden pane/item resources.</summary>
+    internal void RefreshNavViewTheme()
+    {
+        var theme = NavView.RequestedTheme;
+        NavView.RequestedTheme = theme == ElementTheme.Light
+            ? ElementTheme.Dark
+            : ElementTheme.Light;
+        NavView.RequestedTheme = theme;
+    }
+
+    private static uint PackColor(Color c)
+        => ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+    private static Color UnpackColor(uint packed)
+        => Color.FromArgb(0xFF, (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed);
+
+    private void RebuildAllItems()
+    {
+        // Remove by what we hold, not by what the manager still has:
+        // on a Reset the manager is already empty and rows we own would
+        // otherwise stay in MenuItems with their subscriptions live.
+        foreach (var tab in _hooks.Keys.ToArray())
+            RemoveItem(tab);
+        foreach (var tab in _manager.Tabs)
+            AddItem(tab);
+    }
+
+    private void OnTabsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                // NewStartingIndex matters: TabManager.Move is RemoveAt +
+                // Insert, which ObservableCollection reports as Remove then
+                // Add, not Move. Appending here would drift the strip order
+                // away from the manager on every "Move Tab Left/Right".
+                if (e.NewItems is not null)
+                {
+                    var addIndex = e.NewStartingIndex;
+                    foreach (TabModel tab in e.NewItems)
+                    {
+                        AddItem(tab, addIndex);
+                        if (addIndex >= 0) addIndex++;
+                    }
+                }
+                break;
+            case NotifyCollectionChangedAction.Remove:
+                if (e.OldItems is not null)
+                    foreach (TabModel tab in e.OldItems)
+                        RemoveItem(tab);
+                break;
+            case NotifyCollectionChangedAction.Reset:
+            case NotifyCollectionChangedAction.Move:
+                RebuildAllItems();
+                break;
+            case NotifyCollectionChangedAction.Replace:
+                if (e.OldItems is not null)
+                    foreach (TabModel tab in e.OldItems)
+                        RemoveItem(tab);
+                if (e.NewItems is not null)
+                    foreach (TabModel tab in e.NewItems)
+                        AddItem(tab);
+                break;
+        }
+        SyncSelectionFromManager();
+    }
+
+    private void AddItem(TabModel tab, int index = -1)
+    {
+        if (_items.ContainsKey(tab)) return;
+
+        var row = new VerticalTabNavRow(tab, AccentBrush, OnRowCloseClick);
+        var item = new NavigationViewItem
+        {
+            Tag = tab,
+            Icon = TabIconElementFactory.Create(tab.TabIcon),
+            Content = row,
+        };
+        ToolTipService.SetToolTip(item, tab.EffectiveTitle);
+
+        // Title and bell are cheap to reapply, so they share one binding.
+        // Color is separate because it triggers a whole-strip recolor, and
+        // the icon is separate because its spec lives on TabIconViewModel
+        // and changes when the foreground process changes. Folding all
+        // three together would re-decode the icon bitmap and recolor every
+        // row on every OSC 0/2 title the shell emits.
+        var textBinding = AotBinding.Create(tab, _ =>
+        {
+            if (!_items.TryGetValue(tab, out var navItem)) return;
+            if (navItem.Content is VerticalTabNavRow navRow)
+                navRow.Refresh(tab);
+            ToolTipService.SetToolTip(navItem, tab.EffectiveTitle);
         },
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
         nameof(TabModel.UserOverrideTitle),
         nameof(TabModel.BellRinging));
-    }
 
-    private static T? FindFirstChild<T>(Panel panel) where T : class
-    {
-        foreach (var child in panel.Children)
-            if (child is T match) return match;
-        return null;
-    }
+        var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
+            nameof(TabModel.Color));
 
-    private async void OnRowCloseClick(object sender, RoutedEventArgs e)
-    {
-        // Tag is set to the TabModel by OnContainerContentChanging.
-        if (sender is FrameworkElement { Tag: TabModel tab } &&
-            CloseRequestedFromRow is { } handler)
+        var vm = tab.TabIcon;
+        PropertyChangedEventHandler iconHandler = (_, e) =>
         {
-            await handler(tab);
-        }
+            if (e.PropertyName is not null
+                && e.PropertyName != nameof(TabIconViewModel.Icon)
+                && e.PropertyName != nameof(TabIconViewModel.IsMdl2Glyph)
+                && e.PropertyName != nameof(TabIconViewModel.Mdl2CodePoint))
+                return;
+            if (_items.TryGetValue(tab, out var navItem))
+                navItem.Icon = TabIconElementFactory.Create(tab.TabIcon);
+        };
+        vm.PropertyChanged += iconHandler;
+
+        _items[tab] = item;
+        _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
+        if (index >= 0 && index <= NavView.MenuItems.Count)
+            NavView.MenuItems.Insert(index, item);
+        else
+            NavView.MenuItems.Add(item);
+        ApplyItemTabColor(item, tab);
     }
 
-    private void OnChevronClick(object sender, RoutedEventArgs e) =>
-        ChevronToggled?.Invoke(this, EventArgs.Empty);
-
-    /// <summary>
-    /// Wire the owning window into <see cref="NewTabButton"/> so the
-    /// composite control's click handlers can call
-    /// <see cref="MainWindow.OpenProfile"/>. Mirrors
-    /// <see cref="TabHost.AttachOwner"/>; <see cref="VerticalTabHost"/>
-    /// forwards the call after constructing the strip.
-    /// </summary>
-    internal void AttachOwner(MainWindow owner)
+    private void OnRowCloseClick(object sender, RoutedEventArgs e)
     {
-        NewTabButton.Owner = owner;
+        if (sender is FrameworkElement { Tag: TabModel tab })
+            CloseRequestedFromRow?.Invoke(tab);
+    }
+
+    private void RemoveItem(TabModel tab)
+    {
+        if (!_items.TryGetValue(tab, out var item)) return;
+        NavView.MenuItems.Remove(item);
+        _items.Remove(tab);
+        if (_hooks.Remove(tab, out var hooks))
+            hooks.Dispose();
+    }
+
+    private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        if (_syncing) return;
+        if (args.SelectedItem is not NavigationViewItem { Tag: TabModel tab }) return;
+
+        _syncing = true;
+        try { _manager.Activate(tab); }
+        finally { _syncing = false; }
+
+        ApplyAllItemTabColors();
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    /// <summary>Resolve TabModel for a nav item hit-test target.</summary>
+    internal TabModel? TabFromElement(DependencyObject? source)
+    {
+        var item = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
+        return item?.Tag as TabModel;
     }
 }

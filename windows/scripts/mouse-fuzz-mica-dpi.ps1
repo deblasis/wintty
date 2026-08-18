@@ -429,8 +429,10 @@ try {
     $hwnd64 = [int64]$main.Hwnd64
     $dpi = [MzMD]::GetDpiForWindow([MzMD]::P($hwnd64))
     $manifest = Join-Path (Split-Path $ExePath) '..\..\..\..\app.manifest'
-    # Runtime copy: check source tree if not next to exe.
-    $manifestSrc = 'C:\Users\Alessandro\CODE\OSS\ghostty\windows\Ghostty\app.manifest'
+    # Runtime copy: fall back to the source tree if not next to the exe.
+    # Resolved from this script's location so it works in any checkout.
+    $manifestSrc = if (Test-Path $manifest) { $manifest }
+                   else { Join-Path $PSScriptRoot '..\Ghostty\app.manifest' }
     $perMonitorV2 = (Get-Content $manifestSrc -Raw) -match 'PerMonitorV2'
     Write-Host "hwnd=$hwnd64 pid=$pid32 dpi=$dpi perMonitorV2=$perMonitorV2 title=$($main.Title)"
     Shot $hwnd64 '00-launch-mica-solid'

@@ -41,6 +41,11 @@ internal sealed class TitleBarCoordinator
     private readonly FrameworkElement _verticalDragRegion;
     private readonly TextBlock _verticalTitleText;
     private readonly ColumnDefinition _captionInset;
+    // Masks the pane top stroke under the OS caption buttons. Must track
+    // the same RightInset the caption column does; a fixed width leaves a
+    // stroke fragment showing or overhangs into the drag region whenever
+    // the OS caption metrics are not the XAML default.
+    private readonly FrameworkElement _captionSeamCover;
     private readonly Func<bool> _isVerticalMode;
 
     private TabModel? _boundTab;
@@ -61,6 +66,7 @@ internal sealed class TitleBarCoordinator
         FrameworkElement verticalDragRegion,
         TextBlock verticalTitleText,
         ColumnDefinition captionInset,
+        FrameworkElement captionSeamCover,
         Func<bool> isVerticalMode)
     {
         _window = window;
@@ -70,6 +76,7 @@ internal sealed class TitleBarCoordinator
         _verticalDragRegion = verticalDragRegion;
         _verticalTitleText = verticalTitleText;
         _captionInset = captionInset;
+        _captionSeamCover = captionSeamCover;
         _isVerticalMode = isVerticalMode;
 
         // Tab/title plumbing.
@@ -106,6 +113,7 @@ internal sealed class TitleBarCoordinator
         if (_captionless)
         {
             _captionInset.Width = new GridLength(0);
+            _captionSeamCover.Width = 0;
             return;
         }
 
@@ -117,6 +125,7 @@ internal sealed class TitleBarCoordinator
             if (dip > 0)
             {
                 _captionInset.Width = new GridLength(dip);
+                _captionSeamCover.Width = dip;
                 if (_horizontalTabHost.DragRegion is FrameworkElement drag)
                     drag.MinWidth = dip;
             }
