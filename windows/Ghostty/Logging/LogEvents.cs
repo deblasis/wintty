@@ -77,6 +77,8 @@ internal static class LogEvents
     {
         public const int ShowFailed  = 2701;
         public const int ClearFailed = 2702;
+        public const int ActivationFailed = 2703;
+        public const int DetachFailed = 2704;
     }
 
     // 2800-2899: Session restoration
@@ -96,6 +98,7 @@ internal static class LogEvents
         public const int MutexFailed       = 2903;
         public const int ForwardFailed     = 2904;
         public const int ServerStartFailed = 2905;
+        public const int InboundLaunchFailed = 2906;
     }
 
     // 3000-3099: Inspector
