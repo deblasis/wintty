@@ -789,10 +789,17 @@ public partial class App : Application
         _systemMenuHook.Enable();
         RegisterQuakeHotKey();
 
-        _trayIconService = new Ghostty.Shell.TrayIconService(
-            DispatcherQueue.GetForCurrentThread(),
-            ShowOrFocusWindowsFromTray,
-            CloseAllWindows);
+        try
+        {
+            _trayIconService = new Ghostty.Shell.TrayIconService(
+                DispatcherQueue.GetForCurrentThread(),
+                ShowOrFocusWindowsFromTray,
+                CloseAllWindows);
+        }
+        catch (System.Exception ex)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogTrayInitFailed(ex);
+        }
 
         // Re-claim the chord whenever the config changes so an edited
         // quick-terminal-key takes effect without a restart.
@@ -1539,6 +1546,12 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Warning,
                    Message = "Failed to register for toast notifications")]
     internal static partial void LogToastRegisterFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.TrayInitFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to initialize notification-area tray icon")]
+    internal static partial void LogTrayInitFailed(
         this ILogger<App> logger, System.Exception ex);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.MutexFailed,

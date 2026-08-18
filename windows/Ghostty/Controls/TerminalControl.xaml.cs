@@ -1148,7 +1148,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             ImeSink.Focus(FocusState.Programmatic);
     }
 
-    private void OnLostFocus(object sender, RoutedEventArgs e) => SetFocusState(false);
+    private void OnLostFocus(object sender, RoutedEventArgs e)
+    {
+        ClearImeComposition();
+        SetFocusState(false);
+    }
 
     private void SetFocusState(bool focused)
     {
@@ -1742,7 +1746,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void OnImeCompositionEnded(object sender, TextCompositionEndedEventArgs e)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+        ClearImeComposition();
+    }
+
+    /// <summary>Clears WinUI IME state and the libghostty preedit overlay.</summary>
+    private void ClearImeComposition()
+    {
         _imeComposing = false;
+        if (_surface.Handle == IntPtr.Zero) return;
         UpdateSurfacePreedit(null);
         ImeSink.Text = string.Empty;
     }
@@ -1825,6 +1836,8 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// </summary>
     internal void OpenSearch()
     {
+        // Drop any in-flight IME preedit before the needle box takes focus.
+        ClearImeComposition();
         SearchBar.State.IsOpen = true;
         SearchBar.Visibility = Visibility.Visible;
         SearchBar.FocusNeedle();

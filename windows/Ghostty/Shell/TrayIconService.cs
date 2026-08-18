@@ -69,7 +69,10 @@ internal sealed unsafe partial class TrayIconService : IDisposable
             (IntPtr)HWND_MESSAGE,
             IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         if (_messageHwnd == IntPtr.Zero)
-            throw new InvalidOperationException("TrayIconService: CreateWindowExW failed");
+        {
+            throw new InvalidOperationException(
+                $"TrayIconService: CreateWindowExW failed (LastWin32Error={Marshal.GetLastPInvokeError()})");
+        }
 
         lock (s_byHwndLock)
             s_byHwnd[_messageHwnd] = this;
@@ -149,7 +152,8 @@ internal sealed unsafe partial class TrayIconService : IDisposable
                         instance._dispatcher.TryEnqueue(instance._showWindows);
                         return IntPtr.Zero;
                     case WM_RBUTTONUP:
-                        instance.ShowContextMenu();
+                        // Modal menu must run on the UI thread, not inside WndProc.
+                        instance._dispatcher.TryEnqueue(instance.ShowContextMenu);
                         return IntPtr.Zero;
                 }
             }
@@ -202,6 +206,9 @@ internal sealed unsafe partial class TrayIconService : IDisposable
             AppendMenuW(menu, MF_SEPARATOR, 0, null);
             AppendMenuW(menu, MF_STRING, IDM_EXIT, "Exit");
             GetCursorPos(out var pt);
+            // TrackPopupMenu requires the owning window to be foreground
+            // (see SystemMenuPopup.Track / user32 docs).
+            SetForegroundWindow(_messageHwnd);
             var cmd = TrackPopupMenu(
                 menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
                 pt.X, pt.Y, 0, _messageHwnd, IntPtr.Zero);
@@ -307,6 +314,11 @@ internal sealed unsafe partial class TrayIconService : IDisposable
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetCursorPos(out POINT lpPoint);
+
+    [LibraryImport("user32.dll", EntryPoint = "SetForegroundWindow", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetForegroundWindow(IntPtr hWnd);
 
     [LibraryImport("user32.dll", EntryPoint = "TrackPopupMenu", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
