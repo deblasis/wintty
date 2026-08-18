@@ -75,6 +75,7 @@ public partial class App : Application
     private Ghostty.Session.SessionManager? _sessionManager;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
     private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
+    private Ghostty.Shell.TrayIconService? _trayIconService;
     // Reentrancy guard for the Alt+Space system menu: TrackPopupMenu runs
     // a modal loop, and the keyboard hook keeps firing inside it, so a
     // repeat press would otherwise stack a second menu on top.
@@ -788,6 +789,11 @@ public partial class App : Application
         _systemMenuHook.Enable();
         RegisterQuakeHotKey();
 
+        _trayIconService = new Ghostty.Shell.TrayIconService(
+            DispatcherQueue.GetForCurrentThread(),
+            ShowOrFocusWindowsFromTray,
+            CloseAllWindows);
+
         // Re-claim the chord whenever the config changes so an edited
         // quick-terminal-key takes effect without a restart.
         _configService.ConfigChanged += OnConfigReloaded_ReRegisterHotKey;
@@ -1168,6 +1174,27 @@ public partial class App : Application
         normal[next].Activate();
     }
 
+    /// <summary>
+    /// Tray icon double-click / Show menu: restore hidden windows or focus
+    /// the last regular terminal window.
+    /// </summary>
+    private void ShowOrFocusWindowsFromTray()
+    {
+        if (_windowsHiddenByVisibilityToggle)
+        {
+            ToggleAllWindowsVisibility();
+            return;
+        }
+
+        var target = LastRegularWindow ??
+            System.Linq.Enumerable.FirstOrDefault(
+                AllWindows, w => !w.IsQuickTerminal);
+        if (target is null) return;
+        if (!target.AppWindow.IsVisible)
+            target.AppWindow.Show();
+        target.Activate();
+    }
+
     private void RegisterQuakeHotKey()
     {
         if (_quakeHotKey is null) return;
@@ -1362,6 +1389,8 @@ public partial class App : Application
                 _configService.ConfigChanged -= OnConfigReloaded_ReRegisterHotKey;
                 _quakeHotKey?.Dispose();
                 _systemMenuHook?.Dispose();
+                _trayIconService?.Dispose();
+                _trayIconService = null;
 
                 // Force-close the quake window. It does not participate
                 // in WindowsByRoot (so this branch fires when the last
