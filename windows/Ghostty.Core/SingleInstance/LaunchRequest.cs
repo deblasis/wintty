@@ -10,6 +10,14 @@ namespace Ghostty.Core.SingleInstance;
 /// single-instance mode is on: the working directory it was started in
 /// and its full argv. Immutable; serialized to a wire format the primary
 /// parses off the named pipe.
+///
+/// New facts about a launch belong in <see cref="Args"/> as an extra
+/// argument (the way jump-list clicks and toast activations already travel),
+/// not as a new field in the wire format. During an upgrade the PRIMARY is
+/// the older build -- it is the process that was already running -- and its
+/// parser rejects any payload shape it does not know, which drops the
+/// forwarded launch entirely. An argument it does not recognize is simply
+/// ignored, and the launch degrades into opening a window.
 /// </summary>
 public sealed record LaunchRequest(string WorkingDirectory, IReadOnlyList<string> Args)
 {
