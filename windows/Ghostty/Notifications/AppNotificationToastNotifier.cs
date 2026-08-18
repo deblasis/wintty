@@ -12,8 +12,10 @@ namespace Ghostty.Notifications;
 /// plus a per-surface Group (the surface key): Windows replaces a toast when
 /// both match, so a newer toast for a surface supersedes the older one, and
 /// <see cref="ClearForSurface"/> removes a surface's toast by group on focus
-/// regain. Every call is guarded -- a toast failure must never propagate back
-/// through GhosttyHost into the libghostty callback.
+/// regain. The same surface key also travels in the toast's launch arguments,
+/// which is the only part of it a click can read back. Every call is guarded
+/// -- a toast failure must never propagate back through GhosttyHost into the
+/// libghostty callback.
 /// </summary>
 internal sealed class AppNotificationToastNotifier : IToastNotifier
 {
@@ -36,6 +38,19 @@ internal sealed class AppNotificationToastNotifier : IToastNotifier
             var builder = new AppNotificationBuilder();
             if (!string.IsNullOrEmpty(request.Title)) builder.AddText(request.Title);
             builder.AddText(request.Body);
+
+            // Name the surface in the toast's launch arguments. Group already
+            // carries it, but Group is only readable by us for replace/remove;
+            // the activation callback sees arguments and nothing else, so
+            // without this a click knows the app was clicked and not which
+            // pane asked for attention.
+            if (!string.IsNullOrEmpty(request.SurfaceKey))
+            {
+                builder.AddArgument(
+                    Ghostty.Core.Activation.ToastActivation.SurfaceArgumentKey,
+                    request.SurfaceKey);
+            }
+
             var notification = builder.BuildNotification();
             notification.Tag = NotificationTag;
             notification.Group = request.SurfaceKey;

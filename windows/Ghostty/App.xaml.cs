@@ -408,6 +408,28 @@ public partial class App : Application
         // under the AUMID before any Show(); without it Show() throws. The
         // registration persists in the registry (we never Unregister) so the
         // app can be toast-activated later. AUMID is already set above.
+        // NotificationInvoked MUST be attached before Register(), not after,
+        // for two separate reasons. WinAppSDK throws ERROR_NOT_FOUND from a
+        // subscribe that arrives late, and Register() picks its COM
+        // class-registration flag from whether a handler exists at that
+        // instant: with none attached it registers single-use, so a toast
+        // click would spawn a SECOND process instead of reaching this one.
+        //
+        // Its own try, not folded in with Register() below: a throw from the
+        // subscribe would otherwise skip the registration too, costing every
+        // toast rather than only the click routing.
+        try
+        {
+            Microsoft.Windows.AppNotifications.AppNotificationManager.Default
+                .NotificationInvoked += OnToastNotificationInvoked;
+            _toastInvokedSubscribed = true;
+        }
+        catch (System.Exception ex)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
+        }
+
+        // Exactly one Register() call may exist in the process.
         try
         {
             Microsoft.Windows.AppNotifications.AppNotificationManager.Default.Register();
@@ -416,6 +438,16 @@ public partial class App : Application
         {
             Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
         }
+
+        // Read the activation this process was started for, before the
+        // single-instance gate below acts on it. Position is load-bearing: a
+        // secondary forwards its launch and exits at that gate, so anything
+        // probed after it never reaches a secondary at all.
+        // Assigned and, in this repository, never read. It is not dead: a
+        // downstream build tier's URI router consumes it, and that is the live
+        // path behind deep links and the jump list. Deleting it here, or the
+        // probe behind it, breaks activation in the shipping builds.
+        var activationUri = ProbeActivation();
 
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
@@ -673,35 +705,6 @@ public partial class App : Application
         _highContrastMonitor = new Ghostty.Accessibility.HighContrastMonitor(
             _configService, DispatcherQueue.GetForCurrentThread());
 
-        Uri? activationUri = null;
-        try
-        {
-            var activated = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
-            if (activated.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.Protocol
-                && activated.Data is Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs proto)
-            {
-                activationUri = proto.Uri;
-            }
-            else
-            {
-                // Unpackaged fallback: command line --uri <url>.
-                var argv = Environment.GetCommandLineArgs();
-                for (int i = 0; i < argv.Length - 1; i++)
-                {
-                    if (string.Equals(argv[i], "--uri", StringComparison.Ordinal)
-                        && Uri.TryCreate(argv[i + 1], UriKind.Absolute, out var u))
-                    {
-                        activationUri = u;
-                        break;
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[app] protocol activation probe failed: {ex.Message}");
-        }
-
         // Session manager: owns restore decision + debounced persistence.
         // Constructed before window creation so we can decide whether to
         // rebuild a saved session or open a single default window.
@@ -805,6 +808,20 @@ public partial class App : Application
         // quick-terminal-key takes effect without a restart.
         _configService.ConfigChanged += OnConfigReloaded_ReRegisterHotKey;
 
+        // Subscribe to toast clicks down here, not next to Register(): the
+        // handler focuses windows, and up there none exist yet. A click that
+        // already arrived (the probe latches one, and a cold launch also
+        // delivers it during Register()) is replayed to this subscription, so
+        // nothing is lost by waiting. This must stay the FIRST subscriber --
+        // see ToastActivationRelay on why a second one wired above this line
+        // would swallow every cold-launch click.
+        ToastActivations.Subscribe(OnToastActivated);
+
+        // Startup is over and the launch click, if there was one, has been
+        // acted on. Anything arriving from here is a person clicking a new
+        // toast, so it must be delivered even when it names the same surface.
+        ToastActivations.CloseLaunchWindow();
+
         // Start the single-instance forwarding server last, once the UI
         // dispatcher and logger factory exist. No-op unless this process is
         // the single-instance primary.
@@ -858,9 +875,18 @@ public partial class App : Application
     /// </summary>
     private void ForwardLaunchToPrimary(string pipeName)
     {
+        // A toast click can be what started this process, and argv alone does
+        // not say so in any form the primary can read -- the activator's own
+        // token is a WinAppSDK implementation detail. Append the surface the
+        // probe latched so the primary acts on the click instead of reading it
+        // as a bare launch and opening a window. ForwardedArgv also strips any
+        // marker the user's own command line carried, so the one the primary
+        // finds is the one this process put there.
+        var argv = Ghostty.Core.Activation.ToastActivation.ForwardedArgv(
+            Environment.GetCommandLineArgs(), ToastActivations.Pending);
+
         var request = new Ghostty.Core.SingleInstance.LaunchRequest(
-            Program.LaunchWorkingDirectory,
-            Environment.GetCommandLineArgs());
+            Program.LaunchWorkingDirectory, argv);
 
         try
         {
@@ -910,7 +936,22 @@ public partial class App : Application
         {
             _singleInstanceServer = new Ghostty.Hosting.SingleInstanceServer(
                 election.Names.Pipe,
-                req => _uiDispatcher?.TryEnqueue(() => OpenWindowFromLaunch(req)),
+                req => _uiDispatcher?.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        OpenWindowFromLaunch(req);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Enqueued from a pipe thread onto the UI thread, so
+                        // nothing above catches it: an escape here is an
+                        // unhandled UI-thread exception and the process goes
+                        // down. Losing one forwarded launch is the cheaper
+                        // failure.
+                        Ghostty.Logging.StaticLoggers.App.LogInboundLaunchFailed(ex);
+                    }
+                }),
                 _loggerFactory.CreateLogger<Ghostty.Hosting.SingleInstanceServer>());
             _singleInstanceServer.Start();
         }
@@ -936,9 +977,227 @@ public partial class App : Application
             || _lifetimeSupervisor is null || _loggerFactory is null)
             return;
 
+        // A notification click that spawned a secondary lands here carrying the
+        // surface it was raised for. Liveness is checked BEFORE handing it to
+        // the relay, because only this call site can fall through to an
+        // ordinary launch: a marker naming a surface that is not here is a
+        // pane that closed, or a flag a user typed on a command line an older
+        // secondary forwarded verbatim, and neither may cost them the window
+        // (or the --jumplist-action) they actually asked for.
+        var activation = Ghostty.Core.Activation.ToastActivation
+            .FromForwardedArgs(req.Args);
+        if (activation.SurfaceKey is { Length: > 0 } key
+            && AnyWindowHasToastSurface(key))
+        {
+            ToastActivations.Note(activation);
+            return;
+        }
+
         HandleJumpListLaunch(
             Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args),
             req.WorkingDirectory);
+    }
+
+    // Toast activation ---------------------------------------------------
+
+    // Whether the NotificationInvoked subscribe succeeded, so teardown only
+    // detaches what it actually attached.
+    private bool _toastInvokedSubscribed;
+
+    // The relay is where the awkward part lives (latch a click that arrives
+    // before anyone can act on it, replay it to the first subscriber, fan out
+    // afterwards). Static and process-lifetime because the WinRT handler is
+    // wired at the very top of OnLaunched, before the instance state any
+    // consumer needs exists. App keeps only the WinRT wiring.
+    internal static Ghostty.Core.Activation.ToastActivationRelay ToastActivations { get; }
+        = new(ex => Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex));
+
+    /// <summary>
+    /// Read what this process was activated for. Both kinds come off the same
+    /// <c>GetActivatedEventArgs</c> call, which is the only synchronous
+    /// account of the activation available: the AppNotification kind is
+    /// already present when OnLaunched runs, whereas NotificationInvoked fires
+    /// whenever WinAppSDK decides to dispatch it. Reading both means the
+    /// single-instance forward does not depend on that timing.
+    ///
+    /// Returns the protocol URI, if any. The toast half is latched into the
+    /// relay rather than returned, because its consumer is constructed much
+    /// later in startup.
+    /// </summary>
+    private static Uri? ProbeActivation()
+    {
+        Uri? protocolUri = null;
+        try
+        {
+            var activated = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
+            if (activated.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.Protocol
+                && activated.Data is Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs proto)
+            {
+                protocolUri = proto.Uri;
+            }
+            else if (activated.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.AppNotification
+                && activated.Data is Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs toast)
+            {
+                ToastActivations.TryNoteLaunchActivation(
+                    Ghostty.Core.Activation.ToastActivation.FromNotificationArguments(
+                        toast.Arguments));
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[app] activation probe failed: {ex.Message}");
+        }
+
+        // The unpackaged fallback runs OUTSIDE the try above, deliberately.
+        // GetActivatedEventArgs is the half that throws on an unpackaged
+        // build, which is the exact case the --uri scan exists to cover:
+        // nested inside that try it was unreachable precisely when it was
+        // needed. Resolve keeps the precedence rule in one testable place --
+        // a real protocol activation still beats anything in argv.
+        return Ghostty.Core.Activation.ProtocolLaunch.Resolve(
+            protocolUri, Environment.GetCommandLineArgs());
+    }
+
+    private void OnToastNotificationInvoked(
+        Microsoft.Windows.AppNotifications.AppNotificationManager sender,
+        Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs args)
+    {
+        try
+        {
+            // Every callback goes through the same door as the probe, and the
+            // relay decides. This one used to keep its own "is this the first
+            // callback" flag, which encoded ordinal position rather than
+            // identity: when the shell handed the launch click over only via
+            // the activation arguments, the user's next real click was the
+            // first callback and got swallowed. The relay dedupes on what the
+            // click IS, and nothing here needs to guess.
+            ToastActivations.TryNoteLaunchActivation(
+                Ghostty.Core.Activation.ToastActivation.FromNotificationArguments(
+                    args.Arguments));
+        }
+        catch (System.Exception ex)
+        {
+            // This is a WinRT COM callback. A managed exception escaping back
+            // into the activator kills the process from inside code the user
+            // has no way to relate to the notification they clicked.
+            Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex);
+        }
+    }
+
+    /// <summary>
+    /// The one in-repo consumer of <see cref="ToastActivations"/>: put the
+    /// user back on the pane whose toast they clicked.
+    /// </summary>
+    private void OnToastActivated(Ghostty.Core.Activation.ToastActivation activation)
+    {
+        // Everything below touches windows, and this can arrive on a COM
+        // callback thread. TryEnqueue is right for the replay path too, which
+        // already runs on the UI thread: one dispatcher tick later is fine,
+        // and it keeps a single ordering rule instead of two.
+        _uiDispatcher?.TryEnqueue(() =>
+        {
+            var focused = false;
+            try
+            {
+                focused = activation.SurfaceKey is { Length: > 0 } key
+                    && TryFocusToastSurface(key);
+            }
+            catch (System.Exception ex)
+            {
+                Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex);
+            }
+
+            if (focused) return;
+
+            // Outside the try above on purpose. The surface may be gone (its
+            // pane or window closed, or the toast outlived the process that
+            // raised it -- every cold launch lands here), and the scan itself
+            // may have failed; either way the promise a notification click
+            // makes is that the app comes forward, so this has to run even
+            // when the scan threw.
+            try
+            {
+                ShowOrFocusWindowsFromTray();
+            }
+            catch (System.Exception ex)
+            {
+                Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Whether any live pane carries <paramref name="surfaceKey"/>. Read-only:
+    /// the forwarded-launch path has to know whether a click can be honoured
+    /// BEFORE it commits to honouring it, so a marker naming nothing falls
+    /// through to an ordinary launch instead of eating it.
+    /// </summary>
+    private static bool AnyWindowHasToastSurface(string surfaceKey)
+    {
+        foreach (var window in AllWindows.ToArray())
+        {
+            try
+            {
+                if (window.HasToastSurface(surfaceKey)) return true;
+            }
+            catch (System.Exception ex)
+            {
+                // Same reasoning as the acting scan below, over the same
+                // window state: a window mid-teardown throws out of AppWindow,
+                // and a leaf whose Tag has been cleared throws out of the cast
+                // inside Terminal(). A window that cannot answer is treated as
+                // not having it, so one dead window neither decides the answer
+                // for the live ones nor takes down the caller.
+                Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex);
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Find the window owning the surface a toast was raised for, reveal it,
+    /// select its tab and focus the pane. False when no live surface carries
+    /// the key.
+    /// </summary>
+    private bool TryFocusToastSurface(string surfaceKey)
+    {
+        // Snapshot: revealing a window runs XAML handlers that can add or
+        // remove registry entries under us.
+        foreach (var window in AllWindows.ToArray())
+        {
+            try
+            {
+                if (!window.TryFocusToastSurface(surfaceKey)) continue;
+            }
+            catch (System.Exception ex)
+            {
+                // Per window, not per scan. A window mid-teardown throws
+                // RO_E_CLOSED out of AppWindow, and one dead window must not
+                // stop the search reaching a live one behind it. The net is
+                // wide because this walks arbitrary window state and the cost
+                // of a miss is the user's click.
+                Ghostty.Logging.StaticLoggers.App.LogToastActivationFailed(ex);
+                continue;
+            }
+
+            NoteWindowRevealed(window);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Keep the toggle_visibility bookkeeping honest when something other than
+    /// the toggle put a window back on screen. Without this a user who hid
+    /// every window, then clicked a toast, gets a restore rather than a hide
+    /// from the next toggle.
+    /// </summary>
+    private void NoteWindowRevealed(MainWindow window)
+    {
+        if (!_hiddenByVisibilityToggle.Remove(window)) return;
+        if (_hiddenByVisibilityToggle.Count == 0) _windowsHiddenByVisibilityToggle = false;
     }
 
     /// <summary>
@@ -1399,6 +1658,26 @@ public partial class App : Application
                 _trayIconService?.Dispose();
                 _trayIconService = null;
 
+                // Detach both halves of the toast wiring. AppNotificationManager.Default
+                // and the relay are both process-lifetime, so a handler left
+                // attached roots this App for as long as the process runs -- and
+                // a relay handler that outlives the dispatcher it marshals to is
+                // a click delivered into a dead window tree.
+                if (_toastInvokedSubscribed)
+                {
+                    try
+                    {
+                        Microsoft.Windows.AppNotifications.AppNotificationManager.Default
+                            .NotificationInvoked -= OnToastNotificationInvoked;
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Ghostty.Logging.StaticLoggers.App.LogToastDetachFailed(ex);
+                    }
+                    _toastInvokedSubscribed = false;
+                }
+                ToastActivations.Reset();
+
                 // Force-close the quake window. It does not participate
                 // in WindowsByRoot (so this branch fires when the last
                 // *regular* window closes), but the quake window is a
@@ -1546,6 +1825,24 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Warning,
                    Message = "Failed to register for toast notifications")]
     internal static partial void LogToastRegisterFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Notifications.ActivationFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to act on a toast notification click")]
+    internal static partial void LogToastActivationFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Notifications.DetachFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to detach the toast notification handler")]
+    internal static partial void LogToastDetachFailed(
+        this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.InboundLaunchFailed,
+                   Level = LogLevel.Warning,
+                   Message = "A forwarded launch could not be acted on; it was dropped.")]
+    internal static partial void LogInboundLaunchFailed(
         this ILogger<App> logger, System.Exception ex);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.TrayInitFailed,
