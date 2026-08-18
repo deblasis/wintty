@@ -6,9 +6,8 @@ using Xunit;
 namespace Ghostty.Tests.Tabs;
 
 /// <summary>
-/// VerticalTabHost used to swallow ListViewItem right-clicks
-/// ("leave it to whatever per-item flyout exists") but no flyout
-/// was attached. Chrome fuzz then missed Switch to horizontal tabs.
+/// VerticalTabHost shows TabContextMenuBuilder menu on NavigationViewItem
+/// right-click (strip background still uses StripContextMenuBuilder).
 /// </summary>
 public class VerticalTabRowMenuTests
 {
@@ -23,6 +22,7 @@ public class VerticalTabRowMenuTests
         using var reader = new StreamReader(stream!);
         var source = reader.ReadToEnd();
         Assert.Contains("TabContextMenuBuilder.Build", source);
+        Assert.Contains("TabFromElement", source);
         Assert.Contains("isVertical: true", source);
     }
 }
