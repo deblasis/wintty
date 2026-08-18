@@ -154,6 +154,7 @@ public class MarshalComplianceTests
 
         // From the windows\Ghostty wildcard.
         Assert.Contains(scanned, n => n.EndsWith("SplashWindow.cs", StringComparison.Ordinal));
+        Assert.Contains(scanned, n => n.EndsWith("TrayIconService.cs", StringComparison.Ordinal));
         // From the windows\Ghostty.Core wildcard.
         Assert.Contains(scanned, n => n.EndsWith("NtProcessInterop.cs", StringComparison.Ordinal));
         // The ABI structs that declare no import of their own.
