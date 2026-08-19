@@ -6,18 +6,160 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <!--
+            The container owns the whole swatch chrome. The stock
+            GridViewItem template (DefaultGridViewItemStyle) is a
+            ListViewItemPresenter whose selected state paints a rounded fill
+            plus a check mark; over a 20 DIP colour circle that reads as a
+            second, competing colour, so the presenter is replaced by a ring.
+
+            Both ring brushes carry HighContrast mappings of their own
+            (accent to SystemColorHighlightColor, stroke to
+            SystemColorButtonTextColor), which is what keeps "this is
+            the applied colour" perceivable when the swatch fills
+            themselves cannot follow the theme.
+        -->
+        <!--
+            No BasedOn, but the container's built-in default style still supplies
+            everything this one leaves unset, so the stock values below have to be
+            overridden explicitly rather than assumed gone. Measured: dropping the
+            two minimums alone takes the swatches from 26 to 44 DIP.
+        -->
+        <Style x:Key="TabColorSwatchStyle" TargetType="GridViewItem">
+            <Setter Property="Width" Value="26" />
+            <Setter Property="Height" Value="26" />
+            <!-- Stock is 44 DIP square, which would blow the palette out to five
+                 times a touch target. 26 still clears the 24 DIP pointer floor. -->
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Margin" Value="1" />
+            <Setter Property="Background" Value="Transparent" />
+            <!-- Stretch, so the swatch tile can carry hit-testing and the
+                 tooltip across the whole container instead of its circle. -->
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <!-- Stock opts items into being drop targets; these are not. -->
+            <Setter Property="AllowDrop" Value="False" />
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="FocusVisualMargin" Value="-1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewItem">
+                        <Grid Background="{TemplateBinding Background}">
+                            <!--
+                                Separate from the content so state changes never
+                                resize the circle underneath. It is also the focus
+                                target: the system focus visual follows the corner
+                                radius of whatever it is anchored to, and anchoring
+                                it to the square root would ring a circle with a box.
+                            -->
+                            <Border x:Name="Ring"
+                                    Control.IsTemplateFocusTarget="True"
+                                    FocusVisualMargin="{TemplateBinding FocusVisualMargin}"
+                                    CornerRadius="13"
+                                    BorderThickness="0"
+                                    BorderBrush="{ThemeResource SystemControlHighlightAccentBrush}" />
+                            <ContentPresenter
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+
+                            <VisualStateManager.VisualStateGroups>
+                                <!-- Every member of CommonStates, taken from the
+                                     shipped GridViewItemExpanded style (the presenter-free
+                                     one, so its state list is readable). A state a template
+                                     omits is not a no-op: GoToState fails and the item keeps
+                                     the setters of whatever state it was already in. The
+                                     other groups that style declares are dropped on purpose;
+                                     none is reachable here. -->
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderThickness" Value="1" />
+                                            <Setter Target="Ring.BorderBrush"
+                                                    Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderThickness" Value="1" />
+                                            <Setter Target="Ring.BorderBrush"
+                                                    Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Selected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderThickness" Value="2" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="PointerOverSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderThickness" Value="2" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <!-- Re-picking the colour already applied is a
+                                         supported route, so the press has to read as
+                                         something even though selection cannot change. -->
+                                    <VisualState x:Name="PressedSelected">
+                                        <VisualState.Setters>
+                                            <Setter Target="Ring.BorderThickness" Value="2" />
+                                            <Setter Target="Ring.BorderBrush"
+                                                    Value="{ThemeResource ControlStrongStrokeColorDefaultBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
     <StackPanel Orientation="Vertical"
                 Spacing="4"
                 Padding="8">
-        <TextBlock Text="Tab Color"
+        <!-- Raw, not Content: the grid already borrows this text as its
+             automation name, and a client that sees both reads it twice. -->
+        <TextBlock x:Name="PaletteLabel"
+                   Text="Tab Color"
+                   AutomationProperties.AccessibilityView="Raw"
                    FontWeight="SemiBold"
-                   Margin="2,0,0,4"/>
+                   Margin="2,0,0,4" />
         <!--
-            Rows are built in code-behind from TabColorPalette.PaletteRows
-            so the macOS ordering stays the single source of truth. The
-            StackPanels below are just layout scaffolding.
+            Swatches are built in code-behind from TabColorPalette.PaletteRows
+            so the macOS ordering stays the single source of truth; the wrap
+            point below folds that flat sequence back into 2x5, and a test ties
+            it to the row width rather than to this literal.
+
+            A GridView rather than the Buttons SnapZonePicker uses, or a
+            RadioButtons group: the applied colour has to reach a client as a
+            selected item and not only as a drawn ring, and a radio group checks
+            as the caret moves, which here would apply every colour arrowed past.
+
+            Selection holds the applied colour and ItemClick commits, so
+            SingleSelectionFollowsFocus stays off. With it on, arrowing drags the
+            selection along with the caret and "selected" starts reporting where
+            the user is looking rather than what the tab is.
         -->
-        <StackPanel x:Name="Row0" Orientation="Horizontal" Spacing="4"/>
-        <StackPanel x:Name="Row1" Orientation="Horizontal" Spacing="4"/>
+        <GridView x:Name="Swatches"
+                  SelectionMode="Single"
+                  SingleSelectionFollowsFocus="False"
+                  IsItemClickEnabled="True"
+                  ItemClick="OnSwatchClick"
+                  ItemContainerStyle="{StaticResource TabColorSwatchStyle}"
+                  Padding="0"
+                  ScrollViewer.HorizontalScrollMode="Disabled"
+                  ScrollViewer.VerticalScrollMode="Disabled"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                  ScrollViewer.VerticalScrollBarVisibility="Disabled">
+            <GridView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <ItemsWrapGrid Orientation="Horizontal" MaximumRowsOrColumns="5" />
+                </ItemsPanelTemplate>
+            </GridView.ItemsPanel>
+        </GridView>
     </StackPanel>
 </UserControl>
