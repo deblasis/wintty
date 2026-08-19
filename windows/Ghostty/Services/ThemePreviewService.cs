@@ -22,7 +22,7 @@ namespace Ghostty.Services;
 ///   "CONFIRM:ThemeName\n"  -- user accepted the theme
 ///   (pipe closed)          -- user cancelled, revert to original
 /// </summary>
-internal sealed class ThemePreviewService : IAsyncDisposable, IDisposable
+internal sealed partial class ThemePreviewService : IAsyncDisposable, IDisposable
 {
     // Path.GetInvalidFileNameChars() allocates a fresh char[] on each
     // call (defensive copy); SearchValues caches the set once and picks

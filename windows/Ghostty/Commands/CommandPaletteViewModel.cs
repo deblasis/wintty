@@ -18,7 +18,7 @@ internal enum PaletteMode
 /// INPC is hand-rolled with the C# 14 <c>field</c> keyword for the
 /// same reason as <c>TabModel</c>: no source generator dependency.
 /// </summary>
-internal class CommandPaletteViewModel : INotifyPropertyChanged
+internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 {
     private readonly IReadOnlyList<ICommandSource> _sources;
     private readonly FrecencyStore _frecency;
