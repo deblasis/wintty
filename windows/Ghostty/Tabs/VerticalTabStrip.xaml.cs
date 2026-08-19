@@ -10,6 +10,7 @@ using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
@@ -700,7 +701,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             Icon = TabIconElementFactory.Create(tab.TabIcon),
             Content = row,
         };
-        ToolTipService.SetToolTip(item, tab.EffectiveTitle);
+        ApplyItemTitleChrome(item, tab);
 
         // Title and bell are cheap to reapply, so they share one binding.
         // Color is separate because it triggers a whole-strip recolor, and
@@ -713,7 +714,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             if (!_items.TryGetValue(tab, out var navItem)) return;
             if (navItem.Content is VerticalTabNavRow navRow)
                 navRow.Refresh(tab);
-            ToolTipService.SetToolTip(navItem, tab.EffectiveTitle);
+            ApplyItemTitleChrome(navItem, tab);
         },
         nameof(TabModel.EffectiveTitle),
         nameof(TabModel.ShellReportedTitle),
@@ -743,6 +744,20 @@ internal sealed partial class VerticalTabStrip : UserControl
         else
             NavView.MenuItems.Add(item);
         ApplyItemTabColor(item, tab);
+    }
+
+    /// <summary>
+    /// Everything on the item that follows the tab's title: the hover
+    /// tooltip and the text an assistive client reads. The row itself
+    /// cannot do this -- it does not know which item holds it, and the
+    /// name has to sit on the item, which is the ListItem in the
+    /// automation tree.
+    /// </summary>
+    private static void ApplyItemTitleChrome(NavigationViewItem item, TabModel tab)
+    {
+        ToolTipService.SetToolTip(item, tab.EffectiveTitle);
+        AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
+        AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(tab));
     }
 
     private void OnRowCloseClick(object sender, RoutedEventArgs e)

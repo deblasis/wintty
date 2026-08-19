@@ -82,4 +82,43 @@ public class TabModelProfileSnapshotTests
 
         Assert.Equal("Wintty", tab.EffectiveTitle);
     }
+
+    /// <summary>
+    /// A shell can report a title that is empty or all spaces:
+    /// an OSC 2 with an empty payload lands here as "" and never as null, and
+    /// the setter only guards against null. Coalescing on null alone let
+    /// that win the precedence chain, so the strip drew a blank label and
+    /// a reader read a blank name.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t\n")]
+    public void EffectiveTitle_BlankShellTitle_FallsThroughToProfile(string blank)
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.AttachProfileSnapshot(SampleSnapshot());
+        tab.ShellReportedTitle = blank;
+
+        Assert.Equal("Foo", tab.EffectiveTitle);
+    }
+
+    [Fact]
+    public void EffectiveTitle_BlankShellTitleAndNoProfile_FallsBackToProductName()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.ShellReportedTitle = "   ";
+
+        Assert.Equal("Wintty", tab.EffectiveTitle);
+    }
+
+    [Fact]
+    public void EffectiveTitle_BlankUserOverride_FallsThroughToShellTitle()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.ShellReportedTitle = "vim file.txt";
+        tab.UserOverrideTitle = "   ";
+
+        Assert.Equal("vim file.txt", tab.EffectiveTitle);
+    }
 }
