@@ -147,8 +147,20 @@ internal sealed class TabModel : INotifyPropertyChanged
     // button reads its profile Name rather than the generic fallback
     // before the shell sends a title); then the product name for the
     // no-profile / pre-OSC-2 cold-start case.
+    //
+    // Each level is coalesced on whitespace, not just on null. A shell
+    // can report a title that is empty or all spaces (`printf
+    // '\033]2;\007'` does it), and that arrives here as a non-null empty
+    // string, which would otherwise win the precedence chain and leave
+    // the tab with a blank label and a blank name.
     public string EffectiveTitle =>
-        UserOverrideTitle ?? ShellReportedTitle ?? ProfileSnapshot?.DisplayName ?? AppIdentity.ProductName;
+        Titled(UserOverrideTitle)
+        ?? Titled(ShellReportedTitle)
+        ?? Titled(ProfileSnapshot?.DisplayName)
+        ?? AppIdentity.ProductName;
+
+    private static string? Titled(string? title)
+        => string.IsNullOrWhiteSpace(title) ? null : title;
 
     public TabModel(IPaneHost paneHost)
     {
