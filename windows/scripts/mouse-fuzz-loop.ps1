@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -340,7 +341,8 @@ function Invoke-UiaOrClick([System.Windows.Automation.AutomationElement]$el, [ui
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 Start-Sleep -Milliseconds 400
 $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
 $pid32 = [uint32]$proc.Id
@@ -513,5 +515,9 @@ $alive = -not $proc.HasExited
     hwnd = "$hwnd64"
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host "alive=$alive crashGrew=$crashGrew"
+# Leave nothing behind: every other harness here refuses to start while a
+# Wintty is running, and this script used to rely on the next one's
+# blanket kill to reap it.
+Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 if (-not $alive -or $crashGrew) { exit 2 }
 exit 0
