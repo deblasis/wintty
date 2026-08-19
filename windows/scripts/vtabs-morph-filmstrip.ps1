@@ -37,6 +37,7 @@ public static class VtMorph {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int t, bool repaint);
@@ -68,7 +69,7 @@ public static class VtMorph {
     // SetForegroundWindow fails silently under the foreground lock. Confirm
     // ownership before sending anything or the chord lands in the editor.
     static bool Focus(IntPtr expected) {
-        if (expected == IntPtr.Zero) return false;
+        if (expected == IntPtr.Zero || !IsWindow(expected)) return false;
         for (int i = 0; i < 20; i++) {
             if (GetForegroundWindow() == expected) return true;
             SetForegroundWindow(expected);
@@ -86,13 +87,18 @@ public static class VtMorph {
     }
     public static bool ToggleLayout(IntPtr h) { if (!Focus(h)) return false; Chord(VK_OEM_COMMA, true); return true; }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
     public static bool Click(uint pid, int x, int y, bool right) {
         SetCursorPos(x, y); Thread.Sleep(60);
-        var p = new POINT { X = x, Y = y };
-        uint owner = 0; GetWindowThreadProcessId(WindowFromPoint(p), out owner);
+        // Probe the live cursor, not the scripted point: the buttons land
+        // wherever the cursor is now, and a user mouse move during the
+        // settle would divorce the pid check from the click.
+        POINT live; if (!GetCursorPos(out live)) return false;
+        if (Math.Abs(live.X - x) > 2 || Math.Abs(live.Y - y) > 2) return false;
+        uint owner = 0; GetWindowThreadProcessId(WindowFromPoint(live), out owner);
         if (owner != pid) return false;
         uint down = right ? 0x0008u : 0x0002u, up = right ? 0x0010u : 0x0004u;
         mouse_event(down, 0, 0, 0, UIntPtr.Zero);
@@ -218,7 +224,12 @@ try {
 }
 finally {
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg } else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if ($proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        # The dying process can still hold handles under the temp dir; an
+        # immediate delete leaks the GUID dir silently.
+        try { $proc.WaitForExit(3000) } catch {}
+    }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
 }
 Write-Host "OUT=$OutDir"

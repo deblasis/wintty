@@ -6,10 +6,11 @@
 # arrive before the previous one has finished. This drives all of that from a
 # seeded RNG so a failure can be replayed with -Seed.
 #
-# Pass/fail is not "did it crash": the app is built with morph tracing for
-# this run, and every SWITCH end line must report ghosts=0 and morph=null.
-# A ghost left parked on the morph layer is the artifact this whole change
-# exists to remove, so it is the thing worth asserting.
+# Pass/fail is not "did it crash": the app emits a morph trace whenever the
+# WINTTY_MORPH_TRACE env var names a log file (set per run below), and every
+# SWITCH end line must report ghosts=0 and morph=null. A ghost left parked on
+# the morph layer is the artifact this whole change exists to remove, so it
+# is the thing worth asserting.
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [int]$Seed = 0,
@@ -44,6 +45,7 @@ public static class MFz {
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
     const uint KEYUP = 0x0002;
     public static IntPtr FindWin(uint pid) {
@@ -88,6 +90,10 @@ public static class MFz {
     public static bool Type(IntPtr h, string text) {
         if (!Focus(h)) return false;
         foreach (char c in text) {
+            // The burst runs for hundreds of ms; re-confirm ownership per
+            // character so an alt-tab (or app crash) cannot route the tail
+            // of a shell command into a foreign window.
+            if (GetForegroundWindow() != h) return false;
             short vk = VkKeyScan(c);
             bool shift = (vk & 0x100) != 0;
             byte k = (byte)(vk & 0xFF);
@@ -97,6 +103,8 @@ public static class MFz {
             if (shift) keybd_event(0x10, 0, KEYUP, UIntPtr.Zero);
             Thread.Sleep(6);
         }
+        // Enter is the keystroke that executes; never send it blind.
+        if (GetForegroundWindow() != h) return false;
         keybd_event(0x0D, 0, 0, UIntPtr.Zero);
         keybd_event(0x0D, 0, KEYUP, UIntPtr.Zero);
         return true;
@@ -107,8 +115,13 @@ public static class MFz {
     public static bool Click(uint pid, int x, int y, bool right) {
         SetCursorPos(x, y);
         Thread.Sleep(60);
-        var p = new POINT { X = x, Y = y };
-        IntPtr under = WindowFromPoint(p);
+        // The buttons land wherever the cursor is NOW, not at the scripted
+        // point: a user mouse move during the settle would divorce the pid
+        // probe from the click. Probe the live position and require it to
+        // still be ours.
+        POINT live; if (!GetCursorPos(out live)) return false;
+        if (Math.Abs(live.X - x) > 2 || Math.Abs(live.Y - y) > 2) return false;
+        IntPtr under = WindowFromPoint(live);
         uint owner = 0; GetWindowThreadProcessId(under, out owner);
         if (owner != pid) return false;
         uint down = right ? 0x0008u : 0x0002u;
@@ -149,8 +162,9 @@ function Invoke-El($el) {
     } catch { return $false }
 }
 
-$log = Join-Path $env:TEMP 'wintty-morph.log'
-Remove-Item $log -ErrorAction SilentlyContinue
+# Per-run path: a fixed name would interleave lines from a concurrently
+# running instrumented instance in another worktree and corrupt the oracle.
+$log = Join-Path $env:TEMP "wintty-morph-$([guid]::NewGuid()).log"
 
 $tempXdg = Join-Path $env:TEMP "wintty-morphfuzz-$([guid]::NewGuid())"
 $cfgDir = Join-Path $tempXdg 'wintty'
@@ -165,6 +179,8 @@ theme = Catppuccin Mocha
 
 $origXdg = $env:XDG_CONFIG_HOME
 $env:XDG_CONFIG_HOME = $tempXdg
+$origTrace = $env:WINTTY_MORPH_TRACE
+$env:WINTTY_MORPH_TRACE = $log
 $proc = $null
 $actions = @{}
 $chordMisses = 0
@@ -192,6 +208,14 @@ try {
         Start-Sleep -Milliseconds 500
     }
     $tabs = 8
+
+    # One deterministic toggle up front proves the oracle is alive before
+    # minutes of fuzzing are spent on a build that cannot report it.
+    if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { throw 'FOREGROUND_MISS: probe toggle' }
+    Start-Sleep -Milliseconds 1200
+    if (-not (Test-Path $log)) {
+        throw "no morph trace at $log - the app ignored WINTTY_MORPH_TRACE; this build predates the built-in trace"
+    }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
         if (-not [MFz]::IsWindow($hwnd)) { throw "window gone at iteration $i" }
@@ -323,6 +347,8 @@ finally {
     Start-Sleep -Milliseconds 600
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    if ($null -ne $origTrace) { $env:WINTTY_MORPH_TRACE = $origTrace }
+    else { Remove-Item Env:WINTTY_MORPH_TRACE -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
 }
 
@@ -330,7 +356,7 @@ Write-Host ''
 Write-Host 'actions:'
 $actions.GetEnumerator() | Sort-Object Name | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.Key, $_.Value) }
 
-if (-not (Test-Path $log)) { throw 'no morph trace: is this an instrumented build?' }
+if (-not (Test-Path $log)) { throw "no morph trace at $log - the app ignored WINTTY_MORPH_TRACE" }
 $lines = Get-Content $log
 $begins = @($lines | Where-Object { $_ -like 'SWITCH begin*' }).Count
 $ends = @($lines | Where-Object { $_ -like 'SWITCH end*' }).Count

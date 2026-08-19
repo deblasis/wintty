@@ -136,7 +136,10 @@ try {
 }
 finally {
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg } else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if ($proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        try { $proc.WaitForExit(3000) } catch {}
+    }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
 }
 Write-Host "OUT=$OutDir"

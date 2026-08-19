@@ -77,6 +77,9 @@ internal sealed partial class TabSwitcherPopup : UserControl
         CandidateRow.MaximumRowsOrColumns = ColumnsFor(tabs.Count, hostWidth);
         if (hostHeight > 0)
             CandidateScroll.MaxHeight = hostHeight * MaxGridHeightRatio;
+        // A scroll offset left over from the previous open would show the
+        // new grid already scrolled past its first rows.
+        CandidateScroll.ChangeView(null, 0, null, disableAnimation: true);
 
         var renderer = new PanePreviewRenderer(PreviewFont.Resolve(fontFamily));
         foreach (var tab in tabs)
@@ -186,6 +189,10 @@ internal sealed partial class TabSwitcherPopup : UserControl
                 : _idleBorderByTab.TryGetValue(model, out var idle)
                     ? idle
                     : _theme.BorderIdle;
+            // Once the grid scrolls, the ring alone cannot tell the user
+            // which tile is active if it sits below the fold.
+            if (ReferenceEquals(model, tab))
+                cell.StartBringIntoView();
         }
     }
 }

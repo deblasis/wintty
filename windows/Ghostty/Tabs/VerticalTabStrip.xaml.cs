@@ -352,15 +352,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     internal (SolidColorBrush Fill, SolidColorBrush Foreground) ActiveRowChrome(TabModel tab)
     {
+        // The fill always comes from ResolveSelectionRowFill so the ghost and
+        // the real row can never disagree on the selected color.
+        var fill = ResolveSelectionRowFill(tab);
         if (tab.Color != TabColor.None)
         {
-            return (
-                TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: true)),
-                TabColorBrush.FromPackedRgb(TabColorPalette.ForegroundRgb(
-                    tab.Color, selected: true, _stripBackdropPacked)));
+            return (fill, TabColorBrush.FromPackedRgb(TabColorPalette.ForegroundRgb(
+                tab.Color, selected: true, _stripBackdropPacked)));
         }
 
-        var fill = ResolveSelectionRowFill(tab);
         var rowPacked = PackColor(fill.Color);
         var preferred = _shellActiveTextBrush is not null
             ? PackColor(_shellActiveTextBrush.Color)

@@ -74,7 +74,6 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private const int PrimingFrames = 3;
 
-
     // Feel constants for the icon spin/pop, tuned by eye. The spin is one
     // full turn; the pop dips the scale partway through and springs back
     // past 1.0 as it lands.
@@ -122,20 +121,12 @@ internal sealed class LayoutCoordinator
     // the vertical strip becomes the topmost element above the tabs. Layout
     // switching still works via the keyboard chord.
     private bool _verticalTitleBarSuppressed;
-    // Per-frame handler rather than a DispatcherTimer: the strip column is
-    // resized from managed code every frame, and a queued timer competing
-    // with the switch storyboard and its layout passes got starved down to
-    // two ticks in 190ms -- the column lurched instead of sliding.
-    // CompositionTarget.Rendering is tied to composition, so it keeps step.
-    private EventHandler<object>? _columnFrame;
 
     public LayoutCoordinator(
         ColumnDefinition stripColumn,
         ColumnDefinition titleBarStripMirror,
-        FrameworkElement horizontalHost,
         VerticalTabHost verticalTabHost,
         Grid verticalTitleBar,
-        FrameworkElement horizontalIcon,
         ITabHost horizontalTabHost,
         Canvas morphLayer,
         FrameworkElement morphRoot,
@@ -151,11 +142,11 @@ internal sealed class LayoutCoordinator
         _activeTab = activeTab;
         _stripColumn = stripColumn;
         _titleBarStripMirror = titleBarStripMirror;
-        _horizontalHost = horizontalHost;
+        _horizontalHost = horizontalTabHost.HostElement;
         _verticalTabHost = verticalTabHost;
         _verticalHost = verticalTabHost;
         _verticalTitleBar = verticalTitleBar;
-        _horizontalIcon = horizontalIcon;
+        _horizontalIcon = horizontalTabHost.IconBadge;
         _verticalIcon = verticalTabHost.IconBadge;
 
         // Pin toggle snaps immediately -- NavView needs the full column width
@@ -175,6 +166,15 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void Snap(bool verticalTabs)
     {
+        // Snap is the end-state authority for interrupted switches too:
+        // SetStripHidden and SuppressVerticalTitleBar call it directly
+        // mid-flight, so everything a switch keeps in the air -- the tab
+        // ghost, the icon stand-in, the pane reveal's margin and clip --
+        // has to come down here, not only in FinishSwitch.
+        FinishActiveTabMorph();
+        FinishIconGhost();
+        FinishPaneReveal();
+
         var w = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
         _stripColumn.Width = new GridLength(w);
         _titleBarStripMirror.Width = new GridLength(w);
@@ -272,6 +272,7 @@ internal sealed class LayoutCoordinator
         }
         if (_switching) return;
         _switching = true;
+        MorphTrace($"SWITCH begin vertical={verticalTabs}");
 
         var targetColWidth = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
         var fromColWidth = _stripColumn.Width.Value;
@@ -303,8 +304,6 @@ internal sealed class LayoutCoordinator
         var outgoingOffset = verticalTabs
             ? new Windows.Foundation.Point(0, EmergeTravel)
             : new Windows.Foundation.Point(EmergeTravel, 0);
-
-        StopColumnTween();
 
         // The strip column is moved once per switch, never tweened. Changing
         // it resizes the terminal surface, which re-renders synchronously on
@@ -372,10 +371,11 @@ internal sealed class LayoutCoordinator
 
         sb.Completed += (_, _) =>
         {
-            // Only a ghost that actually flew has anything to slam into,
-            // and only a switch that ran to completion has a landing --
-            // the fallback paths below fast-forward without motion.
-            var landed = _morph is not null;
+            // Only a staged flight has anything to slam into: a waiting
+            // morph whose destination never realized parks the ghost and
+            // stages no storyboard, and the fallback paths below
+            // fast-forward without motion.
+            var landed = _morphStoryboard is not null;
             FinishSwitch(verticalTabs, onCompleted);
             if (landed)
                 _impact?.Invoke(verticalTabs ? -1 : 0, verticalTabs ? 0 : -1);
@@ -420,10 +420,35 @@ internal sealed class LayoutCoordinator
         internal required FrameworkElement? From { get; init; }
         internal FrameworkElement? To { get; set; }
         internal EventHandler<object>? Waiting { get; set; }
+        internal EventHandler<object>? WaitingDeadline { get; set; }
     }
 
     private ActiveTabMorph? _morph;
     private Storyboard? _morphStoryboard;
+
+    /// <summary>
+    /// Oracle for the morph fuzz harness: every switch must end with zero
+    /// ghosts on the overlay. Emitting the trace from the product keeps the
+    /// harness runnable against any build, and the env var doubles as the
+    /// per-run log path so concurrent instances never interleave one file.
+    /// Inert (a null check) when the variable is unset.
+    /// </summary>
+    private static readonly string? MorphTracePath =
+        Environment.GetEnvironmentVariable("WINTTY_MORPH_TRACE");
+
+    private static void MorphTrace(string message)
+    {
+        if (MorphTracePath is null) return;
+        try
+        {
+            System.IO.File.AppendAllText(
+                MorphTracePath, message + Environment.NewLine);
+        }
+        catch
+        {
+            // A locked or unwritable log must never take the switch down.
+        }
+    }
 
     /// <summary>
     /// How long to keep waiting for the incoming host to realize the active
@@ -470,11 +495,48 @@ internal sealed class LayoutCoordinator
         {
             if (++frames < PrimingFrames) return;
             CompositionTarget.Rendering -= onFrame;
-            // A switch started meanwhile owns the host's visibility now.
-            if (_switching) return;
+            _primingFrame = null;
+            // Priming owns the host only while it is still the transparent
+            // stand-in it created. A switch in flight, or one that already
+            // landed on this host (Snap sets its opacity back to 1), means
+            // the layout machinery owns visibility now.
+            if (_switching || host.Opacity != 0) return;
             host.Visibility = Visibility.Collapsed;
         };
+        _primingFrame = onFrame;
         CompositionTarget.Rendering += onFrame;
+    }
+
+    /// <summary>
+    /// Detach the priming frame handler on window teardown.
+    /// CompositionTarget.Rendering is a thread-level event, so a pending
+    /// handler would keep the closed window's whole tree alive until the
+    /// thread renders again.
+    /// </summary>
+    public void CancelStripPriming()
+    {
+        if (_primingFrame is null) return;
+        CompositionTarget.Rendering -= _primingFrame;
+        _primingFrame = null;
+    }
+
+    private EventHandler<object>? _primingFrame;
+
+    /// <summary>
+    /// A realized element can still sit scrolled out of the strip's
+    /// viewport; TransformToVisual happily reports its off-screen rect and
+    /// the overlay canvas never clips, so a morph aimed there would fly
+    /// across the terminal to a point where no tab is visible. Off-viewport
+    /// rects count as unavailable and the switch degrades to the
+    /// cross-fade.
+    /// </summary>
+    private static Rect ViewportRectIn(FrameworkElement root, FrameworkElement el)
+    {
+        var rect = RectIn(root, el);
+        if (rect.Width <= 0) return rect;
+        var overlap = new Rect(0, 0, root.ActualWidth, root.ActualHeight);
+        overlap.Intersect(rect);
+        return overlap.IsEmpty ? default : rect;
     }
 
     private static Rect RectIn(FrameworkElement root, FrameworkElement el)
@@ -514,7 +576,7 @@ internal sealed class LayoutCoordinator
 
         var from = outgoing.TabElement(tab);
         if (from is null) return;
-        var fromRect = RectIn(_morphRoot, from);
+        var fromRect = ViewportRectIn(_morphRoot, from);
         if (fromRect.Width <= 0) return;
 
         var (to, toRect) = MeasureIncomingTab(incoming, tab);
@@ -547,6 +609,7 @@ internal sealed class LayoutCoordinator
 
         if (toRect.Width > 0)
         {
+            MorphTrace("MORPH immediate");
             StageMorphAnimations(morph, fromRect, toRect, SwitchDuration);
             return;
         }
@@ -568,7 +631,7 @@ internal sealed class LayoutCoordinator
             }
 
             var late = incoming.TabElement(tab);
-            var rect = late is null ? default : RectIn(_morphRoot, late);
+            var rect = late is null ? default : ViewportRectIn(_morphRoot, late);
 
             // Past the grace period a ghost would have sat still for a
             // noticeable slice of the switch and then lurched. Drop it and
@@ -594,6 +657,7 @@ internal sealed class LayoutCoordinator
 
             // Spend only what is left of the switch, so the ghost still
             // lands with the cross-fade rather than after it.
+            MorphTrace($"MORPH deferred@{clock.ElapsedMilliseconds}ms");
             StageMorphAnimations(
                 morph, fromRect, rect, SwitchDuration - clock.Elapsed);
             try
@@ -607,6 +671,30 @@ internal sealed class LayoutCoordinator
         };
         morph.Waiting = waiting;
         _morphRoot.LayoutUpdated += waiting;
+        MorphTrace("MORPH waiting");
+
+        // LayoutUpdated alone cannot enforce the grace deadline: the switch
+        // storyboard animates only opacity and transforms, which dirty no
+        // layout, so once the visibility-change layout storm settles no
+        // further LayoutUpdated is guaranteed. A container that never
+        // realizes would park the ghost for the whole switch with both real
+        // tabs hidden under it. Rendered frames keep coming regardless, so
+        // they carry the deadline.
+        EventHandler<object>? deadline = null;
+        deadline = (_, _) =>
+        {
+            if (!ReferenceEquals(_morph, morph) || morph.Waiting is null)
+            {
+                CompositionTarget.Rendering -= deadline;
+                return;
+            }
+            if (clock.Elapsed <= RealizationGrace) return;
+            CompositionTarget.Rendering -= deadline;
+            morph.WaitingDeadline = null;
+            FinishActiveTabMorph();
+        };
+        morph.WaitingDeadline = deadline;
+        CompositionTarget.Rendering += deadline;
     }
 
     /// <summary>
@@ -624,17 +712,10 @@ internal sealed class LayoutCoordinator
         _morphRoot.UpdateLayout();
 
         var to = incoming.TabElement(tab);
-        var toRect = to is null ? default : RectIn(_morphRoot, to);
+        var toRect = to is null ? default : ViewportRectIn(_morphRoot, to);
         return (to, toRect);
     }
 
-    /// <summary>
-    /// Drive the ghost from one rect to the other. Width and Height are
-    /// dependent animations because the label must re-lay-out rather than
-    /// scale: squashing a 240px header tab into a 48px rail smears the
-    /// text, which is the artifact in a different costume. One small
-    /// element for the length of a switch is a cheap layout pass.
-    /// </summary>
     /// <summary>
     /// Share of the flight the ghost spends changing size. Position runs
     /// the full duration; size and label settle at this fraction, so the
@@ -643,15 +724,22 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private const double ShapeSettleFraction = 0.75;
 
+    /// <summary>
+    /// Drive the ghost from one rect to the other. Width and Height are
+    /// dependent animations because the label must re-lay-out rather than
+    /// scale: squashing a 240px header tab into a 48px rail smears the
+    /// text, which is the artifact in a different costume. One small
+    /// element for the length of a switch is a cheap layout pass.
+    /// </summary>
     private void StageMorphAnimations(
         ActiveTabMorph morph, Rect from, Rect to, TimeSpan duration)
     {
         var settle = duration * ShapeSettleFraction;
         var sb = new Storyboard();
-        Add(sb, morph.Ghost.Translate, "X", from.X, to.X);
-        Add(sb, morph.Ghost.Translate, "Y", from.Y, to.Y);
-        Add(sb, morph.Ghost, "Width", from.Width, to.Width, dependent: true, settle);
-        Add(sb, morph.Ghost, "Height", from.Height, to.Height, dependent: true, settle);
+        Add(morph.Ghost.Translate, "X", from.X, to.X);
+        Add(morph.Ghost.Translate, "Y", from.Y, to.Y);
+        Add(morph.Ghost, "Width", from.Width, to.Width, dependent: true, settle);
+        Add(morph.Ghost, "Height", from.Height, to.Height, dependent: true, settle);
 
         // The label survives a modest width change but not the collapse to
         // a 48px rail, so it fades on the leg that loses most of its room
@@ -661,14 +749,14 @@ internal sealed class LayoutCoordinator
         if (shrinking || growing)
         {
             morph.Ghost.Label.Opacity = shrinking ? 1 : 0;
-            Add(sb, morph.Ghost.Label, "Opacity",
+            Add(morph.Ghost.Label, "Opacity",
                 shrinking ? 1 : 0, shrinking ? 0 : 1, dependent: false, settle);
         }
 
         _morphStoryboard = sb;
 
         void Add(
-            Storyboard sb, DependencyObject target, string path,
+            DependencyObject target, string path,
             double f, double t, bool dependent = false, TimeSpan? span = null)
         {
             var anim = new DoubleAnimation
@@ -699,6 +787,11 @@ internal sealed class LayoutCoordinator
             _morphRoot.LayoutUpdated -= _morph.Waiting;
             _morph.Waiting = null;
         }
+        if (_morph.WaitingDeadline is not null)
+        {
+            CompositionTarget.Rendering -= _morph.WaitingDeadline;
+            _morph.WaitingDeadline = null;
+        }
         _morphLayer.Children.Remove(_morph.Ghost);
         if (_morph.From is not null) _morph.From.Opacity = 1;
         if (_morph.To is not null) _morph.To.Opacity = 1;
@@ -709,11 +802,11 @@ internal sealed class LayoutCoordinator
     private void FinishSwitch(bool verticalTabs, Action? onCompleted)
     {
         if (!_switching) return;
-        StopColumnTween();
-        FinishActiveTabMorph();
-        FinishIconGhost();
-        FinishPaneReveal();
+        // Snap tears down the in-flight morph, icon ghost, and pane reveal
+        // itself, so the direct-interrupt callers get the same cleanup.
         Snap(verticalTabs);
+        MorphTrace(
+            $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")}");
         _switching = false;
         onCompleted?.Invoke();
     }
@@ -725,48 +818,17 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void SnapStripColumn(double width)
     {
-        StopColumnTween();
+        // Arriving mid-switch (chevron and pin stay clickable during the
+        // 340ms flight), a width change invalidates every rect the morph
+        // measured; drop the flourishes and let the cross-fade finish.
+        FinishActiveTabMorph();
+        FinishIconGhost();
+        FinishPaneReveal();
         _stripColumn.Width = new GridLength(width);
         _titleBarStripMirror.Width = new GridLength(width);
         _verticalTabHost.SetInternalStripWidth(width);
     }
 
-    /// <summary>
-    /// Tween <see cref="ColumnDefinition.Width"/> from its current
-    /// value to <paramref name="to"/>. Used by the chevron expand
-    /// path inside <see cref="VerticalTabHost"/>; the runtime layout
-    /// switch above bundles its column tween into the cross-fade
-    /// Storyboard instead.
-    ///
-    /// Cancels any in-flight column tween so the chevron toggle and
-    /// the layout switch cannot race on the same column.
-    /// </summary>
-    public void TweenStripColumn(double from, double to, Action<double>? onTick = null)
-    {
-        StopColumnTween();
-        var sw = Stopwatch.StartNew();
-        var span = TimeSpan.FromMilliseconds(SwitchDurationMs);
-        EventHandler<object>? frame = null;
-        frame = (_, _) =>
-        {
-            var t = Math.Min(sw.Elapsed / span, 1.0);
-            var value = from + (to - from) * EaseInOutCubic(t);
-            _stripColumn.Width = new GridLength(value);
-            _titleBarStripMirror.Width = new GridLength(value);
-            onTick?.Invoke(value);
-            if (t >= 1.0 && ReferenceEquals(_columnFrame, frame))
-                StopColumnTween();
-        };
-        _columnFrame = frame;
-        CompositionTarget.Rendering += frame;
-    }
-
-    private void StopColumnTween()
-    {
-        if (_columnFrame is null) return;
-        CompositionTarget.Rendering -= _columnFrame;
-        _columnFrame = null;
-    }
 
     private static TranslateTransform GetOrCreateTranslate(FrameworkElement fe)
     {
@@ -828,7 +890,6 @@ internal sealed class LayoutCoordinator
         _iconGhost = ghost;
         outgoing.Opacity = 0;
         incoming.Opacity = 0;
-        _iconGhostHidden = (outgoing, incoming);
 
         sb.Children.Add(MakeRotateAnim(rotate, 0, spin));
         sb.Children.Add(MakePopAnim(scale, "ScaleX"));
@@ -838,15 +899,13 @@ internal sealed class LayoutCoordinator
 
     private void FinishIconGhost()
     {
-        if (_iconGhost is not null)
-        {
-            _morphLayer.Children.Remove(_iconGhost);
-            _iconGhost = null;
-        }
-        if (_iconGhostHidden is not { } pair) return;
-        pair.Outgoing.Opacity = 1;
-        pair.Incoming.Opacity = 1;
-        _iconGhostHidden = null;
+        if (_iconGhost is null) return;
+        _morphLayer.Children.Remove(_iconGhost);
+        _iconGhost = null;
+        // The hidden pair is always the two badge fields, whichever
+        // direction flew.
+        _horizontalIcon.Opacity = 1;
+        _verticalIcon.Opacity = 1;
     }
 
     /// <summary>
@@ -872,13 +931,13 @@ internal sealed class LayoutCoordinator
         FinishPaneReveal();
         try
         {
-            _savedPaneMargin = _paneHost.Margin;
-            _paneRevealActive = true;
+            var saved = _paneHost.Margin;
+            _savedPaneMargin = saved;
             _paneHost.Margin = new Thickness(
-                _savedPaneMargin.Left - laneWidth,
-                _savedPaneMargin.Top,
-                _savedPaneMargin.Right,
-                _savedPaneMargin.Bottom);
+                saved.Left - laneWidth,
+                saved.Top,
+                saved.Right,
+                saved.Bottom);
             _morphRoot.UpdateLayout();
 
             var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
@@ -907,18 +966,17 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private void FinishPaneReveal()
     {
-        if (!_paneRevealActive) return;
-        _paneRevealActive = false;
+        if (_savedPaneMargin is not { } saved) return;
+        _savedPaneMargin = null;
         Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
             .GetElementVisual(_paneHost).Clip = null;
-        _paneHost.Margin = _savedPaneMargin;
+        _paneHost.Margin = saved;
     }
 
-    private bool _paneRevealActive;
-    private Thickness _savedPaneMargin;
+    /// <summary>Non-null exactly while a pane reveal is in flight.</summary>
+    private Thickness? _savedPaneMargin;
 
     private Image? _iconGhost;
-    private (FrameworkElement Outgoing, FrameworkElement Incoming)? _iconGhostHidden;
 
     /// <summary>Matches the ImageIcon inside AppIconBadge.</summary>
     private const double AppIconSize = 16;
@@ -994,11 +1052,6 @@ internal sealed class LayoutCoordinator
                 _verticalTitleBar, "Y", titleTx.Y, -TitleBarSlideDistance));
         }
     }
-
-    private static double EaseInOutCubic(double t)
-        => t < 0.5
-            ? 4.0 * t * t * t
-            : 1.0 - Math.Pow(-2.0 * t + 2.0, 3.0) / 2.0;
 
     private static DoubleAnimationUsingKeyFrames MakeStaggeredFadeIn(FrameworkElement target)
     {

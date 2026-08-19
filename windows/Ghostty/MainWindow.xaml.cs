@@ -721,10 +721,8 @@ public sealed partial class MainWindow : Window
         _layout = new LayoutCoordinator(
             StripColumn,
             TitleBarStripMirror,
-            (FrameworkElement)_horizontalTabHost.HostElement,
             _verticalTabHost,
             VerticalTitleBar,
-            _horizontalTabHost.IconBadge,
             _horizontalTabHost,
             TabMorphLayer,
             RootGrid,
@@ -981,7 +979,17 @@ public sealed partial class MainWindow : Window
 
     private void AnimateTabLayoutTo(bool vertical)
     {
-        if (_layout.IsSwitching) return;
+        if (_layout.IsSwitching)
+        {
+            // A change landing inside the 340ms switch window (settings
+            // toggle, config file reload) must not be dropped: nothing
+            // would replay it and the UI would disagree with the config
+            // until the next unrelated reload. Remember the latest target
+            // and apply it when the running switch completes.
+            _pendingLayoutTarget = vertical;
+            return;
+        }
+        _pendingLayoutTarget = null;
         _verticalTabsVisible = vertical;
         _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
         // Paint caption/title chrome before the cross-fade so the OS
@@ -998,8 +1006,17 @@ public sealed partial class MainWindow : Window
             var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
             if (leaf is not null)
                 leaf.Terminal().Focus(FocusState.Programmatic);
+
+            if (_pendingLayoutTarget is { } target)
+            {
+                _pendingLayoutTarget = null;
+                if (target != _verticalTabsVisible)
+                    AnimateTabLayoutTo(target);
+            }
         });
     }
+
+    private bool? _pendingLayoutTarget;
 
     /// <summary>
     /// Build a <see cref="MainWindow"/> that adopts an existing
@@ -1287,6 +1304,7 @@ public sealed partial class MainWindow : Window
         // before the first await below, so no theme callback fires after
         // teardown begins.
         _isClosed = true;
+        _layout.CancelStripPriming();
         _themeManager.Dispose();
 
         // Close the inspector window before any surface/host teardown below.
@@ -1922,15 +1940,17 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Opaque title-row fills for vertical-tab mode. Without this the
-    /// transparent drag region shows Mica grey over the terminal palette.
-    /// </summary>
-    /// <summary>
     /// Brief, subtle window shake when the layout-switch ghost lands: a
     /// damped nudge along its travel direction, as if the strip absorbed
     /// the impact. Skipped when the window is not a plain movable window
     /// (maximized, fullscreen, quake), where moving it would fight the
-    /// presenter.
+    /// presenter. An Aero-snapped window still reports Restored and will
+    /// take the nudge; there is no public API to tell it apart.
+    ///
+    /// Every step verifies the window still sits where the previous step
+    /// put it and bails otherwise: the awaited delays give the user ~80ms
+    /// to start dragging (or a snap assist to move the window), and a
+    /// blind restore would teleport the window back over their move.
     /// </summary>
     private async void NudgeWindowForImpact(double dx, double dy)
     {
@@ -1942,19 +1962,25 @@ public sealed partial class MainWindow : Window
         try
         {
             var origin = AppWindow.Position;
+            var expected = origin;
             foreach (var amplitude in ImpactAmplitudes)
             {
-                AppWindow.Move(new Windows.Graphics.PointInt32(
+                var current = AppWindow.Position;
+                if (current != expected) return;
+                expected = new Windows.Graphics.PointInt32(
                     origin.X + (int)(dx * amplitude),
-                    origin.Y + (int)(dy * amplitude)));
+                    origin.Y + (int)(dy * amplitude));
+                AppWindow.Move(expected);
                 await System.Threading.Tasks.Task.Delay(26);
             }
-            AppWindow.Move(origin);
+            if (AppWindow.Position == expected)
+                AppWindow.Move(origin);
         }
         catch (Exception)
         {
             // A presenter change mid-shake (user maximizes, monitor sleeps)
-            // can fail the move; the window simply stays where it is.
+            // can fail the move; the window stays wherever the last
+            // successful step left it, at most a few pixels from home.
         }
         finally
         {
@@ -1965,6 +1991,11 @@ public sealed partial class MainWindow : Window
     // Damped: one push in the travel direction, a smaller rebound, done.
     private static readonly int[] ImpactAmplitudes = [4, -2, 1];
     private bool _impactNudgeActive;
+
+    /// <summary>
+    /// Opaque title-row fills for vertical-tab mode. Without this the
+    /// transparent drag region shows Mica grey over the terminal palette.
+    /// </summary>
 
     private void ApplyVerticalTitleBarChrome()
     {

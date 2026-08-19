@@ -36,6 +36,7 @@ public static class SwCap {
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
     const uint KEYUP = 0x0002;
     public static IntPtr FindWin(uint pid) {
@@ -76,8 +77,12 @@ public static class SwCap {
     }
     public static bool Click(uint pid, int x, int y, bool right) {
         SetCursorPos(x, y); Thread.Sleep(60);
-        var p = new POINT { X = x, Y = y };
-        uint owner = 0; GetWindowThreadProcessId(WindowFromPoint(p), out owner);
+        // Probe the live cursor, not the scripted point: the buttons land
+        // wherever the cursor is now, and a user mouse move during the
+        // settle would divorce the pid check from the click.
+        POINT live; if (!GetCursorPos(out live)) return false;
+        if (Math.Abs(live.X - x) > 2 || Math.Abs(live.Y - y) > 2) return false;
+        uint owner = 0; GetWindowThreadProcessId(WindowFromPoint(live), out owner);
         if (owner != pid) return false;
         uint down = right ? 0x0008u : 0x0002u, up = right ? 0x0010u : 0x0004u;
         mouse_event(down, 0, 0, 0, UIntPtr.Zero);
@@ -186,7 +191,8 @@ try {
     Write-Host "strip items found: $($hits.Count) (expected $TabCount)"
     if ($hits.Count -lt 2) { throw "only $($hits.Count) tab(s) in the strip: the new-tab chords did not land" }
     for ($i = 0; $i -lt $hits.Count -and $applied -lt $wanted.Count; $i += 2) {
-        $r = $hits[$i].Current.BoundingRectangle
+        # A cached UIA element can go stale if the strip rebuilt mid-loop.
+        try { $r = $hits[$i].Current.BoundingRectangle } catch { continue }
         if ($r.Width -le 0) { continue }
         $x = [int]($r.X + $r.Width * 0.4); $y = [int]($r.Y + $r.Height / 2)
         if (-not [SwCap]::Click([uint32]$proc.Id, $x, $y, $true)) {
@@ -238,7 +244,10 @@ try {
     Save-Shot $hwnd 'overview'
 }
 finally {
-    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if ($proc -and -not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        try { $proc.WaitForExit(3000) } catch {}
+    }
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
