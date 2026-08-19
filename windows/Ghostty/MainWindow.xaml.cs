@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Ghostty.Accessibility;
 using Ghostty.Commands;
 using Ghostty.Controls;
 using Ghostty.Core.Config;
@@ -133,6 +134,7 @@ public sealed partial class MainWindow : Window
     private readonly LayoutCoordinator _layout;
     private readonly TitleBarCoordinator _titleBar;
     private readonly TaskbarHost _taskbar;
+    private readonly TabBellAnnouncer _bellAnnouncer;
     private readonly WindowThemeManager _themeManager;
     private readonly ShellThemeService _shellTheme;
     private readonly ThemePreviewService _themePreview;
@@ -754,6 +756,13 @@ public sealed partial class MainWindow : Window
 
         _taskbar = new TaskbarHost(this, _tabManager, loggerFactory.CreateLogger<TaskbarHost>());
 
+        // One announcer per window, not one per strip: both strips are alive
+        // at once and both watch the same tab, so a strip-level announcer
+        // would speak every bell twice.
+        _bellAnnouncer = new TabBellAnnouncer(
+            _tabManager,
+            (tab, text) => UiaAnnouncer.Announce(BellAnnouncementSource(tab), text, "tab-bell"));
+
         AppWindow.Changed += (_, args) =>
         {
             _taskbar.OnAppWindowChanged(AppWindow);
@@ -945,6 +954,19 @@ public sealed partial class MainWindow : Window
 
         Closed += OnClosedAsync;
     }
+
+    /// <summary>
+    /// Where a bell announcement is raised from. A screen reader does not
+    /// listen to the whole tree: NVDA scopes its UIA event handlers around
+    /// whatever holds focus, and a notification raised from the ringing
+    /// tab's own item was measured being dropped while the identical
+    /// notification from the focused surface was spoken. So the
+    /// announcement rides the focused element, and falls back to the tab's
+    /// item when nothing in this window holds focus.
+    /// </summary>
+    private FrameworkElement? BellAnnouncementSource(TabModel tab)
+        => FocusManager.GetFocusedElement(Content.XamlRoot) as FrameworkElement
+            ?? _tabHost.TabElement(tab);
 
     private void OnActivatedInstallBeepSuppressor(object sender, WindowActivatedEventArgs args)
     {
@@ -1491,6 +1513,7 @@ public sealed partial class MainWindow : Window
         _gradientVisual = null;
         _slideAnimator?.Dispose();
         _taskbar.Dispose();
+        _bellAnnouncer.Dispose();
         // _themeManager was disposed at the top of this method, before the
         // first await, so no theme callback can fire mid-teardown (#208).
 
