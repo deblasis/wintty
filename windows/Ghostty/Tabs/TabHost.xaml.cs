@@ -6,6 +6,7 @@ using Ghostty.Input;
 using Ghostty.Panes;
 using Ghostty.Services;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -165,6 +166,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 detachWithZone: DetachWithZone),
             DataContext = tab,
         };
+        ApplyItemAccessibleText(item, tab);
         tab.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(TabModel.EffectiveTitle) ||
@@ -172,6 +174,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 e.PropertyName == nameof(TabModel.UserOverrideTitle))
             {
                 headerText.Text = tab.EffectiveTitle;
+                ApplyItemAccessibleText(item, tab);
             }
             else if (e.PropertyName == nameof(TabModel.Progress))
             {
@@ -192,12 +195,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 bellGlyph.Visibility = tab.BellRinging
                     ? Visibility.Visible
                     : Visibility.Collapsed;
+                ApplyItemAccessibleText(item, tab);
             }
         };
         _itemByModel[tab] = item;
         _headerTextByModel[tab] = headerText;
         TabViewControl.TabItems.Add(item);
         ApplyTabChrome(item, headerPanel, tab, selected: false);
+    }
+
+    /// <summary>
+    /// Screen-reader text for a tab. The header is a StackPanel, and an
+    /// unnamed TabViewItem gets no name out of a panel header, so
+    /// without this every tab in the strip is nameless -- an automation
+    /// client sees how many tabs are open and nothing about any of them.
+    /// </summary>
+    private static void ApplyItemAccessibleText(TabViewItem item, TabModel tab)
+    {
+        AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
+        AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(tab));
     }
 
     private void RemoveItem(TabModel tab)
