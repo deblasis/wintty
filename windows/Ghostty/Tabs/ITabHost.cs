@@ -24,6 +24,9 @@ internal interface ITabHost
     /// </summary>
     FrameworkElement HostElement { get; }
 
+    /// <summary>The app-icon badge this host shows in its strip corner.</summary>
+    FrameworkElement IconBadge { get; }
+
     /// <summary>
     /// The drag-region element for extended title bar mode. In
     /// horizontal layout this is the TabView's TabStripFooter; in
@@ -33,6 +36,13 @@ internal interface ITabHost
     /// (or grab handle) drag the window.
     /// </summary>
     UIElement DragRegion { get; }
+
+    /// <summary>
+    /// The element rendering <paramref name="tab"/> in this host, or null
+    /// if the host has no row for it yet. LayoutCoordinator measures this
+    /// on both hosts to morph the active tab across a layout switch.
+    /// </summary>
+    FrameworkElement? TabElement(TabModel tab);
 
     /// <summary>
     /// Single entry point for closing a tab. Shows the multi-pane
