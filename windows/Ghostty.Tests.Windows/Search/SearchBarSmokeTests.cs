@@ -32,8 +32,14 @@ public class SearchBarSmokeTests
     // 6. Press Shift+Enter. The index moves back to 1.
     // 7. Press Esc. The search bar collapses; focus returns to the
     //    terminal surface so typing reaches the shell.
-    // 8. Press Ctrl+Shift+F again to confirm reopen works and
-    //    the counter resets to "" until a new needle is typed.
+    // 8. Press Ctrl+Shift+F again. The previous needle is still in the
+    //    box, and the search runs again for it: the counter repopulates
+    //    with the live count and the matches highlight, without waiting
+    //    for the needle to be retyped. Enter steps matches immediately.
+    // 9. Split the pane, then repeat steps 1-3 in the surviving pane.
+    //    Typing must still start a search: WinUI reparents the control on
+    //    a split, and a debounce handler that does not come back leaves
+    //    the needle box inert.
     [Fact(Skip = "Manual smoke; SearchState pure-logic coverage lives in Ghostty.Tests.Search.SearchStateTests.")]
     public void CtrlShiftF_OpensSearchBar_DebouncesNeedle_StepsMatches_EscRestoresFocus()
     {
