@@ -14,7 +14,7 @@ public class SearchStateTests
 
         Assert.False(state.IsOpen);
         Assert.Equal(string.Empty, state.Needle);
-        Assert.Equal(0L, state.Total);
+        Assert.Equal(SearchState.NoSearch, state.Total);
         Assert.Equal(-1L, state.Selected);
         Assert.Equal(string.Empty, state.CounterText);
     }
@@ -31,10 +31,12 @@ public class SearchStateTests
         Assert.Equal(string.Empty, state.CounterText);
     }
 
+    // Total must be set explicitly: zero means "searched, found nothing",
+    // which is not the state a fresh SearchState starts in.
     [Fact]
     public void CounterText_says_no_matches_when_total_is_zero()
     {
-        var state = new SearchState { Needle = "foo" };
+        var state = new SearchState { Needle = "foo", Total = 0 };
 
         Assert.Equal("No matches", state.CounterText);
     }
@@ -76,6 +78,87 @@ public class SearchStateTests
         };
 
         Assert.Equal("0 of 5", state.CounterText);
+    }
+
+    // libghostty sends -1 for "no total" when the search thread quits, which
+    // is exactly the state the bar is left in after a close. Treating it as a
+    // count rendered "0 of -1" next to the needle.
+    [Fact]
+    public void CounterText_is_empty_when_total_is_negative()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = -1,
+            Selected = -1,
+        };
+
+        Assert.Equal(string.Empty, state.CounterText);
+    }
+
+    [Fact]
+    public void CounterText_is_empty_when_total_is_negative_and_a_match_is_selected()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = -1,
+            Selected = 3,
+        };
+
+        Assert.Equal(string.Empty, state.CounterText);
+    }
+
+    // Closing the bar keeps the query but must stop the counter describing
+    // results that no longer exist. This is the transition the fix creates:
+    // a populated counter going blank.
+    [Fact]
+    public void MarkInactive_blanks_the_counter_but_keeps_the_needle()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = 5,
+            Selected = 2,
+        };
+        Assert.Equal("3 of 5", state.CounterText);
+
+        state.MarkInactive();
+
+        Assert.Equal("foo", state.Needle);
+        Assert.Equal(SearchState.NoSearch, state.Total);
+        Assert.Equal(-1L, state.Selected);
+        Assert.Equal(string.Empty, state.CounterText);
+    }
+
+    [Fact]
+    public void MarkInactive_raises_PropertyChanged_for_the_counter()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = 5,
+            Selected = 2,
+        };
+        var raised = Subscribe(state);
+
+        state.MarkInactive();
+
+        Assert.Contains(nameof(SearchState.Total), raised);
+        Assert.Contains(nameof(SearchState.Selected), raised);
+        Assert.Contains(nameof(SearchState.CounterText), raised);
+        Assert.DoesNotContain(nameof(SearchState.Needle), raised);
+    }
+
+    [Fact]
+    public void MarkInactive_on_an_already_inactive_state_does_not_raise()
+    {
+        var state = new SearchState { Needle = "foo" };
+        var raised = Subscribe(state);
+
+        state.MarkInactive();
+
+        Assert.Empty(raised);
     }
 
     [Fact]
@@ -181,7 +264,7 @@ public class SearchStateTests
 
         Assert.False(state.IsOpen);
         Assert.Equal(string.Empty, state.Needle);
-        Assert.Equal(0L, state.Total);
+        Assert.Equal(SearchState.NoSearch, state.Total);
         Assert.Equal(-1L, state.Selected);
         Assert.Equal(string.Empty, state.CounterText);
     }
