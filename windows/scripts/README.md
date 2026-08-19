@@ -52,9 +52,12 @@ product, and how a real defect gets dismissed as flakiness.
 
 ## Before you run search-fuzz
 
-- It **force-kills every running Wintty** first. Do not launch it from a
-  Wintty window: it will kill its own host, and the cleanup in `finally`
-  never runs.
+- It **refuses to start while any Wintty is running**, and names the pids so
+  you can close them. It will not kill an instance it did not start: builds
+  from several worktrees are often open at once, and a running instance
+  would absorb the launch anyway when single-instance is on. On the way out
+  it kills only the processes that appeared during the run and came from the
+  exe under test.
 - By default it uses **your real config and state directory**, because a
   throwaway `XDG_CONFIG_HOME` made the app crash at startup on the machine
   it was written on. `-IsolatedConfig` opts into the throwaway dir. The

@@ -593,11 +593,19 @@ try {
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
     Write-Host ("config: {0}" -f $(if ($IsolatedConfig) { $tempXdg } else { 'user environment' }))
 
-    # A surviving instance would absorb the launch when single-instance is on.
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    # Give a killed primary time to release the single-instance claim, or the
-    # launch below hands itself off to a dying instance and owns no window.
-    Start-Sleep -Seconds 3
+    # Never kill by name. Developers keep builds from several worktrees open
+    # at once, and a harness that force-kills every Wintty takes down work it
+    # has nothing to do with. Refuse to start instead: a running instance
+    # would absorb this launch anyway when single-instance is on, so there is
+    # no run to be had either way.
+    $script:ExeFull = (Resolve-Path $ExePath).Path
+    $script:PreExisting = @(Get-Process Wintty -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id)
+    if ($script:PreExisting.Count -gt 0) {
+        throw ("close the running Wintty first (pid $($script:PreExisting -join ', ')); " +
+               'this harness will not kill instances it did not start')
+    }
+
     $script:Proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
     $pid32 = [uint32]$script:Proc.Id
     $main = Wait-Ready $script:Proc
@@ -1077,9 +1085,21 @@ finally {
     $result.failed = $script:Findings.Count
     $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
 
-    if ($script:Proc -and -not $KeepOpen) {
-        try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill() } } catch { }
-        try { [void]$script:Proc.WaitForExit(3000) } catch { }
+    # Tear down only what this run started. The launched process is not
+    # always the one left holding the window -- the launch splash can elect a
+    # different instance -- so sweep for processes that appeared during the
+    # run and came from the exe under test, and leave everything else alone.
+    if (-not $KeepOpen) {
+        if ($script:Proc) {
+            try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill() } } catch { }
+            try { [void]$script:Proc.WaitForExit(3000) } catch { }
+        }
+        foreach ($p in @(Get-Process Wintty -ErrorAction SilentlyContinue)) {
+            if ($script:PreExisting -contains $p.Id) { continue }
+            $path = try { $p.Path } catch { $null }
+            if ($path -ne $script:ExeFull) { continue }
+            try { $p.Kill(); [void]$p.WaitForExit(3000) } catch { }
+        }
     }
     if ($IsolatedConfig) {
         if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
