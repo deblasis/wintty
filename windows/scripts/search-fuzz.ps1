@@ -22,8 +22,10 @@
     mouse-fuzz scripts:
       0  clean
       2  product findings - see run-<seed>.json and shots/ under -OutDir
-      1  the harness could not run (no window, foreground stolen, shell never
-         came up); the product was never exercised, so retry rather than file
+      1  the harness could not run; the product was never exercised, so do
+         not file a bug. Retrying helps when the cause was transient (window
+         never appeared, foreground stolen); it will not help when the run
+         was refused because a Wintty is already open - close it first
 
     A seed replays the op sequence, but not the corpus-slice needles drawn
     from live terminal text: those depend on the shell prompt and the window
@@ -276,7 +278,16 @@ function Wait-Ready($proc) {
         Start-Sleep -Milliseconds 300
         $proc.Refresh()
         if ($proc.HasExited) {
-            Add-Finding 'crash' "app exited during startup, code $($proc.ExitCode)" @{}
+            $grew = $false
+            try {
+                $cp = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+                if (Test-Path $cp) { $grew = (Get-Item $cp).Length -gt $script:CrashBaseline }
+            } catch { }
+            # Only a corroborated crash is the product's fault. Without a log
+            # entry this is far more likely an instance that started between
+            # the gate and the launch and absorbed it.
+            Add-Finding $(if ($grew) { 'crash' } else { 'harness' }) `
+                "app exited during startup, code $($proc.ExitCode)$(if (-not $grew) { ' (crash.log did not grow; another instance may have absorbed the launch)' })" @{}
             throw 'app exited during startup'
         }
         $m = Get-Main ([uint32]$proc.Id)
@@ -580,6 +591,12 @@ $origXdg = $env:XDG_CONFIG_HOME
 $script:Proc = $null
 $script:Iter = 0
 $script:ExitCode = 0
+# Set before the try so a throw that precedes their real assignment cannot
+# leave the teardown sweep with a null filter, which matches every process
+# rather than none.
+$script:ExeFull = $null
+$script:PreExisting = @()
+$script:StartedAt = $null
 $result = [ordered]@{
     seed = $Seed; iterations = $Iterations; ops = @()
 }
@@ -593,12 +610,30 @@ try {
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
     Write-Host ("config: {0}" -f $(if ($IsolatedConfig) { $tempXdg } else { 'user environment' }))
 
-    # A surviving instance would absorb the launch when single-instance is on.
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    # Give a killed primary time to release the single-instance claim, or the
-    # launch below hands itself off to a dying instance and owns no window.
-    Start-Sleep -Seconds 3
-    $script:Proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
+    # Never kill by name: developers keep builds from several worktrees open
+    # at once, and force-killing every Wintty takes down work this run has
+    # nothing to do with. Refuse instead.
+    #
+    # The reason is not single-instance -- that mutex is keyed on a hash of
+    # the exe path (SingleInstanceNames.For), so another worktree's build
+    # would not absorb this launch. It is that crash.log is shared: it lives
+    # at %LOCALAPPDATA%\<StateDirName>\crash.log, per user rather than per
+    # exe path, and XDG_CONFIG_HOME does not move it. This harness attributes
+    # every byte the file gains to the run, as a product finding. Any other
+    # instance crashing during a run would therefore be reported as a defect
+    # in the build under test.
+    $script:ExeFull = (Resolve-Path $ExePath).Path
+    $script:PreExisting = @(Get-Process Wintty -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Id)
+    if ($script:PreExisting.Count -gt 0) {
+        throw ("close the running Wintty first (pid: $($script:PreExisting -join ', ')). " +
+               'It shares crash.log with the build under test, so its crashes ' +
+               'would be reported as defects in this run, and this harness ' +
+               'will not kill instances it did not start')
+    }
+
+    $script:StartedAt = Get-Date
+    $script:Proc = Start-Process -FilePath $script:ExeFull -PassThru -WorkingDirectory (Split-Path -Parent $script:ExeFull)
     $pid32 = [uint32]$script:Proc.Id
     $main = Wait-Ready $script:Proc
     $script:Hwnd64 = [int64]$main.Hwnd64
@@ -1075,18 +1110,45 @@ finally {
     $result.checks = $script:Checks
     $result.findings = @($script:Findings)
     $result.failed = $script:Findings.Count
-    $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
+    # A run that never got to assert anything has nothing to record, and
+    # writing it would overwrite the last real run's results.
+    if ($script:Checks -gt 0) {
+        $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
+    }
 
-    if ($script:Proc -and -not $KeepOpen) {
-        try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill() } } catch { }
-        try { [void]$script:Proc.WaitForExit(3000) } catch { }
+    # Tear down only what this run started, and fail closed on anything the
+    # sweep cannot positively identify: an unreadable path or start time is a
+    # reason to leave a process alone, never a reason to kill it. Process.Path
+    # returns null rather than throwing when the process cannot be opened, so
+    # the null checks are the real guard here.
+    #
+    # $script:PreExisting is empty on every path that reaches a launch (the
+    # gate refuses otherwise); it is only non-empty on the refusal path, where
+    # it is exactly what stops this sweep touching the developer's instances.
+    if (-not $KeepOpen) {
+        if ($script:Proc) {
+            try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
+            try { [void]$script:Proc.WaitForExit(3000) } catch { }
+        }
+        if ($script:ExeFull -and $script:StartedAt) {
+            foreach ($p in @(Get-Process Wintty -ErrorAction SilentlyContinue)) {
+                if ($script:PreExisting -contains $p.Id) { continue }
+                $path = try { $p.Path } catch { $null }
+                if ([string]::IsNullOrEmpty($path) -or $path -ne $script:ExeFull) { continue }
+                # Without this a same-build window the developer opened while
+                # the run was going gets killed with it.
+                $started = try { $p.StartTime } catch { $null }
+                if ($null -eq $started -or $started -lt $script:StartedAt) { continue }
+                try { $p.Kill($true); [void]$p.WaitForExit(3000) } catch { }
+            }
+        }
     }
     if ($IsolatedConfig) {
         if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
         else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     }
     Start-Sleep -Milliseconds 500
-    Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
+    if (-not $KeepOpen) { Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue }
 
     Write-Host ""
     if ($script:Findings.Count -eq 0) {
