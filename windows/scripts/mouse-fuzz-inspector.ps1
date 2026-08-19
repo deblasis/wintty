@@ -6,6 +6,20 @@ param(
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
+# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
+# not run" - which the suite retries and then reports as an area nothing is
+# known about. Every finally below still runs: exit from a trap unwinds
+# through them, and `break` rethrows anything that is not a product failure so
+# a genuine harness failure still leaves with 1.
+trap {
+    if ("$_" -like 'PRODUCT_FAIL*') {
+        Write-Host "$_" -ForegroundColor Red
+        exit 2
+    }
+    break
+}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
@@ -514,8 +528,13 @@ Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 
 Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 
+# All of these are defects in the build under test, so they are 2, not 1.
+# They used to exit 1, which under the suite convention means "the harness
+# could not run" -- a code the runners retry and then report as unknown
+# coverage. A real inspector regression was therefore retried and, if it
+# passed the second time, buried.
 if (-not $alive -or $crashGrew) { exit 2 }
-if ($noticeOpen -or -not $renderOk -or -not $closedOk) { exit 1 }
-if (-not $tabDismissOk) { Write-Host 'PRODUCT_FAIL: inspector survived tab switch'; exit 1 }
+if ($noticeOpen -or -not $renderOk -or -not $closedOk) { exit 2 }
+if (-not $tabDismissOk) { Write-Host 'PRODUCT_FAIL: inspector survived tab switch'; exit 2 }
 if ($tabCount -lt 2) { Write-Host "WARN: tabCount=$tabCount (UIA count may flake on AOT; dismissOk=$tabDismissOk)" }
 exit 0

@@ -7,6 +7,20 @@ param(
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
+# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
+# not run" - which the suite retries and then reports as an area nothing is
+# known about. Every finally below still runs: exit from a trap unwinds
+# through them, and `break` rethrows anything that is not a product failure so
+# a genuine harness failure still leaves with 1.
+trap {
+    if ("$_" -like 'PRODUCT_FAIL*') {
+        Write-Host "$_" -ForegroundColor Red
+        exit 2
+    }
+    break
+}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
@@ -461,12 +475,14 @@ finally {
     if ($null -ne $proc) {
         $proc.Refresh()
         if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
         }
     }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    # After the env restores, not before: a throw in the sweep would otherwise
+    # abandon them and leave the shell pointed at a temp profile.
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)

@@ -144,10 +144,10 @@ test-win:
 # windows, so it needs an interactive desktop and no Wintty already running.
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
-splash-race args="": build-win
+splash-race args="": _no-wintty-running build-win
     pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}
 
-# Checked before the builds, not after: search-fuzz refuses to run while a
+# Checked before the builds, not after: the harnesses refuse to run while a
 # Wintty is open, and dotnet build cannot overwrite a locked Wintty.exe, so
 # without this the developer pays a full zig + dotnet build only to be told
 # to close a window -- or gets an MSB file-in-use error that hides the real
@@ -170,6 +170,38 @@ search-fuzz args="": _no-wintty-running build-dll build-win
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/search-fuzz {{args}}
+
+# Real windows and real input, so it needs an interactive desktop and holds
+# the foreground for the duration - about 40 minutes budgeted for everything,
+# 5 for `-Tag smoke` (measured 3). Each harness is killed if it overruns its
+# budget, so a wedged one cannot hold the desktop indefinitely.
+#
+# Exit codes: 0 clean, 2 product findings, 1 one or more harnesses could not
+# run (so their area is untested, not proven good).
+#
+# Args pass through, e.g. `just fuzz "-Tag smoke"` or `just fuzz "-Only search"`.
+#
+# Run every GUI fuzz harness against the Debug build.
+[windows]
+fuzz args="": _no-wintty-running build-dll build-win
+    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 \
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe {{args}}
+
+# No build, no desktop.
+#
+# List the suite: what it runs, what each harness catches, what it costs.
+[windows]
+fuzz-list:
+    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -List
+
+# Runs the suite runner against fixtures that exit 0, 1, 2 and 3 on purpose,
+# plus ones that throw, hang, and fail once then work. About a minute, no
+# build, no desktop, and safe to run with Wintty open.
+#
+# Prove the suite still tells a product finding from a harness that broke.
+[windows]
+fuzz-selftest:
+    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -SelfTest
 
 # === Upstream Sync ===
 
