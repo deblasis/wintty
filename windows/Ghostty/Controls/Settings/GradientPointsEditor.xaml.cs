@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Settings;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Shapes;
@@ -38,7 +39,7 @@ public sealed partial class GradientPointsEditor : UserControl
     // _points. RenderCanvas clears and repopulates these. MovePoint
     // mutates existing instances in place so pointer capture survives.
     private readonly List<Microsoft.UI.Xaml.Shapes.Ellipse> _falloffs = new();
-    private readonly List<Microsoft.UI.Xaml.UIElement> _handles = new();
+    private readonly List<GradientPointHandle> _handles = new();
 
     public event EventHandler<IReadOnlyList<GradientPointModel>>? PointsChanged;
 
@@ -157,32 +158,53 @@ public sealed partial class GradientPointsEditor : UserControl
             });
         row.Children.Add(picker);
 
-        row.Children.Add(BuildNumberBox("X", _points[index].X, v =>
+        // The headers are one letter each, so out of five identical rows a
+        // client hears "X" ten times with nothing to tell the rows apart.
+        // The visible header stays terse; the spoken name carries the row.
+        //
+        // The range is spoken too, because the handle on the canvas reports
+        // the same axis in percent: without it, a client can read 0.5 here
+        // and write it to the handle, landing the point on 0.5%.
+        var point = GradientPointsLogic.DescribeHandle(index, _points.Count);
+
+        var xBox = BuildNumberBox("X", _points[index].X, v =>
         {
             var p = _points[index];
             _points[index] = p with { X = (float)v };
-        }));
-        row.Children.Add(BuildNumberBox("Y", _points[index].Y, v =>
+        });
+        AutomationProperties.SetName(xBox, $"{point} across, 0 to 1");
+        row.Children.Add(xBox);
+        var yBox = BuildNumberBox("Y", _points[index].Y, v =>
         {
             var p = _points[index];
             _points[index] = p with { Y = (float)v };
-        }));
-        row.Children.Add(BuildNumberBox("R", _points[index].Radius, v =>
+        });
+        AutomationProperties.SetName(yBox, $"{point} down, 0 to 1");
+        row.Children.Add(yBox);
+        var rBox = BuildNumberBox("R", _points[index].Radius, v =>
         {
             var p = _points[index];
             _points[index] = p with { Radius = (float)v };
-        }));
+        });
+        AutomationProperties.SetName(rBox, $"{point} radius, 0 to 1");
+        row.Children.Add(rBox);
 
         var remove = new Button
         {
             Content = "\u2715",
             Padding = new Thickness(6, 2, 6, 2),
         };
+        // Content is a glyph, so the implicit name is the glyph.
+        AutomationProperties.SetName(remove, $"Remove {point.ToLowerInvariant()}");
+        ToolTipService.SetToolTip(remove, $"Remove {point.ToLowerInvariant()}");
         remove.Click += (_, _) =>
         {
             _points.RemoveAt(index);
             RenderCanvas();
+            // RebuildRows clears the panel, so the button that was just
+            // clicked goes with it. Same landing as the Delete key.
             RebuildRows();
+            FocusHandle(Math.Min(index, _points.Count - 1));
             RaisePointsChanged();
         };
         row.Children.Add(remove);
@@ -271,19 +293,20 @@ public sealed partial class GradientPointsEditor : UserControl
             _falloffs.Add(falloff);
 
             // Handle: a small circular drag target above the falloff.
-            // ContentControl (not Button) so Button's internal pointer template
-            // does not steal PointerPressed before our drag handler can run.
             // XY focus nav is disabled so Up/Down reach our KeyDown instead of
             // moving focus to the next control outside the canvas.
             var handleSize = HandleDiameter + 4;
-            var handle = new ContentControl
+            var handle = new GradientPointHandle
             {
                 Width = handleSize,
                 Height = handleSize,
                 Padding = new Microsoft.UI.Xaml.Thickness(0),
                 IsTabStop = true,
                 XYFocusKeyboardNavigation = XYFocusKeyboardNavigationMode.Disabled,
-                Tag = i,
+                Index = i,
+                Total = _points.Count,
+                X = p.X,
+                Y = p.Y,
                 Content = new Ellipse
                 {
                     Width = HandleDiameter,
@@ -320,16 +343,47 @@ public sealed partial class GradientPointsEditor : UserControl
                         _points.RemoveAt(capturedIndex);
                         RenderCanvas();
                         RebuildRows();
+                        // Before RaisePointsChanged: the focused handle went away
+                        // with the rest of the canvas. The write it triggers does
+                        // not re-seed the editor today (AppearancePage suppresses
+                        // the echo of its own writes), so this ordering is
+                        // insurance against that suppression going away.
+                        FocusHandle(Math.Min(capturedIndex, _points.Count - 1));
                         RaisePointsChanged();
                         e.Handled = true;
                         return;
                     default:
                         return;
                 }
-                RenderCanvas();
+                // MovePoint, not RenderCanvas: rebuilding the canvas destroys
+                // the handle that has focus, so the next arrow key would go
+                // nowhere. This is the same reason drag uses it.
+                MovePoint(capturedIndex);
+                AnnouncePosition(handle);
                 SyncRowNumbers(capturedIndex);
                 RaisePointsChanged();
                 e.Handled = true;
+            };
+            handle.PositionRequested = (h, nx, ny) =>
+            {
+                // Resolve the index by identity, not by the handle's own copy.
+                // RenderCanvas discards every handle on add, remove and row
+                // edit, and a client keeps its provider across that: trusting
+                // the stale index would move whichever point now sits there.
+                var live = _handles.IndexOf(h);
+                if (live < 0 || live >= _points.Count) return false;
+
+                // Same guard SetPoints uses: an external write landing mid-drag
+                // fights the pointer for the same point.
+                if (_dragIndex != -1) return false;
+
+                var point = _points[live];
+                _points[live] = point with { X = nx, Y = ny };
+                MovePoint(live);
+                AnnouncePosition(h);
+                SyncRowNumbers(live);
+                RaisePointsChanged();
+                return true;
             };
             handle.PointerPressed += (_, e) =>
             {
@@ -349,6 +403,7 @@ public sealed partial class GradientPointsEditor : UserControl
                 var cur = _points[capturedIndex];
                 _points[capturedIndex] = cur with { X = nx, Y = ny };
                 MovePoint(capturedIndex);
+                AnnouncePosition(handle);
                 SyncRowNumbers(capturedIndex);
                 RaisePointsChanged();
             };
@@ -364,6 +419,51 @@ public sealed partial class GradientPointsEditor : UserControl
             PointsCanvas.Children.Add(handle);
             _handles.Add(handle);
         }
+    }
+
+    /// <summary>
+    /// Carry a moved point back onto its handle and tell any listening
+    /// client. MovePoint moves the pixels; this moves what the handle
+    /// reports about itself, which is otherwise stale the moment the
+    /// canvas stops being rebuilt on every keystroke.
+    /// </summary>
+    private void AnnouncePosition(GradientPointHandle handle)
+    {
+        var index = _handles.IndexOf(handle);
+        if (index < 0 || index >= _points.Count) return;
+
+        // The drag path runs this per pointer sample, and describing a
+        // position costs a formatted string that nothing would read.
+        if (!handle.HasAutomationPeer)
+        {
+            var moved = _points[index];
+            handle.X = moved.X;
+            handle.Y = moved.Y;
+            return;
+        }
+
+        var before = handle.PositionText;
+        var p = _points[index];
+        handle.X = p.X;
+        handle.Y = p.Y;
+        handle.NotifyPositionChanged(before);
+    }
+
+    /// <summary>
+    /// Move keyboard focus to a handle by index. Measured to land on the
+    /// neighbouring handle after a delete; the fallback covers the cases that
+    /// have no neighbour to land on - the last point removed, or a canvas
+    /// that has not been arranged - rather than leaving focus nowhere.
+    /// </summary>
+    private void FocusHandle(int index)
+    {
+        if (index >= 0 && index < _handles.Count
+            && _handles[index].Focus(FocusState.Programmatic))
+        {
+            return;
+        }
+
+        AddPointButton.Focus(FocusState.Programmatic);
     }
 
     /// <summary>
