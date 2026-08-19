@@ -147,17 +147,26 @@ test-win:
 splash-race args="": build-win
     pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}
 
+# Checked before the builds, not after: search-fuzz refuses to run while a
+# Wintty is open, and dotnet build cannot overwrite a locked Wintty.exe, so
+# without this the developer pays a full zig + dotnet build only to be told
+# to close a window -- or gets an MSB file-in-use error that hides the real
+# reason. Prerequisites run in the order listed.
+[windows]
+_no-wintty-running:
+    $p = @(Get-Process Wintty -ErrorAction SilentlyContinue); if ($p.Count -gt 0) { Write-Host ("close the running Wintty first (pid: " + ($p.Id -join ', ') + ")") -ForegroundColor Red; exit 1 }
+
 # Fuzz in-pane scrollback search against a real oracle: the harness reads the
 # terminal's own UIA text document, counts matches itself, and compares every
 # needle it types against that count. Drives real input, so it needs an
 # interactive desktop and takes the foreground for the duration.
 #
 # Exit codes: 0 clean, 2 product findings (see the JSON and shots under
-# windows/scripts/search-fuzz/), 1 the harness could not run - retry.
+# windows/scripts/search-fuzz/), 1 the harness could not run.
 #
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
-search-fuzz args="": build-dll build-win
+search-fuzz args="": _no-wintty-running build-dll build-win
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/search-fuzz {{args}}

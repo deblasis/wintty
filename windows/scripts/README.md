@@ -42,7 +42,7 @@ away from:
 |------|---------|
 | 0 | clean |
 | 2 | product findings - read `run-<seed>.json` and `shots/` |
-| 1 | the harness could not run (no window, foreground stolen, shell never came up); the product was never exercised, so retry rather than file a bug |
+| 1 | the harness could not run; the product was never exercised, so do not file a bug. Retrying helps when the cause was transient (no window, foreground stolen, shell never came up); it will not help when the run was refused because a Wintty is open - close it first |
 
 The numbering follows `verified-input-probe.ps1`, `mouse-fuzz-loop.ps1` and
 `mouse-fuzz-probe.ps1`, which already use 2 for a product failure.
@@ -53,11 +53,15 @@ product, and how a real defect gets dismissed as flakiness.
 ## Before you run search-fuzz
 
 - It **refuses to start while any Wintty is running**, and names the pids so
-  you can close them. It will not kill an instance it did not start: builds
-  from several worktrees are often open at once, and a running instance
-  would absorb the launch anyway when single-instance is on. On the way out
-  it kills only the processes that appeared during the run and came from the
-  exe under test.
+  you can close them. That includes a Wintty you launched it from, so run it
+  from another terminal. The reason is not single-instance - that mutex is
+  keyed on a hash of the exe path, so another worktree's build would not
+  absorb the launch. It is that `crash.log` is shared: it lives under
+  `%LOCALAPPDATA%` per user rather than per exe path, `XDG_CONFIG_HOME` does
+  not move it, and the harness reports everything the file gains during a
+  run as a defect in the build under test. On the way out it kills only
+  processes that started after the launch and whose image path is the exe
+  under test, and leaves anything it cannot positively identify alone.
 - By default it uses **your real config and state directory**, because a
   throwaway `XDG_CONFIG_HOME` made the app crash at startup on the machine
   it was written on. `-IsolatedConfig` opts into the throwaway dir. The
