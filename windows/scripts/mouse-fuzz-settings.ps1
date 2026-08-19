@@ -298,10 +298,10 @@ $settingsTitle = $null
 $pages = @()
 $script:vtabFound = @()
 
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
-    Assert-NoWintty
-    $script:WinttyStamp = Get-WinttyLaunchStamp
     Start-Sleep -Milliseconds 400
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
     $pid32 = [uint32]$proc.Id
@@ -420,7 +420,7 @@ finally {
             Start-Sleep -Milliseconds 300
         }
     }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
 }

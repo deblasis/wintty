@@ -515,5 +515,9 @@ $alive = -not $proc.HasExited
     hwnd = "$hwnd64"
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host "alive=$alive crashGrew=$crashGrew"
+# Leave nothing behind: every other harness here refuses to start while a
+# Wintty is running, and this script used to rely on the next one's
+# blanket kill to reap it.
+Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 if (-not $alive -or $crashGrew) { exit 2 }
 exit 0

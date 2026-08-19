@@ -512,7 +512,7 @@ $result = @{
 $result | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 
-Stop-WinttyStartedAfter -Since $script:WinttyStamp
+Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 
 if (-not $alive -or $crashGrew) { exit 2 }
 if ($noticeOpen -or -not $renderOk -or -not $closedOk) { exit 1 }

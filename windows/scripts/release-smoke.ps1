@@ -8,6 +8,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $repo
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 try {
     Write-Host '== build-dll-release (ReleaseFast libghostty) =='
     just build-dll-release
@@ -23,8 +25,6 @@ try {
 
     if (-not $SkipLaunch) {
         Write-Host '== launch Release smoke (3s) =='
-        Assert-NoWintty
-        $script:WinttyStamp = Get-WinttyLaunchStamp
         Start-Sleep -Milliseconds 400
         $proc = Start-Process -FilePath $releaseExe -PassThru -WorkingDirectory (Split-Path $releaseExe)
         Start-Sleep -Seconds 3
@@ -52,7 +52,7 @@ try {
         Write-Host "aot publish ok: $pubExe"
         if (-not $SkipLaunch) {
             Write-Host '== launch NativeAOT smoke (3s) =='
-            Stop-WinttyStartedAfter -Since $script:WinttyStamp
+            Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $releaseExe
             Start-Sleep -Milliseconds 400
             $proc = Start-Process -FilePath $pubExe -PassThru -WorkingDirectory (Split-Path $pubExe)
             Start-Sleep -Seconds 3

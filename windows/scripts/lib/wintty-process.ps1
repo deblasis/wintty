@@ -57,7 +57,14 @@ function Stop-WinttyStartedAfter {
         [int]$TimeoutMs = 3000
     )
 
-    $full = if ($ExePath) { (Resolve-Path -LiteralPath $ExePath -ErrorAction SilentlyContinue)?.Path } else { $null }
+    $full = $null
+    if ($ExePath) {
+        $full = (Resolve-Path -LiteralPath $ExePath -ErrorAction SilentlyContinue)?.Path
+        # A path the caller supplied but that does not resolve means the
+        # filter cannot be applied. Sweep nothing rather than quietly
+        # widening to every process started since the stamp.
+        if (-not $full) { return }
+    }
 
     foreach ($p in @(Get-Process Wintty -ErrorAction SilentlyContinue)) {
         # Process.StartTime and .Path return null or throw for a process the

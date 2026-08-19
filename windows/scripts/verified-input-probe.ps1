@@ -213,8 +213,9 @@ function Post-Chars([IntPtr]$Root, [string]$Text) {
 
 # --- launch ---
 if (-not (Test-Path -LiteralPath $ExePath)) { throw "exe missing: $ExePath" }
+# No stamp and no sweep here on purpose: this probe leaves its window up so
+# the screenshots can be inspected (see the note at the end).
 Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
 Start-Sleep -Milliseconds 400
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
@@ -295,6 +296,9 @@ if ($proc.HasExited -or $crashGrew) {
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host ($result | ConvertTo-Json -Depth 5)
 
-# Leave Wintty up so the shots can be inspected. Do not Alt+F4.
+# Leave Wintty up so the shots can be inspected. Do not Alt+F4. This is the
+# one harness here that does, and it has a cost: the others refuse to start
+# while a Wintty is running, so close it by hand before the next one.
+Write-Host 'NOTE: Wintty left running for inspection; close it before running another harness.' -ForegroundColor Yellow
 if ($result.verdict -eq 'PRODUCT_FAIL') { exit 2 }
 exit 0

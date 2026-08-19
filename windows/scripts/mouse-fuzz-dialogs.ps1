@@ -438,5 +438,10 @@ $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc
     cheatsheetSave = $null -ne $saveMd
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($proc.HasExited -or $crashGrew) { exit 2 }
+$diedEarly = $proc.HasExited
+# Leave nothing behind: every other harness here refuses to start while a
+# Wintty is running, and this script used to rely on the next one's
+# blanket kill to reap it.
+Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+if ($diedEarly -or $crashGrew) { exit 2 }
 exit 0

@@ -487,8 +487,8 @@ $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 if ($proc.HasExited -or $crashGrew -or -not $overview) {
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     exit 2
 }
-Stop-WinttyStartedAfter -Since $script:WinttyStamp
+Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 exit 0

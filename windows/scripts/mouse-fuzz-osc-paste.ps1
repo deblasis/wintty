@@ -391,11 +391,11 @@ $oscOk = $false
 $oscTitle = ''
 $allowClicked = $false
 
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
     Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
-    Assert-NoWintty
-    $script:WinttyStamp = Get-WinttyLaunchStamp
     Start-Sleep -Milliseconds 500
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
     $pid32 = [uint32]$proc.Id
@@ -445,7 +445,7 @@ finally {
         $proc.Refresh()
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
     }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
 }
