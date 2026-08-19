@@ -9,7 +9,7 @@ namespace Ghostty.Tabs;
 /// Expanded-pane row content for a vertical-tab
 /// <see cref="NavigationViewItem"/>: title, optional bell, close.
 /// </summary>
-internal sealed class VerticalTabNavRow : Grid
+internal sealed partial class VerticalTabNavRow : Grid
 {
     private readonly TextBlock _title;
     private readonly FontIcon _bell;
