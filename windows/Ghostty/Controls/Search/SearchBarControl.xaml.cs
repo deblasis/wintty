@@ -45,19 +45,45 @@ public sealed partial class SearchBarControl : UserControl
         _debounceTimer = DispatcherQueue.CreateTimer();
         _debounceTimer.Interval = DebounceInterval;
         _debounceTimer.IsRepeating = false;
-        _debounceTimer.Tick += OnDebounceTick;
 
-        // Drop the Tick handler when the control leaves the tree so a
-        // reparented or torn-down pane doesn't accumulate handler links
-        // on the dispatcher's timer list.
+        // Both subscriptions stay for the control's lifetime. WinUI raises
+        // Unloaded whenever the visual tree reparents the control, not only
+        // when it is torn down, and a pane is reparented on every split,
+        // zoom, unzoom and sibling close. Dropping Unloaded itself here --
+        // or leaving the Tick handler detached -- meant the needle box
+        // stopped starting searches after the first reparent, silently.
+        Loaded += OnControlLoaded;
         Unloaded += OnControlUnloaded;
+
+        // Escape is handled on the needle box, which leaves the bar
+        // undismissable by keyboard once focus is on a nav button: the key
+        // would bubble past here to TerminalControl, which drops it because
+        // the bar owns focus. Handled keys do not reach this handler, so
+        // the needle box still wins when it has focus.
+        KeyDown += OnControlKeyDown;
+    }
+
+    private void OnControlKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Escape) return;
+        RaiseClosed();
+        e.Handled = true;
+    }
+
+    private void OnControlLoaded(object sender, RoutedEventArgs e)
+    {
+        // Subtract first so re-entry cannot double-subscribe.
+        _debounceTimer.Tick -= OnDebounceTick;
+        _debounceTimer.Tick += OnDebounceTick;
     }
 
     private void OnControlUnloaded(object sender, RoutedEventArgs e)
     {
+        // Drop the handler while detached so a torn-down pane doesn't keep
+        // a link on the dispatcher's timer list; OnControlLoaded restores
+        // it if the control comes back.
         _debounceTimer.Stop();
         _debounceTimer.Tick -= OnDebounceTick;
-        Unloaded -= OnControlUnloaded;
     }
 
     /// <summary>
@@ -104,6 +130,23 @@ public sealed partial class SearchBarControl : UserControl
     {
         NeedleBox.Focus(FocusState.Programmatic);
         NeedleBox.SelectAll();
+    }
+
+    /// <summary>
+    /// Re-run the needle currently in the box, if any. Closing the bar ends
+    /// the search inside libghostty, but the needle text is deliberately
+    /// kept so the query survives a close/reopen. Without this the reopened
+    /// bar shows a needle with no search behind it: no highlights, and
+    /// next/previous silently do nothing because libghostty has no active
+    /// search to navigate.
+    /// </summary>
+    public void ReissueSearch()
+    {
+        // Read the box, not State.Needle, for the same reason the debounce
+        // tick does: it is the text the user can see.
+        var needle = NeedleBox.Text;
+        if (needle.Length == 0) return;
+        SearchHost?.StartSearch(needle);
     }
 
     /// <summary>
