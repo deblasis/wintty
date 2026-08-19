@@ -29,4 +29,25 @@
   <PropertyGroup Condition="!Exists('$(AppxMSBuildToolsPath)Microsoft.Build.Packaging.Pri.Tasks.dll')">
     <AppxMSBuildToolsPath>$(ProgramW6432)\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
   </PropertyGroup>
+  <!--
+    CsWinRT1028 says a type implementing WinRT interfaces is not partial. It
+    ships as a warning, but the type it names is unusable across the WinRT
+    ABI: the generated vtable never attaches, and the first XAML call into
+    it - MeasureOverride, usually - takes the process down with 0xC000027B
+    before anything paints. VerticalTabNavRow shipped exactly that way and
+    crashed every launch on the tab strip while the build stayed green, so
+    this one is not survivable.
+
+    Only Ghostty.csproj pulls in WindowsAppSDK, so this binds that project
+    alone; Ghostty.Core is plain net10.0 and the analyzer never loads there.
+    Core types that reach XAML through an object-typed path get no diagnostic
+    from anywhere, which is why KeybindListWinUiAbiTests scans source instead.
+
+    Kept last in the file on purpose: the tiered build patches this props file
+    with a hunk anchored on the opening tag, and materialize applies it with
+    no fuzz, so anything inserted at the top breaks every tier that uses it.
+  -->
+  <PropertyGroup>
+    <WarningsAsErrors>$(WarningsAsErrors);CsWinRT1028</WarningsAsErrors>
+  </PropertyGroup>
 </Project>

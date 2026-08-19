@@ -58,7 +58,7 @@ namespace Ghostty.Logging;
 /// generic path would have produced, so filter rules keyed on
 /// "Ghostty.Settings.WindowStateMigration" behave identically.
 /// </summary>
-internal static class StaticLoggers
+internal static partial class StaticLoggers
 {
     private static ILogger<Ghostty.Services.ConfigService>? _configService;
 
@@ -128,7 +128,7 @@ internal static class StaticLoggers
         ILogger<App>? App,
         ILogger<Ghostty.Hosting.BellAudioPlayer>? BellAudio);
 
-    private sealed class Scope : IDisposable
+    private sealed partial class Scope : IDisposable
     {
         private readonly Snapshot _prior;
         public Scope(Snapshot prior) => _prior = prior;

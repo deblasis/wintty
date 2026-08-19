@@ -30,7 +30,7 @@ namespace Ghostty.Hosting;
 /// ease-out curve. A monotonic token guards completion so a re-toggle mid
 /// animation does not fire a stale <c>Hide()</c>.
 /// </summary>
-internal sealed class QuickTerminalSlideAnimator : IDisposable
+internal sealed partial class QuickTerminalSlideAnimator : IDisposable
 {
     private readonly nint _hwnd;
     private readonly Visual _visual; // content visual, used only for the Center fade

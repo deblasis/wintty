@@ -43,7 +43,7 @@ internal readonly record struct SizeLimitRequest(
 /// drain-last invariant -- every per-window host must Dispose before
 /// the bootstrap host.
 /// </summary>
-internal sealed class GhosttyHost : IDisposable
+internal sealed partial class GhosttyHost : IDisposable
 {
     private GhosttyConfig _config;
     private GhosttyApp _app;

@@ -6,7 +6,7 @@ using Ghostty.Core.Config;
 
 namespace Ghostty.Services;
 
-internal sealed class ThemeProvider : IThemeProvider, IDisposable
+internal sealed partial class ThemeProvider : IThemeProvider, IDisposable
 {
     private readonly IConfigService _configService;
 

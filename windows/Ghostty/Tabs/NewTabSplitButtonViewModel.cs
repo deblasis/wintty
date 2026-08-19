@@ -12,7 +12,7 @@ namespace Ghostty.Tabs;
 /// pending an async-safe SetSourceAsync flow (the prior implementation
 /// disposed the source MemoryStream synchronously, racing the async load).
 /// </summary>
-internal sealed class NewTabSplitButtonViewModel : IDisposable
+internal sealed partial class NewTabSplitButtonViewModel : IDisposable
 {
     private readonly NewTabFlyoutController _controller;
 

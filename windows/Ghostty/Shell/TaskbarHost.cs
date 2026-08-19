@@ -22,7 +22,7 @@ namespace Ghostty.Shell;
 /// is a nice-to-have. <see cref="IsAvailable"/> reports whether the
 /// wiring is live; if not, every call is a no-op.
 /// </summary>
-internal sealed class TaskbarHost : IDisposable
+internal sealed partial class TaskbarHost : IDisposable
 {
     private readonly TaskbarList3Facade? _facade;
     private readonly TaskbarProgressCoordinator? _coordinator;

@@ -15,7 +15,7 @@ namespace Ghostty.Shell;
 /// overlay mode, sits on top of all content as a semi-transparent
 /// tint layer (always visible regardless of terminal opacity).
 /// </summary>
-internal sealed class GradientTintVisual : IDisposable
+internal sealed partial class GradientTintVisual : IDisposable
 {
     private readonly Compositor _compositor;
     private readonly SpriteVisual _rootVisual;

@@ -17,7 +17,7 @@ namespace Ghostty.Hosting;
 /// (the same policy the theme-preview pipe uses) so a server-creation
 /// failure stands the loop down instead of busy-looping.
 /// </summary>
-public sealed class SingleInstanceServer : IDisposable
+public sealed partial class SingleInstanceServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly Action<LaunchRequest> _onLaunch;

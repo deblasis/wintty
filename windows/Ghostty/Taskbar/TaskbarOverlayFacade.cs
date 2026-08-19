@@ -18,7 +18,7 @@ namespace Ghostty.Taskbar;
 /// One facade per window. <see cref="Ghostty.Shell.TaskbarHost"/>
 /// constructs it. Mirrors <see cref="TaskbarList3Facade"/>.
 /// </summary>
-internal sealed class TaskbarOverlayFacade : ITaskbarOverlaySink, IDisposable
+internal sealed partial class TaskbarOverlayFacade : ITaskbarOverlaySink, IDisposable
 {
     // Accessibility text surfaced by screen readers on the overlay.
     private const string OverlayDescription = "Bell";
