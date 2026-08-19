@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -330,7 +331,8 @@ function Close-Extras([int64]$MainHwnd, [uint32]$ProcId) {
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 Start-Sleep -Milliseconds 400
 $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
 $pid32 = [uint32]$proc.Id

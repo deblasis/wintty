@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -372,8 +373,10 @@ $tabsAfterProfile = 0
 
 try {
     $env:XDG_CONFIG_HOME = $tempXdg
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp
     Start-Sleep -Milliseconds 500
+    Assert-NoWintty
+    $script:WinttyStamp = Get-WinttyLaunchStamp
     $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
     $pid32 = [uint32]$proc.Id
     $main = Wait-Ready $proc
@@ -462,7 +465,7 @@ finally {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         }
     }
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
 }

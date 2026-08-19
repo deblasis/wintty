@@ -21,6 +21,7 @@ param(
     [Parameter(Mandatory)][string]$OutDir
 )
 
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -212,7 +213,8 @@ function Post-Chars([IntPtr]$Root, [string]$Text) {
 
 # --- launch ---
 if (-not (Test-Path -LiteralPath $ExePath)) { throw "exe missing: $ExePath" }
-Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 Start-Sleep -Milliseconds 400
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'

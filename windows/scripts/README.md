@@ -50,6 +50,27 @@ The numbering follows `verified-input-probe.ps1`, `mouse-fuzz-loop.ps1` and
 Conflating those two is how a broken harness gets mistaken for a broken
 product, and how a real defect gets dismissed as flakiness.
 
+## Process policy
+
+`lib/wintty-process.ps1` holds the rule, and every harness here dot-sources
+it rather than reimplementing it:
+
+- `Assert-NoWintty` - refuse to start while any Wintty is running, naming the
+  pids. Call it once, before the first launch.
+- `Get-WinttyLaunchStamp` / `Stop-WinttyStartedAfter` - clean up only what the
+  run started, matched on start time and, where the caller knows it, image
+  path. Anything that cannot be positively identified is skipped: an
+  unreadable path or start time is a reason to leave a process alone, never a
+  reason to kill it.
+
+These scripts used to open with `Get-Process Wintty | Stop-Process -Force`,
+which takes down builds from other worktrees and the window the developer is
+working in. That is not a harness's call to make. Two exceptions are
+deliberate and stay: `splash-single-instance-race.ps1` launches a second
+instance on purpose, and `mouse-fuzz-jumplist.ps1` launches secondaries
+against a running primary, so both gate once at the start rather than before
+each launch.
+
 ## Before you run search-fuzz
 
 - It **refuses to start while any Wintty is running**, and names the pids so
