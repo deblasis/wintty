@@ -141,6 +141,16 @@
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch"/>
 
+        <!--
+            Host for the active-tab morph ghost during a layout switch.
+            Spans both rows and columns so the ghost can travel between the
+            header lane and the sidebar rail in one coordinate space.
+        -->
+        <Canvas x:Name="TabMorphLayer"
+                Grid.Row="0" Grid.RowSpan="2"
+                Grid.Column="0" Grid.ColumnSpan="2"
+                IsHitTestVisible="False"/>
+
         <!-- Command palette popup overlay -->
         <Popup x:Name="CommandPalettePopup"
                IsLightDismissEnabled="True"
