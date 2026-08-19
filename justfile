@@ -152,9 +152,15 @@ splash-race args="": _no-wintty-running build-win
 # without this the developer pays a full zig + dotnet build only to be told
 # to close a window -- or gets an MSB file-in-use error that hides the real
 # reason. Prerequisites run in the order listed.
+#
+# The trailing `exit 0` is load-bearing. `pwsh -Command` exits 1 if the script
+# produced ANY error, and Get-Process finding no match is an error even under
+# -ErrorAction SilentlyContinue or Ignore. Without it this recipe refused
+# unconditionally - including when the desktop was clear - and took every
+# recipe that depends on it down with it.
 [windows]
 _no-wintty-running:
-    $p = @(Get-Process Wintty -ErrorAction SilentlyContinue); if ($p.Count -gt 0) { Write-Host ("close the running Wintty first (pid: " + ($p.Id -join ', ') + ")") -ForegroundColor Red; exit 1 }
+    $p = @(Get-Process Wintty -ErrorAction SilentlyContinue); if ($p.Count -gt 0) { Write-Host ("close the running Wintty first (pid: " + ($p.Id -join ', ') + ")") -ForegroundColor Red; exit 1 }; exit 0
 
 # Fuzz in-pane scrollback search against a real oracle: the harness reads the
 # terminal's own UIA text document, counts matches itself, and compares every
