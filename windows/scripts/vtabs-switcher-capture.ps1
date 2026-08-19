@@ -10,6 +10,7 @@ param(
     [int]$TabCount = 14,
     [switch]$Vertical
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -149,6 +150,11 @@ theme = Catppuccin Mocha
 $origXdg = $env:XDG_CONFIG_HOME
 $env:XDG_CONFIG_HOME = $tempXdg
 $proc = $null
+# Same policy as the rest of the directory: refuse rather than fight another
+# instance for the foreground, and reap only what this run started.
+Assert-NoWintty -Context 'The switcher capture'
+$script:WinttyStamp = Get-WinttyLaunchStamp
+
 try {
     $proc = Start-Process -FilePath $ExePath -PassThru
     $hwnd = [IntPtr]::Zero
@@ -245,11 +251,12 @@ try {
 }
 finally {
     if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        try { $proc.WaitForExit(3000) } catch {}
+        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
     }
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
+    # Last, so a throw here cannot abandon the restore or the cleanup above.
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 }
 Write-Host "OUT=$OutDir"
