@@ -40,6 +40,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     public FrameworkElement HostElement => this;
 
+    public FrameworkElement? TabElement(TabModel tab)
+        => _itemByModel.TryGetValue(tab, out var item) ? item : null;
+
     /// <summary>
     /// The wintty icon shown at the start of the tab strip. Exposed so
     /// the layout switch can spin it independently of the strip chrome.
@@ -306,8 +309,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
         if (tab.Color != TabColor.None)
         {
-            normalHandle = DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: false));
-            selectedHandle = DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: true));
+            normalHandle = TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: false));
+            selectedHandle = TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: true));
         }
         else if (selected && _selectedTabFillBrush is not null)
         {
@@ -350,15 +353,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         finally { _suppressSelectionEvent = false; }
     }
 
-    private static SolidColorBrush DrawingColorBrush(System.Drawing.Color drawing)
-        => new(Windows.UI.Color.FromArgb(
-            drawing.A, drawing.R, drawing.G, drawing.B));
-
     private SolidColorBrush TabColorForegroundBrush(TabModel tab, bool selected)
     {
         var packed = TabColorPalette.ForegroundRgb(
             tab.Color, selected, _stripBackdropPacked);
-        return new SolidColorBrush(UnpackColor(packed));
+        return TabColorBrush.FromPackedRgb(packed);
     }
 
     private static void ApplyHeaderRowForeground(StackPanel iconRow, SolidColorBrush fg)
@@ -565,8 +564,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // otherwise drop to a readable black/white. (#342)
         uint accentPacked = PackColor(theme.AccentColor);
         uint activePacked = PackColor(theme.ActiveTabText);
-        _shellActiveTextBrush = new SolidColorBrush(UnpackColor(
-            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked)));
+        _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
+            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
 
         uint tabBgPacked = PackColor(theme.TabBarBackground);
         var inactiveColor = ThemeResolution.PreferLightForeground(tabBgPacked)
@@ -636,10 +635,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private static uint PackColor(Windows.UI.Color c) =>
         ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
-    private static Windows.UI.Color UnpackColor(uint packed) =>
-        Windows.UI.Color.FromArgb(0xFF,
-            (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed);
-
     private ElementTheme _cachedTheme = ElementTheme.Default;
 
 
@@ -703,9 +698,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // a pathological fg/bg that doesn't contrast.
         _accentBrush = new SolidColorBrush(
             Windows.UI.Color.FromArgb(0xFF, background.R, background.G, background.B));
-        _defaultActiveTextBrush = new SolidColorBrush(UnpackColor(
+        _defaultActiveTextBrush = TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(
-                PackColor(background), PackColor(foreground))));
+                PackColor(background), PackColor(foreground)));
 
         // Preset tint foregrounds blend against the tab-bar backdrop, which
         // ApplyShellTheme sets from TabBarBackground -- not terminal bg.
