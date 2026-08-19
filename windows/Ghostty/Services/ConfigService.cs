@@ -28,7 +28,7 @@ internal readonly record struct GradientPoint(
 /// <see cref="RefreshForOsColorScheme"/>) -- the file has not changed
 /// there, but what a conditional theme resolves to may have.
 /// </summary>
-internal sealed class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
+internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profiles.IProfileConfigSource
 {
     private GhosttyConfig _config;
     private GhosttyApp _app;

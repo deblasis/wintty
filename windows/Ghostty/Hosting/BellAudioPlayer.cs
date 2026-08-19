@@ -14,7 +14,7 @@ namespace Ghostty.Hosting;
 /// Failures (missing/unreadable/unsupported file) are logged and swallowed:
 /// a broken audio path must never crash or block the rest of the bell.
 /// </summary>
-internal sealed class BellAudioPlayer : IDisposable
+internal sealed partial class BellAudioPlayer : IDisposable
 {
     private readonly ILogger _logger;
     private MediaPlayer? _player;
