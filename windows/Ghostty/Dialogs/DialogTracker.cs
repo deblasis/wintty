@@ -21,7 +21,7 @@ namespace Ghostty.Dialogs;
 /// <see cref="ContentDialog.ShowAsync"/> completes, whether the user
 /// confirmed, cancelled, or the runtime forced it to close.
 /// </summary>
-internal sealed class DialogTracker
+internal sealed partial class DialogTracker
 {
     private readonly HashSet<TaskCompletionSource> _pending = new();
     private readonly object _lock = new();
@@ -66,7 +66,7 @@ internal sealed class DialogTracker
         tcs.TrySetResult();
     }
 
-    private sealed class Token : System.IDisposable
+    private sealed partial class Token : System.IDisposable
     {
         private readonly DialogTracker _tracker;
         private readonly TaskCompletionSource _tcs;
