@@ -22,6 +22,7 @@ param(
     # so it is where the strip lagging behind the ghost shows up.
     [switch]$Pinned
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -151,6 +152,11 @@ theme = Catppuccin Mocha
 $origXdg = $env:XDG_CONFIG_HOME
 $env:XDG_CONFIG_HOME = $tempXdg
 $proc = $null
+# Same policy as the rest of the directory: refuse rather than fight another
+# instance for the foreground, and reap only what this run started.
+Assert-NoWintty -Context 'The morph filmstrip capture'
+$script:WinttyStamp = Get-WinttyLaunchStamp
+
 try {
     $proc = Start-Process -FilePath $ExePath -PassThru
     $dl = (Get-Date).AddSeconds(45)
@@ -224,12 +230,13 @@ try {
 }
 finally {
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg } else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    # The dying process can still hold handles under the temp dir; an
+    # immediate delete leaks the GUID dir silently, hence the wait.
     if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        # The dying process can still hold handles under the temp dir; an
-        # immediate delete leaks the GUID dir silently.
-        try { $proc.WaitForExit(3000) } catch {}
+        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
     }
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
+    # Last, so a throw here cannot abandon the restore or the cleanup above.
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 }
 Write-Host "OUT=$OutDir"
