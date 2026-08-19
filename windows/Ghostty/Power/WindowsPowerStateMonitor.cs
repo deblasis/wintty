@@ -17,7 +17,7 @@ namespace Ghostty.Power;
 /// raises <see cref="LowPowerChanged"/> only when the resolved bool
 /// flips.
 /// </summary>
-internal sealed class WindowsPowerStateMonitor : IPowerStateMonitor, IDisposable
+internal sealed partial class WindowsPowerStateMonitor : IPowerStateMonitor, IDisposable
 {
     // Debounce window for coalescing bursts. A mode flip, a battery
     // unplug, and a transparency toggle triggered by the OS power

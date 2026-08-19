@@ -174,7 +174,7 @@ internal sealed partial class QuickTerminalFrame : IDisposable
     /// </summary>
     public IDisposable SuppressStyleChanges() => new StyleSuppressionScope(this);
 
-    private sealed class StyleSuppressionScope : IDisposable
+    private sealed partial class StyleSuppressionScope : IDisposable
     {
         private readonly QuickTerminalFrame _owner;
         public StyleSuppressionScope(QuickTerminalFrame owner)
