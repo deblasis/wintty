@@ -18,11 +18,16 @@
     Run it with `just search-fuzz`, optionally passing "-Seed N -Iterations N".
     A seed reproduces an entire op sequence, so a finding can be replayed.
 
-    Exit codes:
+    Exit codes, numbered to match verified-input-probe.ps1 and the
+    mouse-fuzz scripts:
       0  clean
-      1  product findings - see run-<seed>.json and shots/ under -OutDir
-      2  the harness could not run (no window, foreground stolen, shell never
+      2  product findings - see run-<seed>.json and shots/ under -OutDir
+      1  the harness could not run (no window, foreground stolen, shell never
          came up); the product was never exercised, so retry rather than file
+
+    A seed replays the op sequence, but not the corpus-slice needles drawn
+    from live terminal text: those depend on the shell prompt and the window
+    width, so a finding on one is reproducible only in the same environment.
 
     Findings this harness has caught, kept here as the regression list:
       - reopening the bar left the needle visible with no live search behind
@@ -269,14 +274,28 @@ function Wait-Ready($proc) {
     $dl = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $dl) {
         Start-Sleep -Milliseconds 300
-        $proc.Refresh(); if ($proc.HasExited) { throw "app exited early, code $($proc.ExitCode)" }
+        $proc.Refresh()
+        if ($proc.HasExited) {
+            Add-Finding 'crash' "app exited during startup, code $($proc.ExitCode)" @{}
+            throw 'app exited during startup'
+        }
         $m = Get-Main ([uint32]$proc.Id)
         if ($m) { Start-Sleep -Seconds 2; return $m }
     }
     throw 'no main window appeared'
 }
 
-function Get-Root { return $UIA::FromHandle([SFz]::P($script:Hwnd64)) }
+# The captured hwnd can go stale: the launch splash hands off to another
+# window, and a killed instance leaves a handle that UIA rejects outright
+# ("Unrecognized error"). Re-resolve once from the process before giving up,
+# so a window swap does not abort a whole run.
+function Get-Root {
+    try { return $UIA::FromHandle([SFz]::P($script:Hwnd64)) } catch { }
+    $m = Get-Main ([uint32]$script:Proc.Id)
+    if ($null -eq $m) { throw 'the app has no main window' }
+    $script:Hwnd64 = [int64]$m.Hwnd64
+    return $UIA::FromHandle([SFz]::P($script:Hwnd64))
+}
 
 function Find-ByType($root, $controlType) {
     if ($null -eq $root) { return @() }
@@ -305,7 +324,10 @@ function Get-TerminalElements($root) {
 function Get-Term([int]$timeoutMs = 8000) {
     $dl = (Get-Date).AddMilliseconds($timeoutMs)
     while ((Get-Date) -lt $dl) {
-        $els = @(Get-TerminalElements (Get-Root))
+        # No @() here: these helpers already comma-return, and wrapping that
+        # in @() yields a one-element array holding the inner array, so the
+        # count guard is always true and the retry never retries.
+        $els = Get-TerminalElements (Get-Root)
         if ($els.Count -gt 0) { return $els[0] }
         Start-Sleep -Milliseconds 200
     }
@@ -323,7 +345,7 @@ function Get-TerminalText($el) {
 # The counter TextBlock renders "" / "No matches" / "N of M". A window-wide
 # scan for that shape is more robust than walking the search bar's layout
 # panels, which WinUI does not surface consistently in the control view.
-$CounterRe = '^(?:\d+ of \d+|No matches)$'
+$CounterRe = '^(?:-?\d+ of -?\d+|No matches)$'
 
 function Get-CounterTexts($root) {
     $out = @()
@@ -336,9 +358,13 @@ function Get-CounterTexts($root) {
     return , $out
 }
 
+# Returns the single counter in the window. More than one means more than
+# one pane or tab has its bar open; the caller cannot attribute a count in
+# that case, so say so rather than silently joining them into one string.
 function Get-Counter($root) {
-    $all = @(Get-CounterTexts $root)
+    $all = Get-CounterTexts $root
     if ($all.Count -eq 0) { return '' }
+    if ($all.Count -gt 1) { return "<ambiguous: $($all -join ' | ')>" }
     return [string]$all[0]
 }
 
@@ -386,17 +412,20 @@ function Measure-Occurrences([string]$haystack, [string]$needle) {
     return $n
 }
 
-# The document joins rows with newlines. A match that straddles a soft wrap
-# exists in the terminal but not in the newline-joined text, so the oracle
-# reports a range: the joined-with-newlines count is the floor and the
-# newlines-stripped count is the ceiling. A needle is only used for a strict
-# assertion when the two agree.
-function Get-ExpectedRange([string]$doc, [string]$needle) {
-    $lo = Measure-Occurrences $doc $needle
-    $flat = ($doc -replace "`r", '') -replace "`n", ''
-    $hi = Measure-Occurrences $flat $needle
-    if ($hi -lt $lo) { $hi = $lo }
-    return , @($lo, $hi)
+# Both haystacks unwrap soft wraps: the UIA document comes from
+# Screen.selectionString with unwrap = true, and the search window builds its
+# haystack with PageFormatter unwrap = true. So a match cannot straddle a
+# wrap in one and not the other, and the count is exact rather than a range.
+# The only remaining difference is trailing whitespace (the document keeps
+# it, the search haystack trims it), which is why needles containing
+# whitespace never reach a strict assertion.
+#
+# An earlier version widened this to a range using a newlines-stripped
+# ceiling. That admitted matches spanning a hard line break, which cannot
+# exist in the product's haystack: a two-character needle like "0Z" then
+# passed against any reported count up to ~18 in the seeded corpus.
+function Get-ExpectedCount([string]$doc, [string]$needle) {
+    return Measure-Occurrences $doc $needle
 }
 
 # ---- assertions -----------------------------------------------------------
@@ -528,7 +557,7 @@ function Wait-Counter([int]$timeoutMs = 6000, [int]$stableMs = 400) {
 }
 
 function Get-CounterParts([string]$text) {
-    if ($text -match '^(\d+) of (\d+)$') { return @([int]$Matches[1], [int]$Matches[2]) }
+    if ($text -match '^(-?\d+) of (-?\d+)$') { return @([int]$Matches[1], [int]$Matches[2]) }
     if ($text -eq 'No matches') { return @(0, 0) }
     return $null
 }
@@ -566,7 +595,9 @@ try {
 
     # A surviving instance would absorb the launch when single-instance is on.
     Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 900
+    # Give a killed primary time to release the single-instance claim, or the
+    # launch below hands itself off to a dying instance and owns no window.
+    Start-Sleep -Seconds 3
     $script:Proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
     $pid32 = [uint32]$script:Proc.Id
     $main = Wait-Ready $script:Proc
@@ -575,13 +606,14 @@ try {
     Start-Sleep -Milliseconds 800
 
     $root = Get-Root
-    $terms = @(Get-TerminalElements $root)
+    $terms = Get-TerminalElements $root
     if ($terms.Count -lt 1) { throw 'no TerminalControl exposed to UIA' }
     Write-Host "terminal panes: $($terms.Count)"
 
     # Arm the XAML island (see SFz.Click). Without this every posted
     # character is dropped and the terminal never sees a keystroke.
     $rc0 = [SFz]::RectOf($script:Hwnd64)
+    if ($null -eq $rc0) { throw 'window rect is degenerate; cannot arm XAML focus' }
     if (-not [SFz]::Click($pid32, [int]($rc0.L + $rc0.W / 2), [int]($rc0.T + $rc0.Hh * 0.7))) {
         throw 'could not click into the terminal to arm XAML focus'
     }
@@ -601,8 +633,22 @@ try {
     ) -join '; '
 
     Write-Host 'seeding scrollback...'
-    $term = Get-Term
-    (Get-TerminalText $term) | Set-Content (Join-Path $OutDir 'doc-preseed.txt') -Encoding utf8
+
+    # Wait for the shell to actually draw something. Typing into a terminal
+    # that has not started yet loses the keystrokes, and every later oracle
+    # count is measured against the corpus that typing was supposed to
+    # create.
+    $dl = (Get-Date).AddSeconds(30)
+    $preseed = ''
+    while ((Get-Date) -lt $dl) {
+        $preseed = Get-TerminalText (Get-Term)
+        if ($preseed.Trim().Length -gt 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    $preseed | Set-Content (Join-Path $OutDir 'doc-preseed.txt') -Encoding utf8
+    if ($preseed.Trim().Length -eq 0) {
+        throw 'the terminal never rendered any text; the shell did not start'
+    }
 
     # The payload is PowerShell. Sniffing the prompt is unreliable (a themed
     # prompt looks nothing like "PS >"), so ask the shell what it is and wait
@@ -675,9 +721,12 @@ try {
         if ($r -lt 85) { return $weird[$rng.Next($weird.Count)] }
         # A random slice of the live corpus: the oracle handles it the same way.
         $printable = ($doc -replace "[^\x20-\x7E]", ' ')
+        # Both draws happen before any early return, so the stream advances
+        # by a fixed amount whatever the corpus looks like.
         $len = $rng.Next(2, 7)
+        $pos = $rng.Next(0, 100000)
         if ($printable.Length -le $len) { return 'ZQXW' }
-        $at = $rng.Next(0, $printable.Length - $len)
+        $at = $pos % ($printable.Length - $len)
         return $printable.Substring($at, $len).Trim()
     }
 
@@ -688,12 +737,11 @@ try {
             return
         }
         $total = $parts[1]
-        $range = Get-ExpectedRange $doc $needle
-        $lo = $range[0]; $hi = $range[1]
-        $ok = ($total -ge $lo -and $total -le $hi)
+        $expected = Get-ExpectedCount $doc $needle
+        $ok = ($total -eq $expected)
         [void](Assert-That $ok 'count-mismatch' `
-            "needle '$needle': reported $total, oracle expects $lo..$hi" `
-            @{ needle = $needle; reported = $total; oracleLo = $lo; oracleHi = $hi; counter = $counter })
+            "needle '$needle': reported $total, oracle expects $expected" `
+            @{ needle = $needle; reported = $total; oracle = $expected; counter = $counter })
         if (-not $ok) { Shot ("mismatch-{0:d3}" -f $script:Iter) }
     }
 
@@ -720,7 +768,7 @@ try {
     # A keystroke that reaches the shell changes the document. Compare after
     # the same settle the counter got.
     $docNow = Get-TerminalText (Get-Term)
-    [void](Assert-That ($docNow -eq $docBefore) 'keystroke-leak' `
+    [void](Assert-That ($docNow -ceq $docBefore) 'keystroke-leak' `
         'typing the needle changed the terminal document, so keys reached the shell' `
         @{ beforeLen = $docBefore.Length; afterLen = $docNow.Length })
 
@@ -739,6 +787,9 @@ try {
         $monotonic = $true
         for ($k = 1; $k -lt $seen.Count; $k++) {
             $prev = $seen[$k - 1]; $cur = $seen[$k]
+            # -1 marks a counter that could not be parsed; reporting that as
+            # a navigation fault would blame the wrong thing.
+            if ($prev -lt 0 -or $cur -lt 0) { continue }
             if ($cur -ne ($prev % $total) + 1) { $monotonic = $false }
         }
         [void](Assert-That ($seen[0] -ge 1) 'nav-no-selection' "first Enter left the index at $($seen[0])" @{ seen = $seen })
@@ -757,8 +808,12 @@ try {
     # about whether the renderer painted them. The PLMK rows are the ones
     # sitting in the viewport after seeding, so their highlights must show up
     # as pixels in the window.
-    $baseHighlight = Measure-HighlightPixels 255 224 130
     Clear-Needle
+    Start-Sleep -Milliseconds 600
+    # Measure the baseline with no search active. Taking it while the
+    # previous needle was still highlighted compared one search against
+    # another rather than against an unhighlighted screen.
+    $baseHighlight = Measure-HighlightPixels 255 224 130
     Send-Text 'PLMK'
     Start-Sleep -Milliseconds 400
     $cH = Wait-Counter
@@ -802,8 +857,11 @@ try {
         $root = Get-Root
         $barOpen = Test-SearchBarOpen $root
 
+        # Draw unconditionally, even when the op is forced: letting product
+        # state decide whether the RNG advances makes the seed stop
+        # replaying the sequence after the first divergence.
+        $roll = $rng.Next(100)
         $op = if (-not $barOpen) { 'open' } else {
-            $roll = $rng.Next(100)
             if     ($roll -lt 34) { 'type' }
             elseif ($roll -lt 52) { 'next' }
             elseif ($roll -lt 64) { 'prev' }
@@ -825,10 +883,10 @@ try {
                     "focus is '$f' after opening" @{ focused = $f })
                 $detail = "focus=$f"
 
-                # Closing the bar does not reset SearchState, and reopening
-                # does not re-issue the search. If the needle survived, the
-                # counter next to it has to describe that needle rather than
-                # whatever the previous search left behind.
+                # The needle survives a close, and reopening re-runs it.
+                # The counter next to it therefore has to describe that
+                # needle's live results, not whatever the previous search
+                # left behind and not a torn-down search's -1.
                 $keptNeedle = Get-NeedleText (Get-Root)
                 if ($keptNeedle -and $keptNeedle.Length -gt 0) {
                     $c = Wait-Counter 3000 300
@@ -840,7 +898,15 @@ try {
             }
             'type' {
                 $needle = Get-RandomNeedle
-                [void](Set-NeedleFocus)
+                if (-not (Set-NeedleFocus)) {
+                    # Typing with focus elsewhere sends the needle to the
+                    # shell, which corrupts the corpus every later oracle
+                    # count is computed against.
+                    Add-Finding 'needle-focus-lost' `
+                        "could not put focus in the needle box before typing '$needle'" `
+                        @{ needle = $needle; focused = (Get-FocusedName) }
+                    break
+                }
                 Clear-Needle
                 if ($needle.Length -gt 0) { Send-Text $needle }
                 Start-Sleep -Milliseconds 300
@@ -860,7 +926,7 @@ try {
                 }
                 $box = Get-NeedleText (Get-Root)
                 if ($null -ne $box -and $needle -match '^[\x20-\x7E]+$') {
-                    [void](Assert-That ($box -eq $needle) 'needle-box-drift' `
+                    [void](Assert-That ($box -ceq $needle) 'needle-box-drift' `
                         "typed '$needle' but the box holds '$box'" @{ typed = $needle; box = $box })
                 }
             }
@@ -891,6 +957,7 @@ try {
                 }
             }
             'clear' {
+                [void](Set-NeedleFocus)
                 Clear-Needle
                 Start-Sleep -Milliseconds 500
                 $c = Get-Counter (Get-Root)
@@ -910,12 +977,23 @@ try {
                 $detail = if ($useEsc) { 'esc' } else { 'button' }
                 [void](Assert-That (-not (Test-SearchBarOpen (Get-Root))) 'esc-did-not-close' `
                     "close via $detail left the bar open" @{ via = $detail })
+
+                # A torn-down search must leave no counter at all. Anything
+                # else means the teardown sentinel is being rendered as a
+                # number again ("0 of -1").
+                $after = Get-Counter (Get-Root)
+                [void](Assert-That ($after -eq '') 'counter-survived-close' `
+                    "closing via $detail left the counter showing '$after'" `
+                    @{ via = $detail; counter = $after })
             }
             'scroll' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
                 $rc = [SFz]::RectOf($script:Hwnd64)
                 $notches = $rng.Next(-6, 7)
-                [void][SFz]::Wheel($pid32, [int]($rc.L + $rc.W / 2), [int]($rc.T + $rc.Hh / 2), $notches)
+                if ($null -eq $rc -or -not [SFz]::Wheel($pid32, [int]($rc.L + $rc.W / 2), [int]($rc.T + $rc.Hh / 2), $notches)) {
+                    Add-Finding 'harness' 'wheel did not reach the window' @{}
+                    break
+                }
                 Start-Sleep -Milliseconds 500
                 $after = Get-CounterParts (Get-Counter (Get-Root))
                 $detail = "wheel $notches"
@@ -928,7 +1006,10 @@ try {
             'resize' {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
                 $w = $rng.Next(700, 1400); $h = $rng.Next(500, 900)
-                [void][SFz]::Resize($script:Hwnd64, $w, $h)
+                if (-not [SFz]::Resize($script:Hwnd64, $w, $h)) {
+                    Add-Finding 'harness' "resize to ${w}x${h} failed" @{}
+                    break
+                }
                 Start-Sleep -Milliseconds 900
                 $after = Get-CounterParts (Get-Counter (Get-Root))
                 $detail = "resize ${w}x${h}"
@@ -946,7 +1027,8 @@ try {
                 $needleBox = Get-NeedleText (Get-Root)
                 Press-Escape
                 Send-Text ('$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }") 30
-                Start-Sleep -Seconds 2
+                Send-Chord @() ([SFz]::VK_RETURN) 400
+                Start-Sleep -Seconds 3
                 $doc = Get-TerminalText (Get-Term)
                 Open-SearchBar
                 Clear-Needle
@@ -969,22 +1051,31 @@ catch {
     Write-Host "HARNESS ERROR: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 finally {
+
+    # crash.log is append-only across every run on this machine, so only the
+    # bytes this run added are evidence about this run. Slice as bytes: the
+    # baseline is a file length, and using it as a character index reads the
+    # wrong text and throws outright once the log contains any non-ASCII.
+    try {
+        $crashLog = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
+        if (Test-Path $crashLog) {
+            $now = (Get-Item $crashLog).Length
+            if ($now -gt $script:CrashBaseline) {
+                $bytes = [System.IO.File]::ReadAllBytes($crashLog)
+                $fresh = [System.Text.Encoding]::UTF8.GetString(
+                    $bytes, $script:CrashBaseline, $bytes.Length - $script:CrashBaseline)
+                $fresh | Set-Content (Join-Path $OutDir "crash-$Seed.log") -Encoding utf8
+                Add-Finding 'crash' "crash.log grew by $($now - $script:CrashBaseline) bytes during this run" @{}
+            }
+        }
+    } catch {
+        Add-Finding 'harness' "could not read crash.log: $($_.Exception.Message)" @{}
+    }
+
     $result.checks = $script:Checks
     $result.findings = @($script:Findings)
     $result.failed = $script:Findings.Count
     $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
-
-    # crash.log is append-only across every run on this machine, so only the
-    # bytes this run added are evidence about this run.
-    $crashLog = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
-    if (Test-Path $crashLog) {
-        $now = (Get-Item $crashLog).Length
-        if ($now -gt $script:CrashBaseline) {
-            $fresh = (Get-Content $crashLog -Raw).Substring($script:CrashBaseline)
-            $fresh | Set-Content (Join-Path $OutDir "crash-$Seed.log") -Encoding utf8
-            Add-Finding 'crash-log' "crash.log grew by $($now - $script:CrashBaseline) bytes during this run" @{}
-        }
-    }
 
     if ($script:Proc -and -not $KeepOpen) {
         try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill() } } catch { }
@@ -1007,13 +1098,14 @@ finally {
         }
     }
 
-    # Distinct exit codes so a caller can tell the two failures apart: a
-    # product finding is a real defect to act on, whereas a harness error
-    # (no window, foreground stolen, shell never came up) says the run never
-    # got far enough to judge the product and should be retried, not filed.
-    $harnessOnly = @($script:Findings | Where-Object { $_.kind -eq 'harness' })
+    # Distinct exit codes so a caller can tell the two failures apart, using
+    # the same numbering as verified-input-probe.ps1, mouse-fuzz-loop.ps1 and
+    # mouse-fuzz-probe.ps1: 2 means the product is broken, 1 means the run
+    # never got far enough to judge it and should be retried rather than
+    # filed.
+    $product = @($script:Findings | Where-Object { $_.kind -ne 'harness' })
     if ($script:Findings.Count -eq 0) { $script:ExitCode = 0 }
-    elseif ($harnessOnly.Count -eq $script:Findings.Count) { $script:ExitCode = 2 }
+    elseif ($product.Count -gt 0) { $script:ExitCode = 2 }
     else { $script:ExitCode = 1 }
 }
 

@@ -27,8 +27,17 @@ public sealed class SearchState : INotifyPropertyChanged
 {
     private bool _isOpen;
     private string _needle = string.Empty;
-    private long _total;
+    // Starts inactive, not zero: zero means "searched and found nothing", so
+    // a fresh bar would claim "No matches" for the debounce plus round-trip
+    // before its first search has run.
+    private long _total = NoSearch;
     private long _selected = -1;
+
+    /// <summary>
+    /// The <see cref="Total"/> value meaning "no search is running behind
+    /// the bar", as distinct from a search that ran and matched nothing.
+    /// </summary>
+    public const long NoSearch = -1;
 
     /// <summary>True when the search bar is visible.</summary>
     public bool IsOpen
@@ -115,7 +124,8 @@ public sealed class SearchState : INotifyPropertyChanged
         get
         {
             if (_needle.Length == 0) return string.Empty;
-            if (_total < 0) return string.Empty;
+            if (_total < 0) return string.Empty;   // no search running
+
             if (_total == 0) return "No matches";
             if (_selected >= 0)
             {
@@ -134,7 +144,7 @@ public sealed class SearchState : INotifyPropertyChanged
 
     /// <summary>
     /// Restores all fields to their default values: closes the bar,
-    /// clears the needle, zeroes the match count, and unselects. The
+    /// clears the needle, marks the search inactive, and unselects. The
     /// reverse coupling is intentionally absent -- setting
     /// <see cref="IsOpen"/> to <c>false</c> on its own does NOT reset
     /// the search, so the controller can pick its own timing (e.g.
@@ -144,7 +154,18 @@ public sealed class SearchState : INotifyPropertyChanged
     {
         IsOpen = false;
         Needle = string.Empty;
-        Total = 0;
+        MarkInactive();
+    }
+
+    /// <summary>
+    /// Record that the search behind the bar has been torn down, without
+    /// touching the needle: the query is kept so it can be re-run when the
+    /// bar reopens. Only the counts are invalidated, so the counter goes
+    /// blank rather than describing results that no longer exist.
+    /// </summary>
+    public void MarkInactive()
+    {
+        Total = NoSearch;
         Selected = -1;
     }
 

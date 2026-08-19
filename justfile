@@ -152,12 +152,12 @@ splash-race args="": build-win
 # needle it types against that count. Drives real input, so it needs an
 # interactive desktop and takes the foreground for the duration.
 #
-# Exit codes: 0 clean, 1 product findings (see the JSON and shots under
-# windows/scripts/search-fuzz/), 2 the harness could not run - retry.
+# Exit codes: 0 clean, 2 product findings (see the JSON and shots under
+# windows/scripts/search-fuzz/), 1 the harness could not run - retry.
 #
 # Pass extra args through, e.g. `just search-fuzz "-Seed 99 -Iterations 40"`.
 [windows]
-search-fuzz args="": build-win
+search-fuzz args="": build-dll build-win
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
         -OutDir windows/scripts/search-fuzz {{args}}

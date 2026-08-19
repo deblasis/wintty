@@ -1832,25 +1832,33 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>
     /// Show the search bar and move keyboard focus into its needle box.
     /// Called from MainWindow when the Ctrl+Shift+F chord fires against
-    /// this leaf. Idempotent: repeated calls just re-focus the needle.
+    /// this leaf, and from the command palette. Repeated calls on an
+    /// already-open bar just re-focus the needle and leave the running
+    /// search, and the user's place in it, alone.
     /// </summary>
     internal void OpenSearch()
     {
         // Drop any in-flight IME preedit before the needle box takes focus.
         ClearImeComposition();
+        var wasOpen = SearchBar.State.IsOpen;
         SearchBar.State.IsOpen = true;
         SearchBar.Visibility = Visibility.Visible;
         SearchBar.FocusNeedle();
-        // Closing the bar ended the search in libghostty while leaving the
-        // needle text in place, so reopening has to start it again.
-        SearchBar.ReissueSearch();
+
+        // Closing the bar ended the search inside libghostty while leaving
+        // the needle text in place, so a reopen has to start it again.
+        // Only on the closed -> open transition: re-issuing onto a live
+        // search happens to be inert today because libghostty ignores an
+        // unchanged needle, but that is its implementation detail, not a
+        // contract this side should lean on.
+        if (!wasOpen) SearchBar.ReissueSearch();
     }
 
     private void OnSearchClosed(object sender, EventArgs e)
     {
         SearchBar.Visibility = Visibility.Collapsed;
         SearchBar.State.IsOpen = false;
-        SearchBar.MarkInactive();
+        SearchBar.State.MarkInactive();
         // Return focus to the terminal surface so the user can keep typing
         // immediately after dismissing the bar.
         this.Focus(FocusState.Programmatic);
@@ -1893,16 +1901,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     // already DispatcherQueue.TryEnqueues the callback body.
     internal void OnSearchStarted(string needle)
     {
+        // libghostty's start_search reports an empty needle, and adopting it
+        // would clear the box, push the empty string through the two-way
+        // bind and cancel the search a debounce later. macOS and GTK guard
+        // this the same way. Unreachable while the apprt consumes
+        // Ctrl+Shift+F itself, but the guard is what makes that safe to
+        // change.
+        if (needle.Length == 0) return;
         SearchBar.State.Needle = needle;
     }
 
     internal void OnSearchEnded()
     {
-        // Deliberately no MarkInactive here. This arrives asynchronously, so
-        // a close immediately followed by a reopen can deliver the old
-        // search's end after the new one has started, and wiping the counts
-        // then would blank a live search. The teardown pushes a null total
-        // anyway, which SearchState already renders as "no active search".
+        // No MarkInactive here: the teardown already pushes a null total,
+        // which SearchState renders as no active search, so this would be
+        // redundant. It is also the wrong place to invalidate from -- this
+        // arrives through the dispatcher, and the ordering that keeps a
+        // late delivery from landing on a reopened bar is libghostty
+        // performing the binding action inline, not anything enforced here.
         if (SearchBar.Visibility == Visibility.Visible)
         {
             SearchBar.Visibility = Visibility.Collapsed;
