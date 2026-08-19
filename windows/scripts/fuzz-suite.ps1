@@ -324,6 +324,15 @@ function Invoke-Harness {
             Remove-Item -Recurse -Force $kept -ErrorAction SilentlyContinue
             try { Move-Item -LiteralPath $out -Destination $kept -ErrorAction Stop } catch { }
             New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+            # Reap before retrying, not just between harnesses. A harness that
+            # failed halfway often left its window up, and the retry's own gate
+            # then refuses over it - so the retry was guaranteed to fail and
+            # the whole area got reported as untested. Seen for real: dialogs'
+            # retry refused over a pid its first attempt had leaked.
+            if ($script:CurrentStamp) {
+                Stop-WinttyStartedAfter -Since $script:CurrentStamp -ExePath $Exe
+            }
             Start-Sleep -Seconds 2
         }
         $argv = @('-NoProfile', '-File', $scriptPath, '-ExePath', $Exe)

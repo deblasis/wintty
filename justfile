@@ -145,7 +145,7 @@ test-win:
 # Pass extra args through, e.g. `just splash-race "-SecondaryFeatureOff"`.
 [windows]
 splash-race args="": _no-wintty-running build-win
-    pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}
+    pwsh -NoProfile -File windows/scripts/splash-single-instance-race.ps1 {{args}}; exit $LASTEXITCODE
 
 # Checked before the builds, not after: the harnesses refuse to run while a
 # Wintty is open, and dotnet build cannot overwrite a locked Wintty.exe, so
@@ -175,7 +175,7 @@ _no-wintty-running:
 search-fuzz args="": _no-wintty-running build-dll build-win
     pwsh -NoProfile -File windows/scripts/search-fuzz.ps1 \
         -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe \
-        -OutDir windows/scripts/search-fuzz {{args}}
+        -OutDir windows/scripts/search-fuzz {{args}}; exit $LASTEXITCODE
 
 # Real windows and real input, so it needs an interactive desktop and holds
 # the foreground for the duration - about 40 minutes budgeted for everything,
@@ -185,20 +185,25 @@ search-fuzz args="": _no-wintty-running build-dll build-win
 # Exit codes: 0 clean, 2 product findings, 1 one or more harnesses could not
 # run (so their area is untested, not proven good).
 #
+# `; exit $LASTEXITCODE` is not decoration. The recipe body runs under
+# `pwsh -Command`, which collapses ANY non-zero child exit to 1 - so without
+# it a product finding (2) and a harness that could not run (1) arrive here
+# identical, which is the whole distinction these harnesses exist to make.
+#
 # Args pass through, e.g. `just fuzz "-Tag smoke"` or `just fuzz "-Only search"`.
 #
 # Run every GUI fuzz harness against the Debug build.
 [windows]
 fuzz args="": _no-wintty-running build-dll build-win
     pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 \
-        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe {{args}}
+        -ExePath windows/Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe {{args}}; exit $LASTEXITCODE
 
 # No build, no desktop.
 #
 # List the suite: what it runs, what each harness catches, what it costs.
 [windows]
 fuzz-list:
-    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -List
+    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -List; exit $LASTEXITCODE
 
 # Runs the suite runner against fixtures that exit 0, 1, 2 and 3 on purpose,
 # plus ones that throw, hang, and fail once then work. About a minute, no
@@ -207,7 +212,7 @@ fuzz-list:
 # Prove the suite still tells a product finding from a harness that broke.
 [windows]
 fuzz-selftest:
-    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -SelfTest
+    pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -SelfTest; exit $LASTEXITCODE
 
 # === Upstream Sync ===
 

@@ -339,6 +339,7 @@ Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
 Shot $hwnd64 '00-launch'
 
 $overview = $false
+$script:OverviewMissed = $false
 try {
     Invoke-PaletteCommand $hwnd64 $pid32 'show all' 'Show all tabs'
     Start-Sleep -Milliseconds 800
@@ -355,6 +356,13 @@ try {
     }
 } catch {
     Write-Host "overview: $_"
+    # Distinguish "the overview did not open" from "this harness never got to
+    # ask". A HARVEST_MISS or FOREGROUND_MISS is the click never landing, and
+    # reporting that as a product finding is how a flaky click becomes a bug
+    # report against the build.
+    if ("$_" -like '*HARVEST_MISS*' -or "$_" -like '*FOREGROUND_MISS*') {
+        $script:OverviewMissed = $true
+    }
 }
 
 $rename = $false
@@ -500,6 +508,16 @@ $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc
     quake = [bool]$quake
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
+# $overview is false both when the overview genuinely did not open and when
+# the harness never reached it - the run that prompted this logged
+# "HARVEST_MISS: grid context not Wintty" and then reported exit 2, a product
+# finding, for a click that never landed. A miss is a run that judged nothing,
+# so it leaves with 1.
+if ($script:OverviewMissed) {
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+    Write-Host 'the tab overview could not be reached, so nothing is known about it'
+    exit 1
+}
 if ($proc.HasExited -or $crashGrew -or -not $overview) {
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     exit 2
