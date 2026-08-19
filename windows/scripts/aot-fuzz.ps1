@@ -11,6 +11,7 @@ param(
         'mouse-fuzz-loop.ps1'
     )
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $PublishExe = (Resolve-Path -LiteralPath $PublishExe -ErrorAction SilentlyContinue)?.Path
@@ -35,13 +36,17 @@ $base = Join-Path $PSScriptRoot "fuzz-out/aot-$stamp"
 New-Item -ItemType Directory -Force -Path $base | Out-Null
 
 $results = @()
+# Twice with a pause between: a Wintty that is mid-startup can outlive the
+# first sweep.
 function Stop-Wintty {
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp
     Start-Sleep -Milliseconds 1200
-    Get-Process Wintty -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp
     Start-Sleep -Milliseconds 600
 }
 
+Assert-NoWintty
+$script:WinttyStamp = Get-WinttyLaunchStamp
 Stop-Wintty
 $idx = 0
 foreach ($s in $Scripts) {

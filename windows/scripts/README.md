@@ -50,6 +50,43 @@ The numbering follows `verified-input-probe.ps1`, `mouse-fuzz-loop.ps1` and
 Conflating those two is how a broken harness gets mistaken for a broken
 product, and how a real defect gets dismissed as flakiness.
 
+## Process policy
+
+`lib/wintty-process.ps1` holds the rule:
+
+- `Assert-NoWintty` - refuse to start while any Wintty is running, naming the
+  pids. Call it once, before the first launch.
+- `Get-WinttyLaunchStamp` / `Stop-WinttyStartedAfter` - clean up only what the
+  run started, matched on start time and, where the caller knows it, image
+  path. Anything that cannot be positively identified is skipped: an
+  unreadable path or start time is a reason to leave a process alone, never a
+  reason to kill it.
+
+Most scripts here used to open with `Get-Process Wintty | Stop-Process -Force`,
+which takes down builds from other worktrees and the window the developer is
+working in. That is not a harness's call to make.
+
+Four scripts predate the lib and still carry their own copy of the rule.
+They are not exceptions to the policy, just not folded onto it yet, and
+`search-fuzz.ps1` and `splash-single-instance-race.ps1` are in fact stricter
+than the shared helper because they match on image path as well as time:
+
+| script | why it is separate |
+|---|---|
+| `search-fuzz.ps1` | keeps a pre-existing-pid allowlist the helper has no equivalent of |
+| `splash-single-instance-race.ps1` | launches a second instance on purpose, path-scoped gate |
+| `mouse-fuzz-tab-colors.ps1` | already pid-scoped before the lib existed |
+| `vtabs-visual-qa.ps1` | already pid-scoped before the lib existed |
+
+`justfile` also has its own copy of the gate, so `just search-fuzz` can
+refuse before paying for a build.
+
+Two scripts need care beyond a single gate. `mouse-fuzz-jumplist.ps1`
+launches secondaries against a running primary, so its sweep rather than a
+per-process kill is what reaps them. `verified-input-probe.ps1` deliberately
+leaves its window up for inspection and therefore takes no stamp and runs no
+sweep; close it by hand before the next harness.
+
 ## Before you run search-fuzz
 
 - It **refuses to start while any Wintty is running**, and names the pids so
