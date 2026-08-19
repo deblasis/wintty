@@ -107,6 +107,32 @@ public sealed partial class SearchBarControl : UserControl
     }
 
     /// <summary>
+    /// Re-run the needle currently in the box, if any. Closing the bar ends
+    /// the search inside libghostty, but the needle text is deliberately
+    /// kept so the query survives a close/reopen. Without this the reopened
+    /// bar shows a needle with no search behind it: no highlights, and
+    /// next/previous silently do nothing because libghostty has no active
+    /// search to navigate.
+    /// </summary>
+    public void ReissueSearch()
+    {
+        if (State.Needle.Length == 0) return;
+        SearchHost?.StartSearch(State.Needle);
+    }
+
+    /// <summary>
+    /// Record that the search behind the bar has been torn down. The needle
+    /// is kept (see <see cref="ReissueSearch"/>); only the match counts are
+    /// invalidated, so the counter goes blank instead of describing results
+    /// that no longer exist.
+    /// </summary>
+    public void MarkInactive()
+    {
+        State.Total = -1;
+        State.Selected = -1;
+    }
+
+    /// <summary>
     /// True while keyboard focus is anywhere inside the search bar (the
     /// needle box or the prev/next/close buttons). The parent reads this
     /// to gate terminal key forwarding: the bar is a child of

@@ -78,6 +78,35 @@ public class SearchStateTests
         Assert.Equal("0 of 5", state.CounterText);
     }
 
+    // libghostty sends -1 for "no total" when the search thread quits, which
+    // is exactly the state the bar is left in after a close. Treating it as a
+    // count rendered "0 of -1" next to the needle.
+    [Fact]
+    public void CounterText_is_empty_when_total_is_negative()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = -1,
+            Selected = -1,
+        };
+
+        Assert.Equal(string.Empty, state.CounterText);
+    }
+
+    [Fact]
+    public void CounterText_is_empty_when_total_is_negative_and_a_match_is_selected()
+    {
+        var state = new SearchState
+        {
+            Needle = "foo",
+            Total = -1,
+            Selected = 3,
+        };
+
+        Assert.Equal(string.Empty, state.CounterText);
+    }
+
     [Fact]
     public void Setting_IsOpen_raises_PropertyChanged()
     {

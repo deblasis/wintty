@@ -64,7 +64,17 @@ public sealed class SearchState : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Total match count reported by libghostty.</summary>
+    /// <summary>
+    /// Total match count reported by libghostty, or negative when no search
+    /// is active behind the bar.
+    /// </summary>
+    /// <remarks>
+    /// libghostty encodes "no total" as -1 (apprt SearchTotal.cval maps a
+    /// null total onto it), and it sends exactly that when the search thread
+    /// quits. Negative therefore has to mean "nothing to count", not a count
+    /// of -1, or the bar renders "0 of -1" from the moment a search is torn
+    /// down.
+    /// </remarks>
     public long Total
     {
         get => _total;
@@ -95,9 +105,9 @@ public sealed class SearchState : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Formatted match counter for direct display: empty when the
-    /// needle is empty, "No matches" when the needle has no hits,
-    /// "{Selected+1} of {Total}" when a match is selected, or
+    /// Formatted match counter for direct display: empty when the needle is
+    /// empty or no search is active, "No matches" when the needle has no
+    /// hits, "{Selected+1} of {Total}" when a match is selected, or
     /// "0 of {Total}" when matches exist but none is selected yet.
     /// </summary>
     public string CounterText
@@ -105,6 +115,7 @@ public sealed class SearchState : INotifyPropertyChanged
         get
         {
             if (_needle.Length == 0) return string.Empty;
+            if (_total < 0) return string.Empty;
             if (_total == 0) return "No matches";
             if (_selected >= 0)
             {

@@ -54,6 +54,7 @@ vgcore.*
 
 # WinUI mouse/AOT fuzz script outputs (screenshots, UIA dumps, JSON).
 windows/scripts/fuzz-out/
+windows/scripts/search-fuzz/
 windows/scripts/vtabs-layout-switch/
 windows/scripts/vtabs-morph/
 windows/scripts/vtabs-switcher/

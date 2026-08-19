@@ -1841,12 +1841,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SearchBar.State.IsOpen = true;
         SearchBar.Visibility = Visibility.Visible;
         SearchBar.FocusNeedle();
+        // Closing the bar ended the search in libghostty while leaving the
+        // needle text in place, so reopening has to start it again.
+        SearchBar.ReissueSearch();
     }
 
     private void OnSearchClosed(object sender, EventArgs e)
     {
         SearchBar.Visibility = Visibility.Collapsed;
         SearchBar.State.IsOpen = false;
+        SearchBar.MarkInactive();
         // Return focus to the terminal surface so the user can keep typing
         // immediately after dismissing the bar.
         this.Focus(FocusState.Programmatic);
@@ -1894,6 +1898,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
 
     internal void OnSearchEnded()
     {
+        // Deliberately no MarkInactive here. This arrives asynchronously, so
+        // a close immediately followed by a reopen can deliver the old
+        // search's end after the new one has started, and wiping the counts
+        // then would blank a live search. The teardown pushes a null total
+        // anyway, which SearchState already renders as "no active search".
         if (SearchBar.Visibility == Visibility.Visible)
         {
             SearchBar.Visibility = Visibility.Collapsed;
