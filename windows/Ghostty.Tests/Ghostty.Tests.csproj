@@ -125,6 +125,14 @@
     <EmbeddedResource Include="..\Ghostty\Settings\CheatSheetDialog.xaml"
                       Link="Settings\CheatSheetDialog.xaml"
                       LogicalName="Ghostty.Tests.Settings.CheatSheetDialog.xaml" />
+    <!--
+      The picker's XAML, for TabColorSwatchAutomationTests. Its .xaml.cs half
+      needs no entry here: the Ghostty\**\*.cs glob further down already
+      embeds it, and naming it twice is a duplicate-item error.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Tabs\TabColorPalettePicker.xaml"
+                      Link="Tabs\TabColorPalettePicker.xaml"
+                      LogicalName="Ghostty.Tests.Tabs.TabColorPalettePicker.xaml" />
     <EmbeddedResource Include="..\Ghostty\Tabs\VerticalTabStrip.xaml"
                       Link="Tabs\VerticalTabStrip.xaml"
                       LogicalName="Ghostty.Tests.Tabs.VerticalTabStrip.xaml" />
