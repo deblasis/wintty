@@ -145,8 +145,8 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         uint accentPacked = PackColor(theme.AccentColor);
         uint activePacked = PackColor(theme.ActiveTabText);
-        _shellActiveTextBrush = new SolidColorBrush(UnpackColor(
-            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked)));
+        _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
+            ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
 
         uint tabBgPacked = PackColor(theme.TabBarBackground);
         _shellInactiveTextBrush = new SolidColorBrush(
@@ -206,9 +206,9 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         _defaultSelectedTabBgBrush = new SolidColorBrush(
             Windows.UI.Color.FromArgb(0xFF, background.R, background.G, background.B));
-        _defaultActiveTextBrush = new SolidColorBrush(UnpackColor(
+        _defaultActiveTextBrush = TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(
-                PackColor(background), PackColor(foreground))));
+                PackColor(background), PackColor(foreground)));
 
         // Tab-bar backdrop for preset tint blending is owned by
         // ApplyShellChrome / ApplyDefaultPaneChrome. Terminal bg != tab bar.
@@ -293,8 +293,32 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// Paint one straight selected row from the strip inset to the pane edge.
     /// MUXC's rounded pill is hidden; this overlay is the sole selection fill.
     /// </summary>
+    /// <summary>
+    /// Hide the selected-row fill while the active tab is being morphed
+    /// across a layout switch.
+    ///
+    /// SelectionRow is an overlay on its own canvas rather than part of the
+    /// NavigationViewItem, so hiding the item leaves the fill sitting on the
+    /// rail -- a colored block still marking a tab that has visibly flown
+    /// off to the header.
+    /// </summary>
+    internal void SetSelectionRowSuppressed(bool suppressed)
+    {
+        if (_selectionRowSuppressed == suppressed) return;
+        _selectionRowSuppressed = suppressed;
+        UpdateSelectionRow();
+    }
+
+    private bool _selectionRowSuppressed;
+
     private void UpdateSelectionRow()
     {
+        if (_selectionRowSuppressed)
+        {
+            SelectionRow.Visibility = Visibility.Collapsed;
+            return;
+        }
+
         if (_manager.ActiveTab is null
             || !_items.TryGetValue(_manager.ActiveTab, out var item)
             || item.ActualWidth <= 0
@@ -319,10 +343,38 @@ internal sealed partial class VerticalTabStrip : UserControl
         SelectionRow.Visibility = Visibility.Visible;
     }
 
+    /// <summary>
+    /// Fill and readable foreground the active row paints itself with.
+    /// The morph ghost stands in for that row across a layout switch, so it
+    /// asks for the real chrome rather than approximating it -- an
+    /// uncolored tab has a fill too, and a ghost without one reads as the
+    /// tab losing its selection for the length of the switch.
+    /// </summary>
+    internal (SolidColorBrush Fill, SolidColorBrush Foreground) ActiveRowChrome(TabModel tab)
+    {
+        // The fill always comes from ResolveSelectionRowFill so the ghost and
+        // the real row can never disagree on the selected color.
+        var fill = ResolveSelectionRowFill(tab);
+        if (tab.Color != TabColor.None)
+        {
+            return (fill, TabColorBrush.FromPackedRgb(TabColorPalette.ForegroundRgb(
+                tab.Color, selected: true, _stripBackdropPacked)));
+        }
+
+        var rowPacked = PackColor(fill.Color);
+        var preferred = _shellActiveTextBrush is not null
+            ? PackColor(_shellActiveTextBrush.Color)
+            : _defaultActiveTextBrush is not null
+                ? PackColor(_defaultActiveTextBrush.Color)
+                : rowPacked;
+        return (fill, TabColorBrush.FromPackedRgb(
+            ThemeResolution.EnsureReadableForeground(rowPacked, preferred)));
+    }
+
     private SolidColorBrush ResolveSelectionRowFill(TabModel tab)
     {
         if (tab.Color != TabColor.None)
-            return DrawingColorBrush(TabColorPalette.Background(tab.Color, selected: true));
+            return TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: true));
 
         // Mirror horizontal TabHost: shell theme paints accent on the selected
         // handle; default path uses terminal background so the row meets the pane.
@@ -360,7 +412,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 item.ClearValue(Control.BackgroundProperty);
             else
             {
-                item.Background = DrawingColorBrush(
+                item.Background = TabColorBrush.From(
                     TabColorPalette.Background(tab.Color, selected: false));
             }
         }
@@ -383,10 +435,6 @@ internal sealed partial class VerticalTabStrip : UserControl
                 : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
     }
 
-    private static SolidColorBrush DrawingColorBrush(System.Drawing.Color drawing)
-        => new(Windows.UI.Color.FromArgb(
-            drawing.A, drawing.R, drawing.G, drawing.B));
-
     private static readonly string[] NavItemForegroundKeys =
     [
         "NavigationViewItemForeground",
@@ -406,27 +454,16 @@ internal sealed partial class VerticalTabStrip : UserControl
             var active = ReferenceEquals(model, _manager.ActiveTab);
             if (model.Color != TabColor.None)
             {
-                var fg = new SolidColorBrush(UnpackColor(
+                var fg = TabColorBrush.FromPackedRgb(
                     TabColorPalette.ForegroundRgb(
-                        model.Color, active, _stripBackdropPacked)));
+                        model.Color, active, _stripBackdropPacked));
                 ApplyItemForeground(item, fg, active);
                 ApplyItemTabColor(item, model);
                 continue;
             }
 
             if (active)
-            {
-                var rowFill = ResolveSelectionRowFill(model).Color;
-                var rowPacked = PackColor(rowFill);
-                uint preferred = _shellActiveTextBrush is not null
-                    ? PackColor(_shellActiveTextBrush.Color)
-                    : _defaultActiveTextBrush is not null
-                        ? PackColor(_defaultActiveTextBrush.Color)
-                        : rowPacked;
-                var fg = new SolidColorBrush(UnpackColor(
-                    ThemeResolution.EnsureReadableForeground(rowPacked, preferred)));
-                ApplyItemForeground(item, fg, active: true);
-            }
+                ApplyItemForeground(item, ActiveRowChrome(model).Foreground, active: true);
             else
                 ApplyItemForeground(item, ResolveInactiveTextBrush(), active: false);
 
@@ -601,9 +638,6 @@ internal sealed partial class VerticalTabStrip : UserControl
     private static uint PackColor(Color c)
         => ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
-    private static Color UnpackColor(uint packed)
-        => Color.FromArgb(0xFF, (byte)(packed >> 16), (byte)(packed >> 8), (byte)packed);
-
     private void RebuildAllItems()
     {
         // Remove by what we hold, not by what the manager still has:
@@ -739,6 +773,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         RecolorNavItems();
         RefreshSelectionChrome();
     }
+
+    /// <summary>The row rendering <paramref name="tab"/>, if built.</summary>
+    internal FrameworkElement? TabElement(TabModel tab)
+        => _items.TryGetValue(tab, out var item) ? item : null;
 
     /// <summary>Resolve TabModel for a nav item hit-test target.</summary>
     internal TabModel? TabFromElement(DependencyObject? source)
