@@ -27,8 +27,17 @@ public sealed class SearchState : INotifyPropertyChanged
 {
     private bool _isOpen;
     private string _needle = string.Empty;
-    private long _total;
+    // Starts inactive, not zero: zero means "searched and found nothing", so
+    // a fresh bar would claim "No matches" for the debounce plus round-trip
+    // before its first search has run.
+    private long _total = NoSearch;
     private long _selected = -1;
+
+    /// <summary>
+    /// The <see cref="Total"/> value meaning "no search is running behind
+    /// the bar", as distinct from a search that ran and matched nothing.
+    /// </summary>
+    public const long NoSearch = -1;
 
     /// <summary>True when the search bar is visible.</summary>
     public bool IsOpen
@@ -64,7 +73,17 @@ public sealed class SearchState : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Total match count reported by libghostty.</summary>
+    /// <summary>
+    /// Total match count reported by libghostty, or negative when no search
+    /// is active behind the bar.
+    /// </summary>
+    /// <remarks>
+    /// libghostty encodes "no total" as -1 (apprt SearchTotal.cval maps a
+    /// null total onto it), and it sends exactly that when the search thread
+    /// quits. Negative therefore has to mean "nothing to count", not a count
+    /// of -1, or the bar renders "0 of -1" from the moment a search is torn
+    /// down.
+    /// </remarks>
     public long Total
     {
         get => _total;
@@ -95,9 +114,9 @@ public sealed class SearchState : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Formatted match counter for direct display: empty when the
-    /// needle is empty, "No matches" when the needle has no hits,
-    /// "{Selected+1} of {Total}" when a match is selected, or
+    /// Formatted match counter for direct display: empty when the needle is
+    /// empty or no search is active, "No matches" when the needle has no
+    /// hits, "{Selected+1} of {Total}" when a match is selected, or
     /// "0 of {Total}" when matches exist but none is selected yet.
     /// </summary>
     public string CounterText
@@ -105,6 +124,8 @@ public sealed class SearchState : INotifyPropertyChanged
         get
         {
             if (_needle.Length == 0) return string.Empty;
+            if (_total < 0) return string.Empty;   // no search running
+
             if (_total == 0) return "No matches";
             if (_selected >= 0)
             {
@@ -123,7 +144,7 @@ public sealed class SearchState : INotifyPropertyChanged
 
     /// <summary>
     /// Restores all fields to their default values: closes the bar,
-    /// clears the needle, zeroes the match count, and unselects. The
+    /// clears the needle, marks the search inactive, and unselects. The
     /// reverse coupling is intentionally absent -- setting
     /// <see cref="IsOpen"/> to <c>false</c> on its own does NOT reset
     /// the search, so the controller can pick its own timing (e.g.
@@ -133,7 +154,18 @@ public sealed class SearchState : INotifyPropertyChanged
     {
         IsOpen = false;
         Needle = string.Empty;
-        Total = 0;
+        MarkInactive();
+    }
+
+    /// <summary>
+    /// Record that the search behind the bar has been torn down, without
+    /// touching the needle: the query is kept so it can be re-run when the
+    /// bar reopens. Only the counts are invalidated, so the counter goes
+    /// blank rather than describing results that no longer exist.
+    /// </summary>
+    public void MarkInactive()
+    {
+        Total = NoSearch;
         Selected = -1;
     }
 
