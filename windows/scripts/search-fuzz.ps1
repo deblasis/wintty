@@ -50,6 +50,7 @@ param(
     # throwaway dir when a controlled config matters more than stability.
     [switch]$IsolatedConfig
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
@@ -593,9 +594,9 @@ $script:Iter = 0
 $script:ExitCode = 0
 # Set before the try so a throw that precedes their real assignment cannot
 # leave the teardown sweep with a null filter, which matches every process
-# rather than none.
+# rather than none, or bind $null to Stop-WinttyStartedAfter's mandatory
+# -Since and replace the in-flight exception with a binding error.
 $script:ExeFull = $null
-$script:PreExisting = @()
 $script:StartedAt = $null
 $result = [ordered]@{
     seed = $Seed; iterations = $Iterations; ops = @()
@@ -612,27 +613,21 @@ try {
 
     # Never kill by name: developers keep builds from several worktrees open
     # at once, and force-killing every Wintty takes down work this run has
-    # nothing to do with. Refuse instead.
+    # nothing to do with. Refuse instead. lib/wintty-process.ps1 carries the
+    # rule and the reasoning; the short version is that crash.log is shared
+    # per user rather than per exe path, and this harness reports every byte
+    # the file gains during a run as a defect in the build under test.
     #
-    # The reason is not single-instance -- that mutex is keyed on a hash of
-    # the exe path (SingleInstanceNames.For), so another worktree's build
-    # would not absorb this launch. It is that crash.log is shared: it lives
-    # at %LOCALAPPDATA%\<StateDirName>\crash.log, per user rather than per
-    # exe path, and XDG_CONFIG_HOME does not move it. This harness attributes
-    # every byte the file gains to the run, as a product finding. Any other
-    # instance crashing during a run would therefore be reported as a defect
-    # in the build under test.
+    # The gate sits inside the try, unlike the other harnesses, because the
+    # catch below records the refusal as a harness finding and prints it in
+    # the harness's own voice. That is only safe because the sweep in the
+    # finally is guarded on $script:StartedAt: an unguarded call would bind
+    # $null to a mandatory [datetime] and replace this message with a
+    # parameter-binding error.
+    Assert-NoWintty -Context 'The search fuzz'
     $script:ExeFull = (Resolve-Path $ExePath).Path
-    $script:PreExisting = @(Get-Process Wintty -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty Id)
-    if ($script:PreExisting.Count -gt 0) {
-        throw ("close the running Wintty first (pid: $($script:PreExisting -join ', ')). " +
-               'It shares crash.log with the build under test, so its crashes ' +
-               'would be reported as defects in this run, and this harness ' +
-               'will not kill instances it did not start')
-    }
 
-    $script:StartedAt = Get-Date
+    $script:StartedAt = Get-WinttyLaunchStamp
     $script:Proc = Start-Process -FilePath $script:ExeFull -PassThru -WorkingDirectory (Split-Path -Parent $script:ExeFull)
     $pid32 = [uint32]$script:Proc.Id
     $main = Wait-Ready $script:Proc
@@ -1110,42 +1105,47 @@ finally {
     $result.checks = $script:Checks
     $result.findings = @($script:Findings)
     $result.failed = $script:Findings.Count
+    # Decide the verdict before any cleanup runs. It used to be computed at
+    # the very bottom of this block, after the sweep and the env restores, so
+    # anything throwing on the way down left $script:ExitCode at its initial
+    # 0 - a clean PASS with findings already recorded. Nothing below this
+    # point can change what the run found, so nothing below it should be able
+    # to change what the run reports.
+    #
+    # 2 means the product is broken, 1 means the run never got far enough to
+    # judge it and should be retried rather than filed. Same numbering as the
+    # rest of the harnesses.
+    $product = @($script:Findings | Where-Object { $_.kind -ne 'harness' })
+    if ($script:Findings.Count -eq 0) { $script:ExitCode = 0 }
+    elseif ($product.Count -gt 0) { $script:ExitCode = 2 }
+    else { $script:ExitCode = 1 }
+
     # A run that never got to assert anything has nothing to record, and
     # writing it would overwrite the last real run's results.
     if ($script:Checks -gt 0) {
         $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "run-$Seed.json") -Encoding utf8
     }
 
-    # Tear down only what this run started, and fail closed on anything the
-    # sweep cannot positively identify: an unreadable path or start time is a
-    # reason to leave a process alone, never a reason to kill it. Process.Path
-    # returns null rather than throwing when the process cannot be opened, so
-    # the null checks are the real guard here.
+    # Tear down only what this run started. The handle covers the launch
+    # itself; the sweep is the backstop for anything else that came up from
+    # the same exe during the run, and is a no-op when there is nothing.
     #
-    # $script:PreExisting is empty on every path that reaches a launch (the
-    # gate refuses otherwise); it is only non-empty on the refusal path, where
-    # it is exactly what stops this sweep touching the developer's instances.
-    if (-not $KeepOpen) {
-        if ($script:Proc) {
-            try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
-            try { [void]$script:Proc.WaitForExit(3000) } catch { }
-        }
-        if ($script:ExeFull -and $script:StartedAt) {
-            foreach ($p in @(Get-Process Wintty -ErrorAction SilentlyContinue)) {
-                if ($script:PreExisting -contains $p.Id) { continue }
-                $path = try { $p.Path } catch { $null }
-                if ([string]::IsNullOrEmpty($path) -or $path -ne $script:ExeFull) { continue }
-                # Without this a same-build window the developer opened while
-                # the run was going gets killed with it.
-                $started = try { $p.StartTime } catch { $null }
-                if ($null -eq $started -or $started -lt $script:StartedAt) { continue }
-                try { $p.Kill($true); [void]$p.WaitForExit(3000) } catch { }
-            }
-        }
+    # The stamp guard is what keeps a refusal readable. Reaching the finally
+    # with $script:StartedAt still $null means the run never launched, so
+    # there is nothing to sweep; calling anyway would bind $null to a
+    # mandatory [datetime] and replace whatever threw with a binding error.
+    if (-not $KeepOpen -and $script:Proc) {
+        try { $script:Proc.Refresh(); if (-not $script:Proc.HasExited) { $script:Proc.Kill($true) } } catch { }
+        try { [void]$script:Proc.WaitForExit(3000) } catch { }
     }
     if ($IsolatedConfig) {
         if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
         else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    }
+    # After the restore, not before: a throw here would otherwise abandon it
+    # and leave the shell pointed at a temp profile.
+    if (-not $KeepOpen -and $script:StartedAt) {
+        Stop-WinttyStartedAfter -Since $script:StartedAt -ExePath $script:ExeFull
     }
     Start-Sleep -Milliseconds 500
     if (-not $KeepOpen) { Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue }
@@ -1160,15 +1160,6 @@ finally {
         }
     }
 
-    # Distinct exit codes so a caller can tell the two failures apart, using
-    # the same numbering as verified-input-probe.ps1, mouse-fuzz-loop.ps1 and
-    # mouse-fuzz-probe.ps1: 2 means the product is broken, 1 means the run
-    # never got far enough to judge it and should be retried rather than
-    # filed.
-    $product = @($script:Findings | Where-Object { $_.kind -ne 'harness' })
-    if ($script:Findings.Count -eq 0) { $script:ExitCode = 0 }
-    elseif ($product.Count -gt 0) { $script:ExitCode = 2 }
-    else { $script:ExitCode = 1 }
 }
 
 exit $script:ExitCode

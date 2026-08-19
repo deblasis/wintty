@@ -7,6 +7,20 @@ param(
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
+# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
+# not run" - which the suite retries and then reports as an area nothing is
+# known about. Every finally below still runs: exit from a trap unwinds
+# through them, and `break` rethrows anything that is not a product failure so
+# a genuine harness failure still leaves with 1.
+trap {
+    if ("$_" -like 'PRODUCT_FAIL*') {
+        Write-Host "$_" -ForegroundColor Red
+        exit 2
+    }
+    break
+}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
@@ -495,13 +509,15 @@ finally {
     if ($null -ne $proc) {
         $proc.Refresh()
         if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
             Start-Sleep -Milliseconds 300
         }
     }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
+    # After the env restores, not before: a throw in the sweep would otherwise
+    # abandon them and leave the shell pointed at a temp profile.
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
@@ -520,145 +536,4 @@ $result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 if ($crashGrew -or $dpi -eq 0 -or -not $perMonitorV2) { exit 2 }
 if ($styleAfterFrosted -ne 'frosted' -or $styleAfterCrystal -ne 'crystal' -or $paletteBackdropAfter -ne 'opaque') { exit 2 }
-exit 0
-
-try {
-    $env:XDG_CONFIG_HOME = $tempXdg
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    Start-Sleep -Milliseconds 400
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path $ExePath)
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    Start-Sleep -Seconds 2
-    $main = @(Get-WinUiWindows $pid32) | Select-Object -First 1
-    $hwnd64 = [int64]$main.Hwnd64
-    Write-Host "hwnd=$hwnd64 pid=$pid32 title=$($main.Title)"
-    Shot $hwnd64 '00-launch'
-
-    Invoke-PaletteCommand $hwnd64 $pid32 'open config' 'Open Config'
-    $settings = Wait-SettingsWindow $pid32 $hwnd64
-    $settingsHwnd = [int64]$settings.Hwnd64
-    $settingsTitle = $settings.Title
-    Write-Host "settings hwnd=$settingsHwnd title=$settingsTitle"
-    Shot $settingsHwnd '01-settings-open'
-    Shot-Pid $pid32 '01b-all'
-
-    $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-    # Keybindings last: ItemsSource of internal row types can kill the UI thread.
-    $nav = @(
-        @{ Name = 'Appearance'; Shot = '02-appearance' },
-        @{ Name = 'Profiles'; Shot = '03-profiles' },
-        @{ Name = 'Colors'; Shot = '04-colors' },
-        @{ Name = 'Terminal'; Shot = '05-terminal' },
-        @{ Name = 'Advanced'; Shot = '06-advanced' },
-        @{ Name = 'Raw Editor'; Shot = '07-raw' },
-        @{ Name = 'General'; Shot = '08-general' }
-    )
-    foreach ($n in $nav) {
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL died before $($n.Name) exit=$($proc.ExitCode)" }
-        $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-        Select-Nav $sroot $pid32 $n.Name
-        $pages += $n.Name
-        Shot $settingsHwnd $n.Shot
-    }
-
-    $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-    $vtabCards = @(
-        'Vertical tab width',
-        'Pin vertical tabs expanded',
-        'Expand vertical tabs on hover'
-    )
-    $script:vtabFound = @()
-    foreach ($name in $vtabCards) {
-        if ($null -ne (Find-Name $sroot $name)) { $script:vtabFound += $name }
-        else { Write-Host "HARVEST_MISS: settings card '$name'" }
-    }
-    Write-Host "vtabCards=$($script:vtabFound -join ',')/$($vtabCards.Count)"
-
-    $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-    $search = Find-Name $sroot 'Search settings'
-    if ($null -eq $search) {
-        $editCt = [System.Windows.Automation.ControlType]::Edit
-        $cond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $editCt)
-        $search = $sroot.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    }
-    if ($null -ne $search) {
-        try {
-            $vp = $search.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-            $vp.SetValue('font')
-            Write-Host "search font"
-            Start-Sleep -Milliseconds 800
-            Shot $settingsHwnd '09-search-font'
-            $pages += 'search:font'
-            # Nav while _pendingQuery is set is a no-op (results pane stays).
-            # Clear via ValuePattern so Keybindings actually constructs.
-            $vp.SetValue('')
-            Write-Host "search cleared"
-            [MzMD]::Key($settingsHwnd, 0x1B)
-            Start-Sleep -Milliseconds 500
-            Shot $settingsHwnd '09b-search-cleared'
-        } catch { Write-Host "search set failed: $_" }
-    } else {
-        Write-Host "HARVEST_MISS: no Search settings box"
-    }
-
-    try {
-        $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-        Select-Nav $sroot $pid32 'Keybindings'
-        # Loaded → ApplyFilter → ItemsSource can kill the UI thread after Select returns.
-        Start-Sleep -Seconds 2
-        $proc.Refresh()
-        if ($proc.HasExited -or $null -eq [MzMD]::RectOf($settingsHwnd)) {
-            $keybindKilled = $true
-            Write-Host "PRODUCT_FAIL: died after Keybindings nav (ItemsSource ABI)"
-        } else {
-            $pages += 'Keybindings'
-            Shot $settingsHwnd '10-keybindings'
-        }
-    } catch {
-        $proc.Refresh()
-        $keybindKilled = $true
-        Write-Host "keybindings nav: $_ killed=$($proc.HasExited)"
-    }
-
-    $proc.Refresh()
-    if (-not $proc.HasExited -and -not $keybindKilled) {
-        try {
-            $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-            $close = Find-Name $sroot 'Close'
-            if ($null -ne $close) { Invoke-El $close $pid32 'Close Wintty Settings' }
-            else { Write-Host "HARVEST_MISS: no Close on Settings" }
-        } catch { Write-Host "close settings: $_" }
-        Start-Sleep -Milliseconds 400
-        if ($null -ne [MzMD]::RectOf($hwnd64)) { Shot $hwnd64 '11-after-settings-close' }
-        else { Write-Host "main hwnd gone after settings close" }
-    }
-}
-finally {
-    if ($null -ne $proc) {
-        $proc.Refresh()
-        if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
-    if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-}
-
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-$result = @{
-    aliveAtEnd = $false
-    keybindKilled = $keybindKilled
-    crashGrew = $crashGrew
-    settingsTitle = $settingsTitle
-    pages = $pages
-    vtabCards = $script:vtabFound
-    xdg = $tempXdg
-}
-$result | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
-Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($keybindKilled -or $crashGrew -or ($script:vtabFound.Count -lt 3)) { exit 2 }
 exit 0
