@@ -22,7 +22,7 @@ namespace Ghostty.Services;
 /// <see cref="Ghostty.Core.Windows.ThemeResolution"/> so it can be
 /// unit-tested without a WinUI runtime.
 /// </summary>
-internal sealed class WindowThemeManager : IDisposable
+internal sealed partial class WindowThemeManager : IDisposable
 {
     private readonly IConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
