@@ -5,7 +5,7 @@ using Ghostty.Core.Config;
 
 namespace Ghostty.Services;
 
-internal sealed class KeyBindingsProvider : IKeyBindingsProvider, IDisposable
+internal sealed partial class KeyBindingsProvider : IKeyBindingsProvider, IDisposable
 {
     private readonly IConfigService _configService;
     private List<BindingEntry> _bindings = new();
