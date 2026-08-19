@@ -3,6 +3,7 @@ param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [string]$OutDir = (Join-Path $PSScriptRoot ("vtabs-layout-switch/run-" + (Get-Date -Format 'yyyyMMdd-HHmmss')))
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -90,6 +91,13 @@ theme = Catppuccin Mocha
 
 $origXdg = $env:XDG_CONFIG_HOME
 $env:XDG_CONFIG_HOME = $tempXdg
+# vtabs-visual-qa.ps1 runs this first and mouse-fuzz-tab-colors.ps1 second,
+# and tab-colors now refuses when a Wintty is up. Without a gate and a sweep
+# here, a window this script fails to reap makes the next step refuse rather
+# than run.
+Assert-NoWintty -Context 'The layout-switch capture'
+$script:WinttyStamp = Get-WinttyLaunchStamp
+
 try {
     $proc = Start-Process -FilePath $ExePath -PassThru
     $dl = (Get-Date).AddSeconds(45)
@@ -137,9 +145,10 @@ try {
 finally {
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg } else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
         try { $proc.WaitForExit(3000) } catch {}
     }
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
 }
 Write-Host "OUT=$OutDir"

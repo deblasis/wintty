@@ -4,7 +4,22 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# A PRODUCT_FAIL throw is a defect in the build under test, so it has to leave
+# with 2. Thrown, it escapes to pwsh and becomes exit 1 - "the harness could
+# not run" - which the suite retries and then reports as an area nothing is
+# known about. Every finally below still runs: exit from a trap unwinds
+# through them, and `break` rethrows anything that is not a product failure so
+# a genuine harness failure still leaves with 1.
+trap {
+    if ("$_" -like 'PRODUCT_FAIL*') {
+        Write-Host "$_" -ForegroundColor Red
+        exit 2
+    }
+    break
+}
 New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
@@ -580,6 +595,7 @@ theme = Catppuccin Mocha
 no-color-override = strip
 '@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
 
+$script:FatalWasProduct = $null
 $origXdg = $env:XDG_CONFIG_HOME
 $origNoColor = $env:NO_COLOR
 $proc = $null
@@ -599,6 +615,12 @@ function Add-Phase([string]$name, [scriptblock]$body) {
         throw
     }
 }
+# Above the try, so the refusal message survives: with the gate inside, the
+# sweep in the finally would bind a null stamp to a mandatory [datetime] and
+# that binding error would replace it, taking the env restores with it.
+Assert-NoWintty -Context 'The tab-color fuzz'
+$script:WinttyStamp = Get-WinttyLaunchStamp
+
 try {
     Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
     $env:XDG_CONFIG_HOME = $tempXdg
@@ -719,11 +741,19 @@ catch {
         try { Shot $hwnd64 'fail-state' } catch { }
     }
     $result.phases += [ordered]@{ name = 'fatal'; ok = $false; error = "$_" }
+    # Which kind of failure it was decides the exit code. A HARVEST_MISS - a
+    # menu item the script could not find, a click the window refused - is a
+    # run that judged nothing, and filing it as a product finding means it is
+    # never retried and shows up as a defect in the build.
+    $script:FatalWasProduct = ("$_" -like 'PRODUCT_FAIL*')
 }
 finally {
-    # Only this run's process. `Get-Process Wintty | Stop-Process` also
-    # kills the developer's real session on the same desktop.
-    if ($null -ne $proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    # Only this run's processes. `Get-Process Wintty | Stop-Process` also
+    # kills the developer's real session on the same desktop. Kill the tree:
+    # the shell runs as a child and outlives a kill on the parent alone.
+    if ($null -ne $proc -and -not $proc.HasExited) {
+        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
+    }
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($null -ne $origNoColor) { $env:NO_COLOR = $origNoColor }
@@ -731,10 +761,16 @@ finally {
     if ($null -ne $tempXdg -and (Test-Path $tempXdg)) {
         Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
     }
+    # After the env restores, not before: a throw in the sweep would otherwise
+    # abandon them and leave the shell pointed at a temp profile.
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
 }
 
 $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json')
 $fail = @($result.phases | Where-Object { -not $_.ok })
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-if ($fail.Count -gt 0) { exit 2 }
-exit 0
+if ($fail.Count -eq 0) { exit 0 }
+# A phase that failed without a fatal error is a real assertion failing; a
+# fatal PRODUCT_FAIL is too. Anything else got in the way of the run.
+if ($null -eq $script:FatalWasProduct -or $script:FatalWasProduct) { exit 2 }
+exit 1

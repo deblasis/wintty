@@ -17,7 +17,20 @@ param(
     [int]$Iterations = 60,
     [switch]$StartHorizontal
 )
+. (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# Same convention as the mouse-fuzz harnesses: a PRODUCT_FAIL leaves with 2,
+# anything else is a run that could not judge the product and leaves with 1
+# for the runner to retry. FOREGROUND_MISS and a missing trace are the latter
+# - a stolen foreground says nothing about the build.
+trap {
+    if ("$_" -like 'PRODUCT_FAIL*') {
+        Write-Host "$_" -ForegroundColor Red
+        exit 2
+    }
+    break
+}
 if ($Seed -eq 0) { $Seed = Get-Random -Minimum 1 -Maximum 999999 }
 $rng = [System.Random]::new($Seed)
 Write-Host "seed=$Seed iterations=$Iterations"
@@ -185,6 +198,12 @@ $proc = $null
 $actions = @{}
 $chordMisses = 0
 $failures = New-Object System.Collections.Generic.List[string]
+# Above the try so a refusal keeps its own message: with the gate inside, the
+# sweep in the finally would bind a null stamp to a mandatory [datetime] and
+# that error would replace it, taking the env restores with it.
+Assert-NoWintty -Context 'The layout-morph fuzz'
+$script:WinttyStamp = Get-WinttyLaunchStamp
+
 try {
     $proc = Start-Process -FilePath $ExePath -PassThru
     $hwnd = [IntPtr]::Zero
@@ -192,7 +211,7 @@ try {
     while ((Get-Date) -lt $dl) {
         Start-Sleep -Milliseconds 300
         $proc.Refresh()
-        if ($proc.HasExited) { throw "exit $($proc.ExitCode)" }
+        if ($proc.HasExited) { throw "PRODUCT_FAIL: exited during startup, code $($proc.ExitCode)" }
         $hwnd = [MFz]::FindWin([uint32]$proc.Id)
         if ($hwnd -ne [IntPtr]::Zero) { break }
     }
@@ -218,9 +237,9 @@ try {
     }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
-        if (-not [MFz]::IsWindow($hwnd)) { throw "window gone at iteration $i" }
+        if (-not [MFz]::IsWindow($hwnd)) { throw "PRODUCT_FAIL: window gone at iteration $i" }
         $proc.Refresh()
-        if ($proc.HasExited) { throw "process exited at iteration $i (code $($proc.ExitCode))" }
+        if ($proc.HasExited) { throw "PRODUCT_FAIL: process exited at iteration $i (code $($proc.ExitCode))" }
 
         $roll = $rng.Next(100)
         if ($roll -lt 45) {
@@ -343,8 +362,9 @@ try {
     Start-Sleep -Milliseconds 1200
 }
 finally {
-    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if ($proc -and -not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
     Start-Sleep -Milliseconds 600
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     if ($null -ne $origXdg) { $env:XDG_CONFIG_HOME = $origXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($null -ne $origTrace) { $env:WINTTY_MORPH_TRACE = $origTrace }
@@ -389,6 +409,8 @@ Write-Host ''
 if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Host "FAIL: $_" }
     Write-Host "reproduce with: -Seed $Seed"
-    exit 1
+    # 2, not 1: these are layout-switch defects, and 1 is reserved for a run
+    # that never got to assert anything.
+    exit 2
 }
 Write-Host "PASS (seed $Seed)"

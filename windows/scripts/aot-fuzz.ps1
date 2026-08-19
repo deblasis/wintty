@@ -13,6 +13,15 @@ param(
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
+
+# A harness exiting non-zero is this runner's input, not an error. When
+# $PSNativeCommandUseErrorActionPreference is on - it is the default on some
+# hosts and a profile can set it - $ErrorActionPreference = 'Stop' turns the
+# first harness that reports findings into a terminating error, and the run
+# ends with no summary and no verdict. Assign it only where it exists.
+if (Test-Path Variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $PublishExe = (Resolve-Path -LiteralPath $PublishExe -ErrorAction SilentlyContinue)?.Path
 if (-not $PublishExe) {
@@ -38,16 +47,21 @@ New-Item -ItemType Directory -Force -Path $base | Out-Null
 $results = @()
 # Twice with a pause between: a Wintty that is mid-startup can outlive the
 # first sweep.
+#
+# -ExePath is not optional here even though the stamp alone would find the
+# leaks. Without it the sweep matches on time only, and this runs for tens of
+# minutes across five harnesses: any Wintty the developer opens from any
+# worktree while it works gets tree-killed with its shell.
 function Stop-Wintty {
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $script:PublishExe
     Start-Sleep -Milliseconds 1200
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $script:PublishExe
     Start-Sleep -Milliseconds 600
 }
 
-Assert-NoWintty
+$script:PublishExe = $PublishExe
+Assert-NoWintty -Context 'The AOT fuzz'
 $script:WinttyStamp = Get-WinttyLaunchStamp
-Stop-Wintty
 $idx = 0
 foreach ($s in $Scripts) {
     $idx++
@@ -56,17 +70,21 @@ foreach ($s in $Scripts) {
     $out = Join-Path $base $name
     New-Item -ItemType Directory -Force -Path $out | Out-Null
     Write-Host "`n========== $s (AOT) =========="
+    # Retry only exit 1, "the harness could not run": nothing was learned,
+    # and the causes are transient. This used to retry every non-zero exit
+    # and keep the last attempt, so a product finding that passed on the
+    # second run was reported as clean.
     $attempts = 2
     $code = 1
     for ($try = 1; $try -le $attempts; $try++) {
         if ($try -gt 1) {
-            Write-Host "retry $try/$attempts for $name"
+            Write-Host "retry $try/$attempts for $name (could not run)"
             Stop-Wintty
             Start-Sleep -Seconds 2
         }
         & pwsh -NoProfile -File (Join-Path $PSScriptRoot $s) -ExePath $PublishExe -OutDir $out
         $code = $LASTEXITCODE
-        if ($code -eq 0) { break }
+        if ($code -ne 1) { break }
     }
     Stop-Wintty
     $row = [ordered]@{ script = $name; exit = $code; aot = $true }
@@ -84,5 +102,6 @@ $summary = Join-Path $base 'summary.json'
 } | ConvertTo-Json -Depth 6 | Set-Content $summary
 Write-Host "`nAOT SUMMARY -> $summary"
 $results | Format-Table script, exit -AutoSize
+if ($results | Where-Object { $_.exit -eq 2 }) { exit 2 }
 if ($results | Where-Object { $_.exit -ne 0 }) { exit 1 }
 exit 0
