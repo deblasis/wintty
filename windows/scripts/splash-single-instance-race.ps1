@@ -32,6 +32,10 @@
     is on the order of 30-40ms, so a splash shown for less than that would
     be missed.
 
+    Exit codes follow the rest of the harnesses: 0 clean, 2 the race
+    reproduced, 1 nothing was measured (every iteration inconclusive, or a
+    Wintty was already running from this exe).
+
 .PARAMETER ExePath
     Wintty.exe to test. Defaults to the x64 Debug build.
 
@@ -383,6 +387,7 @@ if ($skipped -gt 0) {
     Write-Host "$skipped/$Iterations iteration(s) were INCONCLUSIVE and are not scored." -ForegroundColor Yellow
 }
 if ($scored.Count -eq 0) {
+    # Stays 1: nothing was measured, so nothing is known about the product.
     Write-Host "FAIL: no iteration produced a usable measurement." -ForegroundColor Red
     exit 1
 }
@@ -391,7 +396,7 @@ if ($expectSecondarySplash) {
     $bad = @($scored | Where-Object { $_.SplashSightings -eq 0 })
     if ($bad.Count -gt 0) {
         Write-Host "FAIL: an independent launch was denied its splash in $($bad.Count)/$($scored.Count) scored iteration(s)." -ForegroundColor Red
-        exit 1
+        exit 2
     }
     Write-Host "PASS: the independent launch showed its splash in all $($scored.Count) scored iteration(s)." -ForegroundColor Green
     exit 0
@@ -400,7 +405,7 @@ if ($expectSecondarySplash) {
 $bad = @($scored | Where-Object { $_.SplashSightings -gt 0 })
 if ($bad.Count -gt 0) {
     Write-Host "FAIL: the secondary put a splash on screen in $($bad.Count)/$($scored.Count) scored iteration(s)." -ForegroundColor Red
-    exit 1
+    exit 2
 }
 
 Write-Host "PASS: no secondary showed a splash in any of $($scored.Count) scored iteration(s)." -ForegroundColor Green

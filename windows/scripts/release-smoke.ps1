@@ -8,8 +8,33 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $repo
-Assert-NoWintty
-$script:WinttyStamp = Get-WinttyLaunchStamp
+# Before the builds, not after: a ReleaseFast libghostty plus a Release shell
+# is minutes of work to then be told to close a window, and dotnet cannot
+# overwrite a locked Wintty.exe anyway.
+Assert-NoWintty -Context 'The release smoke'
+
+# One entry per launch, each with its own stamp. A single stamp taken at
+# script start would be minutes stale by the time anything launches, and
+# every Wintty the developer opened while the builds ran would look like
+# this run's.
+$script:Launched = @()
+
+function Invoke-LaunchSmoke {
+    param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Label)
+
+    $since = Get-WinttyLaunchStamp
+    $script:Launched += [pscustomobject]@{ Since = $since; Exe = $Exe }
+    $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
+    Start-Sleep -Seconds 3
+    $proc.Refresh()
+    if ($proc.HasExited) { throw "$Label Wintty exited early code=$($proc.ExitCode)" }
+    # Kill the tree: the shell runs as a child and a wedged one outlives a
+    # Stop-Process on the parent alone.
+    try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
+    Stop-WinttyStartedAfter -Since $since -ExePath $Exe
+    Write-Host "$Label launch ok"
+}
+
 try {
     Write-Host '== build-dll-release (ReleaseFast libghostty) =='
     just build-dll-release
@@ -26,12 +51,7 @@ try {
     if (-not $SkipLaunch) {
         Write-Host '== launch Release smoke (3s) =='
         Start-Sleep -Milliseconds 400
-        $proc = Start-Process -FilePath $releaseExe -PassThru -WorkingDirectory (Split-Path $releaseExe)
-        Start-Sleep -Seconds 3
-        $proc.Refresh()
-        if ($proc.HasExited) { throw "Release Wintty exited early code=$($proc.ExitCode)" }
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        Write-Host 'release launch ok'
+        Invoke-LaunchSmoke -Exe $releaseExe -Label 'release'
     }
 
     if (-not $SkipAot) {
@@ -52,19 +72,19 @@ try {
         Write-Host "aot publish ok: $pubExe"
         if (-not $SkipLaunch) {
             Write-Host '== launch NativeAOT smoke (3s) =='
-            Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $releaseExe
             Start-Sleep -Milliseconds 400
-            $proc = Start-Process -FilePath $pubExe -PassThru -WorkingDirectory (Split-Path $pubExe)
-            Start-Sleep -Seconds 3
-            $proc.Refresh()
-            if ($proc.HasExited) { throw "NativeAOT Wintty exited early code=$($proc.ExitCode)" }
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Write-Host 'aot launch ok'
+            Invoke-LaunchSmoke -Exe $pubExe -Label 'aot'
         }
     }
 
     @{ releaseExe = $releaseExe; ok = $true } | ConvertTo-Json | Write-Output
 }
 finally {
+    # A throw between Start-Process and the kill above leaves a smoke window
+    # on the desktop for the next harness to refuse over. Sweeping per
+    # recorded launch is a no-op when the happy path already reaped it.
+    foreach ($l in $script:Launched) {
+        Stop-WinttyStartedAfter -Since $l.Since -ExePath $l.Exe
+    }
     Pop-Location
 }

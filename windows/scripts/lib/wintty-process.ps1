@@ -52,17 +52,22 @@ function Stop-WinttyStartedAfter {
         [Parameter(Mandatory)][datetime]$Since,
         # Optional, and worth passing whenever the caller knows which exe it
         # launched: start time alone will also match an instance the
-        # developer opened while the run was in flight.
+        # developer opened while the run was in flight. Omit it to mean that
+        # deliberately; passing $null or '' is treated as a filter that could
+        # not be built, and sweeps nothing.
         [string]$ExePath,
         [int]$TimeoutMs = 3000
     )
 
+    # Three cases, and the distinction matters: a caller that omitted -ExePath
+    # is knowingly sweeping on time alone, but a caller that PASSED something
+    # empty or unresolvable meant to filter and failed to. Treating those the
+    # same is a fail-open: an unreadable path swept nothing while $null swept
+    # everything, which is backwards.
     $full = $null
-    if ($ExePath) {
+    if ($PSBoundParameters.ContainsKey('ExePath')) {
+        if ([string]::IsNullOrWhiteSpace($ExePath)) { return }
         $full = (Resolve-Path -LiteralPath $ExePath -ErrorAction SilentlyContinue)?.Path
-        # A path the caller supplied but that does not resolve means the
-        # filter cannot be applied. Sweep nothing rather than quietly
-        # widening to every process started since the stamp.
         if (-not $full) { return }
     }
 

@@ -71,7 +71,9 @@ try {
     $exited = $proc.WaitForExit($TimeoutMs)
     if (-not $exited) {
         Write-Error "TIMEOUT after ${TimeoutMs}ms - killing process"
-        try { Stop-Process -Id $proc.Id -Force }
+        # Kill the tree: the TUI runs as a child and would outlive a kill on
+        # the parent alone, and an orphan does not trip Assert-NoWintty.
+        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) }
         catch [System.InvalidOperationException] {}
         exit 2
     }
