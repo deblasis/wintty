@@ -220,13 +220,13 @@ function Invoke-El($el, [uint32]$ProcId, [string]$what, [int64]$MainHwnd = 0) {
     $inside = $rc -and $x -ge $rc.L -and $x -le $rc.R -and $y -ge $rc.T -and $y -le $rc.B
     if (-not $inside) {
         Write-Host "bounds outside hwnd for $what at $x,$y; Enter"
-        if ($MainHwnd -eq 0) { throw "HARVEST_MISS: empty/outside bounds for $what at $x,$y" }
+        if ($MainHwnd -eq 0) { throw "FOREGROUND_MISS: empty/outside bounds for $what at $x,$y" }
         [MzD]::Key($MainHwnd, 0x0D)
         Start-Sleep -Milliseconds 400
         return
     }
     $hit = [MzD]::ClickScreen($ProcId, $x, $y, $false)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
+    if (-not $hit.Ok) { throw "FOREGROUND_MISS: $what click $($hit.Why) class=$($hit.HitClass) at $x,$y" }
     Write-Host "click $what $x,$y"
     Start-Sleep -Milliseconds 400
 }
@@ -235,7 +235,7 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
     $rc = [MzD]::RectOf($MainHwnd)
     $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: grid context $($hit.Why) class=$($hit.HitClass)" }
+    if (-not $hit.Ok) { throw "FOREGROUND_MISS: grid context $($hit.Why) class=$($hit.HitClass)" }
     Start-Sleep -Milliseconds 300
     $pal = $null
     $dl = (Get-Date).AddMilliseconds(1200)
@@ -251,7 +251,7 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
         Write-Host "palette miss, grid dismiss ok=$($dismiss.Ok)"
         Start-Sleep -Milliseconds 300
         $hit = [MzD]::ClickScreen($ProcId, $rc.L + 400, $rc.T + 280, $true)
-        if (-not $hit.Ok) { throw "HARVEST_MISS: grid context retry $($hit.Why) class=$($hit.HitClass)" }
+        if (-not $hit.Ok) { throw "FOREGROUND_MISS: grid context retry $($hit.Why) class=$($hit.HitClass)" }
         Start-Sleep -Milliseconds 300
         $dl = (Get-Date).AddMilliseconds(1200)
         while ((Get-Date) -lt $dl -and $null -eq $pal) {
@@ -267,11 +267,16 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
 
 function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
-    $editCt = [System.Windows.Automation.ControlType]::Edit
+    # By AutomationId, not "the first Edit under the window". The terminal
+    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
+    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
+    # sink, SetValue typed into it, and the palette never filtered. The list
+    # then still held every command, so the lookup below failed on a command
+    # that was present the whole time.
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $editCt)
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
     $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no Edit in palette" }
+    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
     $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     $vp.SetValue($text)
     Write-Host "filter '$text'"
@@ -318,7 +323,7 @@ function Open-TabMenu([int64]$MainHwnd, [uint32]$ProcId) {
     $rc = [MzD]::RectOf($MainHwnd)
     $x = $rc.L + 80; $y = $rc.T + 16
     $hit = [MzD]::ClickScreen($ProcId, $x, $y, $true)
-    if (-not $hit.Ok) { throw "HARVEST_MISS: tab context $($hit.Why) class=$($hit.HitClass) at $x,$y" }
+    if (-not $hit.Ok) { throw "FOREGROUND_MISS: tab context $($hit.Why) class=$($hit.HitClass) at $x,$y" }
     Start-Sleep -Milliseconds 400
     return [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($MainHwnd))
 }
@@ -340,6 +345,7 @@ Shot $hwnd64 '00-launch'
 
 $overview = $false
 $script:OverviewMissed = $false
+$script:OverviewBroke = $false
 try {
     Invoke-PaletteCommand $hwnd64 $pid32 'show all' 'Show all tabs'
     Start-Sleep -Milliseconds 800
@@ -356,12 +362,20 @@ try {
     }
 } catch {
     Write-Host "overview: $_"
-    # Distinguish "the overview did not open" from "this harness never got to
-    # ask". A HARVEST_MISS or FOREGROUND_MISS is the click never landing, and
-    # reporting that as a product finding is how a flaky click becomes a bug
-    # report against the build.
-    if ("$_" -like '*HARVEST_MISS*' -or "$_" -like '*FOREGROUND_MISS*') {
+    # Distinguish "the overview did not open" from "the click never landed".
+    # Only the latter is a run that judged nothing. A HARVEST_MISS here means a
+    # named control was absent - no Command Palette entry, no Edit in the
+    # palette, no 'Show all tabs' after filtering - and that is a defect, so it
+    # must keep falling through to the exit-2 path below.
+    if ("$_" -like '*FOREGROUND_MISS*') {
         $script:OverviewMissed = $true
+    } else {
+        # Everything else thrown in here is evidence about the build: a named
+        # control that was not there, or a window rect that collapsed. It can
+        # be thrown AFTER $overview was already set true - the screenshot below
+        # the check is one such path - so a separate flag is needed; keying
+        # only off $overview would let it pass.
+        $script:OverviewBroke = $true
     }
 }
 
@@ -437,7 +451,7 @@ if ($null -ne $el) {
 
 $rc = [MzD]::RectOf($hwnd64)
 $menuHit = [MzD]::ClickScreen($pid32, $rc.L + 400, $rc.T + 280, $true)
-if (-not $menuHit.Ok) { throw "HARVEST_MISS: pane menu $($menuHit.Why) class=$($menuHit.HitClass)" }
+if (-not $menuHit.Ok) { throw "FOREGROUND_MISS: pane menu $($menuHit.Why) class=$($menuHit.HitClass)" }
 Start-Sleep -Milliseconds 500
 $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzD]::P($hwnd64))
 $zoomPane = $null -ne (Find-Name $root 'Zoom Pane')
@@ -508,17 +522,21 @@ $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc
     quake = [bool]$quake
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir 'result.json')
 Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
-# $overview is false both when the overview genuinely did not open and when
-# the harness never reached it - the run that prompted this logged
-# "HARVEST_MISS: grid context not Wintty" and then reported exit 2, a product
-# finding, for a click that never landed. A miss is a run that judged nothing,
-# so it leaves with 1.
+# Order matters. A dead process or a grown crash.log is evidence about the
+# build no matter what else happened, so it is checked first; letting the
+# missed-click branch preempt it would report a crash as "could not run" and
+# hand it to the runner to retry, where a clean second attempt buries it.
+if ($proc.HasExited -or $crashGrew) {
+    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+    exit 2
+}
+# Only now: a click that never landed says nothing about the overview.
 if ($script:OverviewMissed) {
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     Write-Host 'the tab overview could not be reached, so nothing is known about it'
     exit 1
 }
-if ($proc.HasExited -or $crashGrew -or -not $overview) {
+if (-not $overview -or $script:OverviewBroke) {
     Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
     exit 2
 }
