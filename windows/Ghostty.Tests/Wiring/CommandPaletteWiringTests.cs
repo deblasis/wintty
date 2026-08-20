@@ -167,10 +167,21 @@ public class CommandPaletteWiringTests
         var method = MainWindow().Method("FocusedTerminal");
         Assert.Single(method.Calls("FocusManager.GetFocusedElement"));
         Assert.Single(method.Calls("VisualTreeHelper.GetParent"));
-        Assert.Single(method.DescendantNodes().OfType<WhileStatementSyntax>());
+        var loop = Assert.Single(method.DescendantNodes().OfType<WhileStatementSyntax>());
         Assert.Contains(
             method.DescendantNodes().OfType<DeclarationPatternSyntax>(),
             p => p.Type.ToString() == "Controls.TerminalControl");
+
+        // Asserting the walk exists is not enough on its own: an
+        // unconditional `return null;` in front of it leaves every check
+        // above satisfied while the walk never runs. Guarding the ones that
+        // are reachable is the whole point, so require that nothing returns
+        // before the loop except from inside a conditional -- which is what
+        // the XamlRoot guard is.
+        var earlyReturns = method.Body!.Statements
+            .TakeWhile(s => s != loop)
+            .OfType<ReturnStatementSyntax>();
+        Assert.Empty(earlyReturns);
     }
 
     [Fact]
