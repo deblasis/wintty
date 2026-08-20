@@ -326,11 +326,14 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
 
 function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzI]::P($MainHwnd))
-    $editCt = [System.Windows.Automation.ControlType]::Edit
+    # By AutomationId, not "the first Edit under the window": the terminal
+    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
+    # sorts ahead of the palette, so FindFirst(Edit) typed into the sink and
+    # the palette never filtered.
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $editCt)
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
     $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: palette Edit" }
+    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
     $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     $vp.SetValue($text)
     Start-Sleep -Milliseconds 350

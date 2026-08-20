@@ -322,11 +322,16 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
 
 function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzOP]::P($MainHwnd))
-    $editCt = [System.Windows.Automation.ControlType]::Edit
+    # By AutomationId, not "the first Edit under the window". The terminal
+    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
+    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
+    # sink, SetValue typed into it, and the palette never filtered. The list
+    # then still held every command, so the lookup below failed on a command
+    # that was present the whole time.
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $editCt)
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
     $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no Edit in palette" }
+    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
     $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     $vp.SetValue($text)
     Write-Host "filter '$text'"

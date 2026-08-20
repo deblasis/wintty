@@ -1,12 +1,14 @@
 using System;
 using System.Linq;
 using System.ComponentModel;
+using Ghostty.Accessibility;
 using Ghostty.Commands;
 using Ghostty.Core.Config;
 using Ghostty.Core.Windows;
 using Ghostty.Services;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -295,6 +297,14 @@ internal sealed partial class CommandPaletteControl : UserControl
         {
             ResultsList.SelectedIndex = idx;
             ResultsList.ScrollIntoView(ResultsList.Items[idx]);
+
+            // Arrowing the palette never moves focus: OnSearchKeyDown handles
+            // Up/Down and marks them handled, so the list is never focused and
+            // its selection-changed event goes unannounced. Without this the
+            // row names below are invisible on the one path a screen-reader
+            // user actually takes through the palette. Announce is gated on a
+            // listener existing, so nobody else pays for it.
+            UiaAnnouncer.Announce(SearchBox, _vm.SelectedCommand.Title, "palette-selection");
         }
     }
 
@@ -323,6 +333,38 @@ internal sealed partial class CommandPaletteControl : UserControl
         ContainerContentChangingEventArgs args)
     {
         if (args.Item is not CommandItem item) return;
+
+        // Name the container before anything below can bail out. Without this
+        // the row's UIA name falls back to CommandItem.ToString(), so a screen
+        // reader announces the whole record - id, description, category, the
+        // Execute delegate - for every command in the list, and any automation
+        // client looking a command up by name finds nothing.
+        AutomationProperties.SetName(args.ItemContainer, item.Title);
+        // Clear rather than skip when there is no description. Containers are
+        // recycled - SyncFilteredCommands clears and refills the list on every
+        // keystroke - and a local value set on one item outlives it, so a row
+        // with no description would keep reading the previous row's. Name is
+        // safe because it is written unconditionally; HelpText was not.
+        // ClearValue, not an empty string: UIA reports "" as present-but-blank.
+        if (!string.IsNullOrEmpty(item.Description))
+        {
+            AutomationProperties.SetHelpText(args.ItemContainer, item.Description);
+        }
+        else
+        {
+            args.ItemContainer.ClearValue(AutomationProperties.HelpTextProperty);
+        }
+        // The key-cap is rendered in the last column, so a sighted user can see
+        // the command is bound. AcceleratorKey is the property Narrator reads
+        // for that; folding it into the name would just make every row longer.
+        if (item.Shortcut is { } binding)
+        {
+            AutomationProperties.SetAcceleratorKey(args.ItemContainer, FormatKeyBinding(binding));
+        }
+        else
+        {
+            args.ItemContainer.ClearValue(AutomationProperties.AcceleratorKeyProperty);
+        }
 
         // Phase 0 fires synchronously during measure; grab the template root.
         // Children are indexed by column order in the DataTemplate:

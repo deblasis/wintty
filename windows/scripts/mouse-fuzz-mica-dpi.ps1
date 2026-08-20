@@ -277,10 +277,27 @@ function Dump-NamesMatching($root, [string]$needle) {
     }
 }
 
-function Select-ComboItem($root, [uint32]$ProcId, [string]$card, [string]$item) {
+# AutomationId first, proximity only as a fallback. Locating a control by how
+# close it sits to a label works right up until the layout moves: this failed
+# on its second pass over 'Backdrop preset' after the first one changed the
+# backdrop and reflowed the page. The combos carry x:Name, which WinUI exposes
+# as the AutomationId, so there is a stable handle to use instead.
+function Find-ComboById($root, [string]$automationId) {
+    if ([string]::IsNullOrEmpty($automationId)) { return $null }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $automationId)
+    return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+}
+
+function Select-ComboItem($root, [uint32]$ProcId, [string]$card, [string]$item, [string]$AutomationId) {
     $named = Find-Name $root $card
     Show-El $named
-    $combo = Find-ComboNearName $root $card
+    $combo = Find-ComboById $root $AutomationId
+    if ($null -ne $combo) {
+        Write-Host "combo by id '$AutomationId'"
+    } else {
+        $combo = Find-ComboNearName $root $card
+    }
     if ($null -eq $combo) { throw "HARVEST_MISS: ComboBox near '$card'" }
     Show-El $combo
     $r = $combo.Current.BoundingRectangle
@@ -354,11 +371,16 @@ function Open-Palette([int64]$MainHwnd, [uint32]$ProcId) {
 
 function Set-PaletteFilter([int64]$MainHwnd, [string]$text) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($MainHwnd))
-    $editCt = [System.Windows.Automation.ControlType]::Edit
+    # By AutomationId, not "the first Edit under the window". The terminal
+    # keeps a 1x1 IME sink TextBox focused whenever a pane has focus, and it
+    # sorts ahead of the palette in the tree - so FindFirst(Edit) returned the
+    # sink, SetValue typed into it, and the palette never filtered. The list
+    # then still held every command, so the lookup below failed on a command
+    # that was present the whole time.
     $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $editCt)
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SearchBox')
     $edit = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
-    if ($null -eq $edit) { throw "HARVEST_MISS: no Edit in palette" }
+    if ($null -eq $edit) { throw "HARVEST_MISS: no SearchBox in palette" }
     $vp = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     $vp.SetValue($text)
     Write-Host "filter '$text'"
@@ -470,7 +492,7 @@ try {
     }
     if ($appearanceCards.Count -lt 3) { throw "PRODUCT_FAIL: missing appearance cards $($appearanceCards -join ',')" }
 
-    Select-ComboItem $sroot $pid32 'Backdrop preset' 'Frosted (Acrylic)'
+    Select-ComboItem $sroot $pid32 'Backdrop preset' 'Frosted (Acrylic)' -AutomationId 'BackgroundStyleCombo'
     Start-Sleep -Milliseconds 400
     $styleAfterFrosted = Read-ConfigKey $configPath 'background-style'
     Write-Host "styleAfterFrosted=$styleAfterFrosted"
@@ -478,7 +500,7 @@ try {
     if ($styleAfterFrosted -ne 'frosted') { throw "PRODUCT_FAIL: expected background-style=frosted got '$styleAfterFrosted'" }
 
     $sroot = [System.Windows.Automation.AutomationElement]::FromHandle([MzMD]::P($settingsHwnd))
-    Select-ComboItem $sroot $pid32 'Backdrop preset' 'Crystal (Zero blur)'
+    Select-ComboItem $sroot $pid32 'Backdrop preset' 'Crystal (Zero blur)' -AutomationId 'BackgroundStyleCombo'
     Start-Sleep -Milliseconds 400
     $styleAfterCrystal = Read-ConfigKey $configPath 'background-style'
     Write-Host "styleAfterCrystal=$styleAfterCrystal"
