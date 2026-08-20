@@ -138,7 +138,11 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
         var newVersion = Interlocked.Increment(ref _version);
         LogRecomposed(newVersion, next.Count);
 
-        _dispatcher(() => ProfilesChanged?.Invoke(this));
+        // Contained per subscriber: this runs as a dispatcher callback, and
+        // an exception escaping one of those cannot be marshalled back to
+        // the enqueuer, so WinRT stows it and fail-fasts the process.
+        _dispatcher(() => Config.ConfigChangeFanOut.InvokeAll(
+            ProfilesChanged, this, LogChangedHandlerFailed));
     }
 
     public ResolvedProfile? Resolve(string profileId)
@@ -200,4 +204,9 @@ internal sealed partial class ProfileRegistry : IProfileRegistry
                    Level = LogLevel.Warning,
                    Message = "discovery refresh failed")]
     private partial void LogDiscoveryRefreshFailed(Exception ex);
+
+    [LoggerMessage(EventId = LogEvents.Profiles.ChangedHandlerFailed,
+                   Level = LogLevel.Error,
+                   Message = "a profiles-changed subscriber threw; its view of the profiles is now stale")]
+    private partial void LogChangedHandlerFailed(Exception ex);
 }
