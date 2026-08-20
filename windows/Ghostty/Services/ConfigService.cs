@@ -615,7 +615,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // on top of the ColorValuesChanged dispatcher frame, and to match
         // the shape Reload already uses. The caches have finished settling
         // either way -- ReadFlags is synchronous and has returned.
-        _dispatcher.TryEnqueue(() => ConfigChanged?.Invoke(this));
+        //
+        // Contained for the same reason as Reload's fan-out, and it matters
+        // more here: this leg fires unattended on the OS light/dark schedule
+        // and on every high-contrast toggle, so a faulting subscriber would
+        // kill the app while nobody was touching it.
+        _dispatcher.TryEnqueue(
+            () => ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault));
     }
 
     /// <summary>
@@ -998,7 +1004,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         CursorTextColor = cursorText ?? bg;
         if (palette.Length >= 16)
             Array.Copy(palette, AnsiPalette, 16);
-        ConfigChanged?.Invoke(this);
+
+        // Invoked inline, but every caller reaches it from inside a
+        // dispatcher callback, so an escaping exception fail-fasts exactly
+        // as it would from the deferred fan-outs. Live theme preview also
+        // calls this once per arrow key, so a subscriber that throws would
+        // kill the app on a keystroke.
+        ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
     }
 
     private unsafe bool GetBool(string key)

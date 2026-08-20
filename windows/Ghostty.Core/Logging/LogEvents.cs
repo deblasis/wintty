@@ -38,6 +38,7 @@ internal static class LogEvents
         public const int RegistryRecomposed      = 1203;
         public const int DiscoveryRefreshFailed  = 1204;
         public const int ProfileParseWarning     = 1205;
+        public const int ChangedHandlerFailed    = 1206;
     }
 
     // 1300-1399: Hosting / window infrastructure

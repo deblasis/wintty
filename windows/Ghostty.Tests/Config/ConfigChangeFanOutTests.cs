@@ -130,21 +130,55 @@ public class ConfigChangeFanOutTests
     }
 
     /// <summary>
-    /// A subscriber that unsubscribes another mid-fan-out must not skip or
-    /// double-invoke anyone: GetInvocationList snapshots, so the list this
-    /// walks is the one that was current when the reload fired.
+    /// Every subscriber is invoked exactly once. A fan-out that walked the
+    /// list twice, or re-entered on a fault, would double-apply a config to
+    /// window chrome that is not idempotent everywhere.
     /// </summary>
     [Fact]
-    public void InvokeAll_WalksASnapshotOfTheSubscribers()
+    public void InvokeAll_InvokesEachSubscriberExactlyOnce()
     {
-        var seen = new List<string>();
-        Action? handlers = null;
-        Action second = () => seen.Add("second");
-        handlers += () => { seen.Add("first"); handlers -= second; };
-        handlers += second;
+        var counts = new Dictionary<string, int>();
+        void Count(string who) => counts[who] = counts.TryGetValue(who, out var n) ? n + 1 : 1;
+
+        Action<Service> handlers = _ => Count("first");
+        handlers += _ => throw new InvalidOperationException("middle");
+        handlers += _ => Count("third");
+
+        ConfigChangeFanOut.InvokeAll(handlers, new Service("cfg"), _ => { });
+
+        Assert.Equal(1, counts["first"]);
+        Assert.Equal(1, counts["third"]);
+    }
+
+    /// <summary>
+    /// A subscriber registered twice is a real shape (two windows, same
+    /// handler), and both registrations must fire.
+    /// </summary>
+    [Fact]
+    public void InvokeAll_InvokesADuplicateSubscriberOncePerRegistration()
+    {
+        var calls = 0;
+        Action shared = () => calls++;
+        Action handlers = shared;
+        handlers += shared;
 
         ConfigChangeFanOut.InvokeAll(handlers, _ => Assert.Fail("no fault expected"));
 
-        Assert.Equal(new[] { "first", "second" }, seen);
+        Assert.Equal(2, calls);
+    }
+
+    /// <summary>
+    /// A missing fault reporter is a wiring mistake in this repo's own code,
+    /// not a runtime condition, so it is worth failing loudly at the call
+    /// site rather than silently dropping every future fault. Pinned because
+    /// the guard is otherwise invisible to the rest of the suite.
+    /// </summary>
+    [Fact]
+    public void InvokeAll_RejectsAMissingFaultReporter()
+    {
+        Assert.Throws<ArgumentNullException>(
+            () => ConfigChangeFanOut.InvokeAll(() => { }, null!));
+        Assert.Throws<ArgumentNullException>(
+            () => ConfigChangeFanOut.InvokeAll(_ => { }, new Service("cfg"), null!));
     }
 }
