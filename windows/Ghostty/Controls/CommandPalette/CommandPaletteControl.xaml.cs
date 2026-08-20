@@ -3,6 +3,7 @@ using System.Linq;
 using System.ComponentModel;
 using Ghostty.Accessibility;
 using Ghostty.Commands;
+using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
 using Ghostty.Core.Windows;
 using Ghostty.Services;
@@ -49,6 +50,11 @@ internal sealed partial class CommandPaletteControl : UserControl
     // chrome (#236). Created in Configure() and disposed on Unloaded.
     // Null until Configure runs, which happens once during MainWindow init.
     private WindowThemeManager? _themeManager;
+
+    // Decides the mode label's accessible name and which result counts are
+    // worth speaking. Stateful across keystrokes (it suppresses repeats),
+    // so it lives with the control rather than being created per update.
+    private readonly CommandPaletteAnnouncer _announcer = new();
 
     public CommandPaletteControl()
     {
@@ -221,8 +227,21 @@ internal sealed partial class CommandPaletteControl : UserControl
 
             switch (e.PropertyName)
             {
+                case nameof(CommandPaletteViewModel.IsOpen):
+                    // Announce on open rather than waiting for StatusText:
+                    // reopening on the count it closed on raises nothing,
+                    // because the ViewModel suppresses same-value changes,
+                    // and the user would land in a palette that never said
+                    // how much it was offering.
+                    if (_vm.IsOpen)
+                    {
+                        _announcer.Reset();
+                        AnnounceStatus(_vm.StatusText);
+                    }
+                    break;
+
                 case nameof(CommandPaletteViewModel.ModeLabel):
-                    ModeLabel.Text = _vm.ModeLabel;
+                    SetModeLabel(_vm.ModeLabel);
                     UpdateFooterHints();
                     break;
 
@@ -247,17 +266,39 @@ internal sealed partial class CommandPaletteControl : UserControl
 
                 case nameof(CommandPaletteViewModel.StatusText):
                     StatusLabel.Text = _vm.StatusText;
-                    LiveAnnouncer.Text = _vm.StatusText;
+                    AnnounceStatus(_vm.StatusText);
                     break;
             }
         });
+    }
+
+    // The footer count is the only feedback that a query matched nothing,
+    // and the palette never moves focus off the search box, so a reader
+    // that only speaks what it is focused on would never reach it. Raise
+    // it from the search box for the same reason the bell announcement
+    // rides the focused element: that is where a reader is listening.
+    private void AnnounceStatus(string statusText)
+    {
+        if (_announcer.StatusChanged(statusText) is { } text)
+            UiaAnnouncer.Announce(SearchBox, text, "palette-status");
+    }
+
+    // Keep the spoken name in step with the visible text. An explicit
+    // AutomationProperties.Name replaces the text a reader would derive
+    // from the TextBlock, so leaving a fixed name here reads the field and
+    // never the mode.
+    private void SetModeLabel(string modeLabel)
+    {
+        ModeLabel.Text = modeLabel;
+        AutomationProperties.SetName(
+            ModeLabel, CommandPaletteAnnouncer.ModeAccessibleName(modeLabel));
     }
 
     private void SyncAll()
     {
         if (_vm is null) return;
 
-        ModeLabel.Text = _vm.ModeLabel;
+        SetModeLabel(_vm.ModeLabel);
         PinButton.IsChecked = _vm.IsPinned;
         SearchBox.Text = _vm.SearchText;
         StatusLabel.Text = _vm.StatusText;

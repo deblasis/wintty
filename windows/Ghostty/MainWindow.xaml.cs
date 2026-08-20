@@ -815,7 +815,7 @@ public sealed partial class MainWindow : Window
                 _commandPaletteVm.Close();
                 SetCommandPaletteOpenOnAllTerminals(false);
                 if (wasOpen)
-                    _previousFocusSurface?.Focus(FocusState.Programmatic);
+                    RestorePaletteFocus();
             }
             finally
             {
@@ -3329,6 +3329,43 @@ public sealed partial class MainWindow : Window
         FocusActiveLeaf();
     }
 
+    /// <summary>
+    /// The terminal that owns keyboard focus, or null when focus is
+    /// elsewhere in the window.
+    ///
+    /// FocusManager reports the innermost focused element, which is never
+    /// the TerminalControl: its GotFocus handler immediately hands focus
+    /// on to the zero-size ImeSink TextBox so WinUI will surface IME
+    /// composition (a UserControl never does). A direct cast to
+    /// TerminalControl therefore always yielded null, which is why the
+    /// palette's focus restore did nothing at all. Walk up to the owning
+    /// surface instead, the way SearchBarControl.ContainsFocus does.
+    /// </summary>
+    private Controls.TerminalControl? FocusedTerminal()
+    {
+        if (Content?.XamlRoot is null) return null;
+        var node = FocusManager.GetFocusedElement(Content.XamlRoot) as DependencyObject;
+        while (node is not null)
+        {
+            if (node is Controls.TerminalControl terminal) return terminal;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Hand focus back to whichever surface the palette was opened from.
+    /// Falls back to the active leaf when that surface is gone (a palette
+    /// command can close the very pane it was opened over) or was never
+    /// captured, because leaving focus on a dismissed popup strands a
+    /// keyboard user with nowhere to type.
+    /// </summary>
+    private void RestorePaletteFocus()
+    {
+        if (_previousFocusSurface?.Focus(FocusState.Programmatic) == true) return;
+        FocusActiveLeaf();
+    }
+
     private void ToggleCommandPalette()
     {
         if (_commandPaletteVm is not { } vm) return;
@@ -3341,13 +3378,13 @@ public sealed partial class MainWindow : Window
                 vm.Close();
                 CommandPalettePopup.IsOpen = false;
                 SetCommandPaletteOpenOnAllTerminals(false);
-                _previousFocusSurface?.Focus(FocusState.Programmatic);
+                RestorePaletteFocus();
             }
             finally { _paletteCloseState = PaletteCloseState.Idle; }
         }
         else
         {
-            _previousFocusSurface = FocusManager.GetFocusedElement(Content.XamlRoot) as Controls.TerminalControl;
+            _previousFocusSurface = FocusedTerminal();
 
             var windowWidth = AppWindow.Size.Width;
             var paletteWidth = Math.Min(600, windowWidth * 0.9);

@@ -23,6 +23,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:converters="using:Ghostty.Converters"
+    AutomationProperties.Name="Command palette"
     Width="560"
     HorizontalAlignment="Center"
     VerticalAlignment="Top">
@@ -222,13 +223,15 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Mode label: "Search" or "Command". Accessible name is
-                     distinct so it cannot steal UIA Find-Name from a command
-                     titled Search. -->
+                <!-- Mode label: "Search" or "Command". The accessible name
+                     carries the mode and stays distinct from a bare mode
+                     word, so it cannot steal UIA Find-Name from a command
+                     titled Search. Code-behind keeps it in step with Text;
+                     see CommandPaletteAnnouncer.ModeAccessibleName. -->
                 <TextBlock x:Name="ModeLabel"
                            Grid.Column="0"
                            Text="Search"
-                           AutomationProperties.Name="Palette mode"
+                           AutomationProperties.Name="Search mode"
                            FontSize="{StaticResource CaptionTextBlockFontSize}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            VerticalAlignment="Center"/>
@@ -240,6 +243,7 @@
                               Padding="0"
                               Background="Transparent"
                               BorderThickness="0"
+                              AutomationProperties.Name="Keep palette open"
                               ToolTipService.ToolTip="Keep open after executing a command (Pin)"
                               Checked="OnPinChecked"
                               Unchecked="OnPinUnchecked">
@@ -250,11 +254,15 @@
                 </ToggleButton>
             </Grid>
 
-            <!-- ── Row 1: Search box ── -->
+            <!-- ── Row 1: Search box ──
+                 PlaceholderText is not the UIA name: it is spoken only as
+                 help text by some readers and by none once the box has
+                 content, so the box needs a name of its own. -->
             <TextBox x:Name="SearchBox"
                      Grid.Row="1"
                      Margin="8,0"
                      Padding="8,10"
+                     AutomationProperties.Name="Search commands"
                      PlaceholderText="Search commands or type &gt; for actions..."
                      Background="Transparent"
                      BorderThickness="0"
@@ -272,6 +280,7 @@
             <!-- ── Row 3: Results list ── -->
             <ListView x:Name="ResultsList"
                       Grid.Row="3"
+                      AutomationProperties.Name="Command results"
                       MaxHeight="320"
                       SelectionMode="Single"
                       IsItemClickEnabled="True"
@@ -315,20 +324,13 @@
             </Grid>
 
             <!--
-                Hidden live region for screen-reader announcements.
-                Sits outside the visual layout at z-order 0 with
-                Width/Height=0 so it consumes no space.
-                AutomationProperties.LiveSetting=Polite ensures
-                changes are announced after the user finishes their
-                current interaction, not immediately (which would be
-                Assertive).
+                There is deliberately no hidden live-region TextBlock here.
+                A LiveSetting alone announces nothing: the change has to be
+                pushed as a UIA event, and a zero-size zero-opacity element
+                is a poor thing to push one from. Status goes through
+                UiaAnnouncer from the focused search box instead, which is
+                the one mechanism the rest of the app already uses.
             -->
-            <TextBlock x:Name="LiveAnnouncer"
-                       Grid.Row="0" Grid.RowSpan="6"
-                       Width="0" Height="0"
-                       Opacity="0"
-                       IsHitTestVisible="False"
-                       AutomationProperties.LiveSetting="Polite"/>
         </Grid>
     </Border>
 </UserControl>

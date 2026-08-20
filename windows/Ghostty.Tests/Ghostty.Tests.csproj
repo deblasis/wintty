@@ -122,6 +122,14 @@
     <EmbeddedResource Include="..\Ghostty\Controls\Search\SearchBarControl.xaml"
                       Link="Search\SearchBarControl.xaml"
                       LogicalName="Ghostty.Tests.Search.SearchBarControl.xaml" />
+    <!--
+      The palette's XAML, for CommandPaletteAutomationTests. The names it
+      checks are the ones a screen reader speaks; nothing in C# can assert
+      they are still on the elements.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Controls\CommandPalette\CommandPaletteControl.xaml"
+                      Link="Commands\CommandPaletteControl.xaml"
+                      LogicalName="Ghostty.Tests.Commands.CommandPaletteControl.xaml" />
     <EmbeddedResource Include="..\Ghostty\Settings\CheatSheetDialog.xaml"
                       Link="Settings\CheatSheetDialog.xaml"
                       LogicalName="Ghostty.Tests.Settings.CheatSheetDialog.xaml" />
