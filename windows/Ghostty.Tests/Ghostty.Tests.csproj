@@ -37,6 +37,15 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!--
+      The compiler as a library, for the wiring guards. The WinUI half of
+      the shell cannot be loaded into a test host, so what those tests can
+      reach is its source; parsing it is the difference between asserting
+      the code does something and asserting a string appears somewhere in
+      the file, which a mutation that keeps the string and drops the
+      behaviour walks straight through.
+    -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -122,6 +131,14 @@
     <EmbeddedResource Include="..\Ghostty\Controls\Search\SearchBarControl.xaml"
                       Link="Search\SearchBarControl.xaml"
                       LogicalName="Ghostty.Tests.Search.SearchBarControl.xaml" />
+    <!--
+      The palette's XAML, for CommandPaletteAutomationTests. The names it
+      checks are the ones a screen reader speaks; nothing in C# can assert
+      they are still on the elements.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Controls\CommandPalette\CommandPaletteControl.xaml"
+                      Link="Commands\CommandPaletteControl.xaml"
+                      LogicalName="Ghostty.Tests.Commands.CommandPaletteControl.xaml" />
     <EmbeddedResource Include="..\Ghostty\Settings\CheatSheetDialog.xaml"
                       Link="Settings\CheatSheetDialog.xaml"
                       LogicalName="Ghostty.Tests.Settings.CheatSheetDialog.xaml" />
