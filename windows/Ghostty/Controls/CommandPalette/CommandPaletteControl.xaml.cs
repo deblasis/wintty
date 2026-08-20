@@ -59,6 +59,7 @@ internal sealed partial class CommandPaletteControl : UserControl
     public CommandPaletteControl()
     {
         InitializeComponent();
+        LinkSearchBoxToResults();
         // Configure() runs during MainWindow init, before this control
         // is in the visual tree. Parent-walk to the Popup may not
         // resolve yet, so re-apply on Loaded to guarantee the Popup's
@@ -68,6 +69,13 @@ internal sealed partial class CommandPaletteControl : UserControl
     }
 
     private void OnPaletteLoaded(object sender, RoutedEventArgs e) => ApplyTheme();
+
+    // Up/Down are handled in OnSearchKeyDown and marked handled, so focus
+    // never leaves the search box while the user walks the list. That is
+    // the case ControlledPeers exists for: it tells a reader which element
+    // the box it is sitting in drives, so the list is reachable at all.
+    private void LinkSearchBoxToResults() =>
+        AutomationProperties.GetControlledPeers(SearchBox).Add(ResultsList);
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -169,6 +177,18 @@ internal sealed partial class CommandPaletteControl : UserControl
     public void FocusSearchBox()
     {
         SearchBox.Focus(FocusState.Programmatic);
+
+        // The result count is published only now, and in a follow-up turn
+        // of the queue rather than alongside the focus call. Everything
+        // the view model raises while opening is already queued ahead of
+        // this, and a reader flushes what it is holding when focus moves,
+        // so a count published any earlier is a count published into the
+        // gap. Focused() is what holds it back until here.
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            if (_vm is null) return;
+            PublishStatus(_announcer.Focused(_vm.StatusText));
+        });
     }
 
     /// <summary>
@@ -228,16 +248,12 @@ internal sealed partial class CommandPaletteControl : UserControl
             switch (e.PropertyName)
             {
                 case nameof(CommandPaletteViewModel.IsOpen):
-                    // Announce on open rather than waiting for StatusText:
-                    // reopening on the count it closed on raises nothing,
-                    // because the ViewModel suppresses same-value changes,
-                    // and the user would land in a palette that never said
-                    // how much it was offering.
-                    if (_vm.IsOpen)
-                    {
-                        _announcer.Reset();
-                        AnnounceStatus(_vm.StatusText);
-                    }
+                    // Arm the announcer before any of the counts this open
+                    // is about to raise reach it. Reopening on the count it
+                    // closed on raises no StatusText at all, because the
+                    // view model suppresses same-value changes, so the open
+                    // itself has to be what speaks.
+                    if (_vm.IsOpen) _announcer.Opening();
                     break;
 
                 case nameof(CommandPaletteViewModel.ModeLabel):
@@ -265,22 +281,28 @@ internal sealed partial class CommandPaletteControl : UserControl
                     break;
 
                 case nameof(CommandPaletteViewModel.StatusText):
-                    StatusLabel.Text = _vm.StatusText;
-                    AnnounceStatus(_vm.StatusText);
+                    PublishStatus(_announcer.StatusChanged(_vm.StatusText));
                     break;
             }
         });
     }
 
-    // The footer count is the only feedback that a query matched nothing,
-    // and the palette never moves focus off the search box, so a reader
-    // that only speaks what it is focused on would never reach it. Raise
-    // it from the search box for the same reason the bell announcement
-    // rides the focused element: that is where a reader is listening.
-    private void AnnounceStatus(string statusText)
+    // Put the current count on screen, and speak it when the announcer
+    // says this one is worth speaking.
+    //
+    // The count rides the footer label as a live region rather than a
+    // notification from the search box. Notifications are queued per
+    // source element and MostRecent discards whatever is still pending
+    // from that element, so a count raised from the search box is
+    // discarded by the row title raised from the search box immediately
+    // after it - which is every keystroke. A live region is a different
+    // element and a different event class, so the two stop colliding.
+    private void PublishStatus(string? toSpeak)
     {
-        if (_announcer.StatusChanged(statusText) is { } text)
-            UiaAnnouncer.Announce(SearchBox, text, "palette-status");
+        if (_vm is null) return;
+        StatusLabel.Text = _vm.StatusText;
+        if (toSpeak is null) return;
+        UiaAnnouncer.RaiseLiveRegionChanged(StatusLabel);
     }
 
     // Keep the spoken name in step with the visible text. An explicit
@@ -375,37 +397,17 @@ internal sealed partial class CommandPaletteControl : UserControl
     {
         if (args.Item is not CommandItem item) return;
 
-        // Name the container before anything below can bail out. Without this
-        // the row's UIA name falls back to CommandItem.ToString(), so a screen
-        // reader announces the whole record - id, description, category, the
-        // Execute delegate - for every command in the list, and any automation
-        // client looking a command up by name finds nothing.
-        AutomationProperties.SetName(args.ItemContainer, item.Title);
-        // Clear rather than skip when there is no description. Containers are
-        // recycled - SyncFilteredCommands clears and refills the list on every
-        // keystroke - and a local value set on one item outlives it, so a row
-        // with no description would keep reading the previous row's. Name is
-        // safe because it is written unconditionally; HelpText was not.
-        // ClearValue, not an empty string: UIA reports "" as present-but-blank.
-        if (!string.IsNullOrEmpty(item.Description))
-        {
-            AutomationProperties.SetHelpText(args.ItemContainer, item.Description);
-        }
-        else
-        {
-            args.ItemContainer.ClearValue(AutomationProperties.HelpTextProperty);
-        }
-        // The key-cap is rendered in the last column, so a sighted user can see
-        // the command is bound. AcceleratorKey is the property Narrator reads
-        // for that; folding it into the name would just make every row longer.
-        if (item.Shortcut is { } binding)
-        {
-            AutomationProperties.SetAcceleratorKey(args.ItemContainer, FormatKeyBinding(binding));
-        }
-        else
-        {
-            args.ItemContainer.ClearValue(AutomationProperties.AcceleratorKeyProperty);
-        }
+        // Name the container before anything below can bail out; the
+        // decision of what each property should hold (and which of them
+        // are absent for this item) is CommandRowAutomation's.
+        var row = CommandRowAutomation.For(
+            item.Title,
+            item.Description,
+            item.Shortcut is { } binding ? FormatKeyBinding(binding) : null);
+
+        AutomationProperties.SetName(args.ItemContainer, row.Name);
+        SetOrClear(args.ItemContainer, AutomationProperties.HelpTextProperty, row.HelpText);
+        SetOrClear(args.ItemContainer, AutomationProperties.AcceleratorKeyProperty, row.AcceleratorKey);
 
         // Phase 0 fires synchronously during measure; grab the template root.
         // Children are indexed by column order in the DataTemplate:
@@ -485,6 +487,19 @@ internal sealed partial class CommandPaletteControl : UserControl
                 shortcutBorder.Visibility = Visibility.Collapsed;
             }
         }
+    }
+
+    // Containers are recycled - SyncFilteredCommands clears and refills the
+    // list on every keystroke - and a local value set for one item outlives
+    // it, so an absent value has to be cleared rather than blanked: UIA
+    // reports an empty string as present-but-blank, which leaves the next
+    // row reading the previous row's text.
+    private static void SetOrClear(DependencyObject target, DependencyProperty property, string? value)
+    {
+        if (value is null)
+            target.ClearValue(property);
+        else
+            target.SetValue(property, value);
     }
 
     // ── UI → ViewModel ────────────────────────────────────────────────────────

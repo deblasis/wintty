@@ -23,7 +23,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:converters="using:Ghostty.Converters"
-    AutomationProperties.Name="Command palette"
+    AutomationProperties.Name="Command palette overlay"
     Width="560"
     HorizontalAlignment="Center"
     VerticalAlignment="Top">
@@ -307,9 +307,19 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Status text: "N commands" / "N actions" -->
+                <!--
+                    Status text: "N commands" / "N actions". Also the
+                    palette's live region: it is the only feedback that a
+                    query matched nothing, and the palette never moves
+                    focus off the search box, so a reader that speaks only
+                    what it is focused on would never reach it. Polite so
+                    it lands after the row title rather than cutting it
+                    off. Code-behind raises the change; a LiveSetting on
+                    its own is silent.
+                -->
                 <TextBlock x:Name="StatusLabel"
                            Grid.Column="0"
+                           AutomationProperties.LiveSetting="Polite"
                            FontSize="{StaticResource CaptionTextBlockFontSize}"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                            VerticalAlignment="Center"/>
@@ -322,15 +332,6 @@
                            VerticalAlignment="Center"
                            Text="↑↓ navigate   ↵ run   Esc close"/>
             </Grid>
-
-            <!--
-                There is deliberately no hidden live-region TextBlock here.
-                A LiveSetting alone announces nothing: the change has to be
-                pushed as a UIA event, and a zero-size zero-opacity element
-                is a poor thing to push one from. Status goes through
-                UiaAnnouncer from the focused search box instead, which is
-                the one mechanism the rest of the app already uses.
-            -->
         </Grid>
     </Border>
 </UserControl>

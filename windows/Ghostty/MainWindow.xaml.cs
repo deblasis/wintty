@@ -3354,17 +3354,29 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Hand focus back to whichever surface the palette was opened from.
-    /// Falls back to the active leaf when that surface is gone (a palette
-    /// command can close the very pane it was opened over) or was never
-    /// captured, because leaving focus on a dismissed popup strands a
-    /// keyboard user with nowhere to type.
+    /// Hand focus back to whichever surface the palette was opened from,
+    /// because leaving it on a dismissed popup strands a keyboard user
+    /// with nowhere to type.
+    ///
+    /// Deferred rather than immediate: this runs inside the Popup's own
+    /// teardown, where WinUI is still moving focus itself, so a
+    /// synchronous call here is one the framework can overwrite on its
+    /// way out. The fallback already went through the queue; the primary
+    /// path has to take the same turn or the two disagree about when they
+    /// happen.
+    ///
+    /// The fallback covers a palette opened while focus sat outside any
+    /// terminal, and a captured surface that will no longer take focus.
+    /// Executing a command does not arrive here at all: that path
+    /// early-returns out of Popup.Closed on the close state, and the
+    /// command itself decides where focus belongs.
     /// </summary>
-    private void RestorePaletteFocus()
-    {
-        if (_previousFocusSurface?.Focus(FocusState.Programmatic) == true) return;
-        FocusActiveLeaf();
-    }
+    private void RestorePaletteFocus() =>
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_previousFocusSurface?.Focus(FocusState.Programmatic) == true) return;
+            FocusActiveLeaf();
+        });
 
     private void ToggleCommandPalette()
     {

@@ -4,15 +4,16 @@ namespace Ghostty.Core.Accessibility;
 
 /// <summary>
 /// What the command palette tells a screen reader: how the mode label is
-/// named, and which result-count changes are worth speaking.
+/// named, and which result counts are worth speaking, and when.
 ///
-/// Pure and deterministic so the wording and the repeat suppression can be
-/// exercised without a live UIA tree; the control only forwards whatever
-/// comes back out of here to the announcer.
+/// Pure and deterministic so the wording, the repeat suppression and the
+/// hold-until-focus rule can be exercised without a live UIA tree; the
+/// control only publishes whatever comes back out of here.
 /// </summary>
 public sealed class CommandPaletteAnnouncer
 {
-    private string? _lastStatus;
+    private string? _lastSpoken;
+    private bool _awaitingFocus;
 
     /// <summary>
     /// Accessible name for the mode label, whose own text ("Search" /
@@ -32,23 +33,48 @@ public sealed class CommandPaletteAnnouncer
             : modeLabel.Trim() + " mode";
 
     /// <summary>
-    /// The result count to speak, or null when there is nothing new to
-    /// say. Repeats are dropped because the palette recomputes its status
-    /// on every keystroke and most keystrokes leave the count alone;
-    /// hearing "12 commands" again after each letter buries the row title
-    /// that is spoken alongside it.
+    /// The palette has opened but focus has not reached it yet.
+    ///
+    /// Everything the view model raises while opening lands before the
+    /// host moves focus into the search box, and a reader flushes what it
+    /// is holding when focus moves. Speaking the count there means
+    /// speaking it into the gap, and worse, banking it: the identical
+    /// count arriving after focus would then be suppressed as a repeat.
+    /// So the count is held, unrecorded, until <see cref="Focused"/>.
     /// </summary>
-    public string? StatusChanged(string? statusText)
+    public void Opening()
     {
-        if (string.IsNullOrWhiteSpace(statusText)) return null;
-        if (string.Equals(statusText, _lastStatus, StringComparison.Ordinal)) return null;
-        _lastStatus = statusText;
-        return statusText;
+        _lastSpoken = null;
+        _awaitingFocus = true;
     }
 
     /// <summary>
-    /// Forget the last spoken status, so reopening the palette on the same
-    /// count says it again instead of opening in silence.
+    /// Focus has landed in the palette. Returns the result count to speak,
+    /// or null when it has already been spoken.
     /// </summary>
-    public void Reset() => _lastStatus = null;
+    public string? Focused(string? statusText)
+    {
+        _awaitingFocus = false;
+        return Speak(statusText);
+    }
+
+    /// <summary>
+    /// A new result count. Returns what to speak, or null when there is
+    /// nothing new to say.
+    ///
+    /// Repeats are dropped because the palette recomputes its status on
+    /// every keystroke and most keystrokes leave the count alone; hearing
+    /// "12 commands" again after each letter buries the row title that is
+    /// spoken alongside it.
+    /// </summary>
+    public string? StatusChanged(string? statusText) =>
+        _awaitingFocus ? null : Speak(statusText);
+
+    private string? Speak(string? statusText)
+    {
+        if (string.IsNullOrWhiteSpace(statusText)) return null;
+        if (string.Equals(statusText, _lastSpoken, StringComparison.Ordinal)) return null;
+        _lastSpoken = statusText;
+        return statusText;
+    }
 }
