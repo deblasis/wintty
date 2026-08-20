@@ -276,9 +276,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // while a window is tearing down or a tab is mid-detach, and
             // a XAML write against a dying leaf must not strand the rest
             // of the tree on the old fill. Letting it escape would be
-            // worse still -- this runs from OnConfigReloadedChrome, one
-            // subscriber of many on ConfigChanged, so a throw here stops
-            // every later subscriber from seeing the reload at all.
+            // worse still -- this runs from OnConfigReloadedChrome, which
+            // is a sequence of deliberately disjoint chrome steps, so a
+            // throw here strands every later step in that sequence and
+            // leaves the window half-applied. The fan-out now contains
+            // each subscriber, so the other windows keep their reload
+            // either way, but this window's own remaining steps do not.
             try
             {
                 leaf.Terminal().ApplyGutterBrush();

@@ -525,10 +525,17 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // Fired even when the snapshot failed: libghostty has moved, so
         // suppressing this would leave the chrome painting against a
         // terminal that already repainted.
+        //
+        // Contained per subscriber. This body is a DispatcherQueueHandler, so
+        // an exception escaping it fail-fasts the whole process with a
+        // stowed exception that leaves no managed stack behind -- which is
+        // how a reload landing mid-startup, while the window chrome was
+        // still being built, presented as an unattributable 0xC000027B on
+        // first launch. See ConfigChangeFanOut for the second reason.
         _dispatcher.TryEnqueue(() =>
         {
-            ConfigChanged?.Invoke(this);
-            ProfileConfigChanged?.Invoke();
+            ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
+            ConfigChangeFanOut.InvokeAll(ProfileConfigChanged, LogChangedHandlerFault);
         });
         return true;
     }
@@ -608,7 +615,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // on top of the ColorValuesChanged dispatcher frame, and to match
         // the shape Reload already uses. The caches have finished settling
         // either way -- ReadFlags is synchronous and has returned.
-        _dispatcher.TryEnqueue(() => ConfigChanged?.Invoke(this));
+        //
+        // Contained for the same reason as Reload's fan-out, and it matters
+        // more here: this leg fires unattended on the OS light/dark schedule
+        // and on every high-contrast toggle, so a faulting subscriber would
+        // kill the app while nobody was touching it.
+        _dispatcher.TryEnqueue(
+            () => ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault));
     }
 
     /// <summary>
@@ -991,7 +1004,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         CursorTextColor = cursorText ?? bg;
         if (palette.Length >= 16)
             Array.Copy(palette, AnsiPalette, 16);
-        ConfigChanged?.Invoke(this);
+
+        // Invoked inline, but every caller reaches it from inside a
+        // dispatcher callback, so an escaping exception fail-fasts exactly
+        // as it would from the deferred fan-outs. Live theme preview also
+        // calls this once per arrow key, so a subscriber that throws would
+        // kill the app on a keystroke.
+        ConfigChangeFanOut.InvokeAll(ConfigChanged, this, LogChangedHandlerFault);
     }
 
     private unsafe bool GetBool(string key)
@@ -1483,6 +1502,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         }
     }
 
+    /// <summary>
+    /// Static rather than a lambda so the fan-out does not allocate a
+    /// closure per reload, and so both call sites provably report the same
+    /// way.
+    /// </summary>
+    private static void LogChangedHandlerFault(Exception ex)
+        => StaticLoggers.ConfigService.LogChangedHandlerFailed(ex);
+
     public void Dispose()
     {
         BeginShutdown();
@@ -1509,6 +1536,16 @@ internal static partial class ConfigServiceLogExtensions
                    Level = LogLevel.Warning,
                    Message = "[ConfigService] Could not seed comment header into empty config file")]
     internal static partial void LogSeedFailed(
+        this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Error: the subscriber that threw did not apply the new config, so
+    // some part of the UI is now painting against a config the rest of the
+    // app has moved past. Containing it keeps the process alive and leaves
+    // a stack to triage, which a stowed exception does not.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.ChangedHandlerFailed,
+                   Level = LogLevel.Error,
+                   Message = "[ConfigService] A config-changed subscriber threw; its view of the config is now stale")]
+    internal static partial void LogChangedHandlerFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
 
     // Error, matching LogReloadFailed: the themed values keep resolving

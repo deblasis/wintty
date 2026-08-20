@@ -579,9 +579,42 @@ internal sealed partial class VerticalTabStrip : UserControl
         });
     }
 
-    private void SetNavResource(string key, Brush brush) => NavView.Resources[key] = brush;
+    /// <summary>
+    /// A config reload can land while this strip is still being built or is
+    /// already tearing down, and the write into the NavigationView's
+    /// resource dictionary fails when it does. Swallowing it costs the
+    /// affected brush until the next reload; letting it escape costs far
+    /// more, because the caller is one step of several in
+    /// OnConfigReloadedChrome and a throw here strands every later step --
+    /// which is how the window ended up with a new backdrop over a stale
+    /// root background. Same guard PaneHost.ApplyGutterBrushes uses, for
+    /// the same reason.
+    /// </summary>
+    private void SetNavResource(string key, Brush brush)
+    {
+        try
+        {
+            NavView.Resources[key] = brush;
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
+                                or InvalidOperationException
+                                or NullReferenceException)
+        {
+        }
+    }
 
-    private void ClearNavResource(string key) => NavView.Resources.Remove(key);
+    private void ClearNavResource(string key)
+    {
+        try
+        {
+            NavView.Resources.Remove(key);
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
+                                or InvalidOperationException
+                                or NullReferenceException)
+        {
+        }
+    }
 
     private SolidColorBrush ResolveThemeBrush(string key)
     {
