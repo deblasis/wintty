@@ -38,6 +38,32 @@ internal static class UiaAnnouncer
     }
 
     /// <summary>
+    /// Re-read <paramref name="source"/> as a live region.
+    ///
+    /// Declaring AutomationProperties.LiveSetting on an element announces
+    /// nothing on its own: WinUI raises no automation event when the text
+    /// under it is assigned, so the client is never told to look again.
+    /// This is the missing half.
+    ///
+    /// Separate from <see cref="Announce"/> on purpose. Notifications are
+    /// queued per source element and MostRecent discards the ones still
+    /// pending from that element, so state raised alongside a stream of
+    /// notifications from the same place loses every race. A live region
+    /// is a different element and a different event class, so the two
+    /// coexist instead of overwriting each other.
+    /// </summary>
+    internal static void RaiseLiveRegionChanged(FrameworkElement? source)
+    {
+        if (source is null) return;
+        if (!AnyoneListening()) return;
+
+        var peer = FrameworkElementAutomationPeer.FromElement(source)
+            ?? FrameworkElementAutomationPeer.CreatePeerForElement(source)
+            ?? new FrameworkElementAutomationPeer(source);
+        peer.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+    }
+
+    /// <summary>
     /// Whether anything is listening. Gated like TerminalAutomationPeer's
     /// raises: crossing the UIA boundary with nobody advised is work for
     /// nothing. There is no AutomationEvents.Notification to ask
