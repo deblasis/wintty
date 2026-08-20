@@ -12,6 +12,14 @@
     Search is ASCII case-insensitive (src/terminal/search/sliding_window.zig
     uses std.ascii.indexOfIgnoreCase), so the oracle folds case the same way.
 
+    The corpus the oracle reads is typed into a live shell, so every seeding
+    send is read back off the input row before Enter commits it. A dropped
+    character there is silent and moves the answer for every later count
+    rather than failing one check, so a line that cannot be read back ends
+    the run as a harness failure - the corpus was never established, and a
+    harness that could not build its own premise has nothing to say about
+    the product.
+
     Failures are recorded and the run continues: one broken invariant should
     not hide the rest.
 
@@ -411,13 +419,17 @@ function Get-FocusedName {
 
 # ---- oracle ---------------------------------------------------------------
 
-# Non-overlapping, ASCII-case-insensitive occurrence count, matching the way
-# the sliding window advances past each hit.
-function Measure-Occurrences([string]$haystack, [string]$needle) {
+# Non-overlapping occurrence count. The default folds case because that is
+# what the oracle needs: search is ASCII case-insensitive, and the sliding
+# window advances past each hit the same way. The seed read-back passes
+# Ordinal instead - a line that came back in a different case did not come
+# back.
+function Measure-Occurrences([string]$haystack, [string]$needle,
+                             [StringComparison]$comparison = [StringComparison]::OrdinalIgnoreCase) {
     if ([string]::IsNullOrEmpty($needle)) { return 0 }
     $n = 0; $i = 0
     while ($true) {
-        $j = $haystack.IndexOf($needle, $i, [StringComparison]::OrdinalIgnoreCase)
+        $j = $haystack.IndexOf($needle, $i, $comparison)
         if ($j -lt 0) { break }
         $n++; $i = $j + $needle.Length
     }
@@ -552,6 +564,121 @@ function Clear-Needle {
     # Select-all then Backspace: shorter and less racy than N backspaces.
     Send-Chord @([SFz]::VK_CONTROL) ([SFz]::VK_A) 120
     Send-Chord @() ([SFz]::VK_BACK) 250
+}
+
+# ---- seeding --------------------------------------------------------------
+#
+# A seed line is typed into a live shell, and a character it loses on the way
+# is invisible: nothing throws, the shell just runs something else. The corpus
+# is what every oracle count is measured against, so a lost character does not
+# fail one check, it moves the answer for the rest of the run - a false pass
+# and a false finding are equally reachable from there.
+#
+# The needle path already refuses to trust a send (see 'needle-box-drift': it
+# reads the box back and compares). These three helpers are the same
+# discipline where there is no box to read, only the terminal document.
+
+# How many times a seed line is retyped before the run gives up on it.
+$script:SeedAttempts = 3
+
+# The first character after the search bar closes gets eaten. Escape tears the
+# bar down and XAML hands focus back to the terminal asynchronously, so a
+# keystroke that arrives mid-handoff lands nowhere: a run that typed
+# "$a='ZQ'+'XW'; ..." straight after Escape reached the shell as
+# "a='ZQ'+'XW'; ...", one dropped '$', and the pipeline behind it then ran
+# against a variable nobody set.
+#
+# The needle box is the only element that can be named positively here, so the
+# gate is "the bar is gone and focus has left it" rather than "the terminal has
+# focus" - TerminalControl's UIA name is not stable enough to wait on.
+function Wait-ShellFocus([int]$timeoutMs = 3000) {
+    $dl = (Get-Date).AddMilliseconds($timeoutMs)
+    while ((Get-Date) -lt $dl) {
+        if (-not (Test-SearchBarOpen (Get-Root)) -and (Get-FocusedName) -ne 'Search scrollback') {
+            # UIA reports the handoff slightly before the island will take a
+            # keystroke, so the settle is on top of the wait, not instead of it.
+            Start-Sleep -Milliseconds 250
+            return $true
+        }
+        Start-Sleep -Milliseconds 120
+    }
+    return $false
+}
+
+# True when the send put one more copy of the seed line into the document.
+#
+# Equality against a row is not on offer: the shell owns that row and repaints
+# it with a prompt in front, a PSReadLine prediction in grey behind the cursor
+# and syntax colours over the top, and a long line wraps. Containment is the
+# strongest check that survives all of those, and it still catches every
+# dropped, doubled or reordered character in the typed text itself, which is
+# the failure being guarded. A check that fires on a legitimate repaint would
+# be worse than no check at all, because it would be switched off.
+#
+# Containment of the *document* is not enough on its own: the emit op retypes
+# the same line every few iterations, so from the second one on the scrollback
+# already holds a copy and a bare containment check would pass on what the
+# previous iteration echoed, whatever this send did. The count has to go up.
+#
+# The document unwraps soft wraps (Screen.selectionString passes unwrap = true),
+# so a wrapped input line rejoins and the ordinal count sees it whole. The
+# newline-stripped second look is only for the case where it does not: it
+# tolerates a row boundary landing inside the typed text, and nothing else.
+#
+# The one way this can say "no" about a send that worked is scrollback that
+# evicted an older copy in the same window, leaving the count level. That
+# needs a scrollback-limit small enough for a run to fill, which the default
+# config used here is not; and the cost of a false no is a retype, not a
+# wrong verdict.
+function Test-SeedLanded([string]$before, [string]$after, [string]$text) {
+    if ([string]::IsNullOrEmpty($text)) { return $true }
+    if ([string]::IsNullOrEmpty($after)) { return $false }
+    $ord = [StringComparison]::Ordinal
+    if ((Measure-Occurrences $after $text $ord) -gt (Measure-Occurrences $before $text $ord)) { return $true }
+    $flatBefore = $before -replace "`r", '' -replace "`n", ''
+    $flatAfter  = $after  -replace "`r", '' -replace "`n", ''
+    return (Measure-Occurrences $flatAfter $text $ord) -gt (Measure-Occurrences $flatBefore $text $ord)
+}
+
+# Type a line that becomes corpus and prove it landed, before Enter commits it.
+# Reading back afterwards is too late: by then the shell has echoed, executed
+# and scrolled, and a mangled line has become output that cannot be told apart
+# from the output that was wanted.
+#
+# The leading space is a sacrificial first character, not decoration. PowerShell
+# ignores leading whitespace, so if the handoff above still eats one keystroke
+# the payload is untouched; the read-back is what decides the outcome either
+# way, and it never looks at the space.
+#
+# Returns $false when the line could not be established. That is a harness
+# problem, not a product one: the corpus the run needs was never built, so the
+# run has nothing to say about the search. Callers throw, which the outer catch
+# records as a 'harness' finding and the verdict below turns into exit 1.
+function Send-SeedText([string]$text, [string]$dumpPath) {
+    for ($try = 1; $try -le $script:SeedAttempts; $try++) {
+        if (-not (Wait-ShellFocus)) {
+            Write-Host "  seed: focus never left the search bar (attempt $try of $script:SeedAttempts)" -ForegroundColor Yellow
+            Press-Escape
+            continue
+        }
+        # Sampled after the focus wait, not before it: the wait can spend
+        # three seconds, and anything the shell printed in them belongs to
+        # the baseline rather than to this send.
+        $before = Get-TerminalText (Get-Term)
+        Send-Text (' ' + $text) 30
+        Start-Sleep -Milliseconds 400
+        $doc = Get-TerminalText (Get-Term)
+        # Overwritten per attempt on purpose: a failure throws straight away,
+        # so the file left behind is the read-back that failed.
+        if ($dumpPath) { $doc | Set-Content $dumpPath -Encoding utf8 }
+        if (Test-SeedLanded $before $doc $text) { return $true }
+        Write-Host "  seed: the input row does not hold the typed line (attempt $try of $script:SeedAttempts), retyping" -ForegroundColor Yellow
+        # Drop whatever did land, including the continuation prompt a dropped
+        # quote leaves behind, so the retry starts from a bare line instead of
+        # appending to a broken one.
+        Clear-CommandLine
+    }
+    return $false
 }
 
 # Poll until the counter stops changing, so assertions never race the
@@ -712,9 +839,9 @@ try {
     # string. Reset the line before committing to the payload.
     Clear-CommandLine
 
-    Send-Text $payload 30
-    Start-Sleep -Milliseconds 400
-    (Get-TerminalText (Get-Term)) | Set-Content (Join-Path $OutDir 'doc-typed.txt') -Encoding utf8
+    if (-not (Send-SeedText $payload (Join-Path $OutDir 'doc-typed.txt'))) {
+        throw "the seed payload never landed on the input row after $script:SeedAttempts attempts, see doc-typed.txt"
+    }
     Send-Chord @() ([SFz]::VK_RETURN) 400
     Start-Sleep -Seconds 3
 
@@ -1056,7 +1183,10 @@ try {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
                 $needleBox = Get-NeedleText (Get-Root)
                 Press-Escape
-                Send-Text ('$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }") 30
+                $emit = '$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }"
+                if (-not (Send-SeedText $emit (Join-Path $OutDir 'doc-emit.txt'))) {
+                    throw "the emit payload never landed on the input row after $script:SeedAttempts attempts, see doc-emit.txt"
+                }
                 Send-Chord @() ([SFz]::VK_RETURN) 400
                 Start-Sleep -Seconds 3
                 $doc = Get-TerminalText (Get-Term)

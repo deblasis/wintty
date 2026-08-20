@@ -177,6 +177,7 @@ $SelfTestHarnesses = @(
     [ordered]@{ name = 'st-no-outdir';  script = 'lib/fuzz-selftest/no-outdir.ps1';  tags = @('selftest'); outDir = $false; seed = $true;  minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-product-throw'; script = 'lib/fuzz-selftest/product-throw.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-unknown-code';  script = 'lib/fuzz-selftest/unknown-code.ps1';  tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
+    [ordered]@{ name = 'st-seed-unverified'; script = 'lib/fuzz-selftest/seed-unverified.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     # Deliberately short budget: the point is the runaway guard, not the wait.
     [ordered]@{ name = 'st-hangs';         script = 'lib/fuzz-selftest/hangs.ps1';         tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; timeoutSeconds = 2; oracle = 'fixture' }
 )
@@ -545,6 +546,7 @@ if ($SelfTest) {
         @{ name = 'st-product-throw'; verdict = 'findings'; attempts = 1; why = 'a thrown PRODUCT_FAIL leaves with 2, not the retryable 1' }
         @{ name = 'st-unknown-code'; verdict = 'error';    attempts = 1; why = 'an exit code outside the convention is not a pass' }
         @{ name = 'st-hangs';      verdict = 'harness';  attempts = 2; why = 'a wedged harness is killed at its budget and treated as retryable' }
+        @{ name = 'st-seed-unverified'; verdict = 'harness'; attempts = 2; why = 'a harness that could not establish its own corpus leaves with 1, not the never-retried 2' }
     )
     $bad = @()
     # One row per harness and nothing else. A harness's console output
@@ -565,9 +567,10 @@ if ($SelfTest) {
     }
     # The aggregate matters as much as the rows, and it is checked by calling
     # the same Get-SuiteOutcome the real run exits on - not by re-deriving it
-    # here. This fixture set holds two findings, four that could not run (an
-    # exit code outside the convention, and one that had to be killed) and
-    # three passes, so every branch of the roll-up has a witness.
+    # here. This fixture set holds two findings, five that could not run (an
+    # exit code outside the convention, one that had to be killed, and one
+    # that classified its own failure as retryable) and three passes, so
+    # every branch of the roll-up has a witness.
     $outcome = Get-SuiteOutcome -Rows $rows -SelectedCount $selected.Count
     if ($outcome.exit -ne 2) {
         $bad += "aggregate exit is $($outcome.exit), expected 2 (findings outrank harness failures)"
@@ -582,8 +585,17 @@ if ($SelfTest) {
     if (-not (Test-Path (Join-Path $ptDir 'finally-ran.txt'))) {
         $bad += 'st-product-throw exited 2 without running its finally, so a real harness would leak its config dir and its window'
     }
-    if ($outcome.broken.Count -ne 4) {
-        $bad += "roll-up counted $($outcome.broken.Count) harness failures, expected 4"
+    if ($outcome.broken.Count -ne 5) {
+        $bad += "roll-up counted $($outcome.broken.Count) harness failures, expected 5"
+    }
+
+    # Same reason as st-product-throw: the verdict must not cost the cleanup.
+    # A seeding failure aborts a real run from the middle of its op loop, and
+    # that is exactly when leaving the app up would make the next harness
+    # refuse to start.
+    $suDir = Join-Path $OutRoot 'st-seed-unverified'
+    if (-not (Test-Path (Join-Path $suDir 'finally-ran.txt'))) {
+        $bad += 'st-seed-unverified exited without running its finally, so a real harness would leave its window up'
     }
     if ($outcome.notRun -ne 0) {
         $bad += "roll-up counted $($outcome.notRun) not reached, expected 0"

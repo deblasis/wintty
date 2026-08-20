@@ -15,6 +15,7 @@ needs no build, no window and no interactive desktop.
 | `product-throw.ps1` | a thrown `PRODUCT_FAIL` leaves with 2 *and* still runs its `finally` |
 | `unknown-code.ps1` | an exit code outside the convention is not a pass |
 | `hangs.ps1` | a wedged harness is killed at its budget rather than hanging the run |
+| `seed-unverified.ps1` | a harness that could not establish its own corpus leaves with 1 out of a catch and a classification, and still runs its `finally` |
 
 Most take `-ExePath` and `-OutDir` like a real harness; `no-outdir.ps1`
 deliberately takes `-Seed` and no `-OutDir`, which is the point of it.
