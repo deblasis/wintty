@@ -6,6 +6,10 @@ using System.Reflection;
 using System.Xml;
 using System.Xml.Linq;
 using Ghostty.Core.Settings;
+using Ghostty.Tests.Wiring;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Settings;
@@ -34,9 +38,16 @@ public class SettingsCardConfigKeyParityTests
 {
     private const string PagePrefix = "Ghostty.Tests.Settings.Pages.";
 
+    // The shell file that states the Page -> tag -> page-type routing these
+    // checks follow. Parsed rather than referenced: it lives in the WinUI
+    // project, which this assembly cannot reference.
+    private const string ShellWindow = "Settings.SettingsWindow.xaml.cs";
+
     // The XAML prefix is an alias (ctrl:), but the namespace it resolves to
     // is what identifies the property, so a renamed alias changes nothing.
     private static readonly XNamespace ControlsNamespace = "using:Ghostty.Controls.Settings";
+    private static readonly XNamespace XamlNamespace =
+        "http://schemas.microsoft.com/winfx/2006/xaml";
     private const string AttachedName = "SettingsCard.ConfigKey";
 
     // Indexed so search can surface them, but not editable from any settings
@@ -53,7 +64,7 @@ public class SettingsCardConfigKeyParityTests
     {
         var indexed = SettingsIndex.All.Select(e => e.Key).ToHashSet(StringComparer.Ordinal);
 
-        var unindexed = ConfigKeysByPage()
+        var unindexed = ConfigKeysByPageType()
             .SelectMany(page => page.Value.Select(key => (Page: page.Key, Key: key)))
             .Where(c => !indexed.Contains(c.Key))
             .OrderBy(c => c.Page, StringComparer.Ordinal)
@@ -77,19 +88,24 @@ public class SettingsCardConfigKeyParityTests
     [Fact]
     public void EveryIndexedKeyHasAControlOnItsOwnPage()
     {
-        var pages = ConfigKeysByPage();
+        var pages = ConfigKeysByPageType();
+        var pageTypes = PageTypesByIndexName();
         var problems = new List<string>();
 
         foreach (var entry in SettingsIndex.All)
         {
             if (KeysWithNoControlYet.Contains(entry.Key, StringComparer.Ordinal)) continue;
 
-            var expectedPage = PageFileFor(entry.Page);
+            // An unrouted page is EveryIndexedPageIsRoutedBySettingsWindow's
+            // report to make. Saying it here too turns one defect into two red
+            // tests with overlapping text.
+            if (!pageTypes.TryGetValue(entry.Page, out var expectedPage)) continue;
+
             if (!pages.TryGetValue(expectedPage, out var keys))
             {
                 problems.Add(
-                    $"  {entry.Key}: Page \"{entry.Page}\" has no {expectedPage} in the " +
-                    "scanned corpus");
+                    $"  {entry.Key}: Page \"{entry.Page}\" resolves to {expectedPage}, " +
+                    "which is not in the scanned corpus");
                 continue;
             }
 
@@ -175,7 +191,7 @@ public class SettingsCardConfigKeyParityTests
     [Fact]
     public void KeysWithNoControlYetIsNotStale()
     {
-        var tagged = ConfigKeysByPage().Values
+        var tagged = ConfigKeysByPageType().Values
             .SelectMany(keys => keys)
             .ToHashSet(StringComparer.Ordinal);
         var indexed = SettingsIndex.All.Select(e => e.Key).ToHashSet(StringComparer.Ordinal);
@@ -238,19 +254,82 @@ public class SettingsCardConfigKeyParityTests
         }
     }
 
+    // An entry naming a page no PageMapping claims is a dead search result:
+    // PageTagFor returns null, the navigation is dropped, and choosing the hit
+    // does nothing at all. A mapping whose tag ShowPage has no arm for is the
+    // same story one hop later, with a null page assigned to the frame.
+    //
+    // SettingsPagesAreEmbedded skips an entry it cannot resolve, so this is the
+    // test that has to notice. It reports per page rather than per key, since
+    // one unrouted page strands every setting on it.
+    [Fact]
+    public void EveryIndexedPageIsRoutedBySettingsWindow()
+    {
+        var routed = PageTypesByIndexName();
+
+        var unrouted = SettingsIndex.All
+            .Select(e => e.Page)
+            .Distinct(StringComparer.Ordinal)
+            .Where(page => !routed.ContainsKey(page))
+            .OrderBy(page => page, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            unrouted.Count == 0,
+            "SettingsIndex names pages SettingsWindow does not route. Search finds " +
+            "the entry and then goes nowhere. Add a PageMapping with this exact " +
+            "IndexName and a ShowPage arm for its tag, or correct the entry's " +
+            $"Page: {string.Join(", ", unrouted)}");
+    }
+
+    // A well-formed routing table proves nothing if nothing reads it, and these
+    // three call sites are the whole path from a search hit to a page on screen.
+    // Each has a mutation that leaves every other test in this file green:
+    // PageTagFor rewritten to `=> null` kills every search result; dropping the
+    // ShowPage call strands the sidebar and opens the window on an empty frame;
+    // and `ContentFrame.Content ??= page` computes the right page forever while
+    // showing whichever one loaded first.
+    [Fact]
+    public void TheRoutingTableIsStillRead()
+    {
+        var window = ShellSource.Load(ShellWindow);
+
+        Assert.Contains(
+            "_pageMappings", window.Method("PageTagFor").ToString(), StringComparison.Ordinal);
+
+        Assert.NotEmpty(window.Method("NavView_SelectionChanged").Calls("ShowPage"));
+
+        var shown = window.Method("ShowPage").DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "ContentFrame.Content")
+            .ToList();
+
+        Assert.True(
+            shown.Count == 1 && shown[0].IsKind(SyntaxKind.SimpleAssignmentExpression),
+            "ShowPage must assign its page to ContentFrame.Content unconditionally. A "
+            + "compound assignment leaves whichever page loaded first on screen while "
+            + "every navigation quietly computes the right one.");
+    }
+
     // Guards the csproj wildcard. Losing it, or moving the pages, would make
     // the checks above scan an empty corpus. EveryIndexedKeyHasAControlOnItsOwnPage
     // already fails loudly in that case; this names the cause.
     [Fact]
     public void SettingsPagesAreEmbedded()
     {
-        var pages = ConfigKeysByPage();
+        var pages = ConfigKeysByPageType();
+        var pageTypes = PageTypesByIndexName();
+
+        // Without this, a routing parse that resolved nothing would leave the
+        // filter below with nothing to check and this test would report success
+        // while naming no page at all - the one failure it exists to name.
+        Assert.NotEmpty(pageTypes);
 
         var missing = SettingsIndex.All
-            .Select(e => PageFileFor(e.Page))
+            .Select(e => pageTypes.GetValueOrDefault(e.Page))
+            .Where(type => type is not null && !pages.ContainsKey(type))
             .Distinct(StringComparer.Ordinal)
-            .Where(f => !pages.ContainsKey(f))
-            .OrderBy(f => f, StringComparer.Ordinal)
+            .OrderBy(type => type, StringComparer.Ordinal)
             .ToList();
 
         Assert.True(
@@ -260,25 +339,135 @@ public class SettingsCardConfigKeyParityTests
             $"{string.Join(", ", missing)}");
     }
 
-    // SettingsWindow maps an entry's Page to a page instance by its own table;
-    // the file names follow the same "<Page>Page.xaml" convention throughout.
-    private static string PageFileFor(string page) => $"{page}Page.xaml";
+    // The page TYPE each indexed Page name resolves to, read out of
+    // SettingsWindow instead of derived from the name.
+    //
+    // The shell routes a search hit in two hops: PageTagFor looks the entry's
+    // Page up in _pageMappings for a tag, and ShowPage's switch turns that tag
+    // into a page instance. Following those two hops is what keeps this in step
+    // with where the user actually lands.
+    //
+    // A type rather than a file name because that is what the corpus is keyed
+    // by too, so nothing here has to assume the two spellings match. What this
+    // replaces concatenated the page name onto "Page.xaml", which agreed with
+    // the shell only while every page name was a single word; a name with a
+    // space in it asked for a file that could not exist, and reported every key
+    // on that page as unreachable while the shell routed it correctly.
+    private static Dictionary<string, string> PageTypesByIndexName()
+    {
+        var window = ShellSource.Load(ShellWindow);
 
-    private static Dictionary<string, HashSet<string>> ConfigKeysByPage()
+        // ShellSource parses with no preprocessor symbols defined, so a region
+        // the compiler SKIPS is one this reads as live, and the region it keeps
+        // is invisible. Either way the table read here would not be the table
+        // that ships. Refusing the file is cheaper and more honest than
+        // guessing at the shell's symbol set.
+        Assert.DoesNotContain("#if", window.Root.ToFullString(), StringComparison.Ordinal);
+
+        // Scoped to the assignment rather than swept from the whole file. A
+        // file-wide search reads any PageMapping built anywhere, so a stray one
+        // above the constructor would shadow the real row while the same stray
+        // below it would not, and a guard whose answer depends on declaration
+        // order is not a guard. Being scoped also means every construction in
+        // here is a row, so a target-typed new(...) needs no special case.
+        var table = window.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "_pageMappings")
+            .ToList();
+        Assert.True(
+            table.Count == 1,
+            $"expected one _pageMappings assignment, found {table.Count}");
+
+        // PageMapping(tag, indexName, navItem). A null indexName marks a page
+        // that hosts no indexed settings, so search never routes to it.
+        // Grouped rather than keyed directly because PageTagFor stops at its
+        // first match, and a table that named one page twice should be read the
+        // way the shell reads it rather than throwing here.
+        var tagsByIndexName = table[0]
+            .DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>()
+            .Where(o => o.ArgumentList is { Arguments.Count: >= 2 })
+            .Select(o => (Tag: PositionalLiteral(o, 0), Index: PositionalLiteral(o, 1)))
+            .Where(m => m.Tag is not null && m.Index is not null)
+            .GroupBy(m => m.Index!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Tag!, StringComparer.Ordinal);
+
+        // ShowPage's switch arms, "tag" => new Pages.SomethingPage(...), taken
+        // from the one top-level switch so that a switch nested inside an arm
+        // cannot contribute arms of its own and collide.
+        var switches = window.Method("ShowPage")
+            .DescendantNodes().OfType<SwitchExpressionSyntax>().ToList();
+        Assert.True(
+            switches.Count == 1,
+            $"expected one switch in ShowPage, found {switches.Count}");
+
+        var typesByTag = switches[0].Arms
+            .Select(arm => (
+                Tag: arm.Pattern is ConstantPatternSyntax constant
+                    ? StringLiteral(constant.Expression)
+                    : null,
+                Type: (arm.Expression as ObjectCreationExpressionSyntax)
+                    ?.Type.ToString().Split('.')[^1]))
+            .Where(a => a.Tag is not null && a.Type is not null)
+            .GroupBy(a => a.Tag!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Type!, StringComparer.Ordinal);
+
+        // A mapping whose tag has no arm builds no page, so it resolves to no
+        // type. EveryIndexedPageIsRoutedBySettingsWindow is what reports that,
+        // rather than it disappearing quietly here.
+        return tagsByIndexName
+            .Where(m => typesByTag.ContainsKey(m.Value))
+            .ToDictionary(m => m.Key, m => typesByTag[m.Value], StringComparer.Ordinal);
+    }
+
+    // The value of a positional string literal argument, or null for anything
+    // else. Named arguments are refused rather than read in order, since
+    // PageMapping(indexName: ..., tag: ...) compiles and would otherwise be
+    // read the wrong way round.
+    private static string? PositionalLiteral(
+        BaseObjectCreationExpressionSyntax creation, int index)
+    {
+        var argument = creation.ArgumentList!.Arguments[index];
+        return argument.NameColon is null ? StringLiteral(argument.Expression) : null;
+    }
+
+    // The value of a string literal, or null for anything else: a null, a
+    // named constant, an interpolation. Callers drop those rather than
+    // guessing at them.
+    private static string? StringLiteral(ExpressionSyntax expression) =>
+        expression is LiteralExpressionSyntax literal
+            && literal.IsKind(SyntaxKind.StringLiteralExpression)
+            ? literal.Token.ValueText
+            : null;
+
+    // Keyed by the type the markup declares, not by the file it sits in. In
+    // WinUI those are paired by x:Class and nothing makes the two read the
+    // same, so a page renamed on disk, or a stale copy left beside the live
+    // one, would otherwise satisfy every check here while the page that
+    // actually loads has been stripped.
+    private static Dictionary<string, HashSet<string>> ConfigKeysByPageType()
         => TaggedControls()
-            .GroupBy(c => c.Page, StringComparer.Ordinal)
+            .Where(c => c.Type is not null)
+            .GroupBy(c => c.Type!, StringComparer.Ordinal)
             .ToDictionary(
                 g => g.Key,
                 g => g.Select(c => c.Key).ToHashSet(StringComparer.Ordinal),
                 StringComparer.Ordinal);
 
-    private static List<(string Page, string Key, string? Group)> TaggedControls()
+    private static List<(string Page, string? Type, string Key, string? Group)> TaggedControls()
         => PageDocuments()
             .SelectMany(p => p.Document.Descendants()
                 .SelectMany(e => e.Attributes()
                     .Where(a => a.Name == ControlsNamespace + AttachedName)
-                    .Select(a => (p.Page, Key: a.Value, Group: EnclosingGroupHeader(e)))))
+                    .Select(a => (
+                        p.Page,
+                        Type: PageTypeOf(p.Document),
+                        Key: a.Value,
+                        Group: EnclosingGroupHeader(e)))))
             .ToList();
+
+    // The tail of the root element's x:Class, which is the type this markup
+    // belongs to. Null for markup that declares none, which is not a page.
+    private static string? PageTypeOf(XDocument document)
+        => document.Root?.Attribute(XamlNamespace + "Class")?.Value.Split('.')[^1];
 
     // Cards are grouped visually by SettingsGroup, and its Header is what an
     // entry's Section has to name for the search breadcrumb to be followable.
