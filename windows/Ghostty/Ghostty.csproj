@@ -136,6 +136,53 @@
     <ApplicationIcon>$(GeneratedBrandingDir)wintty.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!--
+    Build-order only, not a reference: IconGen is a tool this project shells
+    out to, and nothing here links against it.
+
+    Without it the solution build and this project's Exec build IconGen at the
+    same time. IconGen is a project in Ghostty.sln and IconGen.Tests references
+    it, so MSBuild is already building it when GenerateBrandingAssets runs a
+    `dotnet run` on the same project. That inner run is a separate process with
+    its own MSBuild instance, sharing no build graph and no locking, so both
+    write one obj\ and whichever loses reports:
+
+      error MSB3501: Could not read lines from file
+      "obj\Release\net10.0-windows\IconGen.csproj.FileListAbsolute.txt".
+      The process cannot access the file ... used by another process.
+
+    It is a scheduling race, so it survives plenty of green builds and then
+    takes a whole tier build down. A single green build is not evidence that it
+    is fixed.
+
+    Ordering the two is the fix, and it only works because GenerateBrandingAssets
+    hooks AfterTargets="ResolveProjectReferences" (see that target). MSBuild
+    builds one project node per global-property set and every in-graph requester
+    shares it, so once this project's reference has resolved, IconGen's in-graph
+    build is finished for IconGen.Tests too, and the Exec is the only writer left.
+    The inner `dotnet run` still re-enters MSBuild and restores; that is fine
+    once nothing else is in there with it.
+
+    GlobalPropertiesToRemove="RuntimeIdentifier" is not decoration. A
+    ReferenceOutputAssembly="false" reference is dropped from NuGet's restore
+    graph, so IconGen never gets a RID-specific assets target; without this,
+    a RID publish with restore suppressed (windows/scripts/release-smoke.ps1)
+    fails NETSDK1047 on IconGen's assets file and cannot self-repair.
+
+    Redirecting the tool run to its own obj\ instead does NOT work. Overriding
+    BaseIntermediateOutputPath stops the SDK excluding the default obj\ from
+    its compile glob, and IconGen then fails CS0579 on duplicate assembly
+    attributes from the two generated AssemblyInfo.cs files.
+
+    SkipGetTargetFrameworkProperties because the TFMs differ and there is no
+    assembly to reconcile.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\dist\windows\IconGen\IconGen.csproj"
+                      ReferenceOutputAssembly="false"
+                      GlobalPropertiesToRemove="RuntimeIdentifier" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
@@ -652,8 +699,17 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <!--
+    AfterTargets, not BeforeBuild. BeforeBuild is the first entry of
+    $(BuildDependsOn) and ResolveProjectReferences sits under CoreBuild, so a
+    branding step hooked on BeforeBuild runs BEFORE the ProjectReference below
+    has built IconGen - which is the whole point of having it. PrepareResources
+    is the backstop: ApplicationIcon is handed to csc during CoreCompile, and
+    the Content copies happen later still, so this is early enough for both.
+  -->
   <Target Name="GenerateBrandingAssets"
-          BeforeTargets="BeforeBuild"
+          AfterTargets="ResolveProjectReferences"
+          BeforeTargets="PrepareResources"
           Inputs="@(IconGenSource);..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;@(IconGenMaster);$(BrandingStamp)"
           Outputs="$(GeneratedBrandingDir)wintty.ico;$(GeneratedBrandingDir)wintty-settings.ico;$(GeneratedBrandingDir)wintty-inspector.ico;$(GeneratedBrandingDir)AppIcon.scale-100.png;$(GeneratedBrandingDir)AppIcon.scale-150.png;$(GeneratedBrandingDir)AppIcon.scale-200.png;$(GeneratedBrandingDir)AppIcon.scale-400.png;$(GeneratedBrandingDir)SplashIcon.scale-100.png;$(GeneratedBrandingDir)SplashIcon.scale-150.png;$(GeneratedBrandingDir)SplashIcon.scale-200.png;$(GeneratedBrandingDir)SplashIcon.scale-400.png">
     <MakeDir Directories="$(GeneratedBrandingDir)" />
