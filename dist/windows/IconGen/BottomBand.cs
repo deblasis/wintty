@@ -44,32 +44,48 @@ internal static class BottomBand
         if (bandHeight > size) bandHeight = size;
         int bandTop = size - bandHeight;
 
+        // The plate has a metal rim on every side; a full-bleed band removes
+        // it along the bottom, which is most of why the band read as a label
+        // stuck over the icon rather than part of it. Inset by the rim's own
+        // width, which rounds to nothing below 128 px where there is no rim
+        // left to keep.
+        int rim = (int)Math.Round(size / 256.0 * 2);
+        var band = new Rectangle(rim, bandTop, size - rim * 2, bandHeight - rim);
+        if (band.Height < 1 || band.Width < 1)
+            band = new Rectangle(0, bandTop, size, bandHeight);
+
         // The plate has rounded corners and the band runs to the bottom
         // edge, so a plain rectangle would square off the two bottom
         // corners. Snapshot the alpha over the whole band, draw everything,
         // then put the alpha back: the result is clipped to whatever
         // silhouette the master actually has, with no second copy of the
         // corner radius to keep in step.
-        var alpha = SnapshotAlpha(bitmap, bandTop, bandHeight);
+        var alpha = SnapshotAlpha(bitmap, band.Y, band.Height);
 
-        if (nightly && hasBand)
+        if (nightly && hasBand && band.Height >= EditionBrand.MinSplitBandPx)
         {
-            int stripeHeight = Math.Max(1, bandHeight / 2);
-            HazardStripe.Apply(bitmap, new Rectangle(0, bandTop, size, stripeHeight));
+            int stripeHeight = Math.Max(1, band.Height / 2);
+            HazardStripe.Apply(
+                bitmap, new Rectangle(band.X, band.Y, band.Width, stripeHeight));
             MonogramBand.Apply(
                 bitmap, brand,
-                new Rectangle(0, bandTop + stripeHeight, size, bandHeight - stripeHeight));
+                new Rectangle(band.X, band.Y + stripeHeight, band.Width,
+                              band.Height - stripeHeight));
         }
         else if (nightly)
         {
-            HazardStripe.Apply(bitmap, new Rectangle(0, bandTop, size, bandHeight));
+            // Including a nightly EDITION whose band is too short to split.
+            // Two 2 px sub-bands are two illegible marks, and the stated
+            // priority is that nightly reads first, so it takes the whole
+            // band and the edition cue is dropped at those sizes.
+            HazardStripe.Apply(bitmap, band);
         }
         else
         {
-            MonogramBand.Apply(bitmap, brand, new Rectangle(0, bandTop, size, bandHeight));
+            MonogramBand.Apply(bitmap, brand, band);
         }
 
-        RestoreAlpha(bitmap, bandTop, bandHeight, alpha);
+        RestoreAlpha(bitmap, band.Y, band.Height, alpha);
     }
 
     private static byte[] SnapshotAlpha(Bitmap bitmap, int bandTop, int bandHeight)

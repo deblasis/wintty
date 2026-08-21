@@ -119,7 +119,7 @@ public class MonogramBandTests
     [InlineData(40, false)]
     [InlineData(48, false)]
     [InlineData(60, false)]
-    [InlineData(64, true)]
+    [InlineData(80, true)]
     [InlineData(160, true)]
     public void LettersAppearOnlyWhereTheyCanBeRead(int size, bool expectLetters)
     {
@@ -157,7 +157,7 @@ public class MonogramBandTests
         else
             Assert.True(ink == 0,
                 $"Expected no monogram ink at {size} px, which is below the "
-                + $"{EditionBrand.MinLetterSizePx} px floor; found {ink}.");
+                + $"{EditionBrand.MinLetterBandPx} px floor; found {ink}.");
     }
 
     /// <summary>
@@ -209,6 +209,161 @@ public class MonogramBandTests
         double ratio = ContrastRatio(brand.BandFill, brand.BandInk);
         Assert.True(ratio >= 4.5,
             $"{edition}'s band is {ratio:F1}:1, below the 4.5:1 floor for small text.");
+    }
+
+
+    /// <summary>
+    /// A nightly build of an edition never draws a half-height monogram.
+    ///
+    /// This is the defect the interior floor exists for. Gating on the icon's
+    /// size let a nightly Pro compute a 4.25 px em at 64 px output and 5.31 at
+    /// 80 - smaller than the ems refused on the stable path at 40 and 48 - and
+    /// ship them in wintty.ico, one pixel of ink at 64.
+    ///
+    /// Below MinSplitBandPx the band is not divided at all, so a nightly
+    /// edition is byte-identical to a nightly flagship: the hazard takes the
+    /// whole band and the edition cue is dropped rather than drawn badly.
+    /// </summary>
+    [Theory]
+    [InlineData(48)]
+    [InlineData(64)]
+    [InlineData(80)]
+    public void NightlyEditionDropsTheMarkItCannotDraw(int size)
+    {
+        using var masters = MasterRasters.Load(RepoRoot);
+        using var flagship = PngWriter.Resize(
+            masters, size, EditionBrand.For(Edition.None), nightly: true);
+        using var edition = PngWriter.Resize(
+            masters, size, EditionBrand.For(Edition.Pro), nightly: true);
+
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+                Assert.Equal(flagship.GetPixel(x, y).ToArgb(), edition.GetPixel(x, y).ToArgb());
+    }
+
+    /// <summary>
+    /// Where the band IS split, the edition half either carries readable
+    /// letters or none - never the smudge in between.
+    /// </summary>
+    [Theory]
+    [InlineData(96, false)]
+    [InlineData(160, true)]
+    [InlineData(256, true)]
+    public void NightlyEditionLettersAreReadableOrAbsent(int size, bool expectLetters)
+    {
+        using var masters = MasterRasters.Load(RepoRoot);
+        var brand = EditionBrand.For(Edition.Pro);
+        using var icon = PngWriter.Resize(masters, size, brand, nightly: true);
+
+        int bandHeight = Math.Max(
+            EditionBrand.MinBandPx, (int)Math.Round(size * EditionBrand.BandHeightFraction));
+        int rim = (int)Math.Round(size / 256.0 * 2);
+        int drawHeight = Math.Max(1, bandHeight - rim);
+        int monogramTop = size - bandHeight + Math.Max(1, drawHeight / 2);
+
+        double fill = Luminance(brand.BandFill);
+        int ink = 0;
+        for (int y = monogramTop; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                var c = icon.GetPixel(x, y);
+                if (c.A > 200 && Luminance(c) <= fill * 0.6) ink++;
+            }
+
+        if (expectLetters)
+            Assert.True(ink > 20, $"nightly edition at {size} px drew {ink} px of ink");
+        else
+            Assert.True(ink == 0,
+                $"nightly edition at {size} px drew {ink} px of ink into a sub-band too "
+                + "short to carry letters");
+    }
+
+    /// <summary>
+    /// The band stays inside the plate's silhouette.
+    ///
+    /// Without this, deleting the alpha restore in BottomBand leaves all the
+    /// other tests green while squaring off both bottom corners on every
+    /// edition icon at every rung - 15,751 changed pixels on one 640 px rung.
+    /// It is the most intricate code in this area and had no coverage.
+    /// </summary>
+    [Theory]
+    [InlineData(160)]
+    [InlineData(256)]
+    public void BandStaysInsideThePlate(int size)
+    {
+        using var masters = MasterRasters.Load(RepoRoot);
+        using var plain = PngWriter.Resize(
+            masters, size, EditionBrand.For(Edition.None), nightly: false);
+        using var icon = PngWriter.Resize(
+            masters, size, EditionBrand.For(Edition.Pro), nightly: false);
+
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+                if (plain.GetPixel(x, y).A == 0)
+                    Assert.True(icon.GetPixel(x, y).A == 0,
+                        $"The band painted outside the plate at ({x},{y}) on the {size} px rung, "
+                        + "so the rounded corners are squared off.");
+    }
+
+    /// <summary>
+    /// The letters sit inside the band and centred in it.
+    ///
+    /// Pins what MeasureInk exists to do. Replacing it with a plausible fixed
+    /// rectangle left every other test green, because nothing else looks at
+    /// where the ink actually lands.
+    /// </summary>
+    [Fact]
+    public void MonogramIsCentredInsideTheBand()
+    {
+        using var masters = MasterRasters.Load(RepoRoot);
+        var brand = EditionBrand.For(Edition.Pro);
+        using var icon = PngWriter.Resize(masters, 256, brand, nightly: false);
+
+        int bandTop = 256 - (int)Math.Round(256 * EditionBrand.BandHeightFraction);
+        double fill = Luminance(brand.BandFill);
+        int minX = 256, maxX = -1, minY = 256, maxY = -1;
+        for (int y = bandTop; y < 256; y++)
+            for (int x = 0; x < 256; x++)
+            {
+                var c = icon.GetPixel(x, y);
+                if (c.A <= 200 || Luminance(c) > fill * 0.6) continue;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+
+        Assert.True(maxX > 0, "no monogram ink found at 256 px");
+        Assert.True(minY > bandTop, "the monogram reaches above the band");
+        Assert.True(maxY < 256, "the monogram reaches past the bottom edge");
+
+        int leftGap = minX, rightGap = 255 - maxX;
+        Assert.True(Math.Abs(leftGap - rightGap) <= 3,
+            $"the monogram is off-centre: {leftGap} px left, {rightGap} px right");
+    }
+
+    /// <summary>
+    /// The shipping editions differ in LUMINANCE, not only in hue.
+    ///
+    /// Ink contrast alone does not make two bands tellable apart. The first
+    /// palette written for the band design had amber at 0.455 and teal at
+    /// 0.458 - the same grey - so in a high-contrast theme, or to anyone who
+    /// cannot separate those hues, Pro and Enterprise were identical below
+    /// the size where letters are drawn. That is the failure the band exists
+    /// to prevent.
+    /// </summary>
+    [Theory]
+    [InlineData((int)Edition.Pro, (int)Edition.Enterprise)]
+    [InlineData((int)Edition.Pro, (int)Edition.Legacy)]
+    [InlineData((int)Edition.Enterprise, (int)Edition.Legacy)]
+    public void EditionsSeparateInGreyscale(int firstOrdinal, int secondOrdinal)
+    {
+        var a = EditionBrand.For((Edition)firstOrdinal);
+        var b = EditionBrand.For((Edition)secondOrdinal);
+        double r = ContrastRatio(a.BandFill, b.BandFill);
+        Assert.True(r >= 1.5,
+            $"{(Edition)firstOrdinal} and {(Edition)secondOrdinal} are {r:F2}:1 apart in "
+            + "luminance, so they are the same band in greyscale.");
     }
 
     private static double Luminance(Color c) =>

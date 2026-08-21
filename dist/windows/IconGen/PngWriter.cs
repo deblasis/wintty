@@ -21,7 +21,7 @@ internal static class PngWriter
     // window. Read from the shared table rather than restated here: the
     // splash window loads these files by name at runtime, so a rung this
     // tool renames on its own leaves the shell with nothing to draw. The
-    // masters reach 2048 px, so every rung is still a downsample.
+    // masters reach 1024 px, so every rung is still a downsample.
     private static readonly (string Name, int Px)[] SplashTargets =
         LaunchIconAssets.Rungs
             .Select(rung => (Name: rung.FileName, Px: rung.Pixels))

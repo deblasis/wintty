@@ -45,8 +45,20 @@ internal enum Edition
 /// an edition" rather than every icon carrying furniture.</param>
 /// <param name="BandFill">The band's colour. Named here rather than derived
 /// from the artwork, which is what the previous design tried and got wrong.</param>
-/// <param name="BandInk">The letters' colour. Paired with BandFill by hand
-/// so the contrast holds; <c>EditionBrandTests</c> pins the ratio.</param>
+/// <param name="BandInk">The letters' colour, dark or light depending on the
+/// band. The ratios in For() were computed, not eyeballed, and
+/// BandContrastIsLegible pins them: two of the four palettes proposed for this
+/// change were under 4.0:1 and looked fine at 400 px.</param>
+/// <remarks>
+/// The three shipping editions are also a LUMINANCE ladder, worst separation
+/// 2.51:1, because ink contrast alone does not make two bands tellable apart.
+/// The first palette written for this change had amber at 0.455 and teal at
+/// 0.458 - 1.01:1, the same grey - so under a high-contrast theme, or to
+/// anyone who cannot separate the two hues, Pro and Enterprise were identical.
+/// That is the exact failure the band was reinstated to fix, reintroduced by
+/// picking colours that only had to look different in colour.
+/// EditionsSeparateInGreyscale pins it now.
+/// </remarks>
 internal sealed record EditionBrand(
     string Monogram,
     Color BandFill,
@@ -62,11 +74,11 @@ internal sealed record EditionBrand(
     /// <see cref="MonogramBandTests.BandNeverReachesTheGhost"/> holds this
     /// to the real artwork rather than to this comment.
     ///
-    /// Its own constant, not an alias of <see cref="HazardStripe.BandHeightFraction"/>.
-    /// They were shared on the grounds that the two bands could not then
-    /// disagree about where "the band" is - but they no longer have the
-    /// same job, and a nightly build of an edition now has to fit both into
-    /// that space rather than one covering the other.
+    /// The hazard stripe used to share this constant, on the grounds that the
+    /// two bands could not then disagree about where "the band" is. They no
+    /// longer have the same job - a nightly build of an edition fits both into
+    /// this space rather than one covering the other - so the stripe takes the
+    /// rectangle it is handed and owns no fraction of its own.
     /// </summary>
     public const double BandHeightFraction = 0.15;
 
@@ -82,46 +94,58 @@ internal sealed record EditionBrand(
     public const int MinBandPx = 4;
 
     /// <summary>
-    /// Below this OUTPUT size the band carries no letters, only colour.
+    /// Minimum height, in pixels, of the band's interior below its rule for
+    /// letters to be drawn into it at all.
     ///
-    /// Measured, not guessed: at a band height of 0.15 and an em of 0.92
-    /// band heights, a three-glyph monogram is clean at 64 px and up,
-    /// marginal at 48 and mush at 40. The previous design's floor was
-    /// expressed in band pixels and evaluated on the MASTER, so every rung
-    /// that downsampled from a larger master escaped it entirely and 40,
-    /// 48 and 60 px all shipped the smudge the floor existed to prevent.
-    /// This one is in output space because that is the size a human sees.
+    /// Measured by looking: at 9 px of interior a three-glyph monogram is
+    /// not small, it is broken - "PRO" reads "P?O", "LTS" reads "l F 4" -
+    /// and by 10 px all three are clean. This is on the INTERIOR rather
+    /// than on the icon's size because a nightly build of an edition halves
+    /// the band, and an icon-size test let those through at exactly the
+    /// dimensions this exists to refuse.
+    ///
+    /// 10 rather than 11 because the rim inset spends a row: at 80 px output
+    /// the band is 12, the rim takes 1 and the rule takes 1, leaving 10. A
+    /// floor of 11 there would silently move the first lettered rung from 80
+    /// to 96 and leave AppIcon.scale-200 bare.
     /// </summary>
-    public const int MinLetterSizePx = 64;
+    public const int MinLetterBandPx = 10;
+
+    /// <summary>
+    /// Below this band height the top rule is suppressed. At 4 px it eats a
+    /// quarter of the band to draw a line nobody can see.
+    /// </summary>
+    public const int MinRuleBandPx = 6;
+
+    /// <summary>
+    /// Below this band height a nightly edition stops splitting the band and
+    /// draws the hazard alone. Two 2 px sub-bands are two illegible marks;
+    /// the stated priority is that nightly reads first, so it takes the
+    /// whole band and the edition cue is dropped at those sizes.
+    /// </summary>
+    public const int MinSplitBandPx = 12;
 
     public static EditionBrand For(Edition edition) => edition switch
     {
-        // Amber on near-black. The largest move off the base indigo,
-        // because Pro is the edition most often installed next to the
-        // flagship. 9.3:1.
+        // Light gold, dark ink. 12.9:1.
         Edition.Pro => new EditionBrand(
-            "PRO", Color.FromArgb(0xFF, 0xF2, 0xA4, 0x13), Color.FromArgb(0xFF, 0x10, 0x13, 0x17)),
+            "PRO", Color.FromArgb(0xFF, 0xFF, 0xD1, 0x66), Color.FromArgb(0xFF, 0x10, 0x13, 0x17)),
 
-        // Teal. Far enough from both amber and the base blue to survive
-        // being in the same taskbar as either. 9.0:1.
+        // Deep teal, light ink. 9.3:1.
         Edition.Enterprise => new EditionBrand(
-            "ENT", Color.FromArgb(0xFF, 0x3F, 0xC6, 0xCC), Color.FromArgb(0xFF, 0x0B, 0x14, 0x17)),
+            "ENT", Color.FromArgb(0xFF, 0x0E, 0x4A, 0x52), Color.FromArgb(0xFF, 0xF6, 0xF8, 0xFA)),
 
-        // Bronze. Sits beside Pro's amber without competing with it, which
-        // is the pairing that actually has to work: these two are the ones
-        // installed together. 5.4:1.
+        // Bronze, dark ink. 4.7:1.
         Edition.Legacy => new EditionBrand(
             "LTS", Color.FromArgb(0xFF, 0xA8, 0x76, 0x3C), Color.FromArgb(0xFF, 0x10, 0x13, 0x17)),
 
-        // Slate. Light enough to read as a band rather than sinking into
-        // the plate's own dark corner, which near-graphite did. 7.3:1.
-        //
-        // Unreachable in the shipping build: Directory.Build.props maps
-        // only Wintty, Wintty.Pro, Wintty.Pro.Enterprise and
-        // Wintty.Pro.Legacy, and the oss tier does not carry that patch.
-        // Kept because it costs nothing and the mapping is one line away.
+        // Slate. Unreachable in the shipping build - Directory.Build.props
+        // maps only Wintty, Wintty.Pro, Wintty.Pro.Enterprise and
+        // Wintty.Pro.Legacy - so it is excluded from the ladder above and
+        // only has to clear the ink floor. Kept because the mapping is one
+        // line away.
         Edition.Oss => new EditionBrand(
-            "OSS", Color.FromArgb(0xFF, 0x98, 0xA2, 0xB0), Color.FromArgb(0xFF, 0x0F, 0x12, 0x16)),
+            "OSS", Color.FromArgb(0xFF, 0x5D, 0x66, 0x73), Color.FromArgb(0xFF, 0xF6, 0xF8, 0xFA)),
 
         _ => new EditionBrand(string.Empty, Color.Empty, Color.Empty),
     };

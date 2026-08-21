@@ -22,6 +22,69 @@ public class EndToEndTests
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "AppIcon.scale-400.png")));
     }
 
+    /// <summary>
+    /// The edition reaches the written file.
+    ///
+    /// Every other test in this area builds an EditionBrand itself and hands
+    /// it to the writer, so all of them stayed green when Program was changed
+    /// to ask for Edition.None regardless of --edition. That would have
+    /// shipped every edition unbranded with CI passing. This is the only test
+    /// that goes through the CLI the build actually invokes.
+    /// </summary>
+    [Theory]
+    [InlineData("pro")]
+    [InlineData("enterprise")]
+    [InlineData("legacy")]
+    public void EditionOnTheCommandLineReachesTheWrittenIcon(string edition)
+    {
+        using var tempDir = new TempDir();
+        var repoRoot = TempDir.FindRepoRoot();
+
+        int exitCode = Program.Run(
+            new[] { "--channel", "stable", "--edition", edition, "--out", tempDir.Path },
+            repoRoot);
+        Assert.Equal(0, exitCode);
+
+        var brand = EditionBrand.For(Enum.Parse<Edition>(edition, ignoreCase: true));
+        using var png = new Bitmap(Path.Combine(tempDir.Path, "AppIcon.scale-400.png"));
+
+        int bandHeight = (int)Math.Round(png.Height * EditionBrand.BandHeightFraction);
+        int y = png.Height - bandHeight / 2;
+        var sampled = png.GetPixel((int)(png.Width * 0.12), y);
+
+        Assert.True(
+            sampled.R == brand.BandFill.R
+            && sampled.G == brand.BandFill.G
+            && sampled.B == brand.BandFill.B,
+            $"--edition {edition} produced a band of {sampled.R},{sampled.G},{sampled.B} "
+            + $"instead of {brand.BandFill.R},{brand.BandFill.G},{brand.BandFill.B}.");
+    }
+
+    /// <summary>
+    /// And the flagship still carries none, through the same path.
+    /// </summary>
+    [Fact]
+    public void NoEditionOnTheCommandLineLeavesTheIconUnmarked()
+    {
+        using var tempDir = new TempDir();
+        var repoRoot = TempDir.FindRepoRoot();
+
+        Program.Run(new[] { "--channel", "stable", "--out", tempDir.Path }, repoRoot);
+
+        using var png = new Bitmap(Path.Combine(tempDir.Path, "AppIcon.scale-400.png"));
+        foreach (var edition in new[] { Edition.Pro, Edition.Enterprise, Edition.Legacy })
+        {
+            var fill = EditionBrand.For(edition).BandFill;
+            for (int y = png.Height - 24; y < png.Height; y++)
+                for (int x = 0; x < png.Width; x++)
+                {
+                    var c = png.GetPixel(x, y);
+                    Assert.False(c.A > 200 && c.R == fill.R && c.G == fill.G && c.B == fill.B,
+                        $"the unmarked flagship carries {edition}'s band colour at ({x},{y})");
+                }
+        }
+    }
+
     [Fact]
     public void SettingsIcoIsRenderedFromGearGlyph()
     {
