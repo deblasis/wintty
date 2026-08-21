@@ -12,6 +12,14 @@
     Search is ASCII case-insensitive (src/terminal/search/sliding_window.zig
     uses std.ascii.indexOfIgnoreCase), so the oracle folds case the same way.
 
+    The corpus the oracle reads is typed into a live shell, so every seeding
+    send is read back off the input row before Enter commits it. A dropped
+    character there is silent and moves the answer for every later count
+    rather than failing one check, so a line that cannot be read back ends
+    the run as a harness failure - the corpus was never established, and a
+    harness that could not build its own premise has nothing to say about
+    the product.
+
     Failures are recorded and the run continues: one broken invariant should
     not hide the rest.
 
@@ -410,19 +418,14 @@ function Get-FocusedName {
 }
 
 # ---- oracle ---------------------------------------------------------------
+#
+# The occurrence count and the seed read-back rules are shared with the
+# self-test, which exercises them with no window. See lib/seed-readback.ps1.
+. (Join-Path $PSScriptRoot 'lib/seed-readback.ps1')
 
-# Non-overlapping, ASCII-case-insensitive occurrence count, matching the way
-# the sliding window advances past each hit.
-function Measure-Occurrences([string]$haystack, [string]$needle) {
-    if ([string]::IsNullOrEmpty($needle)) { return 0 }
-    $n = 0; $i = 0
-    while ($true) {
-        $j = $haystack.IndexOf($needle, $i, [StringComparison]::OrdinalIgnoreCase)
-        if ($j -lt 0) { break }
-        $n++; $i = $j + $needle.Length
-    }
-    return $n
-}
+
+# Measure-Occurrences and Test-SeedLanded live in lib/seed-readback.ps1, so
+# the read-back rules can be tested without a window. See the dot-source above.
 
 # Both haystacks unwrap soft wraps: the UIA document comes from
 # Screen.selectionString with unwrap = true, and the search window builds its
@@ -554,6 +557,134 @@ function Clear-Needle {
     Send-Chord @() ([SFz]::VK_BACK) 250
 }
 
+# ---- seeding --------------------------------------------------------------
+#
+# A seed line is typed into a live shell, and a character it loses on the way
+# is invisible: nothing throws, the shell just runs something else. The corpus
+# is what every oracle count is measured against, so a lost character does not
+# fail one check, it moves the answer for the rest of the run - a false pass
+# and a false finding are equally reachable from there.
+#
+# The needle path already refuses to trust a send (see 'needle-box-drift': it
+# reads the box back and compares). These three helpers are the same
+# discipline where there is no box to read, only the terminal document.
+
+# How many times a seed line is retyped before the run gives up on it.
+$script:SeedAttempts = 3
+
+# The first character after the search bar closes gets eaten. Escape tears the
+# bar down and XAML hands focus back to the terminal asynchronously, so a
+# keystroke that arrives mid-handoff lands nowhere: a run that typed
+# "$a='ZQ'+'XW'; ..." straight after Escape reached the shell as
+# "a='ZQ'+'XW'; ...", one dropped '$', and the pipeline behind it then ran
+# against a variable nobody set.
+#
+# The needle box is the only element that can be named positively here, so the
+# gate is "the bar is gone and focus has left it" rather than "the terminal has
+# focus" - TerminalControl's UIA name is not stable enough to wait on.
+# Returns 'ok', 'bar-open' or 'timeout'. Which of the two failures it is
+# decides who owns it: a search bar that never closed is a product defect this
+# harness asserts on by name elsewhere, and reporting that as a harness problem
+# would suppress the very regression the run exists to find.
+#
+# The gate is negative - "the bar is gone and focus has left it" - because the
+# needle box is the only element that can be named positively here;
+# TerminalControl's UIA name is not stable enough to wait on. That makes it a
+# weak signal, not a strong one: FocusedElement is system-wide, so another app
+# satisfies it, and Get-FocusedName answers '<none>' on a UIA fault. The
+# read-back below is what actually decides whether a send worked.
+function Wait-ShellFocus([int]$timeoutMs = 3000) {
+    $dl = (Get-Date).AddMilliseconds($timeoutMs)
+    while ((Get-Date) -lt $dl) {
+        if (-not (Test-SearchBarOpen (Get-Root))) {
+            if ((Get-FocusedName) -ne 'Search scrollback') {
+                # UIA reports the handoff slightly before the island will take
+                # a keystroke, so the settle is on top of the wait.
+                Start-Sleep -Milliseconds 250
+                return 'ok'
+            }
+        }
+        Start-Sleep -Milliseconds 120
+    }
+    if (Test-SearchBarOpen (Get-Root)) { return 'bar-open' }
+    return 'timeout'
+}
+
+# Re-arm the XAML island the way startup does. A retry that only retypes
+# repeats whatever swallowed the first attempt: the island does not take focus
+# from the window merely being foreground (see SFz.Click), and Clear-CommandLine
+# goes through the same input path that just failed.
+function Restore-IslandFocus {
+    $rc = [SFz]::RectOf($script:Hwnd64)
+    if ($null -eq $rc) { return $false }
+    $ok = [SFz]::Click($script:Pid32, [int]($rc.L + $rc.W / 2), [int]($rc.T + $rc.Hh * 0.7))
+    Start-Sleep -Milliseconds 300
+    return $ok
+}
+
+# Type a line that becomes corpus and prove it landed, before Enter commits it.
+# Reading back afterwards is too late: by then the shell has echoed, executed
+# and scrolled, and a mangled line has become output that cannot be told apart
+# from the output that was wanted.
+#
+# The leading space is a sacrificial first character, not decoration. PowerShell
+# ignores leading whitespace, so if the handoff above still eats one keystroke
+# the payload is untouched; the read-back is what decides the outcome either
+# way, and it never looks at the space.
+#
+# Returns $false when the line could not be established. That is a harness
+# problem, not a product one: the corpus the run needs was never built, so the
+# run has nothing to say about the search. Callers throw, which the outer catch
+# records as a 'harness' finding and the verdict below turns into exit 1.
+# Returns 'ok', 'bar-open' or 'unverified'. 'bar-open' is handed back rather
+# than retried: the caller files it as the product defect it is.
+function Send-SeedText([string]$text, [string]$dumpPath) {
+    # A dump from a previous run reads as evidence about this one, and OutDir
+    # is reused. Clear it so its presence means this attempt wrote it.
+    if ($dumpPath -and (Test-Path $dumpPath)) { Remove-Item $dumpPath -Force }
+
+    for ($try = 1; $try -le $script:SeedAttempts; $try++) {
+        $focus = Wait-ShellFocus
+        if ($focus -eq 'bar-open') { return 'bar-open' }
+        if ($focus -ne 'ok') {
+            Write-Host "  seed: focus never settled after the bar closed (attempt $try of $script:SeedAttempts)" -ForegroundColor Yellow
+            [void](Restore-IslandFocus)
+            continue
+        }
+        # Sampled after the focus wait, not before it: the wait can spend
+        # three seconds, and anything the shell printed in them belongs to
+        # the baseline rather than to this send.
+        $before = Get-TerminalText (Get-Term)
+        Send-Text (' ' + $text) 30
+
+        # Polled rather than slept. The peer serves its document from a 500ms
+        # cache (TerminalAutomationPeer.ScreenTextCacheMs), so any fixed settle
+        # shorter than that can read a snapshot taken before the last
+        # characters were typed and call a good send a miss - which costs a
+        # retype every time, and three in a row abort a healthy run.
+        $verdict = 'unreadable'
+        $doc = ''
+        $deadline = (Get-Date).AddMilliseconds(2500)
+        do {
+            Start-Sleep -Milliseconds 200
+            $doc = Get-TerminalText (Get-Term)
+            $verdict = Test-SeedLanded $before $doc $text
+        } while ($verdict -ne 'landed' -and (Get-Date) -lt $deadline)
+
+        if ($dumpPath) { $doc | Set-Content $dumpPath -Encoding utf8 }
+        if ($verdict -eq 'landed') { return 'ok' }
+
+        Write-Host "  seed: the input row does not hold the typed line ($verdict, attempt $try of $script:SeedAttempts), retyping" -ForegroundColor Yellow
+        # Drop whatever did land, including the continuation prompt a dropped
+        # quote leaves behind, so the retry starts from a bare line instead of
+        # appending to a broken one, then re-arm the island: retyping through
+        # the input path that just failed is not a different attempt.
+        Clear-CommandLine
+        [void](Restore-IslandFocus)
+    }
+    return 'unverified'
+}
+
 # Poll until the counter stops changing, so assertions never race the
 # progressive search (24ms refresh tick plus incremental feeding).
 function Wait-Counter([int]$timeoutMs = 6000, [int]$stableMs = 400) {
@@ -630,6 +761,7 @@ try {
     $script:StartedAt = Get-WinttyLaunchStamp
     $script:Proc = Start-Process -FilePath $script:ExeFull -PassThru -WorkingDirectory (Split-Path -Parent $script:ExeFull)
     $pid32 = [uint32]$script:Proc.Id
+    $script:Pid32 = $pid32
     $main = Wait-Ready $script:Proc
     $script:Hwnd64 = [int64]$main.Hwnd64
     [void][SFz]::Focus([SFz]::P($script:Hwnd64))
@@ -712,9 +844,22 @@ try {
     # string. Reset the line before committing to the payload.
     Clear-CommandLine
 
-    Send-Text $payload 30
-    Start-Sleep -Milliseconds 400
-    (Get-TerminalText (Get-Term)) | Set-Content (Join-Path $OutDir 'doc-typed.txt') -Encoding utf8
+    # Inline prediction renders the rest of a matching history entry into the
+    # grid as soon as the typed prefix matches it, and those are real cells the
+    # read-back counts. A run whose payload is already in history would then
+    # verify text it had not finished typing, while Enter commits only what was
+    # typed. Default is HistoryAndPlugin on 7.2+, and the default (non-isolated)
+    # run loads the user's profile, so it has to be turned off rather than
+    # assumed off.
+    Send-Text 'Set-PSReadLineOption -PredictionSource None' 30
+    Send-Chord @() ([SFz]::VK_RETURN) 400
+    Start-Sleep -Milliseconds 800
+    Clear-CommandLine
+
+    $seeded = Send-SeedText $payload (Join-Path $OutDir 'doc-typed.txt')
+    if ($seeded -ne 'ok') {
+        throw "the seed payload never landed on the input row ($seeded) after $script:SeedAttempts attempts, see doc-typed.txt"
+    }
     Send-Chord @() ([SFz]::VK_RETURN) 400
     Start-Sleep -Seconds 3
 
@@ -1056,7 +1201,26 @@ try {
                 $before = Get-CounterParts (Get-Counter (Get-Root))
                 $needleBox = Get-NeedleText (Get-Root)
                 Press-Escape
-                Send-Text ('$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }") 30
+                $emit = '$a=' + "'ZQ'+'XW'; 1..12 | % { `"`$a extra `$_`" }"
+                # The initial seed clears the row first and this has to as
+                # well: anything already sitting there is prefixed to the
+                # payload, and "leftover + line" still contains the line, so
+                # the read-back would bless a command the shell cannot run.
+                Clear-CommandLine
+                $seeded = Send-SeedText $emit (Join-Path $OutDir 'doc-emit.txt')
+                if ($seeded -eq 'bar-open') {
+                    # Escape not closing the bar is a product defect this
+                    # harness names elsewhere. Record it BEFORE the throw: the
+                    # verdict is derived from every finding, so this is what
+                    # keeps a live regression at exit 2 instead of being
+                    # filed as a harness failure and retried until it is
+                    # reported as a broken harness.
+                    [void](Assert-That $false 'esc-did-not-close' `
+                        'Escape left the search bar open, so the emit payload could not be typed' @{})
+                }
+                if ($seeded -ne 'ok') {
+                    throw "the emit payload never landed on the input row ($seeded), see doc-emit.txt"
+                }
                 Send-Chord @() ([SFz]::VK_RETURN) 400
                 Start-Sleep -Seconds 3
                 $doc = Get-TerminalText (Get-Term)
