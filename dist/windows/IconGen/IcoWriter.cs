@@ -12,12 +12,13 @@ internal static class IcoWriter
     // on fine detail, without the two arrays drifting silently.
     internal static readonly int[] FrameSizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
 
-    public static void Write(MasterRasters masters, string outPath)
+    public static void Write(
+        MasterRasters masters, string outPath, EditionBrand brand, bool nightly)
     {
         var frames = new List<(int Px, byte[] PngBytes)>();
         foreach (var px in FrameSizes)
         {
-            using var resized = PngWriter.Resize(masters, px);
+            using var resized = PngWriter.Resize(masters, px, brand, nightly);
             using var ms = new MemoryStream();
             resized.Save(ms, ImageFormat.Png);
             frames.Add((px, ms.ToArray()));
