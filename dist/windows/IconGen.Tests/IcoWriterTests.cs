@@ -11,7 +11,7 @@ public class IcoWriterTests
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
         var icoPath = Path.Combine(tempDir.Path, "wintty.ico");
-        IcoWriter.Write(masters, icoPath);
+        IcoWriter.Write(masters, icoPath, EditionBrand.For(Edition.None), nightly: false);
 
         Assert.True(File.Exists(icoPath));
 
