@@ -1,6 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe, not Exe: a console-subsystem binary makes the loader put a
+      console window on screen before managed code runs, which Explorer and
+      the Start menu show as a flash before the splash. UseWinUI does not
+      trigger the SDK's WinExe output inference (only UseWPF and
+      UseWindowsForms do), so this has to be spelled out. Program.MainImpl
+      attaches to the launching terminal's console explicitly so the `+`
+      CLI actions keep their stdio.
+    -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <!--
@@ -85,12 +94,22 @@
     <Channel Condition="'$(Channel)' == '' and '$(Configuration)' == 'Debug'">Nightly</Channel>
     <Channel Condition="'$(Channel)' == ''">Stable</Channel>
     <!--
-      Channel is part of the path so a switch (e.g. -p:Channel=Nightly
+      Which edition's mark to generate: none, pro, enterprise, legacy or
+      oss. This repo builds one product, so the default has to be the
+      unmarked mark; the tier repo that packages the editions sets this
+      per tier. See dist/windows/IconGen/Edition.cs for what each value
+      does to the icon.
+    -->
+    <IconEdition Condition="'$(IconEdition)' == ''">none</IconEdition>
+    <!--
+      Channel and edition are part of the path so a switch (e.g. -p:Channel=Nightly
       after a Stable build) cannot serve the stale variant from the
       previous build: MSBuild only skips GenerateBrandingAssets when its
       declared Outputs exist AND are newer than its Inputs, and keeping
       each channel in its own directory makes "does wintty.ico exist?"
-      channel-aware.
+      channel-aware. Edition sits below channel in the same path for the
+      same reason: two editions built in one tree would otherwise
+      overwrite each other's files.
 
       That is not enough on its own, because the two consumers of these
       files are timestamp-driven and have no channel in their own paths.
@@ -103,15 +122,17 @@
       is what forces the regeneration when the channel changes.
     -->
     <GeneratedBrandingRoot>$(BaseIntermediateOutputPath)$(Platform)\$(Configuration)\$(TargetFramework)\Branding\</GeneratedBrandingRoot>
-    <GeneratedBrandingDir>$(GeneratedBrandingRoot)$(Channel)\</GeneratedBrandingDir>
+    <GeneratedBrandingDir>$(GeneratedBrandingRoot)$(Channel)\$(IconEdition)\</GeneratedBrandingDir>
     <BrandingStamp>$(GeneratedBrandingRoot)last-invocation.txt</BrandingStamp>
     <!--
       One definition, used to run the tool and to stamp what was run.
       Stamping the whole command rather than just the channel keeps the
       guard honest: any future argument that changes what IconGen writes
-      changes the stamp too, without anyone having to remember.
+      changes the stamp too, without anyone having to remember. The
+      edition argument is one such, and it needed nothing added here to
+      be covered.
     -->
-    <IconGenCommand>dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --out "$(GeneratedBrandingDir.TrimEnd('\'))"</IconGenCommand>
+    <IconGenCommand>dotnet run --project ..\..\dist\windows\IconGen --no-launch-profile -c Release -- --channel $(Channel) --edition $(IconEdition) --out "$(GeneratedBrandingDir.TrimEnd('\'))"</IconGenCommand>
     <ApplicationIcon>$(GeneratedBrandingDir)wintty.ico</ApplicationIcon>
   </PropertyGroup>
 
@@ -545,6 +566,92 @@
     Inputs for the same reason as IconGen's own sources: IconGen
     compiles them, so editing one changes what it writes.
   -->
+  <!--
+    The console launcher. Wintty.exe is GUI-subsystem so Explorer does not
+    flash a console at it; that also means a shell does not wait for it, so
+    `wintty +version` needs a console-subsystem binary in front of it. See
+    dist/windows/cli-shim/main.zig.
+
+    Built with zig rather than as a second .NET project because a .NET
+    console app would drag a runtime (or 70 MB of self-contained payload)
+    behind a program whose whole job is CreateProcess plus WaitForSingleObject.
+    zig is already a hard build dependency for libghostty, so this adds a
+    compiler invocation and no new toolchain.
+
+    It lands in a bin/ subdirectory because the app it launches is also
+    called wintty, and a case-insensitive filesystem will not hold both in
+    one directory.
+  -->
+  <!--
+    Target triple for the shim, from $(Platform). Without it zig builds for
+    the host, so an ARM64 package produced on an x64 agent gets an x64 shim
+    beside an ARM64 Wintty.exe. `baseline` because zig otherwise targets the
+    building machine's CPU features, which is how a CI box with AVX-512
+    ships a binary that faults on a user's older chip.
+  -->
+  <PropertyGroup>
+    <CliShimTarget Condition="'$(Platform)' == 'ARM64'">aarch64-windows</CliShimTarget>
+    <CliShimTarget Condition="'$(Platform)' == 'x86'">x86-windows</CliShimTarget>
+    <CliShimTarget Condition="'$(CliShimTarget)' == ''">x86_64-windows</CliShimTarget>
+  <!--
+    The whole command, stamped and listed in Inputs, so a change to the
+    target, the optimisation mode or the zig version regenerates the shim.
+    Listing only main.zig meant none of those did. Same device as
+    $(BrandingStamp) above, and for the same reason.
+  -->
+  </PropertyGroup>
+
+  <!--
+    $(OutDir) is not set while the project body is being evaluated, so the
+    command and the stamp path are built here, inside a target, where it
+    is. Defining them in a PropertyGroup above silently produced
+    -femit-bin="bin\wintty.exe" relative to the project directory and a
+    stamp nothing ever read, which made the target skip on every ordinary
+    build. Properties set inside a target stay set for the rest of it, so
+    BuildCliShim below sees both.
+  -->
+  <Target Name="StampCliShimInvocation" BeforeTargets="BuildCliShim">
+    <PropertyGroup>
+      <CliShimStamp>$(OutDir)bin\last-invocation.txt</CliShimStamp>
+      <CliShimCommand>zig build-exe "$(MSBuildThisFileDirectory)..\..\dist\windows\cli-shim\main.zig" -target $(CliShimTarget) -mcpu baseline -O ReleaseSmall --subsystem console --name wintty -femit-bin="$(OutDir)bin\wintty.exe"</CliShimCommand>
+    </PropertyGroup>
+    <MakeDir Directories="$(OutDir)bin" />
+    <WriteLinesToFile File="$(CliShimStamp)" Lines="$(CliShimCommand)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
+  <Target Name="BuildCliShim"
+          AfterTargets="Build"
+          Inputs="..\..\dist\windows\cli-shim\main.zig;$(OutDir)bin\last-invocation.txt"
+          Outputs="$(OutDir)bin\wintty.exe">
+    <MakeDir Directories="$(OutDir)bin" />
+    <!--
+      The console subsystem is requested explicitly in the command above
+      rather than left to zig's inference. That subsystem byte is the only
+      reason this binary exists, so inferring it would make the feature
+      depend on a compiler default.
+    -->
+    <Exec Command="$(CliShimCommand)" WorkingDirectory="$(MSBuildThisFileDirectory)" />
+  </Target>
+
+  <!--
+    Publish does not copy arbitrary $(OutDir) content, only items the SDK
+    resolved, so the shim built above reaches bin\ and stops there. The MSI
+    harvest and the Velopack pack step both read $(PublishDir)\** (see the
+    comment above the WiX target), so without this the shipped installer
+    contains no shim at all and every packaged build has the console
+    behaviour this feature was written to fix. Dev builds run out of
+    $(OutDir) and look fine, which is what makes the gap easy to miss.
+
+    Same shape as CopyXamlResourcesForAot below, which exists for the
+    identical reason.
+  -->
+  <Target Name="CopyCliShimForPublish" AfterTargets="Publish">
+    <Copy SourceFiles="$(OutDir)bin\wintty.exe"
+          DestinationFolder="$(PublishDir)bin"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
           Inputs="@(IconGenSource);..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;@(IconGenMaster);$(BrandingStamp)"
