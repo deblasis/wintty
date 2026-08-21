@@ -17,7 +17,14 @@ internal static class Program
             var options = Cli.Parse(args);
             Directory.CreateDirectory(options.OutputDir);
 
-            using var masters = MasterRasters.Load(repoRoot);
+            using var loaded = MasterRasters.Load(repoRoot);
+
+            // Edition first, channel second. The nightly stripe and the
+            // edition band want the same bottom band, and a nightly build
+            // of an edition needs to read as nightly before it reads as
+            // that edition - a dev build shipped as if it were stable is
+            // the more expensive confusion.
+            using var masters = BrandMasters(loaded, EditionBrand.For(options.Edition));
 
             if (options.Channel == Channel.Nightly)
             {
@@ -61,6 +68,20 @@ internal static class Program
             Console.Error.WriteLine($"IconGen failed: {ex.Message}");
             return 1;
         }
+    }
+
+    private static MasterRasters BrandMasters(MasterRasters original, EditionBrand brand)
+    {
+        // Caller disposes the returned instance.
+        var dict = new Dictionary<int, System.Drawing.Bitmap>();
+        foreach (var px in original.Sizes)
+        {
+            var bitmap = original.Get(px); // MasterRasters.Get clones
+            TierTint.Apply(bitmap, brand);
+            MonogramBand.Apply(bitmap, brand);
+            dict[px] = bitmap;
+        }
+        return MasterRasters.FromDictionary(dict);
     }
 
     private static MasterRasters StripeMasters(MasterRasters original)
