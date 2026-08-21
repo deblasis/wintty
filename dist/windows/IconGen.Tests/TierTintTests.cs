@@ -31,11 +31,42 @@ public class TierTintTests
 
         TierTint.Apply(icon, EditionBrand.For(Edition.Pro));
 
+        // Exact equality is the wrong assertion, and finding out why is the
+        // point of testing this by chroma. A pure grey (chroma 0) has HSL
+        // saturation 0 and the gate skips it outright. A near-white with a
+        // few counts of chroma computes a saturation near 1.0, because the
+        // HSL denominator collapses as lightness approaches 1 - so the gate
+        // does rotate it, by a hue it barely has. The visible result is
+        // nothing; the bytes move.
+        //
+        // So: pure greys must be untouched, and everything else near-grey
+        // must stay visually identical. The bound is the measured worst case
+        // plus headroom, not a guess - the largest single-channel move over
+        // the whole master is 12/255, on a bezel corner pixel. A regression
+        // that actually recoloured the ghost is nowhere near this: rotating
+        // a genuinely saturated pixel moves channels by 100 or more.
+        int worst = 0;
+        (int X, int Y) worstAt = (0, 0);
         foreach (var (x, y, before) in neutrals)
         {
             var after = icon.GetPixel(x, y);
-            Assert.Equal(before.ToArgb(), after.ToArgb());
+            int shift = Math.Max(Math.Abs(before.R - after.R),
+                Math.Max(Math.Abs(before.G - after.G), Math.Abs(before.B - after.B)));
+            if (shift > worst) { worst = shift; worstAt = (x, y); }
+
+            if (before.R == before.G && before.G == before.B)
+            {
+                Assert.True(before.ToArgb() == after.ToArgb(),
+                    $"A pure grey at ({x},{y}) moved: {before} -> {after}. The "
+                    + "saturation gate must skip these outright.");
+            }
         }
+
+        Assert.True(worst <= 16,
+            $"A near-neutral pixel moved by {worst}/255 at {worstAt}, which is more "
+            + "than the rounding the hue rotation can account for. The ghost and the "
+            + "bezel are the brand: if they shift, the five editions stop looking "
+            + "like one product.");
     }
 
     [Fact]
@@ -56,7 +87,13 @@ public class TierTintTests
     [Fact]
     public void EditionsLandOnDistinctHues()
     {
-        var editions = new[] { Edition.Pro, Edition.Enterprise, Edition.Legacy, Edition.Oss };
+        // None is in the set on purpose: the flagship is what an edition
+        // shortcut sits next to in the Start menu, so "distinct from each
+        // other" is only half the requirement.
+        var editions = new[]
+        {
+            Edition.None, Edition.Pro, Edition.Enterprise, Edition.Legacy, Edition.Oss,
+        };
         var seen = new List<(Edition Edition, Color Colour)>();
 
         using var masters = MasterRasters.Load(RepoRoot);
@@ -92,20 +129,28 @@ public class TierTintTests
         Assert.Equal(before.ToArgb(), icon.GetPixel(30, 128).ToArgb());
     }
 
+    /// <summary>
+    /// Near-grey by chroma, deliberately NOT by the HSL saturation
+    /// <see cref="TierTint"/> gates on.
+    ///
+    /// The first version of this test recomputed that same saturation with
+    /// a tighter cutoff, which made it a strict subset of what the gate
+    /// already skips: it could only fail if the gate inverted, never if
+    /// the gate's threshold moved or its formula changed. Chroma is an
+    /// independent measure, so this now fails when the ghost actually
+    /// starts moving.
+    ///
+    /// It also happens to be the honest measure here. HSL saturation is 1.0
+    /// for any pixel whose max channel is 255 and whose lightness is above
+    /// 0.5, so a near-white (245,247,255) reads as fully saturated - which
+    /// is why "the ghost is low-saturation" was never quite the right
+    /// description of why it survives.
+    /// </summary>
     private static bool IsNeutral(Color c)
     {
         int max = Math.Max(c.R, Math.Max(c.G, c.B));
         int min = Math.Min(c.R, Math.Min(c.G, c.B));
-        if (max == 0) return true;
-        // Mirrors TierTint's cutoff closely enough to select the same
-        // pixels without reaching into its internals.
-        double lightness = (max + min) / 510.0;
-        double delta = (max - min) / 255.0;
-        if (delta == 0) return true;
-        double saturation = lightness > 0.5
-            ? delta / (2.0 - (max + min) / 255.0)
-            : delta / ((max + min) / 255.0);
-        return saturation < 0.12;
+        return max - min <= 12;
     }
 
     private static string FindRepoRoot()

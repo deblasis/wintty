@@ -23,9 +23,16 @@ public class MonogramBandTests
     {
         using var masters = MasterRasters.Load(RepoRoot);
         using var icon = masters.Get(256);
+        using var reference = masters.Get(256);
 
-        int ghostBottom = LowestLitRow(icon);
-        int bandTop = 256 - (int)Math.Round(256 * EditionBrand.BandHeightFraction);
+        int ghostBottom = LowestLitRow(reference);
+
+        // Derived from what Apply actually painted, not recomputed from the
+        // constant. Recomputing tested the arithmetic in this file against
+        // itself and would have passed through any change to Apply's own
+        // geometry - an inset, a different rounding, padding.
+        MonogramBand.Apply(icon, EditionBrand.For(Edition.Pro));
+        int bandTop = TopmostChangedRow(reference, icon);
 
         Assert.True(
             bandTop > ghostBottom,
@@ -122,17 +129,38 @@ public class MonogramBandTests
         using var masters = MasterRasters.Load(RepoRoot);
         using var icon = masters.Get(size);
 
-        MonogramBand.Apply(icon, EditionBrand.For(Edition.Pro));
+        // Tint first, exactly as BrandMasters does. The band samples its
+        // fill off the artwork, so testing on an un-tinted master exercises
+        // a colour combination that never ships - and that sampled colour
+        // is what the ink threshold below has to stay clear of.
+        var brand = EditionBrand.For(Edition.Pro);
+        TierTint.Apply(icon, brand);
+        MonogramBand.Apply(icon, brand);
 
         int bandHeight = Math.Max(2, (int)Math.Round(size * EditionBrand.BandHeightFraction));
         int bandTop = size - bandHeight;
 
+        // Skip the band's own top rule. It is a 25%-black wash over the
+        // fill, so on a dark enough screen colour it satisfies any loose
+        // "is this dark?" predicate and would be counted as glyph ink -
+        // which would let the 256 px case pass for the wrong reason and
+        // the small cases fail for one.
+        int rule = Math.Max(1, (int)Math.Round(size / 256.0 * 4));
+        int scanTop = bandTop + rule;
+
+        // Distance to the actual ink colour rather than a dark-ish
+        // threshold, so the test tracks the constant the drawing uses.
+        var inkColour = Color.FromArgb(0xFF, 0x12, 0x16, 0x1B);
         int ink = 0;
-        for (int y = bandTop; y < size; y++)
+        for (int y = scanTop; y < size; y++)
             for (int x = 0; x < size; x++)
             {
                 var c = icon.GetPixel(x, y);
-                if (c.A > 200 && c.R < 60 && c.G < 60 && c.B < 70) ink++;
+                if (c.A <= 200) continue;
+                int distance = Math.Abs(c.R - inkColour.R)
+                    + Math.Abs(c.G - inkColour.G)
+                    + Math.Abs(c.B - inkColour.B);
+                if (distance <= 40) ink++;
             }
 
         if (expectLetters)
@@ -141,6 +169,24 @@ public class MonogramBandTests
             Assert.True(ink == 0,
                 $"Expected no monogram ink at {size} px (band is {bandHeight} px tall, "
                 + $"below the {EditionBrand.MinLegibleBandPx} px legibility floor); found {ink}.");
+    }
+
+    /// <summary>
+    /// The first row the band actually repainted. Asking the output rather
+    /// than the constant is what makes the caller a test of
+    /// <see cref="MonogramBand.Apply"/> instead of a test of arithmetic
+    /// copied out of it.
+    /// </summary>
+    private static int TopmostChangedRow(Bitmap before, Bitmap after)
+    {
+        for (int y = 0; y < before.Height; y++)
+            for (int x = 0; x < before.Width; x++)
+                if (before.GetPixel(x, y).ToArgb() != after.GetPixel(x, y).ToArgb())
+                    return y;
+
+        throw new InvalidOperationException(
+            "MonogramBand.Apply changed nothing, so there is no band to place. "
+            + "Either the brand was neutral or the band stopped drawing.");
     }
 
     private static int LowestLitRow(Bitmap icon)

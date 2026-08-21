@@ -21,9 +21,15 @@ internal static class TierTint
     /// <summary>
     /// Saturation below which a pixel is treated as neutral and left as
     /// it is. The bezel's silver and the ghost's white sit well under
-    /// this; the screen and the glow sit well over it. Anti-aliased
-    /// pixels along the ghost's edge land in between and move only
-    /// partially, which is what stops the edge from banding.
+    /// this; the screen and the glow sit well over it.
+    ///
+    /// HSL saturation, not chroma, and the difference matters at the top
+    /// end: for any pixel whose brightest channel is 255 the denominator
+    /// collapses as lightness approaches 1, so a near-white carrying a
+    /// few counts of colour computes a saturation close to 1.0 and is
+    /// rotated rather than skipped. It is rotated by a hue it barely has,
+    /// so the result moves by at most 12/255 on the shipping master - not
+    /// visible, and measured by TierTintTests rather than assumed.
     /// </summary>
     private const double NeutralSaturationCutoff = 0.18;
 
