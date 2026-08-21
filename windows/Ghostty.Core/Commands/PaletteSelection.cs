@@ -17,10 +17,14 @@ public static class PaletteSelection
     /// The item <paramref name="delta"/> steps away from
     /// <paramref name="current"/>, clamped to the ends of the list.
     ///
-    /// A null or no-longer-present <paramref name="current"/> resolves to the
-    /// first item, in either direction: pressing Up in a list nothing is
-    /// selected in should land somewhere, and the top is the only end both
-    /// keys agree on.
+    /// A null <paramref name="current"/> resolves to the first item, in
+    /// either direction: pressing Up in a list nothing is selected in
+    /// should land somewhere, and the top is the only end both keys agree
+    /// on. So does one the list does not contain, which is a fallback
+    /// rather than a promise - equality here is whatever the item type
+    /// defines, and a record carrying a delegate does not compare equal to
+    /// itself across a rebuild. Callers pass a selection taken from the
+    /// list they are stepping through, so it does not arise.
     /// </summary>
     public static T? Step<T>(IReadOnlyList<T> items, T? current, int delta)
         where T : class
@@ -31,9 +35,11 @@ public static class PaletteSelection
         var index = IndexOf(items, current);
         if (index < 0) return items[0];
 
-        // Widened before the clamp. A large delta from a paging binding
-        // overflows int arithmetic and lands on the first item, which is the
-        // opposite end from the one the caller asked for.
+        // Widened before the clamp. Every caller passes plus or minus one
+        // today, so this is not reachable; it is here because the failure it
+        // prevents is silent and the opposite of what was asked for. A delta
+        // large enough to overflow wraps negative and clamps to the FIRST
+        // item, so a Page Down would jump to the top of the list.
         var next = Math.Clamp((long)index + delta, 0, items.Count - 1);
         return items[(int)next];
     }
