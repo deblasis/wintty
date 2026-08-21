@@ -19,35 +19,18 @@ internal static class Program
 
             using var loaded = MasterRasters.Load(repoRoot);
 
-            // Edition first, channel second. The nightly stripe and the
-            // edition band want the same bottom band, and a nightly build
-            // of an edition needs to read as nightly before it reads as
-            // that edition - a dev build shipped as if it were stable is
-            // the more expensive confusion. One consequence worth knowing:
-            // on a nightly edition build the stripe covers the monogram, so
-            // those icons carry the hue cue alone.
-            //
-            // The unmarked flagship skips branding entirely rather than
-            // running two no-op transforms over a clone. That is not just
-            // saved work: it keeps the default path byte-identical to what
-            // this tool produced before editions existed, which Cli.cs
-            // states as a requirement and which an extra Bitmap round-trip
-            // would quietly put at risk.
+            // Both marks are applied per output rung by BottomBand, which
+            // also decides how a nightly build of an edition divides the
+            // band between them. Nothing is painted onto the masters, so
+            // the unmarked flagship on the stable channel still walks the
+            // same path it did before editions existed: load, downsample,
+            // save. Cli.cs states that as a requirement.
             var brand = EditionBrand.For(options.Edition);
-            using var branded = IsNeutral(brand) ? null : BrandMasters(loaded, brand);
-            var masters = branded ?? loaded;
+            bool nightly = options.Channel == Channel.Nightly;
 
-            if (options.Channel == Channel.Nightly)
-            {
-                using var striped = StripeMasters(masters);
-                PngWriter.WriteScalePngs(striped, options.OutputDir);
-                IcoWriter.Write(striped, Path.Combine(options.OutputDir, "wintty.ico"));
-            }
-            else
-            {
-                PngWriter.WriteScalePngs(masters, options.OutputDir);
-                IcoWriter.Write(masters, Path.Combine(options.OutputDir, "wintty.ico"));
-            }
+            PngWriter.WriteScalePngs(loaded, options.OutputDir, brand, nightly);
+            IcoWriter.Write(
+                loaded, Path.Combine(options.OutputDir, "wintty.ico"), brand, nightly);
 
             // The Settings and inspector windows get their own glyph .icos so
             // the taskbar group / alt-tab list distinguish them from a terminal
@@ -62,14 +45,16 @@ internal static class Program
             {
                 IcoWriter.Write(
                     settingsMasters,
-                    Path.Combine(options.OutputDir, "wintty-settings.ico"));
+                    Path.Combine(options.OutputDir, "wintty-settings.ico"),
+                    EditionBrand.For(Edition.None), nightly: false);
             }
 
             using (var inspectorMasters = GlyphMasters.Render("\uEBE8"))
             {
                 IcoWriter.Write(
                     inspectorMasters,
-                    Path.Combine(options.OutputDir, "wintty-inspector.ico"));
+                    Path.Combine(options.OutputDir, "wintty-inspector.ico"),
+                    EditionBrand.For(Edition.None), nightly: false);
             }
 
             return 0;
@@ -81,42 +66,6 @@ internal static class Program
         }
     }
 
-    /// <summary>
-    /// Whether this brand changes nothing, so the masters can be used as
-    /// loaded. Asks the brand rather than the <see cref="Edition"/> so a
-    /// future edition that happens to be neutral takes the same path.
-    /// </summary>
-    private static bool IsNeutral(EditionBrand brand)
-        => brand.HueShiftDegrees == 0
-           && brand.SaturationScale == 1.0
-           && string.IsNullOrEmpty(brand.Monogram);
-
-    private static MasterRasters BrandMasters(MasterRasters original, EditionBrand brand)
-    {
-        // Caller disposes the returned instance.
-        var dict = new Dictionary<int, System.Drawing.Bitmap>();
-        foreach (var px in original.Sizes)
-        {
-            var bitmap = original.Get(px); // MasterRasters.Get clones
-            TierTint.Apply(bitmap, brand);
-            MonogramBand.Apply(bitmap, brand);
-            dict[px] = bitmap;
-        }
-        return MasterRasters.FromDictionary(dict);
-    }
-
-    private static MasterRasters StripeMasters(MasterRasters original)
-    {
-        // Caller disposes the returned instance.
-        var dict = new Dictionary<int, System.Drawing.Bitmap>();
-        foreach (var px in original.Sizes)
-        {
-            var bitmap = original.Get(px); // MasterRasters.Get clones
-            HazardStripe.Apply(bitmap);
-            dict[px] = bitmap;
-        }
-        return MasterRasters.FromDictionary(dict);
-    }
 
     private static string FindRepoRoot(string start)
     {

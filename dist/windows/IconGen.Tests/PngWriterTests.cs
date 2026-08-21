@@ -13,7 +13,7 @@ public class PngWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        PngWriter.WriteScalePngs(masters, tempDir.Path);
+        PngWriter.WriteScalePngs(masters, tempDir.Path, EditionBrand.For(Edition.None), nightly: false);
 
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "AppIcon.scale-100.png")));
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "AppIcon.scale-150.png")));
@@ -31,7 +31,7 @@ public class PngWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        PngWriter.WriteScalePngs(masters, tempDir.Path);
+        PngWriter.WriteScalePngs(masters, tempDir.Path, EditionBrand.For(Edition.None), nightly: false);
 
         using var img = new Bitmap(Path.Combine(tempDir.Path, fileName));
         Assert.Equal(expectedPx, img.Width);
@@ -44,7 +44,7 @@ public class PngWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        PngWriter.WriteScalePngs(masters, tempDir.Path);
+        PngWriter.WriteScalePngs(masters, tempDir.Path, EditionBrand.For(Edition.None), nightly: false);
 
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-100.png")));
         Assert.True(File.Exists(Path.Combine(tempDir.Path, "SplashIcon.scale-150.png")));
@@ -62,7 +62,7 @@ public class PngWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        PngWriter.WriteScalePngs(masters, tempDir.Path);
+        PngWriter.WriteScalePngs(masters, tempDir.Path, EditionBrand.For(Edition.None), nightly: false);
 
         using var img = new Bitmap(Path.Combine(tempDir.Path, fileName));
         Assert.Equal(expectedPx, img.Width);
@@ -90,7 +90,7 @@ public class PngWriterTests
         using var tempDir = new TempDir();
         using var masters = MasterRasters.Load(TempDir.FindRepoRoot());
 
-        PngWriter.WriteScalePngs(masters, tempDir.Path);
+        PngWriter.WriteScalePngs(masters, tempDir.Path, EditionBrand.For(Edition.None), nightly: false);
 
         foreach (var rung in LaunchIconAssets.Rungs)
         {
