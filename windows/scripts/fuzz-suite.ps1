@@ -58,6 +58,11 @@
     as more than it is. Keep those strings honest: they were wrong here once,
     in the direction of promising checks the code did not contain.
 
+    A tier build adds its own harnesses by dropping fuzz-tier-harnesses.ps1
+    beside this runner; they append to the base set, so a tier runs what it was
+    built on plus what it adds. Absent means base-only. -RequireLayer makes that
+    absence an error for a build that should have one.
+
     Three integrity checks run on every invocation, including -List, and all
     are free: the manifest cannot name a script that is gone, a script cannot
     sit in this directory unclassified, and a harness cannot stop declaring a
@@ -73,6 +78,7 @@
         just fuzz "-Only search,loop"
         just fuzz-list                # the manifest, no desktop needed
         just fuzz-selftest            # prove the runner classifies correctly
+        ... -RequireLayer pro         # refuse to run the base set alone
 #>
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '../Ghostty/bin/x64/Debug/net10.0-windows10.0.19041.0/Wintty.exe'),
@@ -95,7 +101,13 @@ param(
     # Stop at the first harness that reports findings, leaving its artifacts
     # as the newest thing on disk. Off by default: one broken area should
     # not hide the state of the rest.
-    [switch]$StopOnFindings
+    [switch]$StopOnFindings,
+    # Refuse to run unless the tier layer of this name is present. A tier's own
+    # recipe passes it, so an overlay that failed to place the manifest is exit 1
+    # rather than a green run over the base set - the two are the same event from
+    # here, and without this only the malformed case was loud. The summary is
+    # shape-identical to an oss run, so nothing downstream could tell either.
+    [string]$RequireLayer
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
@@ -117,7 +129,7 @@ if (Test-Path Variable:PSNativeCommandUseErrorActionPreference) {
 # minutes   rough wall clock, so a full run can be planned around. Only the
 #           smoke four are measured; the rest are upper-bound guesses
 # oracle    what a pass from this harness actually rules out
-$Harnesses = @(
+$Harnesses = [System.Collections.Generic.List[object]]@(
     [ordered]@{ name = 'search';         script = 'search-fuzz.ps1';               tags = @('smoke','search'); outDir = $true;  seed = $true;  minutes = 2
                 oracle = 'counts matches in the terminal UIA document itself; printable non-space needles are checked against that count, the rest only for a well-formed counter' }
     [ordered]@{ name = 'probe';          script = 'mouse-fuzz-probe.ps1';          tags = @('smoke','core');   outDir = $true;  seed = $false; minutes = 1
@@ -172,6 +184,149 @@ $NotInSuite = [ordered]@{
     'vtabs-switcher-capture.ps1'    = 'produces frames for a human to look at; no verdict to aggregate'
     'vtabs-morph-filmstrip.ps1'     = 'produces frames for a human to look at; no verdict to aggregate'
     'gen-bell.ps1'                  = 'generates a test asset'
+    'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
+}
+
+# ---- tier layer -----------------------------------------------------------
+# A tier build ships the harnesses above PLUS its own, because a tier is the
+# thing it was built on plus what it adds. The base set is not optional for a
+# tier: a Pro build still has to pass everything oss passes, and running only
+# the Pro harnesses against it would report on the smaller half.
+#
+# The layer arrives as a file the tier overlay drops next to this one, so oss
+# needs no knowledge of which tiers exist and a tier needs no patch against
+# this runner. Absent means base-only, which is what a public build gets.
+#
+# It is read strictly rather than leniently. A tier manifest that is malformed,
+# names a missing script, or collides with a base name would otherwise produce
+# a SMALLER suite that still reports PASS - the same silent-shrink failure
+# integrity check 2 exists to stop, arriving by a different door.
+$TierManifestPath = Join-Path $PSScriptRoot 'fuzz-tier-harnesses.ps1'
+$TierLayerName = $null
+
+foreach ($h in $Harnesses) { $h.layer = 'base' }
+
+if ($RequireLayer -and -not (Test-Path $TierManifestPath)) {
+    Write-Host ("-RequireLayer '$RequireLayer' but no tier manifest sits beside this runner. " +
+                "Either the overlay did not place fuzz-tier-harnesses.ps1, or this is not the " +
+                "tier you think it is.") -ForegroundColor Red
+    exit 1
+}
+
+if (Test-Path $TierManifestPath) {
+    $declared = & $TierManifestPath
+    if ($null -eq $declared) {
+        Write-Host "tier layer: $TierManifestPath returned nothing" -ForegroundColor Red
+        exit 1
+    }
+
+    # One object with a layer name and its harnesses, so the layer can be
+    # named in output without inferring it from the harnesses. Membership is
+    # tested by value rather than through PSObject.Properties, which does not
+    # index a Hashtable the way it indexes a custom object - the manifest is
+    # written as a hashtable literal, so that distinction is the difference
+    # between reading it and rejecting every valid one.
+    if (-not $declared.layer -or -not $declared.harnesses) {
+        Write-Host "tier layer: expected an object with 'layer' and 'harnesses'" -ForegroundColor Red
+        exit 1
+    }
+
+    $TierLayerName = [string]$declared.layer
+    if ($RequireLayer -and $TierLayerName -ne $RequireLayer) {
+        Write-Host ("-RequireLayer '$RequireLayer' but the manifest declares '$TierLayerName'") -ForegroundColor Red
+        exit 1
+    }
+    if ($TierLayerName -eq 'base') {
+        Write-Host "tier layer: 'base' is the name this runner gives its own harnesses" -ForegroundColor Red
+        exit 1
+    }
+    $baseNames = @($Harnesses | ForEach-Object { $_.name })
+    $tierNames = @()
+    $tierProblems = @()
+
+    foreach ($h in @($declared.harnesses)) {
+        # Copied into an ordered hashtable rather than used as it arrives.
+        # A manifest may reasonably be written with [pscustomobject]@{} or
+        # [ordered]@{}, and the two answer different APIs: .Contains() does not
+        # exist on a PSCustomObject, and assigning a property it does not
+        # already have fails. Normalising once here means everything after this
+        # sees the same shape the base manifest uses.
+        $entry = [ordered]@{}
+        if ($h -is [System.Collections.IDictionary]) {
+            foreach ($k in $h.Keys) { $entry[[string]$k] = $h[$k] }
+        } else {
+            foreach ($prop in $h.PSObject.Properties) { $entry[$prop.Name] = $prop.Value }
+        }
+
+        foreach ($key in @('name', 'script', 'tags', 'outDir', 'seed', 'minutes', 'oracle')) {
+            if (-not $entry.Contains($key)) {
+                $tierProblems += "tier harness is missing '$key': $($entry.name)"
+            }
+        }
+
+        # minutes is the dangerous one, so it is coerced here rather than trusted.
+        # It reaches [math]::Max(180, $_ * 60 * 4) in the run loop, and a string
+        # multiplies by REPEATING - '2' * 60 is a 60-character string - which then
+        # throws out of a foreach that has no catch. That kills the report block, so
+        # every verdict already collected, findings included, is discarded and the
+        # run exits 1 "could not run" instead of 2 "findings". Tier harnesses append
+        # last, so on a full run it is the base results that are thrown away.
+        if ($entry.Contains('minutes')) {
+            $asInt = $entry.minutes -as [int]
+            if ($null -eq $asInt) {
+                $tierProblems += "tier harness '$($entry.name)' has a non-numeric minutes: $($entry.minutes)"
+            } else {
+                $entry.minutes = $asInt
+            }
+        }
+
+        # A null or empty tags list passes a key-presence check and then quietly
+        # excludes the harness from every -Tag run, which is how CI invokes this.
+        if (-not @($entry.tags | Where-Object { $_ })) {
+            $tierProblems += "tier harness '$($entry.name)' declares no tags, so no -Tag run would ever select it"
+        }
+
+        # script is resolved relative to this directory and nothing constrained it.
+        # A path that climbs out lands outside the tree the suite is meant to cover,
+        # and combined with the leaf-name comparison in check 2 below it can also
+        # excuse an unrelated script sitting here unclassified.
+        if ($entry.script) {
+            $full = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $entry.script))
+            $rootFull = [System.IO.Path]::GetFullPath($PSScriptRoot)
+            if (-not $full.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar,
+                                      [StringComparison]::OrdinalIgnoreCase)) {
+                $tierProblems += "tier harness '$($entry.name)' names a script outside this directory: $($entry.script)"
+            }
+        }
+        if ($entry.name -and ($baseNames -contains $entry.name)) {
+            # -Only and -Skip match on name, so a collision would make one of
+            # the two unreachable, and which one would depend on order.
+            $tierProblems += "tier harness '$($entry.name)' collides with a base harness of the same name"
+        }
+        if ($entry.name -and ($tierNames -contains $entry.name)) {
+            $tierProblems += "tier harness '$($entry.name)' is declared twice in the tier manifest"
+        }
+        $tierNames += $entry.name
+
+        $entry.layer = $TierLayerName
+        $Harnesses.Add($entry)
+    }
+
+    # The base set carries five scripts that are runners or assets rather than
+    # harnesses. A tier shipping its own had no way to say so: check 2 refuses
+    # the run, and the only escapes were patching this file, which is what the
+    # layer exists to avoid, or declaring it a harness, which is worse.
+    if ($declared.notInSuite) {
+        foreach ($name in $declared.notInSuite.Keys) {
+            $NotInSuite[[string]$name] = [string]$declared.notInSuite[$name]
+        }
+    }
+
+    if ($tierProblems.Count -gt 0) {
+        Write-Host 'tier layer:' -ForegroundColor Red
+        $tierProblems | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        exit 1
+    }
 }
 
 $SelfTestHarnesses = @(
@@ -392,7 +547,11 @@ foreach ($h in @($Harnesses) + @($SelfTestHarnesses)) {
 # 2. A harness exists that the manifest does not name. Without this the
 #    manifest silently shrinks: delete an entry and the suite reports PASS
 #    for an area it never touched.
-$claimed = @(@($Harnesses) | ForEach-Object { Split-Path -Leaf $_.script })
+# Compared on the relative path, not the leaf. Every base harness script is flat,
+# so a leaf comparison was equivalent until a tier could name one in a
+# subdirectory; after that, naming lib/pro/x.ps1 excuses an unrelated x.ps1
+# sitting here unclassified, which is the check's whole purpose.
+$claimed = @(@($Harnesses) | ForEach-Object { ($_.script -replace '/', '\').TrimStart('.\') })
 foreach ($f in Get-ChildItem -Path $PSScriptRoot -Filter '*.ps1' -File) {
     if ($claimed -contains $f.Name) { continue }
     if ($NotInSuite.Contains($f.Name)) { continue }
@@ -424,10 +583,17 @@ if ($problems.Count -gt 0) {
 
 if ($List) {
     $Harnesses | ForEach-Object {
-        [pscustomobject]@{ name = $_.name; tags = ($_.tags -join ','); minutes = $_.minutes; oracle = $_.oracle }
+        [pscustomobject]@{ layer = $_.layer; name = $_.name; tags = ($_.tags -join ','); minutes = $_.minutes; oracle = $_.oracle }
     } | Format-Table -AutoSize -Wrap
     $total = ($Harnesses | ForEach-Object { $_.minutes } | Measure-Object -Sum).Sum
     Write-Host ("{0} harnesses, about {1} minutes for a full run" -f $Harnesses.Count, $total)
+    if ($TierLayerName) {
+        $baseCount = @($Harnesses | Where-Object { $_.layer -eq 'base' }).Count
+        $tierCount = @($Harnesses | Where-Object { $_.layer -eq $TierLayerName }).Count
+        Write-Host ("layers: base ({0}) + {1} ({2})" -f $baseCount, $TierLayerName, $tierCount)
+    } else {
+        Write-Host 'layers: base only (no tier manifest beside this runner)'
+    }
     exit 0
 }
 
