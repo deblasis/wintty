@@ -330,8 +330,8 @@ public partial class App : Application
 
     private static void LogUnhandled(string tag, string detail)
     {
-        // stderr mirror for terminal launches (Program.Main's
-        // FreeConsole gate keeps the console attached in that case).
+        // stderr mirror for terminal launches (Program.MainImpl attaches
+        // to the launching terminal's console, so there is one to write to).
         try
         {
             Console.Error.WriteLine($"{AppIdentity.LogTag} {tag}:");

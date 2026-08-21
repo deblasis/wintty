@@ -114,6 +114,15 @@
                       Link="Cli\Actions\ghostty.zig"
                       LogicalName="Ghostty.Tests.Cli.Actions.ghostty.zig" />
     <!--
+      The console shim's copy of the same alias table, for
+      CliShimParityTests. The shim decides whether the shell waits before
+      the app runs, so it cannot ask CliAliases at runtime and carries a
+      copy; this pins the copy.
+    -->
+    <EmbeddedResource Include="..\..\dist\windows\cli-shim\main.zig"
+                      Link="Cli\Shim\main.zig"
+                      LogicalName="Ghostty.Tests.Cli.Shim.main.zig" />
+    <!--
       Every settings page, for SettingsCardConfigKeyParityTests. A wildcard
       rather than a file list: a page added later is picked up without anyone
       remembering this entry, which is the failure mode the other blocks above

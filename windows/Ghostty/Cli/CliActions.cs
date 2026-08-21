@@ -6,9 +6,10 @@ namespace Ghostty.Cli;
 
 /// <summary>
 /// Handlers for <c>+</c>-prefixed CLI actions intercepted before the
-/// libghostty CLI dispatcher in <see cref="Program"/>. Console
-/// inheritance is provided by Wintty.exe being a console-subsystem app
-/// (see Program.cs comments) - no AttachConsole plumbing is needed.
+/// libghostty CLI dispatcher in <see cref="Program"/>. Wintty is a
+/// GUI-subsystem binary, so the console these write to is the one
+/// <c>Program.AttachToParentConsole</c> borrows from the launching
+/// terminal.
 /// </summary>
 internal static class CliActions
 {
