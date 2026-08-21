@@ -6,7 +6,7 @@ internal enum Channel
     Nightly,
 }
 
-internal sealed record Options(Channel Channel, string OutputDir);
+internal sealed record Options(Channel Channel, string OutputDir, Edition Edition);
 
 internal static class Cli
 {
@@ -14,6 +14,11 @@ internal static class Cli
     {
         Channel? channel = null;
         string? outputDir = null;
+        // Optional, and defaulting to the unmarked mark: this repo builds
+        // one product, and the editions are selected by the tier repo that
+        // packages them. A missing --edition has to keep producing exactly
+        // what it produced before editions existed.
+        var edition = Edition.None;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -35,6 +40,21 @@ internal static class Cli
                         throw new ArgumentException("--out requires a value");
                     outputDir = args[++i];
                     break;
+                case "--edition":
+                    if (i + 1 >= args.Length)
+                        throw new ArgumentException("--edition requires a value");
+                    edition = args[++i].ToLowerInvariant() switch
+                    {
+                        "none" => Edition.None,
+                        "pro" => Edition.Pro,
+                        "enterprise" => Edition.Enterprise,
+                        "legacy" => Edition.Legacy,
+                        "oss" => Edition.Oss,
+                        var other => throw new ArgumentException(
+                            $"Unknown edition '{other}'. Expected 'none', 'pro', "
+                            + "'enterprise', 'legacy' or 'oss'."),
+                    };
+                    break;
             }
         }
 
@@ -43,6 +63,6 @@ internal static class Cli
         if (outputDir is null)
             throw new ArgumentException("--out is required");
 
-        return new Options(channel.Value, outputDir);
+        return new Options(channel.Value, outputDir, edition);
     }
 }
