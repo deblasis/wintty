@@ -15,7 +15,7 @@ public class HazardStripeTests
         using (var g = Graphics.FromImage(bitmap))
             g.Clear(Color.Blue);
 
-        HazardStripe.Apply(bitmap);
+        HazardStripe.Apply(bitmap, FullBand(bitmap.Width));
 
         int yellowCount = CountColor(bitmap, StripeYellow, tolerance: 8);
         Assert.True(yellowCount > 500,
@@ -29,7 +29,7 @@ public class HazardStripeTests
         using (var g = Graphics.FromImage(bitmap))
             g.Clear(Color.Blue);
 
-        HazardStripe.Apply(bitmap);
+        HazardStripe.Apply(bitmap, FullBand(bitmap.Width));
 
         // Top 80% (rows 0..204) should still be pure blue.
         for (int y = 0; y < 204; y++)
@@ -55,5 +55,18 @@ public class HazardStripeTests
                     count++;
             }
         return count;
+    }
+
+    /// <summary>
+    /// The whole bottom band, which is what a nightly build of the
+    /// unmarked flagship gets. A nightly EDITION splits this with the
+    /// monogram; that division lives in BottomBand and is tested there.
+    /// </summary>
+    private static System.Drawing.Rectangle FullBand(int size)
+    {
+        int h = System.Math.Max(
+            EditionBrand.MinBandPx,
+            (int)System.Math.Round(size * EditionBrand.BandHeightFraction));
+        return new System.Drawing.Rectangle(0, size - h, size, h);
     }
 }

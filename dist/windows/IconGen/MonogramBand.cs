@@ -1,164 +1,171 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Drawing.Text;
-using System.Runtime.InteropServices;
 
 namespace Ghostty.IconGen;
 
 /// <summary>
-/// Draws the edition monogram across the bottom band of an icon.
+/// Draws the edition's coloured band, and its letters where they fit.
 ///
-/// The band is held to <see cref="EditionBrand.BandHeightFraction"/> so
-/// it stays below the mark; see that constant for the measurement it
-/// comes from. Below <see cref="EditionBrand.MinLegibleBandPx"/> the
-/// letters are dropped and a plain bar is drawn instead, because a
-/// three-glyph monogram rendered into four pixels is not a small
-/// monogram, it is a smudge that reads as a rendering fault.
+/// Geometry and silhouette clipping belong to <see cref="BottomBand"/>;
+/// this fills the rectangle it is handed and puts type in it.
+///
+/// Below <see cref="EditionBrand.MinLetterSizePx"/> the letters are dropped
+/// and the band is drawn as a plain coloured bar. That is the honest floor:
+/// a three-glyph monogram rendered into four pixels is not a small monogram,
+/// it is a smudge that reads as a rendering fault. At those sizes the colour
+/// is the whole signal, and the flagship having no band at all is the other
+/// half of it.
 /// </summary>
 internal static class MonogramBand
 {
-    private static readonly Color BandInk = Color.FromArgb(0xFF, 0x12, 0x16, 0x1B);
-
-    public static void Apply(Bitmap bitmap, EditionBrand brand)
+    public static void Apply(Bitmap bitmap, EditionBrand brand, Rectangle band)
     {
         if (string.IsNullOrEmpty(brand.Monogram)) return;
 
-        // Thrown rather than asserted: the branding target runs this
-        // tool with -c Release, where Debug.Assert compiles away and a
-        // wrong pixel format would silently round-trip through a
-        // converted buffer instead of failing the build.
-        if (bitmap.Width != bitmap.Height)
-            throw new InvalidOperationException(
-                "MonogramBand.Apply expects a square bitmap.");
-
         int size = bitmap.Width;
-        int bandHeight = (int)Math.Round(size * EditionBrand.BandHeightFraction);
-        if (bandHeight < 2) bandHeight = 2;
-        int bandTop = size - bandHeight;
 
-        // The band's colour is the edition's own hue, taken from the icon
-        // it is being drawn on rather than from a second table that could
-        // drift away from the tint.
-        var bandColour = SampleScreenColour(bitmap, brand);
+        using var g = Graphics.FromImage(bitmap);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.CompositingQuality = CompositingQuality.HighQuality;
+        // Grid-fit, never ClearType: subpixel anti-aliasing on a transparent
+        // surface leaves colour fringes in the exported PNG.
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-        // The plate has rounded corners and the band runs to the bottom
-        // edge, so a plain rectangle would square off the two bottom
-        // corners. Snapshot the alpha, draw, then put the alpha back:
-        // the band ends up clipped to whatever silhouette the master
-        // actually has, with no second copy of the corner radius to keep
-        // in step.
-        var alpha = SnapshotAlpha(bitmap, bandTop, bandHeight);
+        using (var brush = new SolidBrush(brand.BandFill))
+            g.FillRectangle(brush, band);
 
-        using (var g = Graphics.FromImage(bitmap))
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.CompositingQuality = CompositingQuality.HighQuality;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        // A hairline along the top edge so the band reads as a deliberate
+        // layer rather than the screen changing colour halfway down. Two
+        // pixels per 256, not four: at four it was a tenth of the band on
+        // the largest master.
+        int rule = Math.Max(1, (int)Math.Round(size / 256.0 * 2));
+        using (var shade = new SolidBrush(Color.FromArgb(0x59, 0, 0, 0)))
+            g.FillRectangle(shade, band.X, band.Y, band.Width, rule);
 
-            using (var brush = new SolidBrush(bandColour))
-                g.FillRectangle(brush, 0, bandTop, size, bandHeight);
-
-            // A hairline along the top edge so the band reads as a
-            // deliberate layer rather than the screen changing colour
-            // halfway down.
-            int rule = Math.Max(1, (int)Math.Round(size / 256.0 * 4));
-            using (var shade = new SolidBrush(Color.FromArgb(0x40, 0, 0, 0)))
-                g.FillRectangle(shade, 0, bandTop, size, rule);
-
-            if (bandHeight >= EditionBrand.MinLegibleBandPx)
-                DrawMonogram(g, brand.Monogram, size, bandTop, bandHeight);
-        }
-
-        RestoreAlpha(bitmap, bandTop, bandHeight, alpha);
+        if (size >= EditionBrand.MinLetterSizePx)
+            DrawMonogram(g, brand, size, new Rectangle(
+                band.X, band.Y + rule, band.Width, band.Height - rule));
     }
 
-    private static void DrawMonogram(Graphics g, string text, int size, int bandTop, int bandHeight)
+    private static void DrawMonogram(Graphics g, EditionBrand brand, int size, Rectangle inner)
     {
-        // Fitted to the band rather than to a fixed point size, so the
-        // monogram occupies the same proportion of every master instead
-        // of drifting between 32 px and 1024 px.
-        float emSize = bandHeight * 0.72f;
+        using var family = ResolveFamily();
+        using var brush = new SolidBrush(brand.BandInk);
 
-        using var font = new Font(
-            FontFamily.GenericSansSerif, emSize, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var brush = new SolidBrush(BandInk);
-        using var format = new StringFormat
+        // Sized from the INK, measured, rather than from font metrics.
+        //
+        // The obvious approach - em = some fraction of the band, shrink while
+        // Font.GetHeight exceeds it - sets the type far too small, because
+        // GetHeight is the line box: ascent, descent and leading, about 1.33
+        // em, for a monogram whose caps occupy nearer 0.7. Constraining that
+        // against a 9 px band left "PRO" at a 6 px em, which renders as a
+        // dozen anti-aliased pixels rather than letters.
+        //
+        // So: render once at a known em, measure the ink it actually put
+        // down, and scale. Two passes of a tool that runs at build time, and
+        // it is exact for whatever font resolved rather than for the one
+        // whose ratios were hard-coded.
+        const float probeEm = 64f;
+        var probe = MeasureInk(family, brand.Monogram, probeEm);
+        if (probe.IsEmpty) return;
+
+        // The plate's corner arcs eat roughly 8 percent of the width per
+        // side at the band's vertical middle, so hold the letters inside 70
+        // percent. 0.78 of the band height leaves the caps a little air top
+        // and bottom without touching the rule.
+        float byHeight = inner.Height * 0.78f / probe.Height * probeEm;
+        float byWidth = size * 0.70f / probe.Width * probeEm;
+        float em = Math.Max(4f, Math.Min(byHeight, byWidth));
+
+        using var font = new Font(family, em, FontStyle.Bold, GraphicsUnit.Pixel);
+        float scale = em / probeEm;
+        float inkWidth = probe.Width * scale;
+        float inkHeight = probe.Height * scale;
+
+        // probe.X/Y are where the ink began relative to the draw origin, so
+        // subtracting them puts the ink itself where we want it rather than
+        // the glyph box that contains it.
+        float x = inner.X + (inner.Width - inkWidth) / 2f - probe.X * scale;
+        float y = inner.Y + (inner.Height - inkHeight) / 2f - probe.Y * scale;
+
+        // Drawn glyph by glyph because GDI+ DrawString has no tracking, and
+        // caps this small read as a block without a little air between them.
+        foreach (char ch in brand.Monogram)
         {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-        };
-
-        var layout = new RectangleF(0, bandTop, size, bandHeight);
-        g.DrawString(text, font, brush, layout, format);
+            var one = ch.ToString();
+            g.DrawString(one, font, brush, x, y, StringFormat.GenericTypographic);
+            x += g.MeasureString(one, font, PointF.Empty, StringFormat.GenericTypographic).Width
+                 + em * 0.02f;
+        }
     }
 
     /// <summary>
-    /// The band's fill, derived from the icon's own screen so it tracks
-    /// whatever <see cref="TierTint"/> did. Sampled from a row above the
-    /// band and lightened, which keeps the band related to the screen
-    /// while staying separable from it.
+    /// Where the monogram's ink lands when drawn at <paramref name="em"/>,
+    /// relative to the draw origin. Rendered white on black and scanned,
+    /// which measures the glyphs rather than the box the font reserves.
     /// </summary>
-    private static Color SampleScreenColour(Bitmap bitmap, EditionBrand brand)
+    private static RectangleF MeasureInk(FontFamily family, string text, float em)
     {
-        int size = bitmap.Width;
-        int y = (int)Math.Round(size * 0.62);
-        int x = (int)Math.Round(size * 0.5);
-        var sampled = bitmap.GetPixel(Math.Clamp(x, 0, size - 1), Math.Clamp(y, 0, size - 1));
-
-        // A fully desaturated edition would otherwise get a grey band on
-        // a grey screen; nudge the lightness so the edge survives.
-        int lift = brand.SaturationScale < 0.3 ? 70 : 46;
-        return Color.FromArgb(
-            0xFF,
-            Math.Clamp(sampled.R + lift, 0, 255),
-            Math.Clamp(sampled.G + lift, 0, 255),
-            Math.Clamp(sampled.B + lift, 0, 255));
-    }
-
-    private static byte[] SnapshotAlpha(Bitmap bitmap, int bandTop, int bandHeight)
-    {
-        var rect = new Rectangle(0, bandTop, bitmap.Width, bandHeight);
-        var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        try
+        int canvas = (int)Math.Ceiling(em * 4);
+        using var probe = new Bitmap(canvas, canvas, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(probe))
+        using (var font = new Font(family, em, FontStyle.Bold, GraphicsUnit.Pixel))
         {
-            int count = bitmap.Width * bandHeight;
-            var pixels = new int[count];
-            Marshal.Copy(data.Scan0, pixels, 0, count);
-
-            var alpha = new byte[count];
-            for (int i = 0; i < count; i++)
-                alpha[i] = (byte)((pixels[i] >> 24) & 0xFF);
-            return alpha;
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
-        }
-    }
-
-    private static void RestoreAlpha(Bitmap bitmap, int bandTop, int bandHeight, byte[] alpha)
-    {
-        var rect = new Rectangle(0, bandTop, bitmap.Width, bandHeight);
-        var data = bitmap.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
-        try
-        {
-            int count = bitmap.Width * bandHeight;
-            var pixels = new int[count];
-            Marshal.Copy(data.Scan0, pixels, 0, count);
-
-            for (int i = 0; i < count; i++)
+            g.Clear(Color.Black);
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            float x = 0;
+            foreach (char ch in text)
             {
-                int drawn = (pixels[i] >> 24) & 0xFF;
-                int keep = Math.Min(drawn, alpha[i]);
-                pixels[i] = (keep << 24) | (pixels[i] & 0x00FFFFFF);
+                var one = ch.ToString();
+                g.DrawString(one, font, Brushes.White, x, 0, StringFormat.GenericTypographic);
+                x += g.MeasureString(one, font, PointF.Empty, StringFormat.GenericTypographic).Width
+                     + em * 0.02f;
             }
-
-            Marshal.Copy(pixels, 0, data.Scan0, count);
         }
-        finally
+
+        int minX = canvas, minY = canvas, maxX = -1, maxY = -1;
+        for (int py = 0; py < canvas; py++)
+            for (int px = 0; px < canvas; px++)
+                if (probe.GetPixel(px, py).R > 96)
+                {
+                    if (px < minX) minX = px;
+                    if (py < minY) minY = py;
+                    if (px > maxX) maxX = px;
+                    if (py > maxY) maxY = py;
+                }
+
+        if (maxX < 0) return RectangleF.Empty;
+        return new RectangleF(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+
+    private static float MeasureAdvance(Graphics g, string text, Font font, float em)
+    {
+        float total = 0f;
+        foreach (char ch in text)
         {
-            bitmap.UnlockBits(data);
+            total += g.MeasureString(
+                ch.ToString(), font, PointF.Empty, StringFormat.GenericTypographic).Width;
+            total += em * 0.02f;
+        }
+        return total - em * 0.02f;
+    }
+
+    /// <summary>
+    /// Segoe UI where it exists, which is everywhere this tool runs, and
+    /// the generic sans otherwise. The fallback resolves to Microsoft Sans
+    /// Serif, whose small caps are visibly worse, so it is a fallback and
+    /// not a choice.
+    /// </summary>
+    private static FontFamily ResolveFamily()
+    {
+        try
+        {
+            return new FontFamily("Segoe UI");
+        }
+        catch (ArgumentException)
+        {
+            return new FontFamily(GenericFontFamilies.SansSerif);
         }
     }
 }

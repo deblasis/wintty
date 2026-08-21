@@ -1,3 +1,5 @@
+using System.Drawing;
+
 namespace Ghostty.IconGen;
 
 /// <summary>
@@ -17,75 +19,110 @@ internal enum Edition
 }
 
 /// <summary>
-/// How one edition differs from the flagship mark.
+/// How one edition differs from the flagship mark: a coloured band across
+/// the bottom carrying the edition's letters. The artwork above it is the
+/// flagship's, untouched.
 ///
-/// Two cues, deliberately, because each covers the other's blind spot:
-/// hue is the only one that survives at 16 px, where the band is a
-/// couple of pixels of mush; the band is the only one that survives
-/// greyscale, a Windows high-contrast theme, or a user who cannot
-/// separate amber from graphite. Either alone leaves a real user unable
-/// to pick their shortcut.
+/// This replaced a design that rotated the hue of the whole plate and drew
+/// a band as a second cue. The argument for two cues was sound - hue is the
+/// only one that survives at 16 px, the band is the only one that survives
+/// greyscale and high contrast - but the band never delivered its half. It
+/// sampled its fill from the artwork at (50%, 62%), which lands inside the
+/// paperclip's dark metal, the one region the tint deliberately never
+/// touched. Measured across every shipped icon the band came out 96,96,98
+/// for Pro and 96,96,97 for Legacy: the same grey. Under greyscale it
+/// separated "an edition" from "the flagship" and told you nothing about
+/// which edition.
+///
+/// So the cost of dropping the hue rotation is smaller than it looks, and
+/// what it buys is an icon that still reads as this product. The honest
+/// price is stated where it is paid: see MonogramBand, at and below 20 px
+/// the band is too few pixels to carry letters, and editions are told apart
+/// by band colour alone.
 /// </summary>
-/// <param name="HueShiftDegrees">Rotation applied to the screen behind
-/// the mark. Only saturated pixels move (see <see cref="TierTint"/>), so
-/// the silver bezel and the white ghost keep their colour and the family
-/// still reads as one product.</param>
-/// <param name="SaturationScale">Multiplier on saturation. This is what
-/// separates two editions that would otherwise land on neighbouring
-/// hues: Legacy is a muted gold rather than a second amber, and Oss is
-/// near-graphite.</param>
-/// <param name="Monogram">Letters for the band, or empty for no band.
-/// The flagship is deliberately unmarked so that carrying a mark means
-/// "this is an edition" rather than every icon carrying furniture.</param>
+/// <param name="Monogram">Letters for the band, or empty for no band. The
+/// flagship is deliberately unmarked so that carrying a mark means "this is
+/// an edition" rather than every icon carrying furniture.</param>
+/// <param name="BandFill">The band's colour. Named here rather than derived
+/// from the artwork, which is what the previous design tried and got wrong.</param>
+/// <param name="BandInk">The letters' colour. Paired with BandFill by hand
+/// so the contrast holds; <c>EditionBrandTests</c> pins the ratio.</param>
 internal sealed record EditionBrand(
-    double HueShiftDegrees,
-    double SaturationScale,
-    string Monogram)
+    string Monogram,
+    Color BandFill,
+    Color BandInk)
 {
     /// <summary>
-    /// Fraction of the icon height the monogram band occupies.
+    /// Fraction of the icon height the band occupies.
     ///
     /// 0.15 is not a taste choice. The ghost's lowest lit row in the
     /// shipping 256 px master is y=213, which is 83.2 percent down, so a
     /// band starting at 85 percent clears the mark with a few pixels to
-    /// spare. A taller band looks better in isolation and starts eating
-    /// the ghost's body, which is the thing this must not do.
-    /// <see cref="MonogramBandTests.BandNeverReachesTheGhost"/> holds
-    /// this to the real artwork rather than to this comment, and
-    /// Taken from <see cref="HazardStripe.BandHeightFraction"/> rather
-    /// than repeated, so the nightly stripe and the edition band cannot
-    /// disagree about where "the band" is. It was two literals and the
-    /// comment claimed they could not drift, which was not something
-    /// anything enforced.
+    /// spare, and 0.168 is the hard ceiling.
+    /// <see cref="MonogramBandTests.BandNeverReachesTheGhost"/> holds this
+    /// to the real artwork rather than to this comment.
+    ///
+    /// Its own constant, not an alias of <see cref="HazardStripe.BandHeightFraction"/>.
+    /// They were shared on the grounds that the two bands could not then
+    /// disagree about where "the band" is - but they no longer have the
+    /// same job, and a nightly build of an edition now has to fit both into
+    /// that space rather than one covering the other.
     /// </summary>
-    public const double BandHeightFraction = HazardStripe.BandHeightFraction;
+    public const double BandHeightFraction = 0.15;
 
     /// <summary>
-    /// Below this band height in pixels the letters stop being letters.
-    /// A three-glyph monogram needs roughly this much to keep its
-    /// counters open; under it the band is drawn as a plain bar, which
-    /// carries the edition's colour honestly instead of rendering mush
-    /// that reads as damage.
+    /// Floor on the band's height in pixels.
+    ///
+    /// At 16 and 20 px the proportional band is 2 and 3 px, which the
+    /// plate's corner arcs eat most of. Four pixels is what a colour needs
+    /// to survive as a colour. It costs the ghost's last row of
+    /// anti-aliasing at those two sizes only, which is why
+    /// BandNeverReachesTheGhost is scoped above them.
     /// </summary>
-    public const int MinLegibleBandPx = 7;
+    public const int MinBandPx = 4;
+
+    /// <summary>
+    /// Below this OUTPUT size the band carries no letters, only colour.
+    ///
+    /// Measured, not guessed: at a band height of 0.15 and an em of 0.92
+    /// band heights, a three-glyph monogram is clean at 64 px and up,
+    /// marginal at 48 and mush at 40. The previous design's floor was
+    /// expressed in band pixels and evaluated on the MASTER, so every rung
+    /// that downsampled from a larger master escaped it entirely and 40,
+    /// 48 and 60 px all shipped the smudge the floor existed to prevent.
+    /// This one is in output space because that is the size a human sees.
+    /// </summary>
+    public const int MinLetterSizePx = 64;
 
     public static EditionBrand For(Edition edition) => edition switch
     {
-        // Amber. The largest move off the base indigo, because Pro is the
-        // edition most often installed next to the flagship.
-        Edition.Pro => new EditionBrand(160, 1.05, "PRO"),
+        // Amber on near-black. The largest move off the base indigo,
+        // because Pro is the edition most often installed next to the
+        // flagship. 9.3:1.
+        Edition.Pro => new EditionBrand(
+            "PRO", Color.FromArgb(0xFF, 0xF2, 0xA4, 0x13), Color.FromArgb(0xFF, 0x10, 0x13, 0x17)),
 
         // Teal. Far enough from both amber and the base blue to survive
-        // being in the same taskbar as either.
-        Edition.Enterprise => new EditionBrand(-62, 1.0, "ENT"),
+        // being in the same taskbar as either. 9.0:1.
+        Edition.Enterprise => new EditionBrand(
+            "ENT", Color.FromArgb(0xFF, 0x3F, 0xC6, 0xCC), Color.FromArgb(0xFF, 0x0B, 0x14, 0x17)),
 
-        // Muted gold. The hue alone sits close to Pro's amber, so the
-        // saturation drop is doing as much work here as the rotation.
-        Edition.Legacy => new EditionBrand(172, 0.55, "LTS"),
+        // Bronze. Sits beside Pro's amber without competing with it, which
+        // is the pairing that actually has to work: these two are the ones
+        // installed together. 5.4:1.
+        Edition.Legacy => new EditionBrand(
+            "LTS", Color.FromArgb(0xFF, 0xA8, 0x76, 0x3C), Color.FromArgb(0xFF, 0x10, 0x13, 0x17)),
 
-        // Near-graphite. The open-source build reads as the plain one.
-        Edition.Oss => new EditionBrand(0, 0.15, "OSS"),
+        // Slate. Light enough to read as a band rather than sinking into
+        // the plate's own dark corner, which near-graphite did. 7.3:1.
+        //
+        // Unreachable in the shipping build: Directory.Build.props maps
+        // only Wintty, Wintty.Pro, Wintty.Pro.Enterprise and
+        // Wintty.Pro.Legacy, and the oss tier does not carry that patch.
+        // Kept because it costs nothing and the mapping is one line away.
+        Edition.Oss => new EditionBrand(
+            "OSS", Color.FromArgb(0xFF, 0x98, 0xA2, 0xB0), Color.FromArgb(0xFF, 0x0F, 0x12, 0x16)),
 
-        _ => new EditionBrand(0, 1.0, string.Empty),
+        _ => new EditionBrand(string.Empty, Color.Empty, Color.Empty),
     };
 }

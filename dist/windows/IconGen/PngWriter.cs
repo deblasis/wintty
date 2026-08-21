@@ -27,24 +27,33 @@ internal static class PngWriter
             .Select(rung => (Name: rung.FileName, Px: rung.Pixels))
             .ToArray();
 
-    public static void WriteScalePngs(MasterRasters masters, string outDir)
+    public static void WriteScalePngs(
+        MasterRasters masters, string outDir, EditionBrand brand, bool nightly)
     {
         Directory.CreateDirectory(outDir);
-        WriteLadder(masters, outDir, ScaleTargets);
-        WriteLadder(masters, outDir, SplashTargets);
+        WriteLadder(masters, outDir, ScaleTargets, brand, nightly);
+        WriteLadder(masters, outDir, SplashTargets, brand, nightly);
     }
 
     private static void WriteLadder(
-        MasterRasters masters, string outDir, (string Name, int Px)[] targets)
+        MasterRasters masters, string outDir, (string Name, int Px)[] targets,
+        EditionBrand brand, bool nightly)
     {
         foreach (var (name, px) in targets)
         {
-            using var resized = Resize(masters, px);
+            using var resized = Resize(masters, px, brand, nightly);
             resized.Save(Path.Combine(outDir, name), ImageFormat.Png);
         }
     }
 
-    public static Bitmap Resize(MasterRasters masters, int targetPx)
+    /// <summary>
+    /// Downsample to <paramref name="targetPx"/>, then apply the bottom
+    /// band at that size. Banding after the resize is what keeps the
+    /// letters grid-fit and the fill identical on every rung; see
+    /// <see cref="BottomBand"/>.
+    /// </summary>
+    public static Bitmap Resize(
+        MasterRasters masters, int targetPx, EditionBrand brand, bool nightly)
     {
         // Pick the smallest master >= target for cleanest downsample.
         // If none are large enough, fall back to the largest available
@@ -62,6 +71,8 @@ internal static class PngWriter
             g.CompositingQuality = CompositingQuality.HighQuality;
             g.DrawImage(source, new Rectangle(0, 0, targetPx, targetPx));
         }
+
+        BottomBand.Apply(output, brand, nightly);
         return output;
     }
 }
