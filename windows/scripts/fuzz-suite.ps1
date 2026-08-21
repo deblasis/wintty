@@ -28,11 +28,17 @@
     until it passes is how a regression gets buried.
 
     That split only works because each harness leaves with the right code.
-    They signal defects by throwing, and an unhandled throw makes pwsh return
-    1, so every one of them opens with a trap that maps a PRODUCT_FAIL throw
-    to 2 and lets anything else through as 1. HARVEST_MISS and
-    FOREGROUND_MISS stay 1 on purpose: a refused click is usually another app
-    taking the foreground, not a defect.
+    Most signal defects by throwing, and an unhandled throw makes pwsh return
+    1, so they open with a trap that maps a PRODUCT_FAIL throw to 2 and lets
+    anything else through as 1. HARVEST_MISS and FOREGROUND_MISS stay 1 on
+    purpose: a refused click is usually another app taking the foreground,
+    not a defect.
+
+    search-fuzz.ps1 reaches the same split the other way, and the difference
+    matters when reading its exits: it records findings with a kind, and its
+    tail exits 2 when any finding is not a harness one, 1 when they all are.
+    A harness that cannot establish the corpus its oracle measures against
+    leaves with 1 through that path, not 2.
 
     Each harness also gets a wall-clock budget - four times its manifest
     estimate, floor three minutes - after which it is killed and recorded as
@@ -178,6 +184,7 @@ $SelfTestHarnesses = @(
     [ordered]@{ name = 'st-product-throw'; script = 'lib/fuzz-selftest/product-throw.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-unknown-code';  script = 'lib/fuzz-selftest/unknown-code.ps1';  tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     [ordered]@{ name = 'st-seed-unverified'; script = 'lib/fuzz-selftest/seed-unverified.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
+    [ordered]@{ name = 'st-seed-readback'; script = 'lib/fuzz-selftest/seed-readback-cases.ps1'; tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; oracle = 'fixture' }
     # Deliberately short budget: the point is the runaway guard, not the wait.
     [ordered]@{ name = 'st-hangs';         script = 'lib/fuzz-selftest/hangs.ps1';         tags = @('selftest'); outDir = $true; seed = $false; minutes = 0; timeoutSeconds = 2; oracle = 'fixture' }
 )
@@ -547,6 +554,7 @@ if ($SelfTest) {
         @{ name = 'st-unknown-code'; verdict = 'error';    attempts = 1; why = 'an exit code outside the convention is not a pass' }
         @{ name = 'st-hangs';      verdict = 'harness';  attempts = 2; why = 'a wedged harness is killed at its budget and treated as retryable' }
         @{ name = 'st-seed-unverified'; verdict = 'harness'; attempts = 2; why = 'a harness that could not establish its own corpus leaves with 1, not the never-retried 2' }
+        @{ name = 'st-seed-readback'; verdict = 'pass'; attempts = 1; why = 'the seed read-back rules decide whether a run has a real corpus, so they are exercised rather than assumed' }
     )
     $bad = @()
     # One row per harness and nothing else. A harness's console output
@@ -569,7 +577,7 @@ if ($SelfTest) {
     # the same Get-SuiteOutcome the real run exits on - not by re-deriving it
     # here. This fixture set holds two findings, five that could not run (an
     # exit code outside the convention, one that had to be killed, and one
-    # that classified its own failure as retryable) and three passes, so
+    # that classified its own failure as retryable) and four passes, so
     # every branch of the roll-up has a witness.
     $outcome = Get-SuiteOutcome -Rows $rows -SelectedCount $selected.Count
     if ($outcome.exit -ne 2) {
