@@ -403,6 +403,21 @@ public partial class App : Application
         // once ProfileRegistry is live so pinned profiles appear.
         RebuildJumpList();
 
+        // Before Register(), not after. Register() is what (re)creates the key for the identity
+        // below, so a removal that runs first cannot leave this process without a registration
+        // even if the superseded list one day named something still in use; run it afterwards and
+        // that same mistake costs every toast until the next launch.
+        // Recorded rather than discarded. This deletes registry keys, unattended, on every
+        // launch; if it ever removes one it should not, the log line is the only way anyone
+        // reconstructs why notifications stopped.
+        // On one line because the wiring guard matches the callee as source text, and a wrapped
+        // qualified name stops matching. Worth knowing before reformatting it.
+        var staleRemoved = Ghostty.Core.Windows.StaleAppUserModelRegistrations.RemoveSuperseded(AppUserModelId);
+        if (staleRemoved > 0)
+        {
+            Ghostty.Logging.StaticLoggers.App.LogStaleAumidRemoved(staleRemoved);
+        }
+
         // Register for toast notifications. Unpackaged apps must call
         // Register() so AppNotificationManager wires up the COM activator
         // under the AUMID before any Show(); without it Show() throws. The
@@ -1826,6 +1841,12 @@ internal static partial class AppLogExtensions
                    Message = "Failed to register for toast notifications")]
     internal static partial void LogToastRegisterFailed(
         this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.StaleAumidRemoved,
+                   Level = LogLevel.Information,
+                   Message = "Removed {Count} superseded AppUserModelId registration(s)")]
+    internal static partial void LogStaleAumidRemoved(
+        this ILogger<App> logger, int count);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Notifications.ActivationFailed,
                    Level = LogLevel.Warning,
