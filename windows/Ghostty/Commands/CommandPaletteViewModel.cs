@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using Ghostty.Core.Commands;
 
 namespace Ghostty.Commands;
 
@@ -153,6 +154,7 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         IsPinned = false;
         Mode = PaletteMode.Search;
         FilteredCommands = [];
+        SelectedCommand = PaletteSelection.SelectTop(FilteredCommands);
         GhostText = null;
     }
 
@@ -236,8 +238,11 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
             ? "1 command"
             : $"{FilteredCommands.Count} commands";
 
-        if (FilteredCommands.Count > 0)
-            SelectedCommand = FilteredCommands[0];
+        // Assigned for the empty case too. Assigning only when the list came
+        // back non-empty leaves the previous selection live behind a query
+        // that matched nothing, and ExecuteSelectedCommand guards only
+        // against null - so Enter runs a command that is not on screen.
+        SelectedCommand = PaletteSelection.SelectTop(FilteredCommands);
     }
 
     private void ApplyCommandLineFilter(string input)
@@ -245,6 +250,7 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         if (_autoCompleter is null)
         {
             FilteredCommands = [];
+            SelectedCommand = PaletteSelection.SelectTop(FilteredCommands);
             GhostText = null;
             StatusText = "No autocomplete available";
             return;
@@ -281,8 +287,7 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
             ? "1 action"
             : $"{FilteredCommands.Count} actions";
 
-        if (FilteredCommands.Count > 0)
-            SelectedCommand = FilteredCommands[0];
+        SelectedCommand = PaletteSelection.SelectTop(FilteredCommands);
     }
 
     public void AcceptAutocomplete()
@@ -291,21 +296,11 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         SearchText += GhostText;
     }
 
-    public void MoveSelectionUp()
-    {
-        if (FilteredCommands.Count == 0) return;
-        var idx = SelectedCommand is not null ? FilteredCommands.IndexOf(SelectedCommand) : 0;
-        idx = Math.Max(0, idx - 1);
-        SelectedCommand = FilteredCommands[idx];
-    }
+    public void MoveSelectionUp() =>
+        SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, -1);
 
-    public void MoveSelectionDown()
-    {
-        if (FilteredCommands.Count == 0) return;
-        var idx = SelectedCommand is not null ? FilteredCommands.IndexOf(SelectedCommand) : -1;
-        idx = Math.Min(FilteredCommands.Count - 1, idx + 1);
-        SelectedCommand = FilteredCommands[idx];
-    }
+    public void MoveSelectionDown() =>
+        SelectedCommand = PaletteSelection.Step(FilteredCommands, SelectedCommand, +1);
 
     // ── INotifyPropertyChanged ───────────────────────────────────────────────
 
