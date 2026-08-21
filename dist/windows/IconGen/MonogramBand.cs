@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -25,8 +24,13 @@ internal static class MonogramBand
     {
         if (string.IsNullOrEmpty(brand.Monogram)) return;
 
-        Debug.Assert(bitmap.Width == bitmap.Height,
-            "MonogramBand.Apply expects a square bitmap.");
+        // Thrown rather than asserted: the branding target runs this
+        // tool with -c Release, where Debug.Assert compiles away and a
+        // wrong pixel format would silently round-trip through a
+        // converted buffer instead of failing the build.
+        if (bitmap.Width != bitmap.Height)
+            throw new InvalidOperationException(
+                "MonogramBand.Apply expects a square bitmap.");
 
         int size = bitmap.Width;
         int bandHeight = (int)Math.Round(size * EditionBrand.BandHeightFraction);

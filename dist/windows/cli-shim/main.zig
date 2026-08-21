@@ -60,18 +60,79 @@ pub fn main(init: std.process.Init) !u8 {
     const term = try child.wait(io);
     return switch (term) {
         .exited => |code| code,
-        // Signalled, stopped or unknown: the child did not exit on its
-        // own terms, and reporting 0 would tell a script it succeeded.
-        else => 1,
+        // The child did not exit on its own terms, and reporting 0 would
+        // tell a script it succeeded. Listed rather than caught by an
+        // `else` so a new Term variant is a compile error here.
+        .signal, .stopped, .unknown => 1,
     };
 }
 
+/// Every bare-word subcommand the app accepts without a `+`.
+///
+/// A copy, and it has to be: this binary decides whether to wait before
+/// the app has run, so it cannot ask. The copy is pinned to the original
+/// by CliShimParityTests, which parses this array out of this file and
+/// compares it with `CliAliases.Actions` - the same technique
+/// CliAliasParityTests already uses to pin that table to the Action enum
+/// in src/cli/ghostty.zig. Keep the marker comments; the test finds the
+/// array by them.
+// wintty:aliases:begin
+const aliases = [_][]const u8{
+    "boo",
+    "crash-report",
+    "edit-config",
+    "explain-config",
+    "help",
+    "list-actions",
+    "list-colors",
+    "list-fonts",
+    "list-keybinds",
+    "list-themes",
+    "list-themes-tui",
+    "new-tab",
+    "new-window",
+    "show-config",
+    "show-face",
+    "ssh",
+    "ssh-cache",
+    "toggle-quick-terminal",
+    "validate-config",
+    "version",
+};
+// wintty:aliases:end
+
 /// Whether this invocation is a CLI action rather than a launch.
 ///
-/// The `+verb` spelling is libghostty's own, and Program.cs dispatches
-/// on exactly the same test, so the two agree on what counts without
-/// this binary needing to know any of the verbs.
+/// Mirrors what Program.MainImpl treats as a command: a `+verb`, one of
+/// the bare-word aliases above, the version spellings it intercepts
+/// directly, and a help request. Getting this wrong in the permissive
+/// direction returns the prompt before the output, which is the symptom
+/// this binary exists to remove; getting it wrong the other way holds a
+/// shell until the user closes a terminal window. The first is annoying
+/// and the second is broken, so anything uncertain stays out.
 fn isCliAction(argv: []const []const u8) bool {
     if (argv.len < 2) return false;
-    return std.mem.startsWith(u8, argv[1], "+");
+    const first = argv[1];
+
+    if (std.mem.startsWith(u8, first, "+")) return true;
+
+    // `version` and `help` are in the alias table; these two are not,
+    // and Program.MainImpl intercepts them before libghostty sees argv.
+    if (std.mem.eql(u8, first, "--version") or std.mem.eql(u8, first, "-v")) return true;
+
+    for (aliases) |alias| {
+        if (std.mem.eql(u8, first, alias)) return true;
+    }
+
+    // Help, with the same `-e` rule the C# side applies: -e hands the
+    // rest of the line to a child command, so a help flag after it
+    // belongs to that command and this is a launch.
+    for (argv[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) return false;
+        if (std.mem.eql(u8, arg, "--help") or
+            std.mem.eql(u8, arg, "-h") or
+            std.mem.eql(u8, arg, "/?")) return true;
+    }
+
+    return false;
 }

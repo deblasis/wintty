@@ -582,13 +582,74 @@
     called wintty, and a case-insensitive filesystem will not hold both in
     one directory.
   -->
+  <!--
+    Target triple for the shim, from $(Platform). Without it zig builds for
+    the host, so an ARM64 package produced on an x64 agent gets an x64 shim
+    beside an ARM64 Wintty.exe. `baseline` because zig otherwise targets the
+    building machine's CPU features, which is how a CI box with AVX-512
+    ships a binary that faults on a user's older chip.
+  -->
+  <PropertyGroup>
+    <CliShimTarget Condition="'$(Platform)' == 'ARM64'">aarch64-windows</CliShimTarget>
+    <CliShimTarget Condition="'$(Platform)' == 'x86'">x86-windows</CliShimTarget>
+    <CliShimTarget Condition="'$(CliShimTarget)' == ''">x86_64-windows</CliShimTarget>
+  <!--
+    The whole command, stamped and listed in Inputs, so a change to the
+    target, the optimisation mode or the zig version regenerates the shim.
+    Listing only main.zig meant none of those did. Same device as
+    $(BrandingStamp) above, and for the same reason.
+  -->
+  </PropertyGroup>
+
+  <!--
+    $(OutDir) is not set while the project body is being evaluated, so the
+    command and the stamp path are built here, inside a target, where it
+    is. Defining them in a PropertyGroup above silently produced
+    -femit-bin="bin\wintty.exe" relative to the project directory and a
+    stamp nothing ever read, which made the target skip on every ordinary
+    build. Properties set inside a target stay set for the rest of it, so
+    BuildCliShim below sees both.
+  -->
+  <Target Name="StampCliShimInvocation" BeforeTargets="BuildCliShim">
+    <PropertyGroup>
+      <CliShimStamp>$(OutDir)bin\last-invocation.txt</CliShimStamp>
+      <CliShimCommand>zig build-exe "$(MSBuildThisFileDirectory)..\..\dist\windows\cli-shim\main.zig" -target $(CliShimTarget) -mcpu baseline -O ReleaseSmall --subsystem console --name wintty -femit-bin="$(OutDir)bin\wintty.exe"</CliShimCommand>
+    </PropertyGroup>
+    <MakeDir Directories="$(OutDir)bin" />
+    <WriteLinesToFile File="$(CliShimStamp)" Lines="$(CliShimCommand)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
   <Target Name="BuildCliShim"
           AfterTargets="Build"
-          Inputs="..\..\dist\windows\cli-shim\main.zig"
+          Inputs="..\..\dist\windows\cli-shim\main.zig;$(OutDir)bin\last-invocation.txt"
           Outputs="$(OutDir)bin\wintty.exe">
     <MakeDir Directories="$(OutDir)bin" />
-    <Exec Command="zig build-exe &quot;$(MSBuildThisFileDirectory)..\..\dist\windows\cli-shim\main.zig&quot; -O ReleaseSmall --name wintty -femit-bin=&quot;$(OutDir)bin\wintty.exe&quot;"
-          WorkingDirectory="$(MSBuildThisFileDirectory)" />
+    <!--
+      The console subsystem is requested explicitly in the command above
+      rather than left to zig's inference. That subsystem byte is the only
+      reason this binary exists, so inferring it would make the feature
+      depend on a compiler default.
+    -->
+    <Exec Command="$(CliShimCommand)" WorkingDirectory="$(MSBuildThisFileDirectory)" />
+  </Target>
+
+  <!--
+    Publish does not copy arbitrary $(OutDir) content, only items the SDK
+    resolved, so the shim built above reaches bin\ and stops there. The MSI
+    harvest and the Velopack pack step both read $(PublishDir)\** (see the
+    comment above the WiX target), so without this the shipped installer
+    contains no shim at all and every packaged build has the console
+    behaviour this feature was written to fix. Dev builds run out of
+    $(OutDir) and look fine, which is what makes the gap easy to miss.
+
+    Same shape as CopyXamlResourcesForAot below, which exists for the
+    identical reason.
+  -->
+  <Target Name="CopyCliShimForPublish" AfterTargets="Publish">
+    <Copy SourceFiles="$(OutDir)bin\wintty.exe"
+          DestinationFolder="$(PublishDir)bin"
+          SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="GenerateBrandingAssets"

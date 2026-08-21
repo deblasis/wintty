@@ -78,6 +78,9 @@ public static partial class Program
     private static partial IntPtr GetStdHandle(int nStdHandle);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint GetFileType(IntPtr hFile);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool SetStdHandle(int nStdHandle, IntPtr hHandle);
 
@@ -122,6 +125,7 @@ public static partial class Program
     private const uint GENERIC_WRITE = 0x40000000;
     private const uint FILE_SHARE_WRITE = 0x00000002;
     private const uint OPEN_EXISTING = 3;
+    private const uint FILE_TYPE_UNKNOWN = 0x0000;
 
     /// <summary>
     /// Attach to the launching terminal's console, when there is one.
@@ -135,15 +139,29 @@ public static partial class Program
     /// </summary>
     private static void AttachToParentConsole()
     {
+        // Snapshot the three handles BEFORE attaching, and decide from the
+        // snapshot. AllocConsole is documented to initialise the standard
+        // handles; AttachConsole's documentation is silent on whether it
+        // does the same. If it does, reading them afterwards would see
+        // handles Windows had just created, conclude the caller had
+        // already bound them, and skip the bind - which is the correct
+        // outcome by accident for a terminal launch and the wrong one for
+        // `wintty +version > out.txt`, whose redirected handle is what the
+        // guard exists to preserve. Reading first is correct either way
+        // and costs three calls.
+        var inheritedOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        var inheritedErr = GetStdHandle(STD_ERROR_HANDLE);
+        var inheritedIn = GetStdHandle(STD_INPUT_HANDLE);
+
         if (!AttachConsole(ATTACH_PARENT_PROCESS))
             return;
 
         // CONOUT$ is opened for read as well as write because the console
         // screen-buffer queries behind isTty and the interactive TUI need
         // read access on the handle, not just the ability to write to it.
-        BindStandardHandle(STD_OUTPUT_HANDLE, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
-        BindStandardHandle(STD_ERROR_HANDLE, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
-        BindStandardHandle(STD_INPUT_HANDLE, "CONIN$", GENERIC_READ | GENERIC_WRITE);
+        BindStandardHandle(STD_OUTPUT_HANDLE, inheritedOut, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
+        BindStandardHandle(STD_ERROR_HANDLE, inheritedErr, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
+        BindStandardHandle(STD_INPUT_HANDLE, inheritedIn, "CONIN$", GENERIC_READ | GENERIC_WRITE);
     }
 
     /// <summary>
@@ -156,11 +174,22 @@ public static partial class Program
     /// terminal instead of where the caller asked for it, so an existing
     /// handle always wins.
     /// </summary>
-    private static void BindStandardHandle(int stdHandle, string device, uint access)
+    private static void BindStandardHandle(int stdHandle, IntPtr inherited, string device, uint access)
     {
-        var existing = GetStdHandle(stdHandle);
-        if (existing != IntPtr.Zero && existing != InvalidHandleValue)
+        // "Not null and not INVALID_HANDLE_VALUE" is not the same as "a
+        // handle this process can actually use": a launcher can hand a GUI
+        // child a stale or non-inheritable value in STARTUPINFO, and
+        // skipping the bind on one of those sends every CLI diagnostic
+        // nowhere, silently - the exact failure this method exists to
+        // remove. GetFileType answers the real question and costs one
+        // call. See the remarks on WriteConsole below, which is the same
+        // lesson learned somewhere else in this file.
+        if (inherited != IntPtr.Zero
+            && inherited != InvalidHandleValue
+            && GetFileType(inherited) != FILE_TYPE_UNKNOWN)
+        {
             return;
+        }
 
         var handle = CreateFileW(
             device,
@@ -521,10 +550,13 @@ public static partial class Program
         // architecture: ghostty_init parses argv, ghostty_cli_run_action
         // runs the action (if any). If no action, we start the WinUI app.
         //
-        // The project uses Exe (console) subsystem so that CLI actions
-        // inherit the terminal's console handles natively. This lets
-        // Zig's isTty() return true and the Vaxis interactive TUI work.
-        // For GUI mode we detach from the console immediately.
+        // The console these actions write to comes from
+        // AttachToParentConsole above, not from the subsystem: this is a
+        // WinExe binary, so the loader gives it no console and there is
+        // nothing to detach from on the way into the GUI. The handles are
+        // real console handles when the caller had a terminal, which is
+        // what lets Zig's isTty() return true and the Vaxis interactive
+        // TUI work.
         //
         // The StartsWith('+') half of the gate is deliberately unchanged
         // and deliberately not narrowed to known actions: `+bogus` and

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -33,8 +32,13 @@ internal static class TierTint
         if (brand.HueShiftDegrees == 0 && brand.SaturationScale == 1.0)
             return;
 
-        Debug.Assert(bitmap.PixelFormat == PixelFormat.Format32bppArgb,
-            "TierTint.Apply expects 32bpp ARGB; the masters load as ARGB.");
+        // Thrown rather than asserted: the branding target runs this
+        // tool with -c Release, where Debug.Assert compiles away and a
+        // wrong pixel format would silently round-trip through a
+        // converted buffer instead of failing the build.
+        if (bitmap.PixelFormat != PixelFormat.Format32bppArgb)
+            throw new InvalidOperationException(
+                "TierTint.Apply expects 32bpp ARGB; the masters load as ARGB.");
 
         var rect = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
         var data = bitmap.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);

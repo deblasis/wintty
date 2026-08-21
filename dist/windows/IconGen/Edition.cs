@@ -52,11 +52,13 @@ internal sealed record EditionBrand(
     /// the ghost's body, which is the thing this must not do.
     /// <see cref="MonogramBandTests.BandNeverReachesTheGhost"/> holds
     /// this to the real artwork rather than to this comment, and
-    /// <see cref="HazardStripe.BandHeightFraction"/> is the same value so
-    /// the nightly stripe and the edition band cannot disagree about
-    /// where "the band" is.
+    /// Taken from <see cref="HazardStripe.BandHeightFraction"/> rather
+    /// than repeated, so the nightly stripe and the edition band cannot
+    /// disagree about where "the band" is. It was two literals and the
+    /// comment claimed they could not drift, which was not something
+    /// anything enforced.
     /// </summary>
-    public const double BandHeightFraction = 0.15;
+    public const double BandHeightFraction = HazardStripe.BandHeightFraction;
 
     /// <summary>
     /// Below this band height in pixels the letters stop being letters.
