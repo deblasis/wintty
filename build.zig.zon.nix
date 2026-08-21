@@ -422,11 +422,11 @@ in
       };
     }
     {
-      name = "zioshade-0.5.0-8s3a2t1NSAALg56PbAKbTaDxBDPyUOQ-VR3zKsnPDmky";
+      name = "zioshade-0.7.0-8s3a2hNSTgDA_8j-r4WhyCbfEuhsD6TGlETxwat8Xzz8";
       path = fetchZigArtifact {
         name = "zioshade";
-        url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.5.0.tar.gz";
-        hash = "sha256-XLb0+v/41M6n4Dh6NPrg474mCspJ4JLvpyvC1aptQ40=";
+        url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.7.0.tar.gz";
+        hash = "sha256-AB8U+6tn9L+GGqTeTtBN+m3bc11GnrnEcREOTRPXmG4=";
         unpack = false;
       };
     }
