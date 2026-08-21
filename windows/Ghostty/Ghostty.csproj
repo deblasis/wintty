@@ -1,6 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe, not Exe: a console-subsystem binary makes the loader put a
+      console window on screen before managed code runs, which Explorer and
+      the Start menu show as a flash before the splash. UseWinUI does not
+      trigger the SDK's WinExe output inference (only UseWPF and
+      UseWindowsForms do), so this has to be spelled out. Program.MainImpl
+      attaches to the launching terminal's console explicitly so the `+`
+      CLI actions keep their stdio.
+    -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <!--
@@ -545,6 +554,31 @@
     Inputs for the same reason as IconGen's own sources: IconGen
     compiles them, so editing one changes what it writes.
   -->
+  <!--
+    The console launcher. Wintty.exe is GUI-subsystem so Explorer does not
+    flash a console at it; that also means a shell does not wait for it, so
+    `wintty +version` needs a console-subsystem binary in front of it. See
+    dist/windows/cli-shim/main.zig.
+
+    Built with zig rather than as a second .NET project because a .NET
+    console app would drag a runtime (or 70 MB of self-contained payload)
+    behind a program whose whole job is CreateProcess plus WaitForSingleObject.
+    zig is already a hard build dependency for libghostty, so this adds a
+    compiler invocation and no new toolchain.
+
+    It lands in a bin/ subdirectory because the app it launches is also
+    called wintty, and a case-insensitive filesystem will not hold both in
+    one directory.
+  -->
+  <Target Name="BuildCliShim"
+          AfterTargets="Build"
+          Inputs="..\..\dist\windows\cli-shim\main.zig"
+          Outputs="$(OutDir)bin\wintty.exe">
+    <MakeDir Directories="$(OutDir)bin" />
+    <Exec Command="zig build-exe &quot;$(MSBuildThisFileDirectory)..\..\dist\windows\cli-shim\main.zig&quot; -O ReleaseSmall --name wintty -femit-bin=&quot;$(OutDir)bin\wintty.exe&quot;"
+          WorkingDirectory="$(MSBuildThisFileDirectory)" />
+  </Target>
+
   <Target Name="GenerateBrandingAssets"
           BeforeTargets="BeforeBuild"
           Inputs="@(IconGenSource);..\Ghostty.Core\Shell\LaunchIconAssets.cs;..\Ghostty.Core\Shell\LaunchIconMetrics.cs;@(IconGenMaster);$(BrandingStamp)"

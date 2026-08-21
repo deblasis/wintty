@@ -70,14 +70,9 @@ public static partial class Program
         ManagedUnhandled = 3,
     }
 
-    [LibraryImport("kernel32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool FreeConsole();
-
     [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial uint GetConsoleProcessList(
-        [Out] uint[] lpdwProcessList,
-        uint dwProcessCount);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AttachConsole(int dwProcessId);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial IntPtr GetStdHandle(int nStdHandle);
@@ -119,6 +114,66 @@ public static partial class Program
     private const uint FILE_SHARE_READ = 0x00000001;
     private const uint CREATE_ALWAYS = 2;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+    private const int ATTACH_PARENT_PROCESS = -1;
+    private const int STD_INPUT_HANDLE = -10;
+    private const int STD_OUTPUT_HANDLE = -11;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint OPEN_EXISTING = 3;
+
+    /// <summary>
+    /// Attach to the launching terminal's console, when there is one.
+    ///
+    /// Wintty is a GUI-subsystem binary so that Explorer and the Start menu
+    /// do not flash a loader-created console before the splash. The cost is
+    /// that the process starts with no console at all, which would leave
+    /// every <c>wintty +action</c> printing into the void. Attaching to the
+    /// parent gives those handles back, and failing to attach is the
+    /// ordinary Explorer case rather than an error.
+    /// </summary>
+    private static void AttachToParentConsole()
+    {
+        if (!AttachConsole(ATTACH_PARENT_PROCESS))
+            return;
+
+        // CONOUT$ is opened for read as well as write because the console
+        // screen-buffer queries behind isTty and the interactive TUI need
+        // read access on the handle, not just the ability to write to it.
+        BindStandardHandle(STD_OUTPUT_HANDLE, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
+        BindStandardHandle(STD_ERROR_HANDLE, "CONOUT$", GENERIC_READ | GENERIC_WRITE);
+        BindStandardHandle(STD_INPUT_HANDLE, "CONIN$", GENERIC_READ | GENERIC_WRITE);
+    }
+
+    /// <summary>
+    /// Point one standard handle at a console device, but only if Windows
+    /// left it unset.
+    ///
+    /// A redirected launch (<c>wintty +version &gt; out.txt</c>, or a pipe)
+    /// arrives with a real file or pipe handle already in STARTUPINFO.
+    /// Overwriting that with CONOUT$ would quietly send the output to the
+    /// terminal instead of where the caller asked for it, so an existing
+    /// handle always wins.
+    /// </summary>
+    private static void BindStandardHandle(int stdHandle, string device, uint access)
+    {
+        var existing = GetStdHandle(stdHandle);
+        if (existing != IntPtr.Zero && existing != InvalidHandleValue)
+            return;
+
+        var handle = CreateFileW(
+            device,
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            IntPtr.Zero);
+
+        if (handle != InvalidHandleValue)
+            SetStdHandle(stdHandle, handle);
+    }
 
     /// <summary>
     /// Persistent GPU diagnostic log path.  Survives reboot so we can
@@ -297,7 +352,8 @@ public static partial class Program
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // A handle this process may not write to, a pipe with no reader, a
-            // locked log file, a console handle FreeConsole invalidated.
+            // locked log file, a console handle that went away with the
+            // terminal that owned it.
             //
             // Not dropped on the floor: when the console refuses writes and the
             // GPU log is unavailable too, a debugger is the only channel left,
@@ -398,6 +454,13 @@ public static partial class Program
         // App's static constructor used to register this same assembly
         // again, so a `+action` run that found no action and fell through to
         // the GUI died in that static constructor rather than starting.
+        // Borrow the launching terminal's console before anything reads a
+        // standard handle. A GUI-subsystem process starts with none, so the
+        // capture below would otherwise bind _terminalStderr to a handle
+        // that goes nowhere and every CLI diagnostic would vanish on
+        // exactly the launches that have a human watching.
+        AttachToParentConsole();
+
         // Before anything can write to Console.Error and bind it to whatever
         // GetStdHandle returns at that moment. See _terminalStderr.
         _terminalStderr = Console.Error;
@@ -552,28 +615,12 @@ public static partial class Program
         // Menu launch has. InitGhostty tees its fatal line to the terminal.
         InitGhostty();
 
-        // Detach from the console before starting WinUI, but ONLY
-        // when we are the console's sole owner. Explorer / Start
-        // Menu allocates a fresh console for a console-subsystem app
-        // and briefly flashes it; that's the console we want to
-        // close. A terminal launch (bash, cmd, pwsh) shares the
-        // terminal's console with us, and FreeConsole would detach
-        // us from that shared console and silently drop every
-        // Console.Error.WriteLine below (which is how we lose
-        // startup diagnostics and the unhandled-exception dump).
-        //
-        // GetConsoleProcessList returns >= 2 in the shared case (the
-        // parent terminal process counts), exactly 1 in the solo
-        // case, and 0 if the probe fails (no attached console). The
-        // `<= 1` guard treats a probe failure as solo, which matches
-        // the pre-gating behavior and never worse.
-        var consoleProcesses = new uint[4];
-        var consoleProcessCount = GetConsoleProcessList(
-            consoleProcesses,
-            (uint)consoleProcesses.Length);
-        if (consoleProcessCount <= 1)
-            FreeConsole();
-
+        // No console to detach from on the way into the GUI. A shortcut
+        // launch never had one, and a terminal launch is attached to the
+        // caller's console on purpose, so Console.Error diagnostics and the
+        // unhandled-exception mirror still reach whoever started it from a
+        // shell. The gate that used to live here existed because a
+        // console-subsystem binary was handed a console it did not want.
         return StartGui();
     }
 
@@ -685,7 +732,7 @@ public static partial class Program
 
             // Terminal first, and each in its own try: a human is watching
             // that one, and a throw from the log write (disk full, or a
-            // handle FreeConsole invalidated) must not take it down with it.
+            // handle whose terminal has gone) must not take it down with it.
             // Neither may escape either - this method exits with InitFailed,
             // and an exception here would unwind into Main's handler and
             // turn that into ManagedUnhandled, which is the other code the
