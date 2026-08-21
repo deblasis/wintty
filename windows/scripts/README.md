@@ -91,9 +91,11 @@ work leaned on.
 `just fuzz-selftest` runs the suite's own runner against fixtures in
 `lib/fuzz-selftest/` that exit 0, 1, 2 and 3 on purpose, plus one that
 throws, one that throws `PRODUCT_FAIL` from inside a `try`/`finally`, one
-that fails once and then works, and one that hangs forever. It asserts the
-verdict *and* the attempt count for each. It takes about a minute, needs no
-build or desktop, and is safe to run with Wintty open.
+that fails once and then works, one that hangs forever, and one that
+classifies its own failure to establish a corpus as the retryable 1 rather
+than a finding. It asserts the verdict *and* the attempt count for each. It
+takes about a minute, needs no build or desktop, and is safe to run with
+Wintty open.
 
 Two details make it worth trusting rather than just running:
 
@@ -244,6 +246,12 @@ and note two prerequisites:
 2. A foreground guard on every send. A bare `SetForegroundWindow` loses to any
    app that repaints often; attach to the current foreground thread's input
    queue first, then set foreground, bring to top and set focus.
+3. Nothing typed in the moment after XAML hands focus over. Closing the search
+   bar returns focus to the terminal asynchronously, and the first character
+   after it lands nowhere - `search-fuzz.ps1` typed `$a='ZQ'+'XW'; ...` after
+   an Escape and the shell received it without the `$`. Wait for the handoff,
+   spend a sacrificial first character, and read back what landed. The
+   foreground guard does not cover this: the foreground was never lost.
 
 Do not sniff the shell prompt to decide the shell is ready - a themed prompt
 looks nothing like `PS >`. Ask it instead, and wait for the answer to appear
