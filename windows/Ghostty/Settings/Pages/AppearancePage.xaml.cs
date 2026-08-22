@@ -153,6 +153,10 @@ internal sealed partial class AppearancePage : Page
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _configService.ConfigChanged += OnConfigChanged;
+        // Page instances are cached, so returning to this page fires Loaded
+        // without the ctor (or any seeding) running again. Recreate whatever
+        // the preview showed; Page_Unloaded disposed it on the way out.
+        UpdateShaderPreview();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -426,17 +430,22 @@ internal sealed partial class AppearancePage : Page
     {
         if (ShaderPreviewHost is null) return;
 
-        // Removing the old control from the tree unloads (and frees) its
-        // surface; the override is read at creation, so a changed shader
-        // means a new control.
-        ShaderPreviewHost.Child = null;
+        // Dispose the old preview's surface explicitly. Detaching from the
+        // tree does NOT tear it down (TerminalControl.OnUnloaded is
+        // deliberately a no-op there), and each preview owns a native
+        // surface and a shell process rooted in the shared bootstrap host.
+        _shaderPreview?.DisposeSurface();
         _shaderPreview = null;
+        ShaderPreviewHost.Child = null;
 
         var host = App.BootstrapHost;
         if (host is null) return;
 
+        // The path box is the source of truth for a custom file; the combo's
+        // "custom" Tag is a discriminator, never a shader path (passing it
+        // through would arm the shader-failed notice for a valid file).
         var path = string.IsNullOrWhiteSpace(shaderPath)
-            ? (ShaderGalleryCombo?.SelectedItem as ComboBoxItem)?.Tag?.ToString()
+            ? ShaderPathBox.Text
             : shaderPath;
         if (string.IsNullOrEmpty(path)) path = null;
 
@@ -451,11 +460,11 @@ internal sealed partial class AppearancePage : Page
 
     private void Page_Unloaded(object sender, RoutedEventArgs e)
     {
-        // Drop the preview surface when leaving the page. The control's own
-        // Unloaded path frees the surface; clearing the reference keeps the
-        // host's surface map from growing across page visits.
-        ShaderPreviewHost.Child = null;
+        // Dispose the preview surface (and its shell) when leaving the page;
+        // OnLoaded recreates it on return. Detaching alone leaks both.
+        _shaderPreview?.DisposeSurface();
         _shaderPreview = null;
+        ShaderPreviewHost.Child = null;
     }
 
     // The last value this page put in the file, or seeded from it. Blur fires
