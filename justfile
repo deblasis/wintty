@@ -292,7 +292,10 @@ sync force="":
 # for a human to skim, because the report this replaced was skimmed and passed
 # while the product did not compile.
 #
-# Checks, cheapest first:
+# Checks, roughly cheapest first. `base` is the exception: it makes one network
+# round trip, bounded at 15 seconds, and it sits early because everything after
+# it is measured against the ref it checks.
+#
 #
 #   markers   a resolution that left <<<<<<< behind in a file no test compiles
 #   base      what the replay landed on, how far the ref has moved since, and
@@ -370,11 +373,15 @@ sync-verify mode="":
     git_dir=$(git rev-parse --git-dir)
     if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
         echo "FAIL: a rebase is still in progress; finish or abort it first"
+        echo ""
+        echo "sync-verify FAILED"
         exit 1
     fi
     if ! git rev-parse --verify -q refs/remotes/upstream/main >/dev/null; then
         echo "FAIL: no refs/remotes/upstream/main. Add the upstream remote and fetch it;"
         echo "without it nothing below can tell a replay from a fresh checkout."
+        echo ""
+        echo "sync-verify FAILED"
         exit 1
     fi
     dirty=$(git status --porcelain | grep -v "^?? ${tmpd}/\?\$" || true)
@@ -392,13 +399,12 @@ sync-verify mode="":
         note "  none"
     fi
 
-    # Everything from here down reads refs/remotes/upstream/main, and so does
-    # the ancestor check above, and none of it has established that the ref
-    # still stands for the upstream. It usually does when this runs straight
-    # after `just sync`. Run standalone a week later it does not, and the
-    # ancestor check degenerates: an old upstream/main is an ancestor of almost
-    # anything, so a replay onto a stale snapshot passes while the gate claims
-    # the sync landed on upstream.
+    # Everything from here down measures the fork against
+    # refs/remotes/upstream/main, and until this leg runs, nothing has
+    # established what that ref is worth. It is usually the current upstream
+    # when this runs straight after `just sync`, because sync fetches. Run
+    # standalone a week later it is not, and every check below then reports
+    # honestly about the wrong upstream.
     #
     # `git ls-remote` and not `git fetch` on purpose: see the header. A fetch
     # would move the very refs the rest of this run is comparing against.
@@ -413,6 +419,11 @@ sync-verify mode="":
     replay_base=$(git merge-base refs/remotes/upstream/main HEAD 2>/dev/null || true)
     if [ -z "$replay_base" ]; then
         bad "HEAD and upstream/main share no history; this is not a replay of this fork"
+        note "  Nothing below can mean anything measured against an unrelated history,"
+        note "  so the rest is skipped rather than run on a base that does not exist."
+        echo ""
+        echo "sync-verify FAILED"
+        exit 1
     else
         behind=$(git rev-list --count "${replay_base}..refs/remotes/upstream/main")
 
@@ -422,44 +433,85 @@ sync-verify mode="":
         # `timeout` is GNU coreutils. git-bash and Linux have it; a stock macOS
         # does not, and because the redirection below is applied before bash
         # reports an unknown command, a missing `timeout` would otherwise be
-        # swallowed and reported as an unreachable remote. So it is only used
-        # when it is there.
+        # swallowed and reported as an unreachable remote. So it is used only
+        # when it is there. The ssh command this recipe builds carries its own
+        # ConnectTimeout so the one platform without `timeout` still has a bound;
+        # a user who configured their own transport keeps it, and on that branch
+        # the only bound is whatever their command and `timeout` provide.
         #
-        # GIT_SSH_COMMAND is defaulted only when the user has configured no
-        # transport at all. It takes precedence over core.sshCommand, so
-        # testing the environment alone would silently replace a configured
-        # plink, jump host or non-default key with plain ssh for this one call.
+        # GIT_SSH_COMMAND is set only when the user has configured no transport
+        # of their own, and setting it empty is NOT the neutral thing it looks
+        # like: git reads the environment ahead of core.sshCommand, so an empty
+        # value wins and then fails to spawn. That turns this whole leg into a
+        # permanent SKIP for anyone on plink, a jump host or a per-repo key,
+        # with the reason discarded by the redirection.
         ls_rc=0
         ls_out=""
+        have_remote=1
         if ! git remote get-url upstream >/dev/null 2>&1; then
-            look "no remote named 'upstream', only the tracking ref it left behind:"
-            note "    refs/remotes/upstream/main exists but no fetch can ever refresh it,"
-            note "    so every check below reads a ref that is frozen wherever it stopped."
-            ls_rc=-1
+            have_remote=0
         else
             runner=""
             if command -v timeout >/dev/null 2>&1; then runner="timeout 15"; fi
-            ssh_cmd="${GIT_SSH_COMMAND:-}"
-            if [ -z "$ssh_cmd" ] && [ -z "$(git config --get core.sshCommand || true)" ]; then
-                ssh_cmd="ssh -o BatchMode=yes"
+            if [ -n "${GIT_SSH_COMMAND:-}" ] || [ -n "$(git config --get core.sshCommand || true)" ]; then
+                ls_out=$(GIT_TERMINAL_PROMPT=0 $runner git ls-remote upstream main 2>/dev/null) || ls_rc=$?
+            else
+                ls_out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10" $runner git ls-remote upstream main 2>/dev/null) || ls_rc=$?
             fi
-            ls_out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
-                $runner git ls-remote upstream main 2>/dev/null) || ls_rc=$?
         fi
 
-        # ls-remote prints "<sha>\t<ref>". Match the branch exactly: a tag named
-        # main, and its peeled ^{} line, both answer this query too.
+        # ls-remote prints the sha, a tab, then the ref. Match the branch
+        # exactly: a tag named main, and its peeled form, both answer this too.
         remote_up=$(printf '%s\n' "$ls_out" | awk '$2 == "refs/heads/main" { print $1; exit }')
         local_up=$(git rev-parse refs/remotes/upstream/main)
 
-        if [ "$ls_rc" = "-1" ]; then
-            : # already reported above
+        # How old the ref is, measured by the committer date of upstream's own
+        # tip commit. That date is written upstream and travels with the object,
+        # so it needs no reflog and survives a rebase that rewrites every date
+        # on the fork side. Worked out on every path, including the ones that
+        # never reach the remote: a ref nothing can refresh is the state where
+        # its age matters most.
+        #
+        # Validated rather than inlined into the arithmetic. An empty or
+        # non-numeric operand inside an arithmetic expansion aborts the entire
+        # recipe under set -e, and it would do so after the verdict block, so
+        # the run would end with no verdict at all.
+        tip_ct=$(git log -1 --format=%ct refs/remotes/upstream/main 2>/dev/null || true)
+        now_ct=$(date +%s 2>/dev/null || true)
+        case "$tip_ct" in ""|*[!0-9]*) tip_ct="" ;; esac
+        case "$now_ct" in ""|*[!0-9]*) now_ct="" ;; esac
+        tip_age_days=""
+        if [ -n "$tip_ct" ] && [ -n "$now_ct" ]; then
+            tip_age_days=$(( (now_ct - tip_ct) / 86400 ))
+            # A clock skewed forward, or a future-dated commit upstream, would
+            # otherwise report a negative age and quietly disable the finding
+            # below for as long as that commit is the tip.
+            if [ "$tip_age_days" -lt 0 ]; then tip_age_days=0; fi
+        fi
+        stale=0
+        if [ -n "$tip_age_days" ] && [ "$tip_age_days" -ge 7 ]; then stale=1; fi
+
+        if [ "$have_remote" -eq 0 ]; then
+            look "no remote named 'upstream', though refs/remotes/upstream/main is here:"
+            note "    Nothing can refresh that ref, so every check below reads wherever it"
+            note "    was frozen${tip_age_days:+, and its tip is ${tip_age_days} day(s) old}."
+            note "    Neither 'git remote remove' nor 'git remote rename' leaves a ref in"
+            note "    this state; both take the tracking refs with them. It comes from"
+            note "    fetching a URL straight into refs/remotes, or from an edited config."
+            if [ "$stale" -eq 1 ]; then
+                bad "refs/remotes/upstream/main is ${tip_age_days} day(s) old and nothing can refresh it"
+            fi
         elif [ "$ls_rc" -ne 0 ]; then
-            note "  SKIP: the upstream remote did not answer (rc=${ls_rc})."
-            note "  Verifying offline is legitimate, but nothing below established that"
-            note "  refs/remotes/upstream/main is what upstream has, so a clean run means"
-            note "  the fork agrees with the upstream you last fetched and says nothing"
-            note "  about the one that exists now."
+            # look, not note. Verifying offline is legitimate, but a bare note
+            # leaves the run ending in an unqualified PASSED, which reads as
+            # "the ref was checked" when it is the one thing that was not.
+            look "the upstream remote did not answer (rc=${ls_rc}), so the ref is unverified:"
+            note "    Not a finding about the replay. It does mean a clean run below says"
+            note "    the fork agrees with the upstream you last fetched, and says nothing"
+            note "    about the one that exists now${tip_age_days:+; that fetch left a tip ${tip_age_days} day(s) old}."
+            if [ "$stale" -eq 1 ]; then
+                bad "refs/remotes/upstream/main is ${tip_age_days} day(s) old and could not be checked against the remote"
+            fi
         elif [ -z "$remote_up" ]; then
             look "the upstream remote answered with no refs/heads/main:"
             note "    Either the branch is gone or 'upstream' points somewhere unexpected."
@@ -467,17 +519,20 @@ sync-verify mode="":
         elif [ "$remote_up" = "$local_up" ]; then
             note "  refs/remotes/upstream/main is the remote tip (${local_up:0:9})"
         else
-            # The ref every check below reads is not what upstream has. How much
-            # that matters is how old it is, and the honest measure of that is
-            # the committer date of the upstream tip commit itself: it is
-            # written upstream, travels with the object, and needs no reflog. A
-            # fork-side timestamp would not survive a rebase that rewrites
-            # committer dates, and a reflog is local and can be absent or aged
-            # out.
-            tip_age_days=$(( ( $(date +%s) - $(git log -1 --format=%ct refs/remotes/upstream/main) ) / 86400 ))
-            note "    local  upstream/main:   ${local_up:0:9}, tip is ${tip_age_days} day(s) old"
+            note "    local  upstream/main:   ${local_up:0:9}${tip_age_days:+, tip is ${tip_age_days} day(s) old}"
             note "    remote refs/heads/main: ${remote_up:0:9}"
-            if [ "$tip_age_days" -ge 7 ]; then
+            # Differing is not the same as being behind, and a bare inequality
+            # cannot tell them apart. If upstream rewound or force-pushed main,
+            # the local ref is AHEAD of the remote and the fork was replayed
+            # onto commits upstream no longer has, which is worse than being out
+            # of date and would otherwise be reported as upstream moving on.
+            # Whenever that is what happened the remote commit is already in the
+            # local object database, so telling them apart costs no fetch.
+            if git cat-file -e "${remote_up}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$remote_up" "$local_up" 2>/dev/null; then
+                bad "refs/remotes/upstream/main is ahead of the remote; upstream rewound or was repointed"
+                note "    The replay landed on commits the remote no longer has, so the next"
+                note "    'just sync' would rebase onto a history that diverged from this one."
+            elif [ "$stale" -eq 1 ]; then
                 bad "refs/remotes/upstream/main is ${tip_age_days} day(s) stale and every check below reads it"
                 note "    Upstream lands commits most days, so at this distance the fork is"
                 note "    being compared against an upstream that has substantially moved."
@@ -485,25 +540,28 @@ sync-verify mode="":
                 note "    this gate alone: that moves the pre-rebase tip the checks below"
                 note "    compare against."
             else
-                note "    Upstream moved on after the last fetch. Recent enough that the"
+                note "    Upstream has commits this ref does not. Recent enough that the"
                 note "    checks below are still measuring the right thing."
             fi
         fi
 
         # How far the replay itself is from the ref. After a correct `just sync`
-        # this is zero or the handful of commits upstream pushed while the
-        # replay ran, because sync fetches and then rebases onto what it
-        # fetched. A large number means this is not a fresh replay waiting to be
-        # pushed, which is the only state the rest of this gate is designed for.
+        # this is exactly zero: sync fetches and then rebases onto what it
+        # fetched, and nothing moves the ref again in between. Commits upstream
+        # pushed while the replay was running are not in this ref and cannot
+        # show up here. So any non-zero number means the ref moved by a later
+        # fetch and this is not a fresh replay waiting to be pushed, which is
+        # the only state the rest of this gate is built for.
         if [ "$behind" -eq 0 ]; then
             note "  the replay landed on refs/remotes/upstream/main"
         else
             look "the replay landed ${behind} commit(s) behind refs/remotes/upstream/main:"
             note "    replay landed on: $(git rev-parse --short "$replay_base")"
             note "    upstream/main is: $(git rev-parse --short refs/remotes/upstream/main)"
-            note "    A few commits means upstream pushed while you were replaying. A lot"
-            note "    means the ref moved by a later fetch and this is not a fresh replay;"
-            note "    the checks below still compare against the ref, not against what the"
+            note "    After a correct sync this is zero, because sync fetches and then"
+            note "    replays onto what it fetched. Any number here means the ref moved by"
+            note "    a later fetch, so this is not a fresh replay waiting to be pushed;"
+            note "    the checks below compare against the ref, not against what the"
             note "    replay targeted, so read them with that in mind."
         fi
     fi
@@ -520,10 +578,25 @@ sync-verify mode="":
 
     if [ -z "$baseline" ]; then
         note "=== dropped commits / file surface / range-diff / fmt baseline ==="
-        note "  SKIP: ${tracked:-no tracking ref} is at or behind HEAD, so the pre-rebase tip is gone."
-        note "  These four checks only work between the replay and the push."
+        # look, not note. These four are a third of what this gate checks, and a
+        # bare note leaves the run ending in an unqualified PASSED that reads as
+        # though they ran.
+        look "the pre-rebase tip is gone, so four checks did not run:"
+        note "    ${tracked:-no tracking ref} is at or behind HEAD. These only work"
+        note "    between the replay and the push. Run this before you push, not after."
     else
-        old_base=$(git merge-base "$baseline" refs/remotes/upstream/main)
+        # Guarded for the same reason as replay_base above: git merge-base
+        # exits non-zero when two histories have no common ancestor, and an
+        # unguarded command substitution turns that into a silent set -e abort
+        # with no verdict.
+        old_base=$(git merge-base "$baseline" refs/remotes/upstream/main 2>/dev/null || true)
+        if [ -z "$old_base" ]; then
+            bad "${baseline} and upstream/main share no common ancestor"
+            note "  The four checks that compare against the pre-rebase tip cannot run."
+            echo ""
+            echo "sync-verify FAILED"
+            exit 1
+        fi
 
         # One range-diff drives both checks below. It pairs each pre-rebase
         # commit with its replayed twin, which is the only thing that can tell
@@ -598,7 +671,7 @@ sync-verify mode="":
 
     note "=== zig fmt (new offenders only) ==="
     if ! command -v zig >/dev/null 2>&1; then
-        note "  SKIP: zig is not on PATH"
+        look "zig is not on PATH, so the fmt check did not run"
     else
         rm -rf "$tmpd"; mkdir -p "$tmpd"
         # zig reports paths in the platform separator; git only understands
