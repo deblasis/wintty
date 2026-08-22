@@ -18,7 +18,7 @@ public class ShaderGalleryTests
         for (var i = 0; i < 6 && dir is not null; i++)
         {
             if (Directory.Exists(Path.Combine(dir.FullName, "windows", "Ghostty", "Assets", "Shaders")))
-                return dir.FullName;
+                return Path.Combine(dir.FullName, "windows", "Ghostty");
             dir = dir.Parent;
         }
         return string.Empty;
