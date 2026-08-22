@@ -3,11 +3,9 @@ namespace Ghostty.Core.Input;
 /// <summary>
 /// Mirror of <c>ghostty_action_mouse_shape_e</c>
 /// (<c>include/ghostty.h</c>) and <c>terminal.MouseShape</c>
-/// (<c>src/terminal/mouse.zig</c>). Ordinals are pinned by
-/// <c>MouseShapeMapTests.Ordinal_Matches_Upstream</c>.
-///
-/// To re-verify against upstream after a rebase:
-///   grep -nE "^  GHOSTTY_MOUSE_SHAPE_" include/ghostty.h
+/// (<c>src/terminal/mouse.zig</c>). Ordinals are checked against the
+/// header itself by <c>GhosttyActionTagHeaderParityTests</c>, so a sync
+/// that reorders them fails the test rather than needing a manual grep.
 /// </summary>
 public enum MouseShape
 {

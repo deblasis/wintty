@@ -9,14 +9,20 @@ namespace Ghostty.Core.Interop;
 // imports these via `using Ghostty.Core.Interop;` so existing call sites
 // in GhosttyHost compile unchanged.
 //
-// GhosttyActionsLayoutTests in Ghostty.Tests pins the ordinals and
-// struct layouts at build time; that test file also carries the grep
-// command for re-verifying against include/ghostty.h after a rebase.
+// GhosttyActionTagHeaderParityTests reads include/ghostty.h and checks
+// every ordinal below against it; GhosttyActionsLayoutTests pins the
+// struct layouts. Nothing here needs re-verifying by hand after a sync.
 
 // Subset of ghostty_action_tag_e that the Windows apprt dispatches on.
-// Indices are pinned explicitly so an upstream reorder cannot silently
-// misroute a tag to the wrong handler — any unlisted tag falls through
-// to "return false" in GhosttyHost.OnAction.
+// Any unlisted tag falls through to "return false" in
+// GhosttyHost.OnAction.
+//
+// These are positions in an enum upstream edits, and an insertion shifts
+// every later tag without breaking a single compile: the header is not
+// compiled here and the tags arrive as ints. Upstream adding
+// SET_WINDOW_TITLE at 35 shifted twenty of them, so libghostty's
+// first_render arrived as CustomShaderFailed and every new surface raised
+// a custom-shader notice. Only the header can contradict this list.
 internal enum GhosttyActionTag
 {
     NewTab = 2,
@@ -44,26 +50,29 @@ internal enum GhosttyActionTag
     DesktopNotification = 32,
     SetTitle = 33,
     SetTabTitle = 34,
-    PromptTitle = 35,
-    MouseShape = 37,
-    MouseVisibility = 38,
-    MouseOverLink = 39,
-    OpenConfig = 41,
-    FloatWindow = 43,
-    ReloadConfig = 48,
-    ConfigChange = 49,
-    CloseWindow = 50,
-    RingBell = 51,
-    SelectionChanged = 52,
-    ShowChildExited = 57,
-    ProgressReport = 58,
-    StartSearch    = 61,
-    EndSearch      = 62,
-    SearchTotal    = 63,
-    SearchSelected = 64,
-    PromptReady    = 68,
-    FirstRender    = 69,
-    CustomShaderFailed = 70,
+    // Not dispatched: no window-title override UI yet. Listed so the
+    // ordinal it displaced is visible rather than an unexplained gap.
+    SetWindowTitle = 35,
+    PromptTitle = 36,
+    MouseShape = 38,
+    MouseVisibility = 39,
+    MouseOverLink = 40,
+    OpenConfig = 42,
+    FloatWindow = 44,
+    ReloadConfig = 49,
+    ConfigChange = 50,
+    CloseWindow = 51,
+    RingBell = 52,
+    SelectionChanged = 53,
+    ShowChildExited = 58,
+    ProgressReport = 59,
+    StartSearch    = 62,
+    EndSearch      = 63,
+    SearchTotal    = 64,
+    SearchSelected = 65,
+    PromptReady    = 69,
+    FirstRender    = 70,
+    CustomShaderFailed = 71,
 }
 
 // ghostty_action_scrollbar_s:

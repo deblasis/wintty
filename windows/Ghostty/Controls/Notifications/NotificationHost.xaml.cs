@@ -102,6 +102,14 @@ public sealed partial class NotificationHost : UserControl
         // Title is visual-only on InfoBar; UIA Name stays empty unless set,
         // so a harness/narrator looking for the notice title would miss it.
         AutomationProperties.SetName(bar, notice.Title);
+        // An id as well as a name, because Name here is the visible copy and
+        // the copy is the part that gets reworded. A harness that can only
+        // match on the wording reports "no banner" after an edit to it, which
+        // reads as the feature working. DedupKey is the notice's own stable
+        // identity wherever it has one.
+        AutomationProperties.SetAutomationId(
+            bar,
+            string.IsNullOrEmpty(notice.DedupKey) ? "Notice" : "Notice_" + notice.DedupKey);
 
         if (notice.Actions.Count == 1)
         {
