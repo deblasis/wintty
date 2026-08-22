@@ -94,7 +94,7 @@ throws, one that throws `PRODUCT_FAIL` from inside a `try`/`finally`, one
 that fails once and then works, one that hangs forever, and one that
 classifies its own failure to establish a corpus as the retryable 1 rather
 than a finding. It asserts the verdict *and* the attempt count for each. It
-takes about a minute, needs no build or desktop, and is safe to run with
+takes a minute and a half, needs no build or desktop, and is safe to run with
 Wintty open.
 
 Two details make it worth trusting rather than just running:
