@@ -39,8 +39,10 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `pscustomobject.ps1` | an entry written as a custom object normalises rather than crashing |
 | `minutes-string.ps1` | `minutes` as text coerces to `Int32` before the timeout arithmetic reads it |
 | `minutes-bad.ps1` | `minutes` no arithmetic can use is refused |
-| `tags-missing.ps1` | empty and null `tags` are both refused, not just an absent key |
-| `missing-key.ps1` | an entry short of a key the runner reads later is refused |
+| `tags-missing.ps1` | empty, null and all-blank `tags` are each refused, not just an absent key |
+| `missing-key.ps1` | one entry per required key, each short a different one, so shortening the list is visible |
+| `empty-value.ps1` | a key that is present and empty is not a declared key |
+| `script-missing.ps1` | a `script` the tier declared and never shipped is refused, by integrity check 1 |
 | `script-escapes.ps1` | a `script` that climbs out of the directory is refused |
 | `script-sibling.ps1` | so is one in a sibling directory whose path opens with the same characters |
 | `leaf-collision.ps1` | naming a subdirectory script does not classify a same-leaf script at the top level |
@@ -48,8 +50,13 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `base-collision.ps1` | a name the base set already uses is refused |
 | `reserved-layer.ps1` | the layer cannot call itself `base` |
 | `no-harnesses.ps1` | a layer with nothing to run under it is refused |
+| `no-layer.ps1` | so is harnesses with no layer name, which would otherwise merge and report as base-only |
 | `returns-nothing.ps1` | a manifest that emits no object at all is refused |
+| `two-objects.ps1` | so is one that emits two, which member enumeration otherwise reads as a single merged layer |
 | `not-in-suite.ps1` | a layer can classify a runner of its own without patching the suite |
+| `not-in-suite-object.ps1` | the same classification written as a custom object is read, not silently ignored |
+| `not-in-suite-list.ps1` | a list of names rather than name = reason pairs is refused |
+| `not-in-suite-harness.ps1` | a layer cannot excuse a script its own manifest names as a harness |
 
 The self-test runs these against a copy of `windows/scripts`, because the
 manifest is discovered by presence: a fixture placed in the real directory

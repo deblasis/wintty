@@ -1,8 +1,11 @@
 #requires -Version 7
 # minutes as text, which is what a hand-written manifest tends to produce.
-# '2.6' rather than another '2' so the coerced value reads differently from
-# the text it came from: -List is the only output that shows minutes at all,
-# so a string that renders the same either way would assert nothing.
+# '2.6' rather than another '2' so the coerced value reads differently from the
+# text it came from: -List is the only output that shows minutes at all, so a
+# string that renders the same either way would assert nothing. That makes the
+# assertion downstream a pin on the platform's own rounding rather than on a
+# rule anyone here decided; it is used because it is the only signal, not
+# because 2.6 minutes rounding up matters to anything.
 @{
     layer = 'pro'
     harnesses = @(

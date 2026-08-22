@@ -189,6 +189,18 @@ $NotInSuite = [ordered]@{
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
 }
 
+# Everything this file ships beside itself, as paths relative to this directory:
+# the harnesses above plus everything deliberately outside them. Integrity check
+# 2 is what makes that an inventory rather than a claim - a script sitting here
+# in neither collection fails every invocation, -List included. Taken while both
+# are still literals, because the tier merge below appends a tier's own scripts
+# to both and those are not what this file ships. Normalised exactly the way
+# check 2 normalises, so the two cannot drift apart.
+$BaseScripts = @(
+    @($Harnesses  | ForEach-Object { ($_.script -replace '/', '\').TrimStart('.\') }) +
+    @($NotInSuite.Keys | ForEach-Object { ([string]$_ -replace '/', '\').TrimStart('.\') })
+)
+
 # ---- tier layer -----------------------------------------------------------
 # A tier build ships the harnesses above PLUS its own, because a tier is the
 # thing it was built on plus what it adds. The base set is not optional for a
@@ -219,6 +231,16 @@ if (Test-Path $TierManifestPath) {
     $declared = & $TierManifestPath
     if ($null -eq $declared) {
         Write-Host "tier layer: $TierManifestPath returned nothing" -ForegroundColor Red
+        exit 1
+    }
+
+    # More than one object out of one file is what an overlay that appended
+    # rather than replaced leaves behind, and what keeping both sides of a merge
+    # conflict produces. Member enumeration hides it rather than failing: across
+    # an array .layer stringifies to the names joined and .harnesses to both
+    # sets, so everything merges under a layer named after neither of them.
+    if ($declared -is [array]) {
+        Write-Host ("tier layer: $TierManifestPath emitted $($declared.Count) objects; it must emit exactly one") -ForegroundColor Red
         exit 1
     }
 
@@ -266,6 +288,21 @@ if (Test-Path $TierManifestPath) {
             }
         }
 
+        # Present but empty, for the three that are read as text. An empty name
+        # is a blank row in -List that neither -Only nor -Skip can select, and
+        # an OutDir that resolves to the run root. An empty script slips both
+        # the path guard below and integrity check 1 - Test-Path on the
+        # directory itself succeeds - and surfaces only as check 3 saying
+        # nothing declares -ExePath, which reads as a broken harness rather
+        # than a broken manifest. An empty oracle is a harness claiming a pass
+        # rules something out without saying what, and the header above is
+        # explicit that those strings were already wrong here once.
+        foreach ($key in @('name', 'script', 'oracle')) {
+            if ($entry.Contains($key) -and -not "$($entry[$key])".Trim()) {
+                $tierProblems += "tier harness has an empty '$key': $($entry.name)"
+            }
+        }
+
         # minutes is the dangerous one, so it is coerced here rather than trusted.
         # It reaches [math]::Max(180, $_ * 60 * 4) in the run loop, and a string
         # multiplies by REPEATING - '2' * 60 is a 60-character string - which then
@@ -284,7 +321,11 @@ if (Test-Path $TierManifestPath) {
 
         # A null or empty tags list passes a key-presence check and then quietly
         # excludes the harness from every -Tag run, which is how CI invokes this.
-        if (-not @($entry.tags | Where-Object { $_ })) {
+        # Whitespace counts as empty here: only '' is falsy in PowerShell, so a
+        # bare truthiness test keeps '  ' - and Split-List trims the caller's
+        # -Tag values and drops the blanks, so no -Tag argument can ever reach a
+        # tag like that. It selects nothing, exactly like the empty list does.
+        if (-not @($entry.tags | Where-Object { "$_".Trim() })) {
             $tierProblems += "tier harness '$($entry.name)' declares no tags, so no -Tag run would ever select it"
         }
 
@@ -319,8 +360,41 @@ if (Test-Path $TierManifestPath) {
     # the run, and the only escapes were patching this file, which is what the
     # layer exists to avoid, or declaring it a harness, which is worse.
     if ($declared.notInSuite) {
-        foreach ($name in $declared.notInSuite.Keys) {
-            $NotInSuite[[string]$name] = [string]$declared.notInSuite[$name]
+        # Normalised the same way a harness entry is, and for the same reason.
+        # This is the other half of the same manifest and arrives the same two
+        # ways, but a PSCustomObject has no .Keys at all - so the foreach ran
+        # over $null and did nothing, and the run then died at integrity check 2
+        # telling the tier author to classify a file they had classified.
+        $declaredNotInSuite = [ordered]@{}
+        if ($declared.notInSuite -is [System.Collections.IDictionary]) {
+            foreach ($k in $declared.notInSuite.Keys) { $declaredNotInSuite[[string]$k] = [string]$declared.notInSuite[$k] }
+        } elseif ($declared.notInSuite -is [array] -or $declared.notInSuite -is [string]) {
+            # The reason is not decoration: it is the only place a tier says why
+            # a script of its own is not a harness. A bare list also reads as an
+            # object whose properties are Length and Rank, so left to the branch
+            # below it would classify those and nothing else.
+            $tierProblems += 'tier notInSuite must be written as name = reason pairs, not a list of names'
+        } else {
+            foreach ($prop in $declared.notInSuite.PSObject.Properties) { $declaredNotInSuite[[string]$prop.Name] = [string]$prop.Value }
+        }
+
+        # This is the one door in the merge that lets a tier tell check 2 to look
+        # away, so it is the one place a lenient read would undo the strict one.
+        $claimedScripts = @($Harnesses | ForEach-Object { ($_.script -replace '/', '\').TrimStart('.\') })
+        foreach ($name in $declaredNotInSuite.Keys) {
+            # Check 2 compares against a leaf name, so anything carrying a
+            # separator excuses nothing while reading as though it did.
+            if (-not $name.Trim() -or $name -match '[\\/]') {
+                $tierProblems += "tier notInSuite names something that is not a plain file name: '$name'"
+                continue
+            }
+            # Excusing a script the manifest also names is the silent shrink
+            # again, arriving through the only door a tier can open by itself.
+            if ($claimedScripts -contains $name) {
+                $tierProblems += "tier notInSuite excuses '$name', which the manifest also names as a harness script"
+                continue
+            }
+            $NotInSuite[$name] = $declaredNotInSuite[$name]
         }
     }
 
@@ -607,12 +681,17 @@ $all = if ($useFixtures) { @($SelfTestHarnesses) } else { @($Harnesses) }
 
 # The assertions are written against the whole fixture set at exactly one
 # retry, so anything that would change either is refused rather than
-# silently ignored.
+# silently ignored. -OutRoot is refused for a different reason: the tier layer
+# cases below run out of a copy of this directory placed under it, and two
+# self-tests sharing one root rewrite each other's manifest in the window
+# between the copy and the child launch. The default stamp is per-second, so
+# that is two runs started in the same second, not a contrived collision.
 if ($SelfTest -and ($Tag -or $Only -or $Skip -or
                     $PSBoundParameters.ContainsKey('Retries') -or
                     $PSBoundParameters.ContainsKey('Seed') -or
+                    $PSBoundParameters.ContainsKey('OutRoot') -or
                     $StopOnFindings)) {
-    Write-Host '-SelfTest asserts against the whole fixture set at one retry; it takes no filters, -Retries, -Seed or -StopOnFindings' -ForegroundColor Red
+    Write-Host '-SelfTest asserts against the whole fixture set at one retry, under an output root of its own; it takes no filters, -Retries, -Seed, -OutRoot or -StopOnFindings' -ForegroundColor Red
     exit 1
 }
 
@@ -835,10 +914,28 @@ if ($SelfTest) {
     # read is text and none of it is built, a copy is enough.
     $LayerRoot = Join-Path $OutRoot 'layer-scripts'
     New-Item -ItemType Directory -Force -Path $LayerRoot | Out-Null
-    # A tier checkout has a real manifest sitting here. Copying it would give
-    # every case below a second layer, the case that asserts what an ABSENT
-    # manifest does included - on exactly the builds that ship one.
-    Copy-Item -Path (Join-Path $PSScriptRoot '*.ps1') -Destination $LayerRoot -Exclude 'fuzz-tier-harnesses.ps1'
+    # Copied from the inventory by name rather than swept up by a glob. A tier
+    # checkout has the tier's own scripts sitting here too, and a glob takes
+    # those while deliberately leaving behind the one file that classifies them
+    # - so every case below would fail integrity check 2 on exactly the builds
+    # the layer exists for.
+    foreach ($rel in $BaseScripts) {
+        # The manifest is the one name left behind. A tier checkout has a real
+        # one sitting here, and copying it would give every case below a second
+        # layer, the case that asserts what an ABSENT manifest does included -
+        # on exactly the builds that ship one.
+        if ($rel -eq 'fuzz-tier-harnesses.ps1') { continue }
+        $src = Join-Path $PSScriptRoot $rel
+        # $NotInSuite classifies names, and nothing checks that the file behind
+        # one is still there: check 2 only looks the other way. A stale entry is
+        # its silence, not a reason to fail the self-test.
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $dest = Join-Path $LayerRoot $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dest -Force
+    }
+    # lib/ wholesale, because it carries wintty-process.ps1 - dot-sourced before
+    # anything else runs - and every fixture the self-test harnesses name.
     Copy-Item -Path (Join-Path $PSScriptRoot 'lib') -Destination $LayerRoot -Recurse -Force
 
     # Read off this run rather than written down here, so adding a base harness
@@ -858,11 +955,27 @@ exit 0
     $script:LayerInjected = @()
     $script:LayerCases = 0
 
+    # Puts the copy back the way the last case found it. A case injects onto a
+    # relative path, and a path it names may be one the copy legitimately
+    # carries - pass.ps1 and tier-runner.ps1 are both plausible base names - so
+    # what was there is restored rather than deleted. Deleting it instead
+    # mutates the tree under test for every case that follows, which is how a
+    # case comes to pass for a reason nobody wrote down.
+    function Reset-LayerInjection {
+        foreach ($p in $script:LayerInjected) {
+            if ($null -eq $p.was) { Remove-Item -LiteralPath $p.path -Force -ErrorAction SilentlyContinue }
+            else { [System.IO.File]::WriteAllBytes($p.path, $p.was) }
+        }
+        $script:LayerInjected = @()
+    }
+
     # One child run over the copy. The manifest and whatever scripts a case
-    # needs on disk are placed fresh and taken away again on the next call, so
-    # no case inherits what another left behind and the order they are written
-    # in does not matter. -List is the whole run: the merge and all three
-    # integrity checks happen before it, and none of them needs a desktop.
+    # needs on disk are placed fresh and undone again on the next call, so no
+    # case inherits what another left behind and the order they are written in
+    # does not matter. That last part needs the sweep after the final assertion
+    # too: undoing on the way in leaves the last injecting case's files sitting
+    # there. -List is the whole run: the merge and all three integrity checks
+    # happen before it, and none of them needs a desktop.
     function Invoke-Layer {
         param(
             [Parameter(Mandatory)][string]$Case,
@@ -870,8 +983,7 @@ exit 0
             [hashtable]$Inject = @{},
             [string[]]$Extra = @('-List')
         )
-        foreach ($p in $script:LayerInjected) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
-        $script:LayerInjected = @()
+        Reset-LayerInjection
         $script:LayerCases++
 
         $manifestPath = Join-Path $LayerRoot 'fuzz-tier-harnesses.ps1'
@@ -884,8 +996,11 @@ exit 0
         foreach ($rel in $Inject.Keys) {
             $dest = Join-Path $OutRoot $rel
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+            # Whatever was there first, so the sweep can put it back rather than
+            # delete a file it did not create. $null means there was nothing.
+            $was = if (Test-Path -LiteralPath $dest) { [System.IO.File]::ReadAllBytes($dest) } else { $null }
             Set-Content -LiteralPath $dest -Value $Inject[$rel] -Encoding utf8
-            $script:LayerInjected += $dest
+            $script:LayerInjected += @{ path = $dest; was = $was }
         }
 
         $argv = @('-NoProfile', '-File', (Join-Path $LayerRoot 'fuzz-suite.ps1')) + $Extra
@@ -929,8 +1044,11 @@ exit 0
     Assert-Layer -Run (Invoke-Layer -Case 'pscustomobject' -Manifest 'pscustomobject.ps1') -Exit 0 `
         -Says @("layers: base ($baseCount) + pro (1)")
 
-    # '2' and '2.6' coerce to 2 and 3, so a layer that took them as text moves
-    # the total by 4.6 and one that coerced them moves it by 5.
+    # -List's minutes total is the only place a coerced value looks different
+    # from the text it came from, so this pins .NET's rounding of '2.6' to 3 for
+    # want of any other signal. Nobody chose that rounding and nothing depends
+    # on it: if the coercion ever changes, this number follows it rather than
+    # the other way round.
     Assert-Layer -Run (Invoke-Layer -Case 'minutes-string' -Manifest 'minutes-string.ps1') -Exit 0 `
         -Says @("layers: base ($baseCount) + pro (2)",
                 "$($baseCount + 2) harnesses, about $($baseMinutes + 5) minutes for a full run")
@@ -938,12 +1056,26 @@ exit 0
     Assert-Layer -Run (Invoke-Layer -Case 'minutes-bad' -Manifest 'minutes-bad.ps1') -Exit 1 `
         -Says @("tier harness 'st-tier' has a non-numeric minutes: soon")
 
+    # All three in one manifest, because the guard collects them: an empty list,
+    # a null one, and one holding only blanks. The last is the only one a bare
+    # truthiness test does not see, so without it the filter doing the work is
+    # unpinned and could be dropped.
     Assert-Layer -Run (Invoke-Layer -Case 'tags-missing' -Manifest 'tags-missing.ps1') -Exit 1 `
         -Says @("tier harness 'st-tier-empty' declares no tags",
-                "tier harness 'st-tier-null' declares no tags")
+                "tier harness 'st-tier-null' declares no tags",
+                "tier harness 'st-tier-blank' declares no tags")
 
+    # One entry per required key, each short a different one. The loop collects
+    # every problem before it exits, so seven assertions cost one child run - and
+    # a key quietly dropped from the list is otherwise invisible.
     Assert-Layer -Run (Invoke-Layer -Case 'missing-key' -Manifest 'missing-key.ps1') -Exit 1 `
-        -Says @("tier harness is missing 'oracle': st-tier")
+        -Says @("tier harness is missing 'name':",
+                "tier harness is missing 'script': st-tier-no-script",
+                "tier harness is missing 'tags': st-tier-no-tags",
+                "tier harness is missing 'outDir': st-tier-no-outdir",
+                "tier harness is missing 'seed': st-tier-no-seed",
+                "tier harness is missing 'minutes': st-tier-no-minutes",
+                "tier harness is missing 'oracle': st-tier-no-oracle")
 
     # The target is made to exist and to declare what the manifest passes it, so
     # checks 1 and 3 have nothing to say and only the path guard can refuse it.
@@ -976,14 +1108,59 @@ exit 0
     Assert-Layer -Run (Invoke-Layer -Case 'no-harnesses' -Manifest 'no-harnesses.ps1') -Exit 1 `
         -Says @("tier layer: expected an object with 'layer' and 'harnesses'")
 
+    # The other arm of that same check, which nothing else reaches: a manifest
+    # with harnesses and no layer name merges them and then has no name to print,
+    # so -List reports a suite bigger than the base set as base-only. That is
+    # this whole feature's failure mode wearing its own clothes, so the case
+    # pins the silence as well as the exit.
+    Assert-Layer -Run (Invoke-Layer -Case 'no-layer' -Manifest 'no-layer.ps1') -Exit 1 `
+        -Says @("tier layer: expected an object with 'layer' and 'harnesses'") `
+        -Silent @('layers: base only')
+
     Assert-Layer -Run (Invoke-Layer -Case 'returns-nothing' -Manifest 'returns-nothing.ps1') -Exit 1 `
         -Says @('fuzz-tier-harnesses.ps1 returned nothing')
+
+    # The opposite of returns-nothing, and the one the pipeline hides: two
+    # objects out of one file read as a single manifest whose layer name is both
+    # names joined. -RequireLayer refuses that; a run without it did not.
+    Assert-Layer -Run (Invoke-Layer -Case 'two-objects' -Manifest 'two-objects.ps1') -Exit 1 `
+        -Says @('emitted 2 objects; it must emit exactly one')
 
     # A tier ships runners and assets of its own, and until the layer could
     # classify them the choices were patching this file or calling one a harness.
     Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite' -Manifest 'not-in-suite.ps1' `
                                     -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub }) -Exit 0 `
         -Says @("layers: base ($baseCount) + pro (1)")
+
+    # The same classification written as a PSCustomObject. Unnormalised it is a
+    # no-op with no message of its own: the run dies at check 2 naming the very
+    # file the manifest classified, which sends the tier author looking at the
+    # half that was right.
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-object' -Manifest 'not-in-suite-object.ps1' `
+                                    -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub }) -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)") `
+        -Silent @('tier-runner.ps1 is in this directory')
+
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-list' -Manifest 'not-in-suite-list.ps1') -Exit 1 `
+        -Says @('tier notInSuite must be written as name = reason pairs, not a list of names')
+
+    # notInSuite is the only thing in the merge that tells check 2 to look away,
+    # so what it may excuse is the merge's own business.
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-harness' -Manifest 'not-in-suite-harness.ps1') -Exit 1 `
+        -Says @("tier notInSuite excuses 'search-fuzz.ps1', which the manifest also names as a harness script")
+
+    # Present and empty, which a key-presence check takes for declared.
+    Assert-Layer -Run (Invoke-Layer -Case 'empty-value' -Manifest 'empty-value.ps1') -Exit 1 `
+        -Says @("tier harness has an empty 'name':",
+                "tier harness has an empty 'script': st-tier-empty-script",
+                "tier harness has an empty 'oracle': st-tier-empty-oracle")
+
+    # Refused by integrity check 1 rather than by the merge, which is why it is
+    # asserted end to end: the merge reads the manifest strictly so that a tier
+    # cannot shrink the suite quietly, and a script the tier declared but never
+    # shipped is that same event whichever check happens to catch it.
+    Assert-Layer -Run (Invoke-Layer -Case 'script-missing' -Manifest 'script-missing.ps1') -Exit 1 `
+        -Says @('manifest names a script that does not exist: st-tier -> lib/fuzz-selftest/never-shipped.ps1')
 
     # -RequireLayer is a tier's assertion that its overlay landed. An absent
     # manifest and a wrong one are the same event from here, and both leave a
@@ -1000,6 +1177,12 @@ exit 0
     Assert-Layer -Run (Invoke-Layer -Case 'require-match' -Manifest 'valid.ps1' `
                                     -Extra @('-List', '-RequireLayer', 'pro')) -Exit 0 `
         -Says @("layers: base ($baseCount) + pro (1)")
+
+    # What makes the order-independence above a property rather than an accident
+    # of which cases happen to come last. The copy goes with it: it is most of a
+    # megabyte, and nothing under fuzz-out/ is ever pruned.
+    Reset-LayerInjection
+    Remove-Item -Recurse -Force -LiteralPath $LayerRoot -ErrorAction SilentlyContinue
 
     Write-Host ''
     if ($bad.Count -gt 0) {
