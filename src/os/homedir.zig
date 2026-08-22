@@ -77,6 +77,18 @@ fn homeUnix(io: std.Io, environ_map: *const std.process.Environ.Map, buf: []u8) 
 }
 
 fn homeWindows(environ_map: *const std.process.Environ.Map, buf: []u8) !?[]const u8 {
+    // USERPROFILE first. It is what everything else on Windows resolves a home
+    // reference to -- PowerShell, Git Bash, OpenSSH, Python's expanduser -- and
+    // it is what a config carried over from another machine means by `~`.
+    // HOMEDRIVE+HOMEPATH stays as the fallback rather than the primary because
+    // on a domain-joined machine it names a mapped network drive, so preferring
+    // it would send `~/projects` to a share instead of to the user's profile.
+    if (environ_map.get("USERPROFILE")) |result| {
+        if (buf.len < result.len) return Error.BufferTooSmall;
+        @memcpy(buf[0..result.len], result);
+        return buf[0..result.len];
+    }
+
     var writer: std.Io.Writer = .fixed(buf);
     _ = try writer.write(environ_map.get("HOMEDRIVE") orelse return null);
     _ = try writer.write(environ_map.get("HOMEPATH") orelse return null);
@@ -111,8 +123,12 @@ pub fn expandHome(
         // over from macOS or Linux is full of them. Left unexpanded they
         // become a relative path that cannot exist, and the option silently
         // does nothing: a custom-shader at `~/shader.glsl` reports only
-        // "check the path". Both separators are accepted because a config
-        // written on Windows will use the backslash.
+        // "check the path".
+        //
+        // `~/` only, not `~\`, because `~/` is what every caller gates on --
+        // Path.expand and Config.expandHome both test for that prefix before
+        // they get here, so a `~\` arm would be unreachable code asserting
+        // behaviour nothing can produce.
         .windows => try expandHomeWindows(environ_map, path, buf),
 
         // iOS doesn't have a user-writable home directory
@@ -147,14 +163,21 @@ fn expandHomeWindows(
     path: []const u8,
     buf: []u8,
 ) ExpandError![]const u8 {
-    if (!std.mem.startsWith(u8, path, "~/") and
-        !std.mem.startsWith(u8, path, "~\\")) return path;
+    if (!std.mem.startsWith(u8, path, "~/")) return path;
 
     // homeWindows writes into `buf` and returns a slice of it, so the rest of
     // the path is appended in place after it, exactly as the Unix path does.
-    const home_dir: []const u8 = (homeWindows(environ_map, buf) catch
-        return error.HomeDetectionFailed) orelse
-        return error.HomeDetectionFailed;
+    //
+    // Its two failures are not the same failure: the error is its fixed writer
+    // overflowing, which is a buffer problem, and only the null means the home
+    // directory could not be found. Mapping both to HomeDetectionFailed told
+    // the user their home directory was missing when it was found and
+    // truncated, and disagreed with home() above, which maps it to
+    // BufferTooSmall.
+    const home_dir: []const u8 = if (homeWindows(environ_map, buf)) |home_|
+        home_ orelse return error.HomeDetectionFailed
+    else |_|
+        return Error.BufferTooSmall;
 
     const rest = path[1..]; // Skip the ~
     const expanded_len = home_dir.len + rest.len;
@@ -174,20 +197,19 @@ test "expandHomeWindows" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     const home_dir = try expandHomeWindows(&environ_map, "~/", &buf);
-    try testing.expect(home_dir.len > 1);
+    // Joining `~` with `/` leaves the separator on the end, as on Unix.
     try testing.expect(home_dir[home_dir.len - 1] == '/');
 
-    // Both separators reach the same place, since a config may be written
-    // either way on Windows.
-    const fwd = try expandHomeWindows(&environ_map, "~/shader.glsl", &buf);
-    try testing.expect(std.mem.endsWith(u8, fwd, "/shader.glsl"));
-    try testing.expect(!std.mem.startsWith(u8, fwd, "~"));
+    // The whole string, not just its tail. Asserting only that the result ends
+    // in the path and no longer starts with a tilde passes an implementation
+    // that wrote HOMEDRIVE and dropped HOMEPATH.
+    const shader = try expandHomeWindows(&environ_map, "~/shaders/crt.glsl", &buf);
+    const expected = try std.mem.concat(allocator, u8, &[_][]const u8{ home_dir, "shaders/crt.glsl" });
+    defer allocator.free(expected);
+    try testing.expectEqualStrings(expected, shader);
 
-    const back = try expandHomeWindows(&environ_map, "~\\shader.glsl", &buf);
-    try testing.expect(std.mem.endsWith(u8, back, "\\shader.glsl"));
-    try testing.expect(!std.mem.startsWith(u8, back, "~"));
-
-    // A bare tilde and a `~name` prefix are not home references.
+    // A bare tilde, a `~name` prefix and an absolute path are not home
+    // references. `~\` is not one either: every caller gates on `~/`.
     try testing.expectEqualStrings("~", try expandHomeWindows(&environ_map, "~", &buf));
     try testing.expectEqualStrings("~abc/", try expandHomeWindows(&environ_map, "~abc/", &buf));
     try testing.expectEqualStrings("", try expandHomeWindows(&environ_map, "", &buf));
@@ -196,6 +218,7 @@ test "expandHomeWindows" {
         try expandHomeWindows(&environ_map, "C:\\shaders\\x.glsl", &buf),
     );
 
+    // Big enough for the home directory, not for the expansion.
     var small_buf = try allocator.alloc(u8, home_dir.len);
     defer allocator.free(small_buf);
     try testing.expectError(error.BufferTooSmall, expandHomeWindows(

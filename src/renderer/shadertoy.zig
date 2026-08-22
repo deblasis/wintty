@@ -65,11 +65,6 @@ pub fn loadFromFiles(
                 continue;
             }
 
-            // The path, not just the error. This is the last frame that has
-            // it: the caller gets an error with no idea which entry of a
-            // repeatable option produced it, and the user-facing notice can
-            // only say "check the path" without naming one.
-            log.warn("custom shader failed path={s} err={}", .{ path, err });
             return err;
         };
         log.info("loaded custom shader path={s}", .{path});
@@ -137,7 +132,14 @@ fn compileShader(
     const src = src: {
         // Load the shader file
         const cwd = std.Io.Dir.cwd();
-        const file = try cwd.openFile(global.io(), path, .{});
+        const file = cwd.openFile(global.io(), path, .{}) catch |err| {
+            // The only failures nothing else logs. A compile failure is already
+            // reported with its path below; a file that cannot be opened was
+            // reported as a bare error name, leaving the user's "check the
+            // path" notice with no path to check.
+            log.warn("custom shader could not be opened path={s} err={}", .{ path, err });
+            return err;
+        };
         defer file.close(global.io());
         break :src try compat_file.readToEndAlloc(
             file,

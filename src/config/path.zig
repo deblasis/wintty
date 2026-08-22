@@ -158,12 +158,17 @@ pub const Path = union(enum) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
 
         // Check if the path starts with a tilde and expand it to the
-        // home directory on Linux/macOS. We explicitly look for "~/"
-        // because we don't support alternate users such as "~alice/"
-        if (std.mem.startsWith(u8, path, "~/")) expand: {
-            // Windows isn't supported yet
-            if (comptime builtin.os.tag == .windows) break :expand;
-
+        // home directory. We explicitly look for "~/" because we don't
+        // support alternate users such as "~alice/".
+        //
+        // Windows included. It used to break out of this block, on the
+        // grounds that `~/` is not a Windows idiom -- true of Windows, and
+        // untrue of Ghostty configs, where every documented example is
+        // written that way. Left unexpanded the path fell through to the
+        // relative branch and resolved under the config directory, so a
+        // config carried over from macOS or Linux had paths that could
+        // never resolve and said nothing about why.
+        if (std.mem.startsWith(u8, path, "~/")) {
             var environ_map = try global.environMap();
             defer environ_map.deinit();
 
