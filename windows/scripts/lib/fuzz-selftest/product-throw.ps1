@@ -26,5 +26,5 @@ try {
 finally {
     # The self-test asserts this file exists, so a trap that skipped the
     # finally would be caught rather than assumed.
-    Set-Content -Path (Join-Path $OutDir 'finally-ran.txt') -Value 'cleanup happened'
+    Set-Content -LiteralPath (Join-Path $OutDir 'finally-ran.txt') -Value 'cleanup happened'
 }
