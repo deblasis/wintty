@@ -966,9 +966,17 @@ internal sealed partial class GhosttyHost : IDisposable
 
                 case GhosttyActionTag.ProgressReport:
                 {
-                    var state = (GhosttyProgressState)Marshal.ReadInt32(actionPtr, 8);
-                    var rawPct = (sbyte)Marshal.ReadByte(actionPtr, 12);
-                    int pct = rawPct < 0 ? 0 : rawPct;
+                    // Read through the struct rather than at literal +8/+12.
+                    // The literals were guarded only by a test asserting a
+                    // struct nothing compiled against.
+                    GhosttyActionProgressReport report;
+                    unsafe
+                    {
+                        report = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionProgressReport>(
+                            (void*)(actionPtr + 8));
+                    }
+                    var state = report.State;
+                    int pct = report.Progress < 0 ? 0 : report.Progress;
                     var tabState = state switch
                     {
                         GhosttyProgressState.Remove        => Ghostty.Core.Tabs.TabProgressState.None,
@@ -995,10 +1003,14 @@ internal sealed partial class GhosttyHost : IDisposable
                     // config check here. Copy the strings on the libghostty
                     // thread before the buffer frees, then decide + show on the
                     // UI thread where focus state is valid.
-                    var titlePtr = Marshal.ReadIntPtr(actionPtr, 8);
-                    var bodyPtr = Marshal.ReadIntPtr(actionPtr, 16);
-                    var title = Marshal.PtrToStringUTF8(titlePtr) ?? string.Empty;
-                    var body = Marshal.PtrToStringUTF8(bodyPtr) ?? string.Empty;
+                    GhosttyActionDesktopNotification notification;
+                    unsafe
+                    {
+                        notification = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionDesktopNotification>(
+                            (void*)(actionPtr + 8));
+                    }
+                    var title = Marshal.PtrToStringUTF8(notification.Title) ?? string.Empty;
+                    var body = Marshal.PtrToStringUTF8(notification.Body) ?? string.Empty;
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (!TryResolveControl(surfaceHandle, out var c) || c is null) return;

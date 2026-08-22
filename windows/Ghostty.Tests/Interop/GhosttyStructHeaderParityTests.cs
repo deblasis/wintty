@@ -22,13 +22,20 @@ namespace Ghostty.Tests.Interop;
 // still succeeds, and it returns the wrong bytes.
 //
 // So this reads the field list out of the header, computes offsets with the
-// x64 rules, and compares against Marshal. Fields are matched by POSITION, not
-// by name: C is positional, and the names do not always agree anyway --
-// ghostty_surface_message_childexited_s carries the `timetime_ms` typo that
-// the managed side spells RuntimeMs.
+// x64 rules, and compares offset, type and name for each field plus the total
+// size against Marshal.
+//
+// All four, because each alone has a blind spot. Offsets miss a widening that
+// padding absorbs: uint16_t -> uint32_t leaves ResizeSplit at {0, 4} and eight
+// bytes while the managed ushort reads the low half. Types miss a swap of two
+// fields that share a type. Names catch that swap, at the cost of a rename map
+// for the places C and C# genuinely disagree -- there is one, the `timetime_ms`
+// typo that the managed side spells RuntimeMs.
 //
 // The type table refuses anything it does not know rather than guessing a
-// size. A guess here would be a layout assertion resting on an invention.
+// size. A guess here would be a layout assertion resting on an invention. The
+// one modelling gap that would fail GREEN rather than loudly is struct packing,
+// so StructBody refuses a header carrying a pragma for it.
 public class GhosttyStructHeaderParityTests
 {
     private const string HeaderResource = "Ghostty.Tests.Interop.Header.ghostty.h";
@@ -69,9 +76,14 @@ public class GhosttyStructHeaderParityTests
     public void ProgressReport_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionProgressReport>("ghostty_action_progress_report_s");
 
+    // The one rename in the set: the header's field carries a `timetime_ms`
+    // typo that the managed side spells RuntimeMs. Declared rather than
+    // tolerated, so the name check stays on for every other field.
     [Fact]
     public void ChildExited_Layout_Matches_Header() =>
-        AssertLayoutMatchesHeader<GhosttyChildExited>("ghostty_surface_message_childexited_s");
+        AssertLayoutMatchesHeader<GhosttyChildExited>(
+            "ghostty_surface_message_childexited_s",
+            new Dictionary<string, string> { ["timetime_ms"] = "RuntimeMs" });
 
     [Fact]
     public void StartSearch_Layout_Matches_Header() =>
@@ -85,8 +97,28 @@ public class GhosttyStructHeaderParityTests
     public void SearchSelected_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionSearchSelected>("ghostty_action_search_selected_s");
 
-    private static void AssertLayoutMatchesHeader<T>(string typedefName) where T : struct
+    [Fact]
+    public void DesktopNotification_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyActionDesktopNotification>(
+            "ghostty_action_desktop_notification_s");
+
+    /// <param name="renamed">
+    /// C field name to managed field name, for the places the two genuinely
+    /// disagree. Explicit rather than inferred, because "the names need not
+    /// match" is what lets a reorder through: with names compared, swapping two
+    /// fields of the same type is caught, and that is a swap neither the
+    /// offsets nor the types can see.
+    /// </param>
+    private static void AssertLayoutMatchesHeader<T>(
+        string typedefName,
+        IReadOnlyDictionary<string, string>? renamed = null) where T : struct
     {
+        // x64 is what the whole table below assumes. On a 32-bit runtime every
+        // pointer-sized field would compute to 8 while Marshal reports 4, and
+        // eleven tests would report an ABI break that is really this test not
+        // modelling the platform.
+        Assert.True(IntPtr.Size == 8, "these layouts are computed for a 64-bit runtime");
+
         var expected = CLayoutOf(typedefName);
 
         // Ordered by where the runtime actually put them, which is the order
@@ -94,7 +126,7 @@ public class GhosttyStructHeaderParityTests
         // same today and is not guaranteed to be.
         var managed = typeof(T)
             .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(f => (f.Name, Offset: (int)Marshal.OffsetOf<T>(f.Name)))
+            .Select(f => (f.Name, f.FieldType, Offset: (int)Marshal.OffsetOf<T>(f.Name)))
             .OrderBy(f => f.Offset)
             .ToList();
 
@@ -107,12 +139,30 @@ public class GhosttyStructHeaderParityTests
         var problems = new List<string>();
         for (var i = 0; i < managed.Count; i++)
         {
-            if (managed[i].Offset != expected.Fields[i].Offset)
+            var (name, type, offset) = managed[i];
+            var c = expected.Fields[i];
+
+            if (offset != c.Offset)
+            {
+                problems.Add($"  {name} is at +{offset} but {c.Name} ({c.Type}) is at +{c.Offset}");
+            }
+
+            // Offsets alone let a widening that padding absorbs through:
+            // uint16_t amount -> uint32_t keeps ResizeSplit at {0, 4} and 8
+            // bytes while the managed ushort silently reads the low half.
+            if (!TypeMatches(type, c.Type))
+            {
+                problems.Add($"  {name} is {type.Name} but {c.Name} is {c.Type}");
+            }
+
+            var expectedName = renamed is not null && renamed.TryGetValue(c.Name, out var mapped)
+                ? mapped
+                : ToPascal(c.Name);
+            if (!string.Equals(name, expectedName, StringComparison.Ordinal))
             {
                 problems.Add(
-                    $"  {managed[i].Name} is at +{managed[i].Offset} but " +
-                    $"{expected.Fields[i].Name} ({expected.Fields[i].Type}) is at " +
-                    $"+{expected.Fields[i].Offset}");
+                    $"  field {i} is {name} but {typedefName} calls it {c.Name} " +
+                    $"(expected {expectedName}); if the rename is deliberate, pass it in `renamed`");
             }
         }
 
@@ -127,6 +177,46 @@ public class GhosttyStructHeaderParityTests
             $"{typeof(T).Name} does not match {typedefName} in include/ghostty.h:\n" +
             string.Join("\n", problems));
     }
+
+    // Which managed types a C type may be spelled as. An enum stands in for the
+    // C enum it mirrors, so any 4-byte-backed enum is accepted; which enum it is
+    // is GhosttyActionTagHeaderParityTests's business, not this file's.
+    private static bool TypeMatches(Type managed, string cType)
+    {
+        if (managed.IsEnum)
+        {
+            var backing = Enum.GetUnderlyingType(managed);
+            return cType.StartsWith("ghostty_", StringComparison.Ordinal)
+                   && cType.EndsWith("_e", StringComparison.Ordinal)
+                   && (backing == typeof(int) || backing == typeof(uint));
+        }
+
+        if (cType.EndsWith("*", StringComparison.Ordinal))
+        {
+            return managed == typeof(IntPtr) || managed == typeof(UIntPtr);
+        }
+
+        return cType switch
+        {
+            "int8_t" => managed == typeof(sbyte),
+            "uint8_t" or "bool" or "char" => managed == typeof(byte),
+            "int16_t" => managed == typeof(short),
+            "uint16_t" => managed == typeof(ushort),
+            "int32_t" or "int" => managed == typeof(int),
+            "uint32_t" => managed == typeof(uint),
+            "int64_t" => managed == typeof(long),
+            "uint64_t" => managed == typeof(ulong),
+            "float" => managed == typeof(float),
+            "double" => managed == typeof(double),
+            "ssize_t" or "intptr_t" => managed == typeof(IntPtr),
+            "size_t" or "uintptr_t" => managed == typeof(UIntPtr) || managed == typeof(IntPtr),
+            _ => false,
+        };
+    }
+
+    private static string ToPascal(string snake) =>
+        string.Concat(snake.Split('_', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => char.ToUpperInvariant(part[0]) + part[1..]));
 
     private sealed record CField(string Name, string Type, int Offset);
 
@@ -225,13 +315,28 @@ public class GhosttyStructHeaderParityTests
     {
         var header = Header.Value;
 
+        // Everything else here fails loudly when it cannot model something.
+        // Packing is the exception: under a pragma the computed C layout stays
+        // natural, the managed sequential layout stays natural, the two agree,
+        // and the real ABI is neither.
+        Assert.DoesNotContain("#pragma pack", header, StringComparison.Ordinal);
+
         var close = header.IndexOf("} " + typedefName + ";", StringComparison.Ordinal);
         Assert.True(close >= 0, $"{typedefName} not found in include/ghostty.h");
 
         var open = header.LastIndexOf("typedef struct {", close, StringComparison.Ordinal);
         Assert.True(open >= 0, $"no struct body precedes {typedefName} in include/ghostty.h");
 
-        return header[(open + "typedef struct {".Length)..close];
+        var body = header[(open + "typedef struct {".Length)..close];
+
+        // The backwards search only matches the anonymous `typedef struct {`
+        // form. Rewritten as `typedef struct name { ... } name_s;` it would
+        // walk past and return the previous struct's body plus a stray closing
+        // line; that line fails the field pattern, but the message would name
+        // the wrong struct.
+        Assert.DoesNotContain("}", body, StringComparison.Ordinal);
+
+        return body;
     }
 
     private static string LoadHeader()

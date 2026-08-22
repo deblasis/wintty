@@ -15,9 +15,6 @@ namespace Ghostty.Tests.Interop;
 // appended to a C struct fails nothing. GhosttyActionTagHeaderParityTests and
 // GhosttyStructHeaderParityTests read include/ghostty.h instead.
 //
-// PromptTitleEnum_MatchesHeader is the illustration worth keeping in mind: it
-// asserted Surface and Tab, and stayed green through the whole time the
-// managed enum was missing the Window the header had.
 public class GhosttyActionsLayoutTests
 {
     // Probe struct modelling the C ABI of `ghostty_action_s`:
