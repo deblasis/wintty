@@ -797,6 +797,16 @@
     </Content>
 
     <!--
+      The bundled shader gallery: committed sources (GLSL + manifest + license
+      texts), verified end to end by `just gallery-verify` (zioshade -> DXC ->
+      WARP render). A wildcard is safe here, unlike the branding assets above:
+      these files exist at MSBuild evaluation time.
+    -->
+    <Content Include="Assets\Shaders\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+
+    <!--
       The launch splash's texture sheet, as a white-on-transparent mask
       which the splash tints to the ink colour it derives from the
       background. The splash shows one turned crop of it and nothing else,
