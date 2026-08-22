@@ -476,6 +476,11 @@ internal sealed partial class AppearancePage : Page
         if (sender is not TextBox tb) return;
 
         var value = tb.Text ?? string.Empty;
+        // Compare before writing: blur fires on tab-through and window close,
+        // so an unconditional write rewrites the key on every pass. The
+        // shared writer re-checks for its other callers (gallery, browse).
+        if (value == _shaderPathWritten) return;
+
         // Shared with the gallery combo and browse button: collapse warning,
         // write, and the success-checked guards (a failed write must not
         // advance the guard, or retries from this page read as "unchanged").
