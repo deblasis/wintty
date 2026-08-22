@@ -6,10 +6,12 @@ namespace Ghostty.Core.Renderer;
 /// (renderer.CustomShaderFailure in src/renderer.zig).
 /// </summary>
 /// <remarks>
-/// The ordinals are ABI, not an implementation detail — they arrive as a raw
-/// int in the action payload. GhosttyActionsLayoutTests pins them against the
-/// header so a reordering upstream fails a test rather than silently showing
-/// the user the wrong reason.
+/// The ordinals are ABI, not an implementation detail: they arrive as a raw
+/// int in the action payload. GhosttyActionTagHeaderParityTests reads them
+/// out of include/ghostty.h and checks both directions, so an upstream
+/// reorder fails a test rather than silently showing the user the wrong
+/// reason, and an upstream addition fails one rather than arriving as
+/// whichever variant this list happens to end with.
 /// </remarks>
 public enum CustomShaderFailure
 {

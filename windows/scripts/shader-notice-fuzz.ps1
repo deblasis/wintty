@@ -170,6 +170,30 @@ function Find-Name($root, [string]$name) {
     return $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
+# Every named element under the window, walked exactly the way Get-Notices
+# walks it. The reachability probe uses this so it exercises the oracle's own
+# call path rather than a cheaper one that could succeed where that fails.
+function Get-DescendantNames([int64]$Hwnd64) {
+    $root = Get-UiaRoot $Hwnd64
+    if ($null -eq $root) { throw "HARVEST_MISS: no UIA root for hwnd $Hwnd64" }
+    $out = [System.Collections.Generic.List[string]]::new()
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+                                  [System.Windows.Automation.Condition]::TrueCondition)) {
+        $n = try { [string]$el.Current.Name } catch { '' }
+        if ($n) { $out.Add($n) }
+    }
+    return $out.ToArray()
+}
+
+function Measure-TabItems([int64]$Hwnd64) {
+    $root = Get-UiaRoot $Hwnd64
+    if ($null -eq $root) { return 0 }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem)
+    return @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)).Count
+}
+
 # Every notice banner currently on the window, whatever raised it.
 #
 # Matched on AutomationId rather than on the banner's visible title:
@@ -220,6 +244,10 @@ function Get-NoticeReason([string]$Text) {
 $shaderNoticeId = 'Notice_custom-shader'
 
 # ---- staging --------------------------------------------------------------
+# The gate goes above the staging, not below it. Refusing over an open Wintty
+# is the most common way this run ends, and everything under it writes to disk.
+Assert-NoWintty
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $validSrc = Join-Path $repoRoot 'src\renderer\shaders\test_passthrough.glsl'
 $invalidSrc = Join-Path $repoRoot 'src\renderer\shaders\test_shadertoy_invalid.glsl'
@@ -233,10 +261,12 @@ Copy-Item -LiteralPath $validSrc -Destination (Join-Path $stage 'valid.glsl')
 Copy-Item -LiteralPath $invalidSrc -Destination (Join-Path $stage 'invalid.glsl')
 $goneShader = Join-Path $stage 'not-here.glsl'
 
-# The path spelling is fuzzed because config path handling has its own
-# opinions: a backslash path, a forward-slash path, and a quoted path with a
-# space in it are three different parses of the same intent, and all three
-# have to reach the same "cannot read it" answer.
+# The path spelling is fuzzed for one specific confusion, not for path handling
+# in general. All three name a file that is not there, so what separates them is
+# whether the config parser produced a path at all: a spelling it fails to parse
+# leaves custom-shader empty, `configured` is false in the renderer, and NO
+# banner is raised - which this case reads as the banner having gone silent. The
+# quoted-with-a-space spelling is the one that could plausibly do that.
 function Get-MissingPathSpelling([int]$Pick) {
     switch ($Pick) {
         0 { return $goneShader }
@@ -319,13 +349,25 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
         # Reachability, proven against chrome rather than against the thing
         # under test. Without this a UIA connection that returns nothing looks
         # exactly like a build that raises no banner.
-        if ($null -eq (Find-Name (Get-UiaRoot $hwnd64) 'New tab')) {
-            throw "HARVEST_MISS: UIA cannot see 'New tab' on hwnd $hwnd64"
+        #
+        # Probed through the SAME full-descendant FindAll the oracle uses, not
+        # through a targeted FindFirst: those are different UIA paths, and a
+        # client whose FindAll truncates would pass a FindFirst probe and then
+        # report "no banner" for every quiet case.
+        $names = Get-DescendantNames $hwnd64
+        if ($names -notcontains 'New tab') {
+            throw ("HARVEST_MISS: a full-descendant walk of hwnd $hwnd64 returned " +
+                   "$($names.Count) named elements and no 'New tab'")
         }
 
         # Extra surfaces, because the action this banner rides in on is raised
         # per surface. The regression that prompted this harness produced one
         # banner per new tab, so a single-surface run understates it.
+        #
+        # Counted, not assumed. A silent break here would leave the row saying
+        # extraTabs=2 for a run that opened none, which is the per-surface
+        # dimension quietly not being tested.
+        $tabsBefore = Measure-TabItems $hwnd64
         for ($i = 0; $i -lt $ExtraTabs; $i++) {
             $btn = Find-Name (Get-UiaRoot $hwnd64) 'New tab'
             if ($null -eq $btn) { break }
@@ -333,6 +375,11 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
                 $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
             } catch { break }
             Start-Sleep -Milliseconds 700
+        }
+        $tabsOpened = (Measure-TabItems $hwnd64) - $tabsBefore
+        if ($tabsOpened -lt $ExtraTabs) {
+            throw ("HARVEST_MISS: asked for $ExtraTabs extra tabs, opened $tabsOpened; " +
+                   "the per-surface dimension was not exercised")
         }
 
         # A positive case polls until the banner turns up; a quiet case has to
@@ -366,15 +413,32 @@ function Invoke-Case($Case, [int]$ExtraTabs, [string]$Exe) {
 }
 
 $findings = [System.Collections.Generic.List[string]]::new()
+$caseErrors = [System.Collections.Generic.List[string]]::new()
 $rows = [System.Collections.Generic.List[object]]::new()
 $detectorProven = $false
 
-Assert-NoWintty
 try {
     foreach ($case in $order) {
         $extraTabs = $rng.Next(0, 3)
         Write-Host "--- case=$($case.id) expect=$($case.expect) extraTabs=$extraTabs"
-        $seen = @((Invoke-Case $case $extraTabs $ExePath).Notices)
+
+        # Per case, so one case that cannot run does not throw away what the
+        # cases before it already found. Letting it escape lost every finding
+        # collected so far AND the whole report, and the run left with 1 -
+        # "nothing is known about the product" - having in fact observed a
+        # defect. Findings outrank a case that could not run, which is the
+        # same order fuzz-suite.ps1 puts them in.
+        try {
+            $seen = @((Invoke-Case $case $extraTabs $ExePath).Notices)
+        }
+        catch {
+            $note = "case '$($case.id)': $_"
+            if ("$_" -like 'PRODUCT_FAIL*') { $findings.Add($note) } else { $caseErrors.Add($note) }
+            Write-Host "    $note" -ForegroundColor Yellow
+            $rows.Add([ordered]@{ case = $case.id; expect = $case.expect; extraTabs = $extraTabs; error = "$_" })
+            continue
+        }
+
         $shader = @($seen | Where-Object { $_.Id -eq $shaderNoticeId })
         $reasons = @($shader | ForEach-Object { Get-NoticeReason $_.Text })
         $ids = @($seen | ForEach-Object { $_.Id })
@@ -391,14 +455,12 @@ try {
             'load' {
                 if ($reasons -contains 'load') {
                     $detectorProven = $true
-                } elseif (-not $detectorProven) {
-                    # The lead case, by construction. Nothing after it can be
-                    # trusted, so say that rather than going on to collect four
-                    # green quiet cases.
-                    $findings.Add("case '$($case.id)' configures an unreadable shader and no load notice appeared; " +
-                                  "every quiet case after this would pass whether or not the banner works")
+                } elseif ($shader.Count -gt 0) {
+                    $findings.Add("case '$($case.id)' configures an unreadable shader and the banner appeared, but " +
+                                  "with an unrecognised reason (" + ($reasons -join ',') + "); either the copy was " +
+                                  "reworded or the failure is not the load one: " + ($shader[0].Text))
                 } else {
-                    $findings.Add("case '$($case.id)' configures an unreadable shader and no load notice appeared " +
+                    $findings.Add("case '$($case.id)' configures an unreadable shader and no banner appeared " +
                                   "(saw: " + ($ids -join ',') + ")")
                 }
             }
@@ -406,6 +468,12 @@ try {
                 if ($reasons -contains 'load') {
                     $findings.Add("case '$($case.id)' configures a shader that translates, but the banner reports a load failure")
                 }
+            }
+            default {
+                # No silent fall-through. An expectation nobody classified means
+                # the case ran and was judged against nothing, and without this
+                # the run would report a green pass for it.
+                throw "HARVEST_MISS: case '$($case.id)' has an unclassified expect '$($case.expect)'"
             }
         }
 
@@ -417,34 +485,56 @@ try {
             reasons = $reasons
         })
     }
+
+    # The verdict is only worth anything if a banner was seen at least once.
+    # Everything else here is an absence, and an absence proves nothing about a
+    # detector that never demonstrated it can see a presence. This is asserted
+    # rather than left to the ordering above, because the ordering is a property
+    # of the case table and the case table is editable.
+    if (-not $detectorProven -and $caseErrors.Count -eq 0) {
+        $findings.Add('no case ever produced the custom-shader banner, so nothing here shows the ' +
+                      'detector works; every quiet result above is unverified')
+    }
 }
 finally {
     if ($originalXdgSet) { $env:XDG_CONFIG_HOME = $originalXdg }
     else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
     if ($originalNoColorSet) { $env:NO_COLOR = $originalNoColor }
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
-    Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
-}
+    Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
 
-$crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
-if ($crashGrew) { $findings.Add('crash.log grew during the run') }
+    # Written from the finally, so the report survives a throw from outside the
+    # per-case catch above. The exit code is still decided below, on the paths
+    # where there is one to decide.
+    $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
+    if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
-$result = [ordered]@{
-    seed = $Seed
-    spelling = $spelling
-    detectorProven = $detectorProven
-    crashGrew = $crashGrew
-    cases = $rows
-    findings = $findings
+    [ordered]@{
+        seed = $Seed
+        spelling = $spelling
+        detectorProven = $detectorProven
+        crashGrew = $crashGrew
+        cases = $rows
+        findings = $findings
+        caseErrors = $caseErrors
+    } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json')
+    Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 }
-$result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir 'result.json')
-Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
 
 if ($findings.Count -gt 0) {
     Write-Host 'PRODUCT_FAIL:' -ForegroundColor Red
     $findings | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    if ($caseErrors.Count -gt 0) {
+        Write-Host 'also, cases that could not run:' -ForegroundColor Yellow
+        $caseErrors | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    }
     Write-Host "replay with -Seed $Seed" -ForegroundColor Red
     exit 2
+}
+if ($caseErrors.Count -gt 0) {
+    Write-Host 'cases that could not run, so their area is untested:' -ForegroundColor Yellow
+    $caseErrors | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    exit 1
 }
 Write-Host "clean (seed $Seed)" -ForegroundColor Green
 exit 0

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -36,21 +37,33 @@ public class GhosttyActionTagHeaderParityTests
     // Read once. The shift tests below re-read it a few hundred times.
     private static readonly Lazy<string> Header = new(LoadHeader);
 
-    // A C enum entry, rejecting any explicit `= N`: the checks below map a
-    // name to its position, which an explicit value would silently break.
+    // A C enum entry. The value group is optional so both spellings parse, but
+    // which one is ALLOWED is decided per enum below: mixing them is what would
+    // make a positional read wrong. A value is a plain integer or the `1 << N`
+    // the header writes bit flags as. Anything else -- two entries on a line, a
+    // wider expression, a block comment -- fails to match and asserts.
     private static readonly Regex EntryPattern = new(
-        @"^\s*(?<name>[A-Z][A-Z0-9_]*)\s*(?<assign>=)?[^,]*,?\s*(?://.*)?$",
+        @"^\s*(?<name>[A-Z][A-Z0-9_]*)\s*(?:=\s*(?<value>-?\d+|1\s*<<\s*\d+))?\s*,?\s*(?://.*)?$",
         RegexOptions.Compiled);
 
+    // The tag enum is a deliberately partial mirror: only the tags the Windows
+    // apprt dispatches on are listed, so a header member with no managed
+    // counterpart is expected and says nothing.
     [Fact]
-    public void ActionTag_Ordinals_Match_Header()
-    {
-        AssertMatchesHeader<GhosttyActionTag>(ActionTypedef, ActionPrefix);
-    }
+    public void ActionTag_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyActionTag>(ActionTypedef, ActionPrefix, complete: false);
 
     // The payload enums. These never reach a switch on the managed side as a
     // named tag -- they arrive as a raw int the handler casts -- so a reorder
     // is silent in exactly the same way, just one level down.
+    //
+    // They are checked in BOTH directions, unlike the tag enum. A payload enum
+    // is a closed set the handler has to be able to tell apart, so a member
+    // upstream APPENDS is a live behaviour gap rather than a tag we chose not
+    // to dispatch: nothing renumbers, nothing breaks, and the new value falls
+    // into whichever branch the handler happens to end with. That is not
+    // hypothetical -- the sync that shifted the tags above also appended
+    // GHOSTTY_PROMPT_TITLE_WINDOW, and a one-directional check saw nothing.
     [Fact]
     public void SplitDirection_Ordinals_Match_Header() =>
         AssertMatchesHeader<GhosttySplitDirection>(
@@ -101,9 +114,31 @@ public class GhosttyActionTagHeaderParityTests
         AssertMatchesHeader<CustomShaderFailure>(
             "ghostty_action_custom_shader_failure_e", "GHOSTTY_CUSTOM_SHADER_FAILURE_");
 
-    // Not covered: GhosttyGotoTab. Its header entries carry explicit negative
-    // values, so position says nothing about them and the parser below refuses
-    // the enum rather than pretending otherwise.
+    // GhosttyGotoTab is the one enum here whose header entries carry explicit
+    // values, and they are negative sentinels rather than positions. Read with
+    // `explicitValues`, which parses `= N` instead of counting: refusing it
+    // outright left the only ABI enum with hand-written values as the only one
+    // nothing checked.
+    [Fact]
+    public void GotoTab_Values_Match_Header() =>
+        AssertMatchesHeader<GhosttyGotoTab>(
+            "ghostty_action_goto_tab_e", "GHOSTTY_GOTO_TAB_", explicitValues: true);
+
+    // ghostty_target_tag_e decides which half of GhosttyHost.OnAction an action
+    // is delivered to, so swapping these two routes every app action into the
+    // surface arm. It used to be two consts beside that switch, where no test
+    // could see it.
+    [Fact]
+    public void TargetTag_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyTargetTag>("ghostty_target_tag_e", "GHOSTTY_TARGET_");
+
+    // Bit flags rather than positions, so read as explicit values. The managed
+    // None = 0 is skipped as a [Flags] convention; everything else has to be
+    // the bit the header names.
+    [Fact]
+    public void BindingFlags_Values_Match_Header() =>
+        AssertMatchesHeader<GhosttyBindingFlags>(
+            "ghostty_binding_flags_e", "GHOSTTY_BINDING_FLAGS_", explicitValues: true);
 
     // A check that goes red on a header it was handed is worth only as much as
     // its ability to go red on the header that actually broke us. These two
@@ -116,31 +151,31 @@ public class GhosttyActionTagHeaderParityTests
     // at 45 tags when 20 drifted, and the reader has to redo the work. The
     // insertion at index k moves every member from k onward and nothing before
     // it, and that is what this holds it to.
-    [Theory]
-    [InlineData(1)]
-    [InlineData(7)]
-    [InlineData(4242)]
-    public void ActionTag_Check_Names_Exactly_The_Tags_An_Insertion_Moves(int seed) =>
-        AssertShiftIsLocalized(seed, insert: true);
+    [Fact]
+    public void ActionTag_Check_Names_Exactly_The_Tags_An_Insertion_Moves() =>
+        AssertShiftIsLocalized(insert: true);
 
-    [Theory]
-    [InlineData(1)]
-    [InlineData(7)]
-    [InlineData(4242)]
-    public void ActionTag_Check_Names_Exactly_The_Tags_A_Deletion_Moves(int seed) =>
-        AssertShiftIsLocalized(seed, insert: false);
+    [Fact]
+    public void ActionTag_Check_Names_Exactly_The_Tags_A_Deletion_Moves() =>
+        AssertShiftIsLocalized(insert: false);
 
-    private static void AssertShiftIsLocalized(int seed, bool insert)
+    private static void AssertShiftIsLocalized(bool insert)
     {
         var entryCount = ReadHeaderEnum(ActionTypedef).Count;
-        var rng = new Random(seed);
 
-        for (var i = 0; i < 12; i++)
+        // Every position, not a sample. The invariant does not vary with `at`,
+        // so a seeded draw would only cost coverage: the interesting positions
+        // are the first and last entry lines, where the body slice carries its
+        // empty leading and trailing lines, and a sample can miss them.
+        for (var at = 0; at < entryCount; at++)
         {
-            var at = rng.Next(0, entryCount);
             var mutated = ShiftActionEnum(ReadHeader(), at, insert);
 
-            var reported = FindMismatches<GhosttyActionTag>(mutated, ActionTypedef, ActionPrefix)
+            // complete:false, as for the real check. The synthetic entry has no
+            // managed counterpart by construction, and counting that as drift
+            // would swamp the localization this is measuring.
+            var reported = FindMismatches<GhosttyActionTag>(
+                    mutated, ActionTypedef, ActionPrefix, complete: false)
                 .Select(m => m.Name)
                 .OrderBy(n => n, StringComparer.Ordinal)
                 .ToArray();
@@ -168,13 +203,12 @@ public class GhosttyActionTagHeaderParityTests
         }
     }
 
-    // The managed enums are deliberately partial -- only the tags the Windows
-    // apprt dispatches on are listed -- so this checks every managed member
-    // against the header and not the reverse.
-    private static void AssertMatchesHeader<TEnum>(string typedefName, string prefix)
+    private static void AssertMatchesHeader<TEnum>(
+        string typedefName, string prefix, bool complete = true, bool explicitValues = false)
         where TEnum : struct, Enum
     {
-        var mismatches = FindMismatches<TEnum>(ReadHeader(), typedefName, prefix);
+        var mismatches = FindMismatches<TEnum>(
+            ReadHeader(), typedefName, prefix, complete, explicitValues);
 
         Assert.True(
             mismatches.Count == 0,
@@ -183,15 +217,21 @@ public class GhosttyActionTagHeaderParityTests
     }
 
     private static List<(string Name, string Detail)> FindMismatches<TEnum>(
-        string headerText, string typedefName, string prefix)
+        string headerText, string typedefName, string prefix,
+        bool complete = true, bool explicitValues = false)
         where TEnum : struct, Enum
     {
-        var header = ParseHeaderEnum(headerText, typedefName);
+        var header = ParseHeaderEnum(headerText, typedefName, explicitValues);
+
+        // A [Flags] enum's zero member is the "no bits" convention C does not
+        // write down, so it has no header counterpart and is not drift.
+        var isFlags = typeof(TEnum).IsDefined(typeof(FlagsAttribute), inherit: false);
 
         var mismatches = new List<(string Name, string Detail)>();
         foreach (var name in Enum.GetNames<TEnum>())
         {
             var value = Convert.ToInt32(Enum.Parse<TEnum>(name));
+            if (isFlags && value == 0) continue;
             var cName = prefix + ToScreamingSnake(name);
 
             if (!header.TryGetValue(cName, out var expected))
@@ -210,6 +250,23 @@ public class GhosttyActionTagHeaderParityTests
             }
         }
 
+        if (complete)
+        {
+            var mirrored = Enum.GetNames<TEnum>()
+                .Where(n => !isFlags || Convert.ToInt32(Enum.Parse<TEnum>(n)) != 0)
+                .Select(n => prefix + ToScreamingSnake(n))
+                .ToHashSet(StringComparer.Ordinal);
+
+            foreach (var (cName, value) in header.OrderBy(kv => kv.Value))
+            {
+                if (mirrored.Contains(cName)) continue;
+                mismatches.Add((
+                    cName,
+                    $"{cName} = {value} has no member in {typeof(TEnum).Name}; the handler " +
+                    $"cannot tell it from whichever branch it falls into"));
+            }
+        }
+
         return mismatches;
     }
 
@@ -222,13 +279,15 @@ public class GhosttyActionTagHeaderParityTests
         var (open, close) = FindEnumBody(headerText, ActionTypedef);
         var body = headerText[open..close];
 
+        // Entry lines identified with EntryPattern rather than by a second
+        // "non-blank and not a comment" rule, so this cannot come to disagree
+        // with the parser about what an entry is.
         var lines = body.Split('\n').ToList();
         var entryLines = new List<int>();
         for (var i = 0; i < lines.Count; i++)
         {
-            var line = lines[i].Trim();
-            if (line.Length == 0 || line.StartsWith("//", StringComparison.Ordinal)) continue;
-            entryLines.Add(i);
+            if (EntryPattern.Match(lines[i].Trim()) is { Success: true } m && m.Groups["name"].Success)
+                entryLines.Add(i);
         }
 
         Assert.InRange(at, 0, entryLines.Count - 1);
@@ -236,6 +295,14 @@ public class GhosttyActionTagHeaderParityTests
         else lines.RemoveAt(entryLines[at]);
 
         return headerText[..open] + string.Join('\n', lines) + headerText[close..];
+    }
+
+    private static int ParseValue(string raw)
+    {
+        var shift = raw.IndexOf("<<", StringComparison.Ordinal);
+        return shift < 0
+            ? int.Parse(raw, CultureInfo.InvariantCulture)
+            : 1 << int.Parse(raw[(shift + 2)..].Trim(), CultureInfo.InvariantCulture);
     }
 
     private static string ToScreamingSnake(string pascal)
@@ -266,10 +333,12 @@ public class GhosttyActionTagHeaderParityTests
     }
 
     private static Dictionary<string, int> ReadHeaderEnum(string typedefName) =>
-        ParseHeaderEnum(ReadHeader(), typedefName);
+        ParseHeaderEnum(ReadHeader(), typedefName, explicitValues: false);
 
-    // Parses `typedef enum { ... } <typedefName>;` into name -> ordinal.
-    private static Dictionary<string, int> ParseHeaderEnum(string headerText, string typedefName)
+    // Parses `typedef enum { ... } <typedefName>;` into name -> value, taken
+    // from position or from an explicit initializer per `explicitValues`.
+    private static Dictionary<string, int> ParseHeaderEnum(
+        string headerText, string typedefName, bool explicitValues)
     {
         var (open, close) = FindEnumBody(headerText, typedefName);
         var body = headerText[open..close];
@@ -284,15 +353,22 @@ public class GhosttyActionTagHeaderParityTests
             var m = EntryPattern.Match(line);
             Assert.True(m.Success, $"unparsed line in {typedefName}: {line}");
 
-            // An explicit initializer would make position-based ordinals a lie.
-            // ghostty.h uses them for negative sentinels (color kinds); if one
-            // ever lands in an enum checked here, this must learn to read it.
-            Assert.False(
-                m.Groups["assign"].Success,
-                $"{typedefName} entry has an explicit value, ordinals are no " +
-                $"longer positional: {line}");
+            var hasValue = m.Groups["value"].Success;
 
-            entries[m.Groups["name"].Value] = index++;
+            // The two readings cannot be mixed. A positional read of an enum
+            // that assigns even one value is wrong for everything after it, and
+            // an explicit read of an enum that assigns none has nothing to read.
+            // Whichever the caller asked for, every entry has to be that kind.
+            Assert.True(
+                hasValue == explicitValues,
+                explicitValues
+                    ? $"{typedefName} was read for explicit values but this entry has none: {line}"
+                    : $"{typedefName} entry has an explicit value, ordinals are no " +
+                      $"longer positional: {line}");
+
+            entries[m.Groups["name"].Value] =
+                explicitValues ? ParseValue(m.Groups["value"].Value) : index;
+            index++;
         }
 
         // A parse that quietly yields nothing would pass every check above.

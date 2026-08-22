@@ -73,9 +73,9 @@ public class GhosttyActionsLayoutTests
     public void ActionStruct_Payload_Starts_At_Offset_8()
     {
         // Every dispatched case in GhosttyHost.OnAction (SetTitle,
-        // Scrollbar, ProgressReport, MouseShape, …) reads payload bytes
+        // Scrollbar, ProgressReport, MouseShape and the rest) reads payload bytes
         // via Marshal.ReadXxx(actionPtr, 8). This pin catches a future
-        // ABI change that shifts the union — e.g. upstream widening tag
+        // ABI change that shifts the union, e.g. upstream widening tag
         // to int64 (would still be +8 by coincidence) or growing the
         // union's alignment beyond 8 (would push payloads to +16 and
         // silently corrupt every read).

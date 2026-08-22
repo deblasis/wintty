@@ -75,6 +75,11 @@ internal enum GhosttyActionTag
     CustomShaderFailed = 71,
 }
 
+// ghostty_target_tag_e: which half of OnAction the action is addressed to.
+// Lives here rather than as consts beside the switch so a test can reach it:
+// swapping these two routes every app action into the surface arm.
+internal enum GhosttyTargetTag { App = 0, Surface = 1 }
+
 // ghostty_action_scrollbar_s:
 //   { uint64 total; uint64 offset; uint64 len; }
 // All values are row counts. `total` is scrollback+viewport, `offset`
@@ -99,7 +104,7 @@ internal struct GhosttyActionMouseOverLink
     public nuint Len;
 }
 
-// ghostty_action_new_split_direction_e: where the new split is placed
+// ghostty_action_split_direction_e: where the new split is placed
 // relative to the focused surface.
 internal enum GhosttySplitDirection { Right = 0, Down = 1, Left = 2, Up = 3 }
 
@@ -109,7 +114,7 @@ internal enum GhosttySplitDirection { Right = 0, Down = 1, Left = 2, Up = 3 }
 internal enum GhosttyGotoSplit { Previous = 0, Next = 1, Up = 2, Left = 3, Down = 4, Right = 5 }
 
 // ghostty_action_resize_split_direction_e. Note this is a *different*
-// ordering from GhosttySplitDirection — resize grows the split toward
+// ordering from GhosttySplitDirection: resize grows the split toward
 // the named edge, so the values do not line up with placement.
 internal enum GhosttyResizeSplitDirection { Up = 0, Down = 1, Left = 2, Right = 3 }
 
@@ -119,9 +124,12 @@ internal enum GhosttyGotoWindow { Previous = 0, Next = 1 }
 // ghostty_action_float_window_e: always-on-top state to apply.
 internal enum GhosttyFloatWindow { On = 0, Off = 1, Toggle = 2 }
 
-// ghostty_action_prompt_title_e: whether the prompt renames the
-// individual surface (pane) or the surface's containing tab.
-internal enum GhosttyPromptTitle { Surface = 0, Tab = 1 }
+// ghostty_action_prompt_title_e: what the prompt renames. Window arrived in
+// the same sync that shifted the tags above and has no window-title override
+// to drive here, but it is listed because the handler has to be able to tell
+// it from Surface: collapsing the payload to "is it Tab" silently renamed the
+// pane instead, and reported the action handled.
+internal enum GhosttyPromptTitle { Surface = 0, Tab = 1, Window = 2 }
 
 // ghostty_action_size_limit_s:
 //   { uint32 min_width; uint32 min_height; uint32 max_width; uint32 max_height; }
