@@ -775,6 +775,7 @@ pub const LoadingImage = struct {
 
         const first = result.frames[0].data;
         const first_delay_ms = result.frames[0].delay_ms;
+        const first_zero_delay_frames = result.frames[0].zero_delay_frames;
         if (first.len > max_size) {
             log.warn("gif image too large size={} max_size={}", .{ first.len, max_size });
             return error.InvalidData;
@@ -809,6 +810,7 @@ pub const LoadingImage = struct {
             .frames = tail,
             .loop_count = result.loop_count,
             .root_delay_ms = first_delay_ms,
+            .root_zero_delay_frames = first_zero_delay_frames,
         };
     }
 };
@@ -1174,6 +1176,7 @@ test "image load: an animated gif keeps its remaining frames" {
     try testing.expectEqual(@as(u32, 50), anim.frames[0].delay_ms);
     try testing.expectEqual(@as(u32, 30), anim.frames[1].delay_ms);
     try testing.expectEqual(@as(u32, 100), anim.root_delay_ms);
+    try testing.expectEqual(@as(u32, 0), anim.root_zero_delay_frames);
     try testing.expectEqual(@as(u32, 0), anim.loop_count);
     for (anim.frames) |frame| {
         try testing.expectEqual(@as(usize, 2 * 2 * 4), frame.data.len);
