@@ -595,6 +595,13 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Per-surface custom shader override. When set (non-empty), this
+        /// surface's renderer uses ONLY this shader, replacing the app
+        /// config's custom-shader list. Embedding apprts use this for shader
+        /// preview UIs. The string is borrowed and must remain valid until
+        /// the surface is freed (same rule as working_directory/command).
+        custom_shader: ?[*:0]const u8 = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -655,6 +662,31 @@ pub const Surface = struct {
                     log.warn(
                         "error finalizing working directory config dir={s} err={}",
                         .{ wd_val.path, err },
+                    );
+                }
+            }
+        }
+
+        // Per-surface custom-shader override: REPLACE the configured shader
+        // list with this single path so a preview surface shows exactly the
+        // selected shader (the config's list is not chained onto). Arena
+        // memory, same pattern as the working-directory override above.
+        if (opts.custom_shader) |c_shader| {
+            const shader_path = std.mem.sliceTo(c_shader, 0);
+            if (shader_path.len > 0) {
+                if (configpkg.Path.parse(config.arenaAlloc(), shader_path)) |maybe| {
+                    if (maybe) |item| {
+                        var rp: configpkg.RepeatablePath = .{};
+                        if (rp.value.append(config.arenaAlloc(), item)) {
+                            config.@"custom-shader" = rp;
+                        } else |err| {
+                            log.warn("custom shader override out of memory err={}", .{err});
+                        }
+                    }
+                } else |err| {
+                    log.warn(
+                        "error parsing custom shader override path={s} err={}",
+                        .{ shader_path, err },
                     );
                 }
             }
