@@ -24,6 +24,38 @@ public sealed partial class SettingsCard : UserControl
         InitializeComponent();
     }
 
+    /// <summary>
+    /// Stacks the content below the header/description at full card width
+    /// instead of the default right-aligned column. For content that is not
+    /// an input control -- previews, lists -- where the side-by-side split
+    /// wastes the left half of the card.
+    /// </summary>
+    public static readonly DependencyProperty ContentBelowProperty =
+        DependencyProperty.Register(
+            nameof(ContentBelow),
+            typeof(bool),
+            typeof(SettingsCard),
+            new PropertyMetadata(false, OnContentBelowChanged));
+
+    public bool ContentBelow
+    {
+        get => (bool)GetValue(ContentBelowProperty);
+        set => SetValue(ContentBelowProperty, value);
+    }
+
+    private static void OnContentBelowChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var card = (SettingsCard)d;
+        var stacked = (bool)e.NewValue;
+        Grid.SetRow(card.ControlPresenter, stacked ? 1 : 0);
+        Grid.SetColumn(card.ControlPresenter, stacked ? 0 : 1);
+        Grid.SetColumnSpan(card.ControlPresenter, stacked ? 2 : 1);
+        card.ControlPresenter.HorizontalAlignment = stacked
+            ? HorizontalAlignment.Stretch
+            : HorizontalAlignment.Right;
+        card.RootGrid.RowSpacing = stacked ? 12 : 0;
+    }
+
     public static readonly DependencyProperty HeaderProperty =
         DependencyProperty.Register(
             nameof(Header),
