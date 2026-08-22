@@ -53,7 +53,7 @@ Check 'count-folds-case'      2 (Measure-Occurrences 'ZqXw zqxw' 'ZQXW')
 Check 'count-ordinal-strict'  1 `
     (Measure-Occurrences 'ZQXW zqxw' 'ZQXW' ([StringComparison]::Ordinal))
 
-Set-Content -Path (Join-Path $OutDir 'finally-ran.txt') -Value 'cases ran'
+Set-Content -LiteralPath (Join-Path $OutDir 'finally-ran.txt') -Value 'cases ran'
 
 if ($fails.Count -gt 0) {
     $fails | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
