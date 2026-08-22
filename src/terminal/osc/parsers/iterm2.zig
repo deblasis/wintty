@@ -908,6 +908,20 @@ test "OSC: 1337: a File payload survives at any size an image needs" {
     try expectFilePayloadSurvives(alloc, alloc, 512 * 1024);
 }
 
+test "OSC: 1337: a File payload survives across the capture growth boundary" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The capture starts in the parser's inline buffer and moves to the heap
+    // on the byte that overflows it, so that byte is where an off-by-one
+    // would land. The options block is captured too, and `parse` appends a
+    // NUL, so the seam sits below MAX_BUF by those amounts rather than at it.
+    const overhead = "File=inline=1:".len;
+    try expectFilePayloadSurvives(alloc, alloc, Parser.MAX_BUF - overhead - 1);
+    try expectFilePayloadSurvives(alloc, alloc, Parser.MAX_BUF - overhead);
+    try expectFilePayloadSurvives(alloc, alloc, Parser.MAX_BUF - overhead + 1);
+}
+
 test "OSC: 1337: without an allocator File= keeps the fixed-buffer ceiling" {
     const testing = std.testing;
     const alloc = testing.allocator;
