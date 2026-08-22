@@ -40,7 +40,8 @@ public class ShaderGalleryTests
         {
             var entries = ShaderGallery.Entries;
             Assert.True(entries.Count >= 11,
-                $"expected at least 11 bundled shaders, got {entries.Count}");
+                $"expected at least 11 bundled shaders, got {entries.Count}; " +
+                $"load detail: {ShaderGallery.LoadDetail ?? "(none)"}");
             Assert.All(entries, e =>
             {
                 Assert.False(string.IsNullOrWhiteSpace(e.Name));
