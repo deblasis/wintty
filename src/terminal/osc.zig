@@ -919,7 +919,13 @@ pub const Parser = struct {
 
             .@"1337",
             => switch (c) {
-                ';' => self.captureTrailing(.fixed),
+                // Allocating, like OSC 52 and 72, because File= carries a
+                // base64 image and the fixed buffer is 2048 bytes. Anything
+                // larger was dropped without a command ever being produced,
+                // so an inline image simply failed to appear with nothing
+                // logged anywhere. Falls back to the fixed buffer when no
+                // allocator is available.
+                ';' => self.captureTrailing(.allocating),
                 else => self.state = .invalid,
             },
 

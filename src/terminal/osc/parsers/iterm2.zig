@@ -876,10 +876,20 @@ fn filePayloadSurvives(alloc: std.mem.Allocator, len: usize) !bool {
     return std.mem.eql(u8, payload, cmd.iterm2_image_transmit.payload);
 }
 
-test "OSC: 1337: a File payload within the capture limit survives intact" {
+test "OSC: 1337: a File payload survives at any size an image needs" {
     const testing = std.testing;
+
+    // Small enough for the fixed capture either way.
     try testing.expect(try filePayloadSurvives(testing.allocator, 1024));
     try testing.expect(try filePayloadSurvives(testing.allocator, 2000));
+
+    // Past the fixed buffer. A 2.4KB GIF is about 3.2KB of base64, and it
+    // used to vanish here with no error at all: the sequence never became a
+    // command, so nothing downstream knew an image had been sent.
+    try testing.expect(try filePayloadSurvives(testing.allocator, 4096));
+
+    // A photograph rather than an icon.
+    try testing.expect(try filePayloadSurvives(testing.allocator, 512 * 1024));
 }
 
 test "OSC: 1337: test File with extra options before inline=1" {
