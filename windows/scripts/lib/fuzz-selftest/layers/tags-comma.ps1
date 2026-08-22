@@ -5,11 +5,13 @@
 # values, neither of which is what was stored. -List joins tags with a comma
 # too, so splitting it here instead would be a silent reinterpretation nothing
 # downstream could report. The second entry is the same character reached by
-# trimming rather than by typing.
+# trimming rather than by typing. The third declares a good tag first, so a
+# check that reads one tag per harness and stops has something to miss.
 @{
     layer = 'pro'
     harnesses = @(
-        @{ name = 'st-tier-comma';  script = 'lib/fuzz-selftest/pass.ps1'; tags = @('a,b');     outDir = $true; seed = $false; minutes = 1; oracle = 'fixture' }
-        @{ name = 'st-tier-padded'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @(' c,d ');   outDir = $true; seed = $false; minutes = 1; oracle = 'fixture' }
+        @{ name = 'st-tier-comma';  script = 'lib/fuzz-selftest/pass.ps1'; tags = @('a,b');       outDir = $true; seed = $false; minutes = 1; oracle = 'fixture' }
+        @{ name = 'st-tier-padded'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @(' c,d ');     outDir = $true; seed = $false; minutes = 1; oracle = 'fixture' }
+        @{ name = 'st-tier-second'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @('ok', 'e,f'); outDir = $true; seed = $false; minutes = 1; oracle = 'fixture' }
     )
 }

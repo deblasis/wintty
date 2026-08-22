@@ -130,6 +130,18 @@ if (Test-Path Variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
+# Said before anything can refuse this run, because the run it belongs to is
+# meant to be refused. The self-test below starts a child that must leave on the
+# filter refusal, and hands it this flag so that a refusal which stopped
+# refusing would not have the child start a self-test of its own, and that one
+# another. Without a marker of its own in the child's output, a parent that
+# stopped passing the flag looks exactly the same from outside - refused for its
+# filter, with the recursion bound handed to nobody - so the parent requires
+# this line rather than the flag's absence being invisible.
+if ($SelfTestRefusalChild) {
+    Write-Host 'selftest: refusal child; it will not start a self-test of its own'
+}
+
 # name      short id, what -Only and -Skip match
 # script    relative to this directory
 # tags      -Tag matches any
@@ -196,27 +208,40 @@ $NotInSuite = [ordered]@{
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
 }
 
-# The one place a script path is put into the form the checks compare. Every
-# collection compared that way is built through here - the inventory below, the
-# tier's claimed scripts, and both halves of integrity check 2. The rule used to
-# be copied into each of them, so an edit to one was silent in the others. The
-# divergence that argument was written about - check 2 reading $NotInSuite raw
-# while the inventory normalised it - can no longer arise: the base keys are
-# literals here, and a tier's are refused unless they are plain file names, so
-# both sides of check 2 now normalise to themselves. What is left is the script
-# side, where a tier may write './x.ps1' or 'lib/pro/x.ps1' for a file the
-# checks name some other way.
+# The one form every check compares a script path in: the path relative to this
+# directory, resolved. A tier's paths go through here ONCE, at the merge below,
+# and what comes back is STORED on the entry - so the inventory, the tier's
+# claimed scripts, both halves of integrity check 2 and the run loop all read
+# the same string rather than each reducing a manifest's spelling for itself.
+# The base manifest and $NotInSuite are written in that form already, which is
+# why they are read here as literals rather than through this.
+#
+# Reducing by prefix was not enough, and was the last shape of the defect this
+# file keeps growing: a value normalised for one check and compared raw by the
+# next. It took exactly one leading '.\', so 'lib\..\x.ps1', '.\.\x.ps1' and
+# '..\<this directory>\x.ps1' each named a file sitting beside the runner and
+# none of them compared equal to 'x.ps1' - each one reopening the wrong-blame
+# failure at check 2, and each one able to excuse a harness through notInSuite.
+# Resolving the path closes all of them together.
+#
+# $null means the path does not name something inside this directory: it climbed
+# out, it was absolute, or it could not be resolved at all. That is also the
+# answer the escape guard below needs, which is the other reason the resolution
+# belongs here rather than beside it - the guard resolved the path, refused on
+# it, and then threw the resolved form away.
 function ConvertTo-ScriptKey {
     param([string]$Path)
-    $key = $Path -replace '/', '\'
-    # Exactly one leading '.\', by prefix. TrimStart takes a SET of characters,
-    # so it also ate the leading dot of '.helper.ps1' - a tier classifying one
-    # was then told to classify the file it had just classified, which is the
-    # wrong-blame failure the notInSuite trim was added to remove - and it ate
-    # '..\' whole, which only ever looked like an escape because the path guard
-    # refuses those before this is reached.
-    if ($key.StartsWith('.\')) { $key = $key.Substring(2) }
-    return $key
+    $text = "$Path".Trim()
+    if (-not $text) { return $null }
+    $rootFull = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+    # The two-argument overload rather than Join-Path, which is what left the
+    # guard dead for an absolute path: joining one onto the root produced
+    # 'C:\<root>\C:\...\x.ps1', which is inside the root, so the guard passed it
+    # and check 1 blamed a script that does not exist instead.
+    try { $full = [System.IO.Path]::GetFullPath($text, $rootFull) } catch { return $null }
+    $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $full.Substring($prefix.Length)
 }
 
 # Everything this file ships beside itself, as paths relative to this directory:
@@ -226,8 +251,8 @@ function ConvertTo-ScriptKey {
 # are still literals, because the tier merge below appends a tier's own scripts
 # to both and those are not what this file ships.
 $BaseScripts = @(
-    @($Harnesses  | ForEach-Object { ConvertTo-ScriptKey $_.script }) +
-    @($NotInSuite.Keys | ForEach-Object { ConvertTo-ScriptKey ([string]$_) })
+    @($Harnesses  | ForEach-Object { $_.script }) +
+    @($NotInSuite.Keys | ForEach-Object { [string]$_ })
 )
 
 # ---- tier layer -----------------------------------------------------------
@@ -288,7 +313,20 @@ if (Test-Path $TierManifestPath) {
         exit 1
     }
 
-    $TierLayerName = [string]$declared.layer
+    # Trimmed before it is tested, compared or stored, like every other field
+    # the merge reads. The name is matched against 'base' and against
+    # -RequireLayer and printed by -List, so a padded one took the name this
+    # runner reserves for its own harnesses and -List reported
+    # 'layers: base (19) +  base  (1)'.
+    $TierLayerName = ([string]$declared.layer).Trim()
+    # A name that is only padding is no name, the same way an empty oracle is no
+    # oracle. It is what -List prints and what -RequireLayer matches, so a blank
+    # one merges a layer that -List then reports as base-only - this feature's
+    # own failure mode, arriving through the field that names it.
+    if (-not $TierLayerName) {
+        Write-Host "tier layer: the layer name is blank; it is what -List prints and what -RequireLayer matches" -ForegroundColor Red
+        exit 1
+    }
     if ($RequireLayer -and $TierLayerName -ne $RequireLayer) {
         Write-Host ("-RequireLayer '$RequireLayer' but the manifest declares '$TierLayerName'") -ForegroundColor Red
         exit 1
@@ -321,6 +359,22 @@ if (Test-Path $TierManifestPath) {
             }
         }
 
+        # Everything a later check reads is put into its final form HERE, once,
+        # and STORED. Round after round of review found the same defect in a
+        # different field - a value normalised for one check and then compared
+        # raw by the next - so no field is normalised where it is tested any
+        # more. What is stored is what -List prints, what -Only, -Skip and -Tag
+        # match, what the collision checks compare and what the run loop
+        # launches: a value that gets through this block is reachable by every
+        # one of them, or by none of them.
+        #
+        # Only keys that are already present are touched. Assigning into an
+        # ordered hashtable CREATES the key, and the presence check above has to
+        # see a missing one as missing.
+        foreach ($key in @('name', 'script', 'oracle')) {
+            if ($entry.Contains($key)) { $entry[$key] = "$($entry[$key])".Trim() }
+        }
+
         # Present but empty, for the three that are read as text. An empty name
         # is a blank row in -List that neither -Only nor -Skip can select, and
         # an OutDir that resolves to the run root. An empty script slips both
@@ -329,9 +383,12 @@ if (Test-Path $TierManifestPath) {
         # nothing declares -ExePath, which reads as a broken harness rather
         # than a broken manifest. An empty oracle is a harness claiming a pass
         # rules something out without saying what, and the header above is
-        # explicit that those strings were already wrong here once.
+        # explicit that those strings were already wrong here once. Read off
+        # what was stored: a name of ' ' is empty and a name of ' search ' is
+        # the base harness it collides with, and both were true only of the
+        # value the old test trimmed and threw away.
         foreach ($key in @('name', 'script', 'oracle')) {
-            if ($entry.Contains($key) -and -not "$($entry[$key])".Trim()) {
+            if ($entry.Contains($key) -and -not $entry[$key]) {
                 $tierProblems += "tier harness has an empty '$key': $($entry.name)"
             }
         }
@@ -362,36 +419,35 @@ if (Test-Path $TierManifestPath) {
         # meet. Testing the normalised list also settles the values that are not
         # strings: they are compared as strings anyway, so a tag of 0 is exactly
         # as selectable as '0' and is kept.
+        #
+        # The other half of Split-List's rule, a comma, is not checked here: it
+        # applies to a harness name as much as to a tag, and to the base
+        # manifest as much as to a tier's. It is integrity check 4, over the
+        # merged set.
         if ($entry.Contains('tags')) {
             $entry.tags = @($entry.tags | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-            # The other character the two sides still disagreed on. Split-List
-            # CUTS the caller's -Tag on a comma, so a declared tag of 'a,b' is
-            # listed as a real one and no -Tag argument can ever reach it - the
-            # padded-tag failure again, by the half of Split-List's rule the trim
-            # did not copy. Refused rather than split, because splitting means a
-            # manifest that declares one tag silently gets two, and -List joins
-            # tags with a comma, so nothing anyone can read says which happened.
-            foreach ($t in $entry.tags) {
-                if ($t.Contains(',')) {
-                    $tierProblems += ("tier harness '$($entry.name)' declares a tag holding a comma: '$t'. " +
-                                      'A comma separates -Tag values, so no -Tag run could select it; declare them as separate tags')
-                }
-            }
         }
         if (-not $entry.tags) {
             $tierProblems += "tier harness '$($entry.name)' declares no tags, so no -Tag run would ever select it"
         }
 
-        # script is resolved relative to this directory and nothing constrained it.
-        # A path that climbs out lands outside the tree the suite is meant to cover,
-        # and combined with the leaf-name comparison in check 2 below it can also
-        # excuse an unrelated script sitting here unclassified.
+        # Resolved against this directory and STORED in the one form the checks
+        # compare, by the same call that answers the guard. A path that climbs
+        # out lands outside the tree the suite is meant to cover, and combined
+        # with the relative-path comparison in check 2 below it can also excuse
+        # an unrelated script sitting here unclassified. A path that cannot be
+        # resolved at all is not inside this directory either, and lands here
+        # rather than ending the run on an exception.
+        #
+        # The message quotes the path as the manifest wrote it, because that is
+        # the string its author has to go and find; everything after this reads
+        # the resolved one.
         if ($entry.script) {
-            $full = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $entry.script))
-            $rootFull = [System.IO.Path]::GetFullPath($PSScriptRoot)
-            if (-not $full.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar,
-                                      [StringComparison]::OrdinalIgnoreCase)) {
+            $scriptKey = ConvertTo-ScriptKey $entry.script
+            if ($null -eq $scriptKey) {
                 $tierProblems += "tier harness '$($entry.name)' names a script outside this directory: $($entry.script)"
+            } else {
+                $entry.script = $scriptKey
             }
         }
         if ($entry.name -and ($baseNames -contains $entry.name)) {
@@ -417,18 +473,13 @@ if (Test-Path $TierManifestPath) {
     # the tier author is told to classify a script rather than told that the
     # classification they wrote is the wrong shape.
     if ($null -ne $declared.notInSuite) {
-        # Normalised the same way a harness entry is, and for the same reason.
-        # This is the other half of the same manifest and arrives the same two
-        # ways, but a PSCustomObject has no .Keys at all - so the foreach ran
-        # over $null and did nothing, and the run then died at integrity check 2
-        # telling the tier author to classify a file they had classified.
-        # The names are trimmed on the way in, not on the way out: check 2
-        # compares against a bare leaf name, so a key stored with padding
-        # excuses nothing while passing every check below - the same wrong-blame
-        # failure by the door this normalisation left open.
-        $declaredNotInSuite = [ordered]@{}
+        # Read the same two ways a harness entry is, and for the same reason: a
+        # PSCustomObject has no .Keys at all, so the foreach ran over $null and
+        # did nothing, and the run then died at integrity check 2 telling the
+        # tier author to classify a file they had classified.
+        $rawNotInSuite = [ordered]@{}
         if ($declared.notInSuite -is [System.Collections.IDictionary]) {
-            foreach ($k in $declared.notInSuite.Keys) { $declaredNotInSuite[([string]$k).Trim()] = [string]$declared.notInSuite[$k] }
+            foreach ($k in $declared.notInSuite.Keys) { $rawNotInSuite[[string]$k] = [string]$declared.notInSuite[$k] }
         } elseif ($declared.notInSuite -is [array] -or $declared.notInSuite -is [string]) {
             # The reason is not decoration: it is the only place a tier says why
             # a script of its own is not a harness. A bare list also reads as an
@@ -436,15 +487,26 @@ if (Test-Path $TierManifestPath) {
             # below it would classify those and nothing else.
             $tierProblems += 'tier notInSuite must be written as name = reason pairs, not a list of names'
         } else {
-            foreach ($prop in $declared.notInSuite.PSObject.Properties) { $declaredNotInSuite[([string]$prop.Name).Trim()] = [string]$prop.Value }
+            foreach ($prop in $declared.notInSuite.PSObject.Properties) { $rawNotInSuite[[string]$prop.Name] = [string]$prop.Value }
         }
+
+        # One trim over whichever shape it arrived in, rather than one per
+        # branch. A symmetric rule written twice is a rule with two coverage
+        # requirements, and the halves came apart before. The names are
+        # normalised on the way in and not on the way out: check 2 compares
+        # against a stored path, so a key held with padding excuses nothing
+        # while passing every check below - the same wrong-blame failure by the
+        # door this normalisation left open.
+        $declaredNotInSuite = [ordered]@{}
+        foreach ($k in $rawNotInSuite.Keys) { $declaredNotInSuite[$k.Trim()] = $rawNotInSuite[$k] }
 
         # This is the one door in the merge that lets a tier tell check 2 to look
         # away, so it is the one place a lenient read would undo the strict one.
-        $claimedScripts = @($Harnesses | ForEach-Object { ConvertTo-ScriptKey $_.script })
+        $claimedScripts = @($Harnesses | ForEach-Object { $_.script })
         foreach ($name in $declaredNotInSuite.Keys) {
-            # Check 2 compares against a leaf name, so anything carrying a
-            # separator excuses nothing while reading as though it did.
+            # Check 2 compares a stored path against a name, so anything
+            # carrying a separator excuses nothing while reading as though it
+            # did.
             if (-not $name -or $name -match '[\\/]') {
                 $tierProblems += "tier notInSuite names something that is not a plain file name: '$name'"
                 continue
@@ -695,9 +757,12 @@ foreach ($h in @($Harnesses) + @($SelfTestHarnesses)) {
 # Compared on the relative path, not the leaf. Every base harness script is flat,
 # so a leaf comparison was equivalent until a tier could name one in a
 # subdirectory; after that, naming lib/pro/x.ps1 excuses an unrelated x.ps1
-# sitting here unclassified, which is the check's whole purpose.
-$claimed = @(@($Harnesses) | ForEach-Object { ConvertTo-ScriptKey $_.script })
-$excused = @($NotInSuite.Keys | ForEach-Object { ConvertTo-ScriptKey ([string]$_) })
+# sitting here unclassified, which is the check's whole purpose. Both sides are
+# read as stored rather than reduced again here: the merge resolved a tier's
+# spellings once, and reducing them a second time in each place they are
+# compared is how the places came to disagree.
+$claimed = @(@($Harnesses) | ForEach-Object { $_.script })
+$excused = @($NotInSuite.Keys | ForEach-Object { [string]$_ })
 foreach ($f in Get-ChildItem -Path $PSScriptRoot -Filter '*.ps1' -File) {
     if ($claimed -contains $f.Name) { continue }
     if ($excused -contains $f.Name) { continue }
@@ -717,6 +782,31 @@ foreach ($h in @($Harnesses) + @($SelfTestHarnesses)) {
     foreach ($need in @('ExePath') + $(if ($h.outDir) { 'OutDir' }) + $(if ($h.seed) { 'Seed' })) {
         if ($declared -notcontains $need) {
             $problems += "$($h.name) is called with -$need but $($h.script) does not declare it"
+        }
+    }
+}
+
+# 4. A name or a tag holding a comma, which is declared, listed, and unreachable.
+#    Split-List cuts the caller's -Tag, -Only and -Skip values on commas, so a
+#    value declared with one in it can never be matched: -Only 'st,tier' arrives
+#    as two names and is refused as a typo, -Tag 'a,b' matches nothing.
+#    Refused rather than split, because splitting means one declaration silently
+#    becomes two, and -List joins tags with a comma - so one tag 'a,b' and two
+#    tags 'a' and 'b' print identically and nothing anyone can read says which
+#    happened. The refusal is the only place the difference can be seen.
+#    Placed here, after the merge and over the merged set, rather than in the
+#    tier block: the rule is Split-List's and applies to a base harness exactly
+#    as much as to a tier's. The base names and tags are literals in this file,
+#    so it is the tier half that can actually trip it.
+foreach ($h in $Harnesses) {
+    if ("$($h.name)".Contains(',')) {
+        $problems += ("$($h.layer) harness name holds a comma: '$($h.name)'. " +
+                      'A comma separates -Only and -Skip values, so neither could select it')
+    }
+    foreach ($t in $h.tags) {
+        if ("$t".Contains(',')) {
+            $problems += ("$($h.layer) harness '$($h.name)' declares a tag holding a comma: '$t'. " +
+                          'A comma separates -Tag values, so no -Tag run could select it; declare them as separate tags')
         }
     }
 }
@@ -769,11 +859,16 @@ if ($SelfTest -and ($Tag -or $Only -or $Skip -or
 
 # An unknown name in -Only is a typo, and silently running a smaller suite
 # than was asked for is the failure mode this whole script exists to avoid.
-if ($Only) {
+# -Skip is read the same way: a name that matches nothing skips nothing, and an
+# operator who asked for a harness to be left out has no way to tell it ran.
+# Both are compared against the whole manifest rather than against the current
+# selection, so `-Tag smoke -Skip inspector` is not a typo.
+foreach ($filter in @(@{ flag = '-Only'; names = $Only }, @{ flag = '-Skip'; names = $Skip })) {
+    if (-not $filter.names) { continue }
     $known = @($all | ForEach-Object { $_.name })
-    $unknown = @($Only | Where-Object { $known -notcontains $_ })
+    $unknown = @($filter.names | Where-Object { $known -notcontains $_ })
     if ($unknown.Count -gt 0) {
-        Write-Host ("-Only names no such harness: {0}" -f ($unknown -join ', ')) -ForegroundColor Red
+        Write-Host ("{0} names no such harness: {1}" -f $filter.flag, ($unknown -join ', ')) -ForegroundColor Red
         exit 1
     }
 }
@@ -885,16 +980,6 @@ if ($SelfTest) {
         @{ name = 'st-seed-readback'; verdict = 'pass'; attempts = 1; why = 'the seed read-back rules decide whether a run has a real corpus, so they are exercised rather than assumed' }
     )
     $bad = @()
-    # The root has to be this process's own, and nothing else here would notice
-    # if it stopped being one: two self-tests sharing a root corrupt each other
-    # rather than colliding loudly. flaky.ps1 keys its retry marker off the run
-    # root, so the second run's st-flaky passes on attempt 1 and is reported as
-    # '1 attempt(s), expected 2'; and the tier cases below rewrite the manifest
-    # in a copy of this directory between the copy and each child launch, so one
-    # run reads what the other just wrote. Neither reproduces on its own.
-    if (-not $OutRoot.Contains("selftest-$PID")) {
-        $bad += "the run root is not this process's own: $OutRoot. Two self-tests at once would share it and rewrite each other's fixtures"
-    }
     # One row per harness and nothing else. A harness's console output
     # leaking into the result set is not cosmetic: it inflates the pass
     # count that gets reported and fills summary.json with printed lines.
@@ -994,6 +1079,12 @@ if ($SelfTest) {
     if ($typo.exit -ne 1) {
         $bad += "-Only with an unknown name exited $($typo.exit), expected 1 - a typo must not silently shrink the run"
     }
+    # The same typo on the other filter, which fails the quieter way: it runs
+    # what it was asked to leave out, and says nothing either way.
+    $skipTypo = Invoke-Inner -Name 'skip-typo' -Extra @('-Only', 'st-pass', '-Skip', 'st-nope')
+    if ($skipTypo.exit -ne 1) {
+        $bad += "-Skip with an unknown name exited $($skipTypo.exit), expected 1 - a skip that matches nothing skips nothing"
+    }
 
     # The refusal that keeps everything above meaning what it says: the
     # expectations are written for the whole fixture set, so a filter that got
@@ -1010,14 +1101,29 @@ if ($SelfTest) {
     # machine down when a guard breaks is worse than one that misses. Told with
     # a parameter rather than an environment variable because the variable is
     # also readable from outside: exported into the shell that runs this, it
-    # skips the block with no message and no change to the case count, so a run
-    # with the check gone is indistinguishable from one that made it.
+    # skips the block with no message and no change to the case count.
+    #
+    # A flag cannot be set ambiently the way that variable could, but it can
+    # still be typed - and typed, it skipped the block just as quietly. So the
+    # case is counted and the count is printed with the others: a run that did
+    # not make this check says 0 where every other run says 1, which is the
+    # thing the variable never had.
+    $script:RefusalCases = 0
     if (-not $SelfTestRefusalChild) {
         $refused = (& pwsh -NoProfile -File $PSCommandPath -SelfTest -Only st-pass -SelfTestRefusalChild | Out-String)
         $refusedExit = $LASTEXITCODE
         if ($refusedExit -ne 1 -or -not $refused.Contains('it takes no filters')) {
             $bad += "-SelfTest with -Only exited $refusedExit without refusing the filter; every expectation above would have run against one fixture"
         }
+        # The child's own answer that it was told what it is. A parent that
+        # stopped passing the flag would be refused for its filter exactly like
+        # this one and nothing else would differ, so the bound that keeps a
+        # broken refusal from starting self-tests without end would be carried
+        # by nobody.
+        if (-not $refused.Contains('selftest: refusal child')) {
+            $bad += 'the refusal child was not told what it is, so a refusal that stopped refusing would start a self-test of its own, and that one another'
+        }
+        $script:RefusalCases++
     }
 
     # ---- tier layer -------------------------------------------------------
@@ -1081,6 +1187,23 @@ if ($SelfTest) {
     # opens with the copy's.
     $LayerSandbox = Join-Path $OutRoot 'layer'
     $LayerRoot = Join-Path $LayerSandbox 'layer-scripts'
+
+    # Everything this run writes has to sit under a path of this process's own,
+    # and nothing else here would notice if it stopped doing so: two self-tests
+    # sharing a path corrupt each other rather than colliding loudly. flaky.ps1
+    # keys its retry marker off the run root, so the second run's st-flaky
+    # passes on attempt 1 and is reported as '1 attempt(s), expected 2'; and the
+    # tier cases rewrite the manifest in the copy below between the copy and
+    # each child launch, so one run reads what the other just wrote. Neither
+    # reproduces on its own.
+    # Asserted on the copy rather than on $OutRoot, because the copy is where
+    # the second half of that happens and it is built from $OutRoot: this covers
+    # both, where a check on $OutRoot alone still passed with the copy pointed
+    # somewhere shared and the collision fully restored.
+    if (-not $LayerRoot.Contains("selftest-$PID")) {
+        $bad += "the copy the tier cases run out of is not under this process's own root: $LayerRoot. Two self-tests at once would share it and rewrite each other's fixtures"
+    }
+
     Copy-SuiteScripts -From $PSScriptRoot -To $LayerRoot -Inventory $BaseScripts
 
     # Read off this run rather than written down here, so adding a base harness
@@ -1225,11 +1348,30 @@ exit 0
     # show either way: it joins tags with a comma, so a single tag of 'a,b' and
     # two tags a and b print identically. The refusal is the only place the
     # difference can be seen, which is the argument for refusing rather than
-    # splitting. Both entries assert it, because trimming reaches the same
-    # value the second way and a guard placed before the trim would miss it.
+    # splitting. All three entries assert it: the second reaches the same value
+    # by trimming rather than by typing, so a guard placed before the trim would
+    # miss it, and the third declares a good tag before the bad one, so a guard
+    # that reads a harness's first tag and stops has something to miss too. The
+    # message names the layer because the rule is not the tier's - it is
+    # Split-List's, read off the merged set.
     Assert-Layer -Run (Invoke-Layer -Case 'tags-comma' -Manifest 'tags-comma.ps1') -Exit 1 `
-        -Says @("tier harness 'st-tier-comma' declares a tag holding a comma: 'a,b'",
-                "tier harness 'st-tier-padded' declares a tag holding a comma: 'c,d'")
+        -Says @("pro harness 'st-tier-comma' declares a tag holding a comma: 'a,b'",
+                "pro harness 'st-tier-padded' declares a tag holding a comma: 'c,d'",
+                "pro harness 'st-tier-second' declares a tag holding a comma: 'e,f'")
+
+    # The same rule on the field -Only and -Skip match. A name holding a comma
+    # is listed as a real harness that neither filter can name.
+    Assert-Layer -Run (Invoke-Layer -Case 'name-comma' -Manifest 'name-comma.ps1') -Exit 1 `
+        -Says @("pro harness name holds a comma: 'st,tier'")
+
+    # Names that were trimmed to test for emptiness and then stored as they
+    # arrived. Both collision checks read the stored value, so both halves are
+    # here: ' search ' against the base set, and ' dupe ' against the layer's
+    # own names. Accepted, each was a row in -List that no -Only or -Skip could
+    # ever select, and -Skip search did not skip it.
+    Assert-Layer -Run (Invoke-Layer -Case 'name-padded' -Manifest 'name-padded.ps1') -Exit 1 `
+        -Says @("tier harness 'search' collides with a base harness of the same name",
+                "tier harness 'dupe' is declared twice in the tier manifest")
 
     # One entry per required key, each short a different one. The loop collects
     # every problem before it exits, so seven assertions cost one child run - and
@@ -1245,9 +1387,16 @@ exit 0
 
     # The target is made to exist and to declare what the manifest passes it, so
     # checks 1 and 3 have nothing to say and only the path guard can refuse it.
+    # The second name is the absolute path to the same file, spelled out here so
+    # the assertion pins what the run printed rather than that it printed
+    # something: the guard was dead for that input class, and an absolute path
+    # surfaced as check 1 saying the script does not exist.
+    $escapeAbsolute = [System.IO.Path]::GetFullPath((Join-Path $LayerSandbox 'layer-escape/escape.ps1'))
     Assert-Layer -Run (Invoke-Layer -Case 'script-escapes' -Manifest 'script-escapes.ps1' `
                                     -Inject @{ 'layer-escape/escape.ps1' = $LayerStub }) -Exit 1 `
-        -Says @("tier harness 'st-tier' names a script outside this directory: ../layer-escape/escape.ps1")
+        -Says @("tier harness 'st-tier' names a script outside this directory: ../layer-escape/escape.ps1",
+                "tier harness 'st-tier-absolute' names a script outside this directory: $escapeAbsolute") `
+        -Silent @('names a script that does not exist')
 
     # A sibling directory whose full path opens with this one's. A prefix test
     # that stops short of the separator reads it as inside.
@@ -1264,6 +1413,23 @@ exit 0
         -Says @("layers: base ($baseCount) + pro (1)") `
         -Silent @('tier-relative.ps1 is in this directory')
 
+    # The rest of the ways the same path beside the runner gets written. Reducing
+    # by prefix took exactly one leading './', so each of these named a file the
+    # tier ships and compared equal to nothing - and the run died at check 2
+    # naming the very file the manifest declared. The padded one is the same
+    # reduction over a value the emptiness test trimmed and threw away. One
+    # child run, because the failure is one message per spelling and the
+    # assertion is that none of them appears.
+    Assert-Layer -Run (Invoke-Layer -Case 'script-spellings' -Manifest 'script-spellings.ps1' `
+                                    -Inject @{ 'layer-scripts/tier-a.ps1' = $LayerStub
+                                               'layer-scripts/tier-b.ps1' = $LayerStub
+                                               'layer-scripts/tier-c.ps1' = $LayerStub }) -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (4)") `
+        -Silent @('tier-a.ps1 is in this directory',
+                  'tier-b.ps1 is in this directory',
+                  'tier-c.ps1 is in this directory',
+                  'names a script that does not exist')
+
     # The manifest names lib/fuzz-selftest/pass.ps1 and an unrelated pass.ps1
     # sits at the top level. Comparing leaves rather than relative paths reads
     # the first as classifying the second.
@@ -1279,6 +1445,17 @@ exit 0
 
     Assert-Layer -Run (Invoke-Layer -Case 'reserved-layer' -Manifest 'reserved-layer.ps1') -Exit 1 `
         -Says @("tier layer: 'base' is the name this runner gives its own harnesses")
+
+    # The same name with padding, which the refusal compared and missed. -List
+    # then printed two layers whose names differ by characters nobody can see.
+    Assert-Layer -Run (Invoke-Layer -Case 'reserved-layer-padded' -Manifest 'reserved-layer-padded.ps1') -Exit 1 `
+        -Says @("tier layer: 'base' is the name this runner gives its own harnesses")
+
+    # A layer name that is only padding: present, so the shape check takes it,
+    # and empty once normalised. -List reported the merged suite as base-only.
+    Assert-Layer -Run (Invoke-Layer -Case 'layer-blank' -Manifest 'layer-blank.ps1') -Exit 1 `
+        -Says @('tier layer: the layer name is blank') `
+        -Silent @('layers: base only')
 
     Assert-Layer -Run (Invoke-Layer -Case 'no-harnesses' -Manifest 'no-harnesses.ps1') -Exit 1 `
         -Says @("tier layer: expected an object with 'layer' and 'harnesses'")
@@ -1377,8 +1554,10 @@ exit 0
     # nothing said. The stub is injected because that shrink is a PASS: without
     # a file behind the name the run would be refused by check 1 instead.
     Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-harness-relative' -Manifest 'not-in-suite-harness-relative.ps1' `
-                                    -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub }) -Exit 1 `
-        -Says @("tier notInSuite excuses 'tier-runner.ps1', which the manifest also names as a harness script")
+                                    -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub
+                                               'layer-scripts/tier-asset.ps1'  = $LayerStub }) -Exit 1 `
+        -Says @("tier notInSuite excuses 'tier-runner.ps1', which the manifest also names as a harness script",
+                "tier notInSuite excuses 'tier-asset.ps1', which the manifest also names as a harness script")
 
     # Present and empty, which a key-presence check takes for declared. The last
     # is empty only after trimming, which is how a manifest is likelier to write
@@ -1393,8 +1572,13 @@ exit 0
     # asserted end to end: the merge reads the manifest strictly so that a tier
     # cannot shrink the suite quietly, and a script the tier declared but never
     # shipped is that same event whichever check happens to catch it.
+    # Named with the separators the merge stored, not the ones the manifest was
+    # written with. Every check downstream reads the resolved path, and this
+    # message is the one place a tier author sees it, so what it prints is worth
+    # pinning: a message quoting a spelling nothing else uses is how a reader
+    # goes looking for the wrong string.
     Assert-Layer -Run (Invoke-Layer -Case 'script-missing' -Manifest 'script-missing.ps1') -Exit 1 `
-        -Says @('manifest names a script that does not exist: st-tier -> lib/fuzz-selftest/never-shipped.ps1')
+        -Says @('manifest names a script that does not exist: st-tier -> lib\fuzz-selftest\never-shipped.ps1')
 
     # -RequireLayer is a tier's assertion that its overlay landed. An absent
     # manifest and a wrong one are the same event from here, and both leave a
@@ -1458,6 +1642,12 @@ exit 0
     } catch { "$_" }
     if ($noLibSaid -notlike '*has no lib/*') {
         $bad += "layer/no-lib: copying from a directory without lib/ said '$noLibSaid', which does not say what was wrong with the source it was given"
+    } elseif (-not $noLibSaid.Contains($noLib)) {
+        # Naming the source is the whole reason this is a throw of its own
+        # rather than Copy-Item's exception, which names a line in here and not
+        # the argument that was wrong. A message that stops at the diagnosis is
+        # the same dead end wearing better words.
+        $bad += "layer/no-lib: the refusal said '$noLibSaid' without naming the directory it was handed, $noLib"
     }
 
     # Injected over a file the copy legitimately carries, which is what the
@@ -1503,7 +1693,7 @@ exit 0
         $bad | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         exit 1
     }
-    Write-Host ("SELFTEST OK  {0} exit paths classified correctly, {1} tier layer cases, and a real run over them exits 2" -f $expect.Count, $script:LayerCases) -ForegroundColor Green
+    Write-Host ("SELFTEST OK  {0} exit paths classified correctly, {1} tier layer cases, {2} filter refusal case(s), and a real run over them exits 2" -f $expect.Count, $script:LayerCases, $script:RefusalCases) -ForegroundColor Green
     exit 0
 }
 
