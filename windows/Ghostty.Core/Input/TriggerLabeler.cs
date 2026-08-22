@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using Ghostty.Core.Interop;
 
 namespace Ghostty.Core.Input;
 
@@ -20,9 +21,9 @@ public static class TriggerLabeler
     private const uint ModAltRight = 1u << 8;
     private const uint ModSuperRight = 1u << 9;
 
-    private const int TagPhysical = 0;
-    private const int TagUnicode = 1;
-    private const int TagCatchAll = 2;
+    private const int TagPhysical = (int)GhosttyTriggerTag.Physical;
+    private const int TagUnicode = (int)GhosttyTriggerTag.Unicode;
+    private const int TagCatchAll = (int)GhosttyTriggerTag.CatchAll;
 
     private static readonly Dictionary<string, string> Special = new(StringComparer.Ordinal)
     {

@@ -21,7 +21,7 @@ public enum GhosttyBindingFlags : uint
 [StructLayout(LayoutKind.Sequential)]
 public struct GhosttyTriggerC
 {
-    public int Tag;   // 0=physical, 1=unicode, 2=catch_all
+    public int Tag;   // ghostty_input_trigger_tag_e; see GhosttyTriggerTag
     public uint Key;  // union: translated/physical key or unicode codepoint
     public uint Mods; // modifier flags
 }

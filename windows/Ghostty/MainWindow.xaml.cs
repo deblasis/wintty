@@ -447,8 +447,8 @@ public sealed partial class MainWindow : Window
         _systemUiSettings = new Windows.UI.ViewManagement.UISettings();
         var initialDark = Ghostty.Services.OsTheme.IsDark(_systemUiSettings);
         var initialScheme = initialDark
-            ? Ghostty.Interop.GhosttyColorScheme.Dark
-            : Ghostty.Interop.GhosttyColorScheme.Light;
+            ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
+            : Ghostty.Core.Interop.GhosttyColorScheme.Light;
         Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, initialScheme);
         // Closes the gap between ConfigService seeding its themed values in
         // its constructor and this window reading the scheme: a flip in
@@ -473,8 +473,8 @@ public sealed partial class MainWindow : Window
             DispatcherQueue.TryEnqueue(() =>
             {
                 var scheme = dark
-                    ? Ghostty.Interop.GhosttyColorScheme.Dark
-                    : Ghostty.Interop.GhosttyColorScheme.Light;
+                    ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
+                    : Ghostty.Core.Interop.GhosttyColorScheme.Light;
                 Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
                 _host.NotifyColorSchemeChanged(scheme);
 

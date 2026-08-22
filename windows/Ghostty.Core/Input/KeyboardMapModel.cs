@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Ghostty.Core.Interop;
 
 namespace Ghostty.Core.Input;
 
@@ -23,7 +24,7 @@ public sealed class KeyboardMapModel
 {
     private const uint Shift = 1u << 0, Ctrl = 1u << 1, Alt = 1u << 2, Super = 1u << 3;
     private const uint ShiftR = 1u << 6, CtrlR = 1u << 7, AltR = 1u << 8, SuperR = 1u << 9;
-    private const int TagPhysical = 0;
+    private const int TagPhysical = (int)GhosttyTriggerTag.Physical;
 
     public uint ModifierMask { get; }
     private readonly Dictionary<string, KeyboardKeyState> _byKey;
