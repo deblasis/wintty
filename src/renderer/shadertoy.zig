@@ -65,6 +65,11 @@ pub fn loadFromFiles(
                 continue;
             }
 
+            // The path, not just the error. This is the last frame that has
+            // it: the caller gets an error with no idea which entry of a
+            // repeatable option produced it, and the user-facing notice can
+            // only say "check the path" without naming one.
+            log.warn("custom shader failed path={s} err={}", .{ path, err });
             return err;
         };
         log.info("loaded custom shader path={s}", .{path});

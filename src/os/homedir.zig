@@ -106,8 +106,14 @@ pub fn expandHome(
     return switch (builtin.os.tag) {
         .linux, .freebsd, .macos => try expandHomeUnix(io, environ_map, path, buf),
 
-        // `~/` is not an idiom generally used on Windows
-        .windows => return path,
+        // `~/` is not an idiom Windows itself uses, but it is the idiom
+        // every Ghostty config example is written in, so a config carried
+        // over from macOS or Linux is full of them. Left unexpanded they
+        // become a relative path that cannot exist, and the option silently
+        // does nothing: a custom-shader at `~/shader.glsl` reports only
+        // "check the path". Both separators are accepted because a config
+        // written on Windows will use the backslash.
+        .windows => try expandHomeWindows(environ_map, path, buf),
 
         // iOS doesn't have a user-writable home directory
         .ios => return path,
@@ -134,6 +140,69 @@ fn expandHomeUnix(
     @memcpy(buf[home_dir.len..expanded_len], rest);
 
     return buf[0..expanded_len];
+}
+
+fn expandHomeWindows(
+    environ_map: *const std.process.Environ.Map,
+    path: []const u8,
+    buf: []u8,
+) ExpandError![]const u8 {
+    if (!std.mem.startsWith(u8, path, "~/") and
+        !std.mem.startsWith(u8, path, "~\\")) return path;
+
+    // homeWindows writes into `buf` and returns a slice of it, so the rest of
+    // the path is appended in place after it, exactly as the Unix path does.
+    const home_dir: []const u8 = (homeWindows(environ_map, buf) catch
+        return error.HomeDetectionFailed) orelse
+        return error.HomeDetectionFailed;
+
+    const rest = path[1..]; // Skip the ~
+    const expanded_len = home_dir.len + rest.len;
+    if (expanded_len > buf.len) return Error.BufferTooSmall;
+    @memcpy(buf[home_dir.len..expanded_len], rest);
+
+    return buf[0..expanded_len];
+}
+
+test "expandHomeWindows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var environ_map = try testing.environ.createMap(testing.allocator);
+    defer environ_map.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    const home_dir = try expandHomeWindows(&environ_map, "~/", &buf);
+    try testing.expect(home_dir.len > 1);
+    try testing.expect(home_dir[home_dir.len - 1] == '/');
+
+    // Both separators reach the same place, since a config may be written
+    // either way on Windows.
+    const fwd = try expandHomeWindows(&environ_map, "~/shader.glsl", &buf);
+    try testing.expect(std.mem.endsWith(u8, fwd, "/shader.glsl"));
+    try testing.expect(!std.mem.startsWith(u8, fwd, "~"));
+
+    const back = try expandHomeWindows(&environ_map, "~\\shader.glsl", &buf);
+    try testing.expect(std.mem.endsWith(u8, back, "\\shader.glsl"));
+    try testing.expect(!std.mem.startsWith(u8, back, "~"));
+
+    // A bare tilde and a `~name` prefix are not home references.
+    try testing.expectEqualStrings("~", try expandHomeWindows(&environ_map, "~", &buf));
+    try testing.expectEqualStrings("~abc/", try expandHomeWindows(&environ_map, "~abc/", &buf));
+    try testing.expectEqualStrings("", try expandHomeWindows(&environ_map, "", &buf));
+    try testing.expectEqualStrings(
+        "C:\\shaders\\x.glsl",
+        try expandHomeWindows(&environ_map, "C:\\shaders\\x.glsl", &buf),
+    );
+
+    var small_buf = try allocator.alloc(u8, home_dir.len);
+    defer allocator.free(small_buf);
+    try testing.expectError(error.BufferTooSmall, expandHomeWindows(
+        &environ_map,
+        "~/Downloads",
+        small_buf[0..],
+    ));
 }
 
 test "expandHomeUnix" {
