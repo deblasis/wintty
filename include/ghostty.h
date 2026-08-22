@@ -565,6 +565,13 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+
+  // Optional per-surface custom shader override. When set (non-empty), this
+  // surface's renderer uses ONLY this shader, replacing the config's
+  // custom-shader list. Embedding apprts use this for shader preview UIs.
+  // The string is borrowed: it must remain valid until the surface is freed
+  // (same lifetime rule as working_directory / command / initial_input).
+  const char* custom_shader;
 } ghostty_surface_config_s;
 
 typedef struct {

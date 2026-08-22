@@ -41,6 +41,8 @@ internal sealed partial class AppearancePage : Page
         // public. Same constraint CommandPaletteControl documents.
         WindowThemeProductLabel.Text = Ghostty.Core.AppIdentity.ProductName;
 
+        PopulateShaderGallery();
+
         _fontList = new SearchableList(FontFamilySearch, chosen => OnValueChanged("font-family", chosen));
         OpacitySlider.Value = configService.BackgroundOpacity;
         SelectWindowTheme(configService.WindowTheme);
@@ -151,6 +153,10 @@ internal sealed partial class AppearancePage : Page
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _configService.ConfigChanged += OnConfigChanged;
+        // Page instances are cached, so returning to this page fires Loaded
+        // without the ctor (or any seeding) running again. Recreate whatever
+        // the preview showed; Page_Unloaded disposed it on the way out.
+        UpdateShaderPreview();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -276,6 +282,189 @@ internal sealed partial class AppearancePage : Page
         ShaderPathBox.Text = values.Length > 0 ? values[0] : string.Empty;
         _shaderPathWritten = ShaderPathBox.Text;
         _shaderPathExtraEntries = values.Length > 1;
+        SelectShaderComboForPath(ShaderPathBox.Text);
+        UpdateShaderPreview();
+    }
+
+    // ── Shader gallery ─────────────────────────────────────────────────────
+
+    // Gallery entries keyed by the absolute installed path of their shader
+    // file, so a configured path can be mapped back to its combo item.
+    private readonly Dictionary<string, ShaderGalleryEntry> _shaderGalleryByPath = new();
+
+    private void PopulateShaderGallery()
+    {
+        var items = ShaderGalleryCombo.Items;
+        var customIndex = items.IndexOf(ShaderCustomFileItem);
+        foreach (var entry in ShaderGallery.Entries)
+        {
+            _shaderGalleryByPath[ShaderGallery.AbsolutePathFor(entry)] = entry;
+            var item = new ComboBoxItem { Tag = ShaderGallery.AbsolutePathFor(entry) };
+            var panel = new StackPanel();
+            // Explicit typography rather than style/theme-dictionary lookups:
+            // programmatic theme-resource fetches are unreliable in WinUI 3
+            // desktop, and the two-line shape matches the XAML items.
+            panel.Children.Add(new TextBlock
+            {
+                Text = entry.Name,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            });
+            panel.Children.Add(new TextBlock
+            {
+                Text = entry.Description,
+                FontSize = 12,
+                Opacity = 0.7,
+                TextWrapping = TextWrapping.Wrap,
+            });
+            item.Content = panel;
+            // Before the "Custom file" item, keeping None first.
+            items.Insert(customIndex++, item);
+        }
+    }
+
+    private void SelectShaderComboForPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            SelectComboByTag(ShaderGalleryCombo, "");
+        }
+        else if (_shaderGalleryByPath.TryGetValue(path, out _))
+        {
+            SelectComboByTag(ShaderGalleryCombo, path);
+        }
+        else
+        {
+            SelectComboByTag(ShaderGalleryCombo, "custom");
+        }
+    }
+
+    private void ShaderGallery_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender is not ComboBox combo) return;
+        if (combo.SelectedItem is not ComboBoxItem item) return;
+
+        var tag = item.Tag?.ToString();
+        if (tag == "custom")
+        {
+            // No write of its own: the path box below is the source of truth
+            // for a custom file. Preview whatever it holds.
+            UpdateShaderPreview(ShaderPathBox.Text);
+            return;
+        }
+
+        // None ("" or null) clears; a gallery path writes that one shader.
+        var value = string.IsNullOrEmpty(tag) ? null : tag;
+        WriteShaderPathValue(value ?? string.Empty);
+
+        // Keep the two controls telling the same story.
+        ShaderPathBox.Text = value ?? string.Empty;
+        UpdateShaderPreview(value);
+    }
+
+    private async void ShaderBrowse_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            // Window.Current is null in WinUI 3 desktop apps; map the page's
+            // window to an HWND for the picker's COM initializer (same recipe
+            // as IconPickerDialog).
+            var windowId = XamlRoot.ContentIslandEnvironment.AppWindowId;
+            var hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(windowId);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeFilter.Add(".glsl");
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            ShaderPathBox.Text = file.Path;
+            WriteShaderPathValue(file.Path);
+            SelectShaderComboForPath(file.Path);
+            UpdateShaderPreview(file.Path);
+        }
+        catch (Exception ex)
+        {
+            // async void: swallow and log instead of tearing down the process.
+            StaticLoggers.SettingsConfigWriter.LogInformation(
+                "shader browse failed: {Message}", ex.Message);
+        }
+    }
+
+    // Writes the custom-shader key with the same semantics as the path box's
+    // LostFocus (collapse warning, success-checked guards), shared by the box,
+    // the browse button, and the gallery combo.
+    private void WriteShaderPathValue(string value)
+    {
+        if (value == _shaderPathWritten) return;
+
+        if (_shaderPathExtraEntries)
+        {
+            StaticLoggers.SettingsConfigWriter.LogInformation(
+                "custom-shader had more entries than the Appearance box can show; " +
+                "editing it collapses them to the one shown");
+        }
+
+        var values = value.Length > 0 ? new[] { value } : System.Array.Empty<string>();
+        var result = _writer.Write(
+            () => _editor.SetRepeatableValues("custom-shader", values),
+            "custom-shader");
+
+        if (!result.WriteSucceeded) return;
+
+        _shaderPathWritten = value;
+        _shaderPathExtraEntries = false;
+        if (result.Reloaded) _expectingOwnReloads++;
+    }
+
+    // ── Shader preview ─────────────────────────────────────────────────────
+
+    private Controls.TerminalControl? _shaderPreview;
+
+    /// <summary>
+    /// Recreates the preview surface with the given shader applied (null or
+    /// empty = plain terminal). The per-surface override flows through
+    /// TerminalControl.PreviewCustomShader, so browsing the gallery never
+    /// touches the app config or any live terminal.
+    /// </summary>
+    private void UpdateShaderPreview(string? shaderPath = null)
+    {
+        if (ShaderPreviewHost is null) return;
+
+        // Dispose the old preview's surface explicitly. Detaching from the
+        // tree does NOT tear it down (TerminalControl.OnUnloaded is
+        // deliberately a no-op there), and each preview owns a native
+        // surface and a shell process rooted in the shared bootstrap host.
+        _shaderPreview?.DisposeSurface();
+        _shaderPreview = null;
+        ShaderPreviewHost.Child = null;
+
+        var host = App.BootstrapHost;
+        if (host is null) return;
+
+        // The path box is the source of truth for a custom file; the combo's
+        // "custom" Tag is a discriminator, never a shader path (passing it
+        // through would arm the shader-failed notice for a valid file).
+        var path = string.IsNullOrWhiteSpace(shaderPath)
+            ? ShaderPathBox.Text
+            : shaderPath;
+        if (string.IsNullOrEmpty(path)) path = null;
+
+        var control = new Controls.TerminalControl
+        {
+            Host = host,
+            PreviewCustomShader = path,
+        };
+        _shaderPreview = control;
+        ShaderPreviewHost.Child = control;
+    }
+
+    private void Page_Unloaded(object sender, RoutedEventArgs e)
+    {
+        // Dispose the preview surface (and its shell) when leaving the page;
+        // OnLoaded recreates it on return. Detaching alone leaks both.
+        _shaderPreview?.DisposeSurface();
+        _shaderPreview = null;
+        ShaderPreviewHost.Child = null;
     }
 
     // The last value this page put in the file, or seeded from it. Blur fires
@@ -296,29 +485,17 @@ internal sealed partial class AppearancePage : Page
         if (sender is not TextBox tb) return;
 
         var value = tb.Text ?? string.Empty;
+        // Compare before writing: blur fires on tab-through and window close,
+        // so an unconditional write rewrites the key on every pass. The
+        // shared writer re-checks for its other callers (gallery, browse).
         if (value == _shaderPathWritten) return;
 
-        if (_shaderPathExtraEntries)
-        {
-            StaticLoggers.SettingsConfigWriter.LogInformation(
-                "custom-shader had more entries than the Appearance box can show; " +
-                "editing it collapses them to the one shown");
-        }
-
-        var values = value.Length > 0 ? new[] { value } : System.Array.Empty<string>();
-        var result = _writer.Write(
-            () => _editor.SetRepeatableValues("custom-shader", values),
-            "custom-shader");
-
-        // Only on success. Advancing unconditionally meant a write that failed
-        // -- the file locked by a sync client or an editor -- left the guard
-        // holding a value the file does not have, so every retry from this page
-        // read as "unchanged" and was suppressed for the life of the window.
-        if (!result.WriteSucceeded) return;
-
-        _shaderPathWritten = value;
-        _shaderPathExtraEntries = false;
-        if (result.Reloaded) _expectingOwnReloads++;
+        // Shared with the gallery combo and browse button: collapse warning,
+        // write, and the success-checked guards (a failed write must not
+        // advance the guard, or retries from this page read as "unchanged").
+        WriteShaderPathValue(value);
+        SelectShaderComboForPath(value);
+        UpdateShaderPreview(value);
     }
 
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
