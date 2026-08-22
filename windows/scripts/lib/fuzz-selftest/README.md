@@ -26,3 +26,33 @@ that looks like success: a runner that reports green for a harness that
 found defects, could not start, or never ran at all. That is not a
 hypothetical - `vtabs-visual-qa.ps1` marked a step OK whenever the
 sub-script did not throw, and a sub-script that exits 2 does not throw.
+
+## `layers/`
+
+Tier layer manifests, one per thing the merge in `fuzz-suite.ps1` has to
+refuse or accept. They are not harnesses: each emits the object a tier
+overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
+
+| fixture | what it pins down |
+|---|---|
+| `valid.ps1` | a well-formed layer merges, and the run names both counts |
+| `pscustomobject.ps1` | an entry written as a custom object normalises rather than crashing |
+| `minutes-string.ps1` | `minutes` as text coerces to `Int32` before the timeout arithmetic reads it |
+| `minutes-bad.ps1` | `minutes` no arithmetic can use is refused |
+| `tags-missing.ps1` | empty and null `tags` are both refused, not just an absent key |
+| `missing-key.ps1` | an entry short of a key the runner reads later is refused |
+| `script-escapes.ps1` | a `script` that climbs out of the directory is refused |
+| `script-sibling.ps1` | so is one in a sibling directory whose path opens with the same characters |
+| `leaf-collision.ps1` | naming a subdirectory script does not classify a same-leaf script at the top level |
+| `duplicate-name.ps1` | the same name twice inside one layer is refused |
+| `base-collision.ps1` | a name the base set already uses is refused |
+| `reserved-layer.ps1` | the layer cannot call itself `base` |
+| `no-harnesses.ps1` | a layer with nothing to run under it is refused |
+| `returns-nothing.ps1` | a manifest that emits no object at all is refused |
+| `not-in-suite.ps1` | a layer can classify a runner of its own without patching the suite |
+
+The self-test runs these against a copy of `windows/scripts`, because the
+manifest is discovered by presence: a fixture placed in the real directory
+would be picked up by every other invocation from it, including a concurrent
+one, and the case that asserts what an ABSENT manifest does could not exist
+at all.

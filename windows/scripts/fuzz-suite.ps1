@@ -61,7 +61,9 @@
     A tier build adds its own harnesses by dropping fuzz-tier-harnesses.ps1
     beside this runner; they append to the base set, so a tier runs what it was
     built on plus what it adds. Absent means base-only. -RequireLayer makes that
-    absence an error for a build that should have one.
+    absence an error for a build that should have one. -SelfTest covers that
+    merge from a copy of this directory rather than from this one, because a
+    fixture manifest placed here would be found by every other run from it.
 
     Three integrity checks run on every invocation, including -List, and all
     are free: the manifest cannot name a script that is gone, a script cannot
@@ -823,13 +825,189 @@ if ($SelfTest) {
         $bad += "-Only with an unknown name exited $($typo.exit), expected 1 - a typo must not silently shrink the run"
     }
 
+    # ---- tier layer -------------------------------------------------------
+    # The merge reads a manifest found by presence beside this runner, and the
+    # checks it feeds read $PSScriptRoot rather than anything a caller can pass
+    # in. So a fixture manifest cannot be dropped into windows/scripts: it would
+    # change every other invocation from that directory, this run's own child
+    # runs included. Giving the child a different $PSScriptRoot is the only way
+    # to hand those checks a directory of our own, and since everything they
+    # read is text and none of it is built, a copy is enough.
+    $LayerRoot = Join-Path $OutRoot 'layer-scripts'
+    New-Item -ItemType Directory -Force -Path $LayerRoot | Out-Null
+    # A tier checkout has a real manifest sitting here. Copying it would give
+    # every case below a second layer, the case that asserts what an ABSENT
+    # manifest does included - on exactly the builds that ship one.
+    Copy-Item -Path (Join-Path $PSScriptRoot '*.ps1') -Destination $LayerRoot -Exclude 'fuzz-tier-harnesses.ps1'
+    Copy-Item -Path (Join-Path $PSScriptRoot 'lib') -Destination $LayerRoot -Recurse -Force
+
+    # Read off this run rather than written down here, so adding a base harness
+    # is not a self-test failure. What is under test is that a layer adds
+    # exactly its own and leaves the base half alone; a base manifest that
+    # silently shrinks is already integrity check 2's job.
+    $baseSet     = @($Harnesses | Where-Object { $_.layer -eq 'base' })
+    $baseCount   = $baseSet.Count
+    $baseMinutes = ($baseSet | ForEach-Object { $_.minutes } | Measure-Object -Sum).Sum
+
+    # Nothing runs these. Only the param block is read, by integrity check 3.
+    $LayerStub = @'
+#requires -Version 7
+param([string]$ExePath, [Parameter(Mandatory)][string]$OutDir)
+exit 0
+'@
+    $script:LayerInjected = @()
+    $script:LayerCases = 0
+
+    # One child run over the copy. The manifest and whatever scripts a case
+    # needs on disk are placed fresh and taken away again on the next call, so
+    # no case inherits what another left behind and the order they are written
+    # in does not matter. -List is the whole run: the merge and all three
+    # integrity checks happen before it, and none of them needs a desktop.
+    function Invoke-Layer {
+        param(
+            [Parameter(Mandatory)][string]$Case,
+            [string]$Manifest,
+            [hashtable]$Inject = @{},
+            [string[]]$Extra = @('-List')
+        )
+        foreach ($p in $script:LayerInjected) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+        $script:LayerInjected = @()
+        $script:LayerCases++
+
+        $manifestPath = Join-Path $LayerRoot 'fuzz-tier-harnesses.ps1'
+        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+        if ($Manifest) {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot "lib/fuzz-selftest/layers/$Manifest") -Destination $manifestPath
+        }
+        # Rooted at $OutRoot rather than at the copy, so a case can put a file
+        # somewhere only a script path that climbs out of the directory reaches.
+        foreach ($rel in $Inject.Keys) {
+            $dest = Join-Path $OutRoot $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+            Set-Content -LiteralPath $dest -Value $Inject[$rel] -Encoding utf8
+            $script:LayerInjected += $dest
+        }
+
+        $argv = @('-NoProfile', '-File', (Join-Path $LayerRoot 'fuzz-suite.ps1')) + $Extra
+        $text = (& pwsh @argv | Out-String)
+        return @{ case = $Case; exit = $LASTEXITCODE; text = [string]$text }
+    }
+
+    # Both halves are the assertion. Every refusal in the merge leaves with 1,
+    # so a case reading the exit code alone would pass while some other guard
+    # did the refusing - and a guard whose body was gutted still has its shape.
+    function Assert-Layer {
+        param(
+            [Parameter(Mandatory)]$Run,
+            [Parameter(Mandatory)][int]$Exit,
+            [string[]]$Says = @(),
+            [string[]]$Silent = @()
+        )
+        if ($Run.exit -ne $Exit) {
+            $script:bad += "layer/$($Run.case): exited $($Run.exit), expected $Exit"
+        }
+        foreach ($s in $Says) {
+            if (-not $Run.text.Contains($s)) { $script:bad += "layer/$($Run.case): said nothing about: $s" }
+        }
+        foreach ($s in $Silent) {
+            if ($Run.text.Contains($s)) { $script:bad += "layer/$($Run.case): said what it must not: $s" }
+        }
+    }
+
+    # No manifest, which is what a public build runs. This is the property most
+    # likely to rot without anyone noticing, because nothing downstream can tell
+    # a base-only run from the tier run it was supposed to be.
+    Assert-Layer -Run (Invoke-Layer -Case 'base-only') -Exit 0 `
+        -Says @("$baseCount harnesses, about $baseMinutes minutes for a full run",
+                'layers: base only (no tier manifest beside this runner)') `
+        -Silent @('layers: base (')
+
+    Assert-Layer -Run (Invoke-Layer -Case 'valid' -Manifest 'valid.ps1') -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)",
+                "$($baseCount + 1) harnesses, about $($baseMinutes + 1) minutes for a full run")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'pscustomobject' -Manifest 'pscustomobject.ps1') -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)")
+
+    # '2' and '2.6' coerce to 2 and 3, so a layer that took them as text moves
+    # the total by 4.6 and one that coerced them moves it by 5.
+    Assert-Layer -Run (Invoke-Layer -Case 'minutes-string' -Manifest 'minutes-string.ps1') -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (2)",
+                "$($baseCount + 2) harnesses, about $($baseMinutes + 5) minutes for a full run")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'minutes-bad' -Manifest 'minutes-bad.ps1') -Exit 1 `
+        -Says @("tier harness 'st-tier' has a non-numeric minutes: soon")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'tags-missing' -Manifest 'tags-missing.ps1') -Exit 1 `
+        -Says @("tier harness 'st-tier-empty' declares no tags",
+                "tier harness 'st-tier-null' declares no tags")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'missing-key' -Manifest 'missing-key.ps1') -Exit 1 `
+        -Says @("tier harness is missing 'oracle': st-tier")
+
+    # The target is made to exist and to declare what the manifest passes it, so
+    # checks 1 and 3 have nothing to say and only the path guard can refuse it.
+    Assert-Layer -Run (Invoke-Layer -Case 'script-escapes' -Manifest 'script-escapes.ps1' `
+                                    -Inject @{ 'layer-escape/escape.ps1' = $LayerStub }) -Exit 1 `
+        -Says @("tier harness 'st-tier' names a script outside this directory: ../layer-escape/escape.ps1")
+
+    # A sibling directory whose full path opens with this one's. A prefix test
+    # that stops short of the separator reads it as inside.
+    Assert-Layer -Run (Invoke-Layer -Case 'script-sibling' -Manifest 'script-sibling.ps1' `
+                                    -Inject @{ 'layer-scriptsX/escape.ps1' = $LayerStub }) -Exit 1 `
+        -Says @("tier harness 'st-tier' names a script outside this directory: ../layer-scriptsX/escape.ps1")
+
+    # The manifest names lib/fuzz-selftest/pass.ps1 and an unrelated pass.ps1
+    # sits at the top level. Comparing leaves rather than relative paths reads
+    # the first as classifying the second.
+    Assert-Layer -Run (Invoke-Layer -Case 'leaf-collision' -Manifest 'leaf-collision.ps1' `
+                                    -Inject @{ 'layer-scripts/pass.ps1' = $LayerStub }) -Exit 1 `
+        -Says @('pass.ps1 is in this directory but neither in the manifest nor in $NotInSuite')
+
+    Assert-Layer -Run (Invoke-Layer -Case 'duplicate-name' -Manifest 'duplicate-name.ps1') -Exit 1 `
+        -Says @("tier harness 'st-tier' is declared twice in the tier manifest")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'base-collision' -Manifest 'base-collision.ps1') -Exit 1 `
+        -Says @("tier harness 'search' collides with a base harness of the same name")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'reserved-layer' -Manifest 'reserved-layer.ps1') -Exit 1 `
+        -Says @("tier layer: 'base' is the name this runner gives its own harnesses")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'no-harnesses' -Manifest 'no-harnesses.ps1') -Exit 1 `
+        -Says @("tier layer: expected an object with 'layer' and 'harnesses'")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'returns-nothing' -Manifest 'returns-nothing.ps1') -Exit 1 `
+        -Says @('fuzz-tier-harnesses.ps1 returned nothing')
+
+    # A tier ships runners and assets of its own, and until the layer could
+    # classify them the choices were patching this file or calling one a harness.
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite' -Manifest 'not-in-suite.ps1' `
+                                    -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub }) -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)")
+
+    # -RequireLayer is a tier's assertion that its overlay landed. An absent
+    # manifest and a wrong one are the same event from here, and both leave a
+    # summary shape-identical to the oss run nobody asked for.
+    Assert-Layer -Run (Invoke-Layer -Case 'require-missing' -Extra @('-List', '-RequireLayer', 'pro')) -Exit 1 `
+        -Says @("-RequireLayer 'pro' but no tier manifest sits beside this runner")
+
+    Assert-Layer -Run (Invoke-Layer -Case 'require-mismatch' -Manifest 'valid.ps1' `
+                                    -Extra @('-List', '-RequireLayer', 'enterprise')) -Exit 1 `
+        -Says @("-RequireLayer 'enterprise' but the manifest declares 'pro'")
+
+    # The matching case, because a -RequireLayer that refused everything would
+    # satisfy both of the two above.
+    Assert-Layer -Run (Invoke-Layer -Case 'require-match' -Manifest 'valid.ps1' `
+                                    -Extra @('-List', '-RequireLayer', 'pro')) -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)")
+
     Write-Host ''
     if ($bad.Count -gt 0) {
         Write-Host 'SELFTEST FAILED' -ForegroundColor Red
         $bad | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         exit 1
     }
-    Write-Host ("SELFTEST OK  {0} exit paths classified correctly, and a real run over them exits 2" -f $expect.Count) -ForegroundColor Green
+    Write-Host ("SELFTEST OK  {0} exit paths classified correctly, {1} tier layer cases, and a real run over them exits 2" -f $expect.Count, $script:LayerCases) -ForegroundColor Green
     exit 0
 }
 
