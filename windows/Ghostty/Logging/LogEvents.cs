@@ -14,6 +14,7 @@ internal static class LogEvents
         public const int ToastRegisterFailed = 2002;
         public const int TrayInitFailed      = 2003;
         public const int StaleAumidRemoved   = 2004;
+        public const int AppUserModelIconFailed = 2005;
     }
 
     // 2100-2199: Clipboard

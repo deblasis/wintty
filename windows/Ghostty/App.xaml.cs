@@ -454,6 +454,18 @@ public partial class App : Application
             Ghostty.Logging.StaticLoggers.App.LogToastRegisterFailed(ex);
         }
 
+        // Immediately after Register(), never before: it writes a 16x16 toast PNG over IconUri on
+        // EVERY launch, so anything written earlier is reverted rather than kept. This is the
+        // notification identity only - Start was tested and takes its icon and name from the
+        // shortcut, not from this key.
+        if (!Ghostty.Core.Windows.AppUserModelRegistration.Apply(
+                AppUserModelId,
+                Ghostty.Core.AppIdentity.ProductName,
+                Ghostty.Core.Windows.AppUserModelRegistration.DeployedIconPath))
+        {
+            Ghostty.Logging.StaticLoggers.App.LogAppUserModelIconFailed(AppUserModelId);
+        }
+
         // Read the activation this process was started for, before the
         // single-instance gate below acts on it. Position is load-bearing: a
         // secondary forwards its launch and exits at that gate, so anything
@@ -1847,6 +1859,13 @@ internal static partial class AppLogExtensions
                    Message = "Removed {Count} superseded AppUserModelId registration(s)")]
     internal static partial void LogStaleAumidRemoved(
         this ILogger<App> logger, int count);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.AppUserModelIconFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Could not point the AppUserModelId registration for {Aumid} at the "
+                             + "full-resolution icon")]
+    internal static partial void LogAppUserModelIconFailed(
+        this ILogger<App> logger, string aumid);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Notifications.ActivationFailed,
                    Level = LogLevel.Warning,
