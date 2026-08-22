@@ -26,6 +26,32 @@ courtesy to the project.
 - tools/monitor.svg
 - tools/make.svg
 
+## Shader gallery
+
+Bundled custom shaders under windows/Ghostty/Assets/Shaders/. Full license
+texts in that directory's LICENSES/ folder; per-file provenance headers in
+each shader.
+
+### ghostty-cursor-shaders (MIT)
+
+Source: https://github.com/sahaj-b/ghostty-cursor-shaders
+License: MIT (LICENSES/sahaj-b-MIT.txt)
+
+Bundled assets: cursor_sweep.glsl, cursor_tail.glsl, cursor_warp.glsl,
+rectangle_boom_cursor.glsl, ripple_cursor.glsl,
+ripple_rectangle_cursor.glsl, sonic_boom_cursor.glsl
+
+### ghostty-shaders (Unlicense)
+
+Source: https://github.com/zoitrok/ghostty-shaders
+License: Unlicense (LICENSES/zoitrok-Unlicense.txt)
+
+Bundled assets: pixels.glsl, scanline.glsl
+
+### Original shaders (MIT, this project)
+
+text_glow.glsl, snowfall.glsl, aurora_background.glsl
+
 ## Existing third-party assets
 
 See windows/Ghostty.Core/Profiles/IconAssets/LICENSE.md for notices that
