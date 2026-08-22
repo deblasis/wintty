@@ -67,6 +67,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private IntPtr _workingDirectoryUtf8;
     private IntPtr _commandUtf8;
     private IntPtr _initialInputUtf8;
+    private IntPtr _customShaderUtf8;
 
     // The libghostty surface lifecycle is decoupled from
     // OnLoaded/OnUnloaded so that visual-tree reparenting (which fires
@@ -146,6 +147,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// thereafter.
     /// </summary>
     internal Ghostty.Core.Profiles.ProfileSnapshot? Snapshot { get; set; }
+
+    /// <summary>
+    /// Per-surface custom shader override for preview surfaces. When set
+    /// (non-empty path), the surface's renderer uses ONLY this shader,
+    /// replacing the configured custom-shader list. Must be set before the
+    /// control loads: it is read once at surface creation. Regular terminal
+    /// surfaces leave it null and follow the app config.
+    /// </summary>
+    public string? PreviewCustomShader { get; set; }
 
     /// <summary>
     /// The raw libghostty surface handle for this control. Used by
@@ -714,6 +724,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             ? AllocUtf8(cmd)
             : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
+        // Preview shader override: set BEFORE the control loads (it is read
+        // once at surface creation in OnLoaded).
+        _customShaderUtf8 = string.IsNullOrEmpty(PreviewCustomShader)
+            ? IntPtr.Zero
+            : AllocUtf8(PreviewCustomShader);
 
         var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         var surfaceConfig = NativeMethods.SurfaceConfigNew();
@@ -727,6 +742,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         surfaceConfig.WorkingDirectory = _workingDirectoryUtf8;
         surfaceConfig.Command = _commandUtf8;
         surfaceConfig.InitialInput = _initialInputUtf8;
+        surfaceConfig.CustomShader = _customShaderUtf8;
 
         // Pin a managed handle to `this` and pass it as per-surface userdata.
         // libghostty echoes this pointer back through close_surface_cb and the
@@ -919,6 +935,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_workingDirectoryUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_workingDirectoryUtf8);
         if (_commandUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_commandUtf8);
         if (_initialInputUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_initialInputUtf8);
+        if (_customShaderUtf8 != IntPtr.Zero) Marshal.FreeHGlobal(_customShaderUtf8);
 
         _surface = default;
         _workingDirectoryUtf8 = IntPtr.Zero;

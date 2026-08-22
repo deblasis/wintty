@@ -81,6 +81,9 @@ internal struct GhosttySurfaceConfig
     // C99 _Bool on the C side; byte on the managed side.
     public byte WaitAfterCommand;
     public GhosttySurfaceContext Context;
+    // Per-surface custom shader override (const char*). Must stay allocated
+    // until the surface is freed, like the other string fields above.
+    public IntPtr CustomShader;
 }
 
 [StructLayout(LayoutKind.Sequential)]
