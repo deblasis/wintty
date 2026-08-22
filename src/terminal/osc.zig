@@ -624,9 +624,21 @@ pub const Parser = struct {
     }
 
     const Capture = struct {
+        /// Where captured bytes go. This points into `backing`, so promotion
+        /// moves it: anything holding a copy across a `writeByte` is left
+        /// pointing at an abandoned union member, which is a type confusion
+        /// rather than a truncation. Parsers that write the trailing NUL
+        /// through this pointer directly are all on `.fixed` captures, which
+        /// never promote. Go through `writeByte` if that ever stops being true.
         writer: *std.Io.Writer,
         backing: Backing,
         max_bytes: usize,
+
+        /// Allocator used to move the capture off the parser's inline
+        /// buffer once that buffer fills. Null pins the capture to the
+        /// inline buffer for its whole life: either it was requested
+        /// fixed, or no allocator was available to begin with.
+        alloc: ?Allocator,
 
         const Backing = union(enum) {
             fixed: std.Io.Writer,
@@ -643,22 +655,62 @@ pub const Parser = struct {
                 .backing = .{ .fixed = .fixed(buf) },
                 .writer = &new.*.?.backing.fixed,
                 .max_bytes = buf.len,
+                .alloc = null,
             };
         }
 
+        /// A capture that may grow up to max_bytes, but starts in the
+        /// parser's inline buffer and only reaches for the allocator when
+        /// that fills. Reserving up front instead would charge every OSC
+        /// that can grow the price of the rare one that does: the keys
+        /// that dominate this traffic are shell integration ones sent on
+        /// every prompt, tens of bytes each.
         pub inline fn allocating(
             new: *?Capture,
             alloc: Allocator,
+            buf: []u8,
             max_bytes: usize,
-        ) error{OutOfMemory}!void {
+        ) void {
             new.* = .{
-                .backing = .{ .allocating = try std.Io.Writer.Allocating.initCapacity(
-                    alloc,
-                    @min(MAX_BUF, max_bytes),
-                ) },
-                .writer = &new.*.?.backing.allocating.writer,
+                .backing = .{ .fixed = .fixed(buf) },
+                .writer = &new.*.?.backing.fixed,
                 .max_bytes = max_bytes,
+                .alloc = alloc,
             };
+        }
+
+        /// Move a capture that has filled the parser's inline buffer onto
+        /// the heap, copying what it holds so far. Safe against the buffer
+        /// it copies from: that memory belongs to the parser, not to the
+        /// backing union being overwritten here.
+        fn promote(self: *Capture, alloc: Allocator) error{WriteFailed}!void {
+            // Overwriting an allocating backing would drop its buffer on the
+            // floor without deinit. Unreachable from the one call site, and
+            // asserted rather than commented because the cost of it becoming
+            // reachable is a silent leak of up to max_bytes.
+            assert(self.backing == .fixed);
+
+            const buffered = self.writer.buffered();
+
+            // Callers reject the write before this point once max_bytes is
+            // reached, so max_bytes is strictly greater than what we hold and
+            // the capacity below always has room for it.
+            assert(self.max_bytes > buffered.len);
+            const capacity = @min(self.max_bytes, @max(buffered.len *| 2, 1));
+            var heap = std.Io.Writer.Allocating.initCapacity(
+                alloc,
+                capacity,
+            ) catch return error.WriteFailed;
+
+            // The memcpy needs the capacity, not max_bytes. Asserting the
+            // quantity the copy actually depends on: in ReleaseFast a broken
+            // invariant here is an out of bounds write, not a panic.
+            assert(heap.writer.buffer.len >= buffered.len);
+            @memcpy(heap.writer.buffer[0..buffered.len], buffered);
+            heap.writer.end = buffered.len;
+
+            self.backing = .{ .allocating = heap };
+            self.writer = &self.backing.allocating.writer;
         }
 
         /// Append one byte without permitting the backing allocation to grow
@@ -668,7 +720,17 @@ pub const Parser = struct {
             if (self.writer.buffered().len >= self.max_bytes) return error.WriteFailed;
 
             switch (self.backing) {
-                .fixed => {},
+                .fixed => {
+                    const w = &self.backing.fixed;
+                    if (w.end >= w.buffer.len) {
+                        // The inline buffer is full. A capture that may grow
+                        // moves to the heap here. One that may not falls
+                        // through to the writer and fails there, which is the
+                        // ceiling a fixed capture has always had.
+                        if (self.alloc) |alloc| try self.promote(alloc);
+                    }
+                },
+
                 .allocating => |*w| {
                     if (w.writer.end >= w.writer.buffer.len) {
                         const new_capacity = @min(
@@ -734,9 +796,10 @@ pub const Parser = struct {
     };
 
     /// Begin capturing trailing data. All inputs to next from this point
-    /// forward will be captured into the `self.capture.writer` buffer
-    /// which may be backed by either a fixed size or allocating buffer
-    /// depending on mode.
+    /// forward will be captured into the `self.capture.writer` buffer.
+    /// Both modes start in `self.buffer`; `.allocating` additionally
+    /// carries the allocator that lets it outgrow that buffer, while
+    /// `.fixed` stops there.
     ///
     /// Get the trailing data using `capture.trailing()`. Do not access
     /// the writer directly.
@@ -762,13 +825,9 @@ pub const Parser = struct {
                 Capture.allocating(
                     &self.capture,
                     alloc,
+                    &self.buffer,
                     self.max_allocating_bytes,
-                ) catch {
-                    // The allocator failed for some reason, fall back to a fixed buffer
-                    // and hope that it's big enough.
-                    self.captureTrailing(.fixed);
-                    return;
-                };
+                );
             },
         }
     }
@@ -819,8 +878,8 @@ pub const Parser = struct {
                 // budget looked exactly like one that was never sent.
                 error.WriteFailed => {
                     log.warn(
-                        "OSC sequence exceeded the capture limit and was dropped, state={s} captured={d}",
-                        .{ @tagName(self.state), cap.trailing().len },
+                        "OSC sequence was dropped, state={s} captured={d} limit={d}",
+                        .{ @tagName(self.state), cap.trailing().len, cap.max_bytes },
                     );
                     self.state = .invalid;
                 },
@@ -1257,5 +1316,126 @@ test "Parser allocating capture limit includes parser-added bytes" {
 
     const cap = &p.capture.?;
     try testing.expectEqual(@as(usize, 4), cap.trailing().len);
-    try testing.expectEqual(@as(usize, 4), cap.writer.buffer.len);
+
+    // A budget this small is exhausted long before the inline buffer is,
+    // so the bound is enforced without the capture ever reaching the heap.
+    try testing.expect(cap.backing == .fixed);
+}
+
+test "Parser allocating captures do not allocate below the inline buffer" {
+    const testing = std.testing;
+
+    // Nearly all of this traffic is short: shell integration keys emitted on
+    // every prompt, a drag-and-drop query, a clipboard write of a few words.
+    // Reserving for the rare image-sized payload charged all of them a malloc
+    // and a free apiece.
+    const inputs = [_][]const u8{
+        "52;c;YWJjZA==",
+        "66;s=2;hello",
+        "72;t=q",
+        "1337;CurrentDir=/home/user",
+        "5522;type=read:loc=primary",
+    };
+
+    for (inputs) |input| {
+        var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+        var p: Parser = .init(failing.allocator());
+        defer p.deinit();
+
+        for (input) |ch| p.next(ch);
+        _ = p.end('\x1b');
+
+        // Both halves are load-bearing. The allocation count is the point of
+        // the change; `alloc != null` is what stops the test passing vacuously
+        // if one of these regressed to a plain fixed capture, which allocates
+        // nothing for a quite different reason.
+        try testing.expect(p.capture.?.backing == .fixed);
+        try testing.expect(p.capture.?.alloc != null);
+        try testing.expectEqual(@as(usize, 0), failing.allocations);
+    }
+}
+
+test "Parser allocating captures survive a failed promotion intact" {
+    const testing = std.testing;
+
+    // Fail the first allocation, which is the promotion itself: nothing before
+    // it allocates. The capture must be left exactly as it was, because
+    // promote mutates only after initCapacity has succeeded.
+    var failing: std.testing.FailingAllocator = .init(
+        testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var p: Parser = .init(failing.allocator());
+    defer p.deinit();
+
+    for ("1337;") |ch| p.next(ch);
+    for (0..Parser.MAX_BUF + 1) |_| p.next('a');
+
+    // Dropped whole rather than truncated. A partial base64 payload reaching a
+    // decoder would be worse than no payload at all.
+    try testing.expect(p.state == .invalid);
+    try testing.expect(p.end('\x1b') == null);
+
+    const cap = &p.capture.?;
+    try testing.expect(cap.backing == .fixed);
+    try testing.expectEqual(@as(usize, Parser.MAX_BUF), cap.trailing().len);
+}
+
+test "Parser allocating captures reach the heap only once the inline buffer fills" {
+    const testing = std.testing;
+    const prefixes = [_][]const u8{ "52;", "66;", "72;", "1337;", "5522;" };
+
+    for (prefixes) |prefix| {
+        var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+        var p: Parser = .init(failing.allocator());
+        defer p.deinit();
+
+        for (prefix) |ch| p.next(ch);
+        for (0..Parser.MAX_BUF) |_| p.next('a');
+
+        // Exactly full is still free. The byte after it is the seam.
+        const cap = &p.capture.?;
+        try testing.expectEqual(@as(usize, Parser.MAX_BUF), cap.trailing().len);
+        try testing.expect(cap.backing == .fixed);
+        try testing.expectEqual(@as(usize, 0), failing.allocations);
+
+        p.next('b');
+        try testing.expect(p.state != .invalid);
+        try testing.expect(cap.backing == .allocating);
+        try testing.expectEqual(@as(usize, 1), failing.allocations);
+
+        // The promotion copy must carry every byte across, in order.
+        const data = cap.trailing();
+        try testing.expectEqual(@as(usize, Parser.MAX_BUF + 1), data.len);
+        try testing.expect(mem.allEqual(u8, data[0..Parser.MAX_BUF], 'a'));
+        try testing.expectEqual(@as(u8, 'b'), data[Parser.MAX_BUF]);
+    }
+}
+
+test "Parser allocating captures truncate at the default ceiling" {
+    const testing = std.testing;
+
+    // Deliberately the real ceiling rather than a reduced one. The tests
+    // above prove the arithmetic at a cheap limit but say nothing about
+    // which limit production runs with.
+    var p: Parser = .init(testing.allocator);
+    defer p.deinit();
+    try testing.expectEqual(Parser.MAX_ALLOCATING_BUF, p.max_allocating_bytes);
+
+    const prefix = "File=inline=1:";
+    for ("1337;") |ch| p.next(ch);
+    for (prefix) |ch| p.next(ch);
+    for (0..Parser.MAX_ALLOCATING_BUF - prefix.len) |_| p.next('A');
+
+    const cap = &p.capture.?;
+    try testing.expectEqual(Parser.State.@"1337", p.state);
+    try testing.expectEqual(Parser.MAX_ALLOCATING_BUF, cap.trailing().len);
+
+    // One byte past the ceiling drops the sequence whole. next() warns about
+    // it because the symptom is otherwise silent: no command, no image, no
+    // error anywhere downstream.
+    p.next('A');
+    try testing.expectEqual(Parser.State.invalid, p.state);
+    try testing.expectEqual(Parser.MAX_ALLOCATING_BUF, cap.trailing().len);
+    try testing.expect(p.end('\x1b') == null);
 }
