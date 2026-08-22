@@ -42,6 +42,14 @@ pub const LoadingImage = struct {
     /// being stored as an image.
     frame: ?FrameContext = null,
 
+    /// Frames 2..N of an animated GIF, decoded during load.
+    ///
+    /// These cannot be attached here: frames are charged against the image
+    /// storage limit, and that accounting only exists once the image reaches
+    /// storage. Whoever stores the image takes these; deinit frees whatever
+    /// is left behind on the paths that never store it, such as a query.
+    gif_animation: ?sys.Animation = null,
+
     /// Quiet is the quiet settings for the initial load command. This is
     /// used if q isn't set on subsequent chunks.
     quiet: command.Command.Quiet,
@@ -482,6 +490,7 @@ pub const LoadingImage = struct {
     pub fn deinit(self: *LoadingImage, alloc: Allocator) void {
         self.image.deinit(alloc);
         self.data.deinit(alloc);
+        if (self.gif_animation) |*anim| anim.deinit(alloc);
     }
 
     pub fn destroy(self: *LoadingImage, alloc: Allocator) void {
@@ -688,11 +697,18 @@ pub const LoadingImage = struct {
         self.image.format = .rgba;
     }
 
-    /// Decode the first frame of the data as GIF. This also updates
-    /// the image dimensions. Multi-frame GIFs render as the first
-    /// frame only.
+    /// Decode the data as GIF. This also updates the image dimensions.
+    ///
+    /// A multi-frame GIF becomes an animation when an animated decoder is
+    /// available: the first frame becomes the image itself and the rest are
+    /// held in gif_animation for whoever stores the image. Without such a
+    /// decoder the first frame is all we show.
     fn decodeGif(self: *LoadingImage, alloc: Allocator) !void {
         assert(self.image.format == .gif);
+
+        if (sys.decode_gif_frames) |decode_frames_fn| {
+            return self.decodeGifFrames(alloc, decode_frames_fn);
+        }
 
         const decode_gif_fn = sys.decode_gif orelse
             return error.UnsupportedFormat;
@@ -718,6 +734,64 @@ pub const LoadingImage = struct {
         self.image.width = result.width;
         self.image.height = result.height;
         self.image.format = .rgba;
+    }
+
+    /// Decode every frame of a GIF, keeping the first as the image and the
+    /// rest for the animation.
+    fn decodeGifFrames(
+        self: *LoadingImage,
+        alloc: Allocator,
+        decode_frames_fn: sys.DecodeGifFramesFn,
+    ) !void {
+        var result = decode_frames_fn(
+            alloc,
+            self.data.items,
+        ) catch |err| switch (err) {
+            error.InvalidData => return error.InvalidData,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        // Ownership moves out at the end, in one infallible step. Until then
+        // every early return frees the whole animation.
+        var owned = true;
+        defer if (owned) result.deinit(alloc);
+
+        const first = result.frames[0].data;
+        const first_delay_ms = result.frames[0].delay_ms;
+        if (first.len > max_size) {
+            log.warn("gif image too large size={} max_size={}", .{ first.len, max_size });
+            return error.InvalidData;
+        }
+
+        // Every allocation happens before anything is transferred, so a
+        // failure here leaves the animation intact for the defer above.
+        var data: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer data.deinit(alloc);
+        try data.appendSlice(alloc, first);
+
+        var tail: []sys.Animation.Frame = &.{};
+        if (result.frames.len > 1) {
+            tail = try alloc.alloc(sys.Animation.Frame, result.frames.len - 1);
+            @memcpy(tail, result.frames[1..]);
+        }
+
+        // Nothing below can fail.
+        owned = false;
+        alloc.free(result.frames[0].data);
+        alloc.free(result.frames);
+
+        self.data.deinit(alloc);
+        self.data = data;
+        self.image.width = result.width;
+        self.image.height = result.height;
+        self.image.format = .rgba;
+
+        if (tail.len > 0) self.gif_animation = .{
+            .width = result.width,
+            .height = result.height,
+            .frames = tail,
+            .loop_count = result.loop_count,
+            .root_delay_ms = first_delay_ms,
+        };
     }
 };
 
@@ -988,6 +1062,75 @@ test "shared memory range validates dimensions before multiplication" {
 
 // This specifically tests we ALLOW invalid RGB data because Kitty
 // documents that this should work.
+test "image load: an animated gif keeps its remaining frames" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    // Builds without an animated decoder show the first frame and keep
+    // nothing, which the next test covers.
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/anim3.gif")),
+    };
+    defer cmd.deinit(alloc);
+
+    var loading = try LoadingImage.init(io, alloc, &cmd, .direct);
+    defer loading.deinit(alloc);
+
+    var img = try loading.complete(alloc);
+    defer img.deinit(alloc);
+
+    // The first frame became the image, decoded to RGBA.
+    try testing.expectEqual(@as(u32, 2), img.width);
+    try testing.expectEqual(@as(u32, 2), img.height);
+    try testing.expect(img.format == .rgba);
+
+    // The other two are held for whoever stores the image, and the first
+    // frame's delay is carried across so its timing is not lost with it.
+    try testing.expect(loading.gif_animation != null);
+    const anim = loading.gif_animation.?;
+    try testing.expectEqual(@as(usize, 2), anim.frames.len);
+    try testing.expectEqual(@as(u32, 50), anim.frames[0].delay_ms);
+    try testing.expectEqual(@as(u32, 30), anim.frames[1].delay_ms);
+    try testing.expectEqual(@as(u32, 100), anim.root_delay_ms);
+    try testing.expectEqual(@as(u32, 0), anim.loop_count);
+    for (anim.frames) |frame| {
+        try testing.expectEqual(@as(usize, 2 * 2 * 4), frame.data.len);
+    }
+}
+
+test "image load: a still gif keeps no animation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/still.gif")),
+    };
+    defer cmd.deinit(alloc);
+
+    var loading = try LoadingImage.init(io, alloc, &cmd, .direct);
+    defer loading.deinit(alloc);
+
+    var img = try loading.complete(alloc);
+    defer img.deinit(alloc);
+
+    try testing.expect(img.format == .rgba);
+    try testing.expect(loading.gif_animation == null);
+}
+
 test "image load with invalid RGB data" {
     const testing = std.testing;
     const alloc = testing.allocator;
