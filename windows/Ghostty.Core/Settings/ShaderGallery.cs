@@ -3,15 +3,16 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
-namespace Ghostty.Settings;
+namespace Ghostty.Core.Settings;
 
 /// <summary>
 /// One entry of the bundled shader gallery, deserialized from
 /// Assets/Shaders/shaders.json. The manifest is the single source of truth:
-/// the verify pipeline (tools/gallery/verify.sh) compiles and renders every
-/// entry it lists, and this catalog shows the same entries in the UI.
+/// the verify pipeline (tools/gallery/verify.sh in the repo) compiles and
+/// renders every entry it lists, and this catalog shows the same entries
+/// in the settings UI.
 /// </summary>
-internal sealed record ShaderGalleryEntry(
+public sealed record ShaderGalleryEntry(
     string Id,
     string File,
     string Name,
@@ -22,24 +23,31 @@ internal sealed record ShaderGalleryEntry(
     string Source);
 
 /// <summary>
-/// Loads the bundled shader gallery from the app's installed assets. The
-/// directory resolves the same way in every deployment mode (framework-
-/// dependent, single-file, AOT, MSIX): AppContext.BaseDirectory is the
-/// package/exe directory and Content items land in Assets\Shaders next to it.
+/// Loads the bundled shader gallery from the app's installed assets. Lives in
+/// Core so the test project can drive it against the source tree (a test bin
+/// does not receive the app's Content items). The directory resolves the same
+/// way in every deployment mode: AppContext.BaseDirectory is the package/exe
+/// directory and Content items land in Assets\Shaders next to it.
 /// </summary>
-internal static class ShaderGallery
+public static class ShaderGallery
 {
     private static readonly Lazy<IReadOnlyList<ShaderGalleryEntry>> _entries = new(Load);
 
     public static IReadOnlyList<ShaderGalleryEntry> Entries => _entries.Value;
 
     /// <summary>
-    /// Tests inject a checkout-relative base here so the loader runs against
-    /// the source Assets/Shaders (a test bin does not receive the app's
-    /// Content items). Null in production: AppContext.BaseDirectory is used.
-    /// Must be set before the first Entries read.
+    /// Human-readable detail about how the last load went (why the gallery is
+    /// empty, when it is). Set by Load; callers surface it through their own
+    /// logger. Null after a successful non-empty load.
     /// </summary>
-    internal static string? TestBaseDirectory { get; set; }
+    public static string? LoadDetail { get; private set; }
+
+    /// <summary>
+    /// Tests inject a checkout-relative base here so the loader runs against
+    /// the source Assets/Shaders. Null in production: AppContext.BaseDirectory
+    /// is used. Must be set before the first Entries read.
+    /// </summary>
+    public static string? TestBaseDirectory { get; set; }
 
     private sealed class Manifest
     {
@@ -55,8 +63,7 @@ internal static class ShaderGallery
             var manifestPath = Path.Combine(dir, "shaders.json");
             if (!File.Exists(manifestPath))
             {
-                Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
-                    "shader gallery manifest not found at {Path}", manifestPath);
+                LoadDetail = $"manifest not found at {manifestPath}";
                 return Array.Empty<ShaderGalleryEntry>();
             }
 
@@ -74,10 +81,12 @@ internal static class ShaderGallery
                 !File.Exists(Path.Combine(dir, e.File)));
             if (entries.Count == 0)
             {
-                Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
-                    "shader gallery is empty after loading {Path} (raw entries: {Raw})",
-                    manifestPath,
-                    manifest?.Shaders?.Count ?? -1);
+                LoadDetail = $"manifest at {manifestPath} yielded no entries " +
+                             $"(raw: {manifest?.Shaders?.Count.ToString() ?? "null"})";
+            }
+            else
+            {
+                LoadDetail = null;
             }
             return entries.AsReadOnly();
         }
@@ -85,9 +94,7 @@ internal static class ShaderGallery
         {
             // A missing or malformed manifest degrades to "no bundled shaders"
             // (the custom-path UI still works), never to a settings crash.
-            Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
-                "shader gallery load failed: {Type}: {Message}",
-                ex.GetType().Name, ex.Message);
+            LoadDetail = $"load failed: {ex.GetType().Name}: {ex.Message}";
             return Array.Empty<ShaderGalleryEntry>();
         }
     }
