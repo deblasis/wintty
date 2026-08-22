@@ -17,6 +17,7 @@ needs no build, no window and no interactive desktop.
 | `hangs.ps1` | a wedged harness is killed at its budget rather than hanging the run |
 | `seed-unverified.ps1` | a harness that could not establish its own corpus leaves with 1 out of a catch and a classification, and still runs its `finally` |
 | `seed-readback-cases.ps1` | the seed read-back rules themselves: a rising count is landing, an unreadable sample is not a miss |
+| `stderr-flood.ps1` | a harness that writes past a pipe buffer on the stream nobody reads back still reaches its exit, so both pipes are drained |
 
 Most take `-ExePath` and `-OutDir` like a real harness; `no-outdir.ps1`
 deliberately takes `-Seed` and no `-OutDir`, which is the point of it.
@@ -38,7 +39,7 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `valid.ps1` | a well-formed layer merges, and the run names both counts |
 | `pscustomobject.ps1` | an entry written as a custom object normalises rather than crashing |
 | `minutes-string.ps1` | `minutes` and `timeoutSeconds` as text coerce to `Int32` before the timeout arithmetic reads them |
-| `minutes-bad.ps1` | `minutes` no arithmetic can use is refused, and the three a number gets wrong are told apart from text: negative, over the Int32 the budget multiply reaches, and wrapped in a list |
+| `minutes-bad.ps1` | `minutes` no arithmetic can use is refused, and each shape is told apart rather than given the nearest sentence: text, negative, over the Int32 the budget multiply reaches, wrapped in a list, `NaN`, written as `@{ }`, `$true`, and blank |
 | `timeout-bad.ps1` | so is a `timeoutSeconds` that is text, one out of Int32 or in a list, or a budget of zero or less, which skips the floor `minutes` gets |
 | `tags-missing.ps1` | empty, null and all-blank `tags` are each refused, not just an absent key |
 | `tags-padded.ps1` | a padded tag is stored trimmed, so `-Tag` can reach what `-List` shows; a numeric one is kept |
@@ -68,6 +69,7 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `not-in-suite-object.ps1` | the same classification written as a custom object is read, not silently ignored |
 | `not-in-suite-list.ps1` | a list of names rather than name = reason pairs is refused |
 | `not-in-suite-wrapped-pairs.ps1` | the pairs written correctly and then wrapped in a list are told about the wrapper, not about the pairs |
+| `not-in-suite-wrapped-pairs-object.ps1` | the same wrapper with the pairs written as a custom object, which is the other arm of that test |
 | `not-in-suite-typed-list.ps1` | so is the same list typed, which is neither an array nor a dictionary |
 | `not-in-suite-harness.ps1` | a layer cannot excuse a script its own manifest names as a harness |
 | `not-in-suite-harness-relative.ps1` | the same door, with the harness written as a path rather than a name |
