@@ -856,6 +856,32 @@ test "OSC: 1337: test File inline=1 produces iterm2_image_transmit" {
     try testing.expect(tx.hints.preserve_aspect_ratio);
 }
 
+/// Feed a File= payload of the given length and report whether the command
+/// survived, so the size at which inline images start disappearing is a
+/// measured number rather than a guess.
+fn filePayloadSurvives(alloc: std.mem.Allocator, len: usize) !bool {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const payload = try alloc.alloc(u8, len);
+    defer alloc.free(payload);
+    for (payload, 0..) |*b, i| b.* = alphabet[i % alphabet.len];
+
+    var p: Parser = .init(alloc);
+    defer p.deinit();
+
+    for ("1337;File=inline=1:") |ch| p.next(ch);
+    for (payload) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b') orelse return false;
+    if (cmd.* != .iterm2_image_transmit) return false;
+    return std.mem.eql(u8, payload, cmd.iterm2_image_transmit.payload);
+}
+
+test "OSC: 1337: a File payload within the capture limit survives intact" {
+    const testing = std.testing;
+    try testing.expect(try filePayloadSurvives(testing.allocator, 1024));
+    try testing.expect(try filePayloadSurvives(testing.allocator, 2000));
+}
+
 test "OSC: 1337: test File with extra options before inline=1" {
     const testing = std.testing;
 
