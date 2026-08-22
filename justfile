@@ -774,3 +774,11 @@ sync-verify mode="":
         echo "sync-verify PASSED"
     fi
     echo "  git push --force-with-lease origin windows"
+
+# ── shader gallery ─────────────────────────────────────────────────────────
+# Compile + render every bundled gallery shader (windows/Ghostty/Assets/Shaders)
+# through the real shipped pipeline: zioshade HLSL (local) -> DXC DXIL -> D3D12
+# WARP render on the Windows box, fetching PPM preview frames back. A FAIL is a
+# broken gallery entry. See tools/gallery/verify.sh for the env knobs.
+gallery-verify:
+    @bash tools/gallery/verify.sh
