@@ -1021,6 +1021,23 @@ public sealed partial class MainWindow : Window
         _titleBar.ApplyForCurrentMode();
         _layout.Animate(vertical, onCompleted: () =>
         {
+            // The switch lands about 340ms after it starts, and nothing
+            // cancels it if the window goes away in between: closing the last
+            // tab closes the window, and a storyboard that has already begun
+            // still raises Completed.
+            //
+            // Gated on _isClosed rather than on AppWindow, which is the same
+            // reasoning as the other teardown gates in this file. AppWindow
+            // survives into OnClosedAsync (it reads AppWindow.Presenter and
+            // the window geometry there), so it goes null strictly later than
+            // teardown begins. In that gap the theme manager is already
+            // disposed and the panes are being torn down, and the work below
+            // reaches both: RefreshTabHostChrome asks the theme manager for
+            // the element theme, and the focus call touches a leaf that
+            // DisposeAllLeaves may already have freed. AppWindow going null is
+            // only the loudest symptom, not the earliest.
+            if (_isClosed) return;
+
             RefreshTabHostChrome();
             if (vertical)
                 _verticalTabHost.SyncSelectionFromManager();
@@ -2260,11 +2277,21 @@ public sealed partial class MainWindow : Window
         Windows.UI.Color? hoverBg, Windows.UI.Color? hoverFg,
         Windows.UI.Color? pressedBg, Windows.UI.Color? pressedFg)
     {
+        // Defence in depth for callers that outlive the window: the animation
+        // completion that produced the crashes has its own teardown gate now,
+        // but this is reachable from several places and only needs the title
+        // bar to be there.
+        //
+        // Both halves are checked because the crash stack cannot distinguish
+        // them: it points at the line that reads AppWindow.TitleBar, which
+        // faults whether AppWindow or TitleBar is the null one. Nothing is
+        // mutated before the check, so a skipped call leaves no trace.
+        if (AppWindow?.TitleBar is not { } tb) return;
+
         var prev = _lastButtonColors;
         _lastButtonColors = new CaptionColors(
             bg, fg, inactiveBg, inactiveFg, hoverBg, hoverFg, pressedBg, pressedFg);
 
-        var tb = AppWindow.TitleBar;
         if (prev.Bg != bg) tb.ButtonBackgroundColor = bg;
         if (prev.InactiveBg != inactiveBg) tb.ButtonInactiveBackgroundColor = inactiveBg;
         if (prev.HoverBg != hoverBg) tb.ButtonHoverBackgroundColor = hoverBg;
