@@ -1021,6 +1021,15 @@ public sealed partial class MainWindow : Window
         _titleBar.ApplyForCurrentMode();
         _layout.Animate(vertical, onCompleted: () =>
         {
+            // The switch lands about 340ms after it starts, and nothing
+            // cancels it if the window goes away in between: closing the last
+            // tab closes the window, and a storyboard that has already begun
+            // still raises Completed. Window.AppWindow is null once the HWND
+            // is gone, so the chrome work below would take an unhandled
+            // NullReferenceException on the UI thread and take the process
+            // with it.
+            if (AppWindow is null) return;
+
             RefreshTabHostChrome();
             if (vertical)
                 _verticalTabHost.SyncSelectionFromManager();
@@ -2260,11 +2269,17 @@ public sealed partial class MainWindow : Window
         Windows.UI.Color? hoverBg, Windows.UI.Color? hoverFg,
         Windows.UI.Color? pressedBg, Windows.UI.Color? pressedFg)
     {
+        // A closed window has no AppWindow. Callers reach here from animation
+        // completions that outlive the window, so this is checked before the
+        // cache is written: recording colours we never applied would make a
+        // later call skip the real writes as no-ops.
+        if (AppWindow is not { } appWindow) return;
+
         var prev = _lastButtonColors;
         _lastButtonColors = new CaptionColors(
             bg, fg, inactiveBg, inactiveFg, hoverBg, hoverFg, pressedBg, pressedFg);
 
-        var tb = AppWindow.TitleBar;
+        var tb = appWindow.TitleBar;
         if (prev.Bg != bg) tb.ButtonBackgroundColor = bg;
         if (prev.InactiveBg != inactiveBg) tb.ButtonInactiveBackgroundColor = inactiveBg;
         if (prev.HoverBg != hoverBg) tb.ButtonHoverBackgroundColor = hoverBg;
