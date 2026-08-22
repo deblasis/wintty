@@ -1,18 +1,15 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-
+using Ghostty.Core;
+using Ghostty.Core.Interop;
+using Ghostty.Interop;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
-
-using Ghostty.Core;
-using Ghostty.Interop;
-
 using WinRT.Interop;
-using Ghostty.Core.Interop;
 
 namespace Ghostty;
 

@@ -8,7 +8,7 @@ namespace Ghostty.Core.Interop;
 //
 // They live in Ghostty.Core rather than beside the P/Invokes in the WinUI
 // project for one reason: Ghostty.Tests cannot reference that project, so
-// nothing could check them. These are positions in enums upstream edits, and
+// nothing could check them. These are positions in enums edited elsewhere, and
 // an insertion renumbers every later member without breaking a build --
 // exactly what shifted twenty action tags and misrouted first_render into the
 // custom-shader handler. GhosttyActionTagHeaderParityTests now reads each of
@@ -17,15 +17,12 @@ namespace Ghostty.Core.Interop;
 // GhosttyInputKey, GhosttyPoint and the rest of the P/Invoke surface stay in
 // Ghostty/Interop/NativeMethods.cs; only the enums moved.
 
-// Macos and Ios rather than MacOS and IOS: the header spells them
-// GHOSTTY_PLATFORM_MACOS and GHOSTTY_PLATFORM_IOS, and the parity check maps a
-// managed name to a C one by breaking at capitals. Neither is referenced
-// anywhere on Windows; only Windows is.
+// Only Windows is ever passed; the rest exist to hold the ordinals.
 internal enum GhosttyPlatform
 {
     Invalid = 0,
-    Macos = 1,
-    Ios = 2,
+    MacOS = 1,
+    IOS = 2,
     Windows = 3,
 }
 
@@ -101,6 +98,14 @@ internal enum GhosttyInputAction
 }
 
 // Mirrors ghostty_point_tag_e.
+// ghostty_input_trigger_tag_e: which kind of trigger a keybind step carries.
+// Four files under Input/ had their own `private const int TagPhysical = 0`
+// copies of this; they now derive from here, so the values have one source and
+// the header check can see it. An insertion upstream would otherwise decode
+// every physical trigger as unicode and render a garbage glyph in the keybind
+// editor, with nothing reporting an error.
+internal enum GhosttyTriggerTag { Physical = 0, Unicode = 1, CatchAll = 2 }
+
 internal enum GhosttyPointTag
 {
     Active = 0,

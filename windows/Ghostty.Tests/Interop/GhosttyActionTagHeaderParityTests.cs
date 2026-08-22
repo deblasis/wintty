@@ -178,6 +178,19 @@ public class GhosttyActionTagHeaderParityTests
     public void PointCoord_Ordinals_Match_Header() =>
         AssertMatchesHeader<GhosttyPointCoord>("ghostty_point_coord_e", "GHOSTTY_POINT_COORD_");
 
+    [Fact]
+    public void TriggerTag_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyTriggerTag>(
+            "ghostty_input_trigger_tag_e", "GHOSTTY_TRIGGER_");
+
+    // Mirrors config.QuickTerminalSize's tag rather than an action payload, so
+    // it sits apart from the group above. QuickTerminalSizeCLayoutTests pins
+    // the struct around it but never checked these ordinals.
+    [Fact]
+    public void QuickTerminalSizeTag_Ordinals_Match_Header() =>
+        AssertMatchesHeader<QuickTerminalSizeTag>(
+            "ghostty_quick_terminal_size_tag_e", "GHOSTTY_QUICK_TERMINAL_SIZE_");
+
     // ghostty_target_tag_e decides which half of GhosttyHost.OnAction an action
     // is delivered to, so swapping these two routes every app action into the
     // surface arm. It used to be two consts beside that switch, where no test
@@ -278,10 +291,16 @@ public class GhosttyActionTagHeaderParityTests
         var header = ParseHeaderEnum(headerText, typedefName, explicitValues);
 
         // A [Flags] enum's zero member is sometimes the "no bits" convention C
-        // does not write down. Sometimes it is, though -- ghostty_input_mods_e
-        // spells GHOSTTY_MODS_NONE -- so this is a fallback for a zero the
-        // header does not name, not a blanket exemption. Skipping every flags
-        // zero would stop the completeness check seeing a NONE that vanished.
+        // does not write down, and sometimes it is not -- ghostty_input_mods_e
+        // spells GHOSTTY_MODS_NONE. So the exemption is a fallback for a zero
+        // the header does not name, applied only after the lookup misses.
+        //
+        // Exempting it up front instead, as the first version did, also took it
+        // out of `mirrored`, which made every header that DOES name a NONE
+        // report it as unmirrored -- Mods_Values_Match_Header could not have
+        // passed. Note what this still does not catch: a NONE deleted from the
+        // header goes unnoticed either way, because the managed member is
+        // skipped and the completeness loop only walks header entries.
         var isFlags = typeof(TEnum).IsDefined(typeof(FlagsAttribute), inherit: false);
 
         var mismatches = new List<(string Name, string Detail)>();
@@ -361,11 +380,44 @@ public class GhosttyActionTagHeaderParityTests
             : 1 << int.Parse(raw[(shift + 2)..].Trim(), CultureInfo.InvariantCulture);
     }
 
+    // The names no mechanical rule reaches, managed member to C suffix.
+    //
+    // The header is not self-consistent about digits -- OSC_52_READ separates
+    // the digits, OSC8 and F1 do not -- and it runs acronyms together where C#
+    // capitalises them. Rather than grow the converter a rule per exception,
+    // each one is written down here, and StaleNameOverrides refuses an entry
+    // that has stopped being needed.
+    private static readonly Dictionary<string, string> NameOverrides = new(StringComparer.Ordinal)
+    {
+        ["MacOS"] = "MACOS",
+        ["IOS"] = "IOS",
+    };
+
+    [Fact]
+    public void No_Name_Override_Is_Stale()
+    {
+        // An override that the converter would now produce anyway is a lie
+        // about the header, and the next reader has no way to tell which of the
+        // entries here are load-bearing.
+        var redundant = NameOverrides
+            .Where(kv => ToScreamingSnakeCore(kv.Key) == kv.Value)
+            .Select(kv => kv.Key)
+            .ToArray();
+
+        Assert.True(
+            redundant.Length == 0,
+            "these name overrides now match what the converter produces, so " +
+            $"they say nothing: {string.Join(", ", redundant)}");
+    }
+
+    private static string ToScreamingSnake(string pascal) =>
+        NameOverrides.TryGetValue(pascal, out var mapped) ? mapped : ToScreamingSnakeCore(pascal);
+
     // Pascal to SCREAMING_SNAKE, breaking on a change of character class as
     // well as on a capital: the header writes OSC_52_READ, and breaking only on
     // capitals gives OSC52_READ, which then reports as "not in the typedef"
     // rather than as the naming mismatch it is.
-    private static string ToScreamingSnake(string pascal)
+    private static string ToScreamingSnakeCore(string pascal)
     {
         var sb = new StringBuilder(pascal.Length + 8);
         for (var i = 0; i < pascal.Length; i++)
