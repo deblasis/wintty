@@ -154,7 +154,11 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         parser.state = .invalid;
         return null;
     };
-    cap.writer.writeByte(0) catch {
+    // Through the capture, not the raw writer: the capture is what enforces
+    // max_allocating_bytes, and this sentinel is a byte like any other. Going
+    // around it lets a sequence that already filled the budget grow the
+    // allocation past it, which is the whole thing the budget exists to stop.
+    cap.writeByte(0) catch {
         parser.state = .invalid;
         return null;
     };
@@ -856,40 +860,72 @@ test "OSC: 1337: test File inline=1 produces iterm2_image_transmit" {
     try testing.expect(tx.hints.preserve_aspect_ratio);
 }
 
-/// Feed a File= payload of the given length and report whether the command
-/// survived, so the size at which inline images start disappearing is a
-/// measured number rather than a guess.
-fn filePayloadSurvives(alloc: std.mem.Allocator, len: usize) !bool {
+/// Feed a File= payload of the given length and assert it comes back byte for
+/// byte, so the size at which inline images start disappearing is a measured
+/// number rather than a guess.
+///
+/// `capture_alloc` is what the parser gets: null exercises the fixed-buffer
+/// fallback, which is what a parser built without an allocator falls back to.
+fn expectFilePayloadSurvives(
+    alloc: std.mem.Allocator,
+    capture_alloc: ?std.mem.Allocator,
+    len: usize,
+) !void {
+    const testing = std.testing;
+
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     const payload = try alloc.alloc(u8, len);
     defer alloc.free(payload);
     for (payload, 0..) |*b, i| b.* = alphabet[i % alphabet.len];
 
-    var p: Parser = .init(alloc);
+    var p: Parser = .init(capture_alloc);
     defer p.deinit();
 
     for ("1337;File=inline=1:") |ch| p.next(ch);
     for (payload) |ch| p.next(ch);
 
-    const cmd = p.end('\x1b') orelse return false;
-    if (cmd.* != .iterm2_image_transmit) return false;
-    return std.mem.eql(u8, payload, cmd.iterm2_image_transmit.payload);
+    const cmd = p.end('\x1b') orelse {
+        std.log.err("File= payload of {d} bytes produced no command", .{len});
+        return error.TestExpectedCommand;
+    };
+    try testing.expect(cmd.* == .iterm2_image_transmit);
+    try testing.expectEqualStrings(payload, cmd.iterm2_image_transmit.payload);
 }
 
 test "OSC: 1337: a File payload survives at any size an image needs" {
     const testing = std.testing;
+    const alloc = testing.allocator;
 
-    // Small enough for the fixed capture either way.
-    try testing.expect(try filePayloadSurvives(testing.allocator, 1024));
-    try testing.expect(try filePayloadSurvives(testing.allocator, 2000));
+    try expectFilePayloadSurvives(alloc, alloc, 1024);
+    try expectFilePayloadSurvives(alloc, alloc, 2000);
 
     // Past the fixed buffer. A 2.4KB GIF is about 3.2KB of base64, and it
     // used to vanish here with no error at all: the sequence never became a
     // command, so nothing downstream knew an image had been sent.
-    try testing.expect(try filePayloadSurvives(testing.allocator, 4096));
+    try expectFilePayloadSurvives(alloc, alloc, 4096);
 
     // A photograph rather than an icon.
-    try testing.expect(try filePayloadSurvives(testing.allocator, 512 * 1024));
+    try expectFilePayloadSurvives(alloc, alloc, 512 * 1024);
+}
+
+test "OSC: 1337: without an allocator File= keeps the fixed-buffer ceiling" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A parser built without an allocator falls back to the fixed buffer, so
+    // small images still work and large ones still do not. Pinned so the
+    // fallback is a known limitation rather than a surprise.
+    try expectFilePayloadSurvives(alloc, null, 1024);
+
+    const payload = try alloc.alloc(u8, Parser.MAX_BUF + 1);
+    defer alloc.free(payload);
+    @memset(payload, 'A');
+
+    var p: Parser = .init(null);
+    defer p.deinit();
+    for ("1337;File=inline=1:") |ch| p.next(ch);
+    for (payload) |ch| p.next(ch);
+    try testing.expect(p.end('\x1b') == null);
 }
 
 test "OSC: 1337: test File with extra options before inline=1" {

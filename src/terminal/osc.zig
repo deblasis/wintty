@@ -743,7 +743,18 @@ pub const Parser = struct {
             cap.writeByte(c) catch |err| switch (err) {
                 // We have overflowed our buffer or had some other error, set the
                 // state to invalid so that we discard any further input.
-                error.WriteFailed => self.state = .invalid,
+                //
+                // Logged because the symptom is otherwise invisible: the
+                // sequence never becomes a command, so whatever it carried
+                // just fails to happen. An inline image that exceeds the
+                // budget looked exactly like one that was never sent.
+                error.WriteFailed => {
+                    log.warn(
+                        "OSC sequence exceeded the capture limit and was dropped, state={s} captured={d}",
+                        .{ @tagName(self.state), cap.trailing().len },
+                    );
+                    self.state = .invalid;
+                },
             };
             return;
         }
@@ -1040,7 +1051,7 @@ test {
 
 test "Parser allocating captures have a hard limit" {
     const testing = std.testing;
-    const prefixes = [_][]const u8{ "52;", "66;", "72;", "5522;" };
+    const prefixes = [_][]const u8{ "52;", "66;", "72;", "1337;", "5522;" };
     const limit = Parser.MAX_BUF + 1;
 
     for (prefixes) |prefix| {
@@ -1058,6 +1069,30 @@ test "Parser allocating captures have a hard limit" {
         p.next('a');
         try testing.expectEqual(Parser.State.invalid, p.state);
         try testing.expectEqual(@as(usize, limit), cap.trailing().len);
+        try testing.expectEqual(@as(usize, limit), cap.writer.buffer.len);
+    }
+}
+
+test "Parser allocating captures stay within the limit through end" {
+    const testing = std.testing;
+
+    // Terminating a sequence that already filled the budget must not grow the
+    // allocation. Parsers append a NUL sentinel at this point, and one that
+    // writes it around the capture reallocates past the limit here.
+    const prefixes = [_][]const u8{ "52;", "66;", "72;", "1337;", "5522;" };
+    const limit = Parser.MAX_BUF + 1;
+
+    for (prefixes) |prefix| {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+        p.max_allocating_bytes = limit;
+
+        for (prefix) |ch| p.next(ch);
+        for (0..limit) |_| p.next('a');
+
+        _ = p.end('\x1b');
+
+        const cap = &p.capture.?;
         try testing.expectEqual(@as(usize, limit), cap.writer.buffer.len);
     }
 }
