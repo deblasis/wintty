@@ -86,6 +86,7 @@ public static class ShaderGallery
                 return Array.Empty<ShaderGalleryEntry>();
             }
             var entries = parser(json) ?? new List<ShaderGalleryEntry>();
+            var parsedCount = entries.Count;
             // Keep only entries whose file actually shipped; a stale manifest
             // entry must not offer a shader the renderer cannot load.
             entries.RemoveAll(e =>
@@ -94,7 +95,7 @@ public static class ShaderGallery
             if (entries.Count == 0)
             {
                 LoadDetail = $"manifest at {manifestPath} yielded no entries " +
-                             $"(raw: {entries.Count})";
+                             $"(parsed {parsedCount}, kept 0 -- files missing at {dir})";
             }
             else
             {
