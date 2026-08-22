@@ -39,8 +39,8 @@ public static class KeybindConflictAnalyzer
     private const uint OtherMask =
         ModShift | ModShiftRight | ModAlt | ModAltRight | ModSuper | ModSuperRight;
 
-    private const int TagPhysical = 0;
-    private const int TagUnicode = 1;
+    private const int TagPhysical = (int)GhosttyTriggerTag.Physical;
+    private const int TagUnicode = (int)GhosttyTriggerTag.Unicode;
 
     // Plain Ctrl+<letter> control codes worth warning about.
     private static readonly Dictionary<char, string> Shadows = new()
