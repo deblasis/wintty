@@ -33,6 +33,14 @@ internal static class ShaderGallery
 
     public static IReadOnlyList<ShaderGalleryEntry> Entries => _entries.Value;
 
+    /// <summary>
+    /// Tests inject a checkout-relative base here so the loader runs against
+    /// the source Assets/Shaders (a test bin does not receive the app's
+    /// Content items). Null in production: AppContext.BaseDirectory is used.
+    /// Must be set before the first Entries read.
+    /// </summary>
+    internal static string? TestBaseDirectory { get; set; }
+
     private sealed class Manifest
     {
         public List<ShaderGalleryEntry>? Shaders { get; set; }
@@ -42,10 +50,15 @@ internal static class ShaderGallery
     {
         try
         {
-            var dir = Path.Combine(AppContext.BaseDirectory, "Assets", "Shaders");
+            var baseDir = TestBaseDirectory ?? AppContext.BaseDirectory;
+            var dir = Path.Combine(baseDir, "Assets", "Shaders");
             var manifestPath = Path.Combine(dir, "shaders.json");
             if (!File.Exists(manifestPath))
+            {
+                Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
+                    "shader gallery manifest not found at {Path}", manifestPath);
                 return Array.Empty<ShaderGalleryEntry>();
+            }
 
             var json = File.ReadAllText(manifestPath);
             var manifest = JsonSerializer.Deserialize<Manifest>(json, new JsonSerializerOptions
@@ -59,12 +72,22 @@ internal static class ShaderGallery
             entries.RemoveAll(e =>
                 string.IsNullOrWhiteSpace(e.File) ||
                 !File.Exists(Path.Combine(dir, e.File)));
+            if (entries.Count == 0)
+            {
+                Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
+                    "shader gallery is empty after loading {Path} (raw entries: {Raw})",
+                    manifestPath,
+                    manifest?.Shaders?.Count ?? -1);
+            }
             return entries.AsReadOnly();
         }
-        catch
+        catch (Exception ex)
         {
             // A missing or malformed manifest degrades to "no bundled shaders"
             // (the custom-path UI still works), never to a settings crash.
+            Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
+                "shader gallery load failed: {Type}: {Message}",
+                ex.GetType().Name, ex.Message);
             return Array.Empty<ShaderGalleryEntry>();
         }
     }
@@ -74,5 +97,5 @@ internal static class ShaderGallery
     /// the custom-shader config key when the user picks it).
     /// </summary>
     public static string AbsolutePathFor(ShaderGalleryEntry entry) =>
-        Path.Combine(AppContext.BaseDirectory, "Assets", "Shaders", entry.File);
+        Path.Combine(TestBaseDirectory ?? AppContext.BaseDirectory, "Assets", "Shaders", entry.File);
 }
