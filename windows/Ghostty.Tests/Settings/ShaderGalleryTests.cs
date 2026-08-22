@@ -36,6 +36,9 @@ public class ShaderGalleryTests
         }
 
         ShaderGallery.TestBaseDirectory = repo;
+        ShaderGallery.ManifestParser = json =>
+            System.Text.Json.JsonSerializer.Deserialize<TestManifest>(json,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })?.Shaders;
         try
         {
             var entries = ShaderGallery.Entries;
@@ -55,4 +58,10 @@ public class ShaderGalleryTests
             ShaderGallery.TestBaseDirectory = null;
         }
     }
+}
+
+public sealed class TestManifest
+{
+    [System.Text.Json.Serialization.JsonPropertyName("shaders")]
+    public List<ShaderGalleryEntry>? Shaders { get; set; }
 }
