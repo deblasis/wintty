@@ -295,6 +295,8 @@ sync force="":
 # Checks, cheapest first:
 #
 #   markers   a resolution that left <<<<<<< behind in a file no test compiles
+#   base      what the replay landed on, how far the ref has moved since, and
+#             whether that ref is still what upstream has
 #   dropped   commits that replayed empty and silently left the stack
 #   surface   a file the fork used to change and now does not, or the reverse
 #   fmt       a NEW zig fmt offender under src/; the fork carries pre-existing
@@ -309,6 +311,24 @@ sync force="":
 # compile here while the entire test suite stays green. Neither one produces a
 # merge conflict, because only one side edited the text: that is exactly why
 # finishing the rebase without conflicts proves so little.
+#
+# Nothing here fetches, and `base` is why that needs saying. Every check in this
+# gate is measured against refs/remotes/upstream/main, and a gate that moves its
+# own yardstick mid-run is measuring nothing. Fetching origin moves the
+# pre-rebase tip that four checks compare against. Fetching upstream moves the
+# ref past what the replay targeted and hides, rather than reports, the one
+# thing `base` exists to catch. So `base` asks the remote what it has with
+# `git ls-remote`, which writes no ref, and says out loud when it could not ask
+# instead of passing quietly.
+#
+# `base` answers with commit counts and with upstream's own commit dates, not
+# with local timestamps. An earlier version of this leg dated the ref from its
+# reflog and the replay from the fork's committer dates, and both are the wrong
+# clock: a fetch that brings nothing new writes no reflog entry, so a correct
+# sync across a quiet weekend upstream looked stale, while any later fetch made
+# a months-old replay look current. Commit counts do not have that problem, and
+# the committer date of upstream's own tip travels with the object, needs no
+# reflog, and survives a rebase that rewrites every date on the fork side.
 #
 # Four of these compare against the pre-rebase tip: dropped commits, file
 # surface, range-diff, and the fmt baseline. That tip is the ref this branch
@@ -325,6 +345,10 @@ sync-verify mode="":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # No `offline` mode. The freshness leg detects an unreachable remote on its
+    # own and reports the skip, so the mode would only save the timeout; and to
+    # be usable it would have to combine with `fast`, which one positional
+    # argument cannot express without growing a parser.
     case "{{ mode }}" in
         ""|fast) ;;
         *) echo "unknown mode '{{ mode }}'; use 'just sync-verify' or 'just sync-verify fast'"; exit 2 ;;
@@ -357,10 +381,6 @@ sync-verify mode="":
     if [ -n "$dirty" ]; then
         bad "working tree is not clean"
     fi
-    if ! git merge-base --is-ancestor refs/remotes/upstream/main HEAD; then
-        bad "HEAD does not contain upstream/main; the replay did not land on the fetched upstream"
-    fi
-
     note "=== conflict markers ==="
     # Only the <<<<<<< and >>>>>>> forms. A bare ======= line is a legitimate
     # markdown heading underline, and matching it produces pure noise.
@@ -370,6 +390,122 @@ sync-verify mode="":
         printf '%s\n' "$markers" | head -20 || true
     else
         note "  none"
+    fi
+
+    # Everything from here down reads refs/remotes/upstream/main, and so does
+    # the ancestor check above, and none of it has established that the ref
+    # still stands for the upstream. It usually does when this runs straight
+    # after `just sync`. Run standalone a week later it does not, and the
+    # ancestor check degenerates: an old upstream/main is an ancestor of almost
+    # anything, so a replay onto a stale snapshot passes while the gate claims
+    # the sync landed on upstream.
+    #
+    # `git ls-remote` and not `git fetch` on purpose: see the header. A fetch
+    # would move the very refs the rest of this run is comparing against.
+    note "=== upstream base ==="
+    # What the replay landed on, and how far the ref has moved since. Both are
+    # local questions and are answered even when the remote cannot be reached.
+    #
+    # merge-base is guarded because `--is-ancestor` returning non-zero does not
+    # only mean "not an ancestor", it also means "no common ancestor at all",
+    # and on that second path an unguarded command substitution takes the whole
+    # recipe down through set -e with no verdict printed.
+    replay_base=$(git merge-base refs/remotes/upstream/main HEAD 2>/dev/null || true)
+    if [ -z "$replay_base" ]; then
+        bad "HEAD and upstream/main share no history; this is not a replay of this fork"
+    else
+        behind=$(git rev-list --count "${replay_base}..refs/remotes/upstream/main")
+
+        # Asking the remote what it has. Nothing here fetches, so this is
+        # ls-remote, which writes no ref.
+        #
+        # `timeout` is GNU coreutils. git-bash and Linux have it; a stock macOS
+        # does not, and because the redirection below is applied before bash
+        # reports an unknown command, a missing `timeout` would otherwise be
+        # swallowed and reported as an unreachable remote. So it is only used
+        # when it is there.
+        #
+        # GIT_SSH_COMMAND is defaulted only when the user has configured no
+        # transport at all. It takes precedence over core.sshCommand, so
+        # testing the environment alone would silently replace a configured
+        # plink, jump host or non-default key with plain ssh for this one call.
+        ls_rc=0
+        ls_out=""
+        if ! git remote get-url upstream >/dev/null 2>&1; then
+            look "no remote named 'upstream', only the tracking ref it left behind:"
+            note "    refs/remotes/upstream/main exists but no fetch can ever refresh it,"
+            note "    so every check below reads a ref that is frozen wherever it stopped."
+            ls_rc=-1
+        else
+            runner=""
+            if command -v timeout >/dev/null 2>&1; then runner="timeout 15"; fi
+            ssh_cmd="${GIT_SSH_COMMAND:-}"
+            if [ -z "$ssh_cmd" ] && [ -z "$(git config --get core.sshCommand || true)" ]; then
+                ssh_cmd="ssh -o BatchMode=yes"
+            fi
+            ls_out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
+                $runner git ls-remote upstream main 2>/dev/null) || ls_rc=$?
+        fi
+
+        # ls-remote prints "<sha>\t<ref>". Match the branch exactly: a tag named
+        # main, and its peeled ^{} line, both answer this query too.
+        remote_up=$(printf '%s\n' "$ls_out" | awk '$2 == "refs/heads/main" { print $1; exit }')
+        local_up=$(git rev-parse refs/remotes/upstream/main)
+
+        if [ "$ls_rc" = "-1" ]; then
+            : # already reported above
+        elif [ "$ls_rc" -ne 0 ]; then
+            note "  SKIP: the upstream remote did not answer (rc=${ls_rc})."
+            note "  Verifying offline is legitimate, but nothing below established that"
+            note "  refs/remotes/upstream/main is what upstream has, so a clean run means"
+            note "  the fork agrees with the upstream you last fetched and says nothing"
+            note "  about the one that exists now."
+        elif [ -z "$remote_up" ]; then
+            look "the upstream remote answered with no refs/heads/main:"
+            note "    Either the branch is gone or 'upstream' points somewhere unexpected."
+            note "    Check 'git remote get-url upstream'."
+        elif [ "$remote_up" = "$local_up" ]; then
+            note "  refs/remotes/upstream/main is the remote tip (${local_up:0:9})"
+        else
+            # The ref every check below reads is not what upstream has. How much
+            # that matters is how old it is, and the honest measure of that is
+            # the committer date of the upstream tip commit itself: it is
+            # written upstream, travels with the object, and needs no reflog. A
+            # fork-side timestamp would not survive a rebase that rewrites
+            # committer dates, and a reflog is local and can be absent or aged
+            # out.
+            tip_age_days=$(( ( $(date +%s) - $(git log -1 --format=%ct refs/remotes/upstream/main) ) / 86400 ))
+            note "    local  upstream/main:   ${local_up:0:9}, tip is ${tip_age_days} day(s) old"
+            note "    remote refs/heads/main: ${remote_up:0:9}"
+            if [ "$tip_age_days" -ge 7 ]; then
+                bad "refs/remotes/upstream/main is ${tip_age_days} day(s) stale and every check below reads it"
+                note "    Upstream lands commits most days, so at this distance the fork is"
+                note "    being compared against an upstream that has substantially moved."
+                note "    Re-run 'just sync', which fetches first. Do not fetch and re-run"
+                note "    this gate alone: that moves the pre-rebase tip the checks below"
+                note "    compare against."
+            else
+                note "    Upstream moved on after the last fetch. Recent enough that the"
+                note "    checks below are still measuring the right thing."
+            fi
+        fi
+
+        # How far the replay itself is from the ref. After a correct `just sync`
+        # this is zero or the handful of commits upstream pushed while the
+        # replay ran, because sync fetches and then rebases onto what it
+        # fetched. A large number means this is not a fresh replay waiting to be
+        # pushed, which is the only state the rest of this gate is designed for.
+        if [ "$behind" -eq 0 ]; then
+            note "  the replay landed on refs/remotes/upstream/main"
+        else
+            look "the replay landed ${behind} commit(s) behind refs/remotes/upstream/main:"
+            note "    replay landed on: $(git rev-parse --short "$replay_base")"
+            note "    upstream/main is: $(git rev-parse --short refs/remotes/upstream/main)"
+            note "    A few commits means upstream pushed while you were replaying. A lot"
+            note "    means the ref moved by a later fetch and this is not a fresh replay;"
+            note "    the checks below still compare against the ref, not against what the"
+            note "    replay targeted, so read them with that in mind."
+        fi
     fi
 
     # The pre-rebase tip is whatever this branch tracks, taken from the branch
@@ -528,7 +664,11 @@ sync-verify mode="":
             # Route a failure through bad() so the verdict below still prints;
             # letting set -e abort here makes a gate failure look like a plain
             # build error.
-            if ! {{ just_executable() }} "$leg"; then
+            # Quoted. This expands to a Windows path with backslash
+            # separators, and unquoted bash reads each one as an escape and
+            # eats it, so the leg dies as "command not found" and reports as
+            # a build failure that never built anything.
+            if ! "{{ just_executable() }}" "$leg"; then
                 bad "build ladder: just ${leg} failed"
                 break
             fi
