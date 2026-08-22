@@ -20,8 +20,8 @@ all either, so `just test-win` is also a local gate.)
 ```
 just fuzz-list                  # what it runs, no build and no desktop needed
 just fuzz-selftest              # prove the runner classifies exit codes, seconds
-just fuzz                       # everything, about 40 minutes budgeted
-just fuzz "-Tag smoke"          # the fast, high-signal subset, 5 budgeted / 3 measured
+just fuzz                       # everything, about 43 minutes budgeted
+just fuzz "-Tag smoke"          # the fast, high-signal subset, 7 budgeted / 5 measured
 just fuzz "-Only search,loop"
 ```
 

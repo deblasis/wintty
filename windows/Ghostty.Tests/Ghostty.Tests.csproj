@@ -106,6 +106,14 @@
                       Link="Interop\Exports\main_c.zig"
                       LogicalName="Ghostty.Tests.Interop.Exports.main_c.zig" />
     <!--
+      The C header, for GhosttyActionTagHeaderParityTests. The managed FFI
+      enums pin ordinals of C enums nothing here compiles, so the header is
+      the only thing that can contradict them.
+    -->
+    <EmbeddedResource Include="..\..\include\ghostty.h"
+                      Link="Interop\Header\ghostty.h"
+                      LogicalName="Ghostty.Tests.Interop.Header.ghostty.h" />
+    <!--
       The CLI Action enum, for CliAliasParityTests. Deliberately NOT under
       the Interop.Exports prefix: EntryPointParityTests selects its corpus
       by that prefix and would silently absorb this file.
