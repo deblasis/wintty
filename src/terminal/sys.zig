@@ -83,6 +83,10 @@ pub const Animation = struct {
     /// itself, which would otherwise lose that frame's timing.
     root_delay_ms: u32 = 0,
 
+    /// zero_delay_frames of the frame that preceded `frames`, filled in by
+    /// the same caller and for the same reason.
+    root_zero_delay_frames: u32 = 0,
+
     pub const Frame = struct {
         data: []u8,
 
@@ -90,6 +94,14 @@ pub const Animation = struct {
         /// passed through as zero; substituting a default is the caller's
         /// policy decision.
         delay_ms: u32,
+
+        /// How many source frames this one stands in for declared no delay.
+        ///
+        /// A decoder that drops frames folds their delays into the frame that
+        /// replaces them, and zeros fold into zero, so a caller substituting
+        /// a default gap needs a count rather than a flag. Decoders that
+        /// return every frame may leave this zero.
+        zero_delay_frames: u32 = 0,
     };
 
     pub fn deinit(self: *Animation, alloc: Allocator) void {
@@ -238,6 +250,7 @@ fn decodeGifFramesWuffs(
     for (result.frames, frames) |src, *dst| dst.* = .{
         .data = src.data,
         .delay_ms = src.delay_ms,
+        .zero_delay_frames = src.zero_delay_frames,
     };
 
     // The buffers now belong to `frames`, so release only the outer slice.

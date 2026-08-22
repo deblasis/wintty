@@ -19,7 +19,7 @@ default: test build-dll
 # === Testing ===
 
 # Run all Zig tests
-test: test-lib-vt test-full
+test: test-lib-vt test-full test-pkg
 
 # Test libghostty-vt (fastest feedback loop)
 test-lib-vt:
@@ -28,6 +28,20 @@ test-lib-vt:
 # Full Zig test suite
 test-full:
     zig build test -Dapp-runtime=none --summary all
+
+# Tests that live in the vendored packages rather than in src/.
+#
+# `zig build test` roots at src/main.zig and the packages under pkg/ are
+# separate builds, so nothing reachable from that root ever compiles their test
+# blocks. A wrong assertion in pkg/wuffs/src/gif.zig passes the whole suite
+# here. CI does run them, in the test-pkg-linux job, which is a required check,
+# so this closes a local gap rather than a total one.
+#
+# The list mirrors that job's matrix, which is only wuffs. Eight other packages
+# under pkg/ carry test blocks; why CI covers just this one is that job's
+# business, and duplicating a different list here would leave two to maintain.
+test-pkg:
+    cd pkg/wuffs && zig build test --summary all
 
 # Cross-platform sanity check (on demand)
 # Uses the cross-platform-test Claude Code skill for native SSH-based testing.
