@@ -120,9 +120,12 @@
                             </ComboBoxItem>
                         </ComboBox>
                     </ctrl:SettingsCard>
+                    <!-- No ConfigKey here by design: the gallery card above
+                         owns custom-shader (one key per control, or search
+                         reaches only the first). This card edits the same
+                         value through the shared writer. -->
                     <ctrl:SettingsCard Header="Shader file"
-                                       Description="Path to a GLSL shader on disk."
-                                       ctrl:SettingsCard.ConfigKey="custom-shader">
+                                       Description="Path to a GLSL shader on disk.">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <TextBox x:Name="ShaderPathBox"
                                      PlaceholderText="Path to .glsl shader file"
