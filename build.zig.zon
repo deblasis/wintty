@@ -95,8 +95,8 @@
         // between zioshade versions on unchanged input (lowering and
         // identifier fixes); regenerate any golden outputs.
         .zioshade = .{
-            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.7.0.tar.gz",
-            .hash = "zioshade-0.7.0-8s3a2hNSTgDA_8j-r4WhyCbfEuhsD6TGlETxwat8Xzz8",
+            .url = "https://github.com/zioShade/zioshade/archive/refs/tags/v0.8.0.tar.gz",
+            .hash = "zioshade-0.8.0-8s3a2hCFUQBFCDEAmZCLd1pctyWrOnNUh83ftGy3dbZc",
             .lazy = true,
         },
 
