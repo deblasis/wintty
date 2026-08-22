@@ -10,8 +10,10 @@ namespace Ghostty.Core.Interop;
 // in GhosttyHost compile unchanged.
 //
 // GhosttyActionTagHeaderParityTests reads include/ghostty.h and checks
-// every ordinal below against it; GhosttyActionsLayoutTests pins the
-// struct layouts. Nothing here needs re-verifying by hand after a sync.
+// every ordinal below against it; GhosttyStructHeaderParityTests computes
+// the C layout of each struct below and checks offsets, sizes, field
+// types and field names against it. Nothing here needs re-verifying by
+// hand after a sync.
 
 // Subset of ghostty_action_tag_e that the Windows apprt dispatches on.
 // Any unlisted tag falls through to "return false" in
@@ -182,6 +184,18 @@ internal struct GhosttyActionMoveTab
     public nint Amount;
 }
 
+// ghostty_action_desktop_notification_s:
+//   { const char* title; const char* body; }
+// Both pointer-sized: title@0, body@8, 16 bytes on x64. Read at
+// actionPtr+8. Declared so the layout is checked rather than living as
+// two literals at the read site.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionDesktopNotification
+{
+    public nint Title;
+    public nint Body;
+}
+
 // ghostty_action_progress_report_state_e.
 internal enum GhosttyProgressState
 {
@@ -193,11 +207,14 @@ internal enum GhosttyProgressState
 }
 
 // ghostty_action_progress_report_s:
-//   { int32 state; int8 progress; /* -1 if none, else 0..100 */ }
+//   { ghostty_action_progress_report_state_e state;
+//     int8 progress; /* -1 if none, else 0..100 */ }
+// State is the enum rather than a bare int, so it mirrors the C field type
+// and the read site does not have to cast.
 [StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyActionProgressReport
 {
-    public int State;
+    public GhosttyProgressState State;
     public sbyte Progress;
 }
 
