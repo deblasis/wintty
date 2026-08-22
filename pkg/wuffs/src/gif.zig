@@ -12,6 +12,15 @@ const log = std.log.scoped(.wuffs_gif);
 /// The largest number of frames decodeAnimated will compose from one GIF.
 pub const maximum_frames: usize = 1024;
 
+/// The largest canvas edge decodeAnimated will animate, matching the
+/// dimension the kitty layer accepts.
+///
+/// Checked against the header before anything is allocated. A byte budget
+/// alone does not cover this: a canvas can satisfy any total while still
+/// being an absurd shape, and the layer that would reject the shape only
+/// looks after the decode is done.
+pub const maximum_dimension: u32 = 10000;
+
 /// The most memory decodeAnimated will commit to composed frames, and the
 /// largest canvas it will animate.
 ///
@@ -121,6 +130,14 @@ pub fn decodeAnimated(alloc: Allocator, data: []const u8) Error!AnimatedImageDat
         width,
         height,
     );
+
+    if (width > maximum_dimension or height > maximum_dimension) {
+        log.warn(
+            "gif canvas {d}x{d} exceeds the maximum dimension ({d})",
+            .{ width, height, maximum_dimension },
+        );
+        return error.Overflow;
+    }
 
     const size: usize = try mul(
         usize,
@@ -523,6 +540,25 @@ test "gif animated: disposal composes each frame onto the canvas" {
     // checks above but not this.
     try std.testing.expect(!std.mem.eql(u8, anim.frames[0].data, anim.frames[1].data));
     try std.testing.expect(!std.mem.eql(u8, anim.frames[1].data, anim.frames[2].data));
+}
+
+test "gif animated: an absurd canvas is rejected from the header" {
+    // A GIF89a header declaring a 30000x30000 logical screen, then nothing.
+    // The canvas is four bytes of the file, so this is the cheap way to ask
+    // for 3.6GB; it has to be refused before anything is allocated.
+    const header = [_]u8{
+        'G', 'I', 'F', '8', '9', 'a',
+        0x30, 0x75, // width 30000
+        0x30, 0x75, // height 30000
+        0x00, 0x00,
+        0x00,
+        0x3B, // trailer
+    };
+
+    try std.testing.expectError(
+        error.Overflow,
+        decodeAnimated(std.testing.allocator, &header),
+    );
 }
 
 test "gif animated: a single-frame gif yields one frame" {

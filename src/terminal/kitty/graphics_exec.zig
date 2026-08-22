@@ -1303,6 +1303,65 @@ test "kittygfx animated gif with no declared delay uses the default gap" {
     try testing.expect(anim.durationMs() > 0);
 }
 
+test "kittygfx an animated gif actually plays once placed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/anim3.gif")),
+    };
+    defer cmd.deinit(alloc);
+    try testing.expect(execute(io, alloc, &terminal, &cmd).?.ok());
+
+    const storage = &terminal.screens.active.kitty_images;
+    const img = storage.imagePtrByIdOrNumber(31, 0).?;
+    const anim = img.animation.?;
+
+    // Unplaced images never animate, which is what stops a transmitted but
+    // invisible GIF waking the renderer forever.
+    try testing.expect(storage.animationTick(io, 0) == null);
+
+    const pin = try terminal.screens.active.pages.trackPin(
+        terminal.screens.active.cursor.page_pin.*,
+    );
+    try storage.addPlacement(io, alloc, terminal.screens.active, 31, 0, .{
+        .location = .{ .pin = pin },
+    });
+
+    // The frames the file declares: 100ms, then 50ms, then 30ms.
+    const root = img.renderData().bytes().?;
+
+    try testing.expectEqual(@as(?u64, 100), storage.animationTick(io, 0));
+    try testing.expectEqual(@as(u32, 0), anim.current_index);
+
+    try testing.expectEqual(@as(?u64, 50), storage.animationTick(io, 100));
+    try testing.expectEqual(@as(u32, 1), anim.current_index);
+    const second = img.renderData().bytes().?;
+    try testing.expect(!std.mem.eql(u8, root, second));
+
+    try testing.expectEqual(@as(?u64, 30), storage.animationTick(io, 150));
+    try testing.expectEqual(@as(u32, 2), anim.current_index);
+    const third = img.renderData().bytes().?;
+    try testing.expect(!std.mem.eql(u8, second, third));
+
+    // Wraps back to the image's own data and keeps going, because the file
+    // asks to loop forever.
+    try testing.expectEqual(@as(?u64, 100), storage.animationTick(io, 180));
+    try testing.expectEqual(@as(u32, 0), anim.current_index);
+    try testing.expectEqual(@as(u32, 1), anim.current_loop);
+    try testing.expectEqualSlices(u8, root, img.renderData().bytes().?);
+}
+
 test "gif gap substitutes the default only for an unspecified delay" {
     const testing = std.testing;
     try testing.expectEqual(animation.default_gap_ms, gifGap(0));
