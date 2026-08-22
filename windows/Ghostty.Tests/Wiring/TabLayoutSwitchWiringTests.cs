@@ -1,5 +1,6 @@
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -10,85 +11,115 @@ namespace Ghostty.Tests.Wiring;
 /// 340ms after it starts, and nothing cancels it when the window goes away in
 /// between. Closing the last tab closes the window, and a storyboard that has
 /// already begun still raises Completed, so the callback can run against a
-/// window whose HWND is gone.
-///
-/// <c>Window.AppWindow</c> is null at that point. The chrome work the callback
-/// does reaches <c>AppWindow.TitleBar</c>, so without a guard it throws
-/// NullReferenceException on the UI thread, which is unhandled and takes the
-/// process down. Four such crashes were recorded in crash.log with this exact
-/// stack before the guard was added:
+/// window that is tearing down. crash.log recorded four NullReferenceExceptions
+/// with this stack before the gate was added:
 ///
 ///   ApplyButtonColors -> ApplyCaptionButtonChrome -> RefreshTabHostChrome
 ///   -> AnimateTabLayoutTo's completion -> LayoutCoordinator.FinishSwitch
 ///
-/// These are wiring guards. They prove the null checks are still on the path a
-/// dead window takes; whether the window actually survives a switch is only
-/// observable on a live UI.
+/// The gate is _isClosed, not a null AppWindow. AppWindow survives into
+/// OnClosedAsync, so it goes null strictly later than teardown starts, and in
+/// that gap the theme manager is disposed and panes are being freed. These
+/// tests pin the earlier signal deliberately, because a later one leaves the
+/// gap open.
+///
+/// These are wiring guards. They prove the gate is on the path a closing
+/// window takes; whether the window survives a switch is only observable live.
 /// </summary>
 public class TabLayoutSwitchWiringTests
 {
     private static ShellSource Window() => ShellSource.Load("Ghostty.MainWindow.xaml.cs");
 
-    [Fact]
-    public void SwitchCompletion_BailsOutWhenTheWindowIsGone()
+    /// <summary>
+    /// The lambda passed as <c>onCompleted:</c>, found by argument name rather
+    /// than by being the only lambda present, so adding another callback to
+    /// the method does not turn this into an unreadable sequence error.
+    /// </summary>
+    private static ParenthesizedLambdaExpressionSyntax SwitchCompletion()
     {
         var animate = Window().Method("AnimateTabLayoutTo");
+        var arg = animate.DescendantNodes()
+            .OfType<ArgumentSyntax>()
+            .Single(a => a.NameColon?.Name.Identifier.Text == "onCompleted");
+        return Assert.IsType<ParenthesizedLambdaExpressionSyntax>(arg.Expression);
+    }
 
-        // The completion lambda handed to LayoutCoordinator.Animate.
-        var completion = animate.DescendantNodes()
-            .OfType<ParenthesizedLambdaExpressionSyntax>()
-            .Single();
+    private static bool ReturnsEarly(IfStatementSyntax guard) =>
+        guard.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>().Any();
 
-        var guard = completion.DescendantNodes()
+    [Fact]
+    public void SwitchCompletion_BailsOutOnceTeardownHasStarted()
+    {
+        var completion = SwitchCompletion();
+        var statements = completion.Block!.Statements;
+
+        // Identity, not a substring: `if (_isClosed) return;` and nothing that
+        // merely mentions the field. An inverted or dead condition is a
+        // different syntax shape and does not match.
+        var guard = statements
             .OfType<IfStatementSyntax>()
-            .FirstOrDefault(s => s.Condition.ToString().Contains("AppWindow"));
+            .FirstOrDefault(s => s.Condition is IdentifierNameSyntax { Identifier.Text: "_isClosed" });
 
         Assert.True(
             guard is not null,
-            "the layout-switch completion must check AppWindow before touching window chrome");
+            "the layout-switch completion must return early once _isClosed is set; "
+            + "a null AppWindow is a strictly later signal and leaves the teardown gap open");
+        Assert.True(ReturnsEarly(guard!), "the teardown gate must return, not just log");
 
-        // A guard that does not return leaves the crash in place.
-        Assert.Contains("return", guard!.Statement.ToString());
+        // Order matters rather than position: everything below the gate is
+        // what touches disposed state.
+        var guardIndex = statements.IndexOf(guard!);
+        var refreshIndex = statements
+            .TakeWhile(s => !s.DescendantNodesAndSelf()
+                .OfType<InvocationExpressionSyntax>()
+                .Any(i => i.Expression.ToString() == "RefreshTabHostChrome"))
+            .Count();
 
-        // And it has to come first: the calls below it are what crash.
-        var firstStatement = completion.Block!.Statements.First();
-        Assert.Same(guard, firstStatement);
+        Assert.True(refreshIndex < statements.Count, "expected a RefreshTabHostChrome call to guard");
+        Assert.True(guardIndex < refreshIndex, "the teardown gate must precede the chrome work");
     }
 
     [Fact]
-    public void ApplyButtonColors_ChecksAppWindowBeforeDereferencingIt()
+    public void ApplyButtonColors_ChecksBothHalvesBeforeDereferencing()
     {
         var method = Window().Method("ApplyButtonColors");
 
-        var guard = method.DescendantNodes()
+        // The crash line reads AppWindow.TitleBar, which faults whether
+        // AppWindow or TitleBar is null, so the check has to cover both. A
+        // plain `AppWindow is null` test leaves the second half live.
+        var guard = method.Body!.Statements
             .OfType<IfStatementSyntax>()
-            .FirstOrDefault(s => s.Condition.ToString().Contains("AppWindow"));
+            .FirstOrDefault(s =>
+                s.Condition is IsPatternExpressionSyntax pattern &&
+                pattern.Expression.ToString().Contains("AppWindow?.TitleBar"));
 
         Assert.True(
             guard is not null,
-            "ApplyButtonColors dereferences AppWindow.TitleBar and must check it first");
-        Assert.Contains("return", guard!.Statement.ToString());
+            "ApplyButtonColors must check AppWindow?.TitleBar, covering a null window and a null title bar");
+        Assert.True(ReturnsEarly(guard!), "the guard must return");
     }
 
     [Fact]
-    public void ApplyButtonColors_DoesNotRecordColoursItNeverApplied()
+    public void ApplyButtonColors_GuardsBeforeMutatingState()
     {
         var method = Window().Method("ApplyButtonColors");
         var statements = method.Body!.Statements;
 
         var guardIndex = statements
-            .TakeWhile(s => s is not IfStatementSyntax i || !i.Condition.ToString().Contains("AppWindow"))
+            .TakeWhile(s => s is not IfStatementSyntax i ||
+                            !i.Condition.ToString().Contains("AppWindow"))
             .Count();
 
-        // _lastButtonColors is the no-op cache: writing it on a path that
-        // applies nothing makes the next real call skip those writes, so the
-        // window would keep stale caption colours after the guard stops firing.
         var cacheIndex = statements
-            .TakeWhile(s => !s.ToString().Contains("_lastButtonColors ="))
+            .TakeWhile(s => !s.DescendantNodesAndSelf()
+                .OfType<AssignmentExpressionSyntax>()
+                .Any(a => a.Left.ToString() == "_lastButtonColors"))
             .Count();
 
-        Assert.True(
-            guardIndex < cacheIndex,
-            "the AppWindow guard must run before _lastButtonColors is updated");
+        // Both have to exist, or TakeWhile silently returns the full count and
+        // the comparison passes while pinning nothing.
+        Assert.True(guardIndex < statements.Count, "expected an AppWindow guard");
+        Assert.True(cacheIndex < statements.Count, "expected a _lastButtonColors assignment");
+        Assert.True(guardIndex < cacheIndex, "the guard must run before any state is mutated");
     }
 }
