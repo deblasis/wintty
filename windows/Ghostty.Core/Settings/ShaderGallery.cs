@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Ghostty.Core.Settings;
 
@@ -29,6 +30,13 @@ public sealed record ShaderGalleryEntry(
 /// way in every deployment mode: AppContext.BaseDirectory is the package/exe
 /// directory and Content items land in Assets\Shaders next to it.
 /// </summary>
+/// <summary>The shaders.json shape. Kept internal; only the entries are public.</summary>
+internal sealed class ShaderGalleryManifest
+{
+    [JsonPropertyName("shaders")]
+    public List<ShaderGalleryEntry>? Shaders { get; set; }
+}
+
 public static class ShaderGallery
 {
     private static readonly Lazy<IReadOnlyList<ShaderGalleryEntry>> _entries = new(Load);
@@ -49,10 +57,16 @@ public static class ShaderGallery
     /// </summary>
     public static string? TestBaseDirectory { get; set; }
 
-    private sealed class Manifest
-    {
-        public List<ShaderGalleryEntry>? Shaders { get; set; }
-    }
+    // The app publishes NativeAOT: reflection-based serialization is disabled,
+    // so the manifest binds through a source-generated context (the
+    // WindowStateContext pattern; the context must be a top-level internal
+    // partial class or the source generator emits nothing). JIT test runs
+    // would not catch a reflection fallback here -- only the published app
+    // fails, with exactly the NotSupportedException the combo surfaces.
+    [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
+    [JsonSerializable(typeof(ShaderGalleryManifest))]
+    internal sealed partial class ShaderGalleryContext : JsonSerializerContext;
+    
 
     private static IReadOnlyList<ShaderGalleryEntry> Load()
     {
@@ -68,10 +82,8 @@ public static class ShaderGallery
             }
 
             var json = File.ReadAllText(manifestPath);
-            var manifest = JsonSerializer.Deserialize<Manifest>(json, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-            });
+            var manifest = JsonSerializer.Deserialize(
+                json, ShaderGalleryContext.Default.ShaderGalleryManifest);
 
             var entries = manifest?.Shaders ?? new List<ShaderGalleryEntry>();
             // Keep only entries whose file actually shipped; a stale manifest
