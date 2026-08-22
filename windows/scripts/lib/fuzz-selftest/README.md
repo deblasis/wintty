@@ -40,12 +40,14 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `minutes-string.ps1` | `minutes` as text coerces to `Int32` before the timeout arithmetic reads it |
 | `minutes-bad.ps1` | `minutes` no arithmetic can use is refused |
 | `tags-missing.ps1` | empty, null and all-blank `tags` are each refused, not just an absent key |
+| `tags-padded.ps1` | a padded tag is stored trimmed, so `-Tag` can reach what `-List` shows; a numeric one is kept |
 | `missing-key.ps1` | one entry per required key, each short a different one, so shortening the list is visible |
 | `empty-value.ps1` | a key that is present and empty is not a declared key |
 | `script-missing.ps1` | a `script` the tier declared and never shipped is refused, by integrity check 1 |
 | `script-escapes.ps1` | a `script` that climbs out of the directory is refused |
 | `script-sibling.ps1` | so is one in a sibling directory whose path opens with the same characters |
 | `leaf-collision.ps1` | naming a subdirectory script does not classify a same-leaf script at the top level |
+| `script-relative.ps1` | a `script` written as `./name.ps1` is reduced to the leaf the same check compares |
 | `duplicate-name.ps1` | the same name twice inside one layer is refused |
 | `base-collision.ps1` | a name the base set already uses is refused |
 | `reserved-layer.ps1` | the layer cannot call itself `base` |
@@ -53,10 +55,15 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `no-layer.ps1` | so is harnesses with no layer name, which would otherwise merge and report as base-only |
 | `returns-nothing.ps1` | a manifest that emits no object at all is refused |
 | `two-objects.ps1` | so is one that emits two, which member enumeration otherwise reads as a single merged layer |
+| `one-object-collection.ps1` | a leading comma wraps one object in a collection, which is refused as the wrapper it is |
 | `not-in-suite.ps1` | a layer can classify a runner of its own without patching the suite |
 | `not-in-suite-object.ps1` | the same classification written as a custom object is read, not silently ignored |
 | `not-in-suite-list.ps1` | a list of names rather than name = reason pairs is refused |
 | `not-in-suite-harness.ps1` | a layer cannot excuse a script its own manifest names as a harness |
+| `not-in-suite-padded.ps1` | a padded name is stored trimmed, so it excuses the file it names |
+| `not-in-suite-path.ps1` | a name carrying a separator, or a blank one, excuses nothing and is refused |
+| `not-in-suite-empty-reason.ps1` | the pairs form with an empty reason is the list form spelled the long way round |
+| `not-in-suite-empty.ps1` | an empty collection is read as the list form rather than skipped |
 
 The self-test runs these against a copy of `windows/scripts`, because the
 manifest is discovered by presence: a fixture placed in the real directory
