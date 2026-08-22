@@ -1152,7 +1152,7 @@ fn attachGifAnimation(
         // is already the right size and the decoder is done with it.
         anim.frames.append(alloc, .{
             .data = frame.data,
-            .gap_ms = gifGap(frame.delay_ms),
+            .gap_ms = gifGap(frame.delay_ms, frame.zero_delay_frames),
         }) catch {
             storage.releaseAnimationBytes(frame_len);
             break;
@@ -1163,7 +1163,10 @@ fn attachGifAnimation(
     if (taken == 0) return;
 
     const anim = img.animation.?;
-    anim.root_gap_ms = gifGap(decoded.root_delay_ms);
+    anim.root_gap_ms = gifGap(
+        decoded.root_delay_ms,
+        decoded.root_zero_delay_frames,
+    );
     anim.max_loops = decoded.loop_count;
     anim.state = .running;
     anim.frame_shown_at_ms = null;
@@ -1176,8 +1179,20 @@ fn attachGifAnimation(
 /// specific meaning in the kitty model: the frame is gapless and gets skipped
 /// during playback. Passing zero through would silently drop those frames, so
 /// an unspecified delay takes the same default a kitty frame would.
-fn gifGap(delay_ms: u32) u32 {
-    return if (delay_ms == 0) animation.default_gap_ms else delay_ms;
+///
+/// A decimated decode hands back one frame standing in for several, so the
+/// default is owed once per source frame that declared nothing, not once per
+/// frame that arrives here.
+fn gifGap(delay_ms: u32, zero_delay_frames: u32) u32 {
+    // A frame always stands in for at least itself, so no delay and no count
+    // is one frame that declared nothing. Decoders behind the sys seam are
+    // not obliged to count.
+    const unspecified = if (delay_ms == 0 and zero_delay_frames == 0)
+        1
+    else
+        zero_delay_frames;
+
+    return delay_ms +| unspecified *| animation.default_gap_ms;
 }
 
 const EncodeableError = Image.Error || Allocator.Error;
@@ -1362,11 +1377,27 @@ test "kittygfx an animated gif actually plays once placed" {
     try testing.expectEqualSlices(u8, root, img.renderData().bytes().?);
 }
 
-test "gif gap substitutes the default only for an unspecified delay" {
+test "gif gap substitutes the default for every unspecified delay" {
     const testing = std.testing;
-    try testing.expectEqual(animation.default_gap_ms, gifGap(0));
-    try testing.expectEqual(@as(u32, 1), gifGap(1));
-    try testing.expectEqual(@as(u32, 5000), gifGap(5000));
+
+    // Undecimated, which is what every frame of an animation inside the
+    // decoder's budget looks like: one default gap for a frame that declared
+    // nothing, exactly its own delay for a frame that declared one.
+    try testing.expectEqual(animation.default_gap_ms, gifGap(0, 1));
+    try testing.expectEqual(@as(u32, 1), gifGap(1, 0));
+    try testing.expectEqual(@as(u32, 5000), gifGap(5000, 0));
+
+    // Decimated: a frame standing in for four that all declared nothing holds
+    // the screen as long as those four did, instead of a quarter as long.
+    try testing.expectEqual(4 * animation.default_gap_ms, gifGap(0, 4));
+    try testing.expectEqual(
+        100 + 2 * animation.default_gap_ms,
+        gifGap(100, 2),
+    );
+
+    // A decoder behind the sys seam that reports no count still gets the
+    // substitution it got before there was one.
+    try testing.expectEqual(animation.default_gap_ms, gifGap(0, 0));
 }
 
 test "kittygfx query validates image data" {
