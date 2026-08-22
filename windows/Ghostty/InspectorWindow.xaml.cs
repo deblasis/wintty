@@ -12,6 +12,7 @@ using Ghostty.Core;
 using Ghostty.Interop;
 
 using WinRT.Interop;
+using Ghostty.Core.Interop;
 
 namespace Ghostty;
 

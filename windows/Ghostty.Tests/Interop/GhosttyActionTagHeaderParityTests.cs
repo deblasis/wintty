@@ -124,6 +124,60 @@ public class GhosttyActionTagHeaderParityTests
         AssertMatchesHeader<GhosttyGotoTab>(
             "ghostty_action_goto_tab_e", "GHOSTTY_GOTO_TAB_", explicitValues: true);
 
+    // The enums that are not action payloads: what a surface is told about the
+    // platform it runs on, what the clipboard call is for, what the mouse and
+    // keyboard did, and how a point is addressed. They lived beside the
+    // P/Invokes in the WinUI project, which this assembly cannot reference, so
+    // until they moved to Ghostty.Core nothing could check any of them.
+    [Fact]
+    public void Platform_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyPlatform>("ghostty_platform_e", "GHOSTTY_PLATFORM_");
+
+    [Fact]
+    public void SurfaceContext_Values_Match_Header() =>
+        AssertMatchesHeader<GhosttySurfaceContext>(
+            "ghostty_surface_context_e", "GHOSTTY_SURFACE_CONTEXT_", explicitValues: true);
+
+    [Fact]
+    public void Clipboard_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyClipboard>("ghostty_clipboard_e", "GHOSTTY_CLIPBOARD_");
+
+    [Fact]
+    public void ClipboardRequest_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyClipboardRequest>(
+            "ghostty_clipboard_request_e", "GHOSTTY_CLIPBOARD_REQUEST_");
+
+    [Fact]
+    public void MouseState_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyMouseState>("ghostty_input_mouse_state_e", "GHOSTTY_MOUSE_");
+
+    [Fact]
+    public void MouseButton_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyMouseButton>("ghostty_input_mouse_button_e", "GHOSTTY_MOUSE_");
+
+    [Fact]
+    public void ColorScheme_Values_Match_Header() =>
+        AssertMatchesHeader<GhosttyColorScheme>(
+            "ghostty_color_scheme_e", "GHOSTTY_COLOR_SCHEME_", explicitValues: true);
+
+    // Bit flags, like the binding flags above.
+    [Fact]
+    public void Mods_Values_Match_Header() =>
+        AssertMatchesHeader<GhosttyMods>(
+            "ghostty_input_mods_e", "GHOSTTY_MODS_", explicitValues: true);
+
+    [Fact]
+    public void InputAction_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyInputAction>("ghostty_input_action_e", "GHOSTTY_ACTION_");
+
+    [Fact]
+    public void PointTag_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyPointTag>("ghostty_point_tag_e", "GHOSTTY_POINT_");
+
+    [Fact]
+    public void PointCoord_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyPointCoord>("ghostty_point_coord_e", "GHOSTTY_POINT_COORD_");
+
     // ghostty_target_tag_e decides which half of GhosttyHost.OnAction an action
     // is delivered to, so swapping these two routes every app action into the
     // surface arm. It used to be two consts beside that switch, where no test
@@ -223,19 +277,22 @@ public class GhosttyActionTagHeaderParityTests
     {
         var header = ParseHeaderEnum(headerText, typedefName, explicitValues);
 
-        // A [Flags] enum's zero member is the "no bits" convention C does not
-        // write down, so it has no header counterpart and is not drift.
+        // A [Flags] enum's zero member is sometimes the "no bits" convention C
+        // does not write down. Sometimes it is, though -- ghostty_input_mods_e
+        // spells GHOSTTY_MODS_NONE -- so this is a fallback for a zero the
+        // header does not name, not a blanket exemption. Skipping every flags
+        // zero would stop the completeness check seeing a NONE that vanished.
         var isFlags = typeof(TEnum).IsDefined(typeof(FlagsAttribute), inherit: false);
 
         var mismatches = new List<(string Name, string Detail)>();
         foreach (var name in Enum.GetNames<TEnum>())
         {
             var value = Convert.ToInt32(Enum.Parse<TEnum>(name));
-            if (isFlags && value == 0) continue;
             var cName = prefix + ToScreamingSnake(name);
 
             if (!header.TryGetValue(cName, out var expected))
             {
+                if (isFlags && value == 0) continue;
                 mismatches.Add((name, $"{name} = {value}: {cName} is not in {typedefName}"));
                 continue;
             }
@@ -253,7 +310,6 @@ public class GhosttyActionTagHeaderParityTests
         if (complete)
         {
             var mirrored = Enum.GetNames<TEnum>()
-                .Where(n => !isFlags || Convert.ToInt32(Enum.Parse<TEnum>(n)) != 0)
                 .Select(n => prefix + ToScreamingSnake(n))
                 .ToHashSet(StringComparer.Ordinal);
 
@@ -305,12 +361,21 @@ public class GhosttyActionTagHeaderParityTests
             : 1 << int.Parse(raw[(shift + 2)..].Trim(), CultureInfo.InvariantCulture);
     }
 
+    // Pascal to SCREAMING_SNAKE, breaking on a change of character class as
+    // well as on a capital: the header writes OSC_52_READ, and breaking only on
+    // capitals gives OSC52_READ, which then reports as "not in the typedef"
+    // rather than as the naming mismatch it is.
     private static string ToScreamingSnake(string pascal)
     {
         var sb = new StringBuilder(pascal.Length + 8);
         for (var i = 0; i < pascal.Length; i++)
         {
-            if (i > 0 && char.IsUpper(pascal[i])) sb.Append('_');
+            if (i > 0 && (char.IsUpper(pascal[i])
+                          || (char.IsDigit(pascal[i]) && !char.IsDigit(pascal[i - 1]))))
+            {
+                sb.Append('_');
+            }
+
             sb.Append(char.ToUpperInvariant(pascal[i]));
         }
 

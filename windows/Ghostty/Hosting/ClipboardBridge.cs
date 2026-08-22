@@ -5,6 +5,7 @@ using Ghostty.Core.Clipboard;
 using Ghostty.Interop;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
+using Ghostty.Core.Interop;
 
 namespace Ghostty.Hosting;
 

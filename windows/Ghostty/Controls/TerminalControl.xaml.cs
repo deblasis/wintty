@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Input;
+using Ghostty.Core.Interop;
 using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
