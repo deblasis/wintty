@@ -7,6 +7,7 @@ const command = @import("graphics_command.zig");
 const image = @import("graphics_image.zig");
 const animation = @import("graphics_animation.zig");
 const pixel = @import("graphics_pixel.zig");
+const sys = @import("../sys.zig");
 const Command = command.Command;
 const Response = command.Response;
 const LoadingImage = image.LoadingImage;
@@ -1062,6 +1063,14 @@ fn loadAndAddImage(
     errdefer img.deinit(alloc);
     try storage.addImage(io, alloc, terminal.screens.active, img);
 
+    // An animated GIF's remaining frames can only be attached now, because
+    // frames are charged against the storage limit and that accounting needs
+    // the image to be in storage first.
+    if (loading.gif_animation) |*anim| {
+        defer loading.gif_animation = null;
+        attachGifAnimation(io, alloc, terminal, img.id, anim);
+    }
+
     // Get our display settings
     const display_ = loading.display;
 
@@ -1070,6 +1079,105 @@ fn loadAndAddImage(
     loading.deinit(alloc);
 
     return .{ .image = img, .display = display_ };
+}
+
+/// Attach a decoded GIF's remaining frames to an image already in storage,
+/// and start it playing.
+///
+/// Best effort throughout. The image has already been accepted, so running
+/// out of frame storage or memory partway leaves a shorter animation rather
+/// than failing a transmission that otherwise succeeded. The frames are freed
+/// either way.
+///
+/// Auto-playing is a deliberate departure from the kitty model, where an
+/// image starts stopped and a client drives it with a=a. A GIF arrives
+/// through the iTerm2 OSC 1337 path, which has no such client and no way to
+/// express one, so a GIF that never played would be indistinguishable from
+/// the still image we used to show.
+fn attachGifAnimation(
+    io: std.Io,
+    alloc: Allocator,
+    terminal: *Terminal,
+    image_id: u32,
+    decoded: *sys.Animation,
+) void {
+    // Attached frames belong to the animation; whatever we did not get to is
+    // ours to free. Frames are taken in order, so the split is a single index.
+    var taken: usize = 0;
+    defer {
+        for (decoded.frames[taken..]) |frame| alloc.free(frame.data);
+        alloc.free(decoded.frames);
+        decoded.* = undefined;
+    }
+
+    const storage = &terminal.screens.active.kitty_images;
+    var img = storage.imagePtrByIdOrNumber(image_id, 0) orelse return;
+    const frame_len: usize = @as(usize, img.width) * img.height * 4;
+
+    for (decoded.frames) |frame| {
+        // The decoder composes onto the image-sized canvas, so this holds for
+        // our own decoder. A swapped-in one disagreeing would corrupt the
+        // frame, so stop rather than trust it.
+        if (frame.data.len != frame_len) {
+            log.warn("gif frame size {d} does not match image {d}", .{ frame.data.len, frame_len });
+            break;
+        }
+
+        storage.reserveAnimationBytes(
+            io,
+            alloc,
+            terminal.screens.active,
+            image_id,
+            frame_len,
+        ) catch {
+            log.warn(
+                "gif animation truncated after {d} of {d} frames; storage limit reached",
+                .{ taken, decoded.frames.len },
+            );
+            break;
+        };
+        // Eviction can move images around, but never this one: it is passed
+        // to the reservation as the image to spare. Same reasoning as the
+        // a=f path, which also asserts here.
+        img = storage.imagePtrByIdOrNumber(image_id, 0).?;
+
+        // Created on first use so an image that attaches nothing stays a
+        // still image rather than carrying an empty animation.
+        const anim = ensureAnimation(alloc, img) catch {
+            storage.releaseAnimationBytes(frame_len);
+            break;
+        };
+
+        // The buffer moves into the animation rather than being copied. It
+        // is already the right size and the decoder is done with it.
+        anim.frames.append(alloc, .{
+            .data = frame.data,
+            .gap_ms = gifGap(frame.delay_ms),
+        }) catch {
+            storage.releaseAnimationBytes(frame_len);
+            break;
+        };
+        taken += 1;
+    }
+
+    if (taken == 0) return;
+
+    const anim = img.animation.?;
+    anim.root_gap_ms = gifGap(decoded.root_delay_ms);
+    anim.max_loops = decoded.loop_count;
+    anim.state = .running;
+    anim.frame_shown_at_ms = null;
+    storage.markMutated(io);
+}
+
+/// Translate a GIF frame delay into a kitty frame gap.
+///
+/// A GIF that declares no delay means "as fast as reasonable", but zero has a
+/// specific meaning in the kitty model: the frame is gapless and gets skipped
+/// during playback. Passing zero through would silently drop those frames, so
+/// an unspecified delay takes the same default a kitty frame would.
+fn gifGap(delay_ms: u32) u32 {
+    return if (delay_ms == 0) animation.default_gap_ms else delay_ms;
 }
 
 const EncodeableError = Image.Error || Allocator.Error;
@@ -1090,6 +1198,175 @@ fn encodeError(r: *Response, err: EncodeableError) void {
         error.DimensionsRequired => r.message = "EINVAL: dimensions required",
         error.DimensionsTooLarge => r.message = "EINVAL: dimensions too large",
     }
+}
+
+test "kittygfx animated gif transmits as a running animation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/anim3.gif")),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &terminal, &cmd).?;
+    try testing.expect(resp.ok());
+
+    const storage = &terminal.screens.active.kitty_images;
+    const img = storage.imagePtrByIdOrNumber(31, 0).?;
+    try testing.expect(img.animation != null);
+
+    const anim = img.animation.?;
+
+    // Three frames in the file: one is the image, two are animation frames.
+    try testing.expectEqual(@as(u32, 3), anim.frameCount());
+    try testing.expectEqual(@as(u32, 100), anim.gapAt(0));
+    try testing.expectEqual(@as(u32, 50), anim.gapAt(1));
+    try testing.expectEqual(@as(u32, 30), anim.gapAt(2));
+
+    // A GIF has no client to start it, so it starts itself and loops as the
+    // file asks. Zero loops means forever.
+    try testing.expect(anim.state == .running);
+    try testing.expectEqual(@as(u32, 0), anim.max_loops);
+    try testing.expectEqual(@as(u64, 180), anim.durationMs());
+
+    // The frames are charged against the storage limit like any other.
+    try testing.expectEqual(@as(usize, 2 * 2 * 4 * 2), anim.frameBytes());
+}
+
+test "kittygfx a still gif transmits without an animation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/still.gif")),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &terminal, &cmd).?;
+    try testing.expect(resp.ok());
+
+    const storage = &terminal.screens.active.kitty_images;
+    const img = storage.imagePtrByIdOrNumber(31, 0).?;
+    try testing.expect(img.animation == null);
+}
+
+test "kittygfx animated gif with no declared delay uses the default gap" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/anim-nodelay.gif")),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &terminal, &cmd).?;
+    try testing.expect(resp.ok());
+
+    const anim = terminal.screens.active.kitty_images.imagePtrByIdOrNumber(31, 0).?.animation.?;
+
+    // A zero gap means gapless in this model, which skips the frame during
+    // playback. Every frame of a GIF is meant to be seen, so an unspecified
+    // delay takes the default instead of disappearing.
+    try testing.expectEqual(animation.default_gap_ms, anim.gapAt(0));
+    try testing.expectEqual(animation.default_gap_ms, anim.gapAt(1));
+    try testing.expect(anim.durationMs() > 0);
+}
+
+test "kittygfx an animated gif actually plays once placed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    if (sys.decode_gif_frames == null) return error.SkipZigTest;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .transmit = .{
+            .format = .gif,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, @embedFile("testdata/anim3.gif")),
+    };
+    defer cmd.deinit(alloc);
+    try testing.expect(execute(io, alloc, &terminal, &cmd).?.ok());
+
+    const storage = &terminal.screens.active.kitty_images;
+    const img = storage.imagePtrByIdOrNumber(31, 0).?;
+    const anim = img.animation.?;
+
+    // Unplaced images never animate, which is what stops a transmitted but
+    // invisible GIF waking the renderer forever.
+    try testing.expect(storage.animationTick(io, 0) == null);
+
+    const pin = try terminal.screens.active.pages.trackPin(
+        terminal.screens.active.cursor.page_pin.*,
+    );
+    try storage.addPlacement(io, alloc, terminal.screens.active, 31, 0, .{
+        .location = .{ .pin = pin },
+    });
+
+    // The frames the file declares: 100ms, then 50ms, then 30ms.
+    const root = img.renderData().bytes().?;
+
+    try testing.expectEqual(@as(?u64, 100), storage.animationTick(io, 0));
+    try testing.expectEqual(@as(u32, 0), anim.current_index);
+
+    try testing.expectEqual(@as(?u64, 50), storage.animationTick(io, 100));
+    try testing.expectEqual(@as(u32, 1), anim.current_index);
+    const second = img.renderData().bytes().?;
+    try testing.expect(!std.mem.eql(u8, root, second));
+
+    try testing.expectEqual(@as(?u64, 30), storage.animationTick(io, 150));
+    try testing.expectEqual(@as(u32, 2), anim.current_index);
+    const third = img.renderData().bytes().?;
+    try testing.expect(!std.mem.eql(u8, second, third));
+
+    // Wraps back to the image's own data and keeps going, because the file
+    // asks to loop forever.
+    try testing.expectEqual(@as(?u64, 100), storage.animationTick(io, 180));
+    try testing.expectEqual(@as(u32, 0), anim.current_index);
+    try testing.expectEqual(@as(u32, 1), anim.current_loop);
+    try testing.expectEqualSlices(u8, root, img.renderData().bytes().?);
+}
+
+test "gif gap substitutes the default only for an unspecified delay" {
+    const testing = std.testing;
+    try testing.expectEqual(animation.default_gap_ms, gifGap(0));
+    try testing.expectEqual(@as(u32, 1), gifGap(1));
+    try testing.expectEqual(@as(u32, 5000), gifGap(5000));
 }
 
 test "kittygfx query validates image data" {

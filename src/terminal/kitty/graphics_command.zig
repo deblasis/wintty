@@ -528,7 +528,7 @@ pub const Transmission = struct {
         // Ghostty-internal formats the iTerm2 OSC 1337 synth path
         // produces by sniffing magic bytes. The image decoder
         // routes them through the wuffs jpeg / gif paths and emits
-        // RGBA downstream. GIF support is first-frame-only.
+        // RGBA downstream. A multi-frame GIF becomes an animation.
         "jpeg",
         "gif",
     });
