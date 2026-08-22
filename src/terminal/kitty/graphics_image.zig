@@ -167,7 +167,8 @@ pub const LoadingImage = struct {
             switch (t.format) {
                 .png => if (sys.decode_png == null) return error.UnsupportedMedium,
                 .jpeg => if (sys.decode_jpeg == null) return error.UnsupportedMedium,
-                .gif => if (sys.decode_gif == null) return error.UnsupportedMedium,
+                .gif => if (sys.decode_gif == null and sys.decode_gif_frames == null)
+                    return error.UnsupportedMedium,
                 .rgb, .rgba, .gray, .gray_alpha => {},
             }
 
@@ -534,8 +535,9 @@ pub const LoadingImage = struct {
         // format code for JPEG.
         if (img.format == .jpeg) try self.decodeJpeg(alloc);
 
-        // Decode the gif if we have to. Same provenance as JPEG; GIF
-        // is first-frame-only.
+        // Decode the gif if we have to. Same provenance as JPEG. A
+        // multi-frame gif becomes an animation when an animated decoder
+        // is available.
         if (img.format == .gif) try self.decodeGif(alloc);
 
         // Validate our dimensions.
@@ -754,6 +756,13 @@ pub const LoadingImage = struct {
         // every early return frees the whole animation.
         var owned = true;
         defer if (owned) result.deinit(alloc);
+
+        // decode_gif_frames is a swappable seam, so this is not the local
+        // decoder's invariant to rely on.
+        if (result.frames.len == 0) {
+            log.warn("gif decoder returned no frames", .{});
+            return error.InvalidData;
+        }
 
         const first = result.frames[0].data;
         const first_delay_ms = result.frames[0].delay_ms;

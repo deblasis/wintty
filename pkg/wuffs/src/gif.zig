@@ -10,13 +10,21 @@ const mul = std.math.mul;
 const log = std.log.scoped(.wuffs_gif);
 
 /// The largest number of frames decodeAnimated will compose from one GIF.
-///
-/// Frames are composed to the full canvas, so a small file can ask for a
-/// great deal of memory: the frame count is bounded only by the file's
-/// length, and each frame costs width * height * 4 regardless. The caller
-/// bounds total memory as well, but that bound is a runtime setting and this
-/// one exists so a hostile file cannot make us allocate on the way there.
 pub const maximum_frames: usize = 1024;
+
+/// The most memory decodeAnimated will commit to composed frames, and the
+/// largest canvas it will animate.
+///
+/// Both bounds are needed and neither is redundant. A GIF states its canvas
+/// in four bytes and each frame costs width * height * 4 once composed, so
+/// bounding the frame count alone still lets a file a few tens of kilobytes
+/// long ask for terabytes. Every limit the caller applies, including the
+/// image storage limit, is checked against frames this function has already
+/// allocated, so the bound has to live here to be worth anything.
+///
+/// Matched to the 400MB per-image ceiling the kitty layer enforces, so a
+/// still image that would have been accepted before is accepted now.
+pub const maximum_animation_bytes: usize = 400 * 1024 * 1024;
 
 /// A decoded GIF animation. Every frame is composed to the full canvas, so
 /// any single frame can be displayed without replaying the ones before it.
@@ -120,10 +128,20 @@ pub fn decodeAnimated(alloc: Allocator, data: []const u8) Error!AnimatedImageDat
         @sizeOf(c.wuffs_base__color_u32_argb_premul),
     );
 
-    if (size > maximum_image_size) {
-        log.warn("image size {d} is larger than the maximum allowed ({d})", .{ size, maximum_image_size });
+    if (size > maximum_animation_bytes) {
+        log.warn(
+            "gif canvas {d} is larger than the maximum allowed ({d})",
+            .{ size, maximum_animation_bytes },
+        );
         return error.Overflow;
     }
+
+    // How many frames the budget affords. Checked before anything is
+    // allocated, because the canvas alone is already the size of one frame.
+    const frame_limit = @min(
+        maximum_frames,
+        @max(@as(usize, 1), maximum_animation_bytes / @max(size, 1)),
+    );
 
     // The canvas every frame is decoded into and disposed from. Zeroed so
     // pixels no frame ever touches stay transparent.
@@ -166,17 +184,25 @@ pub fn decodeAnimated(alloc: Allocator, data: []const u8) Error!AnimatedImageDat
         frames.deinit(alloc);
     }
 
-    while (frames.items.len < maximum_frames) {
+    // Whether the file ran out before the budget did, which is the only case
+    // where the caller is seeing the whole animation.
+    var complete = false;
+
+    while (frames.items.len < frame_limit) {
         var frame_config: c.wuffs_base__frame_config = undefined;
         const status = c.wuffs_gif__decoder__decode_frame_config(
             decoder,
             &frame_config,
             &source_buffer,
         );
-        // A note rather than an error ends the frame sequence. The source is
-        // fully buffered and closed, so the only note reachable here is
-        // end-of-data; a truncated file surfaces as an error instead.
-        if (c.wuffs_base__status__is_note(&status)) break;
+        // End of data is the normal terminator and arrives as a note rather
+        // than an error. Compared against that one note specifically: any
+        // other note would mean something we did not ask for happened, and
+        // treating it as the end would silently truncate the animation.
+        if (status.repr == c.wuffs_base__note__end_of_data) {
+            complete = true;
+            break;
+        }
         try check(log, &status);
 
         const bounds = c.wuffs_base__frame_config__bounds(&frame_config);
@@ -232,8 +258,11 @@ pub fn decodeAnimated(alloc: Allocator, data: []const u8) Error!AnimatedImageDat
         log.warn("gif contained no frames", .{});
         return error.WuffsError;
     }
-    if (frames.items.len == maximum_frames) {
-        log.warn("gif has more than {d} frames; the rest are dropped", .{maximum_frames});
+    if (!complete) {
+        log.warn(
+            "gif stopped at {d} frames ({d} bytes); the rest are dropped",
+            .{ frames.items.len, frames.items.len * size },
+        );
     }
 
     return .{
@@ -264,7 +293,10 @@ fn clearRect(
 /// wuffs reports durations in flicks. Truncating toward zero matches the
 /// centisecond granularity GIF actually stores.
 fn flicksToMs(duration: c.wuffs_base__flicks) u32 {
-    const ms = @as(u64, @intCast(duration)) / (c.WUFFS_BASE__FLICKS_PER_SECOND / 1000);
+    // Flicks are signed. GIF never yields a negative duration, but clamping
+    // costs nothing and is better than aborting if one ever appears.
+    const ticks: u64 = @intCast(@max(duration, 0));
+    const ms = ticks / (c.WUFFS_BASE__FLICKS_PER_SECOND / 1000);
     return std.math.cast(u32, ms) orelse std.math.maxInt(u32);
 }
 

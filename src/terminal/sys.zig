@@ -167,7 +167,7 @@ fn decodeGifFramesWuffs(
     data: []const u8,
 ) DecodeError!Animation {
     const wuffs = @import("wuffs");
-    const result = wuffs.gif.decodeAnimated(
+    var result = wuffs.gif.decodeAnimated(
         alloc,
         data,
     ) catch |err| switch (err) {
@@ -179,8 +179,14 @@ fn decodeGifFramesWuffs(
     // The two Frame types are identical in layout but belong to different
     // packages, and the terminal package does not depend on wuffs. Move the
     // buffers across rather than copying them.
-    const frames = try alloc.alloc(Animation.Frame, result.frames.len);
-    errdefer alloc.free(frames);
+    //
+    // Freeing explicitly rather than with errdefer: this allocation runs
+    // right after the decoder committed every frame, so it is the likeliest
+    // point to fail and the most expensive one to leak.
+    const frames = alloc.alloc(Animation.Frame, result.frames.len) catch |err| {
+        result.deinit(alloc);
+        return err;
+    };
     for (result.frames, frames) |src, *dst| dst.* = .{
         .data = src.data,
         .delay_ms = src.delay_ms,

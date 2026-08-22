@@ -1101,18 +1101,27 @@ fn attachGifAnimation(
     image_id: u32,
     decoded: *sys.Animation,
 ) void {
-    defer decoded.deinit(alloc);
+    // Attached frames belong to the animation; whatever we did not get to is
+    // ours to free. Frames are taken in order, so the split is a single index.
+    var taken: usize = 0;
+    defer {
+        for (decoded.frames[taken..]) |frame| alloc.free(frame.data);
+        alloc.free(decoded.frames);
+        decoded.* = undefined;
+    }
 
     const storage = &terminal.screens.active.kitty_images;
     var img = storage.imagePtrByIdOrNumber(image_id, 0) orelse return;
     const frame_len: usize = @as(usize, img.width) * img.height * 4;
 
-    const anim = ensureAnimation(alloc, img) catch return;
-
-    for (decoded.frames, 0..) |frame, i| {
-        // The decoder composes to the canvas, so this should always hold; a
-        // mismatch would corrupt the frame buffer, so skip rather than trust.
-        if (frame.data.len != frame_len) continue;
+    for (decoded.frames) |frame| {
+        // The decoder composes onto the image-sized canvas, so this holds for
+        // our own decoder. A swapped-in one disagreeing would corrupt the
+        // frame, so stop rather than trust it.
+        if (frame.data.len != frame_len) {
+            log.warn("gif frame size {d} does not match image {d}", .{ frame.data.len, frame_len });
+            break;
+        }
 
         storage.reserveAnimationBytes(
             io,
@@ -1123,31 +1132,37 @@ fn attachGifAnimation(
         ) catch {
             log.warn(
                 "gif animation truncated after {d} of {d} frames; storage limit reached",
-                .{ i, decoded.frames.len },
+                .{ taken, decoded.frames.len },
             );
             break;
         };
-        // Eviction can move images around, though never this one.
-        img = storage.imagePtrByIdOrNumber(image_id, 0) orelse return;
+        // Eviction can move images around, but never this one: it is passed
+        // to the reservation as the image to spare. Same reasoning as the
+        // a=f path, which also asserts here.
+        img = storage.imagePtrByIdOrNumber(image_id, 0).?;
 
-        const buf = alloc.dupe(u8, frame.data) catch {
+        // Created on first use so an image that attaches nothing stays a
+        // still image rather than carrying an empty animation.
+        const anim = ensureAnimation(alloc, img) catch {
             storage.releaseAnimationBytes(frame_len);
             break;
         };
-        img.animation.?.frames.append(alloc, .{
-            .data = buf,
+
+        // The buffer moves into the animation rather than being copied. It
+        // is already the right size and the decoder is done with it.
+        anim.frames.append(alloc, .{
+            .data = frame.data,
             .gap_ms = gifGap(frame.delay_ms),
         }) catch {
-            alloc.free(buf);
             storage.releaseAnimationBytes(frame_len);
             break;
         };
+        taken += 1;
     }
 
-    // Nothing was attached, so leave the image as a still rather than start
-    // an animation with only the root frame in it.
-    if (anim.frames.items.len == 0) return;
+    if (taken == 0) return;
 
+    const anim = img.animation.?;
     anim.root_gap_ms = gifGap(decoded.root_delay_ms);
     anim.max_loops = decoded.loop_count;
     anim.state = .running;
