@@ -300,6 +300,13 @@ internal sealed partial class AppearancePage : Page
             StaticLoggers.SettingsConfigWriter.LogInformation(
                 "shader gallery empty: {Detail} (base: {Base})",
                 detail, AppContext.BaseDirectory);
+            // Visible in the combo itself: a broken gallery install must be
+            // diagnosable from the UI, not only from logs.
+            ShaderGalleryCombo.Items.Insert(0, new ComboBoxItem
+            {
+                IsEnabled = false,
+                Content = $"Gallery unavailable: {detail}",
+            });
         }
         var items = ShaderGalleryCombo.Items;
         // -1 would make Insert below throw and take the whole page down;
