@@ -102,6 +102,17 @@ public sealed partial class NotificationHost : UserControl
         // Title is visual-only on InfoBar; UIA Name stays empty unless set,
         // so a harness/narrator looking for the notice title would miss it.
         AutomationProperties.SetName(bar, notice.Title);
+        // An id as well as a name, because Name here is the visible copy and
+        // the copy is the part that gets reworded. A harness that can only
+        // match on the wording reports "no banner" after an edit to it, which
+        // reads as the feature working. DedupKey is the notice's own stable
+        // identity wherever it has one; a notice without one falls back to a
+        // slug of its title rather than a shared constant, because UIA expects
+        // an id to be unique among siblings and two banners answering to the
+        // same one make FindFirst return an arbitrary member of the pair.
+        AutomationProperties.SetAutomationId(
+            bar,
+            "Notice_" + (string.IsNullOrEmpty(notice.DedupKey) ? Slug(notice.Title) : notice.DedupKey));
 
         if (notice.Actions.Count == 1)
         {
@@ -151,6 +162,22 @@ public sealed partial class NotificationHost : UserControl
             if (action.DismissesNotice) _service?.Dismiss(notice);
         };
         return button;
+    }
+
+    /// <summary>
+    /// Lowercase, hyphen-separated, letters and digits only, so the fallback
+    /// AutomationId reads like the dedup keys the other notices use.
+    /// </summary>
+    private static string Slug(string title)
+    {
+        var sb = new System.Text.StringBuilder(title.Length);
+        foreach (var ch in title)
+        {
+            if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+            else if (sb.Length > 0 && sb[^1] != '-') sb.Append('-');
+        }
+
+        return sb.ToString().TrimEnd('-');
     }
 
     private static InfoBarSeverity ToInfoBarSeverity(NoticeSeverity severity) => severity switch

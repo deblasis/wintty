@@ -129,7 +129,7 @@ if (Test-Path Variable:PSNativeCommandUseErrorActionPreference) {
 # outDir    does it take -OutDir
 # seed      does it take -Seed
 # minutes   rough wall clock, so a full run can be planned around. Only the
-#           smoke four are measured; the rest are upper-bound guesses
+#           smoke set is measured; the rest are upper-bound guesses
 # oracle    what a pass from this harness actually rules out
 $Harnesses = [System.Collections.Generic.List[object]]@(
     [ordered]@{ name = 'search';         script = 'search-fuzz.ps1';               tags = @('smoke','search'); outDir = $true;  seed = $true;  minutes = 2
@@ -170,6 +170,8 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
                 oracle = 'jump-list CLI arguments reach the running primary and open what they name, across five checks' }
     [ordered]@{ name = 'splash-race';    script = 'splash-single-instance-race.ps1'; tags = @('startup');      outDir = $false; seed = $false; minutes = 2
                 oracle = 'samples the window list for a splash owned by a secondary; demonstrates the race, does not certify its absence' }
+    [ordered]@{ name = 'shader-notice';  script = 'shader-notice-fuzz.ps1';        tags = @('smoke','render','startup'); outDir = $true; seed = $true; minutes = 2
+                oracle = 'the custom-shader banner in both directions against a staged config: absent or empty raises no banner at all, an unreadable or untranslatable shader raises one reporting a load failure. A translatable shader is only checked for NOT reporting a load failure - a missing compiler or a refused pipeline are the machine as much as the build' }
 )
 
 # Deliberately not in the manifest. This is a list rather than a comment

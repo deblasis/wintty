@@ -9,14 +9,20 @@ namespace Ghostty.Core.Interop;
 // imports these via `using Ghostty.Core.Interop;` so existing call sites
 // in GhosttyHost compile unchanged.
 //
-// GhosttyActionsLayoutTests in Ghostty.Tests pins the ordinals and
-// struct layouts at build time; that test file also carries the grep
-// command for re-verifying against include/ghostty.h after a rebase.
+// GhosttyActionTagHeaderParityTests reads include/ghostty.h and checks
+// every ordinal below against it; GhosttyActionsLayoutTests pins the
+// struct layouts. Nothing here needs re-verifying by hand after a sync.
 
 // Subset of ghostty_action_tag_e that the Windows apprt dispatches on.
-// Indices are pinned explicitly so an upstream reorder cannot silently
-// misroute a tag to the wrong handler — any unlisted tag falls through
-// to "return false" in GhosttyHost.OnAction.
+// Any unlisted tag falls through to "return false" in
+// GhosttyHost.OnAction.
+//
+// These are positions in an enum upstream edits, and an insertion shifts
+// every later tag without breaking a single compile: the header is not
+// compiled here and the tags arrive as ints. Upstream adding
+// SET_WINDOW_TITLE at 35 shifted twenty of them, so libghostty's
+// first_render arrived as CustomShaderFailed and every new surface raised
+// a custom-shader notice. Only the header can contradict this list.
 internal enum GhosttyActionTag
 {
     NewTab = 2,
@@ -44,27 +50,35 @@ internal enum GhosttyActionTag
     DesktopNotification = 32,
     SetTitle = 33,
     SetTabTitle = 34,
-    PromptTitle = 35,
-    MouseShape = 37,
-    MouseVisibility = 38,
-    MouseOverLink = 39,
-    OpenConfig = 41,
-    FloatWindow = 43,
-    ReloadConfig = 48,
-    ConfigChange = 49,
-    CloseWindow = 50,
-    RingBell = 51,
-    SelectionChanged = 52,
-    ShowChildExited = 57,
-    ProgressReport = 58,
-    StartSearch    = 61,
-    EndSearch      = 62,
-    SearchTotal    = 63,
-    SearchSelected = 64,
-    PromptReady    = 68,
-    FirstRender    = 69,
-    CustomShaderFailed = 70,
+    // Not dispatched: no window-title override UI yet. Listed so the
+    // ordinal it displaced is visible rather than an unexplained gap.
+    SetWindowTitle = 35,
+    PromptTitle = 36,
+    MouseShape = 38,
+    MouseVisibility = 39,
+    MouseOverLink = 40,
+    OpenConfig = 42,
+    FloatWindow = 44,
+    ReloadConfig = 49,
+    ConfigChange = 50,
+    CloseWindow = 51,
+    RingBell = 52,
+    SelectionChanged = 53,
+    ShowChildExited = 58,
+    ProgressReport = 59,
+    StartSearch    = 62,
+    EndSearch      = 63,
+    SearchTotal    = 64,
+    SearchSelected = 65,
+    PromptReady    = 69,
+    FirstRender    = 70,
+    CustomShaderFailed = 71,
 }
+
+// ghostty_target_tag_e: which half of OnAction the action is addressed to.
+// Lives here rather than as consts beside the switch so a test can reach it:
+// swapping these two routes every app action into the surface arm.
+internal enum GhosttyTargetTag { App = 0, Surface = 1 }
 
 // ghostty_action_scrollbar_s:
 //   { uint64 total; uint64 offset; uint64 len; }
@@ -90,7 +104,7 @@ internal struct GhosttyActionMouseOverLink
     public nuint Len;
 }
 
-// ghostty_action_new_split_direction_e: where the new split is placed
+// ghostty_action_split_direction_e: where the new split is placed
 // relative to the focused surface.
 internal enum GhosttySplitDirection { Right = 0, Down = 1, Left = 2, Up = 3 }
 
@@ -100,7 +114,7 @@ internal enum GhosttySplitDirection { Right = 0, Down = 1, Left = 2, Up = 3 }
 internal enum GhosttyGotoSplit { Previous = 0, Next = 1, Up = 2, Left = 3, Down = 4, Right = 5 }
 
 // ghostty_action_resize_split_direction_e. Note this is a *different*
-// ordering from GhosttySplitDirection — resize grows the split toward
+// ordering from GhosttySplitDirection: resize grows the split toward
 // the named edge, so the values do not line up with placement.
 internal enum GhosttyResizeSplitDirection { Up = 0, Down = 1, Left = 2, Right = 3 }
 
@@ -110,9 +124,12 @@ internal enum GhosttyGotoWindow { Previous = 0, Next = 1 }
 // ghostty_action_float_window_e: always-on-top state to apply.
 internal enum GhosttyFloatWindow { On = 0, Off = 1, Toggle = 2 }
 
-// ghostty_action_prompt_title_e: whether the prompt renames the
-// individual surface (pane) or the surface's containing tab.
-internal enum GhosttyPromptTitle { Surface = 0, Tab = 1 }
+// ghostty_action_prompt_title_e: what the prompt renames. Window arrived in
+// the same sync that shifted the tags above and has no window-title override
+// to drive here, but it is listed because the handler has to be able to tell
+// it from Surface: collapsing the payload to "is it Tab" silently renamed the
+// pane instead, and reported the action handled.
+internal enum GhosttyPromptTitle { Surface = 0, Tab = 1, Window = 2 }
 
 // ghostty_action_size_limit_s:
 //   { uint32 min_width; uint32 min_height; uint32 max_width; uint32 max_height; }

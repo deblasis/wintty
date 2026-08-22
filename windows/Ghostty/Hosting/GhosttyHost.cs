@@ -430,10 +430,6 @@ internal sealed partial class GhosttyHost : IDisposable
         }
     }
 
-    // ghostty_target_s tag values, mirroring ghostty.h ghostty_target_tag_e.
-    private const int GhosttyTargetApp = 0;
-    private const int GhosttyTargetSurface = 1;
-
     /// <summary>
     /// Try to resolve the per-window host that currently owns the
     /// given surface handle. Checks this host's own _surfaces first
@@ -474,8 +470,8 @@ internal sealed partial class GhosttyHost : IDisposable
         try
         {
             tag = (GhosttyActionTag)Marshal.ReadInt32(actionPtr);
-            var targetTag = Marshal.ReadInt32(targetPtr);
-            if (targetTag == GhosttyTargetApp)
+            var targetTag = (GhosttyTargetTag)Marshal.ReadInt32(targetPtr);
+            if (targetTag == GhosttyTargetTag.App)
             {
                 switch (tag)
                 {
@@ -529,7 +525,7 @@ internal sealed partial class GhosttyHost : IDisposable
                 }
             }
 
-            if (targetTag != GhosttyTargetSurface) return 0;
+            if (targetTag != GhosttyTargetTag.Surface) return 0;
             var surfaceHandle = Marshal.ReadIntPtr(targetPtr, 8);
             if (!TryResolveControl(surfaceHandle, out var control) || control is null) return 0;
 
@@ -625,8 +621,21 @@ internal sealed partial class GhosttyHost : IDisposable
 
                 case GhosttyActionTag.PromptTitle:
                 {
-                    // c_int mode at +8: 0 = surface, 1 = tab.
-                    var isTab = Marshal.ReadInt32(actionPtr, 8) == (int)GhosttyPromptTitle.Tab;
+                    // Switched rather than compared against Tab. Reading this
+                    // as "is it Tab" made Window, which upstream appended, look
+                    // like Surface: prompt_window_title renamed the pane and
+                    // then reported the action handled.
+                    var mode = (GhosttyPromptTitle)Marshal.ReadInt32(actionPtr, 8);
+                    if (mode is not (GhosttyPromptTitle.Surface or GhosttyPromptTitle.Tab))
+                    {
+                        // Window, or anything a newer libghostty adds. No
+                        // window-title override exists here, so return 0 and
+                        // let libghostty fall back rather than rename the wrong
+                        // thing and report it handled.
+                        return 0;
+                    }
+
+                    var isTab = mode == GhosttyPromptTitle.Tab;
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (TryResolveControl(surfaceHandle, out var c) && c is not null)
