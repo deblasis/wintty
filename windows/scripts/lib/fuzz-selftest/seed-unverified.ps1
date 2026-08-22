@@ -34,7 +34,7 @@ finally {
     # caught rather than assumed. In the real harness this is where the app
     # is taken back down and XDG_CONFIG_HOME is restored, and a seeding
     # failure aborts the run from the middle of the op loop.
-    Set-Content -Path (Join-Path $OutDir 'finally-ran.txt') -Value 'cleanup happened'
+    Set-Content -LiteralPath (Join-Path $OutDir 'finally-ran.txt') -Value 'cleanup happened'
 }
 
 exit $code

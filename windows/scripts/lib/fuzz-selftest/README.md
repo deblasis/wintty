@@ -17,6 +17,7 @@ needs no build, no window and no interactive desktop.
 | `hangs.ps1` | a wedged harness is killed at its budget rather than hanging the run |
 | `seed-unverified.ps1` | a harness that could not establish its own corpus leaves with 1 out of a catch and a classification, and still runs its `finally` |
 | `seed-readback-cases.ps1` | the seed read-back rules themselves: a rising count is landing, an unreadable sample is not a miss |
+| `stderr-flood.ps1` | a harness that writes past a pipe buffer on the stream nobody reads back still reaches its exit, so both pipes are drained |
 
 Most take `-ExePath` and `-OutDir` like a real harness; `no-outdir.ps1`
 deliberately takes `-Seed` and no `-OutDir`, which is the point of it.
@@ -37,20 +38,28 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 |---|---|
 | `valid.ps1` | a well-formed layer merges, and the run names both counts |
 | `pscustomobject.ps1` | an entry written as a custom object normalises rather than crashing |
-| `minutes-string.ps1` | `minutes` as text coerces to `Int32` before the timeout arithmetic reads it |
-| `minutes-bad.ps1` | `minutes` no arithmetic can use is refused |
+| `minutes-string.ps1` | `minutes` and `timeoutSeconds` as text coerce to `Int32` before the timeout arithmetic reads them |
+| `minutes-bad.ps1` | `minutes` no arithmetic can use is refused, and each shape is told apart rather than given the nearest sentence: text, negative, over the Int32 the budget multiply reaches, wrapped in a list, `NaN`, written as `@{ }`, `$true`, and blank |
+| `timeout-bad.ps1` | so is a `timeoutSeconds` that is text, one out of Int32 or in a list, or a budget of zero or less, which skips the floor `minutes` gets |
 | `tags-missing.ps1` | empty, null and all-blank `tags` are each refused, not just an absent key |
 | `tags-padded.ps1` | a padded tag is stored trimmed, so `-Tag` can reach what `-List` shows; a numeric one is kept |
+| `tags-comma.ps1` | a tag holding a comma is refused, because `-Tag` cuts on one and `-List` cannot show the difference |
+| `name-comma.ps1` | the same rule on the field `-Only` and `-Skip` match |
+| `name-padded.ps1` | a padded name is stored trimmed, so the collision and duplicate checks compare what selection compares |
 | `missing-key.ps1` | one entry per required key, each short a different one, so shortening the list is visible |
 | `empty-value.ps1` | a key that is present and empty is not a declared key |
-| `script-missing.ps1` | a `script` the tier declared and never shipped is refused, by integrity check 1 |
+| `param-missing.ps1` | integrity check 3 speaking: a script that does not declare `-ExePath`, `-OutDir` or `-Seed` the manifest passes it |
+| `script-missing.ps1` | a `script` the tier declared and never shipped is refused by integrity check 1, and so is one naming a directory |
 | `script-escapes.ps1` | a `script` that climbs out of the directory is refused |
 | `script-sibling.ps1` | so is one in a sibling directory whose path opens with the same characters |
 | `leaf-collision.ps1` | naming a subdirectory script does not classify a same-leaf script at the top level |
-| `script-relative.ps1` | a `script` written as `./name.ps1` is reduced to the leaf the same check compares |
+| `script-relative.ps1` | a `script` written as `./name.ps1` is resolved to what the same check compares |
+| `script-spellings.ps1` | so are the other ways of writing a path beside the runner, which a prefix strip left alone, and a plain name holding a wildcard character |
 | `duplicate-name.ps1` | the same name twice inside one layer is refused |
 | `base-collision.ps1` | a name the base set already uses is refused |
 | `reserved-layer.ps1` | the layer cannot call itself `base` |
+| `reserved-layer-padded.ps1` | nor `base` with padding on it, which the refusal used to compare and miss |
+| `layer-blank.ps1` | a layer name that is only padding is no name, and would report the merged suite as base-only |
 | `no-harnesses.ps1` | a layer with nothing to run under it is refused |
 | `no-layer.ps1` | so is harnesses with no layer name, which would otherwise merge and report as base-only |
 | `returns-nothing.ps1` | a manifest that emits no object at all is refused |
@@ -59,8 +68,13 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `not-in-suite.ps1` | a layer can classify a runner of its own without patching the suite |
 | `not-in-suite-object.ps1` | the same classification written as a custom object is read, not silently ignored |
 | `not-in-suite-list.ps1` | a list of names rather than name = reason pairs is refused |
+| `not-in-suite-wrapped-pairs.ps1` | the pairs written correctly and then wrapped in a list are told about the wrapper, not about the pairs |
+| `not-in-suite-wrapped-pairs-object.ps1` | the same wrapper with the pairs written as a custom object, which is the other arm of that test |
+| `not-in-suite-typed-list.ps1` | so is the same list typed, which is neither an array nor a dictionary |
 | `not-in-suite-harness.ps1` | a layer cannot excuse a script its own manifest names as a harness |
+| `not-in-suite-harness-relative.ps1` | the same door, with the harness written as a path rather than a name |
 | `not-in-suite-padded.ps1` | a padded name is stored trimmed, so it excuses the file it names |
+| `not-in-suite-dotname.ps1` | so is a classified name that opens with a dot, which a character trim ate |
 | `not-in-suite-path.ps1` | a name carrying a separator, or a blank one, excuses nothing and is refused |
 | `not-in-suite-empty-reason.ps1` | the pairs form with an empty reason is the list form spelled the long way round |
 | `not-in-suite-empty.ps1` | an empty collection is read as the list form rather than skipped |

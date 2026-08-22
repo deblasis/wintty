@@ -6,10 +6,15 @@
 # assertion downstream a pin on the platform's own rounding rather than on a
 # rule anyone here decided; it is used because it is the only signal, not
 # because 2.6 minutes rounding up matters to anything.
+#
+# timeoutSeconds as text rides along on the second, because it is the same
+# coercion on the same kind of value and a guard that refused it would refuse a
+# manifest that is fine. Its own refusals are a fixture of their own; this is
+# only the half that has to keep working.
 @{
     layer = 'pro'
     harnesses = @(
         @{ name = 'st-tier-a'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @('tier'); outDir = $true; seed = $false; minutes = '2';   oracle = 'fixture' }
-        @{ name = 'st-tier-b'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @('tier'); outDir = $true; seed = $false; minutes = '2.6'; oracle = 'fixture' }
+        @{ name = 'st-tier-b'; script = 'lib/fuzz-selftest/pass.ps1'; tags = @('tier'); outDir = $true; seed = $false; minutes = '2.6'; timeoutSeconds = '90'; oracle = 'fixture' }
     )
 }
