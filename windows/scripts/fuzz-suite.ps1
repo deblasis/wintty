@@ -100,6 +100,13 @@ param(
     # exit code can be asserted. Without it the self-test would exercise
     # everything except the two lines that actually end the run.
     [switch]$SelfTestInner,
+    # Also used by -SelfTest only: marks the child it runs to prove that -SelfTest
+    # refuses filters, so that child does not run one of its own if the refusal
+    # ever stops refusing. A parameter rather than an environment variable,
+    # because an ambient one is set by anything in the process tree and turns the
+    # guard off silently - the self-test then reports the same case count with
+    # the check gone, which is the shape of defect this file exists to refuse.
+    [switch]$SelfTestRefusalChild,
     # Stop at the first harness that reports findings, leaving its artifacts
     # as the newest thing on disk. Off by default: one broken area should
     # not hide the state of the rest.
@@ -192,12 +199,24 @@ $NotInSuite = [ordered]@{
 # The one place a script path is put into the form the checks compare. Every
 # collection compared that way is built through here - the inventory below, the
 # tier's claimed scripts, and both halves of integrity check 2. The rule used to
-# be copied into each of them, so an edit to one was silent in the others, and
-# they already differed: check 2 read $NotInSuite raw while the inventory
-# normalised it.
+# be copied into each of them, so an edit to one was silent in the others. The
+# divergence that argument was written about - check 2 reading $NotInSuite raw
+# while the inventory normalised it - can no longer arise: the base keys are
+# literals here, and a tier's are refused unless they are plain file names, so
+# both sides of check 2 now normalise to themselves. What is left is the script
+# side, where a tier may write './x.ps1' or 'lib/pro/x.ps1' for a file the
+# checks name some other way.
 function ConvertTo-ScriptKey {
     param([string]$Path)
-    return ($Path -replace '/', '\').TrimStart('.\')
+    $key = $Path -replace '/', '\'
+    # Exactly one leading '.\', by prefix. TrimStart takes a SET of characters,
+    # so it also ate the leading dot of '.helper.ps1' - a tier classifying one
+    # was then told to classify the file it had just classified, which is the
+    # wrong-blame failure the notInSuite trim was added to remove - and it ate
+    # '..\' whole, which only ever looked like an escape because the path guard
+    # refuses those before this is reached.
+    if ($key.StartsWith('.\')) { $key = $key.Substring(2) }
+    return $key
 }
 
 # Everything this file ships beside itself, as paths relative to this directory:
@@ -345,6 +364,19 @@ if (Test-Path $TierManifestPath) {
         # as selectable as '0' and is kept.
         if ($entry.Contains('tags')) {
             $entry.tags = @($entry.tags | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            # The other character the two sides still disagreed on. Split-List
+            # CUTS the caller's -Tag on a comma, so a declared tag of 'a,b' is
+            # listed as a real one and no -Tag argument can ever reach it - the
+            # padded-tag failure again, by the half of Split-List's rule the trim
+            # did not copy. Refused rather than split, because splitting means a
+            # manifest that declares one tag silently gets two, and -List joins
+            # tags with a comma, so nothing anyone can read says which happened.
+            foreach ($t in $entry.tags) {
+                if ($t.Contains(',')) {
+                    $tierProblems += ("tier harness '$($entry.name)' declares a tag holding a comma: '$t'. " +
+                                      'A comma separates -Tag values, so no -Tag run could select it; declare them as separate tags')
+                }
+            }
         }
         if (-not $entry.tags) {
             $tierProblems += "tier harness '$($entry.name)' declares no tags, so no -Tag run would ever select it"
@@ -853,6 +885,16 @@ if ($SelfTest) {
         @{ name = 'st-seed-readback'; verdict = 'pass'; attempts = 1; why = 'the seed read-back rules decide whether a run has a real corpus, so they are exercised rather than assumed' }
     )
     $bad = @()
+    # The root has to be this process's own, and nothing else here would notice
+    # if it stopped being one: two self-tests sharing a root corrupt each other
+    # rather than colliding loudly. flaky.ps1 keys its retry marker off the run
+    # root, so the second run's st-flaky passes on attempt 1 and is reported as
+    # '1 attempt(s), expected 2'; and the tier cases below rewrite the manifest
+    # in a copy of this directory between the copy and each child launch, so one
+    # run reads what the other just wrote. Neither reproduces on its own.
+    if (-not $OutRoot.Contains("selftest-$PID")) {
+        $bad += "the run root is not this process's own: $OutRoot. Two self-tests at once would share it and rewrite each other's fixtures"
+    }
     # One row per harness and nothing else. A harness's console output
     # leaking into the result set is not cosmetic: it inflates the pass
     # count that gets reported and fills summary.json with printed lines.
@@ -961,19 +1003,18 @@ if ($SelfTest) {
     # because a run whose filter took would leave with 1 as well, by failing
     # these very assertions.
     #
-    # The child is told what it is, and skips this block. Its whole job is to
-    # be refused before it starts, so if the refusal ever stopped refusing the
-    # child would reach this line and start a -SelfTest of its own, and that
-    # one another, without end. A self-test that takes the machine down when a
-    # guard breaks is worse than one that misses.
-    if (-not $env:WINTTY_FUZZ_SELFTEST_REFUSAL_CHILD) {
-        $env:WINTTY_FUZZ_SELFTEST_REFUSAL_CHILD = '1'
-        try {
-            $refused = (& pwsh -NoProfile -File $PSCommandPath -SelfTest -Only st-pass | Out-String)
-            $refusedExit = $LASTEXITCODE
-        } finally {
-            Remove-Item Env:WINTTY_FUZZ_SELFTEST_REFUSAL_CHILD -ErrorAction SilentlyContinue
-        }
+    # The child is told what it is, on the command line, and skips this block.
+    # Its whole job is to be refused before it starts, so if the refusal ever
+    # stopped refusing the child would reach this line and start a -SelfTest of
+    # its own, and that one another, without end. A self-test that takes the
+    # machine down when a guard breaks is worse than one that misses. Told with
+    # a parameter rather than an environment variable because the variable is
+    # also readable from outside: exported into the shell that runs this, it
+    # skips the block with no message and no change to the case count, so a run
+    # with the check gone is indistinguishable from one that made it.
+    if (-not $SelfTestRefusalChild) {
+        $refused = (& pwsh -NoProfile -File $PSCommandPath -SelfTest -Only st-pass -SelfTestRefusalChild | Out-String)
+        $refusedExit = $LASTEXITCODE
         if ($refusedExit -ne 1 -or -not $refused.Contains('it takes no filters')) {
             $bad += "-SelfTest with -Only exited $refusedExit without refusing the filter; every expectation above would have run against one fixture"
         }
@@ -1021,7 +1062,15 @@ if ($SelfTest) {
         }
         # lib/ wholesale, because it carries wintty-process.ps1 - dot-sourced
         # before anything else runs - and every fixture the harnesses name.
-        Copy-Item -Path (Join-Path $From 'lib') -Destination $To -Recurse -Force
+        # A source without one is not a suite directory. Left to Copy-Item under
+        # $ErrorActionPreference = 'Stop' that ends the whole self-test on an
+        # ItemNotFoundException, which names the line it stopped at and not the
+        # argument that was wrong.
+        $libFrom = Join-Path $From 'lib'
+        if (-not (Test-Path -LiteralPath $libFrom)) {
+            throw "Copy-SuiteScripts: '$From' has no lib/, so it is not a suite directory to copy from"
+        }
+        Copy-Item -Path $libFrom -Destination $To -Recurse -Force
     }
 
     # Everything the tier cases create lives under one directory, the copy and
@@ -1172,6 +1221,16 @@ exit 0
     Assert-Layer -Run (Invoke-Layer -Case 'tags-padded' -Manifest 'tags-padded.ps1') -Exit 0 `
         -Says @("layers: base ($baseCount) + pro (2)", 'tier,x')
 
+    # The last character the two sides disagreed on, and the one -List cannot
+    # show either way: it joins tags with a comma, so a single tag of 'a,b' and
+    # two tags a and b print identically. The refusal is the only place the
+    # difference can be seen, which is the argument for refusing rather than
+    # splitting. Both entries assert it, because trimming reaches the same
+    # value the second way and a guard placed before the trim would miss it.
+    Assert-Layer -Run (Invoke-Layer -Case 'tags-comma' -Manifest 'tags-comma.ps1') -Exit 1 `
+        -Says @("tier harness 'st-tier-comma' declares a tag holding a comma: 'a,b'",
+                "tier harness 'st-tier-padded' declares a tag holding a comma: 'c,d'")
+
     # One entry per required key, each short a different one. The loop collects
     # every problem before it exits, so seven assertions cost one child run - and
     # a key quietly dropped from the list is otherwise invisible.
@@ -1271,6 +1330,17 @@ exit 0
         -Says @("layers: base ($baseCount) + pro (1)") `
         -Silent @('tier-runner.ps1 is in this directory')
 
+    # A classified name that opens with a dot. Reducing a path by trimming the
+    # characters '.' and '\' rather than the prefix takes this one down to
+    # 'helper.ps1' and the run dies at check 2 naming the file the manifest
+    # classified - the padded-name failure again, from the other side of the
+    # same reduction. Nothing else in the set reaches that difference: every
+    # other name here opens with a letter.
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-dotname' -Manifest 'not-in-suite-dotname.ps1' `
+                                    -Inject @{ 'layer-scripts/.helper.ps1' = $LayerStub }) -Exit 0 `
+        -Says @("layers: base ($baseCount) + pro (1)") `
+        -Silent @('.helper.ps1 is in this directory')
+
     Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-list' -Manifest 'not-in-suite-list.ps1') -Exit 1 `
         -Says @('tier notInSuite must be written as name = reason pairs, not a list of names')
 
@@ -1288,20 +1358,36 @@ exit 0
                 "tier notInSuite names something that is not a plain file name: ''")
 
     # The pairs form with an empty reason, which is the list form spelled the
-    # long way round.
+    # long way round. Both ways a reason can say nothing are here: absent, and
+    # present as whitespace. The second is the one an emptiness test that does
+    # not trim reads as given.
     Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-empty-reason' -Manifest 'not-in-suite-empty-reason.ps1') -Exit 1 `
-        -Says @("tier notInSuite gives no reason for 'tier-runner.ps1'")
+        -Says @("tier notInSuite gives no reason for 'tier-runner.ps1'",
+                "tier notInSuite gives no reason for 'tier-asset.ps1'")
 
     # notInSuite is the only thing in the merge that tells check 2 to look away,
     # so what it may excuse is the merge's own business.
     Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-harness' -Manifest 'not-in-suite-harness.ps1') -Exit 1 `
         -Says @("tier notInSuite excuses 'search-fuzz.ps1', which the manifest also names as a harness script")
 
-    # Present and empty, which a key-presence check takes for declared.
+    # The same door, with the harness named as a path rather than as a leaf.
+    # notInSuite names leaves, so the manifest's own scripts have to be reduced
+    # to leaves before the two can be compared - and unreduced they never match,
+    # so the tier excuses a script it declared and the suite shrinks by one with
+    # nothing said. The stub is injected because that shrink is a PASS: without
+    # a file behind the name the run would be refused by check 1 instead.
+    Assert-Layer -Run (Invoke-Layer -Case 'not-in-suite-harness-relative' -Manifest 'not-in-suite-harness-relative.ps1' `
+                                    -Inject @{ 'layer-scripts/tier-runner.ps1' = $LayerStub }) -Exit 1 `
+        -Says @("tier notInSuite excuses 'tier-runner.ps1', which the manifest also names as a harness script")
+
+    # Present and empty, which a key-presence check takes for declared. The last
+    # is empty only after trimming, which is how a manifest is likelier to write
+    # it and the only one that pins the trim.
     Assert-Layer -Run (Invoke-Layer -Case 'empty-value' -Manifest 'empty-value.ps1') -Exit 1 `
         -Says @("tier harness has an empty 'name':",
                 "tier harness has an empty 'script': st-tier-empty-script",
-                "tier harness has an empty 'oracle': st-tier-empty-oracle")
+                "tier harness has an empty 'oracle': st-tier-empty-oracle",
+                "tier harness has an empty 'oracle': st-tier-blank-oracle")
 
     # Refused by integrity check 1 rather than by the merge, which is why it is
     # asserted end to end: the merge reads the manifest strictly so that a tier
@@ -1354,6 +1440,24 @@ exit 0
         if (Test-Path -LiteralPath (Join-Path $stagedCopy $unwanted)) {
             $bad += "layer/tier-checkout: the copy carried $unwanted, which only a glob over a tier checkout takes"
         }
+    }
+
+    # The other thing taking a source root rather than $PSScriptRoot admits: a
+    # source that is not a suite directory at all. lib/ is copied wholesale and
+    # not through the inventory, so a missing one is the one argument error this
+    # function cannot skip past - and under $ErrorActionPreference = 'Stop' it
+    # ended the whole self-test on Copy-Item's own exception, which names a line
+    # in here and not the directory it was handed.
+    $noLib = Join-Path $LayerSandbox 'no-lib'
+    New-Item -ItemType Directory -Force -Path $noLib | Out-Null
+    Set-Content -LiteralPath (Join-Path $noLib 'fuzz-suite.ps1') -Value '# fuzz-suite.ps1' -Encoding utf8
+    $script:LayerCases++
+    $noLibSaid = try {
+        Copy-SuiteScripts -From $noLib -To (Join-Path $LayerSandbox 'no-lib-copy') -Inventory @('fuzz-suite.ps1')
+        '(it did not refuse)'
+    } catch { "$_" }
+    if ($noLibSaid -notlike '*has no lib/*') {
+        $bad += "layer/no-lib: copying from a directory without lib/ said '$noLibSaid', which does not say what was wrong with the source it was given"
     }
 
     # Injected over a file the copy legitimately carries, which is what the
