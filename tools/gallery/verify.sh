@@ -72,7 +72,7 @@ exit /b %ERRORLEVEL%
 EOF
 
 win_dir=$(echo "$WARP_DIR" | sed 's|/|\\|g')
-ssh "$WARP_HOST" "if not exist ${win_dir%\\*} mkdir ${win_dir%\\*}"
+ssh "$WARP_HOST" "if not exist $win_dir mkdir $win_dir"
 scp -q "$ZIOSHADE_DIR/tools/warp/run.ps1" \
        "$ZIOSHADE_DIR/tools/warp/warp_render.cpp" \
        "$ZIOSHADE_DIR/tools/warp/fullscreen_vs.hlsl" \

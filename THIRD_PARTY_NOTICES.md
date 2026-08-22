@@ -37,7 +37,7 @@ each shader.
 Source: https://github.com/sahaj-b/ghostty-cursor-shaders
 License: MIT (LICENSES/sahaj-b-MIT.txt)
 
-Bundled assets: cursor_sweep.glsl, cursor_tail.glsl, cursor_warp.glsl,
+Bundled assets: cursor_sweep.glsl, cursor_tail.glsl,
 rectangle_boom_cursor.glsl, ripple_cursor.glsl,
 ripple_rectangle_cursor.glsl, sonic_boom_cursor.glsl
 
