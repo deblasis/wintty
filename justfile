@@ -235,27 +235,296 @@ fuzz-selftest:
 # PATH; sync is a maintainer command and the maintainer has it.
 
 # Fetch upstream and rebase windows branch.
+#
+# Fetches origin as well, and refuses to start when the current branch lags
+# the ref it tracks. This recipe ends in a force-push, so replaying a stale
+# local copy does not merely miss the newer commits, it overwrites them.
 sync force="":
     #!/usr/bin/env bash
-    set -e
+    set -euo pipefail
     if [ "{{ force }}" != "--force" ] && [ "$(git branch --show-current)" != "windows" ]; then
         echo "WARNING: you are on '$(git branch --show-current)', not 'windows'. Switch to windows branch first. Use 'just sync --force' to override."
         exit 1
     fi
     git fetch upstream
+    git fetch origin
+    tracked=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+    if [ -n "$tracked" ]; then
+        # Compare by patch-id, not by SHA. A replay rewrites every SHA, so
+        # `HEAD..@{u}` reports the whole stack as missing the moment a sync
+        # finishes, and this would then refuse to ever run a second time.
+        # --cherry-pick --right-only drops commits that already exist here
+        # under a different SHA and leaves only genuinely new work.
+        behind=$(git rev-list --count --cherry-pick --right-only "HEAD...${tracked}")
+        if [ "$behind" -gt 0 ]; then
+            echo "REFUSING: ${tracked} has ${behind} commit(s) with no equivalent here:"
+            git rev-list --cherry-pick --right-only --oneline "HEAD...${tracked}" | head -10 || true
+            echo "Replaying now would leave them out, and the force-push at the end"
+            echo "would make that permanent. Take them first:"
+            echo "  git rebase ${tracked}"
+            exit 1
+        fi
+    fi
     git rebase upstream/main
     echo "Rebase complete. Run 'just sync-verify' before pushing:"
-    echo "  git push --force-with-lease origin windows"
+    echo "  git push --force-with-lease origin $(git branch --show-current)"
 
-# Post-rebase sanity check: show what this branch changes relative to
-# upstream/main so an accidental revert or a dropped commit is visible
-# before the force-push. Read the file list - anything outside the
-# expected fork surface is a red flag.
-sync-verify:
+# Post-rebase gate. Exits non-zero on a finding instead of printing a report
+# for a human to skim, because the report this replaced was skimmed and passed
+# while the product did not compile.
+#
+# Checks, cheapest first:
+#
+#   markers   a resolution that left <<<<<<< behind in a file no test compiles
+#   dropped   commits that replayed empty and silently left the stack
+#   surface   a file the fork used to change and now does not, or the reverse
+#   fmt       a NEW zig fmt offender under src/; the fork carries pre-existing
+#             ones, so a bare `zig fmt --check` is mostly noise and gets
+#             ignored. Narrower than upstream CI, which checks the whole tree
+#   build     fork code compiled against upstream code the fork never edits
+#
+# `build` is the leg that matters most and the one a test run will not give
+# you. Zig analyses lazily, so `zig build test` never reaches code no test
+# instantiates. A fork call into an upstream function whose signature moved,
+# or new upstream code switching over an enum the fork extended, both fail to
+# compile here while the entire test suite stays green. Neither one produces a
+# merge conflict, because only one side edited the text: that is exactly why
+# finishing the rebase without conflicts proves so little.
+#
+# Four of these compare against the pre-rebase tip: dropped commits, file
+# surface, range-diff, and the fmt baseline. That tip is the ref this branch
+# tracks, and it survives only until the force-push replaces it. After pushing
+# there is nothing left to compare against, so those four announce themselves
+# as skipped rather than passing silently. Run this before you push, not after.
+#
+# Exit codes: 0 clean, 1 a finding, 2 bad arguments. Items printed as REVIEW
+# exit 0 on purpose, because an upstream rename moves the file surface
+# legitimately and a check that cries wolf gets passed a flag instead of read.
+#
+# `just sync-verify fast` stops before the build ladder.
+sync-verify mode="":
     #!/usr/bin/env bash
-    set -e
-    echo "=== commits unique to this branch ==="
-    git log --oneline upstream/main..HEAD | head -60
+    set -euo pipefail
+
+    case "{{ mode }}" in
+        ""|fast) ;;
+        *) echo "unknown mode '{{ mode }}'; use 'just sync-verify' or 'just sync-verify fast'"; exit 2 ;;
+    esac
+
+    # Deliberately inside the work tree. zig is a native Windows binary and
+    # cannot resolve an msys path, so a `mktemp -d` directory would make every
+    # fmt lookup below fail with FileNotFound under git-bash. The clean-tree
+    # check below ignores this one path because we own it.
+    tmpd=".sync-verify-tmp"
+    rm -rf "$tmpd"
+    trap 'rm -rf "$tmpd"' EXIT
+    fail=0
+    review=0
+    note() { printf '%s\n' "$*"; }
+    bad() { printf 'FAIL: %s\n' "$*"; fail=1; }
+    look() { printf 'REVIEW: %s\n' "$*"; review=$((review + 1)); }
+
+    git_dir=$(git rev-parse --git-dir)
+    if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+        echo "FAIL: a rebase is still in progress; finish or abort it first"
+        exit 1
+    fi
+    if ! git rev-parse --verify -q refs/remotes/upstream/main >/dev/null; then
+        echo "FAIL: no refs/remotes/upstream/main. Add the upstream remote and fetch it;"
+        echo "without it nothing below can tell a replay from a fresh checkout."
+        exit 1
+    fi
+    dirty=$(git status --porcelain | grep -v "^?? ${tmpd}/\?\$" || true)
+    if [ -n "$dirty" ]; then
+        bad "working tree is not clean"
+    fi
+    if ! git merge-base --is-ancestor refs/remotes/upstream/main HEAD; then
+        bad "HEAD does not contain upstream/main; the replay did not land on the fetched upstream"
+    fi
+
+    note "=== conflict markers ==="
+    # Only the <<<<<<< and >>>>>>> forms. A bare ======= line is a legitimate
+    # markdown heading underline, and matching it produces pure noise.
+    markers=$(git grep -n -I -E '^(<{7}|>{7}) ' -- . || true)
+    if [ -n "$markers" ]; then
+        bad "conflict markers survived a resolution:"
+        printf '%s\n' "$markers" | head -20 || true
+    else
+        note "  none"
+    fi
+
+    # The pre-rebase tip is whatever this branch tracks, taken from the branch
+    # itself rather than hardcoded: on a stacked branch cut before the last
+    # push, a hardcoded origin/windows is not an ancestor and every comparison
+    # below would then be against the wrong history and fail bogusly.
+    baseline=""
+    tracked=$(git rev-parse --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+    if [ -n "$tracked" ] && ! git merge-base --is-ancestor "$tracked" HEAD; then
+        baseline="$tracked"
+    fi
+
+    if [ -z "$baseline" ]; then
+        note "=== dropped commits / file surface / range-diff / fmt baseline ==="
+        note "  SKIP: ${tracked:-no tracking ref} is at or behind HEAD, so the pre-rebase tip is gone."
+        note "  These four checks only work between the replay and the push."
+    else
+        old_base=$(git merge-base "$baseline" refs/remotes/upstream/main)
+
+        # One range-diff drives both checks below. It pairs each pre-rebase
+        # commit with its replayed twin, which is the only thing that can tell
+        # "this commit was rewritten" from "this commit is gone". Counting
+        # commits misses a swap; comparing patch-ids flags every hand-resolved
+        # commit as missing, because resolving changes the patch.
+        rd=""
+        rd_ok=1
+        if ! rd=$(git range-diff --no-color "${old_base}..${baseline}" refs/remotes/upstream/main..HEAD 2>&1); then
+            rd_ok=0
+            bad "range-diff failed: $(printf '%s' "$rd" | head -2)"
+        fi
+
+        note "=== dropped commits ==="
+        note "  $(git rev-list --count "${old_base}..${baseline}") before, $(git rev-list --count refs/remotes/upstream/main..HEAD) after"
+        if [ "$rd_ok" -eq 1 ]; then
+            dropped=$(printf '%s\n' "$rd" | grep -E '^ *[0-9]+: *[0-9a-f]+ *< ' || true)
+            if [ -z "$dropped" ]; then
+                note "  none"
+            else
+                while IFS= read -r line; do
+                    [ -n "$line" ] || continue
+                    sha=$(printf '%s' "$line" | awk '{print $2}')
+                    # Upstream absorbing a fork patch drops it from the stack
+                    # legitimately, and that is the expected end state for
+                    # anything sent upstream. `git cherry` marks a commit `-`
+                    # when an equivalent patch already exists there.
+                    if [ "$(git cherry refs/remotes/upstream/main "$sha" "${sha}^" 2>/dev/null | cut -c1)" = "-" ]; then
+                        note "  absorbed upstream: $(git log -1 --oneline "$sha")"
+                    else
+                        bad "commit left the stack and is not upstream: $(git log -1 --oneline "$sha")"
+                    fi
+                done <<< "$dropped"
+            fi
+        fi
+
+        # A set comparison, not a stat diff: a file the fork stops touching is
+        # how a dropped hunk shows up when the commit itself survived.
+        note "=== file surface ==="
+        gone=$(comm -23 <(git diff --name-only "$old_base" "$baseline" | sort) \
+                        <(git diff --name-only refs/remotes/upstream/main HEAD | sort))
+        added=$(comm -13 <(git diff --name-only "$old_base" "$baseline" | sort) \
+                         <(git diff --name-only refs/remotes/upstream/main HEAD | sort))
+        if [ -n "$gone" ] || [ -n "$added" ]; then
+            # Not fatal: an upstream rename legitimately moves the surface, and
+            # that is common enough that failing here would train you to pass
+            # the flag. Read these, do not skim them.
+            look "the fork touches a different set of files than before:"
+            if [ -n "$gone" ]; then
+                printf '%s\n' "$gone" | sed 's/^/    no longer changed: /' | head -20 || true
+            fi
+            if [ -n "$added" ]; then
+                printf '%s\n' "$added" | sed 's/^/    newly changed:     /' | head -20 || true
+            fi
+        else
+            note "  unchanged"
+        fi
+
+        note "=== commits whose content changed in the replay ==="
+        note "  (the ones you resolved by hand, plus any the replay shifted;"
+        note "   read anything here you do not recognise)"
+        if [ "$rd_ok" -eq 1 ]; then
+            changed=$(printf '%s\n' "$rd" | grep -E '^ *[0-9]+: *[0-9a-f]+ *!' || true)
+            if [ -z "$changed" ]; then
+                note "  none"
+            else
+                note "  $(printf '%s\n' "$changed" | wc -l | tr -d ' ') commit(s), showing at most 20:"
+                printf '%s\n' "$changed" | head -20 || true
+            fi
+        fi
+    fi
+
+    note "=== zig fmt (new offenders only) ==="
+    if ! command -v zig >/dev/null 2>&1; then
+        note "  SKIP: zig is not on PATH"
+    else
+        rm -rf "$tmpd"; mkdir -p "$tmpd"
+        # zig reports paths in the platform separator; git only understands
+        # forward slashes, so every lookup below would miss on Windows.
+        offenders=$(zig fmt --check src 2>/dev/null | tr '\\' '/' || true)
+        if [ -z "$offenders" ]; then
+            note "  none"
+        elif [ -z "$baseline" ]; then
+            # Without the pre-rebase tip there is nothing to subtract the known
+            # offenders against. Failing here would flag a standing condition of
+            # the fork as if this replay caused it, which is how a check earns
+            # its way onto the ignore list.
+            look "cannot tell new zig fmt offenders from pre-existing ones without the pre-rebase tip:"
+            printf '%s\n' "$offenders" | sed 's/^/    /' | head -20 || true
+        else
+            known=0
+            while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                if git cat-file -e "${baseline}:${f}" 2>/dev/null; then
+                    # Pre-existing offenders are not this replay's problem.
+                    # Compare each against the same file before the replay.
+                    git show "${baseline}:${f}" > "$tmpd/base.zig"
+                    rc=0
+                    zig fmt --check "$tmpd/base.zig" >/dev/null 2>&1 || rc=$?
+                    case "$rc" in
+                        0) bad "zig fmt: ${f} is newly unformatted" ;;
+                        1) known=$((known + 1)) ;;
+                        # Anything else means zig could not read or parse the
+                        # old copy at all, which is not evidence either way.
+                        *) look "zig fmt could not read ${f} at the pre-rebase tip (rc=${rc}); check it by hand" ;;
+                    esac
+                else
+                    # A file the fork adds in this replay has no excuse.
+                    bad "zig fmt: ${f} is unformatted"
+                fi
+            done <<< "$offenders"
+            note "  ${known} pre-existing offender(s) carried over and ignored"
+        fi
+    fi
+
+    # Stop before the ladder if anything already failed. The ladder is 20+
+    # minutes and cannot tell you anything the findings above have not.
+    if [ "$fail" -ne 0 ]; then
+        echo ""
+        echo "sync-verify FAILED (build ladder skipped; fix the above first)"
+        exit 1
+    fi
+
+    note "=== build ladder ==="
+    if [ "{{ mode }}" = "fast" ]; then
+        note "  SKIP (fast)"
+    else
+        # build-dll goes first: it is the cheapest leg that compiles fork code
+        # against upstream code, so it fails fastest on the exact breakage the
+        # test suite cannot see.
+        legs="build-dll test"
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) legs="$legs build-win test-win" ;;
+            *) note "  not Windows: skipping the C# legs" ;;
+        esac
+        for leg in $legs; do
+            note "--- just ${leg} ---"
+            # Route a failure through bad() so the verdict below still prints;
+            # letting set -e abort here makes a gate failure look like a plain
+            # build error.
+            if ! {{ just_executable() }} "$leg"; then
+                bad "build ladder: just ${leg} failed"
+                break
+            fi
+        done
+    fi
+
     echo ""
-    echo "=== files changed vs upstream/main ==="
-    git diff --stat upstream/main HEAD | tail -30
+    if [ "$fail" -ne 0 ]; then
+        echo "sync-verify FAILED"
+        exit 1
+    fi
+    if [ "$review" -gt 0 ]; then
+        echo "sync-verify PASSED with ${review} item(s) marked REVIEW above."
+        echo "Those are not automatically wrong, but nothing checked them for you."
+    else
+        echo "sync-verify PASSED"
+    fi
+    echo "  git push --force-with-lease origin windows"
