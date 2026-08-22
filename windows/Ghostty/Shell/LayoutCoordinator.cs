@@ -111,6 +111,12 @@ internal sealed class LayoutCoordinator
     private readonly Func<TabModel?> _activeTab;
 
     private bool _switching;
+    // The Storyboard staged by the most recent switch, non-null exactly while
+    // that switch is in flight: Animate stages it, and the Completed handler
+    // and the Begin failure path both clear it. Teardown has to be able to
+    // stop it, and its own Completed handler checks it to find out whether it
+    // is still the switch the coordinator cares about. See CancelSwitch.
+    private Storyboard? _switchStoryboard;
     // When true (quake window with a single tab), the strip + vertical
     // title bar are forced hidden regardless of layout mode, leaving only
     // the pane host. Snap and Animate both honor it so the layout toggle
@@ -369,8 +375,24 @@ internal sealed class LayoutCoordinator
                 0, 0, -outgoingOffset.X, -outgoingOffset.Y, incoming: false);
         }
 
+        _switchStoryboard = sb;
         sb.Completed += (_, _) =>
         {
+            // A cancelled switch must not land; see CancelSwitch for why the
+            // landing is the hazard, and why stopping the storyboard alone
+            // does not settle it.
+            if (!ReferenceEquals(_switchStoryboard, sb)) return;
+
+            // Cleared here rather than in FinishSwitch: FinishSwitch invokes
+            // onCompleted, which legitimately stages the next switch when a
+            // layout change arrived mid-flight, and clearing after that would
+            // null the storyboard that switch just registered. Left set, the
+            // field outlives the switch by the life of the window, and
+            // CancelSwitch would Stop a long-finished storyboard -- releasing
+            // its hold values across the whole chrome tree during teardown,
+            // which is the one thing that method exists to avoid.
+            _switchStoryboard = null;
+
             // Only a staged flight has anything to slam into: a waiting
             // morph whose destination never realized parks the ghost and
             // stages no storyboard, and the fallback paths below
@@ -391,6 +413,9 @@ internal sealed class LayoutCoordinator
         }
         catch (Exception)
         {
+            // Nothing is in flight after a Begin that threw, and FinishSwitch
+            // below can stage the next switch through onCompleted.
+            _switchStoryboard = null;
             FinishSwitch(verticalTabs, onCompleted);
             return;
         }
@@ -521,6 +546,96 @@ internal sealed class LayoutCoordinator
     }
 
     private EventHandler<object>? _primingFrame;
+
+    /// <summary>
+    /// Drop an in-flight layout switch on window teardown without running any
+    /// of the end-state work it was going to run.
+    ///
+    /// A switch lands on its Storyboard's Completed handler roughly 340ms
+    /// after it starts, and the landing goes through Snap, which touches both
+    /// tab hosts, the vertical title bar and the pane host. A closing window
+    /// is disposing exactly that tree, so the landing has to be dropped rather
+    /// than fast-forwarded: calling FinishSwitch here would run the work this
+    /// method exists to prevent. This is the one place that reasoning is
+    /// written down; the Completed handler, the window's completion callback
+    /// and the wiring tests point here rather than repeat it.
+    ///
+    /// Two defences against the landing, because they cover different things.
+    /// Stopping the storyboard means Completed is never raised at all;
+    /// clearing the field the handler checks its identity against covers a
+    /// Completed that was already queued in the same frame as the Stop, which
+    /// the Stop cannot recall.
+    ///
+    /// Then release the rest of what a switch has in the air, none of which
+    /// the switch Storyboard drives:
+    ///
+    /// - The pane reveal is a Composition InsetClip on the pane host's visual
+    ///   with a key-frame animation sweeping its left inset, plus a shifted
+    ///   margin. The compositor keeps driving that against the pane host while
+    ///   the window goes on to dispose its leaves and its host: the same leak,
+    ///   reached through the composition tree instead of a XAML event.
+    /// - The icon ghost is an Image parked on the morph layer, with both real
+    ///   badges left at Opacity 0 behind it.
+    /// - A morph still waiting for its destination holds a LayoutUpdated
+    ///   handler on the morph root and a deadline on
+    ///   CompositionTarget.Rendering. Rendering is a thread-level event, so a
+    ///   pending handler keeps the closed window's whole tree alive until the
+    ///   thread renders again -- the leak CancelStripPriming exists to close,
+    ///   reachable by a second route.
+    ///
+    /// CancelPaneReveal and FinishIconGhost are safe here where FinishSwitch
+    /// is not: between them they touch the pane host's clip, the morph layer
+    /// and the Opacity of the two icon badges, none of it disposed at this
+    /// point and none of it a call into a tab host, the theme manager or
+    /// libghostty. The reveal is released through CancelPaneReveal rather
+    /// than FinishPaneReveal because only the clip has to go: putting the
+    /// pane host's margin back invalidates measure on a tree whose panes are
+    /// about to be freed, to restore a layout nobody will see. The morph's own
+    /// restoration is deliberately skipped -- FinishActiveTabMorph puts
+    /// opacity back on tab elements nobody will see again and asks the
+    /// vertical host to unsuppress its selection row, which is the tree-walking
+    /// this avoids. Only its handlers come off.
+    ///
+    /// Leaves _switching latched true, which is load-bearing rather than
+    /// merely harmless: between here and the config/settings unsubscribes
+    /// further down the closing path, a settings toggle or a debounced config
+    /// reload can still reach the window's layout entry point, and the latch is
+    /// what parks it as a pending target instead of starting a switch on a
+    /// window that is closing.
+    /// </summary>
+    public void CancelSwitch()
+    {
+        if (_switchStoryboard is not null)
+        {
+            // Pairs with the SWITCH begin line this switch emitted: the fuzz
+            // harness counts begins against ends, and a cancelled switch never
+            // reaches FinishSwitch to emit an end. No ghost count on the line
+            // -- the harness reads any ghosts= above zero as a leak, and a
+            // cancel deliberately leaves the morph ghost on a tree that is
+            // about to be destroyed.
+            MorphTrace("SWITCH cancel");
+            _switchStoryboard.Stop();
+            _switchStoryboard = null;
+        }
+
+        FinishIconGhost();
+        CancelPaneReveal();
+
+        _morphStoryboard?.Stop();
+        _morphStoryboard = null;
+        if (_morph is not { } morph) return;
+        if (morph.Waiting is not null)
+        {
+            _morphRoot.LayoutUpdated -= morph.Waiting;
+            morph.Waiting = null;
+        }
+        if (morph.WaitingDeadline is not null)
+        {
+            CompositionTarget.Rendering -= morph.WaitingDeadline;
+            morph.WaitingDeadline = null;
+        }
+        _morph = null;
+    }
 
     /// <summary>
     /// A realized element can still sit scrolled out of the strip's
@@ -971,6 +1086,39 @@ internal sealed class LayoutCoordinator
         Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
             .GetElementVisual(_paneHost).Clip = null;
         _paneHost.Margin = saved;
+    }
+
+    /// <summary>
+    /// Release the reveal on a window that is closing: drop the clip, leave
+    /// the margin shifted.
+    ///
+    /// The clip is the half that has to go. Its left inset is swept by a
+    /// key-frame animation the compositor owns, so no Storyboard.Stop reaches
+    /// it and it would go on running against the pane host after the window
+    /// is gone. Restoring the margin is the half that must not run: it is
+    /// cosmetic on a window nobody will see again, and writing it invalidates
+    /// measure on a tree whose panes are about to be freed, which is the work
+    /// CancelSwitch exists to avoid.
+    ///
+    /// Guarded the way StartPaneReveal guards the same composition calls, and
+    /// for a second reason here: the only caller runs before the first await
+    /// of the window's async void Closed handler, where a COM teardown race
+    /// would come back as an unhandled exception on the UI thread.
+    /// </summary>
+    private void CancelPaneReveal()
+    {
+        if (_savedPaneMargin is null) return;
+        _savedPaneMargin = null;
+        try
+        {
+            Microsoft.UI.Xaml.Hosting.ElementCompositionPreview
+                .GetElementVisual(_paneHost).Clip = null;
+        }
+        catch (Exception)
+        {
+            // Composition refused, or the visual is already gone. Either way
+            // there is nothing left to release.
+        }
     }
 
     /// <summary>Non-null exactly while a pane reveal is in flight.</summary>
