@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+
 
 namespace Ghostty.Core.Settings;
 
@@ -30,13 +29,6 @@ public sealed record ShaderGalleryEntry(
 /// way in every deployment mode: AppContext.BaseDirectory is the package/exe
 /// directory and Content items land in Assets\Shaders next to it.
 /// </summary>
-/// <summary>The shaders.json shape. Kept internal; only the entries are public.</summary>
-internal sealed class ShaderGalleryManifest
-{
-    [JsonPropertyName("shaders")]
-    public List<ShaderGalleryEntry>? Shaders { get; set; }
-}
-
 public static class ShaderGallery
 {
     private static readonly Lazy<IReadOnlyList<ShaderGalleryEntry>> _entries = new(Load);
@@ -57,16 +49,14 @@ public static class ShaderGallery
     /// </summary>
     public static string? TestBaseDirectory { get; set; }
 
-    // The app publishes NativeAOT: reflection-based serialization is disabled,
-    // so the manifest binds through a source-generated context (the
-    // WindowStateContext pattern; the context must be a top-level internal
-    // partial class or the source generator emits nothing). JIT test runs
-    // would not catch a reflection fallback here -- only the published app
-    // fails, with exactly the NotSupportedException the combo surfaces.
-    [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
-    [JsonSerializable(typeof(ShaderGalleryManifest))]
-    internal sealed partial class ShaderGalleryContext : JsonSerializerContext;
-    
+    /// <summary>
+    /// Parses the shaders.json text into entries. Set by the app (source-
+    /// generated, NativeAOT-safe) and by tests (reflection, JIT). Must be
+    /// set before the first Entries read.
+    /// </summary>
+    public static Func<string, List<ShaderGalleryEntry>?>? ManifestParser { get; set; }
+
+
 
     private static IReadOnlyList<ShaderGalleryEntry> Load()
     {
@@ -82,10 +72,20 @@ public static class ShaderGallery
             }
 
             var json = File.ReadAllText(manifestPath);
-            var manifest = JsonSerializer.Deserialize(
-                json, ShaderGalleryContext.Default.ShaderGalleryManifest);
 
-            var entries = manifest?.Shaders ?? new List<ShaderGalleryEntry>();
+            // The app publishes NativeAOT (reflection serialization
+            // disabled), and the STJ source generator does not fire in this
+            // project -- so the manifest binding is INJECTED by the app
+            // (ShaderGalleryJson, source-generated context) and by tests
+            // (reflection is fine under JIT). A missing parser is a wiring
+            // bug and surfaces through LoadDetail.
+            var parser = ManifestParser;
+            if (parser is null)
+            {
+                LoadDetail = "no manifest parser wired";
+                return Array.Empty<ShaderGalleryEntry>();
+            }
+            var entries = parser(json) ?? new List<ShaderGalleryEntry>();
             // Keep only entries whose file actually shipped; a stale manifest
             // entry must not offer a shader the renderer cannot load.
             entries.RemoveAll(e =>
@@ -94,7 +94,7 @@ public static class ShaderGallery
             if (entries.Count == 0)
             {
                 LoadDetail = $"manifest at {manifestPath} yielded no entries " +
-                             $"(raw: {manifest?.Shaders?.Count.ToString() ?? "null"})";
+                             $"(raw: {entries.Count})";
             }
             else
             {

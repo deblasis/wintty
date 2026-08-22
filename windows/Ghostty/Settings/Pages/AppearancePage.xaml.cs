@@ -295,6 +295,10 @@ internal sealed partial class AppearancePage : Page
 
     private void PopulateShaderGallery()
     {
+        // NativeAOT-safe manifest binding (see ShaderGalleryJson). Idempotent;
+        // first consumer to run wires it.
+        Ghostty.Core.Settings.ShaderGallery.ManifestParser ??= ShaderGalleryJson.Parse;
+
         if (ShaderGallery.Entries.Count == 0 && ShaderGallery.LoadDetail is { } detail)
         {
             StaticLoggers.SettingsConfigWriter.LogInformation(
