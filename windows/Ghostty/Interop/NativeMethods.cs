@@ -211,9 +211,11 @@ internal struct GhosttyTarget
 // struct sizes. Call sites in GhosttyHost see them unchanged via the
 // `using Ghostty.Core.Interop;` at the top of this file.
 //
-// See GhosttyActionsLayoutTests in Ghostty.Tests for the build-time
-// assertions and the grep command for re-verifying against
-// include/ghostty.h after a libghostty rebase.
+// GhosttyActionTagHeaderParityTests and GhosttyStructHeaderParityTests read
+// include/ghostty.h itself, so there is nothing here to re-verify by hand
+// after a libghostty rebase. The types still declared BELOW this line are the
+// ones that live in this assembly, which Ghostty.Tests cannot reference, so
+// nothing checks those.
 
 // ghostty_action_set_title_s { const char* title; }
 // We only read .title; the struct is declared so the offset is explicit.
