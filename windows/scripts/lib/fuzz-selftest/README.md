@@ -37,8 +37,9 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 |---|---|
 | `valid.ps1` | a well-formed layer merges, and the run names both counts |
 | `pscustomobject.ps1` | an entry written as a custom object normalises rather than crashing |
-| `minutes-string.ps1` | `minutes` as text coerces to `Int32` before the timeout arithmetic reads it |
+| `minutes-string.ps1` | `minutes` and `timeoutSeconds` as text coerce to `Int32` before the timeout arithmetic reads them |
 | `minutes-bad.ps1` | `minutes` no arithmetic can use is refused |
+| `timeout-bad.ps1` | so is a `timeoutSeconds` that is text, or a budget of zero or less, which skips the floor `minutes` gets |
 | `tags-missing.ps1` | empty, null and all-blank `tags` are each refused, not just an absent key |
 | `tags-padded.ps1` | a padded tag is stored trimmed, so `-Tag` can reach what `-List` shows; a numeric one is kept |
 | `tags-comma.ps1` | a tag holding a comma is refused, because `-Tag` cuts on one and `-List` cannot show the difference |
@@ -46,12 +47,12 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `name-padded.ps1` | a padded name is stored trimmed, so the collision and duplicate checks compare what selection compares |
 | `missing-key.ps1` | one entry per required key, each short a different one, so shortening the list is visible |
 | `empty-value.ps1` | a key that is present and empty is not a declared key |
-| `script-missing.ps1` | a `script` the tier declared and never shipped is refused, by integrity check 1 |
+| `script-missing.ps1` | a `script` the tier declared and never shipped is refused by integrity check 1, and so is one naming a directory |
 | `script-escapes.ps1` | a `script` that climbs out of the directory is refused |
 | `script-sibling.ps1` | so is one in a sibling directory whose path opens with the same characters |
 | `leaf-collision.ps1` | naming a subdirectory script does not classify a same-leaf script at the top level |
 | `script-relative.ps1` | a `script` written as `./name.ps1` is resolved to what the same check compares |
-| `script-spellings.ps1` | so are the other ways of writing a path beside the runner, which a prefix strip left alone |
+| `script-spellings.ps1` | so are the other ways of writing a path beside the runner, which a prefix strip left alone, and a plain name holding a wildcard character |
 | `duplicate-name.ps1` | the same name twice inside one layer is refused |
 | `base-collision.ps1` | a name the base set already uses is refused |
 | `reserved-layer.ps1` | the layer cannot call itself `base` |
@@ -65,6 +66,7 @@ overlay would drop beside the runner as `fuzz-tier-harnesses.ps1`.
 | `not-in-suite.ps1` | a layer can classify a runner of its own without patching the suite |
 | `not-in-suite-object.ps1` | the same classification written as a custom object is read, not silently ignored |
 | `not-in-suite-list.ps1` | a list of names rather than name = reason pairs is refused |
+| `not-in-suite-typed-list.ps1` | so is the same list typed, which is neither an array nor a dictionary |
 | `not-in-suite-harness.ps1` | a layer cannot excuse a script its own manifest names as a harness |
 | `not-in-suite-harness-relative.ps1` | the same door, with the harness written as a path rather than a name |
 | `not-in-suite-padded.ps1` | a padded name is stored trimmed, so it excuses the file it names |
