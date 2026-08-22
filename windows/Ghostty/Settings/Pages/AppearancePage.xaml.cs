@@ -295,7 +295,10 @@ internal sealed partial class AppearancePage : Page
     private void PopulateShaderGallery()
     {
         var items = ShaderGalleryCombo.Items;
+        // -1 would make Insert below throw and take the whole page down;
+        // appending at the end is the correct degenerate order.
         var customIndex = items.IndexOf(ShaderCustomFileItem);
+        if (customIndex < 0) customIndex = items.Count;
         foreach (var entry in ShaderGallery.Entries)
         {
             _shaderGalleryByPath[ShaderGallery.AbsolutePathFor(entry)] = entry;
