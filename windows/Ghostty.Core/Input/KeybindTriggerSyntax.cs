@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using Ghostty.Core.Interop;
 
 namespace Ghostty.Core.Input;
 
@@ -22,9 +23,9 @@ public static class KeybindTriggerSyntax
     private const uint ModAltRight = 1u << 8;
     private const uint ModSuperRight = 1u << 9;
 
-    private const int TagPhysical = 0;
-    private const int TagUnicode = 1;
-    private const int TagCatchAll = 2;
+    private const int TagPhysical = (int)GhosttyTriggerTag.Physical;
+    private const int TagUnicode = (int)GhosttyTriggerTag.Unicode;
+    private const int TagCatchAll = (int)GhosttyTriggerTag.CatchAll;
 
     // Fixed emission order. Maps a normalized mod token -> its rank.
     private static readonly string[] ModOrder = { "ctrl", "shift", "alt", "super" };
