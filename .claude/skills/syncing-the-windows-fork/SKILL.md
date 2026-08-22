@@ -67,12 +67,52 @@ no test instantiates. It also subtracts the fork's standing `zig fmt` offenders
 so only new ones fail, though only under `src/`, which is narrower than the
 whole-tree check upstream CI runs.
 
+**It says what the replay landed on and how far that is from upstream.**
+Every other leg measures the fork against `refs/remotes/upstream/main`, so the
+gate first establishes what that ref is worth. It reports the merge base of
+HEAD and the ref, the number of commits the ref has gained since, and whether
+the ref is still what the remote has. Nothing fetches: fetching origin would
+move the pre-rebase tip four checks compare against, and fetching upstream
+would move the yardstick this leg exists to measure. It asks with
+`git ls-remote`, which writes no ref.
+
+Read the commit count. After a correct `just sync` it is exactly zero, because
+sync fetches and then rebases onto what it fetched and nothing moves the ref in
+between. Commits upstream pushed while you were replaying are not in the ref
+and cannot appear here. Any non-zero number means the ref moved by a later
+fetch and this is not a fresh replay waiting to be pushed, which is the only
+state the rest of the gate is built for.
+
+The FAIL here is the ref being stale: its tip commit is a week or more old and
+nothing established that it is current, whether because it differs from the
+remote, because the remote could not be reached, or because no remote is
+configured to refresh it. Every later check reads that ref, so past that
+distance they are comparing the fork against an upstream that has substantially
+moved. The measure is the committer date of upstream's own tip commit, which
+travels with the object. Fork-side dates and reflogs both looked tempting and
+are both the wrong clock: a fetch that brings nothing new writes no reflog
+entry, so a correct sync across a quiet weekend reads as stale, and any later
+fetch makes a months-old replay read as current. It also fails when the local ref turns out to be
+ahead of the remote, which means upstream rewound and the replay is built on
+commits that no longer exist there. That check only fires when the remote tip is
+already in the local object database, which is what a plain rewind leaves
+behind; a rewind followed by new commits upstream cannot be told from an
+ordinary advance without fetching, and is reported as one.
+
+No network, and a tracking ref with no remote behind it, are both REVIEW rather
+than a bare note, so the verdict names them instead of ending in an unqualified
+PASSED. Verifying offline stays legal, it just verifies less, and if the ref is
+also a week old it fails anyway: a ref nothing can refresh is the state where
+its age matters most.
+
 **A green run is not clearance.** Exit 1 is a hard finding, exit 2 is bad
 arguments, and REVIEW items exit 0 on purpose, because an upstream rename moves
 the file surface legitimately and a check that cries wolf gets a flag passed to
-it instead of being read. The `range-diff` section never affects the exit code
-and caps its listing. Read both before you push: a resolution that dropped a
-whole file's fork changes surfaces in the file-surface REVIEW, and one that
+it instead of being read. The `range-diff` listing of changed commits never
+affects the exit code and caps itself, though a range-diff that fails outright,
+and the dropped-commit check driven by the same output, both can fail the run.
+Read both before you push: a resolution that dropped a whole file's fork
+changes surfaces in the file-surface REVIEW, and one that
 dropped only part of a hunk surfaces nowhere but `range-diff`.
 
 **It does not catch P/Invoke drift.** After a sync that touched the C
