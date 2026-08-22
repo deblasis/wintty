@@ -1021,10 +1021,14 @@ public sealed partial class MainWindow : Window
         _titleBar.ApplyForCurrentMode();
         _layout.Animate(vertical, onCompleted: () =>
         {
-            // The switch lands about 340ms after it starts, and nothing
-            // cancels it if the window goes away in between: closing the last
-            // tab closes the window, and a storyboard that has already begun
-            // still raises Completed.
+            // Belt to CancelSwitch's braces. OnClosedAsync cancels the
+            // switch at the source before anything is disposed -- see
+            // LayoutCoordinator.CancelSwitch for why the landing is the
+            // hazard -- so on a closing window the callback below should not
+            // run at all. This gate stays because it is the only defence that
+            // does not depend on the coordinator: a completion queued in the
+            // same frame as the stop, or a landing site added outside the
+            // coordinator's cancel path, still arrives here.
             //
             // Gated on _isClosed rather than on AppWindow, which is the same
             // reasoning as the other teardown gates in this file. AppWindow
@@ -1419,7 +1423,14 @@ public sealed partial class MainWindow : Window
         // before the first await below, so no theme callback fires after
         // teardown begins.
         _isClosed = true;
+        // Both cancels drop work already scheduled against the tree that is
+        // about to be torn down: a pending rendering-frame handler, and a
+        // layout switch still in flight (see LayoutCoordinator.CancelSwitch
+        // for what that switch is still holding). Nothing is disposed yet at
+        // this point, so cancelling here is the last moment both are still
+        // cheap and safe.
         _layout.CancelStripPriming();
+        _layout.CancelSwitch();
         _themeManager.Dispose();
 
         // Close the inspector window before any surface/host teardown below.
@@ -2067,9 +2078,14 @@ public sealed partial class MainWindow : Window
     /// put it and bails otherwise: the awaited delays give the user ~80ms
     /// to start dragging (or a snap assist to move the window), and a
     /// blind restore would teleport the window back over their move.
+    ///
+    /// The same delays are why _isClosed is re-checked after each one rather
+    /// than only on entry: the shake outlives its own first turn, and the
+    /// window can be closed underneath it while it is suspended.
     /// </summary>
     private async void NudgeWindowForImpact(double dx, double dy)
     {
+        if (_isClosed) return;
         if (IsQuickTerminal) return;
         if (AppWindow?.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter
             { State: Microsoft.UI.Windowing.OverlappedPresenterState.Restored }) return;
@@ -2088,6 +2104,10 @@ public sealed partial class MainWindow : Window
                     origin.Y + (int)(dy * amplitude));
                 AppWindow.Move(expected);
                 await System.Threading.Tasks.Task.Delay(26);
+                // Placed after the await, not at the top of the loop, so the
+                // final delay is covered too: the restore below is a move
+                // against a window that may have been closed during it.
+                if (_isClosed) return;
             }
             if (AppWindow.Position == expected)
                 AppWindow.Move(origin);

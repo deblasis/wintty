@@ -108,13 +108,17 @@ internal static class SyntaxQueries
     /// </summary>
     public static List<InvocationExpressionSyntax> Calls(this SyntaxNode node, string target) =>
         node.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => Callee(i) == target)
+            .Where(i => i.CalleeText() == target)
             .ToList();
 
-    // A null-conditional call parses with the receiver hoisted out, so the
-    // callee on its own reads as ".TryEnqueue". Put the receiver back so a
-    // test can name the call the way the source spells it.
-    private static string Callee(InvocationExpressionSyntax call)
+    /// <summary>
+    /// The callee the way the source spells it, receiver included. A
+    /// null-conditional call parses with the receiver hoisted out, so the
+    /// callee on its own reads as ".TryEnqueue"; put the receiver back so a
+    /// test can name the call as written. Keeping the receiver is what lets a
+    /// test tell `_switchStoryboard.Stop` from a Stop on anything else.
+    /// </summary>
+    public static string CalleeText(this InvocationExpressionSyntax call)
     {
         if (call.Expression is MemberBindingExpressionSyntax
             && call.Ancestors().OfType<ConditionalAccessExpressionSyntax>().FirstOrDefault() is { } conditional)
