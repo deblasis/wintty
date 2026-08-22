@@ -11,6 +11,15 @@
 # SWITCH end line must report ghosts=0 and morph=null. A ghost left parked on
 # the morph layer is the artifact this whole change exists to remove, so it
 # is the thing worth asserting.
+#
+# Every switch also has to be accounted for. A SWITCH begin is answered by a
+# SWITCH end, or by a SWITCH cancel when the window closed while the switch
+# was still in the air -- closing cancels the switch instead of landing it, so
+# counting begins against ends alone would report a graceful close as a switch
+# that never finished. No run of this harness reaches that cancel, though: it
+# keeps the strip above three tabs and kills the process at the end rather than
+# closing the window, so the cancel term keeps the oracle honest for a graceful
+# close rather than recording one this harness drove.
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [int]$Seed = 0,
@@ -384,12 +393,14 @@ $immediate = @($lines | Where-Object { $_ -like 'MORPH immediate*' }).Count
 $deferred = @($lines | Where-Object { $_ -like 'MORPH deferred*' }).Count
 $waiting = @($lines | Where-Object { $_ -like 'MORPH waiting*' }).Count
 $none = @($lines | Where-Object { $_ -like 'MORPH none*' }).Count
+$cancels = @($lines | Where-Object { $_ -like 'SWITCH cancel*' }).Count
 $leaked = @($lines | Where-Object { $_ -match 'ghosts=[1-9]|morph=LEAKED' })
 
 Write-Host ''
 Write-Host "chord misses   : $chordMisses"
 Write-Host "switches begun : $begins"
 Write-Host "switches ended : $ends"
+Write-Host "switches cancel: $cancels"
 Write-Host "morph immediate: $immediate"
 Write-Host "morph deferred : $deferred  (waited: $waiting)"
 Write-Host "morph none     : $none"
@@ -398,8 +409,10 @@ if ($leaked.Count -gt 0) {
     $failures.Add("$($leaked.Count) switch(es) ended with a ghost still on the morph layer")
     $leaked | Select-Object -First 8 | ForEach-Object { Write-Host "  LEAK: $_" }
 }
-if ($begins -ne $ends) {
-    $failures.Add("switch begin/end mismatch: $begins vs $ends (a switch never finished)")
+if ($begins -ne ($ends + $cancels)) {
+    $failures.Add(
+        "switch begin/end mismatch: $begins begun vs $ends ended + $cancels cancelled " +
+        '(a switch never finished)')
 }
 if ($immediate -eq 0 -and $begins -gt 0) {
     $failures.Add('no switch ever staged a morph immediately')
