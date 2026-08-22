@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Ghostty.Controls.Settings;
+using Ghostty.Core.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.DirectWrite;
 using Ghostty.Core.Settings;
@@ -294,6 +295,12 @@ internal sealed partial class AppearancePage : Page
 
     private void PopulateShaderGallery()
     {
+        if (ShaderGallery.Entries.Count == 0 && ShaderGallery.LoadDetail is { } detail)
+        {
+            StaticLoggers.SettingsConfigWriter.LogInformation(
+                "shader gallery empty: {Detail} (base: {Base})",
+                detail, AppContext.BaseDirectory);
+        }
         var items = ShaderGalleryCombo.Items;
         // -1 would make Insert below throw and take the whole page down;
         // appending at the end is the correct degenerate order.

@@ -1,6 +1,6 @@
 using System.IO;
 using System.Linq;
-using Ghostty.Settings;
+using Ghostty.Core.Settings;
 using Xunit;
 
 namespace Ghostty.Tests.Settings;
