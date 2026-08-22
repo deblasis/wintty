@@ -156,10 +156,17 @@ internal sealed partial class GhosttyHost : IDisposable
     private readonly Ghostty.Core.Notifications.IToastNotifier _toasts;
 
     // One-time gate plus copy for the "custom-shader configured but not
-    // applied" notice. Lives on the host because that is the singleton every
-    // surface's action lands on, so one gate sees the whole process rather
-    // than one banner per pane. Only touched from the UI-thread lambda below.
-    private readonly Ghostty.Core.Renderer.CustomShaderNoticeSource _customShaderNotices = new();
+    // applied" notice.
+    //
+    // Static because a host is per-window, not per-process: as an instance
+    // field this claimed to be "the singleton every surface's action lands on"
+    // while actually giving each window its own gate, so a second window
+    // re-raised a banner the user had already dismissed in the first. The
+    // shader is process-wide config, so one dismissal is the whole answer.
+    //
+    // Safe as shared state because it is only ever touched from the UI-thread
+    // lambda below, and every window in this app shares that thread.
+    private static readonly Ghostty.Core.Renderer.CustomShaderNoticeSource _customShaderNotices = new();
 
     public GhosttyApp App => _app;
 
