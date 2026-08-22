@@ -67,6 +67,17 @@ internal sealed partial class AppearancePage : Page
             // NoColorOverride is already normalized to one of notify/strip/keep.
             SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
 
+            // Read from the file rather than from the merged config: this box
+            // edits what is written down, and a default the user never set
+            // would be written back the moment the box loses focus.
+            //
+            // custom-shader is repeatable and this getter returns the first
+            // entry, so a config with two shaders shows only the first. The
+            // dirty check in ShaderPath_LostFocus is what keeps the second one:
+            // passing through the box without editing it writes nothing.
+            ShaderPathBox.Text = cs.GetRawFileValue("custom-shader");
+            _shaderPathWritten = ShaderPathBox.Text;
+
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
             if (cs.IsConfiguredInFile("background-tint-color"))
             {
@@ -257,9 +268,20 @@ internal sealed partial class AppearancePage : Page
             OnValueChanged("window-theme", item.Tag?.ToString() ?? "auto");
     }
 
+    // The last value this page put in the file, or seeded from it. Blur fires
+    // on every pass through the page, including tab-through and the window
+    // closing, so an unconditional write here rewrote custom-shader every time
+    // - and while the box was never seeded, it rewrote it to empty, silently
+    // dropping a configured shader.
+    private string _shaderPathWritten = string.Empty;
+
     private void ShaderPath_LostFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TextBox tb) OnValueChanged("custom-shader", tb.Text);
+        if (sender is not TextBox tb) return;
+        var value = tb.Text ?? string.Empty;
+        if (value == _shaderPathWritten) return;
+        _shaderPathWritten = value;
+        OnValueChanged("custom-shader", value);
     }
 
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
