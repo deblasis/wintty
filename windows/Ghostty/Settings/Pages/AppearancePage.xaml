@@ -136,9 +136,10 @@
                         </StackPanel>
                     </ctrl:SettingsCard>
                     <ctrl:SettingsCard Header="Preview"
-                                       Description="The selected shader, live. Type in it to see cursor effects move.">
+                                       Description="The selected shader, live. Type in it to see cursor effects move."
+                                       ContentBelow="True">
                         <Border x:Name="ShaderPreviewHost"
-                                MinWidth="360" Height="260"
+                                Height="260"
                                 BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="4"

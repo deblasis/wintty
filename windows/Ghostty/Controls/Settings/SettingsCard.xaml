@@ -20,7 +20,11 @@
         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
         BorderThickness="1"
         Margin="0,0,0,6">
-        <Grid ColumnSpacing="16" VerticalAlignment="Center">
+        <Grid x:Name="RootGrid" ColumnSpacing="16" VerticalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
             <Grid.ColumnDefinitions>
                 <!--
                   MinWidth keeps the label readable when Control is a wide
