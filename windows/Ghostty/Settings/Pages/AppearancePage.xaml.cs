@@ -8,6 +8,7 @@ using Ghostty.Core.DirectWrite;
 using Ghostty.Core.Settings;
 using Ghostty.Logging;
 using Ghostty.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -67,16 +68,7 @@ internal sealed partial class AppearancePage : Page
             // NoColorOverride is already normalized to one of notify/strip/keep.
             SelectComboByTag(NoColorOverrideCombo, cs.NoColorOverride);
 
-            // Read from the file rather than from the merged config: this box
-            // edits what is written down, and a default the user never set
-            // would be written back the moment the box loses focus.
-            //
-            // custom-shader is repeatable and this getter returns the first
-            // entry, so a config with two shaders shows only the first. The
-            // dirty check in ShaderPath_LostFocus is what keeps the second one:
-            // passing through the box without editing it writes nothing.
-            ShaderPathBox.Text = cs.GetRawFileValue("custom-shader");
-            _shaderPathWritten = ShaderPathBox.Text;
+            SeedShaderPath();
 
             BlurFollowsOpacityToggle.IsOn = cs.BackgroundBlurFollowsOpacity;
             if (cs.IsConfiguredInFile("background-tint-color"))
@@ -268,6 +260,24 @@ internal sealed partial class AppearancePage : Page
             OnValueChanged("window-theme", item.Tag?.ToString() ?? "auto");
     }
 
+    // Read from the file rather than from the merged config: this box edits
+    // what is written down, and a default the user never set would be written
+    // back the moment the box loses focus.
+    //
+    // custom-shader is repeatable and this is one box, so a config with several
+    // entries can only show one of them. It shows the FIRST, and writing sets
+    // the whole list to just that value, so what the box displays is always
+    // what the setting is. Reading the first and writing the last -- which is
+    // where SetValue lands -- would leave the entry the user was looking at
+    // untouched and destroy one they never saw.
+    private void SeedShaderPath()
+    {
+        var values = _editor.GetRepeatableValues("custom-shader");
+        ShaderPathBox.Text = values.Length > 0 ? values[0] : string.Empty;
+        _shaderPathWritten = ShaderPathBox.Text;
+        _shaderPathExtraEntries = values.Length > 1;
+    }
+
     // The last value this page put in the file, or seeded from it. Blur fires
     // on every pass through the page, including tab-through and the window
     // closing, so an unconditional write here rewrote custom-shader every time
@@ -275,13 +285,40 @@ internal sealed partial class AppearancePage : Page
     // dropping a configured shader.
     private string _shaderPathWritten = string.Empty;
 
+    // Whether the file had more custom-shader lines than this box can show. Only
+    // used to log that writing collapses them, since the box cannot represent
+    // them and silently dropping them would be worse unexplained.
+    private bool _shaderPathExtraEntries;
+
     private void ShaderPath_LostFocus(object sender, RoutedEventArgs e)
     {
+        if (_loading) return;
         if (sender is not TextBox tb) return;
+
         var value = tb.Text ?? string.Empty;
         if (value == _shaderPathWritten) return;
+
+        if (_shaderPathExtraEntries)
+        {
+            StaticLoggers.SettingsConfigWriter.LogInformation(
+                "custom-shader had more entries than the Appearance box can show; " +
+                "editing it collapses them to the one shown");
+        }
+
+        var values = value.Length > 0 ? new[] { value } : System.Array.Empty<string>();
+        var result = _writer.Write(
+            () => _editor.SetRepeatableValues("custom-shader", values),
+            "custom-shader");
+
+        // Only on success. Advancing unconditionally meant a write that failed
+        // -- the file locked by a sync client or an editor -- left the guard
+        // holding a value the file does not have, so every retry from this page
+        // read as "unchanged" and was suppressed for the life of the window.
+        if (!result.WriteSucceeded) return;
+
         _shaderPathWritten = value;
-        OnValueChanged("custom-shader", value);
+        _shaderPathExtraEntries = false;
+        if (result.Reloaded) _expectingOwnReloads++;
     }
 
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -439,6 +476,13 @@ internal sealed partial class AppearancePage : Page
                 .Select(p => new Controls.Settings.GradientPointModel(
                     p.X, p.Y, p.Color, p.Radius))
                 .ToList());
+
+            // The shader box has to move with the file too. Leaving it alone
+            // would not merely show a stale value: _shaderPathWritten would go
+            // on describing a write this page made before the external edit
+            // undid it, so re-committing the displayed value would read as
+            // unchanged and be suppressed.
+            SeedShaderPath();
         }
         finally
         {

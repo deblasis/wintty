@@ -1,47 +1,48 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Xml;
 using System.Xml.Linq;
-using Microsoft.CodeAnalysis.CSharp;
+using Ghostty.Tests.Wiring;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Settings;
 
 // A settings control that writes to the config file on LostFocus has to be
-// seeded from the config file first.
+// seeded from the config file first, AND has to write only when the value
+// actually changed.
 //
 // Blur is not an edit. It fires on every pass through the page: tabbing
-// through, clicking elsewhere, closing the window. So a box that writes
-// unconditionally on blur writes whatever it is currently showing -- and a box
-// that was never seeded is showing nothing. AppearancePage's custom-shader box
-// was the one page control with no seed, so opening Appearance and moving focus
-// past it wrote `custom-shader = ` and dropped a configured shader.
+// through, clicking elsewhere, closing the window. Both halves matter and both
+// have shipped broken:
 //
-// Nothing catches that at runtime: the write is a legitimate config edit, the
-// file stays valid, and the terminal just quietly stops using the shader.
+//   - Unseeded. AppearancePage's custom-shader box was the one page control
+//     with no seed, so opening Appearance and moving focus past it wrote
+//     `custom-shader = ` and dropped a configured shader.
+//   - Unconditional. AdvancedPage's quake-key box wrote on every blur, and
+//     SetValue APPENDS a key the file does not have, so simply visiting
+//     Advanced materialised `quick-terminal-key = ` the user never set.
 //
-// The markup is parsed as XML rather than text-scanned, so a handler named
-// inside an XML comment does not count, and the code-behind is parsed with
-// Roslyn rather than grepped, so the word "ShaderPathBox.Text" in a comment
-// does not satisfy the check.
+// Nothing catches either at runtime: the write is a legitimate config edit, the
+// file stays valid, and the setting just quietly becomes something else.
+//
+// The markup is parsed as XML, so a handler named inside an XML comment does
+// not count, and the code-behind is parsed with Roslyn, so the control name
+// appearing in a comment does not count as a seed.
+//
+// What this does NOT see: a LostFocus handler attached in code-behind rather
+// than in markup, and a seed written through a property other than Text.
 public class SettingsWriteBackSeedingTests
 {
     private const string PagePrefix = "Ghostty.Tests.Settings.Pages.";
-
-    // The WinUI project's sources are already embedded under this prefix,
-    // keeping their directory in the name, so the code-behind is reached by
-    // suffix rather than by adding a second glob that would collide with it.
-    private const string SourcePrefix = "Ghostty.Tests.Interop.Sources.Ghostty.";
 
     private static readonly XNamespace XamlNamespace =
         "http://schemas.microsoft.com/winfx/2006/xaml";
 
     [Fact]
-    public void EveryLostFocusWriteBackControlIsSeededInItsCodeBehind()
+    public void EveryLostFocusWriteBackControlIsSeededAndGuarded()
     {
         var controls = WriteBackControls();
 
@@ -53,24 +54,32 @@ public class SettingsWriteBackSeedingTests
             "found no LostFocus write-back controls in the settings pages; the " +
             "scan is broken, not the pages");
 
-        var unseeded = new List<string>();
+        var problems = new List<string>();
         foreach (var control in controls)
         {
-            var assigned = AssignedControlProperties(control.Page);
-            if (!assigned.Contains(control.Name + ".Text"))
+            var source = SourceFor(control.Page);
+
+            if (!AssignedControlProperties(source).Contains(control.Name + ".Text"))
             {
-                unseeded.Add(
+                problems.Add(
                     $"  {control.Page}: {control.Name} writes the config on " +
-                    $"{control.Handler} but nothing assigns {control.Name}.Text");
+                    $"{control.Handler} but nothing assigns {control.Name}.Text, so " +
+                    "the first blur writes whatever it is showing, which is nothing");
+            }
+
+            if (!ComparesSomething(source, control.Handler))
+            {
+                problems.Add(
+                    $"  {control.Page}: {control.Handler} writes without comparing " +
+                    "the value to anything, so every pass through the page rewrites " +
+                    "the key -- and appends it if the file does not have it");
             }
         }
 
         Assert.True(
-            unseeded.Count == 0,
-            "settings controls that write on blur without being seeded first. " +
-            "Moving focus past one of these writes what it happens to be " +
-            "showing, which for an unseeded box is nothing:\n" +
-            string.Join("\n", unseeded));
+            problems.Count == 0,
+            "settings controls that write on blur without being seeded first, or " +
+            "without checking whether anything changed:\n" + string.Join("\n", problems));
     }
 
     private sealed record WriteBackControl(string Page, string Name, string Handler);
@@ -102,34 +111,33 @@ public class SettingsWriteBackSeedingTests
         return found;
     }
 
-    // The left-hand sides of every assignment in the page's code-behind, as
+    // Parsed once per page. ShellSource does the resource-by-suffix lookup, the
+    // exactly-one assert, and the separator normalisation MSBuild's logical
+    // names need; reimplementing those here drifted from it once already.
+    private static readonly Dictionary<string, ShellSource> SourceCache = new(StringComparer.Ordinal);
+
+    private static ShellSource SourceFor(string pageXamlName)
+    {
+        if (SourceCache.TryGetValue(pageXamlName, out var cached)) return cached;
+
+        var source = ShellSource.Load("Settings.Pages." + pageXamlName + ".cs");
+
+        // Parsed with no preprocessor symbols, so a conditionally-compiled
+        // region would make the file this reads a different program from the
+        // one that ships. Same guard the sibling parity test carries.
+        Assert.DoesNotContain("#if", source.Root.ToFullString(), StringComparison.Ordinal);
+
+        SourceCache[pageXamlName] = source;
+        return source;
+    }
+
+    // The left-hand sides of every assignment in the page, as
     // "Control.Property". Roslyn rather than a string search: a mention in a
     // comment or in a nameof() is not a seed.
-    private static HashSet<string> AssignedControlProperties(string pageXamlName)
+    private static HashSet<string> AssignedControlProperties(ShellSource source)
     {
-        var assembly = Assembly.GetExecutingAssembly();
-        var suffix = pageXamlName + ".cs";
-        var matches = assembly.GetManifestResourceNames()
-            .Where(n => n.StartsWith(SourcePrefix, StringComparison.Ordinal)
-                        && n.EndsWith(suffix, StringComparison.Ordinal))
-            .ToList();
-
-        // Exactly one, not "the first". Two pages of the same name in different
-        // directories would otherwise be checked against whichever the resource
-        // order happened to put first.
-        Assert.True(
-            matches.Count == 1,
-            $"expected exactly one embedded source ending in {suffix}, found " +
-            $"{matches.Count}: {string.Join(", ", matches)}");
-
-        using var stream = assembly.GetManifestResourceStream(matches[0]);
-        Assert.NotNull(stream);
-
-        using var reader = new StreamReader(stream!);
-        var root = CSharpSyntaxTree.ParseText(reader.ReadToEnd()).GetRoot();
-
         var assigned = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var assignment in root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+        foreach (var assignment in source.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>())
         {
             if (assignment.Left is MemberAccessExpressionSyntax
                 {
@@ -142,6 +150,14 @@ public class SettingsWriteBackSeedingTests
 
         return assigned;
     }
+
+    // Whether the handler compares anything at all. Deliberately loose: what it
+    // rules out is the shape that shipped twice, a handler whose only guard is
+    // `_loading` and which then writes whatever it is holding.
+    private static bool ComparesSomething(ShellSource source, string handlerName) =>
+        source.Method(handlerName).DescendantNodes()
+            .OfType<BinaryExpressionSyntax>()
+            .Any(b => b.OperatorToken.Text is "==" or "!=");
 
     private static List<(string Page, XDocument Document)> PageDocuments()
     {
