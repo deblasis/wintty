@@ -5,81 +5,16 @@ using Xunit;
 
 namespace Ghostty.Tests.Interop;
 
-// Pins ghostty_action_* ordinals and struct layouts (FFI ABI with include/ghostty.h).
+// Pins ghostty_action_* struct layouts (FFI ABI with include/ghostty.h).
+// Ordinals live in GhosttyActionTagHeaderParityTests.
 public class GhosttyActionsLayoutTests
 {
-    // int (not enum) parameter: xUnit needs public test class, internal enum can't leak.
-    [Theory]
-    [InlineData((int)GhosttyActionTag.NewTab, 2)]
-    [InlineData((int)GhosttyActionTag.CloseTab, 3)]
-    [InlineData((int)GhosttyActionTag.NewSplit, 4)]
-    [InlineData((int)GhosttyActionTag.CloseAllWindows, 5)]
-    [InlineData((int)GhosttyActionTag.ToggleFullscreen, 7)]
-    [InlineData((int)GhosttyActionTag.ToggleQuickTerminal, 10)]
-    [InlineData((int)GhosttyActionTag.MoveTab, 14)]
-    [InlineData((int)GhosttyActionTag.GotoTab, 15)]
-    [InlineData((int)GhosttyActionTag.GotoSplit, 16)]
-    [InlineData((int)GhosttyActionTag.ResizeSplit, 18)]
-    [InlineData((int)GhosttyActionTag.EqualizeSplits, 19)]
-    [InlineData((int)GhosttyActionTag.ToggleSplitZoom, 20)]
-    [InlineData((int)GhosttyActionTag.Scrollbar, 26)]
-    [InlineData((int)GhosttyActionTag.Inspector, 28)]
-    [InlineData((int)GhosttyActionTag.SetTitle, 33)]
-    [InlineData((int)GhosttyActionTag.MouseShape, 37)]
-    [InlineData((int)GhosttyActionTag.MouseVisibility, 38)]
-    [InlineData((int)GhosttyActionTag.MouseOverLink, 39)]
-    [InlineData((int)GhosttyActionTag.DesktopNotification, 32)]
-    [InlineData((int)GhosttyActionTag.ShowChildExited, 57)]
-    [InlineData((int)GhosttyActionTag.ConfigChange, 49)]
-    [InlineData((int)GhosttyActionTag.CloseWindow, 50)]
-    [InlineData((int)GhosttyActionTag.RingBell, 51)]
-    [InlineData((int)GhosttyActionTag.SelectionChanged, 52)]
-    [InlineData((int)GhosttyActionTag.ProgressReport, 58)]
-    [InlineData((int)GhosttyActionTag.StartSearch, 61)]
-    [InlineData((int)GhosttyActionTag.EndSearch, 62)]
-    [InlineData((int)GhosttyActionTag.SearchTotal, 63)]
-    [InlineData((int)GhosttyActionTag.SearchSelected, 64)]
-    [InlineData((int)GhosttyActionTag.PromptReady, 68)]
-    [InlineData((int)GhosttyActionTag.FirstRender, 69)]
-    [InlineData((int)GhosttyActionTag.CustomShaderFailed, 70)]
-    [InlineData((int)GhosttyActionTag.ToggleVisibility, 12)]
-    [InlineData((int)GhosttyActionTag.ToggleBackgroundOpacity, 13)]
-    [InlineData((int)GhosttyActionTag.GotoWindow, 17)]
-    [InlineData((int)GhosttyActionTag.PresentTerminal, 21)]
-    [InlineData((int)GhosttyActionTag.SizeLimit, 22)]
-    [InlineData((int)GhosttyActionTag.ResetWindowSize, 23)]
-    [InlineData((int)GhosttyActionTag.InitialSize, 24)]
-    [InlineData((int)GhosttyActionTag.SetTabTitle, 34)]
-    [InlineData((int)GhosttyActionTag.PromptTitle, 35)]
-    [InlineData((int)GhosttyActionTag.FloatWindow, 43)]
-    public void ActionTag_Ordinal_Matches_Upstream(int tag, int expected)
-    {
-        Assert.Equal(expected, tag);
-    }
-
-    [Theory]
-    [InlineData((int)GhosttyProgressState.Remove, 0)]
-    [InlineData((int)GhosttyProgressState.Set, 1)]
-    [InlineData((int)GhosttyProgressState.Error, 2)]
-    [InlineData((int)GhosttyProgressState.Indeterminate, 3)]
-    [InlineData((int)GhosttyProgressState.Pause, 4)]
-    public void ProgressState_Ordinal_Matches_Upstream(int state, int expected)
-    {
-        Assert.Equal(expected, state);
-    }
-
-    // ghostty_action_custom_shader_failure_e. These ordinals arrive as a raw
-    // int in the action payload, so a reorder upstream would silently show the
-    // user the wrong reason rather than failing to compile.
-    [Theory]
-    [InlineData((int)CustomShaderFailure.LoadFailed, 0)]
-    [InlineData((int)CustomShaderFailure.CompilerUnavailable, 1)]
-    [InlineData((int)CustomShaderFailure.CompileFailed, 2)]
-    [InlineData((int)CustomShaderFailure.PipelineFailed, 3)]
-    public void CustomShaderFailure_Ordinal_Matches_Upstream(int failure, int expected)
-    {
-        Assert.Equal(expected, failure);
-    }
+    // Ordinals are NOT pinned here. This file used to carry three [Theory]
+    // blocks asserting (int)SomeEnum.Member == a literal copied out of that
+    // same enum, which can only fail if someone edits one of the two copies
+    // alone. They stayed green while an upstream insertion misrouted twenty
+    // tags. GhosttyActionTagHeaderParityTests checks them against
+    // include/ghostty.h, which is the only file that can disagree.
 
     [Fact]
     public void ScrollbarStruct_Size_Is_24_Bytes()
@@ -138,9 +73,9 @@ public class GhosttyActionsLayoutTests
     public void ActionStruct_Payload_Starts_At_Offset_8()
     {
         // Every dispatched case in GhosttyHost.OnAction (SetTitle,
-        // Scrollbar, ProgressReport, MouseShape, …) reads payload bytes
+        // Scrollbar, ProgressReport, MouseShape and the rest) reads payload bytes
         // via Marshal.ReadXxx(actionPtr, 8). This pin catches a future
-        // ABI change that shifts the union — e.g. upstream widening tag
+        // ABI change that shifts the union, e.g. upstream widening tag
         // to int64 (would still be +8 by coincidence) or growing the
         // union's alignment beyond 8 (would push payloads to +16 and
         // silently corrupt every read).
