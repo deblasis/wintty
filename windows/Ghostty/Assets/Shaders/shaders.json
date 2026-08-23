@@ -131,6 +131,16 @@
       "author": "ghostty",
       "license": "MIT",
       "source": "https://github.com/ghostty-org/ghostty"
+    },
+    {
+      "id": "interference",
+      "file": "interference.glsl",
+      "name": "Interference",
+      "description": "Fallout-style CRT interference: a rolling signal band, twitching rows, static grain, and rare line tears. Fires constantly; no cursor action needed.",
+      "category": "effects",
+      "author": "wintty project",
+      "license": "MIT",
+      "source": ""
     }
   ]
 }

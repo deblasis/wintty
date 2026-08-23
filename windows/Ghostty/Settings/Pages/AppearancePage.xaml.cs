@@ -155,9 +155,9 @@ internal sealed partial class AppearancePage : Page
     {
         _configService.ConfigChanged += OnConfigChanged;
         // Page instances are cached, so returning to this page fires Loaded
-        // without the ctor (or any seeding) running again. Recreate whatever
-        // the preview showed; Page_Unloaded disposed it on the way out.
-        UpdateShaderPreview();
+        // without the ctor (or any seeding) running again. Re-sync the mode
+        // radios from the seeded value in case the config changed elsewhere.
+        SyncShaderUiForPath(_shaderPathWritten);
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -283,8 +283,7 @@ internal sealed partial class AppearancePage : Page
         ShaderPathBox.Text = values.Length > 0 ? values[0] : string.Empty;
         _shaderPathWritten = ShaderPathBox.Text;
         _shaderPathExtraEntries = values.Length > 1;
-        SelectShaderComboForPath(ShaderPathBox.Text);
-        UpdateShaderPreview();
+        SyncShaderUiForPath(ShaderPathBox.Text);
     }
 
     // ── Shader gallery ─────────────────────────────────────────────────────
@@ -299,88 +298,115 @@ internal sealed partial class AppearancePage : Page
         // first consumer to run wires it.
         Ghostty.Core.Settings.ShaderGallery.ManifestParser ??= ShaderGalleryJson.Parse;
 
-        if (ShaderGallery.Entries.Count == 0 && ShaderGallery.LoadDetail is { } detail)
+        if (ShaderGallery.Entries.Count == 0)
         {
             StaticLoggers.SettingsConfigWriter.LogInformation(
                 "shader gallery empty: {Detail} (base: {Base})",
-                detail, AppContext.BaseDirectory);
-            // Visible in the combo itself: a broken gallery install must be
-            // diagnosable from the UI, not only from logs.
-            ShaderGalleryCombo.Items.Insert(0, new ComboBoxItem
-            {
-                IsEnabled = false,
-                Content = $"Gallery unavailable: {detail}",
-            });
+                ShaderGallery.LoadDetail, AppContext.BaseDirectory);
         }
-        var items = ShaderGalleryCombo.Items;
-        // -1 would make Insert below throw and take the whole page down;
-        // appending at the end is the correct degenerate order.
-        var customIndex = items.IndexOf(ShaderCustomFileItem);
-        if (customIndex < 0) customIndex = items.Count;
+        // The picker window renders the entries; this page only needs the
+        // path -> entry map to classify a configured path as gallery vs file.
         foreach (var entry in ShaderGallery.Entries)
         {
             _shaderGalleryByPath[ShaderGallery.AbsolutePathFor(entry)] = entry;
-            var item = new ComboBoxItem { Tag = ShaderGallery.AbsolutePathFor(entry) };
-            var panel = new StackPanel();
-            // Explicit typography rather than style/theme-dictionary lookups:
-            // programmatic theme-resource fetches are unreliable in WinUI 3
-            // desktop, and the two-line shape matches the XAML items.
-            panel.Children.Add(new TextBlock
-            {
-                Text = entry.Name,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            });
-            panel.Children.Add(new TextBlock
-            {
-                Text = entry.Description,
-                FontSize = 12,
-                Opacity = 0.7,
-                TextWrapping = TextWrapping.Wrap,
-            });
-            item.Content = panel;
-            // Before the "Custom file" item, keeping None first.
-            items.Insert(customIndex++, item);
         }
     }
 
-    private void SelectShaderComboForPath(string path)
+    /// <summary>
+    /// Mirrors the configured shader path into the three-state selector:
+    /// empty = None, a gallery path = From gallery (named), anything else =
+    /// From file (path shown in the box). No writes; callers own committing.
+    /// </summary>
+    private void SyncShaderUiForPath(string path)
     {
+        // Radio selection fires ShaderMode_SelectionChanged, which writes
+        // for "None"; a pure UI mirror must not re-commit what it just read.
+        var loading = _loading;
+        _loading = true;
+        try
+        {
+
         if (string.IsNullOrWhiteSpace(path))
         {
-            SelectComboByTag(ShaderGalleryCombo, "");
+            ShaderNoneRadio.IsChecked = true;
+            GalleryPickRow.Visibility = Visibility.Collapsed;
+            FilePickRow.Visibility = Visibility.Collapsed;
+            GalleryPickLabel.Text = "No shader selected";
         }
-        else if (_shaderGalleryByPath.TryGetValue(path, out _))
+        else if (_shaderGalleryByPath.TryGetValue(path, out var entry))
         {
-            SelectComboByTag(ShaderGalleryCombo, path);
+            ShaderGalleryRadio.IsChecked = true;
+            GalleryPickRow.Visibility = Visibility.Visible;
+            FilePickRow.Visibility = Visibility.Collapsed;
+            GalleryPickLabel.Text = $"{entry.Name} — {entry.Description}";
+            ShaderPathBox.Text = path;
         }
         else
         {
-            SelectComboByTag(ShaderGalleryCombo, "custom");
+            ShaderFileRadio.IsChecked = true;
+            GalleryPickRow.Visibility = Visibility.Collapsed;
+            FilePickRow.Visibility = Visibility.Visible;
+            ShaderPathBox.Text = path;
+        }
+        }
+        finally
+        {
+            _loading = loading;
         }
     }
 
-    private void ShaderGallery_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ShaderMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_loading) return;
-        if (sender is not ComboBox combo) return;
-        if (combo.SelectedItem is not ComboBoxItem item) return;
+        if (sender is not RadioButtons buttons) return;
+        if (buttons.SelectedItem is not RadioButton radio) return;
 
-        var tag = item.Tag?.ToString();
-        if (tag == "custom")
+        switch (radio.Name)
         {
-            // No write of its own: the path box below is the source of truth
-            // for a custom file. Preview whatever it holds.
-            UpdateShaderPreview(ShaderPathBox.Text);
-            return;
+            case nameof(ShaderNoneRadio):
+                GalleryPickRow.Visibility = Visibility.Collapsed;
+                FilePickRow.Visibility = Visibility.Collapsed;
+                ShaderPathBox.Text = string.Empty;
+                WriteShaderPathValue(string.Empty);
+                break;
+
+            case nameof(ShaderGalleryRadio):
+                GalleryPickRow.Visibility = Visibility.Visible;
+                FilePickRow.Visibility = Visibility.Collapsed;
+                // Selecting the mode opens the picker: that is where a
+                // gallery shader gets chosen and previewed. Cancelling
+                // leaves the mode checked and the config untouched.
+                OpenShaderPicker();
+                break;
+
+            case nameof(ShaderFileRadio):
+                GalleryPickRow.Visibility = Visibility.Collapsed;
+                FilePickRow.Visibility = Visibility.Visible;
+                // No write of its own: the path box is the source of truth
+                // for a custom file, exactly as before.
+                break;
         }
+    }
 
-        // None ("" or null) clears; a gallery path writes that one shader.
-        var value = string.IsNullOrEmpty(tag) ? null : tag;
-        WriteShaderPathValue(value ?? string.Empty);
+    private void ShaderGalleryChoose_Click(object sender, RoutedEventArgs e) => OpenShaderPicker();
 
-        // Keep the two controls telling the same story.
-        ShaderPathBox.Text = value ?? string.Empty;
-        UpdateShaderPreview(value);
+    private void OpenShaderPicker()
+    {
+        var picker = new ShaderPickerWindow
+        {
+            CurrentPath = _shaderGalleryByPath.ContainsKey(_shaderPathWritten)
+                ? _shaderPathWritten
+                : null,
+        };
+        picker.Closed += (sender, args) =>
+        {
+            if (picker.PickedPath is { } path)
+            {
+                WriteShaderPathValue(path);
+                SyncShaderUiForPath(path);
+            }
+        };
+        picker.Activate();
     }
 
     private async void ShaderBrowse_Click(object sender, RoutedEventArgs e)
@@ -400,8 +426,7 @@ internal sealed partial class AppearancePage : Page
 
             ShaderPathBox.Text = file.Path;
             WriteShaderPathValue(file.Path);
-            SelectShaderComboForPath(file.Path);
-            UpdateShaderPreview(file.Path);
+            SyncShaderUiForPath(file.Path);
         }
         catch (Exception ex)
         {
@@ -438,55 +463,9 @@ internal sealed partial class AppearancePage : Page
     }
 
     // ── Shader preview ─────────────────────────────────────────────────────
-
-    private Controls.TerminalControl? _shaderPreview;
-
-    /// <summary>
-    /// Recreates the preview surface with the given shader applied (null or
-    /// empty = plain terminal). The per-surface override flows through
-    /// TerminalControl.PreviewCustomShader, so browsing the gallery never
-    /// touches the app config or any live terminal.
-    /// </summary>
-    private void UpdateShaderPreview(string? shaderPath = null)
-    {
-        if (ShaderPreviewHost is null) return;
-
-        // Dispose the old preview's surface explicitly. Detaching from the
-        // tree does NOT tear it down (TerminalControl.OnUnloaded is
-        // deliberately a no-op there), and each preview owns a native
-        // surface and a shell process rooted in the shared bootstrap host.
-        _shaderPreview?.DisposeSurface();
-        _shaderPreview = null;
-        ShaderPreviewHost.Child = null;
-
-        var host = App.BootstrapHost;
-        if (host is null) return;
-
-        // The path box is the source of truth for a custom file; the combo's
-        // "custom" Tag is a discriminator, never a shader path (passing it
-        // through would arm the shader-failed notice for a valid file).
-        var path = string.IsNullOrWhiteSpace(shaderPath)
-            ? ShaderPathBox.Text
-            : shaderPath;
-        if (string.IsNullOrEmpty(path)) path = null;
-
-        var control = new Controls.TerminalControl
-        {
-            Host = host,
-            PreviewCustomShader = path,
-        };
-        _shaderPreview = control;
-        ShaderPreviewHost.Child = control;
-    }
-
-    private void Page_Unloaded(object sender, RoutedEventArgs e)
-    {
-        // Dispose the preview surface (and its shell) when leaving the page;
-        // OnLoaded recreates it on return. Detaching alone leaks both.
-        _shaderPreview?.DisposeSurface();
-        _shaderPreview = null;
-        ShaderPreviewHost.Child = null;
-    }
+    // The live preview moved into ShaderPickerWindow (gallery mode). This
+    // page no longer hosts a preview surface, so there is nothing to create
+    // or dispose here; the picker window owns its surface's lifetime.
 
     // The last value this page put in the file, or seeded from it. Blur fires
     // on every pass through the page, including tab-through and the window
@@ -515,8 +494,7 @@ internal sealed partial class AppearancePage : Page
         // write, and the success-checked guards (a failed write must not
         // advance the guard, or retries from this page read as "unchanged").
         WriteShaderPathValue(value);
-        SelectShaderComboForPath(value);
-        UpdateShaderPreview(value);
+        SyncShaderUiForPath(value);
     }
 
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)

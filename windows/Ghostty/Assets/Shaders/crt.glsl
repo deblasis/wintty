@@ -1,21 +1,20 @@
 // Written for the wintty shader gallery. License: MIT (wintty project).
 //
-// An original CRT look: gentle curvature, resolution-scaled scanlines with
-// a slow roll, a whisper of a pixel grid, chromatic edge separation, a
-// phosphor hum, and a vignette. Tuned to stay readable as a terminal.
+// An original CRT look, built the way the classic CRT shaders do it: a
+// SMOOTH sine luminance wave for scanlines (hard-edged step lines alias
+// into moire mush at real resolutions) plus a vertical 2px aperture
+// grille for the phosphor-mask feel, gentle barrel curvature, faint
+// chromatic separation, and a vignette. Tuned to stay readable.
 
-const float CRT_CURVE     = 0.022; // barrel strength (kept subtle)
-const float CRT_SCAN_PX   = 4.0;   // screen px per scanline
-const float CRT_SCAN_BOLD = 0.45;  // scanline darkening at its peak
-const float CRT_GRID_PX   = 2.0;   // screen px per pixel-grid cell
-const float CRT_GRID      = 0.04;  // pixel grid darkening (a whisper)
-const float CRT_HUM       = 0.012; // global brightness hum
-const float CRT_CHROMA    = 0.0012;// chromatic offset at the edges
-const float CRT_VIGNETTE  = 0.18;  // corner darkening
+const float CRT_CURVE   = 0.022; // barrel strength (kept subtle)
+const float CRT_SCAN_MIN = 3.5;  // min screen px per scanline period
+const float CRT_SCAN_DEPTH = 0.5; // scanline wave depth (0..1)
+const float CRT_GRILLE   = 0.22;  // vertical grille darkening
+const float CRT_CHROMA   = 0.0012; // chromatic offset at the edges
+const float CRT_VIGNETTE = 0.18;  // corner darkening
 
 vec2 crtCurve(vec2 uv)
 {
-    // Centered coordinates, bulged outward by CURVE.
     vec2 c = uv * 2.0 - 1.0;
     c *= 1.0 + CRT_CURVE * dot(c, c);
     return c * 0.5 + 0.5;
@@ -25,7 +24,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {
     vec2 uv = crtCurve(fragCoord.xy / iResolution.xy);
 
-    // Outside the bulged tube: black bezel.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -40,25 +38,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     col.g = texture(iChannel0, uv).g;
     col.b = texture(iChannel0, uv - off).b;
 
-    // Scanlines, in fragCoord space (same basis as the grid below, which
-    // is confirmed visible) so no iResolution/uv math can hide them:
-    // static, hard-edged, 4px period, 45% darkening. If this is not
-    // visible the shader path itself is broken, not the tuning.
-    float scan = 0.5 + 0.5 * sin(fragCoord.y * 6.2831853 / CRT_SCAN_PX);
-    // Dark only in the trough of each period (~1.4px of every 4): reads as
-    // a scanline, not a band.
-    float line = 1.0 - step(0.45, scan);
-    col *= 1.0 - CRT_SCAN_BOLD * line;
+    // Scanlines: a smooth luminance wave in screen space, gently rolling.
+    // Resolution-adaptive period; the wave shape (not a hard step) is what
+    // keeps the lines visible instead of aliasing into noise.
+    float scan_px = max(CRT_SCAN_MIN, iResolution.y / 320.0);
+    float scans = 0.5 + 0.5 * sin(fragCoord.y * 6.2831853 / scan_px + iTime * 1.5);
+    float m = 1.0 - CRT_SCAN_DEPTH * pow(scans, 1.6);
+    col *= m;
 
-    // Pixel grid: a faint static mask in screen space -- much subtler than
-    // the dedicated Pixels shader, and no content quantization, so text
-    // stays crisp.
-    vec2 g = abs(fract(fragCoord.xy / CRT_GRID_PX) - 0.5) * 2.0;
-    float edge = max(g.x, g.y);
-    col *= 1.0 - CRT_GRID * smoothstep(0.6, 1.0, edge);
-
-    // Slow phosphor hum.
-    col *= 1.0 + CRT_HUM * sin(iTime * 2.1);
+    // Aperture grille: vertical 2px phosphor columns. This, not a pixel
+    // grid, is what reads as "CRT" -- horizontal scanlines above, vertical
+    // grille here.
+    float gx = clamp((mod(fragCoord.x, 2.0) - 1.0) * 2.0, 0.0, 1.0);
+    col *= 1.0 - CRT_GRILLE * gx;
 
     // Vignette.
     float vig = 1.0 - CRT_VIGNETTE * dot(c, c) * 2.2;
