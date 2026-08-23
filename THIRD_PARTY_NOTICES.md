@@ -50,7 +50,12 @@ Bundled assets: pixels.glsl, scanline.glsl
 
 ### Original shaders (MIT, this project)
 
-text_glow.glsl, snowfall.glsl, aurora_background.glsl
+text_glow.glsl, snowfall.glsl, aurora_background.glsl, crt.glsl
+
+(The CRT look is written from scratch for this gallery. Ghostty's
+in-tree test shader for the same effect is derived from an
+Attribution-NonCommercial-ShareAlike source and was deliberately NOT
+vendored.)
 
 ## Existing third-party assets
 
