@@ -24,10 +24,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {
     vec2 uv = crtCurve(fragCoord.xy / iResolution.xy);
 
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
+    // Bezel via multiply, not an early return: an early return in
+    // mainImage lowers to a WGSL path that renders the whole frame black
+    // (zioshade-8h7), and the multiply reads identically on every backend.
+    float inside = step(0.0, uv.x) * step(uv.x, 1.0)
+                 * step(0.0, uv.y) * step(uv.y, 1.0);
 
     // Chromatic separation grows toward the edges.
     vec2 c = uv - 0.5;
@@ -56,5 +57,5 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     float vig = 1.0 - CRT_VIGNETTE * dot(c, c) * 2.2;
     col *= vig;
 
-    fragColor = vec4(col, 1.0);
+    fragColor = vec4(col * inside, 1.0);
 }
