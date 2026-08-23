@@ -20,6 +20,7 @@
 const Command = @This();
 
 const std = @import("std");
+const log = std.log.scoped(.command);
 const builtin = @import("builtin");
 const configpkg = @import("config.zig");
 const global = @import("global.zig");
@@ -302,6 +303,89 @@ fn fork() !posix.pid_t {
     }
 }
 
+/// Resolve a bare program name (no directory component) to an absolute
+/// path so CreateProcessW gets an explicit lpApplicationName. Returned
+/// as UTF-16 straight through; the caller hands it to CreateProcessW
+/// without re-encoding.
+///
+/// With lpApplicationName null, CreateProcessW searches using THIS
+/// process's PATH -- inherited verbatim from whoever launched us. A GUI
+/// app started from a terminal whose session predates a PATH edit (or
+/// that sanitizes the environment) fails to find shells that plainly
+/// exist, surfacing as error.FileNotFound mapped up to an opaque
+/// error.Unexpected on the "error starting IO thread" screen (live
+/// incident 2026-08-23: `command = pwsh.exe` from a Warp session whose
+/// PATH lacked PowerShell 7).
+///
+/// Search order: SearchPathW first (the exact search CreateProcessW
+/// would have done, honoring the caller's PATH ordering), then a few
+/// well-known shell homes PATH misses when stale. Returns null when
+/// nothing resolves; the caller then falls back to the legacy
+/// CreateProcessW search unchanged.
+fn resolveWindowsProgram(arena: Allocator, path: [:0]const u8) !?[:0]u16 {
+    if (std.fs.path.dirname(path) != null) return null;
+
+    // Probe name: the program as written plus .exe when it carries no
+    // extension. SearchPathW would append the extension itself, but
+    // GetFileAttributesW below appends nothing, so a bare `pwsh` only
+    // resolves with the suffix baked in.
+    const probe_u8 = if (std.fs.path.extension(path).len != 0)
+        path
+    else
+        try std.fmt.allocPrintSentinel(arena, "{s}.exe", .{path}, 0);
+    const probe_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, probe_u8);
+    var buf: [32768]u16 = undefined;
+
+    // 1) The PATH-aware search CreateProcessW itself would run.
+    const len = windows.exp.kernel32.SearchPathW(null, probe_w.ptr, null, buf.len, @ptrCast(&buf), null);
+    if (len > 0 and len < buf.len) {
+        return try arena.dupeZ(u16, buf[0..len]);
+    }
+
+    // 2) Well-known homes. Cheap existence probes; covers the default
+    // shells when the caller's PATH is stale.
+    const sys32 = std.unicode.utf8ToUtf16LeStringLiteral("\\System32\\");
+    const pwsh7 = std.unicode.utf8ToUtf16LeStringLiteral("\\PowerShell\\7\\");
+    const ps7_user = std.unicode.utf8ToUtf16LeStringLiteral("\\Programs\\PowerShell\\7\\");
+    const winps = std.unicode.utf8ToUtf16LeStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\");
+    // A missing env var kills only its own probe, never the rest.
+    const dirs = [_][]const u16{
+        winJoinEnv(arena, "SystemRoot", sys32) catch &.{},
+        winJoinEnv(arena, "ProgramFiles", pwsh7) catch &.{},
+        winJoinEnv(arena, "LOCALAPPDATA", ps7_user) catch &.{},
+        winJoinEnv(arena, "SystemRoot", winps) catch &.{},
+    };
+    for (dirs) |dir| {
+        var candidate: [32768 + 16]u16 = undefined;
+        if (dir.len + probe_w.len > candidate.len) continue;
+        @memcpy(candidate[0..dir.len], dir);
+        @memcpy(candidate[dir.len..][0..probe_w.len], probe_w[0..probe_w.len :0]);
+        candidate[dir.len + probe_w.len] = 0;
+        const full = candidate[0 .. dir.len + probe_w.len :0];
+        const attrs = windows.exp.kernel32.GetFileAttributesW(full.ptr);
+        if (attrs != windows.INVALID_FILE_ATTRIBUTES) {
+            return try arena.dupeZ(u16, full);
+        }
+    }
+
+    return null;
+}
+
+/// dir-from-env helper: `<env var value><literal suffix>` as UTF-16, or
+/// null when the variable is unset. Errors are swallowed by the caller
+/// (the resolver treats a missing env as a dead probe, never a spawn
+/// failure).
+fn winJoinEnv(arena: Allocator, name: []const u8, suffix: []const u16) ![]u16 {
+    const name_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, name);
+    var vbuf: [32768]u16 = undefined;
+    const vlen = windows.exp.kernel32.GetEnvironmentVariableW(name_w.ptr, @ptrCast(&vbuf), vbuf.len);
+    if (vlen == 0 or vlen >= vbuf.len) return error.EnvironmentVariableMissing;
+    const out = try arena.alloc(u16, vlen + suffix.len);
+    @memcpy(out[0..vlen], vbuf[0..vlen]);
+    @memcpy(out[vlen..], suffix);
+    return out;
+}
+
 fn startWindows(self: *Command, arena: Allocator) !void {
     const cwd_w = if (self.cwd) |cwd| try std.unicode.utf8ToUtf16LeAllocZ(arena, cwd) else null;
 
@@ -317,6 +401,12 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     else
         try windowsCreateCommandLine(arena, &.{self.path});
     const command_line_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, command_line);
+
+    // Bare program names get an explicit lpApplicationName so the spawn
+    // does not depend on this process's (possibly stale) PATH. argv[0]
+    // in the command line stays as the caller wrote it; only the module
+    // to load comes from the resolved absolute path.
+    const app_name_w: ?[:0]u16 = try resolveWindowsProgram(arena, self.path);
     const env_w = if (self.env) |env_map| try createWindowsEnvBlock(arena, env_map) else null;
 
     const any_null_fd = self.stdin == null or self.stdout == null or self.stderr == null;
@@ -497,7 +587,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
-        null,
+        if (app_name_w) |w| w.ptr else null,
         command_line_w.ptr,
         null,
         null,
@@ -507,7 +597,15 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (cwd_w) |w| w.ptr else null,
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
-    ) == windows.FALSE) return windows.unexpectedError(windows.GetLastError());
+    ) == windows.FALSE) {
+        const failed_rc = windows.GetLastError();
+        log.warn("CreateProcessW failed rc=0x{x} app={s} cmd={s}", .{
+            failed_rc,
+            if (app_name_w) |w| std.unicode.utf16LeToUtf8Alloc(arena, w) catch "<utf16>" else "<path-search>",
+            command_line,
+        });
+        return windows.unexpectedError(failed_rc);
+    }
 
     self.pid = process_information.hProcess;
 }

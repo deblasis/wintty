@@ -59,3 +59,7 @@ windows/scripts/shader-notice-fuzz/
 windows/scripts/vtabs-layout-switch/
 windows/scripts/vtabs-morph/
 windows/scripts/vtabs-switcher/
+
+# Gallery tooling scratch renders (WARP PPMs and PNGs diffed during
+# shader bring-up; never something we want committed).
+tools/gallery/previews/

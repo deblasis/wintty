@@ -72,6 +72,13 @@ public partial class App : Application
     // UI-thread-only access.
     private Window? _settingsWindow;
 
+    /// <summary>
+    /// The app-wide settings window while it is open, else null. Auxiliary
+    /// windows opened from its pages (about, shader picker) parent their
+    /// teardown to it, so closing settings closes them too.
+    /// </summary>
+    internal Window? SettingsWindow => _settingsWindow;
+
     private Ghostty.Session.SessionManager? _sessionManager;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
     private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
