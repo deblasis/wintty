@@ -9,11 +9,13 @@
 // shape flips: the cursor's bottom-left corner only moves when the cell
 // moves.
 //
-// Kept deliberately branchless. zioshade (v0.6.x) sinks the incoming
-// store of a local that is modified inside a conditional containing a
-// loop, so the not-taken path reads an uninitialized variable and the
-// idle frame renders black. The ghost loop runs unconditionally (8 taps,
-// same shape as text_glow) and the whole effect is gated by multipliers.
+// Kept deliberately branchless. Written around a zioshade v0.6.x bug
+// that sank the incoming store of a local modified inside a conditional
+// containing a loop, so the not-taken path read an uninitialized
+// variable and the idle frame rendered black. The store-sink is fixed
+// as of v0.8.2; the shape stays because it costs nothing extra. The
+// ghost loop runs unconditionally (8 taps, same shape as text_glow) and
+// the whole effect is gated by multipliers.
 
 const float DURATION       = 0.22; // total effect, seconds
 const int   GHOST_TAPS     = 8;    // samples averaged into the streak

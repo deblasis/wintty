@@ -68,9 +68,9 @@
       "name": "Cursor teleport",
       "description": "The cursor blinks out, streaks across as a ghost blur, and materializes at its new position.",
       "category": "cursor",
-      "author": "wintty project",
+      "author": "wintty",
       "license": "MIT",
-      "source": ""
+      "source": "https://github.com/deblasis/wintty"
     },
     {
       "id": "lightning_strike",
@@ -78,9 +78,9 @@
       "name": "Lightning strike",
       "description": "A jagged forked bolt strikes from the top edge onto the cursor with an impact flash.",
       "category": "cursor",
-      "author": "wintty project",
+      "author": "wintty",
       "license": "MIT",
-      "source": ""
+      "source": "https://github.com/deblasis/wintty"
     },
     {
       "id": "scanline",
@@ -106,7 +106,7 @@
       "id": "crt",
       "file": "crt.glsl",
       "name": "CRT",
-      "description": "Curvature, a rolling scanline, and a phosphor hum.",
+      "description": "Smooth scanlines, a vertical aperture grille, curvature, and a vignette.",
       "category": "screen",
       "author": "wintty",
       "license": "MIT",
@@ -157,10 +157,10 @@
       "file": "interference.glsl",
       "name": "Interference",
       "description": "Fallout-style CRT interference: a rolling signal band, twitching rows, static grain, and rare line tears. Fires constantly; no cursor action needed.",
-      "category": "effects",
-      "author": "wintty project",
+      "category": "screen",
+      "author": "wintty",
       "license": "MIT",
-      "source": ""
+      "source": "https://github.com/deblasis/wintty"
     }
   ]
 }

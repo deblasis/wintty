@@ -28,11 +28,9 @@ const Buffer = buffer_mod.Buffer;
 
 // ---- Test device helper ----
 
-/// Bundles a device, command queue, command list, and fence so tests
-/// can create resources and record/execute commands.
-// Minimal debug-layer info queue: the debug layer is enabled by
-// Device.init in Debug builds, so any validation error from the post
-// pass lands here. Layout follows d3d12.h's ID3D12InfoQueue.
+/// Minimal debug-layer info queue: the debug layer is enabled by
+/// Device.init in Debug builds, so any validation error from the post
+/// pass lands here. Layout follows d3d12.h's ID3D12InfoQueue.
 const InfoQueue = extern struct {
     vtable: *const VTable,
     pub const IID = com.GUID{
@@ -62,6 +60,8 @@ const InfoQueue = extern struct {
     };
 };
 
+/// Bundles a device, command queue, command list, and fence so tests
+/// can create resources and record/execute commands.
 const TestDevice = struct {
     device: *d3d12.ID3D12Device,
     command_queue: *d3d12.ID3D12CommandQueue,
@@ -879,6 +879,11 @@ test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
 // exactly like generic.zig's post loop -- then reads the target back and
 // looks for the scanline row pattern. If the app path drops the pattern,
 // this test reproduces it in-repo.
+//
+// The app path is the ONLY thing exercised: the draw goes through the
+// app's own post pipeline (bg_color_vs vertex stage), so a regression in
+// that vertex stage fails the assertions below rather than being masked
+// by a hand-written replacement stage.
 test "post pipeline: scanline shader leaves row periodicity" {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -887,12 +892,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
 
     const alloc = std.heap.c_allocator;
 
-    // The scanline body from the gallery's CRT v5: hard-edged dark lines
-    // every 4 px in fragCoord space over the sampled content.
-    // MICRO-BISECT stage: solid red, no uniforms, no texture. If the app
-    // path still renders black with THIS, the draw itself is producing
-    // nothing and the plumbing (PSO/viewport/RT/binding) is the bug, not
-    // anything about the shadertoy contract.
+    // A scanline body in the gallery CRT's shape: a smooth sine darkening
+    // every 4 px in fragCoord space over the sampled content, so the
+    // expected output is periodic row means over mid gray.
     const scanline_body =
         \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
         \\{
@@ -923,18 +925,6 @@ test "post pipeline: scanline shader leaves row periodicity" {
         return err;
     };
     defer alloc.free(hlsl);
-
-    // Dump the app-path HLSL for offline inspection (zioshade-4ne).
-    {
-        const cwd = std.Io.Dir.cwd();
-        if (cwd.createFile(global.io(), "debug_post.hlsl", .{ .truncate = true })) |f| {
-            defer f.close(global.io());
-            var wbuf: [4096]u8 = undefined;
-            var fw = f.writer(global.io(), &wbuf);
-            fw.interface.writeAll(hlsl) catch {};
-            fw.interface.flush() catch {};
-        } else |_| {}
-    }
 
     // Real device in shared-texture (offscreen, headless-safe) mode.
     var device = Device.init(.{ .shared_texture = .{
@@ -971,13 +961,17 @@ test "post pipeline: scanline shader leaves row periodicity" {
         const hr = dev.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&cmd_allocator));
         if (com.FAILED(hr) or cmd_allocator == null) return error.CommandAllocatorCreationFailed;
     }
-    defer if (cmd_allocator) |a| { _ = a.Release(); };
+    defer if (cmd_allocator) |a| {
+        _ = a.Release();
+    };
     var command_list: ?*d3d12.ID3D12GraphicsCommandList = null;
     {
         const hr = dev.CreateCommandList(0, .DIRECT, cmd_allocator.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&command_list));
         if (com.FAILED(hr) or command_list == null) return error.CommandListCreationFailed;
     }
-    defer if (command_list) |l| { _ = l.Release(); };
+    defer if (command_list) |l| {
+        _ = l.Release();
+    };
     var queue: ?*d3d12.ID3D12CommandQueue = null;
     {
         const qd = d3d12.D3D12_COMMAND_QUEUE_DESC{
@@ -993,7 +987,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         );
         if (com.FAILED(hr) or queue == null) return error.CommandQueueCreationFailed;
     }
-    defer if (queue) |q| { _ = q.Release(); };
+    defer if (queue) |q| {
+        _ = q.Release();
+    };
 
     var fence: ?*d3d12.ID3D12Fence = null;
     {
@@ -1005,7 +1001,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         );
         if (com.FAILED(hr) or fence == null) return error.FenceCreationFailed;
     }
-    defer if (fence) |f| { _ = f.Release(); };
+    defer if (fence) |f| {
+        _ = f.Release();
+    };
 
     const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse
         return error.FenceEventCreationFailed;
@@ -1062,7 +1060,8 @@ test "post pipeline: scanline shader leaves row periodicity" {
         pass.complete();
     }
 
-    // BISECT ARM A: the app's post pipeline verbatim (bg_color_vs).
+    // The app's post pipeline verbatim (bg_color_vs). The readback below
+    // asserts on what this draw alone leaves in `front`.
     {
         var pass = RenderPassMod.begin(.{
             .command_list = command_list.?,
@@ -1075,71 +1074,6 @@ test "post pipeline: scanline shader leaves row periodicity" {
         });
         pass.step(.{
             .pipeline = shaders.post_pipelines[0],
-            .uniforms = ubuf.buffer,
-            .textures = &.{back},
-            .samplers = &.{sampler},
-            .draw = .{ .type = .triangle, .vertex_count = 3 },
-        });
-        pass.complete();
-    }
-    // Note: single command-list recording; the readback below reads `front`.
-
-    // BISECT ARM B: same PS bytecode + same post root signature, but a
-    // hand-written fullscreen vertex stage. Renders over arm A's output; if
-    // the readback then shows scanlines where arm A left black, the app's
-    // bg_color_vs vertex stage is the culprit.
-    {
-        const vs_src =
-            \\float4 VSMain(uint vid : SV_VertexID) : SV_Position
-            \\{
-            \\    float2 p = float2((vid == 2) ? 3.0 : -1.0, (vid == 0) ? -3.0 : 1.0);
-            \\    return float4(p, 0.0, 1.0);
-            \\}
-        ;
-        const vs_z = try alloc.dupeZ(u8, vs_src);
-        defer alloc.free(vs_z);
-        const vs_entry_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, "VSMain");
-        defer alloc.free(vs_entry_w);
-        const ps_entry_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, "main");
-        defer alloc.free(ps_entry_w);
-
-        const vs_dxil = (try shaders_mod.compileHlslToDxilProfile(alloc, vs_z, vs_entry_w, std.unicode.utf8ToUtf16LeStringLiteral("vs_6_0"))) orelse return error.VsCompileFailed;
-        defer alloc.free(vs_dxil);
-        const ps_dxil = (try shaders_mod.compileHlslToDxil(alloc, hlsl, ps_entry_w)) orelse return error.PsCompileFailed;
-        defer alloc.free(ps_dxil);
-
-        // Dump the COM-compiled DXIL for disassembly (zioshade-4ne).
-        {
-            const cwd = std.Io.Dir.cwd();
-            if (cwd.createFile(global.io(), "debug_post.cso", .{ .truncate = true })) |f| {
-                defer f.close(global.io());
-                var wbuf: [65536]u8 = undefined;
-                var fw = f.writer(global.io(), &wbuf);
-                fw.interface.writeAll(ps_dxil) catch {};
-                fw.interface.flush() catch {};
-            } else |_| {}
-        }
-
-        const arm_b = Pipeline.init(.{
-            .device = dev,
-            .root_signature = shaders.post_root_signature.?,
-            .vs_bytecode = vs_dxil,
-            .ps_bytecode = ps_dxil,
-            .blend = .none,
-        }) catch return error.ArmBPipelineFailed;
-        defer arm_b.deinit();
-
-        var pass = RenderPassMod.begin(.{
-            .command_list = command_list.?,
-            .srv_heap = &srv_heap,
-            .sampler_heap = &sampler_heap,
-            .attachments = &.{.{
-                .target = .{ .texture = front },
-                .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
-            }},
-        });
-        pass.step(.{
-            .pipeline = arm_b,
             .uniforms = ubuf.buffer,
             .textures = &.{back},
             .samplers = &.{sampler},
@@ -1173,7 +1107,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         };
         _ = dev.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COPY_DEST, null, &d3d12.ID3D12Resource.IID, @ptrCast(&readback));
     }
-    defer if (readback) |r| { _ = r.Release(); };
+    defer if (readback) |r| {
+        _ = r.Release();
+    };
     {
         var dst: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
         dst.pResource = readback.?;
@@ -1278,28 +1214,6 @@ test "post pipeline: scanline shader leaves row periodicity" {
         readback.?.Unmap(0, &nrw2);
     }
 
-    // Dump front as PPM for direct inspection (zioshade-4ne).
-    {
-        const cwd = std.Io.Dir.cwd();
-        if (cwd.createFile(global.io(), "debug_front.ppm", .{ .truncate = true })) |f| {
-            defer f.close(global.io());
-            var wbuf: [4096]u8 = undefined;
-            var fw = f.writer(global.io(), &wbuf);
-            const w = &fw.interface;
-            w.print("P6\n{d} {d}\n255\n", .{ W, H }) catch {};
-            var y2: usize = 0;
-            while (y2 < H) : (y2 += 1) {
-                var x2: usize = 0;
-                while (x2 < W) : (x2 += 1) {
-                    const i = y2 * W * 4 + x2 * 4;
-                    const rgb = [3]u8{ px[i + 2], px[i + 1], px[i] }; // BGRA -> RGB
-                    w.writeAll(&rgb) catch {};
-                }
-            }
-            w.flush() catch {};
-        } else |_| {}
-    }
-
     var row_means: [H]f64 = undefined;
     for (0..H) |y| {
         var sum: u64 = 0;
@@ -1327,22 +1241,7 @@ test "post pipeline: scanline shader leaves row periodicity" {
         readback.?.Unmap(0, &nrw);
     }
 
-    // Solid red expectation: row means near 255 (red channel read here is
-    // the FIRST byte = B in BGRA... red = BGR(0,0,255) so byte0=0? No:
-    // B8G8R8A8 = bytes [B,G,R,A]; a red pixel = [0,0,255,255]. The analysis
-    // reads byte0 = blue = 0. So for the red probe, assert the RED channel
-    // instead: rebuild row means from byte2.
-    var red_means: [H]f64 = undefined;
-    for (0..H) |y| {
-        var sum: u64 = 0;
-        for (0..W) |x| sum += px[y * W * 4 + x * 4 + 2];
-        red_means[y] = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(W));
-    }
-    var red_total: f64 = 0;
-    for (red_means) |v| red_total += v;
-    const red_avg = red_total / @as(f64, @floatFromInt(H));
-    std.debug.print("red-channel average = {d:.1} (255 = solid red)\n", .{red_avg});
-        // Scanlines over mid gray: bright rows ~128, dark rows ~70; strong
+    // Scanlines over mid gray: bright rows ~128, dark rows ~70; strong
     // row-to-row differences and roughly a third of rows dark.
     try std.testing.expect(max_diff > 10.0);
     try std.testing.expect(dark_rows > H / 8);

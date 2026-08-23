@@ -1564,18 +1564,18 @@ test "DECSCUSR sets cursor style (shape changes reach the shader)" {
     // what feeds the renderer glyph width (and thus the cursor shaders'
     // mode-change gate).
     s.nextSlice("\x1B[2 q");
-    try testing.expectEqual(@as(?Screen.CursorStyle, .block), t.screens.active.cursor.cursor_style);
+    try testing.expectEqual(.block, t.screens.active.cursor.cursor_style);
 
     s.nextSlice("\x1B[4 q");
-    try testing.expectEqual(@as(?Screen.CursorStyle, .underline), t.screens.active.cursor.cursor_style);
+    try testing.expectEqual(.underline, t.screens.active.cursor.cursor_style);
 
     s.nextSlice("\x1B[6 q");
-    try testing.expectEqual(@as(?Screen.CursorStyle, .bar), t.screens.active.cursor.cursor_style);
+    try testing.expectEqual(.bar, t.screens.active.cursor.cursor_style);
 
     // Default (CSI 0 SP q / CSI q) re-selects the configured default,
     // which for a bare test Terminal is block.
     s.nextSlice("\x1B[ q");
-    try testing.expectEqual(@as(?Screen.CursorStyle, .block), t.screens.active.cursor.cursor_style);
+    try testing.expectEqual(.block, t.screens.active.cursor.cursor_style);
 }
 
 test "cursor save and restore" {

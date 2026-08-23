@@ -8,12 +8,14 @@
 // strike is seeded from iTimeCursorChange, so every jump draws a
 // different bolt.
 //
-// Kept deliberately branchless. zioshade (v0.6.x) sinks the incoming
-// store of a local that is modified inside a conditional containing a
-// loop, so the not-taken path reads an uninitialized variable and the
-// idle frame renders black. The gate is a multiplier instead, and the
-// loop trip counts collapse to zero when the effect is idle so the
-// per-pixel cost only lands during a strike.
+// Kept deliberately branchless. Written around a zioshade v0.6.x bug
+// that sank the incoming store of a local modified inside a conditional
+// containing a loop, so the not-taken path read an uninitialized
+// variable and the idle frame rendered black. The store-sink is fixed
+// as of v0.8.2; the shape stays because it costs nothing extra. The
+// gate is a multiplier instead, and the loop trip counts collapse to
+// zero when the effect is idle so the per-pixel cost only lands during
+// a strike.
 
 const float DURATION       = 0.30; // total effect, seconds
 const float STRIKE_FRAC    = 0.30; // fraction of DURATION the bolt travels

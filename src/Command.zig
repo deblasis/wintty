@@ -304,7 +304,9 @@ fn fork() !posix.pid_t {
 }
 
 /// Resolve a bare program name (no directory component) to an absolute
-/// path so CreateProcessW gets an explicit lpApplicationName.
+/// path so CreateProcessW gets an explicit lpApplicationName. Returned
+/// as UTF-16 straight through; the caller hands it to CreateProcessW
+/// without re-encoding.
 ///
 /// With lpApplicationName null, CreateProcessW searches using THIS
 /// process's PATH -- inherited verbatim from whoever launched us. A GUI
@@ -320,40 +322,49 @@ fn fork() !posix.pid_t {
 /// well-known shell homes PATH misses when stale. Returns null when
 /// nothing resolves; the caller then falls back to the legacy
 /// CreateProcessW search unchanged.
-fn resolveWindowsProgram(arena: Allocator, path: [:0]const u8) !?[:0]const u8 {
+fn resolveWindowsProgram(arena: Allocator, path: [:0]const u8) !?[:0]u16 {
     if (std.fs.path.dirname(path) != null) return null;
 
-    const name_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, path);
+    // Probe name: the program as written plus .exe when it carries no
+    // extension. SearchPathW would append the extension itself, but
+    // GetFileAttributesW below appends nothing, so a bare `pwsh` only
+    // resolves with the suffix baked in.
+    const probe_u8 = if (std.fs.path.extension(path).len != 0)
+        path
+    else
+        try std.fmt.allocPrintSentinel(arena, "{s}.exe", .{path}, 0);
+    const probe_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, probe_u8);
     var buf: [32768]u16 = undefined;
 
     // 1) The PATH-aware search CreateProcessW itself would run.
-    const dot_exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
-    const ext: ?windows.LPCWSTR = if (std.fs.path.extension(path).len == 0) dot_exe.ptr else null;
-    const len = windows.exp.kernel32.SearchPathW(null, name_w.ptr, ext, buf.len, @ptrCast(&buf), null);
+    const len = windows.exp.kernel32.SearchPathW(null, probe_w.ptr, null, buf.len, @ptrCast(&buf), null);
     if (len > 0 and len < buf.len) {
-        return try std.unicode.utf16LeToUtf8AllocZ(arena, buf[0..len]);
+        return try arena.dupeZ(u16, buf[0..len]);
     }
 
     // 2) Well-known homes. Cheap existence probes; covers the default
     // shells when the caller's PATH is stale.
     const sys32 = std.unicode.utf8ToUtf16LeStringLiteral("\\System32\\");
     const pwsh7 = std.unicode.utf8ToUtf16LeStringLiteral("\\PowerShell\\7\\");
+    const ps7_user = std.unicode.utf8ToUtf16LeStringLiteral("\\Programs\\PowerShell\\7\\");
     const winps = std.unicode.utf8ToUtf16LeStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\");
+    // A missing env var kills only its own probe, never the rest.
     const dirs = [_][]const u16{
-        winJoinEnv(arena, "SystemRoot", sys32) catch return null,
-        winJoinEnv(arena, "ProgramFiles", pwsh7) catch return null,
-        winJoinEnv(arena, "SystemRoot", winps) catch return null,
+        winJoinEnv(arena, "SystemRoot", sys32) catch &.{},
+        winJoinEnv(arena, "ProgramFiles", pwsh7) catch &.{},
+        winJoinEnv(arena, "LOCALAPPDATA", ps7_user) catch &.{},
+        winJoinEnv(arena, "SystemRoot", winps) catch &.{},
     };
     for (dirs) |dir| {
         var candidate: [32768 + 16]u16 = undefined;
-        if (dir.len + name_w.len > candidate.len) continue;
+        if (dir.len + probe_w.len > candidate.len) continue;
         @memcpy(candidate[0..dir.len], dir);
-        @memcpy(candidate[dir.len..][0..name_w.len], name_w[0..name_w.len :0]);
-        candidate[dir.len + name_w.len] = 0;
-        const full = candidate[0 .. dir.len + name_w.len :0];
+        @memcpy(candidate[dir.len..][0..probe_w.len], probe_w[0..probe_w.len :0]);
+        candidate[dir.len + probe_w.len] = 0;
+        const full = candidate[0 .. dir.len + probe_w.len :0];
         const attrs = windows.exp.kernel32.GetFileAttributesW(full.ptr);
         if (attrs != windows.INVALID_FILE_ATTRIBUTES) {
-            return try std.unicode.utf16LeToUtf8AllocZ(arena, full);
+            return try arena.dupeZ(u16, full);
         }
     }
 
@@ -395,10 +406,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     // does not depend on this process's (possibly stale) PATH. argv[0]
     // in the command line stays as the caller wrote it; only the module
     // to load comes from the resolved absolute path.
-    const app_name_w: ?[:0]u16 = if (try resolveWindowsProgram(arena, self.path)) |abs|
-        try std.unicode.utf8ToUtf16LeAllocZ(arena, abs)
-    else
-        null;
+    const app_name_w: ?[:0]u16 = try resolveWindowsProgram(arena, self.path);
     const env_w = if (self.env) |env_map| try createWindowsEnvBlock(arena, env_map) else null;
 
     const any_null_fd = self.stdin == null or self.stdout == null or self.stderr == null;
@@ -591,7 +599,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         &process_information,
     ) == windows.FALSE) {
         const failed_rc = windows.GetLastError();
-        log.warn("CreateProcessW failed rc={d} app={s} cmd={s}", .{
+        log.warn("CreateProcessW failed rc=0x{x} app={s} cmd={s}", .{
             failed_rc,
             if (app_name_w) |w| std.unicode.utf16LeToUtf8Alloc(arena, w) catch "<utf16>" else "<path-search>",
             command_line,
