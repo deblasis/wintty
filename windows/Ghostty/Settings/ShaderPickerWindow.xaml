@@ -5,10 +5,12 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- Gallery shader picker: a real window (not a dialog) so it can stay
-         open while the caller compares against other windows. The combo and
-         the left/right arrow keys both move through the gallery; the live
-         terminal underneath previews each shader as selected. Focus the
-         terminal to type and see cursor-triggered effects. -->
+         open while the caller compares against other windows. The combo, the
+         chevron buttons, and the left/right arrows all move through the
+         gallery; the live terminal underneath previews each shader as
+         selected. Focus the terminal to type and see cursor-triggered
+         effects; while it holds focus its keystrokes (arrows included) are
+         never intercepted, so the chevrons are how you flip then. -->
 
     <Grid x:Name="RootGrid"
           RowSpacing="12"
@@ -21,15 +23,29 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0"
-                   Text="Pick a shader. Left/Right arrows flip through the gallery; click into the terminal below to type and see cursor effects move."
+                   Text="Pick a shader. The chevrons beside the list flip through the gallery; so do Left/Right arrows while the terminal is not focused. Click into the terminal below to type and see cursor effects move."
                    TextWrapping="Wrap"
                    Opacity="0.7" />
 
-        <ComboBox x:Name="PickerCombo"
-                  Grid.Row="1"
-                  MinWidth="360"
-                  HorizontalAlignment="Left"
-                  SelectionChanged="PickerCombo_SelectionChanged" />
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    Spacing="8">
+            <Button x:Name="PrevShaderButton"
+                    Click="PrevShader_Click"
+                    ToolTipService.ToolTip="Previous shader"
+                    AutomationProperties.Name="Previous shader">
+                <FontIcon Glyph="&#xE76B;" />
+            </Button>
+            <ComboBox x:Name="PickerCombo"
+                      MinWidth="360"
+                      SelectionChanged="PickerCombo_SelectionChanged" />
+            <Button x:Name="NextShaderButton"
+                    Click="NextShader_Click"
+                    ToolTipService.ToolTip="Next shader"
+                    AutomationProperties.Name="Next shader">
+                <FontIcon Glyph="&#xE76C;" />
+            </Button>
+        </StackPanel>
 
         <Border x:Name="PickerPreviewHost"
                 Grid.Row="2"

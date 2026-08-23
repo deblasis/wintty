@@ -390,16 +390,32 @@ internal sealed partial class AppearancePage : Page
 
     private void ShaderGalleryChoose_Click(object sender, RoutedEventArgs e) => OpenShaderPicker();
 
+    // The one picker instance while it is open. Both entry points
+    // (selecting the gallery radio and Choose...) funnel through
+    // OpenShaderPicker, so a second ask activates the live window instead
+    // of stacking another one on top. Cleared by Closed, not Unloaded:
+    // the page is cached across navigations while the picker is modeless
+    // and outlives them.
+    private ShaderPickerWindow? _shaderPicker;
+
     private void OpenShaderPicker()
     {
+        if (_shaderPicker is { } open)
+        {
+            open.Activate();
+            return;
+        }
+
         var picker = new ShaderPickerWindow
         {
             CurrentPath = _shaderGalleryByPath.ContainsKey(_shaderPathWritten)
                 ? _shaderPathWritten
                 : null,
         };
+        _shaderPicker = picker;
         picker.Closed += (sender, args) =>
         {
+            _shaderPicker = null;
             if (picker.PickedPath is { } path)
             {
                 WriteShaderPathValue(path);

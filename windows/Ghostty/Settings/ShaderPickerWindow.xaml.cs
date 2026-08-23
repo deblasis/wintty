@@ -9,11 +9,13 @@ using Microsoft.UI.Xaml.Input;
 namespace Ghostty.Settings;
 
 /// <summary>
-/// Gallery shader picker window. The combo and the left/right arrow keys
-/// both walk the gallery; a live terminal underneath previews the selected
-/// shader immediately (per-surface override, never the app config). Select
-/// commits the picked path to <see cref="PickedPath"/> and closes; Cancel
-/// (or closing the window) leaves it null.
+/// Gallery shader picker window. The combo, the chevron buttons, and the
+/// left/right arrow keys all walk the gallery; a live terminal underneath
+/// previews the selected shader immediately (per-surface override, never
+/// the app config). Arrows leave the gallery alone while the terminal
+/// holds focus, so its keystrokes (cursor movement included) are never
+/// stolen. Select commits the picked path to <see cref="PickedPath"/> and
+/// closes; Cancel (or closing the window) leaves it null.
 /// </summary>
 public sealed partial class ShaderPickerWindow : Window
 {
@@ -48,9 +50,11 @@ public sealed partial class ShaderPickerWindow : Window
         // window closing must dispose explicitly (TerminalControl lesson).
         Closed += (_, _) => DisposePreview();
 
-        // Arrows flip shaders unless the terminal has focus: the terminal
-        // consumes arrow keys itself (typing), so its handled events never
-        // bubble here. Everything else in the window has no arrow use.
+        // Arrows flip shaders unless the terminal preview holds focus: the
+        // terminal forwards keys to the shell without marking them handled,
+        // so its arrow KeyDown still bubbles up here, and keys that move a
+        // shell cursor must not also flip the gallery. The chevron buttons
+        // beside the combo switch regardless of focus.
         RootGrid.KeyDown += OnRootKeyDown;
     }
 
@@ -110,12 +114,48 @@ public sealed partial class ShaderPickerWindow : Window
     {
         if (_orderedPaths.Count == 0) return;
         if (e.Key is not (Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)) return;
+        // A focused terminal bubbles its (unhandled) arrow KeyDown up to
+        // RootGrid; those keys belong to the shell cursor, not the gallery.
+        if (PreviewHasFocus) return;
 
-        var delta = e.Key == Windows.System.VirtualKey.Right ? 1 : -1;
-        var next = (PickerCombo.SelectedIndex + delta + _orderedPaths.Count) % _orderedPaths.Count;
-        PickerCombo.SelectedIndex = next;
+        StepSelection(e.Key == Windows.System.VirtualKey.Right ? 1 : -1);
         e.Handled = true;
     }
+
+    /// <summary>
+    /// Whether the live terminal preview (or anything inside it, like its
+    /// search bar) holds keyboard focus. Containment, not identity: focus
+    /// lives on the TerminalControl but can sit on inner elements too, and
+    /// any of them means every keystroke belongs to the terminal.
+    /// </summary>
+    private bool PreviewHasFocus
+    {
+        get
+        {
+            // XamlRoot is null until the window content loads; no focus to own.
+            if (RootGrid.XamlRoot is null) return false;
+            var node = FocusManager.GetFocusedElement(RootGrid.XamlRoot) as DependencyObject;
+            while (node is not null)
+            {
+                if (ReferenceEquals(node, PickerPreviewHost)) return true;
+                node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+            }
+            return false;
+        }
+    }
+
+    // Shared by the arrow keys and the chevron buttons: wrap around the
+    // gallery and let SelectionChanged rebuild the preview.
+    private void StepSelection(int delta)
+    {
+        if (_orderedPaths.Count == 0) return;
+        var next = (PickerCombo.SelectedIndex + delta + _orderedPaths.Count) % _orderedPaths.Count;
+        PickerCombo.SelectedIndex = next;
+    }
+
+    private void PrevShader_Click(object sender, RoutedEventArgs e) => StepSelection(-1);
+
+    private void NextShader_Click(object sender, RoutedEventArgs e) => StepSelection(1);
 
     private void PickerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
