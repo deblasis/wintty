@@ -43,9 +43,20 @@ const shader_bytecode = if (builtin.os.tag == .windows) struct {
     const bg_image_ps: []const u8 = &.{};
 };
 
-/// Compile HLSL source to DXIL bytecode using DXC.
+/// Compile HLSL source to DXIL bytecode using DXC (pixel profile).
 /// Returns null on failure. Caller owns returned memory.
-fn compileHlslToDxil(alloc: std.mem.Allocator, source: [:0]const u8, entry_point: [*:0]const u16) error{OutOfMemory}!?[]const u8 {
+pub fn compileHlslToDxil(alloc: std.mem.Allocator, source: [:0]const u8, entry_point: [*:0]const u16) error{OutOfMemory}!?[]const u8 {
+    return compileHlslToDxilProfile(alloc, source, entry_point, std.unicode.utf8ToUtf16LeStringLiteral("ps_6_0"));
+}
+
+/// Compile HLSL source to DXIL bytecode using DXC (explicit profile).
+/// Returns null on failure. Caller owns returned memory.
+pub fn compileHlslToDxilProfile(
+    alloc: std.mem.Allocator,
+    source: [:0]const u8,
+    entry_point: [*:0]const u16,
+    profile: [*:0]const u16,
+) error{OutOfMemory}!?[]const u8 {
     const dxc_lib = d3d12.DxcLibrary.load() orelse {
         log.warn("dxcompiler.dll not found, cannot compile custom shader", .{});
         return null;
@@ -90,16 +101,15 @@ fn compileHlslToDxil(alloc: std.mem.Allocator, source: [:0]const u8, entry_point
         .Encoding = 0, // UTF-8
     };
 
-    // Build compilation arguments: -T ps_6_0 -E <entry> -O3 -Zpc
+    // Build compilation arguments: -T <profile> -E <entry> -O3 -Zpc
     const target_flag = std.unicode.utf8ToUtf16LeStringLiteral("-T");
-    const target_profile = std.unicode.utf8ToUtf16LeStringLiteral("ps_6_0");
     const entry_flag = std.unicode.utf8ToUtf16LeStringLiteral("-E");
     const opt_level = std.unicode.utf8ToUtf16LeStringLiteral("-O3");
     const packing = std.unicode.utf8ToUtf16LeStringLiteral("-Zpc");
 
     const args = [_]?[*:0]const u16{
         target_flag,
-        target_profile,
+        profile,
         entry_flag,
         entry_point,
         opt_level,

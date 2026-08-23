@@ -615,7 +615,14 @@ const WindowsPty = struct {
             0,
             &hpcon,
         );
-        if (result != windows.S_OK) return error.Unexpected;
+        if (result != windows.S_OK) {
+            log.warn("CreatePseudoConsole failed hr=0x{x} size={d}x{d}", .{
+                @as(u32, @bitCast(result)),
+                size.ws_col,
+                size.ws_row,
+            });
+            return error.Unexpected;
+        }
         pty.pseudo_console = hpcon;
 
         return pty;
