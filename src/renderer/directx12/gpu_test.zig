@@ -21,11 +21,44 @@ const Pipeline = @import("Pipeline.zig");
 const Frame = @import("Frame.zig");
 const Device = @import("device.zig").Device;
 const Surface = @import("surface.zig").Surface;
-const Shaders = @import("shaders.zig").Shaders;
+const shaders_mod = @import("shaders.zig");
+const Shaders = shaders_mod.Shaders;
 
 const Buffer = buffer_mod.Buffer;
 
 // ---- Test device helper ----
+
+/// Minimal debug-layer info queue: the debug layer is enabled by
+/// Device.init in Debug builds, so any validation error from the post
+/// pass lands here. Layout follows d3d12.h's ID3D12InfoQueue.
+const InfoQueue = extern struct {
+    vtable: *const VTable,
+    pub const IID = com.GUID{
+        .data1 = 0x0742a90b,
+        .data2 = 0x426e,
+        .data3 = 0x479e,
+        .data4 = .{ 0x8d, 0xe5, 0x30, 0x10, 0xf7, 0x63, 0x63, 0x94 },
+    };
+    pub const Message = extern struct {
+        Category: u32,
+        Severity: u32,
+        ID: u32,
+        pDescription: ?[*:0]const u8,
+        DescriptionByteLength: usize,
+    };
+    pub const VTable = extern struct {
+        QueryInterface: *const fn (*InfoQueue, *const com.GUID, *?*anyopaque) callconv(.winapi) com.HRESULT,
+        AddRef: *const fn (*InfoQueue) callconv(.winapi) u32,
+        Release: *const fn (*InfoQueue) callconv(.winapi) u32,
+        SetMuteDebugOutput: *const fn (*InfoQueue, i32) callconv(.winapi) void,
+        GetMuteDebugOutput: *const fn (*InfoQueue) callconv(.winapi) i32,
+        GetNumStoredMessages: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetNumStoredMessagesAllowedByRetrievalFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetNumMessagesDeniedByRetrievalFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetNumMessagesDiscardedByMessageFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetMessage: *const fn (*InfoQueue, u64, ?*Message, *usize) callconv(.winapi) com.HRESULT,
+    };
+};
 
 /// Bundles a device, command queue, command list, and fence so tests
 /// can create resources and record/execute commands.
@@ -846,6 +879,11 @@ test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
 // exactly like generic.zig's post loop -- then reads the target back and
 // looks for the scanline row pattern. If the app path drops the pattern,
 // this test reproduces it in-repo.
+//
+// The app path is the ONLY thing exercised: the draw goes through the
+// app's own post pipeline (bg_color_vs vertex stage), so a regression in
+// that vertex stage fails the assertions below rather than being masked
+// by a hand-written replacement stage.
 test "post pipeline: scanline shader leaves row periodicity" {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -854,8 +892,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
 
     const alloc = std.heap.c_allocator;
 
-    // The scanline body from the gallery's CRT v5: hard-edged dark lines
-    // every 4 px in fragCoord space over the sampled content.
+    // A scanline body in the gallery CRT's shape: a smooth sine darkening
+    // every 4 px in fragCoord space over the sampled content, so the
+    // expected output is periodic row means over mid gray.
     const scanline_body =
         \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
         \\{
@@ -922,13 +961,17 @@ test "post pipeline: scanline shader leaves row periodicity" {
         const hr = dev.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&cmd_allocator));
         if (com.FAILED(hr) or cmd_allocator == null) return error.CommandAllocatorCreationFailed;
     }
-    defer if (cmd_allocator) |a| { _ = a.Release(); };
+    defer if (cmd_allocator) |a| {
+        _ = a.Release();
+    };
     var command_list: ?*d3d12.ID3D12GraphicsCommandList = null;
     {
         const hr = dev.CreateCommandList(0, .DIRECT, cmd_allocator.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&command_list));
         if (com.FAILED(hr) or command_list == null) return error.CommandListCreationFailed;
     }
-    defer if (command_list) |l| { _ = l.Release(); };
+    defer if (command_list) |l| {
+        _ = l.Release();
+    };
     var queue: ?*d3d12.ID3D12CommandQueue = null;
     {
         const qd = d3d12.D3D12_COMMAND_QUEUE_DESC{
@@ -944,7 +987,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         );
         if (com.FAILED(hr) or queue == null) return error.CommandQueueCreationFailed;
     }
-    defer if (queue) |q| { _ = q.Release(); };
+    defer if (queue) |q| {
+        _ = q.Release();
+    };
 
     var fence: ?*d3d12.ID3D12Fence = null;
     {
@@ -956,7 +1001,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         );
         if (com.FAILED(hr) or fence == null) return error.FenceCreationFailed;
     }
-    defer if (fence) |f| { _ = f.Release(); };
+    defer if (fence) |f| {
+        _ = f.Release();
+    };
 
     const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse
         return error.FenceEventCreationFailed;
@@ -976,12 +1023,11 @@ test "post pipeline: scanline shader leaves row periodicity" {
         .render_target = true,
     };
 
-    // Content texture: flat mid gray (BGRA), uploaded through the real path.
-    const pixels = try alloc.alloc(u8, W * H * 4);
-    defer alloc.free(pixels);
-    @memset(pixels, 0x80);
-    for (0..W * H) |i| pixels[i * 4 + 3] = 0xFF;
-    var back = try Texture.init(tex_opts, W, H, pixels);
+    // Content texture: render-target pair, filled the way production fills
+    // it -- by a render pass targeting it (Texture.init only uploads initial
+    // data for non-RT textures, so passing pixels here would be silently
+    // ignored). A clear-to-gray stands in for the terminal content pass.
+    var back = try Texture.init(tex_opts, W, H, null);
     defer back.deinit();
 
     // Output texture (the "front" the post pass writes).
@@ -1000,8 +1046,22 @@ test "post pipeline: scanline shader leaves row periodicity" {
     var sampler = try Sampler.init(.{ .device = dev, .sampler_heap = &sampler_heap });
     defer sampler.deinit();
 
-    // The post pass, shaped like generic.zig's loop for the single-shader
-    // case: sample back, write the output target.
+    // Fill back with mid gray via a real render pass (the production shape).
+    {
+        var pass = RenderPassMod.begin(.{
+            .command_list = command_list.?,
+            .srv_heap = &srv_heap,
+            .sampler_heap = &sampler_heap,
+            .attachments = &.{.{
+                .target = .{ .texture = back },
+                .clear_color = .{ 0.5, 0.5, 0.5, 1.0 },
+            }},
+        });
+        pass.complete();
+    }
+
+    // The app's post pipeline verbatim (bg_color_vs). The readback below
+    // asserts on what this draw alone leaves in `front`.
     {
         var pass = RenderPassMod.begin(.{
             .command_list = command_list.?,
@@ -1047,7 +1107,9 @@ test "post pipeline: scanline shader leaves row periodicity" {
         };
         _ = dev.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COPY_DEST, null, &d3d12.ID3D12Resource.IID, @ptrCast(&readback));
     }
-    defer if (readback) |r| { _ = r.Release(); };
+    defer if (readback) |r| {
+        _ = r.Release();
+    };
     {
         var dst: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
         dst.pResource = readback.?;
@@ -1071,16 +1133,87 @@ test "post pipeline: scanline shader leaves row periodicity" {
         if (d3d12.WaitForSingleObject(fence_event, d3d12.INFINITE) != 0) return error.WaitFailed;
     }
 
+    // Drain the debug-layer info queue: the runtime's own complaints about
+    // the post pass (binding, state, viewport) name the defect directly.
+    {
+        var iq: ?*InfoQueue = null;
+        const hr = dev.vtable.QueryInterface(dev, &InfoQueue.IID, @ptrCast(&iq));
+        if (!com.FAILED(hr) and iq != null) {
+            defer _ = iq.?.vtable.Release(iq.?);
+            const n = iq.?.vtable.GetNumStoredMessages(iq.?);
+            std.debug.print("D3D12 debug layer: {d} stored message(s)\n", .{n});
+            var i: u64 = 0;
+            while (i < n and i < 20) : (i += 1) {
+                var len: usize = 0;
+                _ = iq.?.vtable.GetMessage(iq.?, i, null, &len);
+                const buf = alloc.alloc(u8, len) catch break;
+                defer alloc.free(buf);
+                const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
+                if (iq.?.vtable.GetMessage(iq.?, i, msg, &len) == 0) {
+                    const desc = if (msg.pDescription) |d| std.mem.sliceTo(d, 0) else "";
+                    std.debug.print("  [sev={d} id={d}] {s}\n", .{ msg.Severity, msg.ID, desc });
+                }
+            }
+        } else {
+            std.debug.print("D3D12 debug layer unavailable (hr=0x{x})\n", .{@as(u32, @bitCast(hr))});
+        }
+    }
+
     var mapped: ?*anyopaque = null;
     {
         const rr = d3d12.D3D12_RANGE{ .Begin = 0, .End = W * H * 4 };
         _ = readback.?.Map(0, &rr, &mapped);
     }
-    const px: [*]const u8 = @ptrCast(mapped.?);
+    // Snapshot front's bytes NOW: the back-texture probe below reuses this
+    // same readback resource, which silently replaced everything analyzed
+    // after it (the entire "fragCoord.y is constant" trail was this race).
+    const front_bytes = alloc.dupe(u8, @as([*]const u8, @ptrCast(mapped.?))[0 .. W * H * 4]) catch return error.OutOfMemory;
+    defer alloc.free(front_bytes);
+    const px: [*]const u8 = front_bytes.ptr;
 
     // Row analysis: the scanline pattern darkens roughly 1.4px of every 4
     // by ~45% over a mid-gray input, so adjacent row means must differ
     // strongly and periodically.
+    // DISCRIMINATOR: read the back texture itself. Gray => the upload landed
+    // and the SRV/table binding is the bug; black => the upload is the bug.
+    {
+        _ = cmd_allocator.?.Reset();
+        _ = command_list.?.Reset(cmd_allocator.?, null);
+        back.transitionBarrier(command_list.?, d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE, d3d12.D3D12_RESOURCE_STATES.COPY_SOURCE);
+        {
+            var dst: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
+            dst.pResource = readback.?;
+            dst.Type = .PLACED_FOOTPRINT;
+            dst.u.PlacedFootprint.Footprint.Format = .B8G8R8A8_UNORM;
+            dst.u.PlacedFootprint.Footprint.Width = W;
+            dst.u.PlacedFootprint.Footprint.Height = H;
+            dst.u.PlacedFootprint.Footprint.Depth = 1;
+            dst.u.PlacedFootprint.Footprint.RowPitch = W * 4;
+            var src: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
+            src.pResource = back.resource.?;
+            src.Type = .SUBRESOURCE_INDEX;
+            src.u.SubresourceIndex = 0;
+            command_list.?.CopyTextureRegion(&dst, 0, 0, 0, &src, null);
+        }
+        _ = command_list.?.Close();
+        const lists2 = [_]*d3d12.ID3D12GraphicsCommandList{command_list.?};
+        queue.?.ExecuteCommandLists(1, @ptrCast(&lists2));
+        _ = queue.?.Signal(fence.?, 2);
+        if (fence.?.GetCompletedValue() < 2) {
+            _ = fence.?.SetEventOnCompletion(2, fence_event);
+            if (d3d12.WaitForSingleObject(fence_event, d3d12.INFINITE) != 0) return error.WaitFailed;
+        }
+        var mapped2: ?*anyopaque = null;
+        const rr2 = d3d12.D3D12_RANGE{ .Begin = 0, .End = W * H * 4 };
+        _ = readback.?.Map(0, &rr2, &mapped2);
+        const bpx: [*]const u8 = @ptrCast(mapped2.?);
+        var bsum: u64 = 0;
+        for (0..W * H) |i| bsum += bpx[i * 4];
+        std.debug.print("BACK TEXTURE avg byte0 = {d:.1} (~128 = upload landed)\n", .{@as(f64, @floatFromInt(bsum)) / @as(f64, @floatFromInt(W * H))});
+        const nrw2 = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
+        readback.?.Unmap(0, &nrw2);
+    }
+
     var row_means: [H]f64 = undefined;
     for (0..H) |y| {
         var sum: u64 = 0;
@@ -1108,9 +1241,8 @@ test "post pipeline: scanline shader leaves row periodicity" {
         readback.?.Unmap(0, &nrw);
     }
 
-    // With scanlines, max adjacent-row difference is ~45% of the gray level
-    // (~28.8/255) and dark rows cover roughly a third of the height. A flat
-    // output (the bug) gives a max diff near 0.
+    // Scanlines over mid gray: bright rows ~128, dark rows ~70; strong
+    // row-to-row differences and roughly a third of rows dark.
     try std.testing.expect(max_diff > 10.0);
     try std.testing.expect(dark_rows > H / 8);
 }
