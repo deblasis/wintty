@@ -13,8 +13,8 @@
          never intercepted, so the chevrons are how you flip then. -->
 
     <Grid x:Name="RootGrid"
-          RowSpacing="12"
-          Padding="16">
+          RowSpacing="4"
+          Padding="0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -23,13 +23,15 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0"
+                   Margin="12,8,12,0"
                    Text="Pick a shader. The chevrons beside the list flip through the gallery; so do Left/Right arrows while the terminal is not focused. Click into the terminal below to type and see cursor effects move."
                    TextWrapping="Wrap"
                    Opacity="0.7" />
 
         <StackPanel Grid.Row="1"
                     Orientation="Horizontal"
-                    Spacing="8">
+                    Spacing="8"
+                    Margin="12,0">
             <Button x:Name="PrevShaderButton"
                     Click="PrevShader_Click"
                     ToolTipService.ToolTip="Previous shader"
@@ -52,12 +54,12 @@
                 MinHeight="320"
                 BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="4"
-                Padding="4" />
+                                Padding="0" />
 
         <StackPanel Grid.Row="3"
                     Orientation="Horizontal"
                     Spacing="8"
+                    Margin="12,8"
                     HorizontalAlignment="Right">
             <Button Content="Select"
                     Style="{StaticResource AccentButtonStyle}"
