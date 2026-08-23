@@ -121,6 +121,16 @@
       "author": "wintty",
       "license": "MIT",
       "source": "https://github.com/deblasis/wintty"
+    },
+    {
+      "id": "passthrough",
+      "file": "passthrough.glsl",
+      "name": "Passthrough (diagnostic)",
+      "description": "Shows iChannel0 untouched. If the screen is black or missing text, content is not reaching the shader.",
+      "category": "screen",
+      "author": "ghostty",
+      "license": "MIT",
+      "source": "https://github.com/ghostty-org/ghostty"
     }
   ]
 }

@@ -41,6 +41,14 @@ Bundled assets: cursor_sweep.glsl, cursor_tail.glsl,
 rectangle_boom_cursor.glsl, ripple_cursor.glsl,
 ripple_rectangle_cursor.glsl, sonic_boom_cursor.glsl
 
+### ghostty (MIT)
+
+Source: https://github.com/ghostty-org/ghostty
+License: MIT (same as this project)
+
+Bundled assets: passthrough.glsl (the in-tree test shader, used as a
+gallery diagnostic).
+
 ### ghostty-shaders (Unlicense)
 
 Source: https://github.com/zoitrok/ghostty-shaders
