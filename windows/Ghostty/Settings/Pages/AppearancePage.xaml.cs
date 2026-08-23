@@ -426,8 +426,8 @@ internal sealed partial class AppearancePage : Page
         // The picker is a top-level window the OS would keep alive after
         // the app tears down; parent its lifetime to the settings window
         // it was opened from (same pattern as the about window).
-        var owner = App.SettingsWindow;
-        void OnOwnerClosed(object? s, RoutedEventArgs e) => picker.Close();
+        var owner = (Application.Current as App)?.SettingsWindow;
+        void OnOwnerClosed(object? s, WindowEventArgs e) => picker.Close();
         if (owner is not null) owner.Closed += OnOwnerClosed;
 
         picker.Closed += (sender, args) =>
