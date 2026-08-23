@@ -155,9 +155,11 @@ internal sealed partial class AppearancePage : Page
     {
         _configService.ConfigChanged += OnConfigChanged;
         // Page instances are cached, so returning to this page fires Loaded
-        // without the ctor (or any seeding) running again. Re-sync the mode
-        // radios from the seeded value in case the config changed elsewhere.
-        SyncShaderUiForPath(_shaderPathWritten);
+        // without the ctor (or any seeding) running again. ConfigChanged is
+        // unsubscribed in OnUnloaded, so edits made while the page was away
+        // were missed: re-read the file instead of trusting the last value
+        // this page wrote.
+        SeedShaderPath();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -290,7 +292,11 @@ internal sealed partial class AppearancePage : Page
 
     // Gallery entries keyed by the absolute installed path of their shader
     // file, so a configured path can be mapped back to its combo item.
-    private readonly Dictionary<string, ShaderGalleryEntry> _shaderGalleryByPath = new();
+    // Case-insensitive: the picker preselects and commits paths with
+    // OrdinalIgnoreCase semantics, and a casing mismatch would otherwise
+    // classify a gallery pick as "From file".
+    private readonly Dictionary<string, ShaderGalleryEntry> _shaderGalleryByPath =
+        new(StringComparer.OrdinalIgnoreCase);
 
     private void PopulateShaderGallery()
     {
@@ -402,6 +408,9 @@ internal sealed partial class AppearancePage : Page
     {
         if (_shaderPicker is { } open)
         {
+            // Activate alone does not reliably restore a minimized window;
+            // Show brings it back first.
+            open.AppWindow?.Show();
             open.Activate();
             return;
         }
@@ -413,14 +422,26 @@ internal sealed partial class AppearancePage : Page
                 : null,
         };
         _shaderPicker = picker;
+
+        // The picker is a top-level window the OS would keep alive after
+        // the app tears down; parent its lifetime to the settings window
+        // it was opened from (same pattern as the about window).
+        var owner = App.SettingsWindow;
+        void OnOwnerClosed(object? s, RoutedEventArgs e) => picker.Close();
+        if (owner is not null) owner.Closed += OnOwnerClosed;
+
         picker.Closed += (sender, args) =>
         {
             _shaderPicker = null;
+            if (owner is not null) owner.Closed -= OnOwnerClosed;
             if (picker.PickedPath is { } path)
             {
                 WriteShaderPathValue(path);
-                SyncShaderUiForPath(path);
             }
+            // Mirror unconditionally, not only on commit: cancelling must
+            // not leave the radios claiming a pick the config never got.
+            // _shaderPathWritten is the post-write truth either way.
+            SyncShaderUiForPath(_shaderPathWritten);
         };
         picker.Activate();
     }
