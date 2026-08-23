@@ -158,6 +158,16 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     public string? PreviewCustomShader { get; set; }
 
     /// <summary>
+    /// Take keyboard focus as soon as the surface loads. Real terminal
+    /// panes want this so keyboard input starts flowing immediately.
+    /// Preview hosts inside other windows (the shader picker) set false:
+    /// their focus belongs to the picker's own controls, and a loading
+    /// preview would otherwise steal it on every selection change.
+    /// Defaults to true.
+    /// </summary>
+    public bool AutoFocus { get; set; } = true;
+
+    /// <summary>
     /// The raw libghostty surface handle for this control. Used by
     /// <see cref="Ghostty.Hosting.GhosttyHost"/> to resolve a per-surface
     /// userdata pointer back to the handle for clipboard callback completion.
@@ -797,8 +807,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         }
 
         // Request focus so keyboard input starts flowing immediately.
-        // Focus lives on the UserControl now, not the panel.
-        this.Focus(FocusState.Programmatic);
+        // Focus lives on the UserControl now, not the panel. Preview
+        // surfaces (AutoFocus = false) opt out: they live inside other
+        // windows whose focus must stay put.
+        if (AutoFocus)
+        {
+            this.Focus(FocusState.Programmatic);
+        }
 
     }
 
