@@ -2,8 +2,7 @@
     x:Class="Ghostty.Settings.Pages.AppearancePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:ctrl="using:Ghostty.Controls.Settings"
-    Unloaded="Page_Unloaded">
+    xmlns:ctrl="using:Ghostty.Controls.Settings">
 
     <ScrollViewer Padding="24">
         <StackPanel MaxWidth="800">
@@ -95,55 +94,45 @@
                 <ctrl:SettingsGroup Header="Shader"
                                     Description="Post-process the terminal with a GLSL shader.">
                     <ctrl:SettingsCard Header="Custom shader"
-                                       Description="Pick a bundled shader, or pick a file of your own below."
+                                       Description="Where the terminal's shader comes from."
                                        ctrl:SettingsCard.ConfigKey="custom-shader">
-                        <ComboBox x:Name="ShaderGalleryCombo"
-                                  MinWidth="300"
-                                  SelectionChanged="ShaderGallery_SelectionChanged">
-                            <ComboBoxItem Tag="">
-                                <StackPanel>
-                                    <TextBlock Text="None" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="No custom shader."
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                            </ComboBoxItem>
-                            <!-- Gallery entries are inserted before the Custom
-                                 item in code, from Assets/Shaders/shaders.json. -->
-                            <ComboBoxItem x:Name="ShaderCustomFileItem" Tag="custom">
-                                <StackPanel>
-                                    <TextBlock Text="Custom file" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                    <TextBlock Text="Use the shader file picked below."
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-                            </ComboBoxItem>
-                        </ComboBox>
-                    </ctrl:SettingsCard>
-                    <!-- No ConfigKey here by design: the gallery card above
-                         owns custom-shader (one key per control, or search
-                         reaches only the first). This card edits the same
-                         value through the shared writer. -->
-                    <ctrl:SettingsCard Header="Shader file"
-                                       Description="Path to a GLSL shader on disk.">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBox x:Name="ShaderPathBox"
-                                     PlaceholderText="Path to .glsl shader file"
-                                     MinWidth="260"
-                                     LostFocus="ShaderPath_LostFocus" />
-                            <Button Content="Browse..."
-                                    Click="ShaderBrowse_Click" />
+                        <StackPanel Spacing="10">
+                            <RadioButtons x:Name="ShaderModeButtons"
+                                          MaxColumns="1"
+                                          SelectionChanged="ShaderMode_SelectionChanged">
+                                <RadioButton x:Name="ShaderNoneRadio" Content="None" />
+                                <RadioButton x:Name="ShaderGalleryRadio" Content="From gallery" />
+                                <RadioButton x:Name="ShaderFileRadio" Content="From file" />
+                            </RadioButtons>
+                            <!-- Gallery pick row: shown only in gallery mode.
+                                 The picker window owns previewing; this row
+                                 just names the committed pick and reopens it. -->
+                            <StackPanel x:Name="GalleryPickRow"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                <TextBlock x:Name="GalleryPickLabel"
+                                           Text="No shader selected"
+                                           VerticalAlignment="Center"
+                                           TextWrapping="Wrap" />
+                                <Button Content="Choose..."
+                                        Click="ShaderGalleryChoose_Click" />
+                            </StackPanel>
+                            <!-- File row: shown only in file mode. Same
+                                 writer as the old card; no ConfigKey here by
+                                 design (the card above owns custom-shader:
+                                 one key per control, or search reaches only
+                                 the first). -->
+                            <StackPanel x:Name="FilePickRow"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                <TextBox x:Name="ShaderPathBox"
+                                         PlaceholderText="Path to .glsl shader file"
+                                         MinWidth="260"
+                                         LostFocus="ShaderPath_LostFocus" />
+                                <Button Content="Browse..."
+                                        Click="ShaderBrowse_Click" />
+                            </StackPanel>
                         </StackPanel>
-                    </ctrl:SettingsCard>
-                    <ctrl:SettingsCard Header="Preview"
-                                       Description="The selected shader, live. Type in it to see cursor effects move."
-                                       ContentBelow="True">
-                        <Border x:Name="ShaderPreviewHost"
-                                Height="260"
-                                BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                                BorderThickness="1"
-                                CornerRadius="4"
-                                Padding="4" />
                     </ctrl:SettingsCard>
                 </ctrl:SettingsGroup>
                 <ctrl:SettingsCard Header="Backdrop preset"

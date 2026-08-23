@@ -58,6 +58,8 @@ pub const LPCWSTR = windows.LPCWSTR;
 pub const LPSTR = windows.LPSTR;
 pub const LPVOID = windows.LPVOID;
 pub const LPWSTR = windows.LPWSTR;
+/// Win32 INVALID_FILE_ATTRIBUTES sentinel (GetFileAttributesW failure).
+pub const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFFFFFF;
 pub const PVOID = windows.PVOID;
 pub const SIZE_T = windows.SIZE_T;
 pub const UINT = windows.UINT;
@@ -216,6 +218,20 @@ pub const exp = struct {
         // conpty.dll loader in pty.zig resolves its entry points with them.
         // Zig 0.16 also dropped DuplicateHandle. The child-exit watcher in
         // termio/Exec.zig dups the process handle with it.
+        pub extern "kernel32" fn SearchPathW(
+            lpPath: ?LPCWSTR,
+            lpFileName: LPCWSTR,
+            lpExtension: ?LPCWSTR,
+            nBufferLength: DWORD,
+            lpBuffer: LPWSTR,
+            lpFilePart: ?*?LPWSTR,
+        ) callconv(.winapi) DWORD;
+        pub extern "kernel32" fn GetFileAttributesW(lpFileName: LPCWSTR) callconv(.winapi) DWORD;
+        pub extern "kernel32" fn GetEnvironmentVariableW(
+            lpName: LPCWSTR,
+            lpBuffer: LPWSTR,
+            nSize: DWORD,
+        ) callconv(.winapi) DWORD;
         pub extern "kernel32" fn DuplicateHandle(
             hSourceProcessHandle: HANDLE,
             hSourceHandle: HANDLE,

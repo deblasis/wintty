@@ -2252,6 +2252,32 @@ test "alt screen" {
     try testing.expectEqualStrings("Primary", str);
 }
 
+test "DECSCUSR sets cursor style (shape changes reach the shader)" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = .init(&t) });
+    defer s.deinit();
+
+    // Steady block (CSI 2 SP q), then steady underline (CSI 4 SP q), then
+    // steady bar (CSI 6 SP q): each must land in cursor_style, which is
+    // what feeds the renderer glyph width (and thus the cursor shaders'
+    // mode-change gate).
+    s.nextSlice("\x1B[2 q");
+    try testing.expectEqual(.block, t.screens.active.cursor.cursor_style);
+
+    s.nextSlice("\x1B[4 q");
+    try testing.expectEqual(.underline, t.screens.active.cursor.cursor_style);
+
+    s.nextSlice("\x1B[6 q");
+    try testing.expectEqual(.bar, t.screens.active.cursor.cursor_style);
+
+    // Default (CSI 0 SP q / CSI q) re-selects the configured default,
+    // which for a bare test Terminal is block.
+    s.nextSlice("\x1B[ q");
+    try testing.expectEqual(.block, t.screens.active.cursor.cursor_style);
+}
+
 test "cursor save and restore" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
