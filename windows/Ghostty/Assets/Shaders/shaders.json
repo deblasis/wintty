@@ -83,6 +83,16 @@
       "source": "https://github.com/zoitrok/ghostty-shaders"
     },
     {
+      "id": "crt",
+      "file": "crt.glsl",
+      "name": "CRT",
+      "description": "Curvature, a rolling scanline, and a phosphor hum.",
+      "category": "screen",
+      "author": "wintty",
+      "license": "MIT",
+      "source": "https://github.com/deblasis/wintty"
+    },
+    {
       "id": "text_glow",
       "file": "text_glow.glsl",
       "name": "Text glow",
