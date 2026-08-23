@@ -6,10 +6,10 @@
 
 const float CRT_CURVE     = 0.022; // barrel strength (kept subtle)
 const float CRT_ROWS      = 270.0; // scanlines top to bottom
-const float CRT_SCAN_BOLD = 0.22;  // scanline darkening at its peak
+const float CRT_SCAN_BOLD = 0.30;  // scanline darkening at its peak
 const float CRT_ROLL      = 0.05;  // scan phase roll, cycles per second
-const float CRT_PIXELS    = 340.0; // pixelation rows (blocks per height)
-const float CRT_GRID      = 0.12;  // pixel grid line darkening
+const float CRT_PIXELS    = 170.0; // pixelation rows (blocks per height)
+const float CRT_GRID      = 0.05;  // pixel grid line darkening
 const float CRT_HUM       = 0.012; // global brightness hum
 const float CRT_CHROMA    = 0.0012;// chromatic offset at the edges
 const float CRT_VIGNETTE  = 0.18;  // corner darkening
@@ -48,9 +48,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     col.g = texture(iChannel0, puv).g;
     col.b = texture(iChannel0, puv - off).b;
 
-    // Scanlines: the dominant texture, rolling slowly downward.
+    // Scanlines: the dominant texture, rolling slowly downward. The cubed
+    // term narrows the dark crest so lines read as crisp CRT raster rows
+    // rather than a soft gradient.
     float scan = sin(uv.y * CRT_ROWS * 6.2831853 - iTime * CRT_ROLL * 6.2831853);
-    col *= 1.0 - CRT_SCAN_BOLD * (0.5 + 0.5 * scan);
+    float line = pow(0.5 + 0.5 * scan, 3.0);
+    col *= 1.0 - CRT_SCAN_BOLD * line;
 
     // Pixel grid: darken toward each block edge so the pixelation reads.
     vec2 f = abs(fract(uv * grid) - 0.5) * 2.0; // 0 center, 1 edge
