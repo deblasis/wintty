@@ -6,6 +6,7 @@
 //! platforms they're skipped.
 const std = @import("std");
 const builtin = @import("builtin");
+const global = @import("../../global.zig");
 
 const com = @import("com.zig");
 const d3d12 = @import("d3d12.zig");
@@ -14,6 +15,8 @@ const buffer_mod = @import("buffer.zig");
 const DescriptorHeap = @import("descriptor_heap.zig").DescriptorHeap;
 const Texture = @import("Texture.zig");
 const Sampler = @import("Sampler.zig");
+const RenderPassMod = @import("RenderPass.zig");
+const shadertoy = @import("../shadertoy.zig");
 const Pipeline = @import("Pipeline.zig");
 const Frame = @import("Frame.zig");
 const Device = @import("device.zig").Device;
@@ -830,4 +833,284 @@ test "Device: GetDeviceRemovedReason returns S_OK on healthy device" {
     // A healthy device should return S_OK (0) for GetDeviceRemovedReason.
     const hr = dev.device.GetDeviceRemovedReason();
     try std.testing.expectEqual(@as(com.HRESULT, 0), hr);
+}
+
+// ── Post-pipeline reproduction test (zioshade-4ne) ─────────────────────────
+//
+// Live wintty sessions show custom shaders whose effect depends on
+// sin(fragCoord.y * k) (CRT scanlines) rendering as a constant, while the
+// SAME DXIL renders dominant scanlines on the external WARP harness. This
+// test drives the app's REAL post path -- shadertoy.loadFromFile (read +
+// prefix + zioshade HLSL), Shaders.init (DXC + Pipeline.init with
+// bg_color_vs and the post root signature), and a RenderPass step shaped
+// exactly like generic.zig's post loop -- then reads the target back and
+// looks for the scanline row pattern. If the app path drops the pattern,
+// this test reproduces it in-repo.
+test "post pipeline: scanline shader leaves row periodicity" {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const W: u32 = 256;
+    const H: u32 = 256;
+
+    const alloc = std.heap.c_allocator;
+
+    // The scanline body from the gallery's CRT v5: hard-edged dark lines
+    // every 4 px in fragCoord space over the sampled content.
+    const scanline_body =
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec2 uv = fragCoord.xy / iResolution.xy;
+        \\    vec3 col = texture(iChannel0, uv).rgb;
+        \\    float scan = 0.5 + 0.5 * sin(fragCoord.y * 6.2831853 / 4.0);
+        \\    float line = 1.0 - step(0.45, scan);
+        \\    col *= 1.0 - 0.45 * line;
+        \\    fragColor = vec4(col, 1.0);
+        \\}
+    ;
+
+    // Write it to a temp file so the REAL loader path runs (prefix embed,
+    // zioshade compile with the app's options).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(global.io(), .{
+        .sub_path = "scan.glsl",
+        .data = scanline_body,
+    });
+    const real = try tmp.dir.realPathFileAlloc(global.io(), ".", alloc);
+    defer alloc.free(real);
+    const path = try std.fmt.allocPrintSentinel(alloc, "{s}\\scan.glsl", .{real}, 0);
+    defer alloc.free(path);
+
+    const hlsl = shadertoy.loadFromFile(alloc, path, .hlsl) catch |err| {
+        std.debug.print("scan.glsl failed to compile through shadertoy: {}\n", .{err});
+        return err;
+    };
+    defer alloc.free(hlsl);
+
+    // Real device in shared-texture (offscreen, headless-safe) mode.
+    var device = Device.init(.{ .shared_texture = .{
+        .width = W,
+        .height = H,
+    } }, .{}) catch return;
+    defer device.deinit();
+    const dev = device.device;
+
+    // Real pipeline construction for the custom shader.
+    var shaders = Shaders.init(dev, alloc, &.{hlsl}) catch |err| {
+        std.debug.print("Shaders.init failed: {}\n", .{err});
+        return err;
+    };
+    defer shaders.deinit(alloc);
+    if (shaders.post_pipelines.len != 1) {
+        std.debug.print("post pipelines: {d}, failure reason: {any}\n", .{
+            shaders.post_pipelines.len, shaders.post_failure,
+        });
+        return error.PostPipelineMissing;
+    }
+
+    // Heaps the render pass and textures need.
+    var srv_heap = DescriptorHeap.init(dev, .CBV_SRV_UAV, 16, true) catch return;
+    defer srv_heap.deinit();
+    var sampler_heap = DescriptorHeap.init(dev, .SAMPLER, 4, true) catch return;
+    defer sampler_heap.deinit();
+    var rtv_heap = DescriptorHeap.init(dev, .RTV, 4, false) catch return;
+    defer rtv_heap.deinit();
+
+    // Own command recording (same shape as TestDevice above).
+    var cmd_allocator: ?*d3d12.ID3D12CommandAllocator = null;
+    {
+        const hr = dev.CreateCommandAllocator(.DIRECT, &d3d12.ID3D12CommandAllocator.IID, @ptrCast(&cmd_allocator));
+        if (com.FAILED(hr) or cmd_allocator == null) return error.CommandAllocatorCreationFailed;
+    }
+    defer if (cmd_allocator) |a| { _ = a.Release(); };
+    var command_list: ?*d3d12.ID3D12GraphicsCommandList = null;
+    {
+        const hr = dev.CreateCommandList(0, .DIRECT, cmd_allocator.?, null, &d3d12.ID3D12GraphicsCommandList.IID, @ptrCast(&command_list));
+        if (com.FAILED(hr) or command_list == null) return error.CommandListCreationFailed;
+    }
+    defer if (command_list) |l| { _ = l.Release(); };
+    var queue: ?*d3d12.ID3D12CommandQueue = null;
+    {
+        const qd = d3d12.D3D12_COMMAND_QUEUE_DESC{
+            .Type = .DIRECT,
+            .Priority = 0,
+            .Flags = .NONE,
+            .NodeMask = 0,
+        };
+        const hr = dev.CreateCommandQueue(
+            &qd,
+            &d3d12.ID3D12CommandQueue.IID,
+            @ptrCast(&queue),
+        );
+        if (com.FAILED(hr) or queue == null) return error.CommandQueueCreationFailed;
+    }
+    defer if (queue) |q| { _ = q.Release(); };
+
+    var fence: ?*d3d12.ID3D12Fence = null;
+    {
+        const hr = dev.CreateFence(
+            0,
+            .NONE,
+            &d3d12.ID3D12Fence.IID,
+            @ptrCast(&fence),
+        );
+        if (com.FAILED(hr) or fence == null) return error.FenceCreationFailed;
+    }
+    defer if (fence) |f| { _ = f.Release(); };
+
+    const fence_event = d3d12.CreateEventW(null, .FALSE, .FALSE, null) orelse
+        return error.FenceEventCreationFailed;
+    defer _ = d3d12.CloseHandle(fence_event);
+
+    // CommandList is created recording; close it, then reset opens cleanly.
+    _ = command_list.?.Close();
+    _ = cmd_allocator.?.Reset();
+    _ = command_list.?.Reset(cmd_allocator.?, null);
+
+    const tex_opts = Texture.Options{
+        .device = dev,
+        .command_list = command_list,
+        .srv_heap = &srv_heap,
+        .rtv_heap = &rtv_heap,
+        .pixel_format = .B8G8R8A8_UNORM,
+        .render_target = true,
+    };
+
+    // Content texture: flat mid gray (BGRA), uploaded through the real path.
+    const pixels = try alloc.alloc(u8, W * H * 4);
+    defer alloc.free(pixels);
+    @memset(pixels, 0x80);
+    for (0..W * H) |i| pixels[i * 4 + 3] = 0xFF;
+    var back = try Texture.init(tex_opts, W, H, pixels);
+    defer back.deinit();
+
+    // Output texture (the "front" the post pass writes).
+    var front = try Texture.init(tex_opts, W, H, null);
+    defer front.deinit();
+
+    // Uniforms through the real buffer path.
+    var uniforms = std.mem.zeroes(shadertoy.Uniforms);
+    uniforms.resolution = .{ @floatFromInt(W), @floatFromInt(H), 1.0 };
+    uniforms.time = 0.25;
+    var ubuf = try buffer_mod.Buffer(shadertoy.Uniforms).init(.{ .device = dev }, 1);
+    defer ubuf.deinit();
+    try ubuf.sync(&.{uniforms});
+
+    // Sampler.
+    var sampler = try Sampler.init(.{ .device = dev, .sampler_heap = &sampler_heap });
+    defer sampler.deinit();
+
+    // The post pass, shaped like generic.zig's loop for the single-shader
+    // case: sample back, write the output target.
+    {
+        var pass = RenderPassMod.begin(.{
+            .command_list = command_list.?,
+            .srv_heap = &srv_heap,
+            .sampler_heap = &sampler_heap,
+            .attachments = &.{.{
+                .target = .{ .texture = front },
+                .clear_color = .{ 0.0, 0.0, 0.0, 1.0 },
+            }},
+        });
+        pass.step(.{
+            .pipeline = shaders.post_pipelines[0],
+            .uniforms = ubuf.buffer,
+            .textures = &.{back},
+            .samplers = &.{sampler},
+            .draw = .{ .type = .triangle, .vertex_count = 3 },
+        });
+        pass.complete();
+    }
+
+    // Read back the front texture.
+    front.transitionBarrier(command_list.?, d3d12.D3D12_RESOURCE_STATES.PIXEL_SHADER_RESOURCE, d3d12.D3D12_RESOURCE_STATES.COPY_SOURCE);
+    var readback: ?*d3d12.ID3D12Resource = null;
+    {
+        const hp = d3d12.D3D12_HEAP_PROPERTIES{
+            .Type = .READBACK,
+            .CPUPageProperty = 0,
+            .MemoryPoolPreference = 0,
+            .CreationNodeMask = 0,
+            .VisibleNodeMask = 0,
+        };
+        const rd = d3d12.D3D12_RESOURCE_DESC{
+            .Dimension = .BUFFER,
+            .Alignment = 0,
+            .Width = W * H * 4,
+            .Height = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = .UNKNOWN,
+            .SampleDesc = .{ .Count = 1, .Quality = 0 },
+            .Layout = .ROW_MAJOR,
+            .Flags = @enumFromInt(@as(u32, 0)),
+        };
+        _ = dev.CreateCommittedResource(&hp, 0, &rd, d3d12.D3D12_RESOURCE_STATES.COPY_DEST, null, &d3d12.ID3D12Resource.IID, @ptrCast(&readback));
+    }
+    defer if (readback) |r| { _ = r.Release(); };
+    {
+        var dst: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
+        dst.pResource = readback.?;
+        dst.Type = .PLACED_FOOTPRINT;
+        dst.u.PlacedFootprint.Footprint.Format = .B8G8R8A8_UNORM;
+        dst.u.PlacedFootprint.Footprint.Width = W;
+        dst.u.PlacedFootprint.Footprint.Height = H;
+        dst.u.PlacedFootprint.Footprint.Depth = 1;
+        dst.u.PlacedFootprint.Footprint.RowPitch = W * 4;
+        var src: d3d12.D3D12_TEXTURE_COPY_LOCATION = std.mem.zeroes(d3d12.D3D12_TEXTURE_COPY_LOCATION);
+        src.pResource = front.resource.?;
+        src.Type = .SUBRESOURCE_INDEX;
+        command_list.?.CopyTextureRegion(&dst, 0, 0, 0, &src, null);
+    }
+    _ = command_list.?.Close();
+    const lists = [_]*d3d12.ID3D12GraphicsCommandList{command_list.?};
+    queue.?.ExecuteCommandLists(1, @ptrCast(&lists));
+    _ = queue.?.Signal(fence.?, 1);
+    if (fence.?.GetCompletedValue() < 1) {
+        _ = fence.?.SetEventOnCompletion(1, fence_event);
+        if (d3d12.WaitForSingleObject(fence_event, d3d12.INFINITE) != 0) return error.WaitFailed;
+    }
+
+    var mapped: ?*anyopaque = null;
+    {
+        const rr = d3d12.D3D12_RANGE{ .Begin = 0, .End = W * H * 4 };
+        _ = readback.?.Map(0, &rr, &mapped);
+    }
+    const px: [*]const u8 = @ptrCast(mapped.?);
+
+    // Row analysis: the scanline pattern darkens roughly 1.4px of every 4
+    // by ~45% over a mid-gray input, so adjacent row means must differ
+    // strongly and periodically.
+    var row_means: [H]f64 = undefined;
+    for (0..H) |y| {
+        var sum: u64 = 0;
+        for (0..W) |x| {
+            sum += px[y * W * 4 + x * 4];
+        }
+        row_means[y] = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(W));
+    }
+    var max_diff: f64 = 0;
+    for (0..H - 1) |y| {
+        const d = @abs(row_means[y + 1] - row_means[y]);
+        if (d > max_diff) max_diff = d;
+    }
+    // Count distinct dark rows (mean below mid-gray by > 10%).
+    var dark_rows: usize = 0;
+    for (0..H) |y| {
+        if (row_means[y] < 0x80 * 0.9) dark_rows += 1;
+    }
+
+    std.debug.print("post-pipeline scanline: max row diff = {d:.1}, dark rows = {d}/{d}, first rows: {d:.1} {d:.1} {d:.1} {d:.1} {d:.1} {d:.1}\n", .{
+        max_diff, dark_rows, H, row_means[0], row_means[1], row_means[2], row_means[3], row_means[4], row_means[5],
+    });
+    {
+        const nrw = d3d12.D3D12_RANGE{ .Begin = 0, .End = 0 };
+        readback.?.Unmap(0, &nrw);
+    }
+
+    // With scanlines, max adjacent-row difference is ~45% of the gray level
+    // (~28.8/255) and dark rows cover roughly a third of the height. A flat
+    // output (the bug) gives a max diff near 0.
+    try std.testing.expect(max_diff > 10.0);
+    try std.testing.expect(dark_rows > H / 8);
 }
