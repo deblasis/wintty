@@ -3,11 +3,22 @@
 Agent-host-neutral tooling for the fork's quality gates. Any agent (or
 human) working in this repo uses the same contract:
 
-- `just signoff` - run the full local test ladder (zig fmt check, zig
-  tests, Windows tests) and record a pass/fail keyed to the current HEAD
-  commit. A green signoff for a PR's exact head commit is required before
-  that PR may be merged; local runners are the merge authority while CI is
-  unavailable.
+- `just signoff` - run the test legs this branch's changes actually need
+  and record a pass/fail keyed to the current HEAD commit. A green signoff
+  covering a PR's exact head commit is required before that PR may be
+  merged; local runners are the merge authority while CI is unavailable.
+  Which legs run comes from the changed paths (`gate_scope.py`): a change
+  touching no Zig and no C# does not pay for the Zig suite, and a path no
+  rule classifies pays for everything. `just signoff-plan` shows the
+  decision without running anything; `just signoff-full` runs every leg.
+  The gate recomputes the requirement from the PR's own files, so a cheap
+  record cannot stand in for an expensive one.
+- `just signoff-defer "<motivation>"` - merge without running the legs, on
+  the record. For batching a run of small PRs behind one later ladder. The
+  motivation is stored in a ledger, at most a few deferrals may be
+  outstanding and none may go stale, and only a green `signoff-full` (or a
+  green nightly) settles them. `just signoff-debt` lists what is currently
+  merged on credit; the session-start doctor reports it too.
 - `just pr-gate <n>` - validate a PR against the merge gate without
   merging: countable size limit, body present, no unchecked task items,
   no spaced issue references, signoff present.

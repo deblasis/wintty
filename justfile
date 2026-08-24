@@ -1093,6 +1093,24 @@ gallery-verify:
 signoff:
     python .agents/scripts/signoff.py
 
+# Show which legs a signoff would run for the current branch, and why.
+signoff-plan:
+    python .agents/scripts/signoff.py --plan
+
+# Run every leg regardless of what changed, and settle any deferred debt.
+signoff-full:
+    python .agents/scripts/signoff.py --full
+
+# Merge without running the legs, on the record. For batching a run of small
+# PRs behind one later ladder: the motivation is stored, the debt is capped,
+# and only a green signoff-full clears it.
+signoff-defer reason:
+    python .agents/scripts/signoff.py --defer {{quote(reason)}}
+
+# What is currently merged on credit.
+signoff-debt:
+    python .agents/scripts/signoff.py --debt
+
 # Validate a PR against the merge quality gate without merging.
 pr-gate pr:
     python .agents/scripts/pr_gate.py --check-pr {{pr}}

@@ -308,6 +308,21 @@ if (-not $lastSuccess -or ((Get-Date) - $lastSuccess).TotalDays -gt 7) {
 }
 
 $legFailed = ($testRc -ne 0) -or ($testWinRc -ne 0) -or ($fuzzRc -is [int] -and $fuzzRc -ne 0)
+
+# Deferred signoffs are merges made on credit against exactly this run. A
+# green pass over the whole branch is what they were borrowing, so it settles
+# the ledger; a red one deliberately leaves the debt standing and visible.
+if (-not $legFailed) {
+    python (Join-Path $scriptRoot 'signoff.py') --settle "nightly full ladder green at $script:sha"
+} else {
+    $debt = python (Join-Path $scriptRoot 'signoff.py') --debt 2>$null
+    if ($debt) {
+        Write-Host "nightly: deferred signoff debt still outstanding after a red run:"
+        $debt | ForEach-Object { Write-Host "  $_" }
+        File-Issue '[nightly] deferred signoff debt outstanding while the branch is red' "Merges were made on deferred signoffs and the nightly ladder is failing, so nothing has verified them:`n`n$($debt -join "`n")"
+    }
+}
+
 Write-Status 'done'
 Stop-Transcript | Out-Null
 

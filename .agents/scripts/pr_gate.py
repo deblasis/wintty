@@ -18,8 +18,12 @@ endpoint) unless the PR passes:
   closes-spacing  `Closes # N` does not auto-close on GitHub; only
                   `Closes #N` does.
   signoff         a green local run recorded by `just signoff` for the PR's
-                  exact head commit. Local runners are the merge authority
-                  when CI is unavailable: no fresh full-suite run, no merge.
+                  exact head commit, which ran every leg this PR's files
+                  require (see gate_scope). Local runners are the merge
+                  authority when CI is unavailable: no fresh run, no merge.
+                  Scoping keeps that affordable, and the gate recomputes the
+                  requirement here so a cheap record cannot stand in for an
+                  expensive one.
 
 The size thresholds fit this repository's merge history: focused
 single-concern PRs stay comfortably under the block line, and the warn line
@@ -49,12 +53,14 @@ import subprocess
 import sys
 from fnmatch import fnmatch
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gate_scope  # noqa: E402
+
 REPO = "deblasis/ghostty"
 WARN_LINES = 500
 BLOCK_LINES = 900
 BODY_MIN_CHARS = 200
 BODY_REQUIRED_ABOVE = 50
-SIGNOFF_REQUIRED_ABOVE = 50
 
 # Exemptions are anchored to basenames (or explicit directory shapes) so a
 # source file that merely contains "license" in its name stays countable.
@@ -114,7 +120,68 @@ def countable_lines(pr):
     )
 
 
-def check_pr(pr, signoff_lookup=None):
+def check_signoff(pr, signoff_lookup, ledger=None):
+    """A signoff must exist for this exact head, be green, and have run every
+    leg the PR's own files require. Returns (errors, warnings).
+
+    The scope check is what keeps a cheap run from standing in for an
+    expensive one: the legs are recomputed here from the PR's file list, so a
+    record that scoped itself narrowly and a PR that later grew Zig changes
+    cannot agree. A record written before scoping existed has no scope block
+    and ran the whole ladder, which satisfies any requirement.
+
+    A deferred record is credit rather than evidence, so it merges with a
+    warning while the ledger has room, and stops merging entirely once the
+    limits are hit. That is the difference between batching a ladder run and
+    quietly abandoning it.
+    """
+    head = pr.get("headRefOid", "")
+    rec = signoff_lookup(head)
+    if rec is None:
+        return ([("signoff-missing",
+                  f"No local signoff for head {head[:10]}. Run 'just signoff' on the PR branch and retry.")], [])
+
+    errors, warnings = [], []
+
+    if rec.get("deferred"):
+        entries = ledger or []
+        blockers = gate_scope.ledger_blockers(entries)
+        if blockers:
+            errors.append(("signoff-defer-limit",
+                           "Deferred signoff refused - " + "; ".join(blockers) +
+                           ". Run 'just signoff-full' on the merged branch to settle the debt first."))
+        else:
+            warnings.append(("signoff-deferred",
+                             f"merging {head[:10]} on a DEFERRED signoff ({len(entries)} outstanding): "
+                             f"{rec.get('reason', 'no reason recorded')}. Settle with 'just signoff-full'."))
+        return errors, warnings
+
+    if not rec.get("pass"):
+        failed = [k for k, v in rec.get("steps", {}).items() if v.get("rc") != 0]
+        errors.append(("signoff-failed",
+                       f"Signoff for {head[:10]} is red (failed: {', '.join(failed) or 'unknown'}). Fix and rerun 'just signoff'."))
+
+    scope = rec.get("scope")
+    if scope is not None:
+        pr_paths = sorted(f["path"].replace("\\", "/") for f in pr.get("files", []))
+        rec_paths = scope.get("paths")
+        legs_run = set(scope.get("legs_run") or [])
+        if rec_paths is not None and sorted(rec_paths) != pr_paths:
+            errors.append(("signoff-stale",
+                           f"Signoff for {head[:10]} was computed over a different file set than this PR "
+                           f"({len(rec_paths)} vs {len(pr_paths)} paths). Rerun 'just signoff'."))
+        else:
+            required = set(gate_scope.required_legs(
+                pr_paths, justfile_legs=scope.get("justfile_legs")))
+            missing = sorted(required - legs_run)
+            if missing:
+                errors.append(("signoff-scope",
+                               f"Signoff for {head[:10]} did not run {', '.join(missing)}, which this PR's files "
+                               "require. Rerun 'just signoff' (or 'just signoff-full')."))
+    return errors, warnings
+
+
+def check_pr(pr, signoff_lookup=None, ledger=None):
     """Returns (errors, warnings): lists of (code, message)."""
     errors, warnings = [], []
     body = pr.get("body") or ""
@@ -152,18 +219,10 @@ def check_pr(pr, signoff_lookup=None):
             ("closes-spacing", f"PR #{n} body contains 'Closes # N' with a space; GitHub will not auto-close. Use 'Closes #N'.")
         )
 
-    if signoff_lookup is not None and lines > SIGNOFF_REQUIRED_ABOVE:
-        head = pr.get("headRefOid", "")
-        rec = signoff_lookup(head)
-        if rec is None:
-            errors.append(
-                ("signoff-missing", f"No local signoff for head {head[:10]}. Run 'just signoff' on the PR branch (full test suite) and retry.")
-            )
-        elif not rec.get("pass"):
-            failed = [k for k, v in rec.get("steps", {}).items() if v.get("rc") != 0]
-            errors.append(
-                ("signoff-failed", f"Signoff for {head[:10]} is red (failed: {', '.join(failed) or 'unknown'}). Fix and rerun 'just signoff'.")
-            )
+    if signoff_lookup is not None:
+        sign_errors, sign_warnings = check_signoff(pr, signoff_lookup, ledger)
+        errors.extend(sign_errors)
+        warnings.extend(sign_warnings)
 
     return errors, warnings
 
@@ -198,6 +257,13 @@ def signoff_lookup_factory(cwd):
             return None
 
     return lookup
+
+
+def ledger_for(cwd):
+    common = git_common_dir(cwd)
+    if not common:
+        return []
+    return gate_scope.load_ledger(os.path.join(common, "pr-signoff"))
 
 
 def fetch_pr(number, repo, cwd=None):
@@ -304,7 +370,7 @@ def hook_main():
     except Exception as e:
         deny(f"pr-gate: could not fetch PR #{number} to validate it ({e}). Refusing to merge unvalidated.")
 
-    errors, warnings = check_pr(pr, signoff_lookup_factory(cwd))
+    errors, warnings = check_pr(pr, signoff_lookup_factory(cwd), ledger_for(cwd))
     if errors:
         deny("pr-gate blocked this merge:\n- " + "\n- ".join(m for _, m in errors))
     if warnings:
@@ -321,7 +387,7 @@ def hook_main():
 
 def check_pr_main(number, repo):
     pr = fetch_pr(number, repo)
-    errors, warnings = check_pr(pr, signoff_lookup_factory(os.getcwd()))
+    errors, warnings = check_pr(pr, signoff_lookup_factory(os.getcwd()), ledger_for(os.getcwd()))
     for _, m in warnings:
         print(f"WARN  {m}")
     for _, m in errors:
@@ -427,6 +493,83 @@ def self_test():
     for body, expect in box_cases:
         got = len(UNCHECKED_BOX_RE.findall(body))
         report(got == expect, "boxes", f"{body!r} -> {got}")
+
+    # Scope rules: what a change must run, and the fail-closed default.
+    scope_cases = [
+        (["docs/guide.md"], False, []),
+        ([".gitignore"], False, []),
+        ([".agents/scripts/pr_gate.py"], False, ["gates-selftest"]),
+        (["src/main.zig"], False, ["zig-fmt", "zig-tests"]),
+        (["windows/App.xaml.cs"], False, ["windows-tests"]),
+        (["src/a.zig", "windows/b.cs"], False, ["windows-tests", "zig-fmt", "zig-tests"]),
+        (["brand/new/dir/thing.bin"], False, sorted(gate_scope.ALL_LEGS)),
+        (["justfile"], list(gate_scope.ALL_LEGS), sorted(gate_scope.ALL_LEGS)),
+        (["justfile"], [], []),
+    ]
+    for paths, jf, expect in scope_cases:
+        got = gate_scope.required_legs(paths, justfile_legs=jf)
+        report(got == expect, "scope", f"{paths} (jf={jf}) -> {got}")
+
+    # A scoped record only satisfies a PR whose files it actually covers.
+    pr694 = load(694)
+    win_paths = sorted(f["path"].replace("\\", "/") for f in pr694["files"])
+
+    def scoped(legs, paths=None):
+        rec = {"pass": True, "steps": {}, "scope": {
+            "legs_run": legs,
+            "paths": win_paths if paths is None else paths,
+            "justfile_legs": [],
+        }}
+        return lambda sha: rec
+
+    signoff_scope_cases = [
+        (scoped(["windows-tests"]), set(), "covers the required leg"),
+        (scoped(["windows-tests", "zig-tests"]), set(), "superset is fine"),
+        (scoped([]), {"signoff-scope"}, "skipped the required leg"),
+        (scoped(["zig-tests"]), {"signoff-scope"}, "ran a different leg"),
+        (scoped(["windows-tests"], ["docs/unrelated.md"]), {"signoff-stale"}, "different file set"),
+    ]
+    for lookup, expect, label in signoff_scope_cases:
+        errs, _w = check_pr(pr694, lookup)
+        got = {c for c, _ in errs}
+        report(got == expect, "signoff-scope", f"{label} -> {sorted(got) or ['clean']}")
+
+    # Deferral is credit: it merges while the ledger has room and stops when
+    # the limits are reached, so it cannot quietly become the normal path.
+    import datetime
+    deferred = lambda sha: {"pass": True, "deferred": True, "reason": "batching four settings PRs",
+                            "steps": {}, "scope": {"paths": win_paths, "legs_run": list(gate_scope.ALL_LEGS)}}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fresh = [{"sha": "a" * 40, "created": now.isoformat(), "reason": "r"}]
+    at_limit = [{"sha": f"{i}" * 40, "created": now.isoformat(), "reason": "r"}
+                for i in range(gate_scope.DEFER_MAX_OUTSTANDING)]
+    stale = [{"sha": "b" * 40,
+              "created": (now - datetime.timedelta(days=gate_scope.DEFER_MAX_AGE_DAYS + 1)).isoformat(),
+              "reason": "r"}]
+
+    defer_cases = [
+        ([], set(), True, "deferred with an empty ledger warns and merges"),
+        (fresh, set(), True, "deferred within the limit still merges"),
+        (at_limit, {"signoff-defer-limit"}, False, "deferred at the outstanding limit is refused"),
+        (stale, {"signoff-defer-limit"}, False, "deferred with stale debt is refused"),
+    ]
+    for ledger, expect, expect_warn, label in defer_cases:
+        errs, warns = check_pr(pr694, deferred, ledger)
+        got = {c for c, _ in errs}
+        warned = any(c == "signoff-deferred" for c, _ in warns)
+        report(got == expect and warned == expect_warn, "defer", f"{label} -> {sorted(got) or ['clean']}, warn={warned}")
+
+    ledger_cases = [
+        ([], []),
+        (fresh, []),
+        (at_limit, ["outstanding"]),
+        (stale, ["days old"]),
+    ]
+    for entries, expect_fragments in ledger_cases:
+        blockers = gate_scope.ledger_blockers(entries, now)
+        ok = len(blockers) == len(expect_fragments) and all(
+            any(frag in b for b in blockers) for frag in expect_fragments)
+        report(ok, "ledger", f"{len(entries)} entries -> {blockers or ['clear']}")
 
     print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
     sys.exit(1 if failed else 0)

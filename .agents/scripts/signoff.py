@@ -1,33 +1,48 @@
 #!/usr/bin/env python3
 """Local test signoff for quality control.
 
-Runs the full local test ladder and records the result against the current
-HEAD commit, in <git-common-dir>/pr-signoff/<sha>.json. The pr_gate merge
-hook requires a green record for a PR's exact head commit before it lets
-`gh pr merge` proceed, which makes local runners the merge authority when
-CI is unavailable: the evidence is a recorded run, not a claim.
+Runs the test legs a change actually needs and records the result against
+the current HEAD commit, in <git-common-dir>/pr-signoff/<sha>.json. The
+pr_gate merge hook requires a green record covering a PR's exact head
+commit before it lets a merge proceed, which makes local runners the merge
+authority when CI is unavailable: the evidence is a recorded run, not a
+claim.
+
+Which legs run comes from gate_scope, computed over the paths this branch
+changes against origin/windows. A change touching no Zig and no C# does not
+pay for the Zig suite; a change touching anything unclassified pays for
+everything. The record stores the paths it was computed from, so the gate
+can tell a record that covers the PR from one that does not, and refuses
+the second.
 
 The record is keyed by commit sha, so it survives worktree switches and
 cannot vouch for code that was changed after the run. Rerun after any
 amend or rebase.
 
-Usage: just signoff   (or: python .agents/scripts/signoff.py)
+Usage: just signoff          (scoped to what changed)
+       just signoff-full     (every leg, whatever changed)
 """
 
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gate_scope  # noqa: E402
 
-STEPS = [
-    ("zig-fmt", ["zig", "fmt", "--check", "src"]),
-    ("zig-tests", ["just", "test"]),
-    ("windows-tests", ["just", "test-win"]),
-]
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_REF = "origin/windows"
+
+LEG_COMMANDS = {
+    gate_scope.LEG_FMT: ["zig", "fmt", "--check", "src"],
+    gate_scope.LEG_ZIG: ["just", "test"],
+    gate_scope.LEG_WIN: ["just", "test-win"],
+    gate_scope.LEG_GATES: ["just", "gates-selftest"],
+}
 
 
 def run(cmd, **kw):
@@ -46,7 +61,224 @@ def resolve_common_dir():
     return common if os.path.isdir(common) else None
 
 
-def main():
+def merge_base():
+    out = run(["git", "merge-base", "HEAD", BASE_REF])
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def changed_paths(base):
+    out = run(["git", "diff", "--name-only", f"{base}...HEAD"])
+    if out.returncode != 0:
+        return None
+    return sorted(p.strip().replace("\\", "/") for p in out.stdout.splitlines() if p.strip())
+
+
+def _hunk_lines(diff_text, side):
+    """Line numbers touched on one side of a unified diff (side: '-' or '+')."""
+    lines = set()
+    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_text, re.M):
+        start = int(m.group(1) if side == "-" else m.group(3))
+        count = m.group(2) if side == "-" else m.group(4)
+        count = 1 if count is None else int(count)
+        for i in range(count):
+            lines.add(start + i)
+    return lines
+
+
+def _recipe_at(content_lines, lineno):
+    """Name of the recipe owning a 1-based line, or None for file preamble.
+
+    Body lines are indented, so the owning recipe is the nearest header at
+    column 0 above. A changed line that is itself at column 0 and not a
+    recipe header (a `set` directive, an assignment) belongs to no recipe
+    and is treated as preamble, which forces a full run.
+    """
+    idx = lineno - 1
+    if idx < 0 or idx >= len(content_lines):
+        return None
+    # Parameters may be bare (`pr-gate pr:`), defaulted (`splash-race
+    # args="":`) or variadic (`+args`), and the trailing colon must not be
+    # the `:=` of a `set` directive or an assignment.
+    header = re.compile(
+        r"^([a-zA-Z_][\w-]*)"
+        r"(?:\s+[+*]?[\w-]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'))?)*"
+        r"\s*:(?!=)"
+    )
+    line = content_lines[idx]
+    if line and not line[0].isspace():
+        m = header.match(line)
+        return m.group(1) if m else None
+    for i in range(idx, -1, -1):
+        cur = content_lines[i]
+        if not cur or cur[0].isspace():
+            continue
+        m = header.match(cur)
+        return m.group(1) if m else None
+    return None
+
+
+def justfile_legs(base):
+    """Legs whose meaning a justfile edit could have changed.
+
+    Editing the recipe a leg runs through invalidates that leg only; a
+    changed line outside every recipe (the shell preamble, a variable) can
+    reach any of them and forces all. Adding an unrelated recipe forces
+    nothing. Comment-only and blank-line changes never count, since a guard
+    that demands an hour of tests for a typo fix is the kind that gets
+    switched off. Both sides of the diff are inspected so a deleted recipe
+    cannot slip through by leaving no new lines.
+    """
+    diff = run(["git", "diff", "--unified=0", base, "HEAD", "--", "justfile"])
+    if diff.returncode != 0:
+        return set(gate_scope.ALL_LEGS)
+    if not diff.stdout.strip():
+        return set()
+
+    new_content = run(["git", "show", "HEAD:justfile"])
+    old_content = run(["git", "show", f"{base}:justfile"])
+    if new_content.returncode != 0 or old_content.returncode != 0:
+        return set(gate_scope.ALL_LEGS)
+
+    legs = set()
+    for side, blob in (("+", new_content.stdout), ("-", old_content.stdout)):
+        content_lines = blob.splitlines()
+        for lineno in _hunk_lines(diff.stdout, side):
+            if lineno - 1 >= len(content_lines):
+                return set(gate_scope.ALL_LEGS)
+            text = content_lines[lineno - 1].strip()
+            if not text or text.startswith("#"):
+                continue
+            recipe = _recipe_at(content_lines, lineno)
+            if recipe is None:
+                return set(gate_scope.ALL_LEGS)
+            legs.update(gate_scope.RECIPE_LEGS.get(recipe, ()))
+    return legs
+
+
+def plan(full=False):
+    """Returns (legs, paths, justfile_legs, reason)."""
+    every = sorted(gate_scope.ALL_LEGS)
+    base = merge_base()
+    if full:
+        return every, None, every, "--full requested"
+    if not base:
+        return every, None, every, f"could not resolve a merge base with {BASE_REF}"
+    paths = changed_paths(base)
+    if paths is None:
+        return every, None, every, "could not list changed paths"
+    if not paths:
+        return every, [], every, "no changes against the base; nothing to scope"
+    jf = sorted(justfile_legs(base)) if "justfile" in paths else []
+    legs = gate_scope.required_legs(paths, justfile_legs=jf)
+    unknown = gate_scope.unknown_paths(paths)
+    if unknown:
+        reason = f"unclassified path(s) force every leg: {', '.join(unknown[:5])}"
+    elif jf:
+        reason = f"scoped to {len(paths)} changed path(s); justfile edit touches {', '.join(jf)}"
+    else:
+        reason = f"scoped to {len(paths)} changed path(s)"
+    return legs, paths, jf, reason
+
+
+def signoff_dir():
+    common = resolve_common_dir()
+    if not common:
+        return None
+    d = os.path.join(common, "pr-signoff")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def write_ledger(entries):
+    d = signoff_dir()
+    if not d:
+        return False
+    tmp = gate_scope.ledger_path(d) + f".{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+    os.replace(tmp, gate_scope.ledger_path(d))
+    return True
+
+
+def defer(reason):
+    """Record a deliberate skip so a batch of small PRs can share one later
+    ladder run. Refused when the reason is not a reason, or when the ledger
+    is already at its limit: credit has to be settled before more is given."""
+    if len(reason.strip()) < gate_scope.DEFER_MIN_REASON_CHARS:
+        print(f"signoff: give a real motivation (at least {gate_scope.DEFER_MIN_REASON_CHARS} chars); "
+              "it is recorded in the ledger and read later when the debt is settled.")
+        return 2
+    d = signoff_dir()
+    if not d:
+        print("signoff: could not resolve the git common dir; NOT recording.")
+        return 2
+    entries = gate_scope.load_ledger(d)
+    blockers = gate_scope.ledger_blockers(entries)
+    if blockers:
+        print("signoff: refusing to defer - " + "; ".join(blockers))
+        print("signoff: settle the debt first with 'just signoff-full' on the merged branch, "
+              "or let the nightly run settle it.")
+        return 1
+
+    head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    legs, paths, jf, _ = plan(False)
+    created = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    record = {
+        "sha": head,
+        "created": created,
+        "steps": {},
+        "pass": True,
+        "deferred": True,
+        "reason": reason.strip(),
+        "scope": {
+            "legs_run": list(gate_scope.ALL_LEGS),
+            "legs_deferred": legs,
+            "paths": paths,
+            "justfile_legs": jf,
+            "reason": "deferred",
+            "full": False,
+        },
+    }
+    with open(os.path.join(d, f"{head}.json"), "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+    entries.append({"sha": head, "created": created, "reason": reason.strip(),
+                    "legs_deferred": legs})
+    write_ledger(entries)
+    remaining = gate_scope.DEFER_MAX_OUTSTANDING - len(entries)
+    print(f"signoff: DEFERRED for {head[:10]} - {reason.strip()}")
+    print(f"signoff: {len(entries)} outstanding, {remaining} more available before the gate refuses. "
+          "Settle with 'just signoff-full' once the batch has landed.")
+    return 0
+
+
+def settle(note):
+    d = signoff_dir()
+    if not d:
+        print("signoff: could not resolve the git common dir; nothing settled.")
+        return 2
+    entries = gate_scope.load_ledger(d)
+    if not entries:
+        print("signoff: no deferred signoffs outstanding.")
+        return 0
+    write_ledger([])
+    print(f"signoff: settled {len(entries)} deferred signoff(s) - {note}")
+    for e in entries:
+        print(f"  {e.get('sha', '?')[:10]}  {e.get('reason', '')}")
+    return 0
+
+
+def report_debt():
+    d = signoff_dir()
+    entries = gate_scope.load_ledger(d) if d else []
+    if not entries:
+        return
+    print(f"signoff: {len(entries)} deferred signoff(s) outstanding:")
+    for e in entries:
+        print(f"  {e.get('sha', '?')[:10]}  {e.get('created', '')[:16]}  {e.get('reason', '')}")
+
+
+def main(argv):
+    full = "--full" in argv
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "status", "--porcelain"]).stdout.strip()
     if dirty:
@@ -54,14 +286,18 @@ def main():
         print(dirty)
         return 1
 
+    legs, paths, jf, reason = plan(full)
+    print(f"signoff: {reason}")
+    print(f"signoff: legs: {', '.join(legs) if legs else '(none needed)'}")
+
     results = {}
     ok = True
-    for name, cmd in STEPS:
+    for name in legs:
+        cmd = LEG_COMMANDS[name]
         print(f"signoff: running {name}: {' '.join(cmd)}", flush=True)
         start = time.monotonic()
         try:
-            r = subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt"))
-            rc = r.returncode
+            rc = subprocess.run(cmd, cwd=REPO_ROOT, shell=(os.name == "nt")).returncode
         except FileNotFoundError as e:
             print(f"signoff: {name} could not run: {e}")
             rc = 127
@@ -86,13 +322,109 @@ def main():
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "steps": results,
         "pass": ok,
+        "scope": {
+            "legs_run": legs,
+            "paths": paths,
+            "justfile_legs": jf,
+            "reason": reason,
+            "full": bool(full),
+        },
     }
     path = os.path.join(outdir, f"{head}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
     print(f"signoff: {'PASS' if ok else 'FAIL'} recorded for {head[:10]} at {path}")
+
+    # A green run of every leg is what deferred merges were borrowing
+    # against, so it settles the ledger. A scoped run proves nothing about
+    # the code those merges carried and settles nothing.
+    if ok and set(legs) == set(gate_scope.ALL_LEGS):
+        entries = gate_scope.load_ledger(outdir)
+        if entries:
+            settle(f"full ladder green at {head[:10]}")
+    else:
+        report_debt()
     return 0 if ok else 1
 
 
+def self_test():
+    failed = False
+
+    def report(ok, label, detail=""):
+        nonlocal failed
+        if not ok:
+            failed = True
+        print(f"{'ok ' if ok else 'FAIL'} {label}{': ' + detail if detail else ''}")
+
+    justfile = [
+        "# preamble comment",
+        'set windows-shell := ["pwsh.exe"]',
+        "",
+        "test: test-lib-vt",
+        "    zig build test",
+        "",
+        "[windows]",
+        "gallery-verify:",
+        "    bash tools/gallery/verify.sh",
+        "",
+        "pr-gate pr:",                       # bare parameter
+        "    python .agents/scripts/pr_gate.py",
+        "",
+        'splash-race args="": build-win',    # defaulted parameter and a dep
+        "    pwsh -File x.ps1",
+        "",
+        "signoff-defer +reason:",            # variadic parameter
+        "    python .agents/scripts/signoff.py",
+    ]
+    owner_cases = [
+        (1, None),   # comment in the preamble
+        (2, None),   # set directive, not a recipe called "set"
+        (4, "test"),
+        (5, "test"),
+        (8, "gallery-verify"),
+        (9, "gallery-verify"),
+        (11, "pr-gate"),
+        (12, "pr-gate"),
+        (14, "splash-race"),
+        (15, "splash-race"),
+        (17, "signoff-defer"),
+        (18, "signoff-defer"),
+    ]
+    for lineno, expect in owner_cases:
+        got = _recipe_at(justfile, lineno)
+        report(got == expect, "recipe-owner", f"line {lineno} -> {got}")
+
+    # A pure insertion (-10,0) touches no old line, so only the new side
+    # carries it; a replacement (-4 +4) appears on both.
+    hunk = "@@ -10,0 +11,2 @@\n+new line\n+another\n@@ -4 +4 @@\n-old\n+new\n"
+    report(_hunk_lines(hunk, "+") == {11, 12, 4}, "hunk-new", str(sorted(_hunk_lines(hunk, "+"))))
+    report(_hunk_lines(hunk, "-") == {4}, "hunk-old", str(sorted(_hunk_lines(hunk, "-"))))
+
+    deletion = "@@ -20,3 +19,0 @@\n-a\n-b\n-c\n"
+    report(_hunk_lines(deletion, "-") == {20, 21, 22}, "hunk-deletion", str(sorted(_hunk_lines(deletion, "-"))))
+    report(_hunk_lines(deletion, "+") == set(), "hunk-deletion-new", str(sorted(_hunk_lines(deletion, "+"))))
+
+    print("SELF-TEST " + ("FAILED" if failed else "PASSED"))
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    argv = sys.argv[1:]
+    if "--self-test" in argv:
+        sys.exit(self_test())
+    if "--plan" in argv:
+        legs, paths, jf, reason = plan("--full" in argv)
+        print(f"reason: {reason}")
+        print(f"legs:   {', '.join(legs) if legs else '(none needed)'}")
+        print(f"paths:  {len(paths) if paths is not None else 'unknown'}")
+        sys.exit(0)
+    if "--debt" in argv:
+        report_debt()
+        sys.exit(0)
+    if "--defer" in argv:
+        i = argv.index("--defer")
+        sys.exit(defer(" ".join(argv[i + 1:])))
+    if "--settle" in argv:
+        i = argv.index("--settle")
+        sys.exit(settle(" ".join(argv[i + 1:]) or "manual settle"))
+    sys.exit(main(argv))

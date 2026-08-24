@@ -95,12 +95,38 @@ def nightly_task_registered():
         return None
 
 
+def deferred_debt():
+    """Outstanding deferred signoffs. Reported at session start because a
+    skip nobody is reminded of is indistinguishable from a pass."""
+    sys.path.insert(0, SCRIPT_DIR)
+    try:
+        import gate_scope
+    except ImportError:
+        return []
+    out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=15)
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common:
+        return []
+    if not os.path.isabs(common):
+        common = os.path.join(REPO_ROOT, common)
+    return gate_scope.load_ledger(os.path.join(common, "pr-signoff"))
+
+
 def session_main():
     problems, _ = check()
+    messages = []
     if problems:
-        print(json.dumps({
-            "systemMessage": "doctor: quality gates are impaired - " + "; ".join(problems)
-        }))
+        messages.append("quality gates are impaired - " + "; ".join(problems))
+    try:
+        debt = deferred_debt()
+    except Exception:
+        debt = []
+    if debt:
+        messages.append(f"{len(debt)} deferred signoff(s) outstanding; settle with 'just signoff-full' "
+                        f"(oldest: {debt[0].get('reason', '')[:60]})")
+    if messages:
+        print(json.dumps({"systemMessage": "doctor: " + "; ".join(messages)}))
     sys.exit(0)
 
 
@@ -110,6 +136,12 @@ def full_main():
         print(f"FAIL {p}")
     for n in notes:
         print(f"warn {n}")
+    try:
+        debt = deferred_debt()
+    except Exception:
+        debt = []
+    for e in debt:
+        print(f"warn deferred signoff outstanding: {e.get('sha', '?')[:10]}  {e.get('reason', '')}")
     reg = nightly_task_registered()
     if reg is True:
         print("ok   nightly task registered")

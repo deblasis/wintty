@@ -68,3 +68,4 @@ tools/gallery/previews/
 .claude/worktrees/
 .agents/worktrees/
 .agents/nightly-logs/
+.agents/scripts/__pycache__/
