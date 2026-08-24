@@ -297,9 +297,21 @@ public sealed partial class ShaderPickerWindow : Window
         PickerPreviewHost.Child = control;
 
         // Autoplay starts the moment the preview exists: the demo types
-        // itself, no clicks needed.
+        // itself, no clicks needed. The feed's opening writes (banner and
+        // first prompt) must wait for FirstRender: this method runs from
+        // the ctor's SelectionChanged, before the window is activated,
+        // when the surface handle is still zero and WriteVt would silently
+        // drop them. Starting on FirstRender also buys the loop a surface
+        // that has actually drawn a frame.
         _feed = new ShaderPreviewFeed(control);
-        _feed.Start();
+        control.FirstRender += OnPreviewFirstRender;
+    }
+
+    private void OnPreviewFirstRender(object? sender, EventArgs e)
+    {
+        // Fires once, from the terminal's first-render callback; Start is
+        // idempotent anyway.
+        _feed?.Start();
     }
 
     private void DisposePreview()
