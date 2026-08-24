@@ -702,6 +702,41 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceRequestClose(GhosttySurface surface);
 
+    // ghostty_surface_set_custom_shader swaps the per-surface custom shader
+    // override live: the renderer rebuilds its post-process pipeline through
+    // the config-change path while the grid, scrollback, and cursor are
+    // preserved. Null or empty clears the override (no shader). Used by the
+    // shader gallery picker so flipping entries never resets the preview.
+    // StringMarshalling.Utf8 is a [LibraryImport] option, not a
+    // [MarshalAs], so it coexists with DisableRuntimeMarshalling (same
+    // rationale as the clipboard request binding above).
+    //
+    // Imported as void even though the Zig side returns a bool. That bool is
+    // false only when updateConfig fails, NOT when the shader fails to load
+    // or compile (those arrive as the custom_shader_failed action), and there
+    // is nothing a caller can do with it: the preview has no second shader to
+    // fall back to and the surface keeps rendering with whatever it had. A
+    // bool return would promise information nobody consumes, and discarding
+    // one at the call site is how a silent failure hides. Dropping a cdecl
+    // return value is well defined; the callee still pops nothing.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_custom_shader",
+        StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void SurfaceSetCustomShader(
+        GhosttySurface surface,
+        string? shaderPath);
+
+    // ghostty_surface_vt_write feeds raw VT bytes into the surface's
+    // terminal parser as if they came from the PTY. Raw-pointer overload:
+    // the caller owns the buffer for the duration of the call and passes
+    // its length in bytes (no NUL terminator involved).
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_vt_write")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static unsafe partial void SurfaceVtWrite(
+        GhosttySurface surface,
+        byte* utf8,
+        nuint len);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_process_exited")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial byte SurfaceProcessExitedNative(GhosttySurface surface);
