@@ -72,15 +72,14 @@ echo "zioshade HLSL: $pass pass, $fail fail"
 # <name>.sc.hlsl and render-diffs them on WARP. A rejection here FAILS the
 # gate: a reference gap is a gate gap (that shader would silently lose its
 # differential).
-# The reference input is the identical prefixed source: no normalization
-# between the two legs. (An earlier normalization renamed the reserved-word
-# identifier `active` on the reference side; the shaders now avoid reserved
-# words, so glslang accepts every gallery source verbatim.)
+# Both legs read the same file, so there is no normalization to drift: a
+# rejection here is a broken gallery entry, not a normalization to add.
+# Gallery sources must be accepted by glslang verbatim, which among other
+# things means no GLSL reserved words as identifiers.
 refpass=0; reffail=0; reffailed=""
 for glsl in "$shaders_dir"/*.glsl; do
   name=$(basename "$glsl" .glsl)
-  cp "$stage/$name.full.glsl" "$stage/$name.ref.glsl"
-  if "$GLSLANG" -V -S frag "$stage/$name.ref.glsl" -o "$stage/$name.spv" >/dev/null 2>"$stage/$name.ref.err" &&
+  if "$GLSLANG" -V -S frag "$stage/$name.full.glsl" -o "$stage/$name.spv" >/dev/null 2>"$stage/$name.ref.err" &&
      "$SPIRV_CROSS" --hlsl --shader-model 60 "$stage/$name.spv" > "$stage/$name.sc.hlsl" 2>>"$stage/$name.ref.err"; then
     refpass=$((refpass+1))
   else
