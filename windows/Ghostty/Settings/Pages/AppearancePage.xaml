@@ -106,16 +106,20 @@
                             </RadioButtons>
                             <!-- Gallery pick row: shown only in gallery mode.
                                  The picker window owns previewing; this row
-                                 just names the committed pick and reopens it. -->
+                                 just names the committed pick and reopens it.
+                                 Vertical on purpose: gallery descriptions
+                                 run long, and a wrapping label sharing a
+                                 horizontal row with the button is exactly
+                                 how Choose... got pushed off the card. The
+                                 button always sits on its own line below. -->
                             <StackPanel x:Name="GalleryPickRow"
-                                        Orientation="Horizontal"
                                         Spacing="8">
                                 <TextBlock x:Name="GalleryPickLabel"
                                            Text="No shader selected"
-                                           VerticalAlignment="Center"
                                            TextWrapping="Wrap" />
                                 <Button Content="Choose..."
-                                        Click="ShaderGalleryChoose_Click" />
+                                        Click="ShaderGalleryChoose_Click"
+                                        HorizontalAlignment="Left" />
                             </StackPanel>
                             <!-- File row: shown only in file mode. Same
                                  writer as the old card; no ConfigKey here by
