@@ -292,8 +292,6 @@ fuzz-selftest:
 # carries the tree of the latest series/vN tag. sync refuses to start when
 # that does not hold, because the fold-in below relies on it.
 
-# Replay the fork onto the latest upstream.
-#
 # Builds the candidate on the series-wip branch: latest series tag, plus the
 # PRs windows merged since the last snapshot, rebased onto upstream/main. The
 # fold-in applies clean by construction - at the last snapshot both sides had
@@ -301,13 +299,34 @@ fuzz-selftest:
 # invariant broke earlier.
 #
 # Re-running is safe at every point. A series-wip left over from a published
-# sync equals the latest tag and is rebuilt; one holding an unpublished
-# replay is resumed, folding in only commits (by patch-id) it does not
-# already carry, so a publish that lost a race to a mid-sync PR merge is
-# retried with this same command.
+# sync still carries its series tag and is rebuilt; a tagless one holds an
+# unpublished replay and is resumed, folding in only commits (by patch-id) it
+# does not already carry, so a publish that lost a race to a mid-sync PR
+# merge is retried with this same command. The exception is a series-wip built from a
+# generation that is no longer the latest: publishing it would drop whatever
+# the newer generation folded in, so it is refused, not resumed.
+#
+# Replay the fork onto the latest upstream.
 sync force="":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Probed before the branch guard: a conflicted rebase leaves
+    # `git branch --show-current` EMPTY, so without this the operator who
+    # re-runs sync mid-conflict (the habit the fold-in message trains) gets
+    # a wrong-branch warning naming '', and --force would then abandon the
+    # rebase state half-applied.
+    git_dir=$(git rev-parse --git-dir)
+    if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+        echo "REFUSING: a rebase is in progress. Resolve and 'git rebase --continue'"
+        echo "(or 'git rebase --abort'), then re-run 'just sync'."
+        exit 1
+    fi
+    if [ -f "$git_dir/CHERRY_PICK_HEAD" ]; then
+        echo "REFUSING: a cherry-pick is in progress. Resolve and"
+        echo "'git cherry-pick --continue' (or 'git cherry-pick --abort'), then"
+        echo "re-run 'just sync'."
+        exit 1
+    fi
     branch=$(git branch --show-current)
     if [ "{{ force }}" != "--force" ] && [ "$branch" != "windows" ] && [ "$branch" != "series-wip" ]; then
         echo "WARNING: you are on '$branch', not 'windows' or 'series-wip'. sync checks"
@@ -322,6 +341,13 @@ sync force="":
     fi
     git fetch upstream
     git fetch origin
+    # Explicit, because tag auto-following cannot deliver these: series tags
+    # point at replay tips no branch reaches, so a plain fetch never brings
+    # them and a second machine would number generations from a stale set and
+    # read the invariant check below as corruption. Unforced on purpose - a
+    # tag that moved on the remote surfaces as an error instead of being
+    # silently adopted.
+    git fetch origin 'refs/tags/series/*:refs/tags/series/*'
     prev_n=$(git tag --list 'series/v*' | sed 's|^series/v||' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
     if [ -z "$prev_n" ]; then
         echo "REFUSING: no series/v* tag. This flow publishes windows by snapshot merge"
@@ -329,10 +355,14 @@ sync force="":
         exit 1
     fi
     prev="refs/tags/series/v${prev_n}"
-    # The last snapshot is the only kind of merge commit windows carries,
-    # because PRs squash-merge. Before the first snapshot exists, the v0 tag
-    # itself sits on windows and plays the role.
-    mprev=$(git rev-list --min-parents=2 --first-parent -1 refs/remotes/origin/windows)
+    # The last snapshot is the only merge commit in FORK-ONLY history, because
+    # PRs squash-merge - hence the range bound. Unbounded, this walk would
+    # sail past the fork's linear commits into upstream's first-parent chain,
+    # which is full of upstream's own PR merges, and return one of those; the
+    # bound excludes them while keeping the snapshot, which is never reachable
+    # from upstream/main. Before the first snapshot exists the range holds no
+    # merge at all, and the v0 tag plays the role.
+    mprev=$(git rev-list --min-parents=2 --first-parent -1 refs/remotes/upstream/main..refs/remotes/origin/windows)
     if [ -z "$mprev" ]; then
         mprev=$(git rev-parse "${prev}^{commit}")
     fi
@@ -346,12 +376,35 @@ sync force="":
         echo "find out which one moved before replaying anything."
         exit 1
     fi
+    if [ "$branch" != "series-wip" ] && git worktree list --porcelain | grep -qx "branch refs/heads/series-wip"; then
+        echo "REFUSING: series-wip is checked out in another worktree, and sync"
+        echo "rebuilds it in place. Run from that worktree, or remove it first."
+        exit 1
+    fi
+    # A wip some series tag points at was published; it holds nothing of its
+    # own and is rebuilt from the latest generation. Only a TAGLESS wip is an
+    # unpublished replay worth resuming.
     if git rev-parse --verify -q refs/heads/series-wip >/dev/null && \
-       [ "$(git rev-parse refs/heads/series-wip)" != "$(git rev-parse "${prev}^{commit}")" ]; then
+       ! git tag --list 'series/v*' --points-at refs/heads/series-wip | grep -q .; then
+        # Resume only a replay built from the generation that is STILL the
+        # latest. The fold-in below only looks past the last snapshot, so a
+        # wip stranded across someone else's publish is missing whatever that
+        # publish folded in - and publishing it would fast-forward windows to
+        # a tree without those commits, which no branch protection can catch.
+        stamp=$(git config --get branch.series-wip.seriesbase || echo "")
+        if [ "$stamp" != "series/v${prev_n}" ]; then
+            echo "REFUSING: series-wip was built from '${stamp:-an unknown generation}',"
+            echo "but the series is now at series/v${prev_n}; publishing it would drop"
+            echo "whatever the newer generation folded in. If it holds nothing you"
+            echo "need: git checkout windows && git branch -D series-wip, then re-run"
+            echo "'just sync'. Anything it does hold must be carried over by hand."
+            exit 1
+        fi
         echo "resuming the unpublished replay on series-wip"
         git checkout series-wip
     else
         git checkout -B series-wip "${prev}^{commit}"
+        git config branch.series-wip.seriesbase "series/v${prev_n}"
     fi
     # Fold in what windows merged since the last snapshot. Patch-id, not SHA:
     # on a resume the earlier fold already carries some of these under new
@@ -384,16 +437,22 @@ sync force="":
 # the snapshot marker. Requires the branch to still be linear: after the first
 # snapshot merge lands there is nothing meaningful left for this to tag, and
 # it refuses rather than bless a merge as a series.
+#
+# Tag origin/windows as series/v0, the one-time cutover to this flow.
 sync-bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
+    git fetch upstream
+    git fetch origin
+    # Fetched before the already-bootstrapped check so a clone that never
+    # received the series tags (plain fetches cannot deliver them) does not
+    # bootstrap a second, conflicting v0.
+    git fetch origin 'refs/tags/series/*:refs/tags/series/*'
     if [ -n "$(git tag --list 'series/v*')" ]; then
         echo "REFUSING: series tags already exist; bootstrap is one-time."
         git tag --list 'series/v*' | sed 's/^/  /'
         exit 1
     fi
-    git fetch upstream
-    git fetch origin
     tip=$(git rev-parse refs/remotes/origin/windows)
     if [ "$(git rev-list --count --min-parents=2 "refs/remotes/upstream/main..${tip}")" -ne 0 ]; then
         echo "REFUSING: origin/windows carries merge commits, so it is not the linear"
@@ -415,6 +474,8 @@ sync-bootstrap:
 # 'just sync' folds the new commits into the standing replay. It is atomic
 # across the branch and the series tag so a half-published sync cannot exist
 # on the remote.
+#
+# Publish the verified replay onto windows as a snapshot merge.
 sync-publish:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -433,12 +494,30 @@ sync-publish:
         echo "Run 'just sync' (it fetches and rebases) before publishing."
         exit 1
     fi
+    # Same explicit namespace fetch as sync: the next generation is numbered
+    # from these tags, and a stale set would mint a duplicate number.
+    git fetch origin 'refs/tags/series/*:refs/tags/series/*'
     prev_n=$(git tag --list 'series/v*' | sed 's|^series/v||' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
     if [ -z "$prev_n" ]; then
         echo "REFUSING: no series/v* tag; run 'just sync-bootstrap' first."
         exit 1
     fi
-    next=$((prev_n + 1))
+    if [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'refs/remotes/origin/windows^{tree}')" ] \
+       && git merge-base --is-ancestor refs/remotes/upstream/main refs/remotes/origin/windows; then
+        echo "nothing to publish: windows already carries this tree on the current upstream."
+        exit 0
+    fi
+    # Re-checked here, not just in sync: an accidental publish of a replay
+    # stranded across someone else's publish would be an ordinary
+    # fast-forward that silently drops what the newer generation folded in.
+    stamp=$(git config --get branch.series-wip.seriesbase || echo "")
+    if [ "$stamp" != "series/v${prev_n}" ]; then
+        echo "REFUSING: series-wip was built from '${stamp:-an unknown generation}', but"
+        echo "the series is now at series/v${prev_n}; publishing would drop whatever the"
+        echo "newer generation folded in. Re-run 'just sync'."
+        exit 1
+    fi
+    next=$((10#$prev_n + 1))
     base=$(git rev-parse refs/remotes/origin/windows)
     up=$(git rev-parse refs/remotes/upstream/main)
     tree=$(git rev-parse 'HEAD^{tree}')
@@ -474,6 +553,15 @@ sync-publish:
     fi
     echo "published: windows snapshot $(git rev-parse --short "$m") (series v${next})"
 
+# Drives the real recipes against throwaway git fixtures: bootstrap, a plain
+# sync, a fold-in, a raced publish, a conflicted replay, a second clone
+# joining mid-series, and a stale leftover replay that must be refused. A few
+# minutes; no network, no desktop, safe alongside real work.
+#
+# Prove the sync flow still refuses, folds, races, and publishes correctly.
+sync-selftest:
+    @bash .agents/scripts/syncflow-selftest.sh
+
 # Post-rebase gate. Exits non-zero on a finding instead of printing a report
 # for a human to skim, because the report this replaced was skimmed and passed
 # while the product did not compile.
@@ -503,10 +591,11 @@ sync-publish:
 #
 # Nothing here fetches, and `base` is why that needs saying. Every check in this
 # gate is measured against refs/remotes/upstream/main, and a gate that moves its
-# own yardstick mid-run is measuring nothing. Fetching origin moves the
-# pre-rebase tip that four checks compare against. Fetching upstream moves the
+# own yardstick mid-run is measuring nothing. Fetching upstream moves the
 # ref past what the replay targeted and hides, rather than reports, the one
-# thing `base` exists to catch. So `base` asks the remote what it has with
+# thing `base` exists to catch. Fetching origin can change which series tag
+# counts as the latest generation, and on the tracking-ref fallback path it
+# moves the pre-rebase tip itself. So `base` asks the remote what it has with
 # `git ls-remote`, which writes no ref, and says out loud when it could not ask
 # instead of passing quietly.
 #
@@ -532,6 +621,8 @@ sync-publish:
 # legitimately and a check that cries wolf gets passed a flag instead of read.
 #
 # `just sync-verify fast` stops before the build ladder.
+#
+# Gate the replay before publishing.
 sync-verify mode="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -572,7 +663,10 @@ sync-verify mode="":
         echo "sync-verify FAILED"
         exit 1
     fi
-    dirty=$(git status --porcelain | grep -v "^?? ${tmpd}/\?\$" || true)
+    # A plain prefix match, because BRE `\?` is GNU-only and a literal on BSD
+    # grep; the porcelain line is `?? .sync-verify-tmp/` with or without the
+    # trailing slash and nothing else starts with that prefix.
+    dirty=$(git status --porcelain | grep -v "^?? ${tmpd}" || true)
     if [ -n "$dirty" ]; then
         bad "working tree is not clean"
     fi
@@ -725,8 +819,8 @@ sync-verify mode="":
                 note "    Upstream lands commits most days, so at this distance the fork is"
                 note "    being compared against an upstream that has substantially moved."
                 note "    Re-run 'just sync', which fetches first. Do not fetch and re-run"
-                note "    this gate alone: that moves the pre-rebase tip the checks below"
-                note "    compare against."
+                note "    this gate alone: that moves the upstream ref every check below"
+                note "    measures against (and, off series-wip, the tracking-ref baseline)."
             else
                 note "    Upstream has commits this ref does not. Recent enough that the"
                 note "    checks below are still measuring the right thing."
@@ -969,8 +1063,12 @@ sync-verify mode="":
     else
         echo "sync-verify PASSED"
     fi
-    echo "Publish with:"
-    echo "  just sync-publish"
+    # Only where publish would not refuse; on any other branch the hint
+    # would advertise a command whose first guard rejects it.
+    if [ "$(git branch --show-current)" = "series-wip" ]; then
+        echo "Publish with:"
+        echo "  just sync-publish"
+    fi
 
 # ── shader gallery ─────────────────────────────────────────────────────────
 # Compile + render every bundled gallery shader (windows/Ghostty/Assets/Shaders)

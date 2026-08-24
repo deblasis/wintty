@@ -33,11 +33,12 @@ touching anything, because the fold-in step relies on it.
 | Publish | `just sync-publish` |
 | List what the fork changes | `git diff --name-only upstream/main...refs/heads/windows` |
 | Smoke the C boundary | `just run-win` |
-| Resume after fixing a conflict | `git add <file> && git rebase --continue` |
-| Abandon the replay entirely | `git rebase --abort`, then `git branch -D series-wip` |
+| Resume after fixing a rebase conflict | `git add <file> && git rebase --continue` |
+| Resume after fixing a fold-in conflict | `git add <file> && git cherry-pick --continue`, then re-run `just sync` |
+| Abandon the replay entirely | `git rebase --abort` (or `git cherry-pick --abort`), `git checkout windows`, `git branch -D series-wip` |
 | Fold a fix into an earlier commit | `git commit --fixup=<sha>`, then autosquash (below) |
 | One-time cutover from the force-push flow | `just sync-bootstrap` |
-| Self-test the whole flow on a fixture | `bash .agents/scripts/syncflow-selftest.sh` |
+| Self-test the whole flow on fixtures | `just sync-selftest` |
 
 The autosquash step needs an env var, so it differs by shell. In sh:
 `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <sha>^`. In pwsh, which is
@@ -53,9 +54,20 @@ fresh replay a fold-in conflict means the invariant broke, not that you
 resolved something wrong.
 
 Re-running `just sync` is safe at every point and is also the recovery path:
-a `series-wip` equal to the latest tag is rebuilt, one holding an unpublished
-replay is resumed, and the fold-in is by patch-id so nothing is picked twice.
-A publish that lost a race to a mid-sync PR merge is retried by exactly this.
+a `series-wip` that some series tag still points at was published and is
+rebuilt; a tagless one holds an unpublished replay and is resumed, with the
+fold-in by patch-id so nothing is picked twice. A publish that lost a race to
+a mid-sync PR merge is retried by exactly this.
+
+Two multi-machine rules are enforced rather than assumed. The series tags
+point at commits no branch reaches, so plain fetches never deliver them; the
+recipes fetch `refs/tags/series/*` explicitly, which is what lets a second
+clone join mid-series. And a wip records which generation it was built from
+(`branch.series-wip.seriesbase`); a wip stranded across someone else's
+publish is REFUSED, not resumed, because the fold-in only looks past the
+last snapshot and publishing such a wip would silently drop whatever the
+newer generation folded in. If the refused wip holds nothing of yours,
+delete it and re-run; anything it does hold must be carried over by hand.
 
 ## Overview of what can go wrong
 
@@ -173,11 +185,17 @@ express this - it would re-merge and could resolve differently than the replay
 did - so the commit is built with `git commit-tree` and an equality check
 guards the result.
 
-The push is deliberately not forced. The two ways it fails:
+The push is deliberately not forced. The ways it stops:
 
+- **"nothing to publish":** the replay's tree is already what `windows`
+  carries on the current upstream. A no-op sync or a double publish ends
+  here, with exit 0 and no empty snapshot minted.
 - **Rejected non-fast-forward:** a PR merged into `windows` mid-sync. The tag
   is rolled back automatically; re-run `just sync` (it resumes the replay and
   folds the new commits in by patch-id), re-verify, publish again.
+- **"series-wip was built from ...":** the wip predates the latest published
+  generation, and publishing it would drop what that generation folded in.
+  Re-run `just sync`.
 - **The invariant check refuses at the next `just sync`:** the last snapshot's
   tree no longer matches the latest series tag. Someone pushed to `windows`
   outside the PR flow or moved a series tag; find out which before replaying.
@@ -230,6 +248,6 @@ by an earlier bundle may have no `refs/remotes/origin/*` at all, so fall back
 to whatever it has checked out:
 
 ```sh
-ssh HOST 'cd ~/CODE/OSS/ghostty && (git rev-parse --verify -q refs/remotes/origin/windows || git rev-parse HEAD)'
+ssh HOST 'cd <checkout> && (git rev-parse --verify -q refs/remotes/origin/windows || git rev-parse HEAD)'
 git bundle create sync.bundle <that-sha>..refs/heads/series-wip
 ```
