@@ -1080,3 +1080,53 @@ sync-verify mode="":
 # broken gallery entry. See tools/gallery/verify.sh for the env knobs.
 gallery-verify:
     @bash tools/gallery/verify.sh
+
+# ── quality control ────────────────────────────────────────────────────────
+# These recipes need Python 3 on PATH as `python`. The signoff ladder
+# includes test-win, so signoff is a Windows-host recipe like the rest of
+# the win targets above.
+#
+# Run the full local test ladder (zig fmt check, zig tests, Windows tests)
+# and record a signoff for the current HEAD. The pr-gate merge hook requires
+# a green signoff for a PR's head commit before a merge is allowed, so local
+# runners are the merge authority while CI is unavailable.
+signoff:
+    python .agents/scripts/signoff.py
+
+# Show which legs a signoff would run for the current branch, and why.
+signoff-plan:
+    python .agents/scripts/signoff.py --plan
+
+# Run every leg regardless of what changed, and settle any deferred debt.
+signoff-full:
+    python .agents/scripts/signoff.py --full
+
+# Merge without running the legs, on the record. For batching a run of small
+# PRs behind one later ladder: the motivation is stored, the debt is capped,
+# and only a green signoff-full clears it.
+signoff-defer reason:
+    python .agents/scripts/signoff.py --defer {{quote(reason)}}
+
+# What is currently merged on credit.
+signoff-debt:
+    python .agents/scripts/signoff.py --debt
+
+# Validate a PR against the merge quality gate without merging.
+pr-gate pr:
+    python .agents/scripts/pr_gate.py --check-pr {{pr}}
+
+# Check that everything the gates depend on is present and wired: tools on
+# PATH, scripts where the hooks point, settings parseable, nightly task
+# registration. A SessionStart hook runs the fast subset automatically.
+doctor:
+    python .agents/scripts/doctor.py
+
+# Prove the gates still catch what they exist for (recorded-PR replays,
+# matcher escapes, exemption anchoring) and that the nightly scripts'
+# helpers roundtrip.
+gates-selftest:
+    python .agents/scripts/pr_gate.py --self-test
+    python .agents/scripts/workspace_guard.py --self-test
+    python .agents/scripts/doctor.py --self-test
+    pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
+    pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
