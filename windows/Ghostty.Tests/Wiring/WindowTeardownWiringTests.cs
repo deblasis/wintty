@@ -94,20 +94,6 @@ public class WindowTeardownWiringTests
     {
         ("AppWindow.Closing", "runs during the close by design: it is what turns a quake close "
                               + "into a hide. _isClosed is still false when it fires"),
-        // These two are exempt because a gate is the wrong instrument, not
-        // because they are harmless. The subscription is guarded on seedTab
-        // being null, and only the tab-adoption path passes one, so the
-        // cold-start window, the quake window and every restored or reopened
-        // window all subscribe: the action runs once per window, and each
-        // closure captures this window and keeps it rooted on the bootstrap
-        // host for the life of the process. Detaching on close would leave a
-        // multi-window session with nobody handling the action at all. The fix
-        // is to own these where the bootstrap host lives rather than per
-        // window, which is a behaviour change and is filed separately.
-        ("appHost.OpenConfigRequested", "every non-adopted window subscribes; duplicate execution "
-                                        + "and a per-window leak, fixed by moving ownership to App "
-                                        + "rather than by a gate"),
-        ("appHost.ReloadConfigRequested", "same ownership problem as OpenConfigRequested"),
     };
 
     private sealed record Subscription(string Event, string Receiver, string Handler, ExpressionSyntax Rhs);
