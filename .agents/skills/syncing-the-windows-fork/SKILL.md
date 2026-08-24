@@ -1,29 +1,75 @@
 ---
 name: syncing-the-windows-fork
-description: Use when rebasing this fork onto upstream with `just sync` or checking one with `just sync-verify`, when resolving the conflicts a replay raises, when a rebase finishes clean but the build then breaks, when git reports `ambiguous argument 'windows'`, or when judging whether a replayed branch is safe to force-push.
+description: Use when syncing this fork with upstream via `just sync` / `just sync-verify` / `just sync-publish`, when resolving the conflicts a replay raises, when a rebase finishes clean but the build then breaks, when git reports `ambiguous argument 'windows'`, when a publish is rejected, or when judging whether a replayed series is safe to publish.
 ---
 
 # Syncing the Windows fork
+
+## The shape of the flow
+
+`windows` is never rebased and never force-pushed. Each sync lands on it as
+one merge commit whose tree is taken wholesale from a verified replay, so the
+branch only moves forward and branch protection can hold on it.
+
+The replay still happens, on a separate lineage:
+
+- **`series/vN` tags** hold the fork as a linear patch series, rebased onto
+  the upstream of its day. Conflicts are resolved here, and `sync-verify`
+  measures here.
+- **`windows`** is what everything consumes: PRs squash-merge into it, the
+  nightly tracks it, wintty-release pins point into it.
+
+The invariant tying them together: the last snapshot merge on `windows`
+carries the tree of the latest `series/vN` tag. `just sync` checks it before
+touching anything, because the fold-in step relies on it.
 
 ## Quick reference
 
 | Need | Command |
 |---|---|
 | Replay onto the latest upstream | `just sync` |
-| Gate the result before pushing | `just sync-verify` |
+| Gate the result before publishing | `just sync-verify` |
 | Structure only, no build ladder | `just sync-verify fast` |
+| Publish | `just sync-publish` |
 | List what the fork changes | `git diff --name-only upstream/main...refs/heads/windows` |
 | Smoke the C boundary | `just run-win` |
-| Resume after fixing a conflict | `git add <file> && git rebase --continue` |
-| Abandon the replay entirely | `git rebase --abort` |
+| Resume after fixing a rebase conflict | `git add <file> && git rebase --continue` |
+| Resume after fixing a fold-in conflict | `git add <file> && git cherry-pick --continue`, then re-run `just sync` |
+| Abandon the replay entirely | `git rebase --abort` (or `git cherry-pick --abort`), `git checkout windows`, `git branch -D series-wip` |
 | Fold a fix into an earlier commit | `git commit --fixup=<sha>`, then autosquash (below) |
-| Publish | `git push --force-with-lease origin windows` |
+| One-time cutover from the force-push flow | `just sync-bootstrap` |
+| Self-test the whole flow on fixtures | `just sync-selftest` |
 
 The autosquash step needs an env var, so it differs by shell. In sh:
 `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <sha>^`. In pwsh, which is
 this repo's default shell: `$env:GIT_SEQUENCE_EDITOR=':'; git rebase -i --autosquash <sha>^`.
 
-## Overview
+## What `just sync` does
+
+It builds the candidate on the `series-wip` branch: check out the latest
+series tag, cherry-pick the PRs `windows` merged since the last snapshot (the
+fold-in), rebase everything onto `upstream/main`. The fold-in applies clean by
+construction - at the last snapshot both sides had the same tree - so on a
+fresh replay a fold-in conflict means the invariant broke, not that you
+resolved something wrong.
+
+Re-running `just sync` is safe at every point and is also the recovery path:
+a `series-wip` that some series tag still points at was published and is
+rebuilt; a tagless one holds an unpublished replay and is resumed, with the
+fold-in by patch-id so nothing is picked twice. A publish that lost a race to
+a mid-sync PR merge is retried by exactly this.
+
+Two multi-machine rules are enforced rather than assumed. The series tags
+point at commits no branch reaches, so plain fetches never deliver them; the
+recipes fetch `refs/tags/series/*` explicitly, which is what lets a second
+clone join mid-series. And a wip records which generation it was built from
+(`branch.series-wip.seriesbase`); a wip stranded across someone else's
+publish is REFUSED, not resumed, because the fold-in only looks past the
+last snapshot and publishing such a wip would silently drop whatever the
+newer generation folded in. If the refused wip holds nothing of yours,
+delete it and re-run; anything it does hold must be carried over by hand.
+
+## Overview of what can go wrong
 
 `just sync` replays roughly 550 fork commits onto a much newer upstream. A
 rebase that ends without conflicts, a file surface that still matches, and a
@@ -71,16 +117,15 @@ whole-tree check upstream CI runs.
 Every other leg measures the fork against `refs/remotes/upstream/main`, so the
 gate first establishes what that ref is worth. It reports the merge base of
 HEAD and the ref, the number of commits the ref has gained since, and whether
-the ref is still what the remote has. Nothing fetches: fetching origin would
-move the pre-rebase tip four checks compare against, and fetching upstream
-would move the yardstick this leg exists to measure. It asks with
-`git ls-remote`, which writes no ref.
+the ref is still what the remote has. Nothing fetches: fetching upstream would
+move the yardstick this leg exists to measure. It asks with `git ls-remote`,
+which writes no ref.
 
 Read the commit count. After a correct `just sync` it is exactly zero, because
 sync fetches and then rebases onto what it fetched and nothing moves the ref in
 between. Commits upstream pushed while you were replaying are not in the ref
 and cannot appear here. Any non-zero number means the ref moved by a later
-fetch and this is not a fresh replay waiting to be pushed, which is the only
+fetch and this is not a fresh replay waiting to be published, which is the only
 state the rest of the gate is built for.
 
 The FAIL here is the ref being stale: its tip commit is a week or more old and
@@ -92,12 +137,12 @@ moved. The measure is the committer date of upstream's own tip commit, which
 travels with the object. Fork-side dates and reflogs both looked tempting and
 are both the wrong clock: a fetch that brings nothing new writes no reflog
 entry, so a correct sync across a quiet weekend reads as stale, and any later
-fetch makes a months-old replay read as current. It also fails when the local ref turns out to be
-ahead of the remote, which means upstream rewound and the replay is built on
-commits that no longer exist there. That check only fires when the remote tip is
-already in the local object database, which is what a plain rewind leaves
-behind; a rewind followed by new commits upstream cannot be told from an
-ordinary advance without fetching, and is reported as one.
+fetch makes a months-old replay read as current. It also fails when the local
+ref turns out to be ahead of the remote, which means upstream rewound and the
+replay is built on commits that no longer exist there. That check only fires
+when the remote tip is already in the local object database, which is what a
+plain rewind leaves behind; a rewind followed by new commits upstream cannot be
+told from an ordinary advance without fetching, and is reported as one.
 
 No network, and a tracking ref with no remote behind it, are both REVIEW rather
 than a bare note, so the verdict names them instead of ending in an unqualified
@@ -111,28 +156,49 @@ the file surface legitimately and a check that cries wolf gets a flag passed to
 it instead of being read. The `range-diff` listing of changed commits never
 affects the exit code and caps itself, though a range-diff that fails outright,
 and the dropped-commit check driven by the same output, both can fail the run.
-Read both before you push: a resolution that dropped a whole file's fork
+Read both before you publish: a resolution that dropped a whole file's fork
 changes surfaces in the file-surface REVIEW, and one that
 dropped only part of a hunk surfaces nowhere but `range-diff`.
 
 **It does not catch P/Invoke drift.** After a sync that touched the C
 boundary, run `just run-win`, open a window and a split, and type in both.
 
-## The pre-rebase tip
+## The pre-rebase baseline
 
-Four checks need the branch as it was before the replay: dropped commits, file
-surface, `range-diff`, and the `zig fmt` baseline. All four read the ref this
-branch tracks, which points at the old commit only until the force-push
-replaces it. The first three then announce themselves as skipped; the `zig fmt`
-one still runs but degrades to a REVIEW listing every standing offender,
-because it can no longer tell the new ones from the old.
+Four checks compare the replay against the series it started from: dropped
+commits, file surface, `range-diff`, and the `zig fmt` baseline. On
+`series-wip` that baseline is the latest `series/vN` tag, which is durable -
+nothing about publishing destroys it, so there is no backup tag to keep and no
+window that closes at the push. What publishing does do is tag the replay as
+the new latest, after which the four announce themselves as skipped because
+there is no longer an older series to compare against; that is the expected
+end state, not a loss.
 
-So run the gate before the push, and keep the old tip if you may want it:
+Run the gate between `just sync` and `just sync-publish`, on `series-wip`.
 
-```sh
-git tag sync-backup-$(date +%F) "@{u}"
-git push origin "sync-backup-$(date +%F)"
-```
+## What `just sync-publish` does
+
+Builds one merge commit whose parents are the current `origin/windows` and
+`upstream/main` and whose tree is exactly the `series-wip` tree, tags the
+replay as the next `series/vN`, and pushes both atomically. `git merge` cannot
+express this - it would re-merge and could resolve differently than the replay
+did - so the commit is built with `git commit-tree` and an equality check
+guards the result.
+
+The push is deliberately not forced. The ways it stops:
+
+- **"nothing to publish":** the replay's tree is already what `windows`
+  carries on the current upstream. A no-op sync or a double publish ends
+  here, with exit 0 and no empty snapshot minted.
+- **Rejected non-fast-forward:** a PR merged into `windows` mid-sync. The tag
+  is rolled back automatically; re-run `just sync` (it resumes the replay and
+  folds the new commits in by patch-id), re-verify, publish again.
+- **"series-wip was built from ...":** the wip predates the latest published
+  generation, and publishing it would drop what that generation folded in.
+  Re-run `just sync`.
+- **The invariant check refuses at the next `just sync`:** the last snapshot's
+  tree no longer matches the latest series tag. Someone pushed to `windows`
+  outside the PR flow or moved a series tag; find out which before replaying.
 
 ## Traps
 
@@ -144,8 +210,8 @@ git push origin "sync-backup-$(date +%F)"
 `git diff --name-only upstream/main...refs/heads/windows` diffs from the merge
 base, which is what the fork actually changes. The two-dot form shows every
 upstream commit you have not merged as though the fork reverted it. Directly
-after a clean rebase both agree, which is why the difference is easy to miss
-and bites later.
+after a publish both agree, which is why the difference is easy to miss and
+bites later.
 
 **Never accept `zig fmt` collateral.** Running `zig fmt` on a file you just
 resolved also reformats unrelated pre-existing deviations and folds them into
@@ -155,8 +221,9 @@ toolchain problem that will corrupt every file you format.
 
 ## Landing a fix found after the replay
 
-Default to a new commit at the tip. Fold back with `git commit --fixup=<sha>`
-and `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <sha>^` only when that
+Before publishing, default to a new commit at the tip of `series-wip`. Fold
+back with `git commit --fixup=<sha>` and
+`GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <sha>^` only when that
 commit must build in isolation, which here means you are about to cherry-pick
 it out of the stack.
 
@@ -165,10 +232,14 @@ conflicts, and each must be resolved with the API vintage correct *at that
 point in history*, not the current one. Getting that wrong breaks a different
 commit than the one you set out to fix.
 
+After publishing, a fix is just a normal PR into `windows`; the next sync
+folds it into the series automatically.
+
 ## Cross-platform legs
 
 **REQUIRED:** use the cross-platform-test skill for the host list and its
-quirks.
+quirks. The commit to ship to the other hosts is the replay, i.e.
+`refs/heads/series-wip`, not `windows`.
 
 One fact it does not carry: a host with no route to GitHub needs the commit
 delivered by `git bundle`, and the bundle base must be a commit that host
@@ -177,6 +248,6 @@ by an earlier bundle may have no `refs/remotes/origin/*` at all, so fall back
 to whatever it has checked out:
 
 ```sh
-ssh HOST 'cd ~/CODE/OSS/ghostty && (git rev-parse --verify -q refs/remotes/origin/windows || git rev-parse HEAD)'
-git bundle create sync.bundle <that-sha>..refs/heads/windows
+ssh HOST 'cd <checkout> && (git rev-parse --verify -q refs/remotes/origin/windows || git rev-parse HEAD)'
+git bundle create sync.bundle <that-sha>..refs/heads/series-wip
 ```
