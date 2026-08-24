@@ -17,9 +17,9 @@ Two hook modes:
             this worktree but were never touched by this session. If any
             exist, the command is denied with the list, since another
             session (or a human) may be mid-work here. To proceed anyway
-            after reviewing, start the command with GUARD_ACK=1 (bash) or
-            $env:GUARD_ACK=1; (PowerShell) - the override must lead the
-            command, so quoting it in a commit message does not count.
+            after reviewing, start the command with $env:GUARD_ACK=1;
+            (PowerShell) or GUARD_ACK=1 (bash) - the override must lead
+            the command, so quoting it in a commit message does not count.
 
 Known limits, accepted deliberately: only edits made through the Edit/Write
 tools are tracked, so files changed via shell redirection read as foreign
@@ -241,7 +241,7 @@ def check_main():
                     "mid-work here:\n- " + listing + more +
                     "\nReview them before publishing. Ask the user how to "
                     "proceed; to override after review, start the command "
-                    "with GUARD_ACK=1 (bash) or $env:GUARD_ACK=1; (PowerShell)."
+                    "with $env:GUARD_ACK=1; (PowerShell) or GUARD_ACK=1 (bash)."
                 ),
             }
         }))
