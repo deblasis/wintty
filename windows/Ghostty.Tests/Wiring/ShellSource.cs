@@ -83,6 +83,50 @@ internal sealed class ShellSource
         return new ShellSource(root);
     }
 
+    /// <summary>
+    /// Every embedded source whose normalized resource name starts with
+    /// <paramref name="dottedPrefix"/>, as (tail, raw text).
+    ///
+    /// For rules that are about the whole corpus rather than about one file:
+    /// "nothing outside these files subscribes to this event" cannot be
+    /// checked by loading the files that are allowed to.
+    /// </summary>
+    public static IReadOnlyList<(string Tail, string Text)> AllUnder(string dottedPrefix)
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var found = new List<(string, string)>();
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            var normalized = Normalize(name);
+            if (!normalized.StartsWith(dottedPrefix, StringComparison.Ordinal)) continue;
+            if (!normalized.EndsWith(".cs", StringComparison.Ordinal)) continue;
+
+            using var stream = asm.GetManifestResourceStream(name)!;
+            using var reader = new StreamReader(stream);
+            found.Add((normalized[dottedPrefix.Length..], reader.ReadToEnd()));
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Parse text that is already in hand, without the disabled-region check
+    /// <see cref="Load"/> makes.
+    ///
+    /// Only for a corpus-wide scan, where refusing every file that has a
+    /// conditional region would refuse most of the corpus. The blind spot is
+    /// real and does not go away: a caller using this owes a second rule
+    /// covering the disabled regions for every file it reads this way -- a
+    /// text-level rule, since no parse sees them, or <see cref="Load"/> for
+    /// the handful the text rule exempts. Reach for <see cref="Load"/> for
+    /// anything about one file.
+    /// </summary>
+    public static ShellSource ParseForCorpusScan(string text)
+    {
+        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
+        return new ShellSource((CompilationUnitSyntax)CSharpSyntaxTree.ParseText(text, options).GetRoot());
+    }
+
     // MSBuild substitutes the host's directory separator into the logical
     // name, so neither "\" nor "/" can be assumed. Fold both to dots.
     private static string Normalize(string resourceName) =>

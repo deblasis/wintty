@@ -717,6 +717,16 @@ public partial class App : Application
         BootstrapHost = _bootstrapHost;
         _configService.SetApp(_bootstrapHost.App);
 
+        // App-targeted actions (OpenConfig, ReloadConfig) are sent by
+        // libghostty with target=app, so they arrive here and never on a
+        // per-window host. Exactly one subscriber for the process: they act on
+        // process-global state, so a subscriber per window ran them once per
+        // window, and the closures kept every window alive on a host that
+        // lives as long as the process. Named methods rather than lambdas so
+        // the teardown below can take them back.
+        _bootstrapHost.OpenConfigRequested += OnAppOpenConfigRequested;
+        _bootstrapHost.ReloadConfigRequested += OnAppReloadConfigRequested;
+
         // App-level: High Contrast is a system-wide state and config is
         // applied app-wide, so a single monitor drives the surface override.
         // Constructed AFTER SetApp so its initial Apply() reloads into a live
@@ -1377,6 +1387,62 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// The app-targeted OpenConfig action. Opens the settings window when the
+    /// settings UI is enabled, and otherwise hands the config file to the
+    /// shell. GhosttyHost raises this on the UI thread.
+    /// </summary>
+    private void OnAppOpenConfigRequested(object? sender, EventArgs e)
+    {
+        var configService = _configService;
+        if (configService is null) return;
+
+        if (configService.SettingsUiEnabled)
+        {
+            ShowOrActivateSettings();
+            return;
+        }
+
+        var path = configService.ConfigFilePath;
+        if (string.IsNullOrEmpty(path)) return;
+
+        // The config file has no extension so UseShellExecute may fail to find
+        // an associated program. Try shell execute first (respects user file
+        // associations), then fall back to notepad which can always open text
+        // files.
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.Exception shellEx)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start("notepad.exe", path);
+            }
+            catch (System.Exception notepadEx)
+            {
+                // Both halves. The shell failure is the one that says why;
+                // notepad failing after it is usually a symptom, and logging
+                // only the symptom is how this becomes unexplainable.
+                Ghostty.Logging.StaticLoggers.App.LogConfigOpenFailed(
+                    new System.AggregateException(shellEx, notepadEx), path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The app-targeted ReloadConfig action. ConfigService is process-wide and
+    /// fans its ConfigChanged out to every window, so one reload is the whole
+    /// action. GhosttyHost raises this on the UI thread.
+    /// </summary>
+    private void OnAppReloadConfigRequested(object? sender, EventArgs e) =>
+        _configService?.Reload();
+
+    /// <summary>
     /// Show the app-wide settings window, or focus the existing one if it is
     /// already open. One settings window serves the whole process, so opening
     /// it from any window reuses the same instance. The caller guards on
@@ -1728,6 +1794,15 @@ public partial class App : Application
                 // onto the UI thread).
                 _singleInstanceServer?.Dispose();
 
+                // Take the app-action subscriptions back before the host
+                // frees the ghostty app. They are attached for the life of
+                // the process, so nothing else would.
+                if (_bootstrapHost is not null)
+                {
+                    _bootstrapHost.OpenConfigRequested -= OnAppOpenConfigRequested;
+                    _bootstrapHost.ReloadConfigRequested -= OnAppReloadConfigRequested;
+                }
+
                 // Bootstrap host is the LAST host. Its Dispose drains
                 // _hostBySurface (asserts empty), notifies the
                 // supervisor (which throws if anything is still live),
@@ -1848,6 +1923,12 @@ internal static partial class AppLogExtensions
                    Message = "Failed to register for toast notifications")]
     internal static partial void LogToastRegisterFailed(
         this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ConfigOpenFailed,
+                   Level = LogLevel.Warning,
+                   Message = "Failed to open config file {ConfigPath}")]
+    internal static partial void LogConfigOpenFailed(
+        this ILogger<App> logger, System.Exception ex, string configPath);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.StaleAumidRemoved,
                    Level = LogLevel.Information,

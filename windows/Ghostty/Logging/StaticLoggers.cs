@@ -20,9 +20,11 @@ namespace Ghostty.Logging;
 /// are safe no-ops.
 ///
 /// Why each remaining site stays here:
-///   - <see cref="App"/>: logs AUMID/jump-list failures in
-///     <c>App.OnLaunched</c> BEFORE the factory is built. No ctor
-///     available in the early-startup scope.
+///   - <see cref="App"/>: XAML constructs it, so there is no ctor the
+///     factory can be handed to, and its earliest records (AUMID,
+///     jump list) are written before the factory exists at all.
+///     Every App-scoped record goes through here, including the ones
+///     written long after startup.
 ///   - <see cref="ConfigService"/>: constructed before the factory
 ///     exists because the factory reads <c>log-level</c> /
 ///     <c>log-filter</c> off <c>ConfigService</c>. Chicken-and-egg,
