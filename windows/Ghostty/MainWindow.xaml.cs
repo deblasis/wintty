@@ -823,58 +823,13 @@ public sealed partial class MainWindow : Window
         // forward straight into the router that owns the pane/tab state.
         _host.PaneActionRequested += action => _router.Invoke(action);
 
-        // App-targeted actions (OpenConfig, ReloadConfig) fire on the
-        // bootstrap host because libghostty sends them with target=app,
-        // not target=surface. The per-window _host never receives them.
-        // Every window except an adopted one subscribes, because that is the
-        // only path that passes a seed tab. So the cold-start window, the
-        // quake window and each restored window all handle these, the action
-        // runs once per window, and each closure keeps its window rooted on
-        // the bootstrap host. Owning them on App instead is the fix; it is a
-        // behaviour change and is tracked separately.
-        if (seedTab is null)
-        {
-            var appHost = Ghostty.App.BootstrapHost!;
-            appHost.OpenConfigRequested += (_, _) =>
-            {
-                if (configService.SettingsUiEnabled)
-                {
-                    // One settings window serves the whole process; App owns
-                    // the singleton (mirrors the quake window), so opening it
-                    // from any window reuses the same instance.
-                    ((App)Application.Current).ShowOrActivateSettings();
-                    return;
-                }
-
-                var path = configService.ConfigFilePath;
-                if (string.IsNullOrEmpty(path)) return;
-                try
-                {
-                    // The config file has no extension so UseShellExecute
-                    // may fail to find an associated program. Try shell
-                    // execute first (respects user file associations), then
-                    // fall back to notepad which can always open text files.
-                    try
-                    {
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = path,
-                            UseShellExecute = true,
-                        });
-                    }
-                    catch
-                    {
-                        System.Diagnostics.Process.Start("notepad.exe", path);
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    _logger.LogConfigOpenFailed(ex);
-                }
-            };
-
-            appHost.ReloadConfigRequested += (_, _) => configService.Reload();
-        }
+        // App-targeted actions (OpenConfig, ReloadConfig) arrive on the
+        // bootstrap host, because libghostty sends them with target=app rather
+        // than target=surface, so the per-window _host never receives them.
+        // App owns that subscription for the whole process: one subscriber
+        // means the action runs once no matter how many windows are open, and
+        // no window is left rooted on a process-lifetime host by a closure
+        // that captured it.
 
         // Ctrl+Shift+Scroll wheel opacity adjustment from any terminal surface.
         _host.OpacityAdjustRequested += (_, direction) => AdjustOpacity(direction);
@@ -4061,12 +4016,6 @@ public sealed partial class MainWindow : Window
 
 internal static partial class MainWindowLogExtensions
 {
-    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.ConfigOpenFailed,
-                   Level = LogLevel.Warning,
-                   Message = "[MainWindow] Failed to open config file")]
-    internal static partial void LogConfigOpenFailed(
-        this ILogger<MainWindow> logger, System.Exception ex);
-
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.MainWindow.DialogDrainFailed,
                    Level = LogLevel.Warning,
                    Message = "DialogTracker drain failed")]
