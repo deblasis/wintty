@@ -272,6 +272,12 @@ fuzz-selftest:
 # itself is never rewritten and never force-pushed, which is what lets branch
 # protection hold on it.
 #
+# REQUIRED reading before resolving anything a replay raises:
+# .agents/skills/syncing-the-windows-fork/SKILL.md - it carries the breakage
+# shapes that never conflict, the traps, and the recovery paths. It lives in
+# .agents/ (not .claude/), so agent tooling does not auto-load it; this
+# pointer is the discovery mechanism.
+#
 # Two representations of the same content, on purpose:
 #
 #   series/vN tags   the fork as a linear patch series, rebased onto the
@@ -371,6 +377,7 @@ sync force="":
     echo "Replay complete. Gate it, then publish:"
     echo "  just sync-verify"
     echo "  just sync-publish"
+    echo "Guidance (conflict shapes, traps): .agents/skills/syncing-the-windows-fork/SKILL.md"
 
 # One-time cutover from the force-push flow. Tags origin/windows as series/v0,
 # which the first 'just sync' after this uses as both the series baseline and

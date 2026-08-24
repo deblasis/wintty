@@ -37,7 +37,7 @@ touching anything, because the fold-in step relies on it.
 | Abandon the replay entirely | `git rebase --abort`, then `git branch -D series-wip` |
 | Fold a fix into an earlier commit | `git commit --fixup=<sha>`, then autosquash (below) |
 | One-time cutover from the force-push flow | `just sync-bootstrap` |
-| Self-test the whole flow on a fixture | `bash .claude/scripts/syncflow-selftest.sh` |
+| Self-test the whole flow on a fixture | `bash .agents/scripts/syncflow-selftest.sh` |
 
 The autosquash step needs an env var, so it differs by shell. In sh:
 `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash <sha>^`. In pwsh, which is
