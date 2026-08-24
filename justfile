@@ -1097,11 +1097,18 @@ signoff:
 pr-gate pr:
     python .agents/scripts/pr_gate.py --check-pr {{pr}}
 
+# Check that everything the gates depend on is present and wired: tools on
+# PATH, scripts where the hooks point, settings parseable, nightly task
+# registration. A SessionStart hook runs the fast subset automatically.
+doctor:
+    python .agents/scripts/doctor.py
+
 # Prove the gates still catch what they exist for (recorded-PR replays,
 # matcher escapes, exemption anchoring) and that the nightly scripts'
 # helpers roundtrip.
 gates-selftest:
     python .agents/scripts/pr_gate.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
+    python .agents/scripts/doctor.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest

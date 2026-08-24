@@ -11,6 +11,11 @@ human) working in this repo uses the same contract:
 - `just pr-gate <n>` - validate a PR against the merge gate without
   merging: countable size limit, body present, no unchecked task items,
   no spaced issue references, signoff present.
+- `just doctor` - verify everything the gates depend on: required tools on
+  PATH, scripts where the hook wiring points, settings parseable, nightly
+  task registration. A Claude Code SessionStart hook runs the fast subset
+  at the start of every session, so a broken gate environment is loud
+  instead of silently absent.
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring) and that the
   nightly scripts' helpers roundtrip.
