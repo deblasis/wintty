@@ -11,7 +11,7 @@ The record is keyed by commit sha, so it survives worktree switches and
 cannot vouch for code that was changed after the run. Rerun after any
 amend or rebase.
 
-Usage: just signoff   (or: python .claude/scripts/signoff.py)
+Usage: just signoff   (or: python .agents/scripts/signoff.py)
 """
 
 import datetime

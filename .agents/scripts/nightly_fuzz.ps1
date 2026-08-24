@@ -31,7 +31,7 @@
 # the saved config allows it, and only after the same continuous-idle check,
 # so the machine is never hibernated under someone using it.
 #
-# Config and status live next to the logs (.claude/nightly-logs/), managed
+# Config and status live next to the logs (.agents/nightly-logs/), managed
 # by nightly_control.ps1: nightly-config.json {hibernateAfter, runFuzz},
 # status.json {phase, sha, results, log}.
 #
@@ -50,7 +50,7 @@ $ErrorActionPreference = 'Continue'
 $repo = 'deblasis/ghostty'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptRoot '..\..')).Path
-$logDir = Join-Path $repoRoot '.claude\nightly-logs'
+$logDir = Join-Path $repoRoot '.agents\nightly-logs'
 if ($SelfTest) {
     # The self-test must never touch the real config, status, or logs.
     $logDir = Join-Path ([System.IO.Path]::GetTempPath()) "nightly-selftest-$PID"
@@ -136,7 +136,7 @@ if ($SelfTest) {
     if (Wait-ForIdle -IdleMinutes 99999 -TimeoutMinutes 0) { Write-Host 'SELF-TEST FAILED: timeout path returned true'; $failed = $true }
     # The self-test dir must be disjoint from the real logs, or a run of the
     # self-test would wipe the user's saved options.
-    if ($logDir -eq (Join-Path $repoRoot '.claude\nightly-logs')) { Write-Host 'SELF-TEST FAILED: not sandboxed'; $failed = $true }
+    if ($logDir -eq (Join-Path $repoRoot '.agents\nightly-logs')) { Write-Host 'SELF-TEST FAILED: not sandboxed'; $failed = $true }
     Remove-Item -Recurse -Force $logDir -ErrorAction SilentlyContinue
     if ($failed) { Write-Host 'SELF-TEST FAILED'; exit 1 }
     Write-Host "SELF-TEST PASSED (idle=$([math]::Round($idle,1))m)"
@@ -198,7 +198,7 @@ Log tail:
 
 $(Get-LogTail)
 
-Full log: .claude/nightly-logs/$stamp.log on the build machine.
+Full log: .agents/nightly-logs/$stamp.log on the build machine.
 "@ | Set-Content $bodyFile
     $global:LASTEXITCODE = $null
     gh issue create --repo $repo --title $title --label P1 --body-file $bodyFile
@@ -232,7 +232,7 @@ git -C $repoRoot fetch origin windows
 if (($LASTEXITCODE ?? 1) -ne 0) {
     Write-Host 'nightly: fetch failed; testing the last-known origin/windows ref'
 }
-$wt = Join-Path $repoRoot '.claude\worktrees\nightly'
+$wt = Join-Path $repoRoot '.agents\worktrees\nightly'
 git -C $repoRoot worktree prune
 if (-not (Test-Path $wt)) {
     git -C $repoRoot worktree add --detach $wt origin/windows

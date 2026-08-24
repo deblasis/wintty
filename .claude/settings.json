@@ -7,14 +7,14 @@
           {
             "type": "command",
             "command": "python",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/pr_gate.py", "--hook"],
+            "args": ["${CLAUDE_PROJECT_DIR}/.agents/scripts/pr_gate.py", "--hook"],
             "timeout": 90,
             "statusMessage": "quality gates"
           },
           {
             "type": "command",
             "command": "python",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/workspace_guard.py", "--check"],
+            "args": ["${CLAUDE_PROJECT_DIR}/.agents/scripts/workspace_guard.py", "--check"],
             "timeout": 30,
             "statusMessage": "quality gates"
           }
@@ -28,7 +28,7 @@
           {
             "type": "command",
             "command": "python",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/workspace_guard.py", "--track"],
+            "args": ["${CLAUDE_PROJECT_DIR}/.agents/scripts/workspace_guard.py", "--track"],
             "timeout": 15
           }
         ]

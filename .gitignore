@@ -64,6 +64,7 @@ windows/scripts/vtabs-switcher/
 # shader bring-up; never something we want committed).
 tools/gallery/previews/
 
-# Claude Code session worktrees and nightly quality-control logs
+# Agent session worktrees and nightly quality-control state
 .claude/worktrees/
-.claude/nightly-logs/
+.agents/worktrees/
+.agents/nightly-logs/

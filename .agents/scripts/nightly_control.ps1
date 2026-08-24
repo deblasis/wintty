@@ -6,7 +6,7 @@
 # scheduled runs honor), open the latest log, and register or unregister the
 # 23:00 scheduled task.
 #
-# Run with:  pwsh -File .claude/scripts/nightly_control.ps1
+# Run with:  pwsh -File .agents/scripts/nightly_control.ps1
 # -SelfTest builds the form and checks the config roundtrip without showing
 # any UI, so the script stays verifiable headlessly.
 
@@ -18,7 +18,7 @@ Add-Type -AssemblyName System.Drawing
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $scriptRoot '..\..')).Path
-$logDir = Join-Path $repoRoot '.claude\nightly-logs'
+$logDir = Join-Path $repoRoot '.agents\nightly-logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $configFile = Join-Path $logDir 'nightly-config.json'
 $statusFile = Join-Path $logDir 'status.json'
