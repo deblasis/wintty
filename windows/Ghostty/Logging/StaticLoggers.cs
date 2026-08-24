@@ -46,6 +46,11 @@ namespace Ghostty.Logging;
 ///     constructed by the XAML Settings pages (same no-DI-Frame
 ///     constraint as <see cref="GeneralPage"/>); logs config-file
 ///     write failures from immediate-write handlers.
+///   - <see cref="ShaderPreviewFeed"/>: Core helper owned by
+///     <see cref="Ghostty.Settings.ShaderPickerWindow"/>, a
+///     <c>Window</c> the settings pages construct directly (same
+///     no-DI-Frame constraint as <see cref="GeneralPage"/>); logs
+///     the autoplay feed dying.
 ///
 /// Tests should use <see cref="Install"/> which returns an
 /// <see cref="IDisposable"/> scope that restores the pre-install
@@ -71,6 +76,7 @@ internal static partial class StaticLoggers
     private static ILogger<Ghostty.Settings.Pages.KeybindingsPage>? _keybindingsPage;
     private static ILogger<Ghostty.Settings.CheatSheetDialog>? _cheatSheet;
     private static ILogger<Ghostty.Core.Config.SettingsConfigWriter>? _settingsConfigWriter;
+    private static ILogger<Ghostty.Core.Settings.ShaderPreviewFeed>? _shaderPreviewFeed;
     private static ILogger<App>? _app;
     private static ILogger<Ghostty.Hosting.BellAudioPlayer>? _bellAudio;
 
@@ -88,6 +94,8 @@ internal static partial class StaticLoggers
         => _cheatSheet ?? NullLogger<Ghostty.Settings.CheatSheetDialog>.Instance;
     internal static ILogger<Ghostty.Core.Config.SettingsConfigWriter> SettingsConfigWriter
         => _settingsConfigWriter ?? NullLogger<Ghostty.Core.Config.SettingsConfigWriter>.Instance;
+    internal static ILogger<Ghostty.Core.Settings.ShaderPreviewFeed> ShaderPreviewFeed
+        => _shaderPreviewFeed ?? NullLogger<Ghostty.Core.Settings.ShaderPreviewFeed>.Instance;
     internal static ILogger<App> App
         => _app ?? NullLogger<App>.Instance;
     internal static ILogger<Ghostty.Hosting.BellAudioPlayer> BellAudio
@@ -102,6 +110,7 @@ internal static partial class StaticLoggers
         _keybindingsPage = factory.CreateLogger<Ghostty.Settings.Pages.KeybindingsPage>();
         _cheatSheet = factory.CreateLogger<Ghostty.Settings.CheatSheetDialog>();
         _settingsConfigWriter = factory.CreateLogger<Ghostty.Core.Config.SettingsConfigWriter>();
+        _shaderPreviewFeed = factory.CreateLogger<Ghostty.Core.Settings.ShaderPreviewFeed>();
         _app = factory.CreateLogger<App>();
         _bellAudio = factory.CreateLogger<Ghostty.Hosting.BellAudioPlayer>();
     }
@@ -115,7 +124,7 @@ internal static partial class StaticLoggers
 
     private static Snapshot CaptureSnapshot() => new(
         _configService, _windowStateMigration, _windowState, _generalPage, _keybindingsPage,
-        _cheatSheet, _settingsConfigWriter, _app, _bellAudio);
+        _cheatSheet, _settingsConfigWriter, _shaderPreviewFeed, _app, _bellAudio);
 
     private readonly record struct Snapshot(
         ILogger<Ghostty.Services.ConfigService>? ConfigService,
@@ -125,6 +134,7 @@ internal static partial class StaticLoggers
         ILogger<Ghostty.Settings.Pages.KeybindingsPage>? KeybindingsPage,
         ILogger<Ghostty.Settings.CheatSheetDialog>? CheatSheet,
         ILogger<Ghostty.Core.Config.SettingsConfigWriter>? SettingsConfigWriter,
+        ILogger<Ghostty.Core.Settings.ShaderPreviewFeed>? ShaderPreviewFeed,
         ILogger<App>? App,
         ILogger<Ghostty.Hosting.BellAudioPlayer>? BellAudio);
 
@@ -142,6 +152,7 @@ internal static partial class StaticLoggers
             _keybindingsPage = _prior.KeybindingsPage;
             _cheatSheet = _prior.CheatSheet;
             _settingsConfigWriter = _prior.SettingsConfigWriter;
+            _shaderPreviewFeed = _prior.ShaderPreviewFeed;
             _app = _prior.App;
             _bellAudio = _prior.BellAudio;
         }

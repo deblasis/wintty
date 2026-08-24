@@ -47,4 +47,10 @@ internal static class LogEvents
         public const int HotKeyRegisterFailed = 1300;
         public const int QuakeFrameSubclassFailed = 1301;
     }
+
+    // 1400-1499: Shader gallery preview (the picker's autoplay feed)
+    internal static class ShaderPreview
+    {
+        public const int FeedStopped = 1400;
+    }
 }

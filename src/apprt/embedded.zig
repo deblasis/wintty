@@ -2351,6 +2351,55 @@ pub const CAPI = struct {
         };
     }
 
+    /// Swap this surface's per-surface custom shader override live. This is
+    /// the same path a config reload takes (core_surface.updateConfig), so
+    /// the renderer rebuilds its post-process pipeline while the grid,
+    /// scrollback, and cursor are preserved: a preview can flip through
+    /// shaders without ever resetting the terminal. A null or empty path
+    /// clears the override (the surface renders with no custom shader).
+    ///
+    /// The override applies immediately only; a later app-level config
+    /// update to this surface re-derives from the app config and drops it
+    /// (the embedder re-applies on its next selection change).
+    ///
+    /// Returns false when the config could not be rebuilt (the surface
+    /// keeps rendering with its current shader).
+    export fn ghostty_surface_set_custom_shader(
+        surface: *Surface,
+        c_shader: ?[*:0]const u8,
+    ) bool {
+        const app = surface.app;
+
+        // Shallow copy of the app config, the same base the surface was
+        // created from, so every other setting keeps its current value.
+        var config = app.config.shallowClone(app.core_app.alloc);
+        defer config.deinit();
+
+        // Replace (never extend) the custom-shader list with the override:
+        // a preview surface shows exactly the selected shader, not the
+        // configured list chained onto it. Arena memory, same pattern as
+        // the creation-time override in Surface.init.
+        var override: configpkg.RepeatablePath = .{};
+        apply: {
+            const c_path = c_shader orelse break :apply;
+            const shader_path = std.mem.sliceTo(c_path, 0);
+            if (shader_path.len == 0) break :apply;
+            const maybe = configpkg.Path.parse(
+                config.arenaAlloc(),
+                shader_path,
+            ) catch break :apply;
+            const item = maybe orelse break :apply;
+            override.value.append(config.arenaAlloc(), item) catch break :apply;
+        }
+        config.@"custom-shader" = override;
+
+        surface.core_surface.updateConfig(&config) catch |err| {
+            log.err("error updating custom shader err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Returns true if the surface needs to confirm quitting.
     export fn ghostty_surface_needs_confirm_quit(surface: *Surface) bool {
         return surface.core_surface.needsConfirmQuit();
