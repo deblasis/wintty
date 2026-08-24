@@ -115,9 +115,11 @@ internal sealed class ShellSource
     ///
     /// Only for a corpus-wide scan, where refusing every file that has a
     /// conditional region would refuse most of the corpus. The blind spot is
-    /// real and does not go away: a caller using this owes a second rule that
-    /// covers the disabled regions -- a text-level one, since no parse sees
-    /// them. Reach for <see cref="Load"/> for anything about one file.
+    /// real and does not go away: a caller using this owes a second rule
+    /// covering the disabled regions for every file it reads this way -- a
+    /// text-level rule, since no parse sees them, or <see cref="Load"/> for
+    /// the handful the text rule exempts. Reach for <see cref="Load"/> for
+    /// anything about one file.
     /// </summary>
     public static ShellSource ParseForCorpusScan(string text)
     {

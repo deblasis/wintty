@@ -1404,28 +1404,33 @@ public partial class App : Application
 
         var path = configService.ConfigFilePath;
         if (string.IsNullOrEmpty(path)) return;
+
+        // The config file has no extension so UseShellExecute may fail to find
+        // an associated program. Try shell execute first (respects user file
+        // associations), then fall back to notepad which can always open text
+        // files.
         try
         {
-            // The config file has no extension so UseShellExecute may fail to
-            // find an associated program. Try shell execute first (respects
-            // user file associations), then fall back to notepad which can
-            // always open text files.
-            try
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = path,
-                    UseShellExecute = true,
-                });
-            }
-            catch
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (System.Exception shellEx)
+        {
+            try
             {
                 System.Diagnostics.Process.Start("notepad.exe", path);
             }
-        }
-        catch (System.Exception ex)
-        {
-            Ghostty.Logging.StaticLoggers.App.LogConfigOpenFailed(ex);
+            catch (System.Exception notepadEx)
+            {
+                // Both halves. The shell failure is the one that says why;
+                // notepad failing after it is usually a symptom, and logging
+                // only the symptom is how this becomes unexplainable.
+                Ghostty.Logging.StaticLoggers.App.LogConfigOpenFailed(
+                    new System.AggregateException(shellEx, notepadEx), path);
+            }
         }
     }
 
@@ -1921,9 +1926,9 @@ internal static partial class AppLogExtensions
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.ConfigOpenFailed,
                    Level = LogLevel.Warning,
-                   Message = "Failed to open config file")]
+                   Message = "Failed to open config file {ConfigPath}")]
     internal static partial void LogConfigOpenFailed(
-        this ILogger<App> logger, System.Exception ex);
+        this ILogger<App> logger, System.Exception ex, string configPath);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.StaleAumidRemoved,
                    Level = LogLevel.Information,

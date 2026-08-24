@@ -823,13 +823,9 @@ public sealed partial class MainWindow : Window
         // forward straight into the router that owns the pane/tab state.
         _host.PaneActionRequested += action => _router.Invoke(action);
 
-        // App-targeted actions (OpenConfig, ReloadConfig) arrive on the
-        // bootstrap host, because libghostty sends them with target=app rather
-        // than target=surface, so the per-window _host never receives them.
-        // App owns that subscription for the whole process: one subscriber
-        // means the action runs once no matter how many windows are open, and
-        // no window is left rooted on a process-lifetime host by a closure
-        // that captured it.
+        // Actions libghostty sends with target=app never reach the per-window
+        // _host. App subscribes to those on the bootstrap host, once for the
+        // process; see App.OnLaunched.
 
         // Ctrl+Shift+Scroll wheel opacity adjustment from any terminal surface.
         _host.OpacityAdjustRequested += (_, direction) => AdjustOpacity(direction);
