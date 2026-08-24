@@ -4691,7 +4691,7 @@ test "request mode DECRQM ANSI form with write_pty callback" {
 
     const S = struct {
         var last_response: ?[:0]const u8 = null;
-        fn writePty(_: *Handler, data: [:0]const u8) void {
+        fn writePty(_: *Handler, data: []const u8) void {
             if (last_response) |old| testing.allocator.free(old);
             last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
         }
@@ -4718,7 +4718,7 @@ test "device status DECXCPR extended cursor position with write_pty callback" {
 
     const S = struct {
         var last_response: ?[:0]const u8 = null;
-        fn writePty(_: *Handler, data: [:0]const u8) void {
+        fn writePty(_: *Handler, data: []const u8) void {
             if (last_response) |old| testing.allocator.free(old);
             last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
         }
