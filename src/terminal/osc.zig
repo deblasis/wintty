@@ -46,12 +46,13 @@ pub const Command = union(Key) {
     /// Semantic prompt command: https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
     semantic_prompt: SemanticPrompt,
 
-    /// Set or get clipboard contents. If data is null, then the current
-    /// clipboard contents are sent to the pty. If data is set, this
-    /// contents is set on the clipboard.
+    /// Set or get clipboard contents. If data is "?", then the current
+    /// clipboard contents are sent to the pty. Otherwise, the contents
+    /// are set on the clipboard.
     clipboard_contents: struct {
         kind: u8,
         data: [:0]const u8,
+        terminator: Terminator = .st,
     },
 
     /// OSC 7. Reports the current working directory of the shell. This is
@@ -162,6 +163,9 @@ pub const Command = union(Key) {
     /// OSC 3008. Hierarchical context signalling (UAPI spec).
     /// https://uapi-group.org/specifications/specs/osc_context/
     context_signal: parsers.context_signal.Command,
+
+    /// Kitty desktop notifications (OSC 99)
+    kitty_desktop_notification: KittyDesktopNotification,
 
     /// iTerm2 OSC 1337 File= inline image transmission.
     /// https://iterm2.com/documentation-images.html
@@ -309,6 +313,8 @@ pub const Command = union(Key) {
 
     pub const KittyDndProtocol = parsers.kitty_dnd_protocol.OSC;
 
+    pub const KittyDesktopNotification = parsers.kitty_desktop_notification.OSC;
+
     pub const Key = LibEnum(
         lib.target,
         // NOTE: Order matters, see LibEnum documentation.
@@ -339,6 +345,7 @@ pub const Command = union(Key) {
             "kitty_clipboard_protocol",
             "kitty_dnd_protocol",
             "context_signal",
+            "kitty_desktop_notification",
             "iterm2_image_transmit",
             "iterm2_multipart_image",
             "iterm2_report_cell_size",
@@ -507,6 +514,7 @@ pub const Parser = struct {
         @"66",
         @"72",
         @"77",
+        @"99",
         @"104",
         @"110",
         @"111",
@@ -587,6 +595,7 @@ pub const Parser = struct {
             .kitty_text_sizing,
             .kitty_clipboard_protocol,
             .kitty_dnd_protocol,
+            .kitty_desktop_notification,
             .context_signal,
             .iterm2_image_transmit,
             .iterm2_multipart_image,
@@ -1005,11 +1014,24 @@ pub const Parser = struct {
                 else => self.state = .invalid,
             },
 
+            .@"9",
+            => switch (c) {
+                ';' => self.captureTrailing(.fixed),
+                '9' => self.state = .@"99",
+                else => self.state = .invalid,
+            },
+
+            .@"99",
+            => switch (c) {
+                // OSC 99 encoded payloads can exceed the fixed buffer.
+                ';' => self.captureTrailing(.allocating),
+                else => self.state = .invalid,
+            },
+
             .@"0",
             .@"22",
             .@"777",
             .@"8",
-            .@"9",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
                 else => self.state = .invalid,
@@ -1090,6 +1112,8 @@ pub const Parser = struct {
 
             .@"77" => null,
 
+            .@"99" => parsers.kitty_desktop_notification.parse(self, terminator_ch),
+
             .@"133" => parsers.semantic_prompt.parse(self, terminator_ch),
 
             .@"552" => null,
@@ -1110,7 +1134,7 @@ test {
 
 test "Parser allocating captures have a hard limit" {
     const testing = std.testing;
-    const prefixes = [_][]const u8{ "52;", "66;", "72;", "1337;", "5522;" };
+    const prefixes = [_][]const u8{ "52;", "66;", "72;", "99;", "1337;", "5522;" };
     const limit = Parser.MAX_BUF + 1;
 
     for (prefixes) |prefix| {

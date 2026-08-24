@@ -160,6 +160,7 @@ pub const mouse_encoder_encode = mouse_encode.encode;
 
 pub const paste_is_safe = paste.is_safe;
 pub const paste_encode = paste.encode;
+pub const terminal_paste = paste.terminal_paste;
 
 pub const alloc_alloc = allocator.alloc;
 pub const alloc_free = allocator.free;

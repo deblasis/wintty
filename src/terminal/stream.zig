@@ -128,6 +128,8 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
+    kitty_clipboard: KittyClipboard,
+    kitty_dnd: KittyDnd,
     /// iTerm2 OSC 1337 File= inline image. The struct carries the raw
     /// base64 payload plus parsed geometry hints; the handler decodes
     /// the payload and dispatches as a kitty graphics command.
@@ -236,6 +238,8 @@ pub const Action = union(Key) {
             "kitty_color_report",
             "color_operation",
             "semantic_prompt",
+            "kitty_clipboard",
+            "kitty_dnd",
             "iterm2_image_transmit",
             "iterm2_multipart_image",
         },
@@ -423,6 +427,7 @@ pub const Action = union(Key) {
     pub const ClipboardContents = struct {
         kind: u8,
         data: []const u8,
+        terminator: osc.Terminator,
 
         pub const C = extern struct {
             kind: u8,
@@ -455,6 +460,10 @@ pub const Action = union(Key) {
     };
 
     pub const SemanticPrompt = osc.Command.SemanticPrompt;
+
+    pub const KittyClipboard = osc.Command.KittyClipboardProtocol;
+
+    pub const KittyDnd = osc.Command.KittyDndProtocol;
 };
 
 /// Returns a type that can process a stream of tty control characters.
@@ -2510,6 +2519,7 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.clipboard_contents, .{
                         .kind = clip.kind,
                         .data = clip.data,
+                        .terminator = clip.terminator,
                     });
                 },
 
@@ -2565,6 +2575,14 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.progress_report, v);
                 },
 
+                .kitty_clipboard_protocol => |v| {
+                    self.handler.vt(.kitty_clipboard, v);
+                },
+
+                .kitty_dnd_protocol => |v| {
+                    self.handler.vt(.kitty_dnd, v);
+                },
+
                 .iterm2_image_transmit => |transmit| {
                     self.handler.vt(.iterm2_image_transmit, transmit);
                 },
@@ -2587,8 +2605,7 @@ pub fn Stream(comptime H: type) type {
                 .conemu_output_environment_variable,
                 .conemu_run_process,
                 .kitty_text_sizing,
-                .kitty_clipboard_protocol,
-                .kitty_dnd_protocol,
+                .kitty_desktop_notification,
                 .context_signal,
                 => {
                     log.debug("unimplemented OSC callback: {}", .{cmd});

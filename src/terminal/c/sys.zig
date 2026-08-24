@@ -23,6 +23,13 @@ pub const DecodePngFn = *const fn (
     *Image,
 ) callconv(lib.calling_conv) bool;
 
+/// C: GhosttySysRandomSecureFn
+pub const RandomSecureFn = *const fn (
+    ?*anyopaque,
+    [*]u8,
+    usize,
+) callconv(lib.calling_conv) bool;
+
 /// C: GhosttySysDecodeJpegFn
 pub const DecodeJpegFn = *const fn (
     ?*anyopaque,
@@ -73,14 +80,19 @@ pub const Option = enum(c_int) {
     userdata = 0,
     decode_png = 1,
     log = 2,
-    decode_jpeg = 3,
-    decode_gif = 4,
+    random_secure = 3,
+    // 4/5, not 3/4: upstream took 3 for random_secure in the same window
+    // these landed; the fork renumbers its own additions to the next free
+    // slots.
+    decode_jpeg = 4,
+    decode_gif = 5,
 
     pub fn InType(comptime self: Option) type {
         return switch (self) {
             .userdata => ?*const anyopaque,
             .decode_png => ?DecodePngFn,
             .log => ?LogFn,
+            .random_secure => ?RandomSecureFn,
             .decode_jpeg => ?DecodeJpegFn,
             .decode_gif => ?DecodeGifFn,
         };
@@ -95,6 +107,7 @@ const Global = struct {
     decode_jpeg: ?DecodeJpegFn = null,
     decode_gif: ?DecodeGifFn = null,
     log: ?LogFn = null,
+    random_secure: ?RandomSecureFn = null,
 };
 
 /// Global state for the C sys interface.
@@ -120,6 +133,12 @@ fn decodePngWrapper(
         .height = out.height,
         .data = result_data[0..out.data_len],
     };
+}
+
+/// Zig-compatible wrapper that calls through to the stored C callback.
+fn randomSecureWrapper(buffer: []u8) terminal_sys.RandomSecureError!void {
+    const func = global.random_secure orelse return error.EntropyUnavailable;
+    if (!func(global.userdata, buffer.ptr, buffer.len)) return error.EntropyUnavailable;
 }
 
 fn decodeJpegWrapper(
@@ -197,6 +216,10 @@ fn setTyped(
             terminal_sys.decode_gif = if (value != null) &decodeGifWrapper else null;
         },
         .log => global.log = value,
+        .random_secure => {
+            global.random_secure = value;
+            terminal_sys.random_secure = if (value != null) &randomSecureWrapper else null;
+        },
     }
     return .success;
 }

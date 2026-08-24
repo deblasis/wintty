@@ -125,6 +125,24 @@ typedef bool (*GhosttySysDecodePngFn)(
     GhosttySysImage* out);
 
 /**
+ * Callback type for secure random bytes.
+ *
+ * Fills @p buf with @p len cryptographically secure random bytes. The
+ * library uses this for secrets, so it must be a real CSPRNG (getrandom,
+ * arc4random_buf, BCryptGenRandom, crypto.getRandomValues, ...); a
+ * predictable source is a security hole.
+ *
+ * @param userdata The userdata pointer set via GHOSTTY_SYS_OPT_USERDATA
+ * @param buf      Buffer to fill
+ * @param len      Number of bytes to fill
+ * @return true if the buffer was filled, false if no entropy is available
+ */
+typedef bool (*GhosttySysRandomSecureFn)(
+    void* userdata,
+    uint8_t* buf,
+    size_t len);
+
+/**
  * Callback type for JPEG decoding.
  *
  * Decodes raw JPEG data into RGBA pixels. The output pixel data must be
@@ -211,6 +229,21 @@ typedef enum GHOSTTY_ENUM_TYPED {
     GHOSTTY_SYS_OPT_LOG = 2,
 
     /**
+     * Override the secure random source.
+     *
+     * By default the library draws secure random bytes from the
+     * platform (getrandom or arc4random_buf on POSIX, CNG on Windows).
+     * Targets without one, such as wasm32-freestanding, have no default
+     * and operations that need entropy fail with GHOSTTY_IO_ERROR until
+     * this is set. When set,
+     * it is used instead of the platform source on every target. When
+     * cleared (NULL value), the platform default is restored.
+     *
+     * Input type: GhosttySysRandomSecureFn (function pointer, or NULL)
+     */
+    GHOSTTY_SYS_OPT_RANDOM_SECURE = 3,
+
+    /**
      * Set the JPEG decode function.
      *
      * When set, the iTerm2 OSC 1337 File= path can render JPEG
@@ -220,7 +253,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
      *
      * Input type: GhosttySysDecodeJpegFn (function pointer, or NULL)
      */
-    GHOSTTY_SYS_OPT_DECODE_JPEG = 3,
+    GHOSTTY_SYS_OPT_DECODE_JPEG = 4,
 
     /**
      * Set the GIF decode function.
@@ -232,7 +265,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
      *
      * Input type: GhosttySysDecodeGifFn (function pointer, or NULL)
      */
-    GHOSTTY_SYS_OPT_DECODE_GIF = 4,
+    GHOSTTY_SYS_OPT_DECODE_GIF = 5,
     GHOSTTY_SYS_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySysOption;
 

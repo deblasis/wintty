@@ -44,6 +44,23 @@ pub const Writer = extern struct {
     }
 };
 
+/// C: GhosttyMimeReaderFn
+pub const MimeReaderFn = *const fn (
+    userdata: ?*anyopaque,
+    mime: lib.String,
+    writer: Writer,
+) callconv(lib.calling_conv) bool;
+
+/// C: GhosttyMimeReader
+pub const MimeReader = extern struct {
+    read: ?MimeReaderFn = null,
+    userdata: ?*anyopaque = null,
+
+    pub fn valid(self: MimeReader) bool {
+        return self.read != null;
+    }
+};
+
 /// Adapts a `GhosttyReader` to `std.Io.Reader`.
 ///
 /// The adapter must have a stable address while `interface` is in use. Its
@@ -418,6 +435,8 @@ test "C reader and writer layouts keep callback first" {
     try std.testing.expectEqual(@sizeOf(?ReaderFn) + @sizeOf(?*anyopaque), @sizeOf(Reader));
 
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(Writer, "write"));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(MimeReader, "read"));
+    try std.testing.expectEqual(@sizeOf(?MimeReaderFn), @offsetOf(MimeReader, "userdata"));
     try std.testing.expectEqual(@sizeOf(?WriterFn), @offsetOf(Writer, "userdata"));
     try std.testing.expectEqual(@sizeOf(?WriterFn) + @sizeOf(?*anyopaque), @sizeOf(Writer));
 }
