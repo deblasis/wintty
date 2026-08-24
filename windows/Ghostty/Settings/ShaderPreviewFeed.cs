@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -191,6 +192,17 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
 
     private void Write(string vt)
     {
+        // WriteVt is UI-thread-only: its disposed guard is a non-volatile
+        // field read followed by a native call on a surface DisposeSurface
+        // frees from the UI thread. Today every write lands on the UI thread
+        // because Start is driven from FirstRender (raised through
+        // GhosttyHost's dispatcher) and every continuation below resumes on
+        // that context. Assert it so a future change that moves the feed off
+        // the UI thread fails loudly in Debug instead of silently racing a
+        // free in Release.
+        Debug.Assert(
+            _terminal.DispatcherQueue.HasThreadAccess,
+            "ShaderPreviewFeed must write from the UI thread; WriteVt is not thread-safe.");
         _terminal.WriteVt(Encoding.UTF8.GetBytes(vt));
     }
 }

@@ -222,8 +222,19 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// <summary>
     /// Feed raw VT bytes into the terminal as if the child program wrote
     /// them: sequences update the grid, cursor, and colors exactly like pty
-    /// output. Thread-safe. Used by preview surfaces, whose placeholder
-    /// child never writes, to drive their canned session.
+    /// output. Used by preview surfaces, whose placeholder child never
+    /// writes, to drive their canned session.
+    ///
+    /// Must be called on the UI thread, like the sibling
+    /// <see cref="RequestRepaint"/> and <see cref="SetPreviewCustomShader"/>.
+    /// The guard below is a plain read of a non-volatile field plus a read of
+    /// <c>_surface.Handle</c>, and <see cref="DisposeSurface"/> flips that
+    /// field and calls <c>SurfaceFree</c> from the UI thread with no
+    /// synchronization at all. An off-thread caller can therefore see the
+    /// guard pass, be preempted, and hand a freed surface pointer to
+    /// libghostty (an access violation, not an exception). Making this
+    /// genuinely callable from a pty reader thread needs a lock or an
+    /// interlocked handle swap on BOTH sides, not a comment.
     /// </summary>
     internal unsafe void WriteVt(ReadOnlySpan<byte> bytes)
     {
