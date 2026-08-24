@@ -69,6 +69,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private IntPtr _initialInputUtf8;
     private IntPtr _customShaderUtf8;
 
+    /// <summary>
+    /// True when this surface was created with a per-surface shader override
+    /// (<see cref="PreviewCustomShader"/>), i.e. it is a gallery preview and
+    /// not a real terminal pane. Latched at surface creation, because that is
+    /// the one point the override property is read. Used by
+    /// <see cref="Ghostty.Hosting.GhosttyHost"/> to keep a preview shader's
+    /// failure out of the app-level custom-shader notice, which talks about
+    /// the user's config.
+    /// </summary>
+    internal bool IsPreviewSurface => _isPreviewSurface;
+    private bool _isPreviewSurface;
+
     // The libghostty surface lifecycle is decoupled from
     // OnLoaded/OnUnloaded so that visual-tree reparenting (which fires
     // Unloaded then Loaded asynchronously) does NOT tear down the
@@ -796,6 +808,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _customShaderUtf8 = string.IsNullOrEmpty(PreviewCustomShader)
             ? IntPtr.Zero
             : AllocUtf8(PreviewCustomShader);
+        // Latched here rather than recomputed from PreviewCustomShader later:
+        // this is the one moment the property is defined to be read, and
+        // SetPreviewCustomShader swaps the surface's shader without touching
+        // it. What the flag means is "this surface was born a preview", which
+        // is exactly the question the shader-failure notice needs answered.
+        _isPreviewSurface = _customShaderUtf8 != IntPtr.Zero;
 
         var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         var surfaceConfig = NativeMethods.SurfaceConfigNew();

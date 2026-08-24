@@ -943,6 +943,20 @@ internal sealed partial class GhosttyHost : IDisposable
                     // nothing. Raised app-level rather than per-surface because
                     // it explains a config problem, not something about this
                     // one pane.
+                    //
+                    // Which is exactly why a gallery preview must not raise it.
+                    // Its shader comes from the picker, not from custom-shader,
+                    // so the notice's copy ("Your custom-shader did not
+                    // compile") would blame settings the user never touched.
+                    // Worse, CustomShaderNoticeSource latches on the reason and
+                    // never re-arms, so one broken gallery entry would also
+                    // swallow a genuine config-shader failure for the rest of
+                    // the session. Returning before Resolve leaves that latch
+                    // untouched, which is the half that matters. A preview
+                    // failure is not silent either way: the preview visibly
+                    // renders unshaded, and libghostty still logs it.
+                    if (control.IsPreviewSurface) return 1;
+
                     var failure = (Ghostty.Core.Renderer.CustomShaderFailure)
                         Marshal.ReadInt32(actionPtr, 8);
                     _dispatcher.TryEnqueue(() =>
