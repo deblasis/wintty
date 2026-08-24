@@ -152,10 +152,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// Per-surface custom shader override for preview surfaces. When set
     /// (non-empty path), the surface's renderer uses ONLY this shader,
     /// replacing the configured custom-shader list. Must be set before the
-    /// control loads: it is read once at surface creation. Regular terminal
+    /// control loads: it is read once at surface creation (swap it later
+    /// through <see cref="SetPreviewCustomShader"/>). Regular terminal
     /// surfaces leave it null and follow the app config.
     /// </summary>
     public string? PreviewCustomShader { get; set; }
+
+    /// <summary>
+    /// Command the surface runs instead of the profile's shell. Must be set
+    /// before the control loads. Preview surfaces point this at a silent,
+    /// never-exiting placeholder so the pty never delivers a single byte of
+    /// its own: everything on screen comes from <see cref="WriteVt"/>, which
+    /// makes the preview deterministic and race-free against shell banners.
+    /// Regular terminal surfaces leave it null and use the snapshot's
+    /// resolved command.
+    /// </summary>
+    public string? PreviewCommand { get; set; }
 
     /// <summary>
     /// Take keyboard focus as soon as the surface loads. Real terminal
@@ -190,6 +202,36 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;
         NativeMethods.SurfaceDraw(_surface);
+    }
+
+    /// <summary>
+    /// Swap this surface's custom shader override live. The renderer rebuilds
+    /// its post-process pipeline (the config-change path) while the terminal
+    /// content, scrollback, and cursor are preserved, so a preview flipping
+    /// through shaders never resets. A null or empty path clears the shader.
+    /// No-op once the surface is gone. Only meaningful for surfaces created
+    /// with <see cref="PreviewCustomShader"/>; regular surfaces follow the
+    /// app config.
+    /// </summary>
+    internal void SetPreviewCustomShader(string? shaderPath)
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;
+        NativeMethods.SurfaceSetCustomShader(_surface, shaderPath);
+    }
+
+    /// <summary>
+    /// Feed raw VT bytes into the terminal as if the child program wrote
+    /// them: sequences update the grid, cursor, and colors exactly like pty
+    /// output. Thread-safe. Used by preview surfaces, whose placeholder
+    /// child never writes, to drive their canned session.
+    /// </summary>
+    internal unsafe void WriteVt(ReadOnlySpan<byte> bytes)
+    {
+        if (_surfaceDisposed || bytes.IsEmpty || _surface.Handle == IntPtr.Zero) return;
+        fixed (byte* p = bytes)
+        {
+            NativeMethods.SurfaceVtWrite(_surface, p, (nuint)bytes.Length);
+        }
     }
 
     /// <summary>
@@ -730,9 +772,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _workingDirectoryUtf8 = Snapshot is { WorkingDirectory: { Length: > 0 } wd }
             ? AllocUtf8(wd)
             : AllocEmptyUtf8();
-        _commandUtf8 = Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
-            ? AllocUtf8(cmd)
-            : AllocEmptyUtf8();
+        // PreviewCommand wins over the snapshot: a preview surface never
+        // wants the real shell's banner interleaving with its canned feed.
+        _commandUtf8 = PreviewCommand is { Length: > 0 } previewCmd
+            ? AllocUtf8(previewCmd)
+            : Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
+                ? AllocUtf8(cmd)
+                : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
         // Preview shader override: set BEFORE the control loads (it is read
         // once at surface creation in OnLoaded).

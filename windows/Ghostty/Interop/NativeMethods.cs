@@ -702,6 +702,35 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void SurfaceRequestClose(GhosttySurface surface);
 
+    // ghostty_surface_set_custom_shader swaps the per-surface custom shader
+    // override live: the renderer rebuilds its post-process pipeline through
+    // the config-change path while the grid, scrollback, and cursor are
+    // preserved. Null or empty clears the override (no shader). Used by the
+    // shader gallery picker so flipping entries never resets the preview.
+    // StringMarshalling.Utf8 is a [LibraryImport] option, not a
+    // [MarshalAs], so it coexists with DisableRuntimeMarshalling (same
+    // rationale as the clipboard request binding above).
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_custom_shader",
+        StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte SurfaceSetCustomShaderNative(
+        GhosttySurface surface,
+        string? shaderPath);
+
+    internal static bool SurfaceSetCustomShader(GhosttySurface surface, string? shaderPath)
+        => SurfaceSetCustomShaderNative(surface, shaderPath) != 0;
+
+    // ghostty_surface_vt_write feeds raw VT bytes into the surface's
+    // terminal parser as if they came from the PTY. Raw-pointer overload:
+    // the caller owns the buffer for the duration of the call and passes
+    // its length in bytes (no NUL terminator involved).
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_vt_write")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static unsafe partial void SurfaceVtWrite(
+        GhosttySurface surface,
+        byte* utf8,
+        UIntPtr len);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_process_exited")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial byte SurfaceProcessExitedNative(GhosttySurface surface);

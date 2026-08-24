@@ -7,10 +7,11 @@
     <!-- Gallery shader picker: a real window (not a dialog) so it can stay
          open while the caller compares against other windows. The combo, the
          chevron buttons, and the left/right arrows all move through the
-         gallery; the live terminal underneath previews each shader as
-         selected. Focus the terminal to type and see cursor-triggered
-         effects; while it holds focus its keystrokes (arrows included) are
-         never intercepted, so the chevrons are how you flip then. -->
+         gallery; the preview terminal underneath plays a canned session that
+         types itself, so every shader has moving content (and cursor-shape
+         flips for the cursor shaders) from the moment the window opens.
+         Flipping entries swaps only the shader: the terminal and its content
+         are never reset. -->
 
     <Grid x:Name="RootGrid"
           RowSpacing="4"
@@ -24,7 +25,7 @@
 
         <TextBlock Grid.Row="0"
                    Margin="12,8,12,0"
-                   Text="Pick a shader. The chevrons beside the list flip through the gallery; so do Left/Right arrows while the terminal is not focused. Click into the terminal below to type and see cursor effects move."
+                   Text="Pick a shader. The chevrons beside the list flip through the gallery; so do Left/Right arrows while the terminal is not focused. The preview below plays by itself and keeps its content while you flip; only the shader changes."
                    TextWrapping="Wrap"
                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 

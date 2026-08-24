@@ -14,15 +14,34 @@ namespace Ghostty.Settings;
 
 /// <summary>
 /// Gallery shader picker window. The combo, the chevron buttons, and the
-/// left/right arrow keys all walk the gallery; a live terminal underneath
-/// previews the selected shader immediately (per-surface override, never
-/// the app config). Arrows leave the gallery alone while the terminal
-/// holds focus, so its keystrokes (cursor movement included) are never
+/// left/right arrow keys all walk the gallery; a preview terminal
+/// underneath plays a canned, self-typing session (see <see
+/// cref="ShaderPreviewFeed"/>) so every shader, cursor-effect ones
+/// included, has moving content to work on. The preview terminal is
+/// created once and lives for the whole window: flipping entries swaps
+/// only the per-surface shader (never the app config), so its content,
+/// scrollback, and cursor survive every switch. Arrows leave the gallery
+/// alone while the terminal holds focus, so its keystrokes are never
 /// stolen. Select commits the picked path to <see cref="PickedPath"/> and
 /// closes; Cancel (or closing the window) leaves it null.
 /// </summary>
 public sealed partial class ShaderPickerWindow : Window
 {
+    /// <summary>
+    /// The preview's placeholder child: PowerShell put to sleep writes
+    /// nothing, never exits, and never reads stdin, so the pty stays
+    /// silent and the canned feed is the terminal's only writer
+    /// (deterministic content, no banner race, stray clicks into the
+    /// preview cannot produce output). A real shell here would interleave
+    /// its own prompt with the feed. No shell metacharacters on purpose:
+    /// the spawn path wraps commands containing them in cmd.exe, which
+    /// would make the placeholder noisier and quoting-dependent. The sleep
+    /// length is Start-Sleep's documented maximum (~24.8 days); the picker
+    /// closing kills the surface and the child with it.
+    /// </summary>
+    private const string PreviewPlaceholderCommand =
+        "powershell.exe -NoLogo -NoProfile -Command Start-Sleep -Seconds 2147483";
+
     /// <summary>Path to preselect in the combo, if it is a gallery entry.</summary>
     public string? CurrentPath { get; set; }
 
@@ -30,6 +49,7 @@ public sealed partial class ShaderPickerWindow : Window
     public string? PickedPath { get; private set; }
 
     private Controls.TerminalControl? _preview;
+    private ShaderPreviewFeed? _feed;
     private readonly List<string> _orderedPaths = new();
 
     public ShaderPickerWindow()
@@ -79,9 +99,10 @@ public sealed partial class ShaderPickerWindow : Window
         // exists.
         RootGrid.Loaded += (_, _) => PickerCombo.Focus(FocusState.Programmatic);
 
-        // The preview owns a native surface + shell process on the shared
-        // bootstrap host; OnUnloaded detachment does NOT free them, so the
-        // window closing must dispose explicitly (TerminalControl lesson).
+        // The preview owns a native surface + placeholder child process on
+        // the shared bootstrap host, plus its autoplay feed; OnUnloaded
+        // detachment does NOT free them, so the window closing must
+        // dispose explicitly (TerminalControl lesson).
         Closed += (_, _) => DisposePreview();
 
         // Arrows flip shaders unless the terminal preview holds focus: the
@@ -141,7 +162,7 @@ public sealed partial class ShaderPickerWindow : Window
             }
         }
 
-        // Setting the selection fires SelectionChanged, which builds the
+        // Setting the selection fires SelectionChanged, which shows the
         // first preview. Guard for the degenerate no-selection case.
         if (PickerCombo.Items.Count > 0)
         {
@@ -207,7 +228,7 @@ public sealed partial class ShaderPickerWindow : Window
     }
 
     // Shared by the arrow keys and the chevron buttons: wrap around the
-    // gallery and let SelectionChanged rebuild the preview.
+    // gallery; SelectionChanged swaps the preview's shader in place.
     private void StepSelection(int delta)
     {
         if (_orderedPaths.Count == 0) return;
@@ -240,9 +261,20 @@ public sealed partial class ShaderPickerWindow : Window
         SelectButton.IsEnabled =
             (PickerCombo.SelectedItem as ComboBoxItem)?.Tag is string;
 
+    // The preview terminal is built once and reused for every selection:
+    // switching a shader only swaps the surface's custom shader in place
+    // (TerminalControl.SetPreviewCustomShader), so the terminal, its
+    // content, and its autoplay feed are never reset, no new surface is
+    // spawned per change, and nothing steals focus from the combo.
     private void ShowPreview(string shaderPath)
     {
-        DisposePreview();
+        EnsurePreview(shaderPath);
+        _preview?.SetPreviewCustomShader(shaderPath);
+    }
+
+    private void EnsurePreview(string initialShaderPath)
+    {
+        if (_preview is not null) return;
 
         var host = App.BootstrapHost;
         if (host is null) return;
@@ -250,7 +282,11 @@ public sealed partial class ShaderPickerWindow : Window
         var control = new Controls.TerminalControl
         {
             Host = host,
-            PreviewCustomShader = shaderPath,
+            // Seed the override at creation so the very first rendered
+            // frame already wears the selected shader.
+            PreviewCustomShader = initialShaderPath,
+            // Silence the child: everything on screen comes from the feed.
+            PreviewCommand = PreviewPlaceholderCommand,
             // The preview must not steal focus when its surface loads:
             // TerminalControl focuses itself on load by default (real
             // panes want that), which would hand the arrows to the shell
@@ -259,10 +295,17 @@ public sealed partial class ShaderPickerWindow : Window
         };
         _preview = control;
         PickerPreviewHost.Child = control;
+
+        // Autoplay starts the moment the preview exists: the demo types
+        // itself, no clicks needed.
+        _feed = new ShaderPreviewFeed(control);
+        _feed.Start();
     }
 
     private void DisposePreview()
     {
+        _feed?.Dispose();
+        _feed = null;
         _preview?.DisposeSurface();
         _preview = null;
         if (PickerPreviewHost is not null) PickerPreviewHost.Child = null;
