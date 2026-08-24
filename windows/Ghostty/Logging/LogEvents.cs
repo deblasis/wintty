@@ -14,6 +14,7 @@ internal static class LogEvents
         public const int ToastRegisterFailed = 2002;
         public const int TrayInitFailed      = 2003;
         public const int StaleAumidRemoved   = 2004;
+        public const int ConfigOpenFailed    = 2005;
     }
 
     // 2100-2199: Clipboard
@@ -60,7 +61,8 @@ internal static class LogEvents
     // 2500-2599: MainWindow
     internal static class MainWindow
     {
-        public const int ConfigOpenFailed  = 2500;
+        // 2500 retired (was ConfigOpenFailed; the action moved to App and
+        // logs under Startup.ConfigOpenFailed). Not reused: old logs carry it.
         public const int DialogDrainFailed = 2501;
     }
 
