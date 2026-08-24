@@ -1081,6 +1081,60 @@ sync-verify mode="":
 gallery-verify:
     @bash tools/gallery/verify.sh
 
+# Parse every bundled gallery shader with glslang, prefixed exactly the way the
+# renderer assembles it (shadertoy_prefix.glsl + the shader).
+#
+# This is gallery-verify's reference leg with everything unhermetic removed: no
+# zioshade build, no spirv-cross, no Windows box, so CI can run it on every
+# push and a contributor can run it in a second. What it buys is the class of
+# break gallery-verify would otherwise find late and by hand: `active` was a
+# GLSL reserved word sitting in two shipped shaders, and `filter`, `input`,
+# `output`, `union`, `resource` and the rest of GLSL 4.60 section 3.6 are still
+# accepted by the renderer's own lenient frontend. Leniency there is correct
+# for shaders users load from the wild; the shaders WE ship have to be
+# acceptable to a spec-conforming compiler, because gallery-verify's
+# independent reference path compiles them with one.
+#
+# Deliberately the same tool and flags as verify.sh step 2, so a shader that
+# passes here cannot fail there for a parse reason.
+gallery-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    glslang=${GLSLANG:-glslang}
+    command -v "$glslang" >/dev/null || {
+        echo "glslang not found (nix develop, or brew install glslang)" >&2
+        exit 2
+    }
+    prefix=src/renderer/shaders/shadertoy_prefix.glsl
+    prefix_lines=$(wc -l < "$prefix" | tr -d ' ')
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/gallery_lint.XXXXXX")
+    trap 'rm -rf "$stage"' EXIT
+    pass=0
+    failed=""
+    for glsl in windows/Ghostty/Assets/Shaders/*.glsl; do
+        name=$(basename "$glsl" .glsl)
+        cat "$prefix" "$glsl" > "$stage/$name.full.glsl"
+        if "$glslang" -V -S frag "$stage/$name.full.glsl" -o "$stage/$name.spv" \
+                > "$stage/$name.log" 2>&1; then
+            pass=$((pass + 1))
+        else
+            echo "FAIL $glsl"
+            # Point the diagnostics back at a file that exists, and say what
+            # the line numbers are relative to: they are counted in the
+            # concatenation, whose first $prefix_lines lines are the prefix.
+            sed -e "s|$stage/$name.full.glsl|$glsl|g" "$stage/$name.log" | sed '/^$/d'
+            echo "  (line numbers are in ${prefix} + ${glsl}; the prefix is ${prefix_lines} lines)"
+            failed="$failed $name"
+        fi
+    done
+    if [ -n "$failed" ]; then
+        echo "glslang: $pass pass, $(echo $failed | wc -w | tr -d ' ') fail:$failed"
+        echo "A gallery shader must be accepted by glslang verbatim, which among other"
+        echo "things means no GLSL reserved word (section 3.6) used as an identifier."
+        exit 1
+    fi
+    echo "glslang: $pass pass, 0 fail"
+
 # ── quality control ────────────────────────────────────────────────────────
 # These recipes need Python 3 on PATH as `python`. The signoff ladder
 # includes test-win, so signoff is a Windows-host recipe like the rest of
