@@ -2645,4 +2645,3 @@ test "ctrlseq: ctrl c with no text uses logical key" {
     const seq = ctrlSeq(.key_c, "", 'c', .{ .ctrl = true });
     try testing.expectEqual(@as(u8, 0x03), seq.?);
 }
-

@@ -488,7 +488,6 @@ pub const InlineThemePicker = struct {
             .search => self.drawSearchBox(),
             .help => self.drawHelpOverlay(),
         }
-
     }
 
     fn drawThemeList(self: *InlineThemePicker) void {
@@ -1115,7 +1114,6 @@ pub const InlineThemePicker = struct {
             remaining -= chunk;
         }
     }
-
 };
 
 fn paletteColor(config: Config, idx: usize) [3]u8 {
