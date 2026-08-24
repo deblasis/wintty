@@ -45,6 +45,7 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
     /// spending wall-clock time on it.
     /// </summary>
     internal delegate Task PacingDelay(int milliseconds, CancellationToken ct);
+
     // SGR foregrounds only, never a background: the terminal theme is the
     // only background, so fullscreen shaders light up where text is drawn
     // instead of stopping at a palette-resolved bg cell (website lesson).
@@ -104,39 +105,61 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
     private const string EchoReply =
         "\r\nshaders make terminals fun\r\n\r\n";
 
+    // The loop is endless, so every constant it writes is encoded once at
+    // type load rather than re-encoded on every pass forever.
+    //
+    // "..."u8 literals are not available here: these constants are built by
+    // const string concatenation, and u8 literals are neither const nor
+    // concatenable, so static readonly byte[] is the shape that exists.
+    private static readonly byte[] CrLfVt = Vt("\r\n");
+    private static readonly byte[] PromptVt = Vt(Prompt);
+    private static readonly byte[] BannerVt = Vt(Banner);
+    private static readonly byte[] DirListingVt = Vt(DirListing);
+    private static readonly byte[] AutoexecVt = Vt(Autoexec);
+    private static readonly byte[] VerReplyVt = Vt(VerReply);
+    private static readonly byte[] EchoReplyVt = Vt(EchoReply);
+    private static readonly byte[] CursorBlockVt = Vt(CursorBlock);
+    private static readonly byte[] CursorBarVt = Vt(CursorBar);
+    private static readonly byte[] CursorUnderlineVt = Vt(CursorUnderline);
+
+    private static byte[] Vt(string text) => Encoding.UTF8.GetBytes(text);
+
     /// <summary>
     /// One beat of the loop: the command to type at the prompt (null for a
     /// bare cursor flip) and the VT bytes to emit once Enter lands. The
     /// echo of the typed characters is part of the beat.
     /// </summary>
-    private readonly record struct Beat(string? Command, string Response);
+    private readonly record struct Beat(string? Command, byte[] Response);
 
     // Same shape as the website's demo script: a couple of listings, then
     // repeated cursor-shape flips (each one fires the cursor shaders), a
     // MODE pair that walks underline to block, and a closing echo.
     private static readonly Beat[] Script =
-    {
-        new("dir", DirListing),
-        new("type autoexec.bat", Autoexec),
-        new(null, CursorBar),
-        new(null, CursorBlock),
-        new(null, CursorBar),
-        new("ver", VerReply),
-        new(null, CursorBlock),
-        new("mode cursor=underline", CursorUnderline),
-        new("mode cursor=block", CursorBlock),
-        new("echo shaders make terminals fun", EchoReply),
-        new(null, CursorBar),
-    };
+    [
+        new("dir", DirListingVt),
+        new("type autoexec.bat", AutoexecVt),
+        new(null, CursorBarVt),
+        new(null, CursorBlockVt),
+        new(null, CursorBarVt),
+        new("ver", VerReplyVt),
+        new(null, CursorBlockVt),
+        new("mode cursor=underline", CursorUnderlineVt),
+        new("mode cursor=block", CursorBlockVt),
+        new("echo shaders make terminals fun", EchoReplyVt),
+        new(null, CursorBarVt),
+    ];
 
     private readonly VtSink _sink;
     private readonly PacingDelay _delay;
     private readonly ILogger<ShaderPreviewFeed> _logger;
-    // Fixed seed so the demo plays identically every time (matching the
-    // website's per-character jitter without its nondeterminism).
+    // Fixed seed so the typing jitter is reproducible instead of a fresh
+    // random walk per window. Reproducible within a runtime version, not
+    // across them: Random(int) makes no cross-version stability promise, and
+    // nothing here needs one.
     private readonly Random _random = new(1009);
 
     private CancellationTokenSource? _cts;
+    private bool _disposed;
 
     internal ShaderPreviewFeed(
         VtSink sink,
@@ -148,16 +171,22 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
         _delay = delay ?? ((ms, ct) => Task.Delay(ms, ct));
     }
 
-    /// <summary>Begin autoplay. Safe to call once per feed.</summary>
+    /// <summary>
+    /// Begin autoplay. Idempotent, and a no-op after <see cref="Dispose"/>:
+    /// Dispose nulls the token source, so without the disposed flag a late
+    /// Start (a FirstRender arriving during teardown) would hand a torn-down
+    /// feed a fresh session to play into a sink that is going away.
+    /// </summary>
     public void Start()
     {
-        if (_cts is not null) return;
+        if (_disposed || _cts is not null) return;
         _cts = new CancellationTokenSource();
         _ = RunAsync(_cts.Token);
     }
 
     public void Dispose()
     {
+        _disposed = true;
         _cts?.Cancel();
         _cts?.Dispose();
         _cts = null;
@@ -170,25 +199,38 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
             // Boot text lands at once (it is a machine booting, not a
             // person), then the first command comes after a beat so the
             // window has settled and the shader is already visible.
-            Write(Banner);
-            Write(Prompt);
+            Write(BannerVt);
+            Write(PromptVt);
             await _delay(1200, ct);
 
             while (true)
             {
                 foreach (var beat in Script)
                 {
+                    // Observe cancellation here rather than waiting for the
+                    // next _delay to throw it. Without these checks the loop
+                    // can still push a Write past Cancel(), which leans on
+                    // the sink's own disposed guard for correctness; one
+                    // guard carrying that weight is enough.
+                    ct.ThrowIfCancellationRequested();
                     if (beat.Command is { } command)
                     {
                         await TypeAsync(command, ct);
                         await _delay(350, ct);
-                        Write("\r\n" + beat.Response + Prompt);
+                        ct.ThrowIfCancellationRequested();
+                        // Three writes rather than a concatenation: the
+                        // newline, the response and the prompt are already
+                        // encoded, so this beat allocates nothing.
+                        Write(CrLfVt);
+                        Write(beat.Response);
+                        Write(PromptVt);
                     }
                     else
                     {
                         // A flip is a keypress: pause before and after so
                         // the cursor-shape animation has time to read.
                         await _delay(650, ct);
+                        ct.ThrowIfCancellationRequested();
                         Write(beat.Response);
                     }
                 }
@@ -217,14 +259,24 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
     {
         foreach (var ch in text)
         {
-            Write(ch.ToString());
+            ct.ThrowIfCancellationRequested();
+            WriteChar(ch);
             await _delay(55 + _random.Next(70), ct);
         }
     }
 
-    private void Write(string vt)
+    private void Write(ReadOnlySpan<byte> vt) => _sink(vt);
+
+    // One keystroke, encoded onto the stack: the typing path runs a few times
+    // a second forever, and a string plus a byte[] per character is two
+    // allocations for at most four bytes. Four is the ceiling for one char: a
+    // BMP scalar encodes to at most three, and a lone surrogate encodes as
+    // U+FFFD, which is three.
+    private void WriteChar(char ch)
     {
-        _sink(Encoding.UTF8.GetBytes(vt));
+        Span<byte> buffer = stackalloc byte[4];
+        var written = Encoding.UTF8.GetBytes(new ReadOnlySpan<char>(in ch), buffer);
+        _sink(buffer[..written]);
     }
 
     // Its own category, not a borrowed one: raising the config writer's
