@@ -52,6 +52,10 @@ public sealed partial class ShaderPickerWindow : Window
     private Controls.TerminalControl? _preview;
     private ShaderPreviewFeed? _feed;
     private readonly List<string> _orderedPaths = new();
+    // Latched by Closed. The window's teardown is the point after which no
+    // native surface may be created, and Closed is not a state the WinUI
+    // Window type otherwise exposes.
+    private bool _closed;
 
     public ShaderPickerWindow()
     {
@@ -104,7 +108,11 @@ public sealed partial class ShaderPickerWindow : Window
         // the shared bootstrap host, plus its autoplay feed; OnUnloaded
         // detachment does NOT free them, so the window closing must
         // dispose explicitly (TerminalControl lesson).
-        Closed += (_, _) => DisposePreview();
+        Closed += (_, _) =>
+        {
+            _closed = true;
+            DisposePreview();
+        };
 
         // Arrows flip shaders unless the terminal preview holds focus: the
         // terminal forwards keys to the shell without marking them handled,
@@ -243,14 +251,17 @@ public sealed partial class ShaderPickerWindow : Window
 
     private void PickerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        // No else branch. The only tagless item is the "Gallery unavailable"
+        // diagnostic, which exists exactly when there are no entries at all,
+        // so nothing can select away from a preview and back. Tearing the
+        // preview down here would also contradict the contract above: the
+        // terminal is built once and lives for the whole window, and
+        // rebuilding it would spawn a second placeholder powershell and
+        // restart the session mid-browse.
         if (PickerCombo.SelectedItem is ComboBoxItem item &&
             item.Tag is string path)
         {
             ShowPreview(path);
-        }
-        else
-        {
-            DisposePreview();
         }
         UpdateSelectEnabled();
     }
@@ -276,6 +287,12 @@ public sealed partial class ShaderPickerWindow : Window
     private void EnsurePreview(string initialShaderPath)
     {
         if (_preview is not null) return;
+        // Nothing may build a native surface (and a placeholder child
+        // process) after the window has closed: DisposePreview has already
+        // run, so whatever this created would be owned by nobody and leak the
+        // surface and the powershell with it. A SelectionChanged arriving
+        // during teardown is the path that gets here.
+        if (_closed) return;
 
         var host = App.BootstrapHost;
         if (host is null) return;

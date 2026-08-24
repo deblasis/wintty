@@ -113,6 +113,7 @@
                                  how Choose... got pushed off the card. The
                                  button always sits on its own line below. -->
                             <StackPanel x:Name="GalleryPickRow"
+                                        Orientation="Vertical"
                                         Spacing="8">
                                 <TextBlock x:Name="GalleryPickLabel"
                                            Text="No shader selected"
