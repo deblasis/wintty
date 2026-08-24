@@ -63,3 +63,7 @@ windows/scripts/vtabs-switcher/
 # Gallery tooling scratch renders (WARP PPMs and PNGs diffed during
 # shader bring-up; never something we want committed).
 tools/gallery/previews/
+
+# Claude Code session worktrees and nightly quality-control logs
+.claude/worktrees/
+.claude/nightly-logs/

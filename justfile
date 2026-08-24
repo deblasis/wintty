@@ -1080,3 +1080,15 @@ sync-verify mode="":
 # broken gallery entry. See tools/gallery/verify.sh for the env knobs.
 gallery-verify:
     @bash tools/gallery/verify.sh
+
+# ── quality control ────────────────────────────────────────────────────────
+# Run the full local test ladder (zig fmt check, zig tests, Windows tests)
+# and record a signoff for the current HEAD. The pr-gate merge hook requires
+# a green signoff for a PR's head commit before a merge is allowed, so local
+# runners are the merge authority while CI is unavailable.
+signoff:
+    python .claude/scripts/signoff.py
+
+# Validate a PR against the merge quality gate without merging.
+pr-gate pr:
+    python .claude/scripts/pr_gate.py --check-pr {{pr}}
