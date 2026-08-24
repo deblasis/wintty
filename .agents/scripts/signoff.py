@@ -34,6 +34,18 @@ def run(cmd, **kw):
     return subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True, **kw)
 
 
+def resolve_common_dir():
+    """The absolute git common dir, or None if it cannot be trusted (a dying
+    session can kill the git child and leave empty output)."""
+    out = run(["git", "rev-parse", "--git-common-dir"])
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(REPO_ROOT, common)
+    return common if os.path.isdir(common) else None
+
+
 def main():
     head = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "status", "--porcelain"]).stdout.strip()
@@ -59,9 +71,14 @@ def main():
         if rc != 0:
             ok = False
 
-    common = run(["git", "rev-parse", "--git-common-dir"]).stdout.strip()
-    if not os.path.isabs(common):
-        common = os.path.join(REPO_ROOT, common)
+    common = resolve_common_dir()
+    if not common:
+        # Fail closed: without a resolvable git dir the record would land in
+        # the working tree, dirtying it and hiding the result from the merge
+        # gate. Exit distinctly so a wrapper can tell "environment broke"
+        # from "tests failed".
+        print("signoff: could not resolve the git common dir; NOT recording. Rerun in a healthy session.")
+        return 2
     outdir = os.path.join(common, "pr-signoff")
     os.makedirs(outdir, exist_ok=True)
     record = {
