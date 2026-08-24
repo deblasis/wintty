@@ -17,21 +17,21 @@ pub const Rgba = packed struct(u32) {
 /// slightly (e.g. red is documented as 80,13,13 but ships as
 /// 204,36,36 in libsixel). Match the reference, not the manual.
 pub const dec_default_palette: [16]Rgba = .{
-    .{ .r = 0,   .g = 0,   .b = 0,   .a = 255 }, // 0: black
-    .{ .r = 51,  .g = 51,  .b = 204, .a = 255 }, // 1: blue
-    .{ .r = 204, .g = 36,  .b = 36,  .a = 255 }, // 2: red
-    .{ .r = 51,  .g = 204, .b = 51,  .a = 255 }, // 3: green
-    .{ .r = 204, .g = 51,  .b = 204, .a = 255 }, // 4: magenta
-    .{ .r = 51,  .g = 204, .b = 204, .a = 255 }, // 5: cyan
-    .{ .r = 204, .g = 204, .b = 51,  .a = 255 }, // 6: yellow
+    .{ .r = 0, .g = 0, .b = 0, .a = 255 }, // 0: black
+    .{ .r = 51, .g = 51, .b = 204, .a = 255 }, // 1: blue
+    .{ .r = 204, .g = 36, .b = 36, .a = 255 }, // 2: red
+    .{ .r = 51, .g = 204, .b = 51, .a = 255 }, // 3: green
+    .{ .r = 204, .g = 51, .b = 204, .a = 255 }, // 4: magenta
+    .{ .r = 51, .g = 204, .b = 204, .a = 255 }, // 5: cyan
+    .{ .r = 204, .g = 204, .b = 51, .a = 255 }, // 6: yellow
     .{ .r = 120, .g = 120, .b = 120, .a = 255 }, // 7: grey 50%
-    .{ .r = 69,  .g = 69,  .b = 69,  .a = 255 }, // 8: grey 25%
-    .{ .r = 92,  .g = 92,  .b = 158, .a = 255 }, // 9: blue*
-    .{ .r = 158, .g = 92,  .b = 92,  .a = 255 }, // 10: red*
-    .{ .r = 92,  .g = 158, .b = 92,  .a = 255 }, // 11: green*
-    .{ .r = 158, .g = 92,  .b = 158, .a = 255 }, // 12: magenta*
-    .{ .r = 92,  .g = 158, .b = 158, .a = 255 }, // 13: cyan*
-    .{ .r = 158, .g = 158, .b = 92,  .a = 255 }, // 14: yellow*
+    .{ .r = 69, .g = 69, .b = 69, .a = 255 }, // 8: grey 25%
+    .{ .r = 92, .g = 92, .b = 158, .a = 255 }, // 9: blue*
+    .{ .r = 158, .g = 92, .b = 92, .a = 255 }, // 10: red*
+    .{ .r = 92, .g = 158, .b = 92, .a = 255 }, // 11: green*
+    .{ .r = 158, .g = 92, .b = 158, .a = 255 }, // 12: magenta*
+    .{ .r = 92, .g = 158, .b = 158, .a = 255 }, // 13: cyan*
+    .{ .r = 158, .g = 158, .b = 92, .a = 255 }, // 14: yellow*
     .{ .r = 204, .g = 204, .b = 204, .a = 255 }, // 15: grey 75%
 };
 
@@ -121,12 +121,31 @@ fn hlsToRgba(h_in: u16, l: u8, s: u8) Rgba {
     var r1: f64 = 0;
     var g1: f64 = 0;
     var b1: f64 = 0;
-    if (h_sector < 1) { r1 = c; g1 = x; b1 = 0; }
-    else if (h_sector < 2) { r1 = x; g1 = c; b1 = 0; }
-    else if (h_sector < 3) { r1 = 0; g1 = c; b1 = x; }
-    else if (h_sector < 4) { r1 = 0; g1 = x; b1 = c; }
-    else if (h_sector < 5) { r1 = x; g1 = 0; b1 = c; }
-    else { r1 = c; g1 = 0; b1 = x; }
+    if (h_sector < 1) {
+        r1 = c;
+        g1 = x;
+        b1 = 0;
+    } else if (h_sector < 2) {
+        r1 = x;
+        g1 = c;
+        b1 = 0;
+    } else if (h_sector < 3) {
+        r1 = 0;
+        g1 = c;
+        b1 = x;
+    } else if (h_sector < 4) {
+        r1 = 0;
+        g1 = x;
+        b1 = c;
+    } else if (h_sector < 5) {
+        r1 = x;
+        g1 = 0;
+        b1 = c;
+    } else {
+        r1 = c;
+        g1 = 0;
+        b1 = x;
+    }
 
     // The L/S clamps above mean (r1+m)*255 etc. can't escape [0, 255]
     // mathematically; the saturating min/max here is defensive against

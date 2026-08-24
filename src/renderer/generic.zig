@@ -586,8 +586,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // skip the field reads entirely (comptime-gated, the
                 // `.rtv`/`.srv` paths below never get type-checked on
                 // those backends).
-                const front_rtv_slot, const back_rtv_slot,
-                const front_srv_slot, const back_srv_slot =
+                const front_rtv_slot, const back_rtv_slot, const front_srv_slot, const back_srv_slot =
                     if (comptime @hasField(Texture, "rtv")) slots: {
                         const D = @TypeOf(self.front_texture.rtv);
                         const fr = self.front_texture.rtv;
