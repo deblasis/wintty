@@ -147,10 +147,13 @@ run-win-release: build-dll-release build-win-release
 
 # Run the C# test suites. Ghostty.Tests is pure logic and cross-platform;
 # Ghostty.Tests.Windows holds the tests that need real Windows semantics
-# (named mutexes, file sharing, the registry).
+# (named mutexes, file sharing, the registry). Both need Platform=x64:
+# Ghostty.Core's CsWin32 bindings include pointer-size-dependent structs
+# (SHFILEINFOW) that cannot generate for AnyCPU, so an unqualified build
+# fails before any test runs.
 [windows]
 test-win:
-    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj
+    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64
     dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64
 
 # Launch two instances a few hundred ms apart and watch for a launch splash
