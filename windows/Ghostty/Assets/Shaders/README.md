@@ -37,3 +37,10 @@ CC BY-NC-SA, GPL) must not be added.
 3. Add the license text under `LICENSES/` if it is not original work,
    and an entry in the repo's `THIRD_PARTY_NOTICES.md`.
 4. Run `just gallery-verify` and make sure it reports PASS.
+
+The source must compile under `glslang` verbatim: the gate feeds the same
+file to our compiler and to the reference one, so anything glslang refuses
+takes the whole gate down rather than just that shader. The trap worth
+naming is GLSL's reserved-word list (`active`, `filter`, `input`,
+`output`, `union`, `resource` and friends in GLSL 4.60 section 3.6): our
+compiler accepts them, glslang does not.
