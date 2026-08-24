@@ -8,8 +8,11 @@ endpoint) unless the PR passes:
   size            countable changed lines <= 900 (warn above 500). Countable
                   excludes licence texts, lockfiles, vendored and generated
                   files. A line matching `Size-override: <reason>` in the PR
-                  body downgrades the block to a warning, so mechanical bulk
-                  changes stay mergeable with an auditable reason.
+                  body downgrades the block to a warning: mechanical bulk is
+                  the common case, but any reason is accepted because the
+                  reason stays in the body permanently, which is worth more
+                  than a rule nobody can satisfy honestly. State what is
+                  actually true; "it is big" is not a reason.
   body            non-empty (>= 200 chars) when the countable diff is > 50
                   lines: a large change must say what it is and how it was
                   verified.
