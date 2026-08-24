@@ -373,7 +373,12 @@ public sealed partial class MainWindow : Window
             var startTimer = DispatcherQueue.CreateTimer();
             startTimer.Interval = TimeSpan.FromSeconds(3);
             startTimer.IsRepeating = false;
-            startTimer.Tick += (_, _) => { startTimer.Stop(); StartDemo(mode); };
+            startTimer.Tick += (_, _) =>
+            {
+                startTimer.Stop();
+                if (_isClosed) return;
+                StartDemo(mode);
+            };
             startTimer.Start();
         }
 #endif
@@ -462,34 +467,11 @@ public sealed partial class MainWindow : Window
         // app-level scheme when it initializes. The runtime handler below
         // covers post-init OS theme changes.
 
-        // Subscribe to runtime theme changes. ColorValuesChanged fires on a
-        // background thread, so dispatch back to the UI thread before calling
-        // into libghostty (which expects UI-thread callers for App-level ops).
-        _systemUiSettings.ColorValuesChanged += (s, _) =>
-        {
-            // Classify the event's own sender rather than activating a
-            // second UISettings, which could answer for a later moment.
-            var dark = Ghostty.Services.OsTheme.IsDark(s);
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                var scheme = dark
-                    ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
-                    : Ghostty.Core.Interop.GhosttyColorScheme.Light;
-                Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
-                _host.NotifyColorSchemeChanged(scheme);
-
-                // The two calls above move libghostty onto the new scheme,
-                // so the surfaces repaint. Anything the C# chrome derives
-                // from a conditional theme is still resolved against the
-                // outgoing one until this runs, which is what would leave
-                // window chrome on the old palette beside a repainted
-                // terminal. Self-guarding, so the per-window duplicates of
-                // this handler collapse to one refresh. Handed the same
-                // `dark` that drove the two calls above, so libghostty and
-                // the config caches cannot describe different schemes.
-                _configService.RefreshForOsColorScheme(dark);
-            });
-        };
+        // Subscribe to runtime theme changes. Named rather than inline so
+        // OnClosedAsync can take it back off: UISettings is an OS object that
+        // outlives the window, and a live subscription both keeps the closed
+        // window alive and points an OS callback at a freed libghostty app.
+        _systemUiSettings.ColorValuesChanged += OnSystemColorValuesChanged;
 
         // Apply initial backdrop (Mica when opaque, transparent when
         // background-opacity < 1). Also sets the Win32 class brush
@@ -765,6 +747,13 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Changed += (_, args) =>
         {
+            // Cheap insurance rather than a known crash: no case has been
+            // constructed where AppWindow raises Changed after Window.Closed.
+            // But the body reaches _taskbar and _titleBar, and _taskbar is
+            // disposed in OnClosedAsync after an await, so if one ever does
+            // arrive in that gap it lands on disposed state. The gate is one
+            // comparison; proving the negative is not.
+            if (_isClosed) return;
             _taskbar.OnAppWindowChanged(AppWindow);
             _titleBar.SyncCaptionInset();
             if (IsQuickTerminal && args.DidSizeChange && !_movingQuake && AppWindow.IsVisible)
@@ -837,8 +826,12 @@ public sealed partial class MainWindow : Window
         // App-targeted actions (OpenConfig, ReloadConfig) fire on the
         // bootstrap host because libghostty sends them with target=app,
         // not target=surface. The per-window _host never receives them.
-        // Only the primary window subscribes; adopted windows (tab detach)
-        // skip this to avoid stacking duplicate handlers.
+        // Every window except an adopted one subscribes, because that is the
+        // only path that passes a seed tab. So the cold-start window, the
+        // quake window and each restored window all handle these, the action
+        // runs once per window, and each closure keeps its window rooted on
+        // the bootstrap host. Owning them on App instead is the fix; it is a
+        // behaviour change and is tracked separately.
         if (seedTab is null)
         {
             var appHost = Ghostty.App.BootstrapHost!;
@@ -1433,6 +1426,24 @@ public sealed partial class MainWindow : Window
         _layout.CancelSwitch();
         _themeManager.Dispose();
 
+        // Stop the dispatcher-driven timers this window started. None of them
+        // is owned by the visual tree, so nothing else in this method reaches
+        // them, and each keeps the closed window alive for as long as it runs:
+        // the picker poll forever, the Ctrl+Tab popup for 1.2s, the shell-pid
+        // poll for the rest of its 10s budget. Their handlers are gated on
+        // _isClosed as well, for the tick already queued when the stop lands.
+        //
+        // ClosePicker also hands the picker back to libghostty, which reads
+        // and writes through the picker's surface -- so it has to run here,
+        // above DisposeAllLeaves, not after it.
+        ClosePicker();
+        _cyclePopupTimer?.Stop();
+        // The detach also unregisters the tab from App's process tracker,
+        // which is process-global. Teardown frees the leaves without ever
+        // removing a tab, so TabRemoved -- the only other caller -- never
+        // fires here and every tab would stay in that registry.
+        foreach (var t in _tabManager.Tabs) DetachProcessTracking(t);
+
         // Close the inspector window before any surface/host teardown below.
         // Its present timer drives libghostty against the bound surface every
         // frame; closing it now runs its shutdown (stop timer + tear down the
@@ -1468,6 +1479,17 @@ public sealed partial class MainWindow : Window
         _configService.ConfigChanged -= OnConfigReloaded;
         _configService.ConfigChanged -= OnConfigReloadedChrome;
         _shellTheme.ThemeChanged -= OnShellThemeChanged;
+        // UISettings is an OS object and calls back on a thread-pool thread.
+        // Left attached, an OS light/dark flip, accent change or high-contrast
+        // toggle during teardown puts AppSetColorScheme through the app
+        // pointer _host.Dispose is about to free at the end of this method.
+        _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
+        // The preview service owns a named-pipe server on a background task,
+        // so it raises this from outside the window's own lifetime. The task
+        // itself outlives this window either way -- nothing disposes the
+        // service -- but detaching keeps a LIST_THEMES arriving afterwards
+        // from starting a picker on a window whose surfaces are gone.
+        _themePreview.ListThemesRequested -= OnListThemesRequested;
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
@@ -1664,6 +1686,18 @@ public sealed partial class MainWindow : Window
             pidPoll.Interval = ShellPidPollInterval;
             pidPoll.Tick += (_, _) =>
             {
+                // The dispatcher drives this timer, not the window, so the
+                // ticks keep arriving through teardown. OnClosedAsync detaches
+                // every tab, which stops the timer; this turns away a tick
+                // already queued when it did. Stopping here too, because a
+                // detach that ever stopped reaching this timer would otherwise
+                // leave it running for the rest of the budget.
+                if (_isClosed)
+                {
+                    pidPoll?.Stop();
+                    pidPoll = null;
+                    return;
+                }
                 pollTicks++;
                 TryAssignPid(leaf);
                 if (tab.ShellPid is not null)
@@ -1887,6 +1921,10 @@ public sealed partial class MainWindow : Window
         _cyclePopupTimer.Tick += (_, _) =>
         {
             _cyclePopupTimer!.Stop();
+            // OnClosedAsync stops the timer, but a tick queued in the same
+            // dispatcher turn still arrives, and the popup host is part of the
+            // tree the close is taking down.
+            if (_isClosed) return;
             TabSwitcherPopupHost.IsOpen = false;
         };
 
@@ -2667,6 +2705,50 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void OnWindowThemeChanged(bool isDark) => ApplyTheme();
 
+    /// <summary>
+    /// UISettings.ColorValuesChanged handler: an OS light/dark flip, accent
+    /// change or high-contrast toggle. Fires on a thread-pool thread, so the
+    /// work hops to the dispatcher before touching libghostty (which expects
+    /// UI-thread callers for App-level ops).
+    ///
+    /// That hop is why the unsubscribe in OnClosedAsync is not the whole
+    /// defence. The enqueued body runs on a later dispatcher turn, and by
+    /// then _host may already have been disposed at the end of the teardown,
+    /// which would put AppSetColorScheme through a freed app pointer -- the
+    /// same shape as the config-reload race the other teardown gates in this
+    /// file exist for. OnClosedAsync unsubscribes so the OS stops calling and
+    /// stops retaining the window; the gate below turns away the one call
+    /// already in the air.
+    /// </summary>
+    private void OnSystemColorValuesChanged(
+        Windows.UI.ViewManagement.UISettings sender, object args)
+    {
+        if (_isClosed) return;
+        // Classify the event's own sender rather than activating a
+        // second UISettings, which could answer for a later moment.
+        var dark = Ghostty.Services.OsTheme.IsDark(sender);
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_isClosed) return;
+            var scheme = dark
+                ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
+                : Ghostty.Core.Interop.GhosttyColorScheme.Light;
+            Ghostty.Interop.NativeMethods.AppSetColorScheme(_host.App, scheme);
+            _host.NotifyColorSchemeChanged(scheme);
+
+            // The two calls above move libghostty onto the new scheme,
+            // so the surfaces repaint. Anything the C# chrome derives
+            // from a conditional theme is still resolved against the
+            // outgoing one until this runs, which is what would leave
+            // window chrome on the old palette beside a repainted
+            // terminal. Self-guarding, so the per-window duplicates of
+            // this handler collapse to one refresh. Handed the same
+            // `dark` that drove the two calls above, so libghostty and
+            // the config caches cannot describe different schemes.
+            _configService.RefreshForOsColorScheme(dark);
+        });
+    }
+
     private void OnShellThemeChanged()
     {
         // Same teardown race as ApplyTheme: ShellThemeService routes its
@@ -2877,6 +2959,12 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateQuakeStripVisibility()
     {
+        // Reached from TabAdded/TabRemoved, and SetStripHidden walks the tab
+        // hosts and the pane host -- the tree a close is taking down. Teardown
+        // happens not to raise TabRemoved today (it frees the leaves and never
+        // removes a tab), so this is currently unreachable on close. That is an
+        // ordering accident in another method, not a guard here.
+        if (_isClosed) return;
         if (!IsQuickTerminal) return;
         _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
     }
@@ -3813,6 +3901,18 @@ public sealed partial class MainWindow : Window
     private GhosttySurface _pickerSurface;
     private IntPtr _pickerHandle;
 
+    /// <summary>
+    /// The control and tab the picker's surface belongs to.
+    /// <see cref="_pickerSurface"/> is a copy of a raw pointer and nothing
+    /// zeroes it when that surface is freed, so these are what make the
+    /// liveness check in <see cref="ClosePicker"/> possible.
+    /// </summary>
+    private Ghostty.Controls.TerminalControl? _pickerTerminal;
+    private Ghostty.Core.Tabs.TabModel? _pickerTab;
+    // Held rather than left local to StartPickerPoll: the dispatcher drives
+    // the poll, so the window's teardown has no other way to reach it.
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
+
     private void OnListThemesRequested(object? sender, EventArgs e)
     {
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
@@ -3822,7 +3922,16 @@ public sealed partial class MainWindow : Window
         var surfaceHandle = terminal.SurfaceHandle;
         if (surfaceHandle == IntPtr.Zero) return;
 
+        // A second request while one is open would otherwise overwrite the
+        // handle, stranding the first picker's allocation with nothing left
+        // able to free it, and reassign the callback field, dropping the GC
+        // root for a delegate whose function pointer the first picker still
+        // holds.
+        ClosePicker();
+
         _pickerSurface = new GhosttySurface(surfaceHandle);
+        _pickerTerminal = terminal;
+        _pickerTab = _tabManager.ActiveTab;
 
         // Theme callback: apply preview/confirm colors on the UI thread.
         _inlineThemeCb = (namePtr, confirmed) =>
@@ -3857,19 +3966,96 @@ public sealed partial class MainWindow : Window
     {
         // Use a DispatcherQueue timer so cleanup runs on the UI thread
         // with no race against the apprt thread's input redirect.
-        var timer = DispatcherQueue.CreateTimer();
-        timer.Interval = TimeSpan.FromMilliseconds(50);
-        timer.Tick += (_, _) =>
+        //
+        // One poll at a time: a second picker replaces _pickerHandle, and a
+        // leftover timer would then be polling the new picker and could run
+        // the cleanup out from under it.
+        _pickerPoll?.Stop();
+        var poll = DispatcherQueue.CreateTimer();
+        _pickerPoll = poll;
+        poll.Interval = TimeSpan.FromMilliseconds(50);
+        poll.Tick += (_, _) =>
         {
+            // Act on this timer, never on whatever the field holds now.
+            // Stopping a timer does not recall a tick already queued on the
+            // dispatcher, so a tick from the previous poll can still arrive
+            // after a second picker has installed its own; reading the field
+            // would let it stop and deinit the newer one.
+            if (!ReferenceEquals(_pickerPoll, poll))
+            {
+                poll.Stop();
+                return;
+            }
+
+            // ClosePicker has already run the deinit against a surface that
+            // was still valid; the surface this tick would hand it is not.
+            // A tick queued in the same dispatcher turn as that stop still
+            // arrives, which is what this turns away.
+            if (_isClosed)
+            {
+                poll.Stop();
+                _pickerPoll = null;
+                return;
+            }
+
             if (!NativeMethods.SurfaceListThemesShouldQuit(_pickerHandle))
                 return;
 
-            timer.Stop();
-            NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
-            _pickerHandle = IntPtr.Zero;
-            _inlineThemeCb = null;
+            ClosePicker();
         };
-        timer.Start();
+        poll.Start();
+    }
+
+    /// <summary>
+    /// Stop the picker poll and hand the picker back to libghostty.
+    ///
+    /// Nothing else ends the poll. It runs until the picker reports
+    /// should_quit, and once the window's leaves are freed no key can reach
+    /// the picker to set it, so the timer would hold the closed window for the
+    /// life of the process and the picker allocation would never be returned.
+    /// The sharper half is the other order: should_quit can already be true
+    /// with the tick still queued, and the deinit it then runs writes through
+    /// <see cref="_pickerSurface"/> -- restoring the redirects and nudging the
+    /// shell -- which <c>DisposeAllLeaves</c> has freed by that point.
+    ///
+    /// So the close calls this before any teardown, for the same reason it
+    /// closes the inspector there. Safe to call with no picker running: the
+    /// timer is null and the handle is zero, and the native deinit ignores a
+    /// null picker in any case.
+    /// </summary>
+    private void ClosePicker()
+    {
+        _pickerPoll?.Stop();
+        _pickerPoll = null;
+        if (_pickerHandle == IntPtr.Zero) return;
+
+        // A non-zero handle does not mean the surface behind it is still
+        // there. Deinit writes through that pointer -- it clears three
+        // redirects and pushes pty input -- so running it against a freed
+        // surface is a write into freed memory, and closing the picker's tab
+        // frees the surface without touching anything here.
+        //
+        // The control zeroes its own handle when it disposes the surface, so
+        // a mismatch means the surface is gone. The tab check answers the
+        // other direction: a detached tab carries its live surface to another
+        // window, and deiniting from here would strip the redirects of a
+        // window that never closed.
+        //
+        // When neither holds, the picker allocation is stranded, which is
+        // what happened before this path existed at all. Leaking it is the
+        // right trade against writing through a dangling pointer.
+        var live = _pickerTerminal is { } terminal
+            && terminal.SurfaceHandle == _pickerSurface.Handle
+            && _pickerTab is { } tab
+            && _tabManager.Tabs.Contains(tab);
+        if (live)
+            NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
+
+        _pickerHandle = IntPtr.Zero;
+        _pickerSurface = default;
+        _pickerTerminal = null;
+        _pickerTab = null;
+        _inlineThemeCb = null;
     }
 }
 

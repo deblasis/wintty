@@ -52,8 +52,35 @@ internal sealed class ShellSource
 
         using var stream = asm.GetManifestResourceStream(matches[0])!;
         using var reader = new StreamReader(stream);
-        var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd());
-        return new ShellSource((CompilationUnitSyntax)tree.GetRoot());
+        // Conditional regions are invisible with default parse options:
+        // Roslyn keeps them as disabled trivia, so anything inside `#if DEMO`
+        // is simply absent from the tree. That is not a gap a census can live
+        // with, because it reports full coverage of a file it only partly
+        // read, and DEMO is a configuration that ships.
+        //
+        // Defining the symbol reveals that branch. It cannot be the whole
+        // answer, because it hides the other one: an `#else` or `#if !DEMO`
+        // becomes the disabled region instead. So the assertion below refuses
+        // any tree that still has disabled text, which turns adding a new
+        // conditional into a decision someone has to make rather than a
+        // silent widening of the blind spot.
+        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
+        var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), options);
+        var root = (CompilationUnitSyntax)tree.GetRoot();
+
+        var hidden = root.DescendantTrivia()
+            .Where(t => t.IsKind(SyntaxKind.DisabledTextTrivia))
+            .Select(t => tree.GetLineSpan(t.Span).StartLinePosition.Line + 1)
+            .ToList();
+        Assert.True(
+            hidden.Count == 0,
+            $"{dottedTail} has conditional regions this parse cannot see, at line(s) "
+                + string.Join(", ", hidden)
+                + ". Every scan over this file silently skips them. Either define the "
+                + "symbol that enables them here, or restructure so the code is not "
+                + "hidden from the wiring tests.");
+
+        return new ShellSource(root);
     }
 
     // MSBuild substitutes the host's directory separator into the logical
