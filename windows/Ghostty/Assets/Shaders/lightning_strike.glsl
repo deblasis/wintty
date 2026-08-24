@@ -83,8 +83,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // around a fixed corner, only a real move shifts it.
     float cornerJump = length(iCurrentCursor.xy - iPreviousCursor.xy);
     float age = iTime - iTimeCursorChange;
-    float active = step(cellH * JUMP_THRESHOLD, cornerJump)
-                 * step(age, DURATION) * step(0.0, age);
+    float activeGate = step(cellH * JUMP_THRESHOLD, cornerJump)
+                     * step(age, DURATION) * step(0.0, age);
     float p = clamp(age / DURATION, 0.0, 1.0);
     vec3 tint = iCurrentCursorColor.rgb;
     vec3 boltCol = mix(tint, vec3(1.0), 0.55);
@@ -101,11 +101,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // Per-frame flicker keeps the channel alive while it glows.
     float flicker = 0.7 + 0.5 * hash1(seed + floor(iTime * 48.0) * 0.618);
     // Full brightness while traveling, then a decaying afterglow.
-    float boltEnv = exp(-max(p - STRIKE_FRAC, 0.0) * 6.0) * flicker * active;
+    float boltEnv = exp(-max(p - STRIKE_FRAC, 0.0) * 6.0) * flicker * activeGate;
 
     // Loop trip counts collapse to zero when idle.
-    int mainSegs = int(active) * MAIN_SEGS;
-    int branchSegs = int(active) * BRANCH_SEGS;
+    int mainSegs = int(activeGate) * MAIN_SEGS;
+    int branchSegs = int(activeGate) * BRANCH_SEGS;
 
     float glowI = 0.0;
     float coreI = 0.0;
@@ -161,7 +161,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // Impact: the flash fires as the front lands and decays from there;
     // a radial bloom plus a bright cell hit the character.
     float flashEnv = smoothstep(STRIKE_FRAC * 0.8, STRIKE_FRAC, p)
-                   * exp(-max(p - STRIKE_FRAC, 0.0) * 9.0) * active;
+                   * exp(-max(p - STRIKE_FRAC, 0.0) * 9.0) * activeGate;
     float dImp = distance(fragCoord.xy, impact);
     float sdfCell = sdRect(fragCoord.xy, impact, cellHalf);
     col += mix(tint, vec3(1.0), 0.6)
