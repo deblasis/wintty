@@ -41,6 +41,8 @@ const Buffer = buffer_mod.Buffer;
 /// is called keeps the suite green on headless hosts and unchanged on
 /// interactive ones.
 fn hasInteractiveDesktop() bool {
+    if (comptime builtin.os.tag != .windows) return false;
+
     const USEROBJECTFLAGS = extern struct {
         fInherit: i32,
         fReserved: i32,
@@ -113,6 +115,13 @@ const Factory4 = extern struct {
         EnumAdapterByLuid: *const anyopaque,
         EnumWarpAdapter: *const fn (*Factory4, *const com.GUID, *?*anyopaque) callconv(.winapi) com.HRESULT,
     };
+
+    comptime {
+        // The slot arithmetic above is the one thing here that cannot be
+        // checked by reading: a wrong count calls an arbitrary function
+        // pointer. Pin it so the compiler answers on every build.
+        std.debug.assert(@offsetOf(VTable, "EnumWarpAdapter") == 27 * @sizeOf(usize));
+    }
 };
 
 /// The WARP software adapter when WINTTY_GPU_TEST_WARP=1, else null (the
@@ -120,9 +129,14 @@ const Factory4 = extern struct {
 /// on the software rasterizer on demand, e.g.
 ///   WINTTY_GPU_TEST_WARP=1 zig build test -Dtest-filter="DescriptorHeap"
 /// or the same variable set for a loop of full runs on a box whose
-/// default adapter is hardware. Returns null on any failure so callers
-/// fall back to the default adapter rather than skipping.
-fn warpAdapterIfRequested() ?*anyopaque {
+/// default adapter is hardware.
+///
+/// The value must be exactly "1"; anything else (including "true") leaves
+/// the default adapter in place. Acquisition failure while the variable IS
+/// set returns an error rather than falling back: an explicit opt-in that
+/// silently runs on hardware would report a green run for a path it never
+/// exercised, which is the whole point of the knob.
+fn warpAdapterIfRequested() !?*anyopaque {
     if (comptime builtin.os.tag != .windows) return null;
 
     const kernel32 = struct {
@@ -138,7 +152,13 @@ fn warpAdapterIfRequested() ?*anyopaque {
 
     var factory: ?*Factory4 = null;
     const hr = dxgi.CreateDXGIFactory2(0, &Factory4.IID, @ptrCast(&factory));
-    if (com.FAILED(hr) or factory == null) return null;
+    if (com.FAILED(hr) or factory == null) {
+        std.debug.print(
+            "WINTTY_GPU_TEST_WARP=1 but IDXGIFactory4 is unavailable (hr=0x{X:0>8})\n",
+            .{@as(u32, @bitCast(hr))},
+        );
+        return error.WarpAdapterUnavailable;
+    }
     defer _ = factory.?.vtable.Release(factory.?);
 
     const iid_iunknown = com.GUID{
@@ -149,7 +169,13 @@ fn warpAdapterIfRequested() ?*anyopaque {
     };
     var adapter: ?*anyopaque = null;
     const hr2 = factory.?.vtable.EnumWarpAdapter(factory.?, &iid_iunknown, &adapter);
-    if (com.FAILED(hr2) or adapter == null) return null;
+    if (com.FAILED(hr2) or adapter == null) {
+        std.debug.print(
+            "WINTTY_GPU_TEST_WARP=1 but EnumWarpAdapter failed (hr=0x{X:0>8})\n",
+            .{@as(u32, @bitCast(hr2))},
+        );
+        return error.WarpAdapterUnavailable;
+    }
     return adapter;
 }
 
@@ -194,6 +220,14 @@ const InfoQueue = extern struct {
         GetNumMessagesDeniedByStorageFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
         GetNumStoredMessages: *const fn (*InfoQueue) callconv(.winapi) u64,
     };
+
+    comptime {
+        // The previous declaration spliced ID3D12InfoQueue1's mute methods
+        // in front of the counters, leaving GetMessage on a counter's slot.
+        // Pin the layout so that class of defect fails the build.
+        std.debug.assert(@offsetOf(VTable, "GetMessage") == 5 * @sizeOf(usize));
+        std.debug.assert(@offsetOf(VTable, "GetNumStoredMessages") == 8 * @sizeOf(usize));
+    }
 };
 
 /// Bundles a device, command queue, command list, and fence so tests
@@ -254,7 +288,7 @@ fn createTestDevice() !TestDevice {
     // Device. Null adapter selects the system GPU; the WARP software
     // adapter replaces it when WINTTY_GPU_TEST_WARP=1 (see
     // warpAdapterIfRequested).
-    const warp_adapter = warpAdapterIfRequested();
+    const warp_adapter = try warpAdapterIfRequested();
     defer releaseCom(warp_adapter);
     var device: ?*d3d12.ID3D12Device = null;
     var hr = d3d12.D3D12CreateDevice(
@@ -738,7 +772,7 @@ test "Frame: create, reset, deinit" {
 
 test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
     if (comptime builtin.os.tag != .windows) return;
-    if (!hasInteractiveDesktop()) return;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
     const HINSTANCE = std.os.windows.HINSTANCE;
@@ -907,7 +941,7 @@ test "Device: shared texture deinit does not leak" {
 
 test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {
     if (comptime builtin.os.tag != .windows) return;
-    if (!hasInteractiveDesktop()) return;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
     const HINSTANCE = std.os.windows.HINSTANCE;
@@ -1287,8 +1321,18 @@ test "post pipeline: scanline shader leaves row periodicity" {
             var i: u64 = 0;
             while (i < n and i < 20) : (i += 1) {
                 var len: usize = 0;
-                _ = iq.?.vtable.GetMessage(iq.?, i, null, &len);
-                const buf = alloc.alloc(u8, len) catch break;
+                const size_hr = iq.?.vtable.GetMessage(iq.?, i, null, &len);
+                if (com.FAILED(size_hr)) {
+                    std.debug.print(
+                        "  (message {d}: size query failed, hr=0x{X:0>8})\n",
+                        .{ i, @as(u32, @bitCast(size_hr)) },
+                    );
+                    continue;
+                }
+                // Message is read back through this buffer, so it must carry
+                // the struct's alignment: alloc gives align 1 and the cast
+                // below is a checked @alignCast, not a hint.
+                const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch break;
                 defer alloc.free(buf);
                 const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
                 if (iq.?.vtable.GetMessage(iq.?, i, msg, &len) == 0) {
