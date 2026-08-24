@@ -1082,6 +1082,10 @@ gallery-verify:
     @bash tools/gallery/verify.sh
 
 # ── quality control ────────────────────────────────────────────────────────
+# These recipes need Python 3 on PATH as `python`. The signoff ladder
+# includes test-win, so signoff is a Windows-host recipe like the rest of
+# the win targets above.
+#
 # Run the full local test ladder (zig fmt check, zig tests, Windows tests)
 # and record a signoff for the current HEAD. The pr-gate merge hook requires
 # a green signoff for a PR's head commit before a merge is allowed, so local
@@ -1092,3 +1096,12 @@ signoff:
 # Validate a PR against the merge quality gate without merging.
 pr-gate pr:
     python .claude/scripts/pr_gate.py --check-pr {{pr}}
+
+# Prove the gates still catch what they exist for (recorded-PR replays,
+# matcher escapes, exemption anchoring) and that the nightly scripts'
+# helpers roundtrip.
+gates-selftest:
+    python .claude/scripts/pr_gate.py --self-test
+    python .claude/scripts/workspace_guard.py --self-test
+    pwsh -NoProfile -File .claude/scripts/nightly_fuzz.ps1 -SelfTest
+    pwsh -NoProfile -File .claude/scripts/nightly_control.ps1 -SelfTest

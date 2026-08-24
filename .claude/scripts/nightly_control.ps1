@@ -40,22 +40,32 @@ function Save-Config($cfg) {
     $cfg | ConvertTo-Json | Set-Content $configFile
 }
 
-function Get-StatusText {
-    $lines = @()
+# The task queries are two COM round-trips, too heavy for every 2s tick on
+# the UI thread; they refresh on their own slower cadence.
+$script:taskLine = 'Task: checking...'
+function Update-TaskLine {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($task) {
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-        $lines += "Task: registered ($($task.State)); next run $($info.NextRunTime); last result $($info.LastTaskResult)"
+        $script:taskLine = "Task: registered ($($task.State)); next run $($info.NextRunTime); last result $($info.LastTaskResult)"
     } else {
-        $lines += 'Task: not registered on this machine'
+        $script:taskLine = 'Task: not registered on this machine'
     }
+}
+
+function Get-StatusText {
+    $lines = @($script:taskLine)
     if (Test-Path $statusFile) {
         try {
             $s = Get-Content $statusFile -Raw | ConvertFrom-Json
-            $lines += "Run: $($s.phase)  (started $($s.started), updated $($s.updated))"
-            if ($s.sha) { $lines += "Commit: $($s.sha)" }
-            if ($s.results) {
-                $s.results.psobject.Properties | ForEach-Object { $lines += "  $($_.Name): $($_.Value)" }
+            if ($s) {
+                $lines += "Run: $($s.phase)  (started $($s.started), updated $($s.updated))"
+                if ($s.sha) { $lines += "Commit: $($s.sha)" }
+                if ($s.results) {
+                    $s.results.psobject.Properties | ForEach-Object { $lines += "  $($_.Name): $($_.Value)" }
+                }
+            } else {
+                $lines += 'Run: status file empty (run in progress?)'
             }
         } catch { $lines += 'Run: status file unreadable' }
     } else {
@@ -125,9 +135,14 @@ $registerButton = New-Button 'Register 23:00 task' 268 290 150
 $unregisterButton = New-Button 'Unregister task' 268 326 150
 
 $runButton.Add_Click({
-    # -Scheduled makes the run honor the saved config, so the checkboxes
-    # above govern manual runs too (including hibernate-after).
-    Start-Process pwsh -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-Scheduled')
+    # A manual run starts immediately: -Scheduled would drag in the 3-minute
+    # idle gate the user just clicked through, so the checkboxes are handed
+    # over as explicit switches instead. The runner's own single-instance
+    # check keeps this from stomping a scheduled run already in flight.
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner)
+    if ($hibernateCheck.Checked) { $argList += '-HibernateAfter' }
+    if (-not $fuzzCheck.Checked) { $argList += '-NoFuzz' }
+    Start-Process pwsh -ArgumentList $argList
 })
 $logButton.Add_Click({
     $latest = Get-LatestLog
@@ -143,8 +158,14 @@ $unregisterButton.Add_Click({
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000
-$timer.Add_Tick({ $statusBox.Text = Get-StatusText })
+$script:tick = 0
+$timer.Add_Tick({
+    $script:tick++
+    if ($script:tick % 5 -eq 0) { Update-TaskLine }
+    $statusBox.Text = Get-StatusText
+})
 $timer.Start()
+Update-TaskLine
 $statusBox.Text = Get-StatusText
 
 if ($SelfTest) {
@@ -153,11 +174,14 @@ if ($SelfTest) {
     foreach ($c in @($statusBox, $hibernateCheck, $fuzzCheck, $runButton, $logButton, $registerButton, $unregisterButton)) {
         if (-not $form.Controls.Contains($c)) { Write-Host "SELF-TEST FAILED: missing control $($c.Text)"; $failed = $true }
     }
+    # Restore what was actually on disk: Load-Config always returns defaults,
+    # so its result cannot distinguish "no file" from "file of defaults".
+    $hadFile = Test-Path $configFile
     $before = Load-Config
     Save-Config @{ hibernateAfter = $false; runFuzz = $true }
     $cfg = Load-Config
     if ($cfg.hibernateAfter) { Write-Host 'SELF-TEST FAILED: config roundtrip'; $failed = $true }
-    if ($before.Count) { Save-Config $before } else { Remove-Item $configFile -ErrorAction SilentlyContinue }
+    if ($hadFile) { Save-Config $before } else { Remove-Item $configFile -ErrorAction SilentlyContinue }
     if (-not (Get-StatusText)) { Write-Host 'SELF-TEST FAILED: empty status text'; $failed = $true }
     $form.Dispose()
     if ($failed) { Write-Host 'SELF-TEST FAILED'; exit 1 }

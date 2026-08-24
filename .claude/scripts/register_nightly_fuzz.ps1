@@ -13,9 +13,11 @@ if (-not (Test-Path $target)) { throw "nightly_fuzz.ps1 not found next to this s
 
 $action = New-ScheduledTaskAction -Execute 'pwsh.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$target`" -Scheduled"
+# The limit must clear the worst case: up to 3h of idle-wait plus the full
+# ladder, the fuzz suite's own idle-wait, and the hibernate wait.
 $trigger = New-ScheduledTaskTrigger -Daily -At 23:00
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
     -MultipleInstances IgnoreNew
 
 Register-ScheduledTask -TaskName 'wintty-nightly-quality' `

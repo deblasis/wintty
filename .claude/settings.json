@@ -7,16 +7,16 @@
           {
             "type": "command",
             "command": "python",
-            "args": [".claude/scripts/pr_gate.py", "--hook"],
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/pr_gate.py", "--hook"],
             "timeout": 90,
-            "statusMessage": "pr-gate: validating merge"
+            "statusMessage": "quality gates"
           },
           {
             "type": "command",
             "command": "python",
-            "args": [".claude/scripts/workspace_guard.py", "--check"],
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/workspace_guard.py", "--check"],
             "timeout": 30,
-            "statusMessage": "workspace-guard: checking for foreign changes"
+            "statusMessage": "quality gates"
           }
         ]
       }
@@ -28,9 +28,8 @@
           {
             "type": "command",
             "command": "python",
-            "args": [".claude/scripts/workspace_guard.py", "--track"],
-            "timeout": 15,
-            "async": true
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/scripts/workspace_guard.py", "--track"],
+            "timeout": 15
           }
         ]
       }
