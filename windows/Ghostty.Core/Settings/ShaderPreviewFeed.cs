@@ -1,11 +1,11 @@
 using System;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Ghostty.Core.Logging;
 using Microsoft.Extensions.Logging;
 
-namespace Ghostty.Settings;
+namespace Ghostty.Core.Settings;
 
 /// <summary>
 /// Drives the shader picker's preview terminal with a canned session: a
@@ -17,8 +17,34 @@ namespace Ghostty.Settings;
 /// Mirrors the wintty.io/shaders demo: same DOS flavor, same pacing, same
 /// cursor-shape flips that exercise the mode-change cursor shaders.
 /// </summary>
+/// <remarks>
+/// UI-free and dependency-free, like <c>CustomShaderNoticeSource</c>: the
+/// feed writes to a <see cref="VtSink"/> delegate and paces itself through a
+/// <see cref="PacingDelay"/>, so the script, the ordering, and the
+/// cancellation unit-test without a WinUI runtime or a UI thread. The WinUI
+/// side supplies <c>TerminalControl.WriteVt</c> and <c>Task.Delay</c>.
+///
+/// Not thread-safe, and the sink it is given generally is not either:
+/// <c>WriteVt</c> is UI-thread-only. Start the feed on the UI thread so
+/// every continuation resumes there.
+/// </remarks>
 internal sealed partial class ShaderPreviewFeed : IDisposable
 {
+    /// <summary>
+    /// Where the feed's VT bytes go: the preview terminal in the app, a
+    /// recorder in tests. A bespoke delegate rather than
+    /// <c>Action&lt;ReadOnlySpan&lt;byte&gt;&gt;</c> because a ref struct
+    /// cannot be a type argument to the BCL's <c>Action&lt;T&gt;</c>.
+    /// </summary>
+    internal delegate void VtSink(ReadOnlySpan<byte> bytes);
+
+    /// <summary>
+    /// The pacing hook, awaited for every keystroke gap and beat pause.
+    /// Production passes <see cref="Task.Delay(int, CancellationToken)"/>;
+    /// tests pass a completed task so a full pass of the script runs without
+    /// spending wall-clock time on it.
+    /// </summary>
+    internal delegate Task PacingDelay(int milliseconds, CancellationToken ct);
     // SGR foregrounds only, never a background: the terminal theme is the
     // only background, so fullscreen shaders light up where text is drawn
     // instead of stopping at a palette-resolved bg cell (website lesson).
@@ -103,16 +129,23 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
         new(null, CursorBar),
     };
 
-    private readonly Controls.TerminalControl _terminal;
+    private readonly VtSink _sink;
+    private readonly PacingDelay _delay;
+    private readonly ILogger<ShaderPreviewFeed> _logger;
     // Fixed seed so the demo plays identically every time (matching the
     // website's per-character jitter without its nondeterminism).
     private readonly Random _random = new(1009);
 
     private CancellationTokenSource? _cts;
 
-    public ShaderPreviewFeed(Controls.TerminalControl terminal)
+    internal ShaderPreviewFeed(
+        VtSink sink,
+        ILogger<ShaderPreviewFeed> logger,
+        PacingDelay? delay = null)
     {
-        _terminal = terminal;
+        _sink = sink;
+        _logger = logger;
+        _delay = delay ?? ((ms, ct) => Task.Delay(ms, ct));
     }
 
     /// <summary>Begin autoplay. Safe to call once per feed.</summary>
@@ -139,7 +172,7 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
             // window has settled and the shader is already visible.
             Write(Banner);
             Write(Prompt);
-            await Task.Delay(1200, ct);
+            await _delay(1200, ct);
 
             while (true)
             {
@@ -148,14 +181,14 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
                     if (beat.Command is { } command)
                     {
                         await TypeAsync(command, ct);
-                        await Task.Delay(350, ct);
+                        await _delay(350, ct);
                         Write("\r\n" + beat.Response + Prompt);
                     }
                     else
                     {
                         // A flip is a keypress: pause before and after so
                         // the cursor-shape animation has time to read.
-                        await Task.Delay(650, ct);
+                        await _delay(650, ct);
                         Write(beat.Response);
                     }
                 }
@@ -163,7 +196,7 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
                 // Breathe between passes, then keep scrolling: the session
                 // grows exactly like the website demo, and scrollback
                 // bounds it (the configured scrollback limit).
-                await Task.Delay(4000, ct);
+                await _delay(4000, ct);
             }
         }
         catch (OperationCanceledException)
@@ -174,8 +207,7 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
         {
             // A feed glitch must never take the picker down; the preview
             // just stops playing. Log it so it is diagnosable.
-            Logging.StaticLoggers.SettingsConfigWriter.LogInformation(
-                "shader preview feed stopped: {Message}", ex.Message);
+            LogFeedStopped(ex);
         }
     }
 
@@ -186,23 +218,21 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
         foreach (var ch in text)
         {
             Write(ch.ToString());
-            await Task.Delay(55 + _random.Next(70), ct);
+            await _delay(55 + _random.Next(70), ct);
         }
     }
 
     private void Write(string vt)
     {
-        // WriteVt is UI-thread-only: its disposed guard is a non-volatile
-        // field read followed by a native call on a surface DisposeSurface
-        // frees from the UI thread. Today every write lands on the UI thread
-        // because Start is driven from FirstRender (raised through
-        // GhosttyHost's dispatcher) and every continuation below resumes on
-        // that context. Assert it so a future change that moves the feed off
-        // the UI thread fails loudly in Debug instead of silently racing a
-        // free in Release.
-        Debug.Assert(
-            _terminal.DispatcherQueue.HasThreadAccess,
-            "ShaderPreviewFeed must write from the UI thread; WriteVt is not thread-safe.");
-        _terminal.WriteVt(Encoding.UTF8.GetBytes(vt));
+        _sink(Encoding.UTF8.GetBytes(vt));
     }
+
+    // Its own category, not a borrowed one: raising the config writer's
+    // category to Debug to chase a config bug must not also turn on shader
+    // preview noise. Warning with the exception object, so the stack trace
+    // survives; a feed that stopped is a preview that silently froze.
+    [LoggerMessage(EventId = LogEvents.ShaderPreview.FeedStopped,
+                   Level = LogLevel.Warning,
+                   Message = "[ShaderPreviewFeed] shader preview feed stopped")]
+    private partial void LogFeedStopped(Exception ex);
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using Ghostty.Core.Settings;
 
 using Microsoft.UI.Windowing;
@@ -303,7 +304,22 @@ public sealed partial class ShaderPickerWindow : Window
         // when the surface handle is still zero and WriteVt would silently
         // drop them. Starting on FirstRender also buys the loop a surface
         // that has actually drawn a frame.
-        _feed = new ShaderPreviewFeed(control);
+        // The feed is UI-free by design (it unit-tests without a WinUI
+        // runtime), so the WinUI half of it lives here: the sink is the
+        // control's WriteVt, which is UI-thread-only. FirstRender is raised
+        // through GhosttyHost's dispatcher and every continuation in the feed
+        // resumes on that context, so every write lands on the UI thread; the
+        // assert is what makes a future regression loud rather than a race
+        // against SurfaceFree.
+        _feed = new ShaderPreviewFeed(
+            bytes =>
+            {
+                Debug.Assert(
+                    control.DispatcherQueue.HasThreadAccess,
+                    "ShaderPreviewFeed must write from the UI thread; WriteVt is not thread-safe.");
+                control.WriteVt(bytes);
+            },
+            Logging.StaticLoggers.ShaderPreviewFeed);
         control.FirstRender += OnPreviewFirstRender;
     }
 
