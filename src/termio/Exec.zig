@@ -137,26 +137,26 @@ pub fn threadEnter(
     // independently of the Command's handle.
     const win_proc_handle: if (builtin.os.tag == .windows) windows.HANDLE else void =
         if (comptime builtin.os.tag == .windows) blk: {
-        const cmd = switch (self.subprocess.process orelse return error.ProcessNotStarted) {
-            .fork_exec => |c| c,
-            .flatpak => unreachable, // Flatpak is Linux-only
-        };
-        const src = cmd.pid orelse return error.ProcessNoPid;
-        var dup: windows.HANDLE = undefined;
-        const self_proc = windows.GetCurrentProcess();
-        if (windows.exp.kernel32.DuplicateHandle(
-            self_proc,
-            src,
-            self_proc,
-            &dup,
-            0,
-            windows.FALSE,
-            windows.DUPLICATE_SAME_ACCESS,
-        ) == .FALSE) {
-            return windows.unexpectedError(windows.GetLastError());
-        }
-        break :blk dup;
-    } else {};
+            const cmd = switch (self.subprocess.process orelse return error.ProcessNotStarted) {
+                .fork_exec => |c| c,
+                .flatpak => unreachable, // Flatpak is Linux-only
+            };
+            const src = cmd.pid orelse return error.ProcessNoPid;
+            var dup: windows.HANDLE = undefined;
+            const self_proc = windows.GetCurrentProcess();
+            if (windows.exp.kernel32.DuplicateHandle(
+                self_proc,
+                src,
+                self_proc,
+                &dup,
+                0,
+                windows.FALSE,
+                windows.DUPLICATE_SAME_ACCESS,
+            ) == .FALSE) {
+                return windows.unexpectedError(windows.GetLastError());
+            }
+            break :blk dup;
+        } else {};
 
     // Track our process start time for abnormal exits
     const process_start: std.Io.Timestamp = .now(global.io(), .awake);

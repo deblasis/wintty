@@ -2763,4 +2763,3 @@ test "resolveCell out of range resolves to blank" {
     try testing.expectEqual(state.colors.foreground, wide_y.fg);
     try testing.expectEqual(state.colors.background, wide_y.bg);
 }
-

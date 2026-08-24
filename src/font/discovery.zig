@@ -526,8 +526,12 @@ pub const DirectWrite = struct {
         fn queryInterface(_: *TextAnalysisSource, _: *const dwrite.GUID, _: *?*anyopaque) callconv(.winapi) dwrite.HRESULT {
             return dwrite.E_NOINTERFACE;
         }
-        fn addRef(_: *TextAnalysisSource) callconv(.winapi) u32 { return 1; }
-        fn release(_: *TextAnalysisSource) callconv(.winapi) u32 { return 1; }
+        fn addRef(_: *TextAnalysisSource) callconv(.winapi) u32 {
+            return 1;
+        }
+        fn release(_: *TextAnalysisSource) callconv(.winapi) u32 {
+            return 1;
+        }
 
         fn getTextAtPosition(self: *TextAnalysisSource, pos: u32, text_out: *?[*]const u16, len_out: *u32) callconv(.winapi) dwrite.HRESULT {
             if (pos >= self.text_len) {
