@@ -710,15 +710,21 @@ internal static partial class NativeMethods
     // StringMarshalling.Utf8 is a [LibraryImport] option, not a
     // [MarshalAs], so it coexists with DisableRuntimeMarshalling (same
     // rationale as the clipboard request binding above).
+    //
+    // Imported as void even though the Zig side returns a bool. That bool is
+    // false only when updateConfig fails, NOT when the shader fails to load
+    // or compile (those arrive as the custom_shader_failed action), and there
+    // is nothing a caller can do with it: the preview has no second shader to
+    // fall back to and the surface keeps rendering with whatever it had. A
+    // bool return would promise information nobody consumes, and discarding
+    // one at the call site is how a silent failure hides. Dropping a cdecl
+    // return value is well defined; the callee still pops nothing.
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_set_custom_shader",
         StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    private static partial byte SurfaceSetCustomShaderNative(
+    internal static partial void SurfaceSetCustomShader(
         GhosttySurface surface,
         string? shaderPath);
-
-    internal static bool SurfaceSetCustomShader(GhosttySurface surface, string? shaderPath)
-        => SurfaceSetCustomShaderNative(surface, shaderPath) != 0;
 
     // ghostty_surface_vt_write feeds raw VT bytes into the surface's
     // terminal parser as if they came from the PTY. Raw-pointer overload:
@@ -729,7 +735,7 @@ internal static partial class NativeMethods
     internal static unsafe partial void SurfaceVtWrite(
         GhosttySurface surface,
         byte* utf8,
-        UIntPtr len);
+        nuint len);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_surface_process_exited")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
