@@ -2051,9 +2051,12 @@ pub fn Stream(comptime H: type) type {
                     }
                 },
 
-                // DECRQM - Request Mode
+                // DECRQM - Request Mode. Accepts both the ANSI form (CSI Ps $ p,
+                // one intermediate) and the DEC form (CSI ? Ps $ p, two); the inner
+                // switch tells them apart. Non-`$` single intermediates fall through
+                // to the same unimplemented warning as before.
                 'p' => switch (input.intermediates.len) {
-                    2 => decrqm: {
+                    1, 2 => decrqm: {
                         const ansi_mode = ansi: {
                             switch (input.intermediates.len) {
                                 1 => if (input.intermediates[0] == '$') break :ansi true,
@@ -4890,4 +4893,53 @@ test "stream: continuation every-byte cuts preserve future behavior" {
             restored_final_writer.buffered(),
         );
     };
+}
+
+const DecrqmTestHandler = struct {
+    mode: ?modes.Mode = null,
+    unknown: ?Action.RawMode = null,
+
+    pub fn deinit(_: *@This()) void {}
+
+    pub fn vt(
+        self: *@This(),
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) void {
+        switch (action) {
+            .request_mode => self.mode = value.mode,
+            .request_mode_unknown => self.unknown = value,
+            else => {},
+        }
+    }
+};
+
+test "stream: DECRQM ansi form" {
+    var s: Stream(DecrqmTestHandler) = .init(.{ .handler = .{} });
+    s.nextSlice("\x1b[4$p");
+
+    try testing.expectEqual(modes.Mode.insert, s.handler.mode.?);
+}
+
+test "stream: DECRQM dec form" {
+    var s: Stream(DecrqmTestHandler) = .init(.{ .handler = .{} });
+    s.nextSlice("\x1b[?6$p");
+
+    try testing.expectEqual(modes.Mode.origin, s.handler.mode.?);
+}
+
+test "stream: DECRQM ansi form unknown mode" {
+    var s: Stream(DecrqmTestHandler) = .init(.{ .handler = .{} });
+    s.nextSlice("\x1b[9999$p");
+
+    try testing.expectEqual(@as(u16, 9999), s.handler.unknown.?.mode);
+    try testing.expect(s.handler.unknown.?.ansi);
+}
+
+test "stream: CSI p with a non-$ intermediate is ignored" {
+    var s: Stream(DecrqmTestHandler) = .init(.{ .handler = .{} });
+    s.nextSlice("\x1b[4!p");
+
+    try testing.expect(s.handler.mode == null);
+    try testing.expect(s.handler.unknown == null);
 }
