@@ -3866,13 +3866,13 @@ public sealed partial class MainWindow : Window
     private IntPtr _pickerHandle;
 
     /// <summary>
-    /// The control and tab the picker's surface belongs to.
+    /// The control whose surface the picker was opened on.
     /// <see cref="_pickerSurface"/> is a copy of a raw pointer and nothing
-    /// zeroes it when that surface is freed, so these are what make the
-    /// liveness check in <see cref="ClosePicker"/> possible.
+    /// zeroes it when that surface is freed, so this is what makes the
+    /// liveness check in <see cref="ClosePicker"/> possible: the control
+    /// clears its own handle on disposal.
     /// </summary>
     private Ghostty.Controls.TerminalControl? _pickerTerminal;
-    private Ghostty.Core.Tabs.TabModel? _pickerTab;
     // Held rather than left local to StartPickerPoll: the dispatcher drives
     // the poll, so the window's teardown has no other way to reach it.
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
@@ -3895,7 +3895,6 @@ public sealed partial class MainWindow : Window
 
         _pickerSurface = new GhosttySurface(surfaceHandle);
         _pickerTerminal = terminal;
-        _pickerTab = _tabManager.ActiveTab;
 
         // Theme callback: apply preview/confirm colors on the UI thread.
         _inlineThemeCb = (namePtr, confirmed) =>
@@ -4000,25 +3999,30 @@ public sealed partial class MainWindow : Window
         // frees the surface without touching anything here.
         //
         // The control zeroes its own handle when it disposes the surface, so
-        // a mismatch means the surface is gone. The tab check answers the
-        // other direction: a detached tab carries its live surface to another
-        // window, and deiniting from here would strip the redirects of a
-        // window that never closed.
+        // a mismatch means the surface is gone and nothing can reach the
+        // picker any more. That is the only case where skipping is right, and
+        // it strands the picker allocation, which is what happened before this
+        // path existed at all. Leaking it beats writing through a dangling
+        // pointer.
         //
-        // When neither holds, the picker allocation is stranded, which is
-        // what happened before this path existed at all. Leaking it is the
-        // right trade against writing through a dangling pointer.
+        // Deliberately NOT conditioned on the tab still being ours. A detached
+        // tab carries its live surface to another window with this picker's
+        // input, scroll and resize redirects still installed on it, and this
+        // deinit is the only thing that clears them or frees the picker. Not
+        // running it leaves that window wedged in the picker's alt screen with
+        // its input redirected, and drops the last GC root for the delegate
+        // whose function pointer the picker still holds, so the next keystroke
+        // there is a callback on a collected delegate, which kills the process
+        // rather than throwing. Cleaning up after our own picker is a repair
+        // for that window, not damage to it.
         var live = _pickerTerminal is { } terminal
-            && terminal.SurfaceHandle == _pickerSurface.Handle
-            && _pickerTab is { } tab
-            && _tabManager.Tabs.Contains(tab);
+            && terminal.SurfaceHandle == _pickerSurface.Handle;
         if (live)
             NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
 
         _pickerHandle = IntPtr.Zero;
         _pickerSurface = default;
         _pickerTerminal = null;
-        _pickerTab = null;
         _inlineThemeCb = null;
     }
 }
