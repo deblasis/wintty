@@ -72,16 +72,14 @@ echo "zioshade HLSL: $pass pass, $fail fail"
 # <name>.sc.hlsl and render-diffs them on WARP. A rejection here FAILS the
 # gate: a reference gap is a gate gap (that shader would silently lose its
 # differential).
-# The one normalization: glslang is stricter than zioshade's frontend about
-# reserved words. The gallery uses `active` (reserved in desktop GLSL) as an
-# identifier and zioshade deliberately accepts it (wintty compiles via zioshade
-# alone). Renaming just that identifier on the REFERENCE side is
-# semantics-preserving (a local variable), so the oracle still covers these
-# shaders; anything else glslang or spirv-cross rejects is a loud FAIL.
+# The reference input is the identical prefixed source: no normalization
+# between the two legs. (An earlier normalization renamed the reserved-word
+# identifier `active` on the reference side; the shaders now avoid reserved
+# words, so glslang accepts every gallery source verbatim.)
 refpass=0; reffail=0; reffailed=""
 for glsl in "$shaders_dir"/*.glsl; do
   name=$(basename "$glsl" .glsl)
-  perl -pe 's/\bactive\b/active_/g' "$stage/$name.full.glsl" > "$stage/$name.ref.glsl"
+  cp "$stage/$name.full.glsl" "$stage/$name.ref.glsl"
   if "$GLSLANG" -V -S frag "$stage/$name.ref.glsl" -o "$stage/$name.spv" >/dev/null 2>"$stage/$name.ref.err" &&
      "$SPIRV_CROSS" --hlsl --shader-model 60 "$stage/$name.spv" > "$stage/$name.sc.hlsl" 2>>"$stage/$name.ref.err"; then
     refpass=$((refpass+1))
