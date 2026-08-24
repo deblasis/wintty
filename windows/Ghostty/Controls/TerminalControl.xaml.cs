@@ -69,6 +69,18 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private IntPtr _initialInputUtf8;
     private IntPtr _customShaderUtf8;
 
+    /// <summary>
+    /// True when this surface was created with a per-surface shader override
+    /// (<see cref="PreviewCustomShader"/>), i.e. it is a gallery preview and
+    /// not a real terminal pane. Latched at surface creation, because that is
+    /// the one point the override property is read. Used by
+    /// <see cref="Ghostty.Hosting.GhosttyHost"/> to keep a preview shader's
+    /// failure out of the app-level custom-shader notice, which talks about
+    /// the user's config.
+    /// </summary>
+    internal bool IsPreviewSurface => _isPreviewSurface;
+    private bool _isPreviewSurface;
+
     // The libghostty surface lifecycle is decoupled from
     // OnLoaded/OnUnloaded so that visual-tree reparenting (which fires
     // Unloaded then Loaded asynchronously) does NOT tear down the
@@ -152,10 +164,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// Per-surface custom shader override for preview surfaces. When set
     /// (non-empty path), the surface's renderer uses ONLY this shader,
     /// replacing the configured custom-shader list. Must be set before the
-    /// control loads: it is read once at surface creation. Regular terminal
+    /// control loads: it is read once at surface creation (swap it later
+    /// through <see cref="SetPreviewCustomShader"/>). Regular terminal
     /// surfaces leave it null and follow the app config.
     /// </summary>
     public string? PreviewCustomShader { get; set; }
+
+    /// <summary>
+    /// Command the surface runs instead of the profile's shell. Must be set
+    /// before the control loads. Preview surfaces point this at a silent,
+    /// never-exiting placeholder so the pty never delivers a single byte of
+    /// its own: everything on screen comes from <see cref="WriteVt"/>, which
+    /// makes the preview deterministic and race-free against shell banners.
+    /// Regular terminal surfaces leave it null and use the snapshot's
+    /// resolved command.
+    /// </summary>
+    public string? PreviewCommand { get; set; }
 
     /// <summary>
     /// Take keyboard focus as soon as the surface loads. Real terminal
@@ -190,6 +214,47 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     {
         if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;
         NativeMethods.SurfaceDraw(_surface);
+    }
+
+    /// <summary>
+    /// Swap this surface's custom shader override live. The renderer rebuilds
+    /// its post-process pipeline (the config-change path) while the terminal
+    /// content, scrollback, and cursor are preserved, so a preview flipping
+    /// through shaders never resets. A null or empty path clears the shader.
+    /// No-op once the surface is gone. Only meaningful for surfaces created
+    /// with <see cref="PreviewCustomShader"/>; regular surfaces follow the
+    /// app config.
+    /// </summary>
+    internal void SetPreviewCustomShader(string? shaderPath)
+    {
+        if (_surfaceDisposed || _surface.Handle == IntPtr.Zero) return;
+        NativeMethods.SurfaceSetCustomShader(_surface, shaderPath);
+    }
+
+    /// <summary>
+    /// Feed raw VT bytes into the terminal as if the child program wrote
+    /// them: sequences update the grid, cursor, and colors exactly like pty
+    /// output. Used by preview surfaces, whose placeholder child never
+    /// writes, to drive their canned session.
+    ///
+    /// Must be called on the UI thread, like the sibling
+    /// <see cref="RequestRepaint"/> and <see cref="SetPreviewCustomShader"/>.
+    /// The guard below is a plain read of a non-volatile field plus a read of
+    /// <c>_surface.Handle</c>, and <see cref="DisposeSurface"/> flips that
+    /// field and calls <c>SurfaceFree</c> from the UI thread with no
+    /// synchronization at all. An off-thread caller can therefore see the
+    /// guard pass, be preempted, and hand a freed surface pointer to
+    /// libghostty (an access violation, not an exception). Making this
+    /// genuinely callable from a pty reader thread needs a lock or an
+    /// interlocked handle swap on BOTH sides, not a comment.
+    /// </summary>
+    internal unsafe void WriteVt(ReadOnlySpan<byte> bytes)
+    {
+        if (_surfaceDisposed || bytes.IsEmpty || _surface.Handle == IntPtr.Zero) return;
+        fixed (byte* p = bytes)
+        {
+            NativeMethods.SurfaceVtWrite(_surface, p, (nuint)bytes.Length);
+        }
     }
 
     /// <summary>
@@ -730,15 +795,25 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         _workingDirectoryUtf8 = Snapshot is { WorkingDirectory: { Length: > 0 } wd }
             ? AllocUtf8(wd)
             : AllocEmptyUtf8();
-        _commandUtf8 = Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
-            ? AllocUtf8(cmd)
-            : AllocEmptyUtf8();
+        // PreviewCommand wins over the snapshot: a preview surface never
+        // wants the real shell's banner interleaving with its canned feed.
+        _commandUtf8 = PreviewCommand is { Length: > 0 } previewCmd
+            ? AllocUtf8(previewCmd)
+            : Snapshot is { ResolvedCommand: { Length: > 0 } cmd }
+                ? AllocUtf8(cmd)
+                : AllocEmptyUtf8();
         _initialInputUtf8 = AllocEmptyUtf8();
         // Preview shader override: set BEFORE the control loads (it is read
         // once at surface creation in OnLoaded).
         _customShaderUtf8 = string.IsNullOrEmpty(PreviewCustomShader)
             ? IntPtr.Zero
             : AllocUtf8(PreviewCustomShader);
+        // Latched here rather than recomputed from PreviewCustomShader later:
+        // this is the one moment the property is defined to be read, and
+        // SetPreviewCustomShader swaps the surface's shader without touching
+        // it. What the flag means is "this surface was born a preview", which
+        // is exactly the question the shader-failure notice needs answered.
+        _isPreviewSurface = _customShaderUtf8 != IntPtr.Zero;
 
         var panelPtr = SwapChainPanelInterop.QueryInterface(Panel);
         var surfaceConfig = NativeMethods.SurfaceConfigNew();
