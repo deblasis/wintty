@@ -26,18 +26,181 @@ const Shaders = shaders_mod.Shaders;
 
 const Buffer = buffer_mod.Buffer;
 
+// ---- Test environment helpers ----
+
+/// True when this process runs on an interactive desktop.
+///
+/// The HWND/dcomp tests below need a composition swap chain, and
+/// CreateSwapChainForComposition returns DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+/// (0x887A0022) wherever DWM is not composing for the caller: session 0
+/// services, ssh sessions, and headless CI. Device.init logs that HRESULT
+/// as an error, and the test runner treats any logged error as a run
+/// failure even though the tests themselves skip, so every headless run
+/// of this suite turned two environmental impossibilities into "N errors
+/// were logged" and a failed `zig build test`. Skipping before Device.init
+/// is called keeps the suite green on headless hosts and unchanged on
+/// interactive ones.
+fn hasInteractiveDesktop() bool {
+    if (comptime builtin.os.tag != .windows) return false;
+
+    const USEROBJECTFLAGS = extern struct {
+        fInherit: i32,
+        fReserved: i32,
+        dwFlags: u32,
+    };
+    const UOI_FLAGS: u32 = 1;
+    const WSF_VISIBLE: u32 = 0x0001;
+
+    const user32 = struct {
+        extern "user32" fn GetProcessWindowStation() callconv(.winapi) ?*anyopaque;
+        extern "user32" fn GetUserObjectInformationW(
+            hObj: ?*anyopaque,
+            nIndex: u32,
+            pvInfo: ?*anyopaque,
+            nLength: u32,
+            lpnLengthNeeded: ?*u32,
+        ) callconv(.winapi) i32;
+    };
+
+    const station = user32.GetProcessWindowStation() orelse return false;
+    var flags: USEROBJECTFLAGS = std.mem.zeroes(USEROBJECTFLAGS);
+    var needed: u32 = 0;
+    if (user32.GetUserObjectInformationW(
+        station,
+        UOI_FLAGS,
+        &flags,
+        @sizeOf(USEROBJECTFLAGS),
+        &needed,
+    ) == 0) return false;
+    return flags.dwFlags & WSF_VISIBLE != 0;
+}
+
+/// COM object reduced to its Release slot, for owning a raw IUnknown.
+const AnyComObject = extern struct {
+    vtable: *const VTable,
+    pub const VTable = extern struct {
+        QueryInterface: *const anyopaque,
+        AddRef: *const anyopaque,
+        Release: *const fn (*AnyComObject) callconv(.winapi) u32,
+    };
+};
+
+fn releaseCom(ptr: ?*anyopaque) void {
+    if (ptr) |p| {
+        const obj: *AnyComObject = @ptrCast(@alignCast(p));
+        _ = obj.vtable.Release(obj);
+    }
+}
+
+/// Minimal IDXGIFactory4 binding for EnumWarpAdapter, which is vtable
+/// slot 27: IUnknown holds slots 0..2, IDXGIObject 3..6, IDXGIFactory
+/// 7..11, IDXGIFactory1 12..13, IDXGIFactory2 14..24 (including the two
+/// Unregister methods), IDXGIFactory3 25, then EnumAdapterByLuid 26 and
+/// EnumWarpAdapter 27. Asking for the adapter as IUnknown keeps the
+/// returned pointer usable by D3D12CreateDevice and releasable through
+/// AnyComObject.
+const Factory4 = extern struct {
+    vtable: *const VTable,
+    pub const IID = com.GUID{
+        .data1 = 0x1bc6ea02,
+        .data2 = 0xef36,
+        .data3 = 0x464f,
+        .data4 = .{ 0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a },
+    };
+    pub const VTable = extern struct {
+        QueryInterface: *const fn (*Factory4, *const com.GUID, *?*anyopaque) callconv(.winapi) com.HRESULT,
+        AddRef: *const fn (*Factory4) callconv(.winapi) u32,
+        Release: *const fn (*Factory4) callconv(.winapi) u32,
+        pad: [23]*const anyopaque,
+        EnumAdapterByLuid: *const anyopaque,
+        EnumWarpAdapter: *const fn (*Factory4, *const com.GUID, *?*anyopaque) callconv(.winapi) com.HRESULT,
+    };
+
+    comptime {
+        // The slot arithmetic above is the one thing here that cannot be
+        // checked by reading: a wrong count calls an arbitrary function
+        // pointer. Pin it so the compiler answers on every build.
+        std.debug.assert(@offsetOf(VTable, "EnumWarpAdapter") == 27 * @sizeOf(usize));
+    }
+};
+
+/// The WARP software adapter when WINTTY_GPU_TEST_WARP=1, else null (the
+/// default adapter). This is how the whole TestDevice family can be run
+/// on the software rasterizer on demand, e.g.
+///   WINTTY_GPU_TEST_WARP=1 zig build test -Dtest-filter="DescriptorHeap"
+/// or the same variable set for a loop of full runs on a box whose
+/// default adapter is hardware.
+///
+/// The value must be exactly "1"; anything else (including "true") leaves
+/// the default adapter in place. Acquisition failure while the variable IS
+/// set returns an error rather than falling back: an explicit opt-in that
+/// silently runs on hardware would report a green run for a path it never
+/// exercised, which is the whole point of the knob.
+fn warpAdapterIfRequested() !?*anyopaque {
+    if (comptime builtin.os.tag != .windows) return null;
+
+    const kernel32 = struct {
+        extern "kernel32" fn GetEnvironmentVariableA(
+            lpName: [*:0]const u8,
+            lpBuffer: ?[*]u8,
+            nSize: u32,
+        ) callconv(.winapi) u32;
+    };
+    var buf: [4]u8 = undefined;
+    const n = kernel32.GetEnvironmentVariableA("WINTTY_GPU_TEST_WARP", &buf, buf.len);
+    if (n != 1 or buf[0] != '1') return null;
+
+    var factory: ?*Factory4 = null;
+    const hr = dxgi.CreateDXGIFactory2(0, &Factory4.IID, @ptrCast(&factory));
+    if (com.FAILED(hr) or factory == null) {
+        std.debug.print(
+            "WINTTY_GPU_TEST_WARP=1 but IDXGIFactory4 is unavailable (hr=0x{X:0>8})\n",
+            .{@as(u32, @bitCast(hr))},
+        );
+        return error.WarpAdapterUnavailable;
+    }
+    defer _ = factory.?.vtable.Release(factory.?);
+
+    const iid_iunknown = com.GUID{
+        .data1 = 0x00000000,
+        .data2 = 0x0000,
+        .data3 = 0x0000,
+        .data4 = .{ 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 },
+    };
+    var adapter: ?*anyopaque = null;
+    const hr2 = factory.?.vtable.EnumWarpAdapter(factory.?, &iid_iunknown, &adapter);
+    if (com.FAILED(hr2) or adapter == null) {
+        std.debug.print(
+            "WINTTY_GPU_TEST_WARP=1 but EnumWarpAdapter failed (hr=0x{X:0>8})\n",
+            .{@as(u32, @bitCast(hr2))},
+        );
+        return error.WarpAdapterUnavailable;
+    }
+    return adapter;
+}
+
 // ---- Test device helper ----
 
 /// Minimal debug-layer info queue: the debug layer is enabled by
 /// Device.init in Debug builds, so any validation error from the post
-/// pass lands here. Layout follows d3d12.h's ID3D12InfoQueue.
+/// pass lands here. Layout follows d3d12sdklayers.h's ID3D12InfoQueue:
+/// the IID is 0742a90b-c387-483f-b946-30a7e4e61458 and the method order
+/// after IUnknown is SetMessageCountLimit, ClearStoredMessages,
+/// GetMessage, then the GetNum* counters. The two defects this corrects
+/// in the previous declaration: a wrong IID (E_NOINTERFACE on every
+/// machine, so the drain below never ran and healthy runs printed
+/// "D3D12 debug layer unavailable") and ID3D12InfoQueue1's mute methods
+/// spliced into the vtable, which left GetNumStoredMessages on
+/// GetMessage's slot and GetMessage on a counter's slot; the drain only
+/// worked at all because the wrong IID kept the misaligned calls from
+/// ever being made.
 const InfoQueue = extern struct {
     vtable: *const VTable,
     pub const IID = com.GUID{
         .data1 = 0x0742a90b,
-        .data2 = 0x426e,
-        .data3 = 0x479e,
-        .data4 = .{ 0x8d, 0xe5, 0x30, 0x10, 0xf7, 0x63, 0x63, 0x94 },
+        .data2 = 0xc387,
+        .data3 = 0x483f,
+        .data4 = .{ 0xb9, 0x46, 0x30, 0xa7, 0xe4, 0xe6, 0x14, 0x58 },
     };
     pub const Message = extern struct {
         Category: u32,
@@ -50,14 +213,21 @@ const InfoQueue = extern struct {
         QueryInterface: *const fn (*InfoQueue, *const com.GUID, *?*anyopaque) callconv(.winapi) com.HRESULT,
         AddRef: *const fn (*InfoQueue) callconv(.winapi) u32,
         Release: *const fn (*InfoQueue) callconv(.winapi) u32,
-        SetMuteDebugOutput: *const fn (*InfoQueue, i32) callconv(.winapi) void,
-        GetMuteDebugOutput: *const fn (*InfoQueue) callconv(.winapi) i32,
-        GetNumStoredMessages: *const fn (*InfoQueue) callconv(.winapi) u64,
-        GetNumStoredMessagesAllowedByRetrievalFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
-        GetNumMessagesDeniedByRetrievalFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
-        GetNumMessagesDiscardedByMessageFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        SetMessageCountLimit: *const fn (*InfoQueue, u64) callconv(.winapi) com.HRESULT,
+        ClearStoredMessages: *const fn (*InfoQueue) callconv(.winapi) void,
         GetMessage: *const fn (*InfoQueue, u64, ?*Message, *usize) callconv(.winapi) com.HRESULT,
+        GetNumMessagesAllowedByStorageFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetNumMessagesDeniedByStorageFilter: *const fn (*InfoQueue) callconv(.winapi) u64,
+        GetNumStoredMessages: *const fn (*InfoQueue) callconv(.winapi) u64,
     };
+
+    comptime {
+        // The previous declaration spliced ID3D12InfoQueue1's mute methods
+        // in front of the counters, leaving GetMessage on a counter's slot.
+        // Pin the layout so that class of defect fails the build.
+        std.debug.assert(@offsetOf(VTable, "GetMessage") == 5 * @sizeOf(usize));
+        std.debug.assert(@offsetOf(VTable, "GetNumStoredMessages") == 8 * @sizeOf(usize));
+    }
 };
 
 /// Bundles a device, command queue, command list, and fence so tests
@@ -115,10 +285,14 @@ const TestDevice = struct {
 fn createTestDevice() !TestDevice {
     if (comptime builtin.os.tag != .windows) return error.TestSkipped;
 
-    // Device
+    // Device. Null adapter selects the system GPU; the WARP software
+    // adapter replaces it when WINTTY_GPU_TEST_WARP=1 (see
+    // warpAdapterIfRequested).
+    const warp_adapter = try warpAdapterIfRequested();
+    defer releaseCom(warp_adapter);
     var device: ?*d3d12.ID3D12Device = null;
     var hr = d3d12.D3D12CreateDevice(
-        null,
+        @ptrCast(@alignCast(warp_adapter)),
         d3d12.D3D_FEATURE_LEVEL_12_0,
         &d3d12.ID3D12Device.IID,
         @ptrCast(&device),
@@ -598,6 +772,7 @@ test "Frame: create, reset, deinit" {
 
 test "Device: HWND surface uses DirectComposition with PREMULTIPLIED alpha" {
     if (comptime builtin.os.tag != .windows) return;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
     const HINSTANCE = std.os.windows.HINSTANCE;
@@ -766,6 +941,7 @@ test "Device: shared texture deinit does not leak" {
 
 test "Device: HWND surface with 0x0 dimensions clamps to 1x1" {
     if (comptime builtin.os.tag != .windows) return;
+    if (!hasInteractiveDesktop()) return error.SkipZigTest;
 
     const HWND = dxgi.HWND;
     const HINSTANCE = std.os.windows.HINSTANCE;
@@ -1145,8 +1321,18 @@ test "post pipeline: scanline shader leaves row periodicity" {
             var i: u64 = 0;
             while (i < n and i < 20) : (i += 1) {
                 var len: usize = 0;
-                _ = iq.?.vtable.GetMessage(iq.?, i, null, &len);
-                const buf = alloc.alloc(u8, len) catch break;
+                const size_hr = iq.?.vtable.GetMessage(iq.?, i, null, &len);
+                if (com.FAILED(size_hr)) {
+                    std.debug.print(
+                        "  (message {d}: size query failed, hr=0x{X:0>8})\n",
+                        .{ i, @as(u32, @bitCast(size_hr)) },
+                    );
+                    continue;
+                }
+                // Message is read back through this buffer, so it must carry
+                // the struct's alignment: alloc gives align 1 and the cast
+                // below is a checked @alignCast, not a hint.
+                const buf = alloc.alignedAlloc(u8, .of(InfoQueue.Message), len) catch break;
                 defer alloc.free(buf);
                 const msg: *InfoQueue.Message = @ptrCast(@alignCast(buf.ptr));
                 if (iq.?.vtable.GetMessage(iq.?, i, msg, &len) == 0) {
