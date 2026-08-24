@@ -63,3 +63,9 @@ windows/scripts/vtabs-switcher/
 # Gallery tooling scratch renders (WARP PPMs and PNGs diffed during
 # shader bring-up; never something we want committed).
 tools/gallery/previews/
+
+# Agent session worktrees and nightly quality-control state
+.claude/worktrees/
+.agents/worktrees/
+.agents/nightly-logs/
+.agents/scripts/__pycache__/
