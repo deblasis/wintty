@@ -327,7 +327,8 @@ function Invoke-SelfTest {
     foreach ($fn in @(
         'Write-Osc', 'ConvertTo-B64', 'ConvertTo-B64Text',
         'Read-Until-Terminal', 'Clear-Input', 'Convert-ReadReply',
-        'Write-ClipboardPayload', 'Read-ClipboardPayload', 'Invoke-Sweep',
+        'Write-ClipboardPayload', 'Read-ClipboardPayload',
+        'Invoke-Sweep', 'New-FillerBytes',
         'Get-Sha', 'New-TestPng')) {
         Check "function $fn is defined" ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) 'missing'
     }
@@ -377,68 +378,123 @@ function New-TestPng([int]$w, [int]$h, [int]$seed) {
 
 # ---- run ------------------------------------------------------------------
 
+function New-FillerBytes([int]$n) {
+    # StringBuilder, not a pipeline. Generating 256KB one character at a time
+    # through ForEach-Object takes longer than the write being measured, and
+    # while it sits outside the timed region it still makes the sweep tedious
+    # enough that nobody runs it.
+    $sb = [Text.StringBuilder]::new($n)
+    for ($i = 0; $i -lt $n; $i++) { [void]$sb.Append([char](97 + ($i % 26))) }
+    return [Text.Encoding]::UTF8.GetBytes($sb.ToString())
+}
+
 function Invoke-Sweep {
     # text/plain, not PNG: the size is then exactly what was asked for, and
     # no image encoder sits between the harness and the path being measured.
-    $sizes = @(1KB, 4KB, 16KB, 64KB, 256KB)
+    $sizes = @(4KB, 16KB, 64KB, 256KB)
+    $repeats = 5
+    $chunkBytes = 24000
     $rows = @()
 
     Write-Host ''
     Write-Host 'Write-cost sweep. Reading nothing, so no read prompt.'
     Write-Host 'Needs clipboard-write = allow, or each size waits on a dialog.'
     Write-Host ''
-    Write-Host '     size      encode     write    KB/s'
+
+    # Discarded, never reported. The first write of the session pays for JIT
+    # and for whatever the clipboard initialises once, and folding that into
+    # the smallest sample is how the first version of this sweep produced a
+    # negative slope and then printed a confident sentence about it.
+    Write-Host '  warming up (first write is discarded)...'
+    $null = Write-ClipboardPayload (New-FillerBytes 4KB) 'text/plain' 'sweep-warmup'
+
+    Write-Host ''
+    Write-Host "     size   chunks    median     best    KB/s   (n=$repeats)"
 
     foreach ($n in $sizes) {
-        $text = -join ((1..$n) | ForEach-Object { [char](97 + ($_ % 26)) })
-        $payload = [Text.Encoding]::UTF8.GetBytes($text)
+        $payload = New-FillerBytes $n
+        $chunks = [Math]::Ceiling($payload.Length / $chunkBytes)
+        $samples = @()
 
-        # The harness's own share, measured separately so it can be subtracted
-        # rather than argued about. It has been ~2ms for 31KB; if the write
-        # comes back at hundreds of ms, this line is what proves the cost is
-        # not here.
-        $swEnc = [Diagnostics.Stopwatch]::StartNew()
-        $null = [Convert]::ToBase64String($payload)
-        $swEnc.Stop()
+        # Repeats and a median, because one sample of a clipboard write on a
+        # desktop is competing with whatever else is running. A single number
+        # per size cannot be distinguished from noise, and this sweep exists
+        # to settle an argument rather than to add to it.
+        for ($r = 0; $r -lt $repeats; $r++) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $null = Write-ClipboardPayload $payload 'text/plain' "sweep-$n-$r"
+            $sw.Stop()
+            $samples += $sw.Elapsed.TotalMilliseconds
+        }
 
-        $swW = [Diagnostics.Stopwatch]::StartNew()
-        $null = Write-ClipboardPayload $payload 'text/plain' "sweep-$n"
-        $swW.Stop()
+        $sorted = $samples | Sort-Object
+        $median = $sorted[[int]($repeats / 2)]
+        $best = $sorted[0]
+        $kbs = [Math]::Round(($payload.Length / 1KB) / ($median / 1000.0), 1)
 
-        $ms = [Math]::Max(1, $swW.ElapsedMilliseconds)
-        $kbs = [Math]::Round(($payload.Length / 1KB) / ($ms / 1000.0), 1)
-        Write-Host ('  {0,7}   {1,6}ms  {2,6}ms  {3,7}' -f
-            "$([int]($n/1KB))KB", $swEnc.ElapsedMilliseconds, $swW.ElapsedMilliseconds, $kbs)
-        $rows += [pscustomobject]@{ Bytes = $payload.Length; Ms = $swW.ElapsedMilliseconds }
+        Write-Host ('  {0,7}   {1,6}   {2,6:N1}ms  {3,6:N1}ms  {4,6}' -f
+            "$([int]($n/1KB))KB", $chunks, $median, $best, $kbs)
+        $rows += [pscustomobject]@{ Bytes = $payload.Length; Ms = $median; Chunks = $chunks }
     }
 
-    # Two points, two unknowns. Cost per byte comes from the slope between the
-    # smallest and largest sample; the intercept is what every write pays
-    # regardless of size. Crude, but it is the distinction that matters and it
-    # needs no curve fitting to see.
-    $lo = $rows[0]
-    $hi = $rows[-1]
-    $perByte = ($hi.Ms - $lo.Ms) / [double]($hi.Bytes - $lo.Bytes)
-    $fixed = $lo.Ms - ($perByte * $lo.Bytes)
+    # Least squares over every sample, not the two endpoints. An endpoint fit
+    # gives one outlier total control of the answer, which is exactly what
+    # went wrong before.
+    $nPts = $rows.Count
+    $sumX = ($rows | Measure-Object -Property Bytes -Sum).Sum
+    $sumY = ($rows | Measure-Object -Property Ms -Sum).Sum
+    $sumXY = 0.0; $sumXX = 0.0
+    foreach ($row in $rows) {
+        $sumXY += [double]$row.Bytes * $row.Ms
+        $sumXX += [double]$row.Bytes * $row.Bytes
+    }
+    $denom = ($nPts * $sumXX) - ($sumX * $sumX)
+    $perByte = if ($denom -ne 0) { (($nPts * $sumXY) - ($sumX * $sumY)) / $denom } else { 0 }
+    $fixed = ($sumY - ($perByte * $sumX)) / $nPts
+
+    # How well the straight line actually describes the data. Reported because
+    # a fit nobody checked is what produced the last wrong answer: if the
+    # points are not on a line, neither the slope nor the intercept means
+    # anything and this must say so instead of picking one.
+    $meanY = $sumY / $nPts
+    $ssTot = 0.0; $ssRes = 0.0
+    foreach ($row in $rows) {
+        $pred = $fixed + ($perByte * $row.Bytes)
+        $ssRes += [Math]::Pow($row.Ms - $pred, 2)
+        $ssTot += [Math]::Pow($row.Ms - $meanY, 2)
+    }
+    $r2 = if ($ssTot -gt 0) { 1 - ($ssRes / $ssTot) } else { 0 }
 
     Write-Host ''
-    Write-Host ('  fixed cost per write : {0:N0}ms' -f [Math]::Max(0, $fixed))
-    Write-Host ('  marginal cost        : {0:N2}ms per KB  ({1:N0} KB/s at the margin)' -f
-        ($perByte * 1KB), $(if ($perByte -gt 0) { 1000.0 / ($perByte * 1KB) } else { 0 }))
+    Write-Host ('  linear fit: {0:N0}ms fixed + {1:N2}ms per KB   (R2 = {2:N3})' -f
+        $fixed, ($perByte * 1KB), $r2)
     Write-Host ''
-    if ($fixed -gt 100) {
-        Write-Host '  Reading: cost is dominated by the FIXED part, so this is a'
-        Write-Host '  per-write expense (the clipboard call itself, or work done'
-        Write-Host '  once per transaction). Faster parsing would not move it.'
+
+    if ($perByte -le 0 -or $r2 -lt 0.9) {
+        # Refusing to answer is a result. A model this poor cannot separate
+        # fixed cost from marginal cost, and reporting either number would be
+        # inventing precision the data does not have.
+        Write-Host '  INCONCLUSIVE: cost is not linear in payload size, so the'
+        Write-Host '  fixed and marginal figures above do not mean what they'
+        Write-Host '  say. Read the per-size KB/s column instead: if it climbs'
+        Write-Host '  with size, a per-transaction cost is being amortised and'
+        Write-Host '  throughput is not the problem.'
+    }
+    elseif ($fixed -gt 100) {
+        Write-Host '  Cost is dominated by the FIXED part, so this is a per-write'
+        Write-Host '  expense (the clipboard call itself, or work done once per'
+        Write-Host '  transaction). Faster parsing would not move it.'
     }
     else {
-        Write-Host '  Reading: cost scales with SIZE, so this is throughput --'
-        Write-Host '  the transport or the parser. Compare the marginal figure'
-        Write-Host '  against upstream before calling it a regression.'
+        Write-Host ('  Cost scales with SIZE at {0:N0} KB/s.' -f (1000.0 / ($perByte * 1KB)))
+        Write-Host '  Upstream quoted 1MiB in 446ms (about 2300 KB/s) BEFORE'
+        Write-Host '  their SIMD work, so compare against that before calling'
+        Write-Host '  anything here a regression.'
     }
     Write-Host ''
     exit 0
 }
+
 
 # Dispatched below every function definition, not beside the parameter
 # block: the self-test's roll call asserts each function the live run
