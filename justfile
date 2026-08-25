@@ -281,6 +281,17 @@ clipboard-roundtrip-selftest:
 clipboard-roundtrip args="":
     pwsh -NoProfile -File windows/scripts/kitty-clipboard-roundtrip.ps1 {{args}}; exit ($LASTEXITCODE ?? 1)
 
+# Write cost against payload size, run INSIDE Wintty.
+#
+# A single round-trip timing cannot say whether a slow clipboard write is a
+# fixed per-write expense or a per-byte one, and those have opposite fixes.
+# This writes five sizes and reports the shape, so the answer comes from a
+# slope rather than from a guess. Set clipboard-write = allow first, or every
+# size waits on a dialog and the numbers measure the human.
+[windows]
+clipboard-sweep:
+    pwsh -NoProfile -File windows/scripts/kitty-clipboard-roundtrip.ps1 -Sweep; exit ($LASTEXITCODE ?? 1)
+
 # Randomized round-trip fuzz over the clipboard marshalling boundary.
 #
 # No build of the app, no desktop, safe to run with Wintty open. The ladder
