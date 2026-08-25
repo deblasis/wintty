@@ -248,6 +248,39 @@ fuzz args="": _no-wintty-running build-dll build-win
 [windows]
 fuzzy args="": (fuzz args)
 
+# Round-trip a payload through the system clipboard over OSC 5522.
+#
+# RUN THIS INSIDE WINTTY. It drives the terminal with escape sequences and
+# reads the replies off its own stdin, so it needs no GUI automation and no
+# synthesized input. Oracle: SHA-256 of the bytes written against the bytes
+# read back.
+#
+# This is the only harness here that exercises the LIVE C ABI end to end --
+# write_clipboard_cb out to the Windows clipboard and read_clipboard_cb back
+# again. `just clipboard-fuzz` checks our reader against our writer; this
+# checks that libghostty drives them the way we think.
+#
+# Attended by default: the read raises the permission prompt and waits for a
+# human to allow it, which is also how you check the prompt previews an image
+# as an image. Pass `unattended` once clipboard-read and clipboard-write are
+# both `allow` in the config, and then iterations above 1 loop without anyone
+# watching.
+# Exercise the round-trip harness's own reply parser against synthetic
+# replies. No terminal, no clipboard, no human, about a second.
+#
+# It exists because every failure that harness reported on its first outing
+# was a bug in the parser rather than in the clipboard, and each one cost a
+# full attended run to find. Parsing a reply is string processing; it does
+# not need a GUI to be checked, and checking it here keeps the attended run
+# for verifying the product instead of debugging the harness.
+[windows]
+clipboard-roundtrip-selftest:
+    pwsh -NoProfile -File windows/scripts/kitty-clipboard-roundtrip.ps1 -SelfTest; exit ($LASTEXITCODE ?? 1)
+
+[windows]
+clipboard-roundtrip args="":
+    pwsh -NoProfile -File windows/scripts/kitty-clipboard-roundtrip.ps1 {{args}}; exit ($LASTEXITCODE ?? 1)
+
 # Randomized round-trip fuzz over the clipboard marshalling boundary.
 #
 # No build of the app, no desktop, safe to run with Wintty open. The ladder
