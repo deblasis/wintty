@@ -27,6 +27,8 @@ internal static class LogEvents
         public const int ReadHandlerErr     = 2104; // ClipboardBridge
         public const int ConfirmHandlerErr  = 2105; // ClipboardBridge
         public const int WriteHandlerErr    = 2106; // ClipboardBridge
+        public const int ServedMimeNoReader = 2107; // WinUiClipboardBackend
+        public const int WriteWroteNothing  = 2108; // WinUiClipboardBackend
     }
 
     // 2200-2299: ThemePreview
@@ -39,7 +41,6 @@ internal static class LogEvents
         public const int PipeError         = 2204;
         public const int InvalidThemeName  = 2205;
         public const int PipeServerUnavailable = 2206;
-        public const int NoWindowForThemePicker = 2207;
     }
 
     // 2300-2399: WindowState + migration

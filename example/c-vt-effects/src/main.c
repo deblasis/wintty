@@ -40,13 +40,17 @@ void on_title_changed(GhosttyTerminal terminal, void* userdata) {
 //! [effects-title-changed]
 
 //! [effects-clipboard-write]
-GhosttyClipboardWriteResult on_clipboard_write(
+void on_clipboard_write(
     GhosttyTerminal terminal,
     void* userdata,
     const GhosttyClipboardWrite* write) {
   (void)terminal;
   (void)userdata;
 
+  // The write is synchronous: a real embedder would ask the user for
+  // permission here (unless write->granted) and the VT stream waits until
+  // this callback returns. The replied result is sent to the program
+  // (OSC 5522) through the write_pty callback.
   printf("  clipboard write (location=%d, contents=%zu)\n",
          (int)write->location, write->contents_len);
   if (write->contents_len == 0) {
@@ -66,7 +70,12 @@ GhosttyClipboardWriteResult on_clipboard_write(
     printf("\n");
   }
 
-  return GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+  GhosttyClipboardWriteReply reply = {
+      .size = sizeof(reply),
+      .result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS,
+      .remember = false,
+  };
+  write->reply(write, &reply);
 }
 //! [effects-clipboard-write]
 

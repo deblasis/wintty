@@ -11,6 +11,9 @@
 //!     metadata section), an unknown or missing `type`, and invalid
 //!     base64 in `mime`, `name`, or `pw` all silently drop the request
 //!     with no response.
+//!   * Decoded metadata and MIME-list payloads must be valid UTF-8. An
+//!     invalid value on `wdata` or `walias`, or a `walias` without a
+//!     target MIME type, aborts an in-flight write with EINVAL.
 //!   * `mime`, `name`, and `pw` metadata values are base64-encoded UTF-8;
 //!     everything else is verbatim. Unknown keys are ignored.
 //!   * `id` is sanitized by stripping characters outside [a-zA-Z0-9-_+.]
@@ -21,7 +24,6 @@
 //!   * A `type=write` silently replaces any in-flight transaction. A
 //!     commit (`type=wdata` without a MIME type) with no in-flight
 //!     transaction is silently ignored.
-//!   * Oversized writes are truncated and still complete with DONE.
 //!   * Responses never send a payload section for an empty payload,
 //!     except the targets ('.') listing DATA packet which is always sent.
 //!
@@ -44,6 +46,7 @@ pub const Terminator = oscpkg.Terminator;
 
 pub const Metadata = command.Metadata;
 pub const Payload = command.Payload;
+pub const readPromptExempt = command.readPromptExempt;
 pub const max_id_len = command.max_id_len;
 pub const max_pw_len = command.max_pw_len;
 pub const max_mime_len = command.max_mime_len;

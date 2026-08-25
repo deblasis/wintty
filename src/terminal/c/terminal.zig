@@ -28,6 +28,7 @@ const selection_c = @import("selection.zig");
 const style_c = @import("style.zig");
 const color = @import("../color.zig");
 const clipboard = @import("../clipboard.zig");
+const kitty_clipboard = @import("../kitty/clipboard.zig");
 const c_io = @import("io.zig");
 const snapshot_core = @import("../snapshot/main.zig");
 const Result = @import("result.zig").Result;
@@ -129,6 +130,8 @@ pub const ClipboardContent = extern struct {
 };
 
 /// A protocol-neutral request to replace or clear clipboard contents.
+/// The embedder answers by calling `reply` with the request before the
+/// callback returns.
 ///
 /// C: GhosttyClipboardWrite
 pub const ClipboardWrite = extern struct {
@@ -136,7 +139,27 @@ pub const ClipboardWrite = extern struct {
     location: clipboard.Location,
     contents: ?[*]const ClipboardContent,
     contents_len: usize,
+    name: lib.String,
+    granted: bool,
+    can_remember: bool,
+    /// Terminal-owned reply state; opaque to the embedder.
+    ctx: *const anyopaque,
+    reply: ClipboardWriteReplyFn,
 };
+
+/// The reply to a clipboard write request.
+///
+/// C: GhosttyClipboardWriteReply
+pub const ClipboardWriteReply = extern struct {
+    size: usize,
+    result: clipboard.Write.Status,
+    remember: bool,
+};
+
+/// C function pointer type for replying to a clipboard write.
+///
+/// C: GhosttyClipboardWriteReplyFn
+pub const ClipboardWriteReplyFn = *const fn (*const ClipboardWrite, *const ClipboardWriteReply) callconv(lib.calling_conv) void;
 
 /// The reply to a clipboard read request.
 ///
@@ -293,8 +316,9 @@ const Effects = struct {
     pub const XtversionFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) lib.String;
 
     /// C function pointer type for the clipboard_write callback. The request
-    /// and its contents are borrowed and only valid for the callback duration.
-    pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
+    /// is borrowed for the callback duration and must be answered through
+    /// its reply function before the callback returns.
+    pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the clipboard_read callback. The request
     /// is borrowed for the callback duration and must be answered through
@@ -365,9 +389,15 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata);
     }
 
-    fn clipboardWriteTrampoline(handler: *Handler, write: clipboard.Write) clipboard.WriteResult {
+    /// Opaque context behind ClipboardWrite.ctx for the reply trampoline.
+    const ClipboardWriteCtx = struct {
+        write: clipboard.Write,
+    };
+
+    fn clipboardWriteTrampoline(handler: *Handler, write: clipboard.Write) void {
         const wrapper = TerminalWrapper.fromHandler(handler);
-        const func = wrapper.effects.clipboard_write orelse return .unsupported;
+        const func = wrapper.effects.clipboard_write orelse
+            return write.reply(.unsupported);
 
         // Most protocols currently produce one representation, so keep that
         // path allocation-free while supporting arbitrary multi-MIME writes.
@@ -376,7 +406,7 @@ const Effects = struct {
             stack_contents[0..write.contents.len]
         else
             wrapper.terminal.gpa().alloc(ClipboardContent, write.contents.len) catch
-                return .io_error;
+                return write.reply(.io_error);
         defer if (write.contents.len > stack_contents.len)
             wrapper.terminal.gpa().free(contents);
 
@@ -393,13 +423,35 @@ const Effects = struct {
             };
         }
 
+        const ctx: ClipboardWriteCtx = .{ .write = write };
         const request: ClipboardWrite = .{
             .size = @sizeOf(ClipboardWrite),
             .location = write.location,
             .contents = if (contents.len > 0) contents.ptr else null,
             .contents_len = contents.len,
+            .name = .init(write.name),
+            .granted = write.granted,
+            .can_remember = write.can_remember,
+            .ctx = &ctx,
+            .reply = &clipboardWriteReplyTrampoline,
         };
-        return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+        func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+    }
+
+    fn clipboardWriteReplyTrampoline(
+        request: *const ClipboardWrite,
+        reply: *const ClipboardWriteReply,
+    ) callconv(lib.calling_conv) void {
+        const ctx: *const ClipboardWriteCtx = @ptrCast(@alignCast(request.ctx));
+        const write = ctx.write;
+        switch (reply.result) {
+            .success => write.reply(.{ .success = .{ .remember = reply.remember } }),
+            .denied => write.reply(.denied),
+            .busy => write.reply(.busy),
+            .invalid_data => write.reply(.invalid_data),
+            .io_error => write.reply(.io_error),
+            .unsupported, _ => write.reply(.unsupported),
+        }
     }
 
     /// Opaque context behind ClipboardRead.ctx for the reply trampoline.
@@ -1166,6 +1218,7 @@ pub const Option = enum(c_int) {
     unknown_max_bytes = 36,
     terminfo_name = 37,
     clipboard_read = 38,
+    clipboard_write_max_bytes = 39,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -1201,6 +1254,7 @@ pub const Option = enum(c_int) {
             .scrollback_max_lines,
             .continuation_max_bytes,
             .unknown_max_bytes,
+            .clipboard_write_max_bytes,
             => ?*const usize,
             .selection => ?*const selection_c.CSelection,
             .default_cursor_style => ?*const TerminalCursorStyle,
@@ -1401,6 +1455,8 @@ fn setTyped(
         ),
         .unknown_max_bytes => wrapper.stream.handler.apc_handler.unknown_max_bytes =
             if (value) |ptr| ptr.* else 0,
+        .clipboard_write_max_bytes => wrapper.stream.handler.kitty_clipboard_write_max_bytes =
+            if (value) |ptr| ptr.* else kitty_clipboard.max_write_size,
         .mode, .mode_default => {
             const config = (value orelse return .invalid_value).*;
             const mode = config.toMode() orelse return .invalid_value;
@@ -1534,6 +1590,7 @@ pub const TerminalData = enum(c_int) {
     mode = 37,
     vt_ground = 38,
     cursor_at_prompt = 39,
+    clipboard_write_max_bytes = 40,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -1558,6 +1615,7 @@ pub const TerminalData = enum(c_int) {
             .scrollback_max_bytes,
             .scrollback_max_lines,
             .continuation_max_bytes,
+            .clipboard_write_max_bytes,
             => usize,
             .width_px, .height_px => u32,
             .color_foreground,
@@ -1709,6 +1767,7 @@ fn getTyped(
             out.* = max;
         },
         .continuation_max_bytes => out.* = continuationMaxBytes(wrapper),
+        .clipboard_write_max_bytes => out.* = wrapper.stream.handler.kitty_clipboard_write_max_bytes,
         .mode => {
             const mode = out.toMode() orelse return .invalid_value;
             out.value = t.modes.get(mode);
@@ -4607,13 +4666,16 @@ test "set clipboard_write callback" {
         var last_mime_lens: [8]usize = @splat(0);
         var last_data: [8][64]u8 = undefined;
         var last_data_lens: [8]usize = @splat(0);
-        var next_result: clipboard.WriteResult = .success;
+        var last_name_len: usize = 0;
+        var last_granted: bool = true;
+        var last_can_remember: bool = true;
+        var next_result: clipboard.Write.Status = .success;
 
         fn clipboardWrite(
             terminal_: Terminal,
             ud: ?*anyopaque,
             request: *const ClipboardWrite,
-        ) callconv(lib.calling_conv) clipboard.WriteResult {
+        ) callconv(lib.calling_conv) void {
             count += 1;
             last_terminal = terminal_;
             last_userdata = ud;
@@ -4621,6 +4683,9 @@ test "set clipboard_write callback" {
             last_location = request.location;
             last_contents_null = request.contents == null;
             last_contents_len = request.contents_len;
+            last_name_len = request.name.len;
+            last_granted = request.granted;
+            last_can_remember = request.can_remember;
 
             if (request.contents) |ptr| {
                 for (ptr[0..@min(request.contents_len, last_mimes.len)], 0..) |content, i| {
@@ -4638,7 +4703,11 @@ test "set clipboard_write callback" {
                 }
             }
 
-            return next_result;
+            request.reply(request, &.{
+                .size = @sizeOf(ClipboardWriteReply),
+                .result = next_result,
+                .remember = false,
+            });
         }
     };
     S.count = 0;
@@ -4664,6 +4733,11 @@ test "set clipboard_write callback" {
     try testing.expectEqual(@as(usize, 1), S.last_contents_len);
     try testing.expectEqualStrings("text/plain", S.last_mimes[0][0..S.last_mime_lens[0]]);
     try testing.expectEqualSlices(u8, "hello\x00world", S.last_data[0][0..S.last_data_lens[0]]);
+
+    // OSC 52 carries no program identity or password grant state.
+    try testing.expectEqual(@as(usize, 0), S.last_name_len);
+    try testing.expect(!S.last_granted);
+    try testing.expect(!S.last_can_remember);
 
     // OSC 52 destinations are normalized rather than exposed as wire bytes.
     const location_cases = [_]struct {
@@ -4704,8 +4778,9 @@ test "set clipboard_write callback" {
     try testing.expectEqualStrings("text/plain", S.last_mimes[0][0..S.last_mime_lens[0]]);
     try testing.expectEqualStrings("iTerm", S.last_data[0][0..S.last_data_lens[0]]);
 
-    // Every representation is converted, and callback results propagate
-    // through the C trampoline for protocols that can acknowledge writes.
+    // Every representation is converted, and callback replies propagate
+    // back through the C trampoline for protocols that can acknowledge
+    // writes.
     const internal_contents = [_]clipboard.Content{
         .{ .mime = "text/plain", .data = "plain" },
         .{ .mime = "application/octet-stream", .data = "a\x00b" },
@@ -4713,13 +4788,27 @@ test "set clipboard_write callback" {
         .{ .mime = "text/rtf", .data = "{\\rtf1 plain}" },
         .{ .mime = "image/png", .data = "\x89PNG" },
     };
+    const Reply = struct {
+        var last: ?clipboard.Write.Result = null;
+        fn reply(_: *anyopaque, result: clipboard.Write.Result) void {
+            last = result;
+        }
+    };
     S.next_result = .busy;
     const handler = &t.?.stream.handler;
-    const write_result = handler.effects.clipboard_write.?(handler, .{
+    handler.effects.clipboard_write.?(handler, .{
         .location = .primary,
         .contents = &internal_contents,
+        .name = "app",
+        .granted = true,
+        .can_remember = true,
+        .reply_ctx = handler,
+        .reply_fn = &Reply.reply,
     });
-    try testing.expectEqual(clipboard.WriteResult.busy, write_result);
+    try testing.expect(Reply.last.? == .busy);
+    try testing.expectEqual(@as(usize, 3), S.last_name_len);
+    try testing.expect(S.last_granted);
+    try testing.expect(S.last_can_remember);
     try testing.expectEqual(@as(usize, 7), S.count);
     try testing.expectEqual(@as(usize, 5), S.last_contents_len);
     try testing.expectEqualStrings(
@@ -4779,6 +4868,9 @@ test "kitty clipboard write via C effects" {
         var last_mime_lens: [4]usize = @splat(0);
         var last_data: [4][64]u8 = undefined;
         var last_data_lens: [4]usize = @splat(0);
+        var last_granted: bool = true;
+        var last_can_remember: bool = true;
+        var next_remember: bool = false;
 
         fn writePty(
             _: Terminal,
@@ -4794,7 +4886,7 @@ test "kitty clipboard write via C effects" {
             _: Terminal,
             _: ?*anyopaque,
             request: *const ClipboardWrite,
-        ) callconv(lib.calling_conv) clipboard.WriteResult {
+        ) callconv(lib.calling_conv) void {
             write_count += 1;
             last_location = request.location;
             last_contents_len = request.contents_len;
@@ -4812,13 +4904,22 @@ test "kitty clipboard write via C effects" {
                     );
                 }
             }
-            return .success;
+            last_granted = request.granted;
+            last_can_remember = request.can_remember;
+            request.reply(request, &.{
+                .size = @sizeOf(ClipboardWriteReply),
+                .result = .success,
+                .remember = next_remember,
+            });
         }
     };
     S.responses_len = 0;
     S.write_count = 0;
     S.last_mime_lens = @splat(0);
     S.last_data_lens = @splat(0);
+    S.last_granted = true;
+    S.last_can_remember = true;
+    S.next_remember = false;
 
     try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
     try testing.expectEqual(Result.success, set(t, .clipboard_write, @ptrCast(&S.clipboardWrite)));
@@ -4846,12 +4947,36 @@ test "kitty clipboard write via C effects" {
         "\x1B]5522;type=write:status=DONE:id=c1\x1B\\",
         S.responses[0..S.responses_len],
     );
+    try testing.expect(!S.last_granted);
+    try testing.expect(!S.last_can_remember);
+
+    // Password grants round-trip through the C reply: the first pw'd
+    // commit isn't granted and asks to remember, so the next one
+    // arrives granted.
+    S.responses_len = 0;
+    S.next_remember = true;
+    const grant_seqs = [_][]const u8{
+        "\x1B]5522;type=write:id=g1:pw=c2VjcmV0:name=YXBw\x1B\\",
+        "\x1B]5522;type=wdata\x1B\\",
+        "\x1B]5522;type=write:id=g2:pw=c2VjcmV0:name=YXBw\x1B\\",
+        "\x1B]5522;type=wdata\x1B\\",
+    };
+    for (grant_seqs) |seq| vt_write(t, seq.ptr, seq.len);
+    try testing.expectEqual(@as(usize, 3), S.write_count);
+    try testing.expect(S.last_granted);
+    try testing.expect(S.last_can_remember);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=DONE:id=g1\x1B\\" ++
+            "\x1B]5522;type=write:status=DONE:id=g2\x1B\\",
+        S.responses[0..S.responses_len],
+    );
+    S.next_remember = false;
 
     // Without a read callback reads are denied.
     S.responses_len = 0;
     const read = "\x1B]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1B\\";
     vt_write(t, read, read.len);
-    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expectEqual(@as(usize, 3), S.write_count);
     try testing.expectEqualStrings(
         "\x1B]5522;type=read:status=EPERM:id=r1\x1B\\",
         S.responses[0..S.responses_len],
@@ -4930,6 +5055,81 @@ test "kitty clipboard write via C effects" {
         "\x1B]5522;type=write:status=ENOSYS:id=c2\x1B\\",
         S.responses[0..S.responses_len],
     );
+}
+
+test "set clipboard write max bytes" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var responses: [512]u8 = undefined;
+        var responses_len: usize = 0;
+        var write_count: usize = 0;
+
+        fn writePty(
+            _: Terminal,
+            _: ?*anyopaque,
+            ptr: [*]const u8,
+            len: usize,
+        ) callconv(lib.calling_conv) void {
+            @memcpy(responses[responses_len..][0..len], ptr[0..len]);
+            responses_len += len;
+        }
+
+        fn clipboardWrite(
+            _: Terminal,
+            _: ?*anyopaque,
+            request: *const ClipboardWrite,
+        ) callconv(lib.calling_conv) void {
+            write_count += 1;
+            request.reply(request, &.{
+                .size = @sizeOf(ClipboardWriteReply),
+                .result = .success,
+                .remember = false,
+            });
+        }
+    };
+    S.responses_len = 0;
+    S.write_count = 0;
+
+    try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
+    try testing.expectEqual(Result.success, set(t, .clipboard_write, @ptrCast(&S.clipboardWrite)));
+
+    // The built-in default reads back.
+    var max: usize = 0;
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
+
+    // Set a tiny limit; an oversized text write fails with EFBIG and
+    // never reaches the callback.
+    const limit: usize = 4;
+    try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, @ptrCast(&limit)));
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(limit, max);
+
+    const seqs = [_][]const u8{
+        "\x1B]5522;type=write:id=c1\x1B\\",
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbA==\x1B\\", // "Hell"
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bw==\x1B\\", // "o"
+        "\x1B]5522;type=wdata\x1B\\",
+    };
+    for (seqs) |seq| vt_write(t, seq.ptr, seq.len);
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EFBIG:id=c1\x1B\\",
+        S.responses[0..S.responses_len],
+    );
+
+    // A NULL value reverts to the built-in default.
+    try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, null));
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
 }
 
 test "set clipboard_read callback" {

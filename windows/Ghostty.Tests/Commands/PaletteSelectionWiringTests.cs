@@ -85,13 +85,25 @@ public class PaletteSelectionWiringTests
         Assert.Equal(2, ShellSource.Load(ViewModel).Root.Calls("PaletteSelection.Step").Count);
     }
 
-    // The guard that used to live here -- "no disabled #if region assigns
-    // FilteredCommands" -- moved into ShellSource.Load, which now parses with
-    // the symbol defined and refuses outright to hand back a tree that still
-    // has disabled regions. So the demo block in this file is real syntax to
-    // the guards above rather than trivia they look through, and the same now
-    // holds for every file a test reads through Load rather than for this one
-    // alone. It is not corpus-wide: AllUnder hands back raw text, and
-    // ParseForCorpusScan and AllShellSources each skip that refusal on
-    // purpose, for the reason each of them documents.
+    /// <summary>
+    /// The parser runs with no preprocessor symbols, so a disabled `#if`
+    /// region is trivia and every guard above looks straight through it.
+    /// This file has a live `#if DEMO` block, so a demo path that touched
+    /// the list would ship unguarded in DEMO builds.
+    /// </summary>
+    [Fact]
+    public void NoDisabledRegionTouchesTheList()
+    {
+        var hidden = ShellSource.Load(ViewModel).Root
+            .DescendantTrivia()
+            .Where(t => t.IsKind(SyntaxKind.DisabledTextTrivia))
+            .Select(t => t.ToString())
+            .Where(t => t.Contains("FilteredCommands"))
+            .ToList();
+
+        Assert.True(hidden.Count == 0,
+            "A conditionally compiled region assigns FilteredCommands. It is trivia to "
+            + "the parser, so the guards in this file cannot see it: "
+            + string.Join("\n", hidden));
+    }
 }

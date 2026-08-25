@@ -43,13 +43,13 @@ internal sealed class WindowsProcessRunner : IProcessRunner
         try
         {
             if (!process.Start())
-                return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.DidNotStart);
+                return new ProcessResult(-1, "", "", sw.Elapsed);
         }
         catch (System.ComponentModel.Win32Exception)
         {
             // File not found / not executable. Match the interface
             // contract: ExitCode = -1 means "did not start".
-            return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.DidNotStart);
+            return new ProcessResult(-1, "", "", sw.Elapsed);
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -72,13 +72,13 @@ internal sealed class WindowsProcessRunner : IProcessRunner
             // immediately.
             try { await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false); }
             catch { }
-            return new ProcessResult(-1, "", "", sw.Elapsed, Ended(ct));
+            return new ProcessResult(-1, "", "", sw.Elapsed);
         }
 
         // Process exited cleanly; drain the read tasks. If cts was
         // cancelled in the tiny window between WaitForExit returning and
-        // the awaits completing (e.g. token raced the exit), report it the
-        // same way as the WaitForExit cancellation branch.
+        // the awaits completing (e.g. token raced the exit), treat as a
+        // timeout — same shape as the WaitForExit cancellation branch.
         string stdout;
         string stderr;
         try
@@ -88,17 +88,8 @@ internal sealed class WindowsProcessRunner : IProcessRunner
         }
         catch (OperationCanceledException)
         {
-            return new ProcessResult(-1, "", "", sw.Elapsed, Ended(ct));
+            return new ProcessResult(-1, "", "", sw.Elapsed);
         }
-        return new ProcessResult(process.ExitCode, stdout, stderr, sw.Elapsed, ProcessOutcome.Exited);
+        return new ProcessResult(process.ExitCode, stdout, stderr, sw.Elapsed);
     }
-
-    /// <summary>
-    /// Which cancellation ended the run. The linked source fires for both the
-    /// caller's token and CancelAfter, so only the caller's own token can tell
-    /// them apart -- and they are not the same event: a timeout is evidence
-    /// about the child, a cancelled pipeline is evidence about the caller.
-    /// </summary>
-    private static ProcessOutcome Ended(CancellationToken ct) =>
-        ct.IsCancellationRequested ? ProcessOutcome.Canceled : ProcessOutcome.TimedOut;
 }

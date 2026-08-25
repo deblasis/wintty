@@ -170,13 +170,30 @@ internal delegate void GhosttyWakeupCb(IntPtr userdata);
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate byte GhosttyActionCb(GhosttyApp app, IntPtr targetPtr, IntPtr actionPtr);
 
+// ghostty_runtime_read_clipboard_cb. The mime filter (a NULL-terminated-ish
+// array plus its length) says which representations the caller will accept;
+// an empty filter means "anything". `listing` marks an enumerate-only
+// request, which upstream deliberately exempts from the permission prompt.
+// Returns ghostty_clipboard_read_result_e, not a bool: libghostty gates the
+// mode 5522 report on the distinction between "nothing there" and "this
+// runtime cannot do that".
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate byte GhosttyReadClipboardCb(IntPtr userdata, GhosttyClipboard kind, IntPtr state);
+internal delegate GhosttyClipboardReadResult GhosttyReadClipboardCb(
+    IntPtr userdata,
+    GhosttyClipboard kind,
+    IntPtr state,
+    IntPtr mimeFilter,      // const char* const*
+    UIntPtr mimeFilterLen,
+    byte listing);
 
+// ghostty_runtime_confirm_read_clipboard_cb. The second argument used to be
+// a plain const char* preview; it is now a ghostty_clipboard_confirm_s*
+// carrying the contents, the available MIME names, the requesting party's
+// name, and whether a "remember for this session" grant may be offered.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void GhosttyConfirmReadClipboardCb(
     IntPtr userdata,
-    IntPtr str,
+    IntPtr confirm,         // const ghostty_clipboard_confirm_s*
     IntPtr state,
     GhosttyClipboardRequest request);
 
@@ -744,37 +761,49 @@ internal static partial class NativeMethods
     internal static bool SurfaceProcessExited(GhosttySurface surface)
         => SurfaceProcessExitedNative(surface) != 0;
 
-    // ghostty_surface_complete_clipboard_request(surface, text, state, confirmed)
-    // Called once per read/confirm request to return clipboard text to libghostty
-    // and release its internal request state. Must be called exactly once even on
-    // error paths -- skipping it leaks state inside libghostty.
-    // StringMarshalling.Utf8 is a first-class [LibraryImport] option and
-    // is NOT a [MarshalAs] attribute, so it coexists cleanly with
-    // DisableRuntimeMarshalling. Only `confirmed` needed the fix.
-    [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request",
-        StringMarshalling = StringMarshalling.Utf8)]
+    // ghostty_surface_complete_clipboard_request(surface, complete_s*, state)
+    // Called once per read/confirm request to return clipboard contents to
+    // libghostty and release its internal request state. Must be called
+    // exactly once even on error paths -- skipping it leaks state inside
+    // libghostty. The deny entry point below is the other way to discharge
+    // the obligation; exactly one of the two must run.
+    //
+    // `confirmed` used to be a trailing bool here. It now lives inside
+    // ghostty_clipboard_complete_s along with `remember`, so a denial is no
+    // longer expressible as "complete with confirmed = false" -- that would
+    // now complete with an EMPTY payload and a confirmed flag, which is not
+    // the same thing. Denials go through SurfaceDenyClipboardRequest.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial void SurfaceCompleteClipboardRequestNative(
         IntPtr surface,
-        string text,
-        IntPtr state,
-        byte confirmed);
+        IntPtr complete,
+        IntPtr state);
 
     internal static void SurfaceCompleteClipboardRequest(
         IntPtr surface,
-        string text,
-        IntPtr state,
-        bool confirmed)
-        => SurfaceCompleteClipboardRequestNative(surface, text, state, confirmed ? (byte)1 : (byte)0);
+        IntPtr complete,
+        IntPtr state)
+        => SurfaceCompleteClipboardRequestNative(surface, complete, state);
+
+    // ghostty_surface_deny_clipboard_request(surface, state)
+    // Discharges the request without supplying contents. This is the correct
+    // answer for "the user said no" and for "this runtime cannot serve that",
+    // both of which previously had to be faked as an empty completion.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_deny_clipboard_request")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceDenyClipboardRequestNative(
+        IntPtr surface,
+        IntPtr state);
+
+    internal static void SurfaceDenyClipboardRequest(IntPtr surface, IntPtr state)
+        => SurfaceDenyClipboardRequestNative(surface, state);
 
 
     // ---- inline theme picker ---------------------------------------------
 
-    // Callback for the inline theme picker, fired for each preview/confirm
-    // event. Synchronous, on the calling thread: the picker only ever runs
-    // from the surface's input and scroll redirects, so this arrives inside
-    // the key or scroll call the embedder made -- the UI thread, not an
-    // apprt one.
+    // Callback for the inline theme picker. Fired from the Zig/apprt
+    // thread for each preview/confirm event.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void InlineThemeCallback(IntPtr namePtr, byte confirmed);
 

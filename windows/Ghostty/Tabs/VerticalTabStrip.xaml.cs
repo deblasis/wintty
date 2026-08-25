@@ -39,6 +39,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     private SolidColorBrush? _shellInactiveTextBrush;
     private SolidColorBrush? _defaultActiveTextBrush;
     private bool _selectionRefreshScheduled;
+    private bool _placementSettleHooked;
     private uint _stripBackdropPacked = 0x0C0C0C;
 
     private static readonly SolidColorBrush TransparentBrush =
@@ -345,6 +346,38 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
+    /// Re-place the row once the pane's next layout pass has landed.
+    ///
+    /// Closing a row above the active one moves the active row without
+    /// changing any size this control watches, and MUXC has not re-arranged
+    /// the pane by the time the deferred pass runs, so TransformToVisual
+    /// still reports the offset the row had before the removal and the fill
+    /// is left marking the slot the closed tab vacated. The zero-bounds
+    /// retry does not cover it: the surviving item's bounds are non-zero,
+    /// only its offset is stale. A bring-into-view scroll moves the row the
+    /// same way, for the same reason.
+    ///
+    /// One-shot rather than the standing LayoutUpdated subscription this
+    /// control deliberately avoids: it costs one extra placement per refresh
+    /// request instead of one per layout pass anywhere in the window.
+    /// </summary>
+    private void PlaceSelectionRowAfterLayout()
+    {
+        if (_placementSettleHooked) return;
+        _placementSettleHooked = true;
+        LayoutUpdated += OnSelectionRowPlacementSettled;
+    }
+
+    private void OnSelectionRowPlacementSettled(object? sender, object e)
+    {
+        // Unhook first: placing the row invalidates layout, and a handler
+        // still attached would be re-entered on the pass that causes.
+        LayoutUpdated -= OnSelectionRowPlacementSettled;
+        _placementSettleHooked = false;
+        UpdateSelectionRow();
+    }
+
+    /// <summary>
     /// Fill and readable foreground the active row paints itself with.
     /// The morph ghost stands in for that row across a layout switch, so it
     /// asks for the real chrome rather than approximating it -- an
@@ -511,6 +544,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void ScheduleSelectionLayoutPass(bool retryIfZeroBounds)
     {
         UpdateSelectionRow();
+        // Both passes below read offsets from a layout that may not have
+        // caught up with the change that asked for this refresh, so the
+        // authoritative placement is the one after layout settles.
+        PlaceSelectionRowAfterLayout();
 
         if (_selectionRefreshScheduled) return;
         _selectionRefreshScheduled = true;

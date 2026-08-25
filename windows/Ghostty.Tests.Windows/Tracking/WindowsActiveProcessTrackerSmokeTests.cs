@@ -17,10 +17,7 @@ public sealed class WindowsActiveProcessTrackerSmokeTests
         _output = output;
     }
 
-    // PwshFact, not SpawnFact: this spawns pwsh, which is not in-box on
-    // Windows and pays a runtime cold start that the whole 8s budget below is
-    // sized around. A cmd.exe measurement predicts neither.
-    [PwshFact]
+    [Fact]
     public async Task Track_PwshThenCmd_ReportsTransition()
     {
         // Spawn pwsh and have it run a long-lived cmd child that waits on

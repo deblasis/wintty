@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Ghostty.Core.Clipboard;
@@ -56,23 +57,38 @@ internal sealed class ClipboardBridge
 
     // read_clipboard_cb
 
-    public bool HandleRead(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
+    public GhosttyClipboardReadResult HandleRead(
+        IntPtr userdata,
+        GhosttyClipboard kind,
+        IntPtr state,
+        IntPtr mimeFilter,
+        UIntPtr mimeFilterLen,
+        bool listing)
     {
         var surface = _resolveSurface(userdata);
         if (surface == IntPtr.Zero)
-            return false;
+            return GhosttyClipboardReadResult.Unsupported;
 
         var managedKind = (ClipboardKind)kind;
-        if (managedKind == ClipboardKind.Selection)
-            return false;
+        if (managedKind is ClipboardKind.Selection or ClipboardKind.Primary)
+        {
+            // Win32 has no PRIMARY-style buffer. Unsupported, not
+            // Unavailable: libghostty gates the mode 5522 report on the
+            // difference, and answering "empty" here would advertise a
+            // selection clipboard we do not have.
+            return GhosttyClipboardReadResult.Unsupported;
+        }
+
+        // Copy the MIME filter WHILE STILL ON THE CALLER'S THREAD; the array
+        // belongs to libghostty for the duration of this call.
+        var accepted = ClipboardConfirmMarshaller.ReadStringArray(mimeFilter, mimeFilterLen);
 
         var enqueued = _dispatcher.TryEnqueue(async () =>
         {
-            string textToReturn = string.Empty;
+            ClipboardReadOutcome outcome = ClipboardReadOutcome.Empty;
             try
             {
-                var text = await _service.HandleReadAsync(managedKind);
-                textToReturn = text ?? string.Empty;
+                outcome = await _service.HandleKittyReadAsync(managedKind, accepted, listing);
             }
             catch (Exception ex)
             {
@@ -81,46 +97,40 @@ internal sealed class ClipboardBridge
             finally
             {
                 if (_isSurfaceAlive(surface))
-                {
-                    NativeMethods.SurfaceCompleteClipboardRequest(
-                        surface, textToReturn, state, false);
-                }
+                    Complete(surface, state, outcome, confirmed: false, remember: false);
             }
         });
 
         if (!enqueued)
         {
-            // Dispatcher shutting down. Complete synchronously so
-            // libghostty does not leak the request state.
+            // Dispatcher shutting down. Discharge the request synchronously
+            // so libghostty does not leak the state.
             if (_isSurfaceAlive(surface))
-            {
-                NativeMethods.SurfaceCompleteClipboardRequest(
-                    surface, string.Empty, state, false);
-            }
+                NativeMethods.SurfaceDenyClipboardRequest(surface, state);
         }
 
-        return true;
+        return GhosttyClipboardReadResult.Started;
     }
 
     // confirm_read_clipboard_cb
 
-    public void HandleConfirm(IntPtr userdata, IntPtr str, IntPtr state, GhosttyClipboardRequest request)
+    public void HandleConfirm(IntPtr userdata, IntPtr confirmPtr, IntPtr state, GhosttyClipboardRequest request)
     {
         var surface = _resolveSurface(userdata);
         if (surface == IntPtr.Zero)
             return;
 
-        // CRITICAL: copy the C string before the callback returns.
-        // libghostty owns the buffer for the duration of this call only.
-        var text = Marshal.PtrToStringUTF8(str) ?? string.Empty;
+        // CRITICAL: copy everything the struct points at before the callback
+        // returns. libghostty owns the whole graph for this call only.
+        var snapshot = ClipboardConfirmMarshaller.Read(confirmPtr);
         var managedRequest = (ClipboardConfirmRequest)request;
 
         var enqueued = _dispatcher.TryEnqueue(async () =>
         {
-            bool confirmed = false;
+            var decision = ClipboardConfirmResult.Denied;
             try
             {
-                confirmed = await _service.HandleConfirmAsync(text, managedRequest, surface);
+                decision = await _service.HandleConfirmAsync(snapshot, managedRequest, surface);
             }
             catch (Exception ex)
             {
@@ -130,17 +140,60 @@ internal sealed class ClipboardBridge
             {
                 if (_isSurfaceAlive(surface))
                 {
-                    NativeMethods.SurfaceCompleteClipboardRequest(
-                        surface, text, state, confirmed);
+                    if (decision.Accepted)
+                    {
+                        // The contents come back from the snapshot, not from a
+                        // fresh clipboard read: what the user approved is what
+                        // they were shown. Re-reading here would open a window
+                        // in which the clipboard changes between the prompt and
+                        // the answer.
+                        using var complete = new NativeClipboardComplete(
+                            snapshot.Contents,
+                            snapshot.Available,
+                            confirmed: true,
+                            decision.Remember && snapshot.CanRemember);
+                        NativeMethods.SurfaceCompleteClipboardRequest(surface, complete.Pointer, state);
+                    }
+                    else
+                    {
+                        NativeMethods.SurfaceDenyClipboardRequest(surface, state);
+                    }
                 }
             }
         });
 
         if (!enqueued && _isSurfaceAlive(surface))
+            NativeMethods.SurfaceDenyClipboardRequest(surface, state);
+    }
+
+    // Completes a read with a single text/plain representation, or denies
+    // when there was nothing to give. Completing with an empty payload and
+    // denying are different answers now that `confirmed` lives inside the
+    // struct, and libghostty distinguishes them.
+    // Completes a read, or denies it when there is nothing to give.
+    // Completing with an empty payload and denying are different answers
+    // now that `confirmed` lives inside the struct, and libghostty
+    // distinguishes them.
+    private static void Complete(
+        IntPtr surface,
+        IntPtr state,
+        ClipboardReadOutcome outcome,
+        bool confirmed,
+        bool remember)
+    {
+        if (outcome.Status != ClipboardReadStatus.Ok)
         {
-            NativeMethods.SurfaceCompleteClipboardRequest(
-                surface, text, state, false);
+            NativeMethods.SurfaceDenyClipboardRequest(surface, state);
+            return;
         }
+
+        // `available` is what the clipboard is offering, NOT what the caller
+        // asked for. A caller that filtered to image/png still wants to be
+        // told text/plain exists, which is the whole point of the LIST
+        // request being answerable without reading anything.
+        using var complete = new NativeClipboardComplete(
+            outcome.Contents, outcome.Available, confirmed, remember);
+        NativeMethods.SurfaceCompleteClipboardRequest(surface, complete.Pointer, state);
     }
 
     // write_clipboard_cb
@@ -152,7 +205,7 @@ internal sealed class ClipboardBridge
             return;
 
         var managedKind = (ClipboardKind)kind;
-        if (managedKind == ClipboardKind.Selection)
+        if (managedKind is ClipboardKind.Selection or ClipboardKind.Primary)
             return;
 
         // Walk the array WHILE STILL ON THE CALLER'S THREAD. The native
