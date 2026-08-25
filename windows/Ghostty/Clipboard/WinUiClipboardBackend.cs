@@ -91,12 +91,12 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
             switch (WindowsClipboardFormatMap.FromMime(payload.Mime))
             {
                 case WindowsClipboardFormat.Text:
-                    package.SetText(payload.Data);
+                    package.SetText(payload.Text);
                     break;
                 case WindowsClipboardFormat.Html:
                     // CreateHtmlFormat wraps the body in the CF_HTML
                     // header that Word and Outlook understand.
-                    package.SetHtmlFormat(HtmlFormatHelper.CreateHtmlFormat(payload.Data));
+                    package.SetHtmlFormat(HtmlFormatHelper.CreateHtmlFormat(payload.Text));
                     break;
                 default:
                     // Unknown MIME: already filtered by the service, but

@@ -9,4 +9,7 @@ public enum ClipboardConfirmRequest
     Paste = 0,
     Osc52Read = 1,
     Osc52Write = 2,
+    KittyRead = 3,
+    KittyWrite = 4,
+    List = 5,
 }
