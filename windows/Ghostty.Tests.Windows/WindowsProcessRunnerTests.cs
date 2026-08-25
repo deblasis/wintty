@@ -20,7 +20,12 @@ public sealed class WindowsProcessRunnerTests
         Assert.Equal(42, result.ExitCode);
     }
 
-    [SpawnFact]
+    // Plain Fact: nothing here ever spawns successfully, and there is no
+    // elapsed assertion, so spawn latency cannot change the answer. A host
+    // that denies process creation outright reaches DidNotStart down the same
+    // catch as a missing file. Gating it would delete the only coverage of
+    // that path on exactly the hosts the gate fires on.
+    [Fact]
     public async System.Threading.Tasks.Task Run_MissingExe_ReturnsMinusOne()
     {
         var runner = new WindowsProcessRunner();
@@ -51,5 +56,38 @@ public sealed class WindowsProcessRunnerTests
         Assert.Equal(ProcessOutcome.TimedOut, result.Outcome);
         Assert.Equal(-1, result.ExitCode);
         Assert.InRange(sw.ElapsedMilliseconds, 400, 3000);
+    }
+
+    [SpawnFact]
+    public async System.Threading.Tasks.Task Run_CallerCancelsMidFlight_ReportsCanceled()
+    {
+        // The timeout is two orders of magnitude past the cancel, so nothing
+        // but the caller's token can be what ended this run. Reporting TimedOut
+        // here would assert the child was too slow, which it was not.
+        var runner = new WindowsProcessRunner();
+        using var cts = new CancellationTokenSource();
+        var run = runner.RunAsync("ping.exe", new[] { "-n", "60", "127.0.0.1" },
+            TimeSpan.FromSeconds(60), cts.Token);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(200));
+        var result = await run;
+        Assert.Equal(ProcessOutcome.Canceled, result.Outcome);
+        // Cancelled runs stay -1 like every other non-Exited ending, so
+        // callers that only read ExitCode see no change.
+        Assert.Equal(-1, result.ExitCode);
+    }
+
+    [SpawnFact]
+    public async System.Threading.Tasks.Task Run_CallerTokenAlreadyCanceled_ReportsCanceled()
+    {
+        // Same distinction without the race: the token is dead before the
+        // runner is called, so the elapsed time cannot be mistaken for a
+        // timeout by anything downstream either.
+        var runner = new WindowsProcessRunner();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var result = await runner.RunAsync("ping.exe", new[] { "-n", "60", "127.0.0.1" },
+            TimeSpan.FromSeconds(60), cts.Token);
+        Assert.Equal(ProcessOutcome.Canceled, result.Outcome);
+        Assert.Equal(-1, result.ExitCode);
     }
 }

@@ -15,12 +15,15 @@ public enum ProcessOutcome
     Exited,       // Ran to completion; ExitCode is the child's own.
     DidNotStart,  // Never spawned: file not found, not executable.
     TimedOut,     // Spawned, then killed when the timeout elapsed.
+    Canceled,     // Spawned, then killed because the caller's token fired.
 }
 
 /// <summary>
-/// Result of running an external process. ExitCode is -1 if the
-/// process did not start (e.g. file not found) or was killed on
-/// timeout; Outcome says which of the two happened.
+/// Result of running an external process. ExitCode is -1 for every ending
+/// but Exited, so callers that only read it are unaffected; Outcome says
+/// which ending it was. Canceled is separate from TimedOut because a
+/// pipeline that abandons its probes says nothing about how long the child
+/// was going to take.
 /// </summary>
 public sealed record ProcessResult(
     int ExitCode,
