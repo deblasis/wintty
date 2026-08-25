@@ -814,6 +814,47 @@ function Write-NewLines {
 # telling the .NET side, which nothing here does, and every path a harness is
 # handed is absolute - so it costs nothing today. It is named because a harness
 # that starts reading a relative path is where it stops being free.
+# Minimizes every other window, and names what was in the way.
+#
+# The harnesses click at screen coordinates and refuse the click when
+# WindowFromPoint says the pixel belongs to somebody else. That guard is
+# right -- clicking blind into another app is worse than failing -- but with
+# nothing clearing the desktop first, whatever the developer left on screen
+# decides how much of the suite runs. One round lost 10 of 21 harnesses to an
+# overlapping window, and the reason was a HARVEST_MISS buried in a single
+# harness's stderr, which reads as a product problem rather than a desktop
+# one.
+#
+# Minimizing is not a guarantee: an app can raise itself again mid-run. So
+# this reports what it found rather than claiming the desktop is clear.
+function Clear-Desktop {
+    $before = @(Get-Process |
+        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } |
+        ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id })
+
+    try {
+        (New-Object -ComObject Shell.Application).MinimizeAll()
+        Start-Sleep -Milliseconds 600
+    }
+    catch {
+        Write-Host "  could not minimize windows: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host '  harnesses that click by coordinate may be refused by whatever is on top'
+        return
+    }
+
+    $after = @(Get-Process |
+        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle } |
+        ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id })
+
+    Write-Host ("desktop: minimized {0} window(s)" -f $before.Count)
+    if ($after.Count -gt 0) {
+        # Windows that survive MinimizeAll are the ones most likely to steal a
+        # click later: always-on-top overlays, and anything that re-raises
+        # itself. Worth naming now rather than inferring from a failure.
+        Write-Host ("  still on screen: {0}" -f ($after -join ', ')) -ForegroundColor Yellow
+    }
+}
+
 function Start-HarnessProcess {
     param(
         [Parameter(Mandatory)][string[]]$Argv,
@@ -1284,6 +1325,7 @@ if ($useFixtures) {
     # the start of a 40-minute run rather than 30 minutes in is the point.
     Assert-NoWintty -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
+    Clear-Desktop
 }
 
 # ---- run ------------------------------------------------------------------
