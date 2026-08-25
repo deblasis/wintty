@@ -137,7 +137,6 @@ public sealed partial class MainWindow : Window
     private readonly TabBellAnnouncer _bellAnnouncer;
     private readonly WindowThemeManager _themeManager;
     private readonly ShellThemeService _shellTheme;
-    private readonly ThemePreviewService _themePreview;
 
     // Set at the top of OnClosedAsync. Theme callbacks route through the
     // dispatcher, so a switch-then-close can leave an ApplyTheme queued to
@@ -280,6 +279,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal bool IsQuickTerminal { get; }
 
+    /// <summary>
+    /// True once this window's close has started. Process-wide services that
+    /// route work to a window read this so they do not pick one whose panes
+    /// and surfaces are already being torn down.
+    /// </summary>
+    internal bool IsClosing => _isClosed;
+
     internal MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,
@@ -321,8 +327,7 @@ public sealed partial class MainWindow : Window
     /// shared-app ctor. <paramref name="loggerFactory"/> is the
     /// process-wide factory built in App.OnLaunched; MainWindow holds
     /// it to construct loggers for the per-window components it owns
-    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop,
-    /// ThemePreviewService).
+    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop).
     /// </summary>
     private MainWindow(
         ConfigService configService,
@@ -509,11 +514,10 @@ public sealed partial class MainWindow : Window
 
         _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
-        _themePreview = new ThemePreviewService(
-            configService,
-            DispatcherQueue,
-            loggerFactory.CreateLogger<ThemePreviewService>());
-        _themePreview.ListThemesRequested += OnListThemesRequested;
+
+        // The +list-themes pipe server is process-wide, not per window: its
+        // pipe name is per process. App owns the one service and routes the
+        // request here; see App.OnLaunched.
 
         _factory = new PaneHostFactory(_host, configService);
         // Restore a saved session into this window when one was passed and
@@ -1435,25 +1439,6 @@ public sealed partial class MainWindow : Window
         // toggle during teardown puts AppSetColorScheme through the app
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
-        // The preview service owns a named-pipe server on a background task,
-        // so it raises this from outside the window's own lifetime. Detaching
-        // keeps a LIST_THEMES arriving afterwards from starting a picker on a
-        // window whose surfaces are gone; disposing is what ends the task,
-        // which otherwise ran for the life of the process, holding the
-        // per-process pipe name with nobody listening on it. The cancel is
-        // observed by the awaits inside the accept loop, so the synchronous
-        // wait here is bounded.
-        //
-        // The service is per window and the pipe name is per process, so in a
-        // multi-window session only the first one to start ever owns the pipe
-        // (FirstPipeInstance stands the others down at construction). Closing
-        // that window therefore leaves the session with no server rather than
-        // with one whose only subscriber has detached. Both states are broken
-        // for `+list-themes`; this one at least does not leak. The real fix is
-        // to own the service where the bootstrap host lives, the same shape as
-        // the app-targeted config actions, which App owns for that reason.
-        _themePreview.ListThemesRequested -= OnListThemesRequested;
-        _themePreview.Dispose();
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
@@ -3877,8 +3862,19 @@ public sealed partial class MainWindow : Window
     // the poll, so the window's teardown has no other way to reach it.
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
 
-    private void OnListThemesRequested(object? sender, EventArgs e)
+    /// <summary>
+    /// Open the inline theme picker on this window's active surface. Called
+    /// by App when a LIST_THEMES arrives on the preview pipe; App picks the
+    /// window. UI thread only.
+    /// </summary>
+    internal void ShowInlineThemePicker()
     {
+        // App filters closing windows out of the routing, but the request
+        // crosses a thread hop to get here, so one enqueued before this
+        // window's close is delivered after it -- and every surface the
+        // picker would install itself into is already freed by then.
+        if (_isClosed) return;
+
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
 
@@ -3914,7 +3910,9 @@ public sealed partial class MainWindow : Window
                 // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
-                    _themePreview.ApplyThemePreview(name);
+                    // Null once the process shutdown has disposed it, which
+                    // an in-flight picker keystroke can still land after.
+                    Ghostty.App.ThemePreview?.ApplyThemePreview(name);
                 });
             }
             catch { }

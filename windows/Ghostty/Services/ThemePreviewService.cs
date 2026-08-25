@@ -22,7 +22,7 @@ namespace Ghostty.Services;
 ///   "CONFIRM:ThemeName\n"  -- user accepted the theme
 ///   (pipe closed)          -- user cancelled, revert to original
 /// </summary>
-internal sealed partial class ThemePreviewService : IAsyncDisposable, IDisposable
+internal sealed partial class ThemePreviewService : IDisposable
 {
     // Path.GetInvalidFileNameChars() allocates a fresh char[] on each
     // call (defensive copy); SearchValues caches the set once and picks
@@ -61,28 +61,30 @@ internal sealed partial class ThemePreviewService : IAsyncDisposable, IDisposabl
         _serverTask = Task.Run(() => RunServer(_cts.Token));
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        _cts.Cancel();
-        if (_serverTask is not null)
-        {
-            try { await _serverTask; }
-            catch (OperationCanceledException) { }
-            catch (Exception) { /* server loop handles its own errors */ }
-        }
-        _cts.Dispose();
-    }
-
+    /// <summary>
+    /// Ends the accept loop and drops subscribers. Called once, from the
+    /// process shutdown that runs after the last window closes.
+    /// </summary>
+    // Synchronous, and there is no DisposeAsync to prefer: the shutdown that
+    // calls this is a `void` event handler with nothing to await it, so an
+    // async variant would have had no caller able to use it.
+    //
+    // Waiting on the server task from the UI thread is bounded rather than a
+    // deadlock. Every await in the loop -- WaitForConnectionAsync,
+    // ReadLineAsync, the backoff Delay -- takes the token, so the cancel above
+    // completes all three, and the loop never awaits back onto the UI thread:
+    // it hands work over with TryEnqueue and does not wait for it. So nothing
+    // the task still has to do needs the thread that is blocked here.
     public void Dispose()
     {
         _cts.Cancel();
-        // Best-effort synchronous wait -- prefer DisposeAsync.
         try { _serverTask?.GetAwaiter().GetResult(); }
         catch { /* expected OCE or pipe error */ }
         _cts.Dispose();
 
-        // Drop subscribers so MainWindow is not rooted via this event
-        // after the service tears down at window-close.
+        // Drop subscribers. The loop is over by now, but the event is a root
+        // like any other and this service is only ever disposed on the way out
+        // of the process.
         ListThemesRequested = null;
     }
 
@@ -122,11 +124,12 @@ internal sealed partial class ThemePreviewService : IAsyncDisposable, IDisposabl
     /// </summary>
     private async Task<PipeLoopOutcome> RunOneServerSession(CancellationToken ct)
     {
-        // Creating the server is its own failure mode. With FirstPipeInstance
-        // + a per-process PipeName, the ctor throws "All pipe instances are
-        // busy" when another ThemePreviewService in this process already owns
-        // the name -- permanent for this loop, so the policy stands it down
-        // rather than retrying.
+        // Creating the server is its own failure mode. FirstPipeInstance is
+        // what makes the name exclusive, so the ctor throws "All pipe
+        // instances are busy" when anything else already holds it -- another
+        // process squatting the name, or a handle from this process that has
+        // not been released yet. Neither clears by retrying on this loop, so
+        // the policy stands it down rather than spinning.
         NamedPipeServerStream server;
         try
         {
