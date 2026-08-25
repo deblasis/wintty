@@ -32,6 +32,7 @@ internal sealed partial class ThemePreviewService : IDisposable
 
     private readonly ConfigService _configService;
     private readonly DispatcherQueue _dispatcher;
+    private readonly Ghostty.Core.Themes.InlineThemePreviewSession _session;
     private readonly ILogger<ThemePreviewService> _logger;
     private readonly CancellationTokenSource _cts = new();
     private Task? _serverTask;
@@ -43,21 +44,26 @@ internal sealed partial class ThemePreviewService : IDisposable
     /// </summary>
     public event EventHandler? ListThemesRequested;
 
-    // Saved palette so we can revert on cancel.
-    private uint _savedBg, _savedFg;
-    private uint? _savedCursor, _savedCursorText;
-    private uint[]? _savedPalette;
-
     public static string PipeName { get; } =
         $"ghostty-theme-preview-{Environment.ProcessId}";
 
+    /// <param name="session">
+    /// The process's theme browse, shared with the inline picker. This
+    /// service used to keep saved colours of its own, which made it a second
+    /// snapshotter of the same process-wide palette that did not know the
+    /// picker existed: a TUI client could snapshot a theme the picker was
+    /// only browsing, and the picker's cancel could then revert over a theme
+    /// the TUI had confirmed.
+    /// </param>
     public ThemePreviewService(
         ConfigService configService,
         DispatcherQueue dispatcher,
+        Ghostty.Core.Themes.InlineThemePreviewSession session,
         ILogger<ThemePreviewService> logger)
     {
         _configService = configService;
         _dispatcher = dispatcher;
+        _session = session;
         _logger = logger;
     }
 
@@ -203,9 +209,12 @@ internal sealed partial class ThemePreviewService : IDisposable
                 await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
                 _logger.LogClientConnected();
 
-                // Snapshot current colors for revert on cancel.
-                SaveCurrentColors();
-
+                // No snapshot on connect. The session takes one before the
+                // first preview and not before, so a client that connects and
+                // sends nothing but LIST_THEMES leaves the slot alone -- and,
+                // more to the point, a client that connects while a picker is
+                // already browsing does not overwrite what that browse has to
+                // put back.
                 using var reader = new StreamReader(server);
                 var confirmed = false;
 
@@ -226,11 +235,13 @@ internal sealed partial class ThemePreviewService : IDisposable
                     else if (line.StartsWith("PREVIEW:", StringComparison.Ordinal))
                     {
                         var themeName = line[8..];
+                        NotePreview();
                         ApplyThemePreview(themeName);
                     }
                     else if (line.StartsWith("CONFIRM:", StringComparison.Ordinal))
                     {
                         var themeName = line[8..];
+                        NoteConfirm();
                         ApplyThemePreview(themeName);
                         confirmed = true;
                     }
@@ -269,24 +280,40 @@ internal sealed partial class ThemePreviewService : IDisposable
         }
     }
 
-    private void SaveCurrentColors()
-    {
-        _savedBg = _configService.BackgroundColor;
-        _savedFg = _configService.ForegroundColor;
-        _savedCursor = _configService.CursorColor;
-        _savedCursorText = _configService.CursorTextColor;
-        _savedPalette = (uint[])_configService.AnsiPalette.Clone();
-    }
+    /// <summary>
+    /// The live colours, as a snapshot a cancel can restore.
+    /// </summary>
+    private Ghostty.Core.Themes.ThemePreviewColors CaptureColors() => new(
+        _configService.ForegroundColor,
+        _configService.BackgroundColor,
+        _configService.CursorColor,
+        _configService.CursorTextColor,
+        _configService.AnsiPalette);
 
-    private void RevertColors()
-    {
-        if (_savedPalette is null) return;
+    // The three session verbs, each dispatched. The session is UI-thread
+    // state -- the inline picker drives it from the keystroke that opened the
+    // picker -- and this loop runs on a pipe thread, so touching it here would
+    // race the picker rather than share a slot with it. Ordering survives the
+    // hop: ApplyThemePreview enqueues its own apply from this thread too, so
+    // a record queued just before it still lands first, and the snapshot is
+    // taken before the colours it describes are overwritten.
+
+    private void NotePreview() =>
+        _dispatcher.TryEnqueue(() => _session.NotePreview(CaptureColors));
+
+    private void NoteConfirm() => _dispatcher.TryEnqueue(_session.NoteConfirm);
+
+    private void RevertColors() =>
         _dispatcher.TryEnqueue(() =>
         {
+            if (_session.End() is not { } restore) return;
             _configService.ApplyThemeColors(
-                _savedFg, _savedBg, _savedCursor, _savedCursorText, _savedPalette);
+                restore.Foreground,
+                restore.Background,
+                restore.Cursor,
+                restore.CursorText,
+                restore.Palette);
         });
-    }
 
     internal void ApplyThemePreview(string themeName)
     {
