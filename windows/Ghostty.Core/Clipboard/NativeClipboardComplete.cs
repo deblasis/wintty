@@ -2,10 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-using Ghostty.Core.Clipboard;
 using Ghostty.Core.Interop;
 
-namespace Ghostty.Hosting;
+namespace Ghostty.Core.Clipboard;
 
 /// <summary>
 /// Builds an unmanaged ghostty_clipboard_complete_s for
@@ -21,8 +20,16 @@ namespace Ghostty.Hosting;
 /// Payload data is copied as raw bytes, never as a C string: the header
 /// is explicit that clipboard contents are binary-safe and not
 /// necessarily null-terminated. The MIME names beside them ARE C strings.
+///
+/// Lives in Ghostty.Core rather than beside the bridge that uses it
+/// because Ghostty.Tests cannot reference the WinUI project. Pairing this
+/// writer with ClipboardContentMarshaller gives a round-trip that can be
+/// asserted -- build the native memory, read it back, compare the bytes --
+/// which is the only cheap check that covers the stride, the field
+/// offsets and the length together. It has no WinUI dependency, so the
+/// move costs nothing.
 /// </summary>
-internal sealed partial class NativeClipboardComplete : IDisposable
+public sealed partial class NativeClipboardComplete : IDisposable
 {
     private readonly List<IntPtr> _allocations = new();
     private IntPtr _struct;
