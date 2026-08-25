@@ -3904,9 +3904,14 @@ public sealed partial class MainWindow : Window
                 var name = Marshal.PtrToStringUTF8(namePtr);
                 if (name is null) return;
 
-                // The callback fires from the Zig/apprt thread. Dispatch
-                // to the UI thread so ConfigService and ShellThemeService
-                // updates happen on the right thread.
+                // Not a thread hop: the picker calls this synchronously from
+                // the surface's input and scroll redirects, so it arrives
+                // inside the key or scroll call the terminal control made,
+                // on the UI thread. The enqueue earns its place for the
+                // other reason -- it keeps ConfigService and
+                // ShellThemeService off the stack of a native input
+                // callback, rather than re-entering libghostty while it is
+                // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     _themePreview.ApplyThemePreview(name);
@@ -3917,18 +3922,33 @@ public sealed partial class MainWindow : Window
         var cbPtr = Marshal.GetFunctionPointerForDelegate(_inlineThemeCb);
 
         _pickerHandle = NativeMethods.SurfaceListThemes(_pickerSurface, cbPtr);
+        if (_pickerHandle == IntPtr.Zero)
+        {
+            // No picker was installed -- no redirects, no allocation -- so
+            // there is nothing to hand back and ClosePicker returns on the
+            // zero handle before it reaches the clears below. Without this
+            // the window keeps a raw copy of a surface pointer that whoever
+            // owns that surface is free to release, and a strong reference
+            // to the control and its whole pane subtree, until some later
+            // picker opens or the window dies.
+            _pickerSurface = default;
+            _pickerTerminal = null;
+            _inlineThemeCb = null;
+            return;
+        }
+
         // Picker is now active. handleKey fires on each key event and
         // sets should_quit when the user confirms/cancels. We poll on
         // a timer to clean up, avoiding a thread that races with the
         // input redirect callback.
-        if (_pickerHandle != IntPtr.Zero)
-            StartPickerPoll();
+        StartPickerPoll();
     }
 
     private void StartPickerPoll()
     {
-        // Use a DispatcherQueue timer so cleanup runs on the UI thread
-        // with no race against the apprt thread's input redirect.
+        // A DispatcherQueue timer rather than a polling thread, so the
+        // cleanup lands on the same thread the input redirect runs the
+        // picker from and cannot tear it down mid-keystroke.
         //
         // One poll at a time: a second picker replaces _pickerHandle, and a
         // leftover timer would then be polling the new picker and could run

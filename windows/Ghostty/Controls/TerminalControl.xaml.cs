@@ -781,6 +781,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // Surface creation runs exactly once per control instance,
         // even across multiple reparents. Subsequent Loaded events
         // skip this entire block.
+        //
+        // MainWindow's picker cleanup leans on that: comparing SurfaceHandle
+        // against the pointer it saved only proves reachability while a
+        // control's handle can be that pointer or zero and never a recycled
+        // third one.
         if (_surfaceCreated) return;
         _surfaceCreated = true;
 

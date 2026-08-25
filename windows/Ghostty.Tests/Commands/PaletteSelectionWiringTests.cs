@@ -89,6 +89,9 @@ public class PaletteSelectionWiringTests
     // FilteredCommands" -- moved into ShellSource.Load, which now parses with
     // the symbol defined and refuses outright to hand back a tree that still
     // has disabled regions. So the demo block in this file is real syntax to
-    // the guards above rather than trivia they look through, and the check is
-    // enforced for every file any wiring test loads instead of this one.
+    // the guards above rather than trivia they look through, and the same now
+    // holds for every file a test reads through Load rather than for this one
+    // alone. It is not corpus-wide: AllUnder hands back raw text, and
+    // ParseForCorpusScan and AllShellSources each skip that refusal on
+    // purpose, for the reason each of them documents.
 }
