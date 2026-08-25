@@ -27,6 +27,8 @@ internal static class LogEvents
         public const int ReadHandlerErr     = 2104; // ClipboardBridge
         public const int ConfirmHandlerErr  = 2105; // ClipboardBridge
         public const int WriteHandlerErr    = 2106; // ClipboardBridge
+        public const int ServedMimeNoReader = 2107; // WinUiClipboardBackend
+        public const int WriteWroteNothing  = 2108; // WinUiClipboardBackend
     }
 
     // 2200-2299: ThemePreview

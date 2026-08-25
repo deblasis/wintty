@@ -141,8 +141,15 @@ public sealed class ClipboardServiceTests
     {
         // Crucially: do NOT clear the clipboard by sending an empty
         // package. Stay quiet.
+        //
+        // Both reasons a payload can fail the write filter are represented:
+        // a mime we do not know at all, and one we can read but not write.
         var (svc, backend, _) = Make();
-        var payloads = new[] { ClipboardPayload.FromText("image/png", "binary blob") };
+        var payloads = new[]
+        {
+            ClipboardPayload.FromText("application/x-something", "unknown"),
+            ClipboardPayload.FromText(ClipboardMime.TextUriList, "file:///tmp/a"),
+        };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
 

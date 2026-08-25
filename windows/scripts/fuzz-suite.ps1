@@ -212,6 +212,8 @@ $NotInSuite = [ordered]@{
     'vtabs-morph-filmstrip.ps1'     = 'produces frames for a human to look at; no verdict to aggregate'
     'gen-bell.ps1'                  = 'generates a test asset'
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
+    'clipboard-fuzz.ps1'            = 'no desktop and no app; it drives the marshalling round-trip oracles in Ghostty.Tests, which the build ladder already runs at a cheaper iteration count'
+    'kitty-clipboard-roundtrip.ps1' = 'runs INSIDE Wintty rather than launching it, and its attended mode waits on a human at the permission prompt; -Unattended needs clipboard-read and clipboard-write set to allow, which is a config this suite does not stage'
 }
 
 # The one form every check compares a script path in: the path relative to this

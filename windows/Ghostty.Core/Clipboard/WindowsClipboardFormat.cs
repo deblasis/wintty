@@ -42,19 +42,28 @@ public static class WindowsClipboardFormatMap
     /// <summary>
     /// The subset we can put ON the clipboard, as opposed to take off it.
     ///
-    /// Reading and writing are deliberately not the same set. We can read
-    /// StorageItems and serve them as text/uri-list, but writing files back
-    /// means materialising StorageFile objects, and we can read a bitmap but
-    /// not yet encode one. Collapsing the two sets is not a cosmetic
-    /// mistake: the write path drops entries it cannot handle, so a payload
-    /// that passes the filter and is then dropped leaves an EMPTY
-    /// DataPackage, and handing SetContent an empty package clears the
-    /// user's clipboard instead of leaving it alone.
+    /// Reading and writing are deliberately not the same set: writing files
+    /// back means materialising StorageFile objects, which we do not do, so
+    /// text/uri-list is read-only.
+    ///
+    /// Keeping the sets separate matters because the write path drops
+    /// entries it cannot handle, so a payload that passes the filter and is
+    /// then dropped leaves an EMPTY DataPackage, and handing SetContent an
+    /// empty package clears the user's clipboard instead of leaving it
+    /// alone.
+    ///
+    /// But excluding a format here is not free either, and image/png was
+    /// excluded once by mistake. write_clipboard_cb returns void, so a
+    /// write we silently decline is still reported to the client as DONE:
+    /// the terminal claims success for something that never happened. A
+    /// format belongs out of this set only when we genuinely cannot produce
+    /// it, never as a shortcut.
     /// </summary>
     public static WindowsClipboardFormat? FromMimeForWrite(string? mime) => FromMime(mime) switch
     {
         WindowsClipboardFormat.Text => WindowsClipboardFormat.Text,
         WindowsClipboardFormat.Html => WindowsClipboardFormat.Html,
+        WindowsClipboardFormat.Image => WindowsClipboardFormat.Image,
         _ => null,
     };
 

@@ -40,20 +40,25 @@ public sealed class WindowsClipboardFormatMapTests
     [Theory]
     [InlineData("text/plain", WindowsClipboardFormat.Text)]
     [InlineData("text/html", WindowsClipboardFormat.Html)]
-    public void FromMimeForWrite_TextFormats_Map(string mime, WindowsClipboardFormat expected)
+    [InlineData("image/png", WindowsClipboardFormat.Image)]
+    public void FromMimeForWrite_WritableFormats_Map(string mime, WindowsClipboardFormat expected)
     {
+        // image/png belongs here. It was excluded once, and because the write
+        // path reports DONE for every payload it accepted the protocol
+        // cheerfully acknowledged image writes that never reached the
+        // clipboard. A dropped format is not a no-op, so each writable one is
+        // pinned.
         Assert.Equal(expected, WindowsClipboardFormatMap.FromMimeForWrite(mime));
     }
 
     [Theory]
     [InlineData("text/uri-list")]
-    [InlineData("image/png")]
     public void FromMimeForWrite_ReadOnlyFormats_ReturnNull(string mime)
     {
-        // We can read StorageItems and serve them as text/uri-list, and read
-        // a bitmap, but writing either back means materialising files or
-        // encoding an image. Until then these must not pass the write
-        // filter, or the write path builds an empty package.
+        // We can read StorageItems and serve them as text/uri-list, but
+        // writing them back means materialising files somewhere. Until then
+        // this must not pass the write filter, or the write path builds an
+        // empty package.
         Assert.Null(WindowsClipboardFormatMap.FromMimeForWrite(mime));
         Assert.NotNull(WindowsClipboardFormatMap.FromMime(mime));
     }
