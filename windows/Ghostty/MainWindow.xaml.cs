@@ -436,7 +436,10 @@ public sealed partial class MainWindow : Window
                 RegisteredRoot = fe.XamlRoot;
                 if (RegisteredRoot != null)
                 {
-                    App.WindowsByRoot[RegisteredRoot] = this;
+                    // App does the insert, because registering is also the
+                    // moment process-wide services may start acting on a
+                    // window and only App knows which those are.
+                    App.NoteRegularWindowRegistered(this);
                 }
             }
         }
@@ -3910,9 +3913,14 @@ public sealed partial class MainWindow : Window
                 // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
-                    // Null once the process shutdown has disposed it, which
-                    // an in-flight picker keystroke can still land after.
-                    Ghostty.App.ThemePreview?.ApplyThemePreview(name);
+                    // Null until OnLaunched builds the service and again
+                    // once the shutdown's finally block clears it; a picker
+                    // keystroke in flight across this dispatch can land in
+                    // either gap. Non-null is not proof the service is still
+                    // live -- the shutdown disposes it well before that
+                    // clearing -- but applying colors after the dispose is
+                    // fenced off by ConfigService's own shutdown flag.
+                    Ghostty.App.ApplyThemePreview?.Invoke(name);
                 });
             }
             catch { }

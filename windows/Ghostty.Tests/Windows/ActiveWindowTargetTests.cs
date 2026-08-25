@@ -17,8 +17,11 @@ public sealed class ActiveWindowTargetTests
 {
     private sealed record FakeWindow(string Name, bool Quake = false, bool Closing = false);
 
-    // The shell's predicate, verbatim in shape: a hidden quake window cannot
-    // show a picker, and a closing one has no surfaces left.
+    // The shell's predicate, verbatim in shape. The closing half is the one
+    // that fires in the shell; the quake half is a backstop, since the shell
+    // keeps the quake window out of the registry and out of last-activated
+    // both. This helper lives in Core and can see neither, so it has to
+    // answer for a quake window it is handed anyway.
     private static bool Eligible(FakeWindow w) => !w.Quake && !w.Closing;
 
     private static FakeWindow? Choose(FakeWindow? lastActivated, params FakeWindow[] all) =>
@@ -60,8 +63,10 @@ public sealed class ActiveWindowTargetTests
     [Fact]
     public void AQuakeOnlySessionChoosesNothing()
     {
-        // The quake window stays in the registry while hidden, so "some window
-        // exists" is not the same question as "some window can take this".
+        // "Some window exists" is not the same question as "some window can
+        // take this". The shell excludes the quake window upstream, so this
+        // is the backstop being exercised rather than a state the shell
+        // produces.
         var quake = new FakeWindow("quake", Quake: true);
 
         Assert.Null(Choose(quake, quake));

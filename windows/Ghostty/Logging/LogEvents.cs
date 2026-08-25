@@ -15,7 +15,6 @@ internal static class LogEvents
         public const int TrayInitFailed      = 2003;
         public const int StaleAumidRemoved   = 2004;
         public const int ConfigOpenFailed    = 2005;
-        public const int NoWindowForThemePicker = 2006;
     }
 
     // 2100-2199: Clipboard
@@ -40,6 +39,7 @@ internal static class LogEvents
         public const int PipeError         = 2204;
         public const int InvalidThemeName  = 2205;
         public const int PipeServerUnavailable = 2206;
+        public const int NoWindowForThemePicker = 2207;
     }
 
     // 2300-2399: WindowState + migration

@@ -35,6 +35,7 @@ internal sealed partial class ThemePreviewService : IDisposable
     private readonly ILogger<ThemePreviewService> _logger;
     private readonly CancellationTokenSource _cts = new();
     private Task? _serverTask;
+    private bool _disposed;
 
     /// <summary>
     /// Raised on the UI thread when a CLI process sends LIST_THEMES
@@ -58,6 +59,24 @@ internal sealed partial class ThemePreviewService : IDisposable
         _configService = configService;
         _dispatcher = dispatcher;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Begin serving the pipe. Idempotent, and a no-op once
+    /// <see cref="Dispose"/> has run. UI thread only, like every other
+    /// call into this service from the shell.
+    /// </summary>
+    // Separate from construction because the pipe's existence is the
+    // readiness signal the CLI reads: `wintty +list-themes` probes for
+    // \\.\pipe\ghostty-theme-preview-{pid} with File.Exists, and treats a
+    // successful write to it as delivery -- it never waits for an answer. So
+    // a pipe opened before any window is able to draw a picker turns the
+    // CLI's fallback (libghostty's own TUI picker, which it runs when it
+    // finds no pipe) into a silent exit 0 that does nothing at all. The
+    // caller starts this when the first window registers.
+    internal void Start()
+    {
+        if (_disposed || _serverTask is not null) return;
         _serverTask = Task.Run(() => RunServer(_cts.Token));
     }
 
@@ -69,14 +88,29 @@ internal sealed partial class ThemePreviewService : IDisposable
     // calls this is a `void` event handler with nothing to await it, so an
     // async variant would have had no caller able to use it.
     //
-    // Waiting on the server task from the UI thread is bounded rather than a
-    // deadlock. Every await in the loop -- WaitForConnectionAsync,
-    // ReadLineAsync, the backoff Delay -- takes the token, so the cancel above
-    // completes all three, and the loop never awaits back onto the UI thread:
-    // it hands work over with TryEnqueue and does not wait for it. So nothing
-    // the task still has to do needs the thread that is blocked here.
+    // Waiting on the server task from the UI thread cannot deadlock. Every
+    // await in the loop -- WaitForConnectionAsync, ReadLineAsync, the backoff
+    // Delay -- takes the token, so the cancel below completes all three, and
+    // each is ConfigureAwait(false), so no continuation wants the thread that
+    // is blocked here. The loop also hands UI work over with TryEnqueue and
+    // does not wait for it.
+    //
+    // Bounded, but not instantly: the token reaches none of the synchronous
+    // work between those awaits, and the long piece of it is reading the
+    // theme file (File.Exists plus ParseThemeFile's File.ReadLines) for a
+    // PREVIEW that arrived just before the cancel. That is one small file
+    // from the config directory, which can be a redirected or UNC path, so
+    // the real bound is a file read that may have to time out. A timeout on
+    // the wait would not improve on that: it would return with the accept
+    // loop still running into the state this shutdown is freeing.
     public void Dispose()
     {
+        // Callers get a Dispose that can be called twice, per the BCL
+        // contract. Without this the second call cancels a disposed
+        // CancellationTokenSource and throws ObjectDisposedException.
+        if (_disposed) return;
+        _disposed = true;
+
         _cts.Cancel();
         try { _serverTask?.GetAwaiter().GetResult(); }
         catch { /* expected OCE or pipe error */ }
@@ -99,14 +133,14 @@ internal sealed partial class ThemePreviewService : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
-            var outcome = await RunOneServerSession(ct);
+            var outcome = await RunOneServerSession(ct).ConfigureAwait(false);
             switch (_retryPolicy.Decide(outcome))
             {
                 case PipeLoopDecision.Stop:
                 case PipeLoopDecision.StandDown:
                     return;
                 case PipeLoopDecision.RetryAfterBackoff:
-                    try { await Task.Delay(_retryPolicy.Backoff, ct); }
+                    try { await Task.Delay(_retryPolicy.Backoff, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
                     break;
                 case PipeLoopDecision.RetryImmediately:
@@ -118,9 +152,9 @@ internal sealed partial class ThemePreviewService : IDisposable
 
     /// <summary>
     /// Runs one accept-serve cycle of the named-pipe server and classifies
-    /// how it ended. Never throws (cancellation and I/O faults are mapped to
-    /// outcomes); the caller's policy decides whether to retry, back off, or
-    /// stand down.
+    /// how it ended. Never throws -- cancellation and every fault, from
+    /// creating the server through serving it, are mapped to outcomes; the
+    /// caller's policy decides whether to retry, back off, or stand down.
     /// </summary>
     private async Task<PipeLoopOutcome> RunOneServerSession(CancellationToken ct)
     {
@@ -145,13 +179,28 @@ internal sealed partial class ThemePreviewService : IDisposable
             _logger.LogPipeServerUnavailable(ex);
             return PipeLoopOutcome.ServerCreationFailed;
         }
+        catch (Exception ex)
+        {
+            // Everything else the ctor can raise -- an ACL that denies the
+            // create, a disposal race during teardown, an allocation failure
+            // -- is a creation failure too, and this try sits outside the
+            // broad catch below, so without this it escapes into the
+            // fire-and-forget server task instead. A faulted task there is
+            // silent: nothing observes it, .NET Core no longer tears the
+            // process down for it, and +list-themes is dead for the rest of
+            // the session with nothing in the log to say why. Logged through
+            // the general pipe-error message rather than the stand-down one,
+            // which describes the collision case and would misreport this.
+            _logger.LogPipeError(ex);
+            return PipeLoopOutcome.ServerCreationFailed;
+        }
 
         try
         {
             using (server)
             {
                 _logger.LogPipeWaiting(PipeName);
-                await server.WaitForConnectionAsync(ct);
+                await server.WaitForConnectionAsync(ct).ConfigureAwait(false);
                 _logger.LogClientConnected();
 
                 // Snapshot current colors for revert on cancel.
@@ -162,7 +211,7 @@ internal sealed partial class ThemePreviewService : IDisposable
 
                 while (!ct.IsCancellationRequested)
                 {
-                    var line = await reader.ReadLineAsync(ct);
+                    var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
                     if (line is null) break; // pipe closed
 
                     if (line == "LIST_THEMES")
