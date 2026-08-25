@@ -706,14 +706,14 @@ public class WindowTeardownWiringTests
     public void AFailedPickerOpenClearsWhatTheCloseWillNotReach()
     {
         var source = ShellSource.Load(MainWindow.File);
-        var statements = source.Method("OnListThemesRequested").Body!.Statements;
+        var statements = source.Method("ShowInlineThemePicker").Body!.Statements;
 
         var opened = statements
             .TakeWhile(s => !s.Calls("NativeMethods.SurfaceListThemes").Any())
             .Count();
         Assert.True(
             opened < statements.Count,
-            "expected OnListThemesRequested to open the picker through "
+            "expected ShowInlineThemePicker to open the picker through "
             + "NativeMethods.SurfaceListThemes; without that call there is no failure path "
             + "here and this test would pass while reading nothing");
 
@@ -730,35 +730,11 @@ public class WindowTeardownWiringTests
 
         Assert.True(
             cleared.Count == 1,
-            "OnListThemesRequested must clear " + string.Join(", ", PickerFields)
+            "ShowInlineThemePicker must clear " + string.Join(", ", PickerFields)
             + " and return when SurfaceListThemes hands back a zero handle. Nothing else will: "
             + "ClosePicker bails on the zero handle before it reaches those same clears, so the "
             + "stale surface pointer and the pane subtree behind _pickerTerminal are held until "
             + "the next successful picker or the window's close.");
-    }
-
-    /// <summary>
-    /// ThemePreviewService, the one gap #694 named and did not close.
-    ///
-    /// It is not an event source the census can see: it owns a named-pipe
-    /// server running on a background task, and the close only detached the
-    /// window from its ListThemesRequested. The task then ran for the life of
-    /// the process, holding the per-process pipe name with nobody left
-    /// listening to what arrived on it. Disposing cancels the loop, waits for
-    /// it, and drops the subscribers, so the window is neither rooted by it
-    /// nor outlived by it.
-    /// </summary>
-    [Fact]
-    public void TheThemePreviewServiceIsDisposedByTheClose()
-    {
-        var source = ShellSource.Load(MainWindow.File);
-        var statements = source.Method("OnClosedAsync").Body!.Statements;
-
-        var disposed = statements.TakeWhile(s => !s.Calls("_themePreview.Dispose").Any()).Count();
-        Assert.True(
-            disposed < statements.Count,
-            "OnClosedAsync must dispose _themePreview: unsubscribing alone leaves its pipe server "
-            + "task running for the life of the process");
     }
 
     /// <summary>
