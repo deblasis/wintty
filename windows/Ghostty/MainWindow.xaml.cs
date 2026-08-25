@@ -3943,11 +3943,40 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        // The only warning that this surface is about to go. Closing the
+        // picker's tab frees its leaves before it announces the tab is gone,
+        // so nothing tab-level runs early enough: by then the deinit below
+        // can no longer run, and the picker allocation, its theme arena, the
+        // 50ms poll and the control's whole visual subtree are stranded for
+        // the life of the window.
+        //
+        // Taken out after the open succeeds, not alongside the field
+        // assignments above, so the single detach in ClosePicker is enough: a
+        // subscription then only ever exists while _pickerHandle is non-zero,
+        // which is exactly when ClosePicker runs past its early return.
+        terminal.SurfaceDisposing += OnPickerSurfaceDisposing;
+
         // Picker is now active. handleKey fires on each key event and
         // sets should_quit when the user confirms/cancels. We poll on
         // a timer to clean up, avoiding a thread that races with the
         // input redirect callback.
         StartPickerPoll();
+    }
+
+    /// <summary>
+    /// The surface the picker is installed on is being freed. Close the picker
+    /// now, while the deinit can still reach it: this runs above
+    /// <c>SurfaceFree</c>, so the redirects come off and the allocation comes
+    /// back instead of being stranded.
+    /// </summary>
+    private void OnPickerSurfaceDisposing(object? sender, EventArgs e)
+    {
+        // Act on the control this picker was opened on, never on whatever
+        // raised the event: a stale subscription -- one taken out for a picker
+        // that has since been replaced -- must not tear down the current one.
+        if (!ReferenceEquals(sender, _pickerTerminal)) return;
+
+        ClosePicker();
     }
 
     private void StartPickerPoll()
@@ -4021,8 +4050,12 @@ public sealed partial class MainWindow : Window
         // A non-zero handle does not mean the surface behind it is still
         // there. Deinit writes through that pointer -- it clears three
         // redirects and pushes pty input -- so running it against a freed
-        // surface is a write into freed memory, and closing the picker's tab
-        // frees the surface without touching anything here.
+        // surface is a write into freed memory.
+        //
+        // The control now says so before it frees anything, which is what
+        // gets a tab close here while the deinit still means something. The
+        // mismatch below is the residual case: any path that reaches the free
+        // without this window being told.
         //
         // The control zeroes its own handle when it disposes the surface, so
         // a mismatch means the surface is gone and nothing can reach the
@@ -4041,12 +4074,30 @@ public sealed partial class MainWindow : Window
         // there is a callback on a collected delegate, which kills the process
         // rather than throwing. Cleaning up after our own picker is a repair
         // for that window, not damage to it.
-        var live = _pickerTerminal is { } terminal
-            && terminal.SurfaceHandle == _pickerSurface.Handle;
-        if (live)
-            NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
-
+        //
+        // Ownership of the picker leaves this window here, before the deinit
+        // rather than after it. The native side only checks the pointer is
+        // non-null and then destroys the allocation, so it is not idempotent,
+        // and a second call through a handle the field was still holding is a
+        // double free. Anything that re-entered ClosePicker while the deinit
+        // was running would find a zero handle and turn back at the early
+        // return above instead.
+        var handle = _pickerHandle;
         _pickerHandle = IntPtr.Zero;
+
+        if (_pickerTerminal is { } terminal)
+        {
+            // Taken back here rather than left to the control to null when it
+            // disposes, because the control can outlive this window: a
+            // detached tab carries it to another window, and a subscription
+            // left on it would keep this closed window reachable from a
+            // control it no longer owns.
+            terminal.SurfaceDisposing -= OnPickerSurfaceDisposing;
+
+            if (terminal.SurfaceHandle == _pickerSurface.Handle)
+                NativeMethods.SurfaceListThemesDeinit(_pickerSurface, handle);
+        }
+
         _pickerSurface = default;
         _pickerTerminal = null;
         _inlineThemeCb = null;

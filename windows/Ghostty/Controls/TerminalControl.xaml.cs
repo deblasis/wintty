@@ -660,6 +660,20 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// glow.</summary>
     public event EventHandler? FirstRender;
 
+    /// <summary>Raised from <see cref="DisposeSurface"/> while the surface is
+    /// still valid, for holders of native state keyed on this control's
+    /// surface pointer -- the window's inline theme picker keeps input,
+    /// scroll and resize redirects installed on it, and handing those back
+    /// writes through the pointer.
+    ///
+    /// Nothing at the tab level can serve them: TabManager.CloseTab frees the
+    /// tab's leaves before it announces the tab is gone, so a TabRemoved
+    /// subscriber already holds a dangling pointer by the time it runs.
+    ///
+    /// Fires at most once per control, and never for a control whose surface
+    /// was never created.</summary>
+    internal event EventHandler? SurfaceDisposing;
+
     // Distance the search bar floats from the terminal's top-right, on
     // top of whatever gutter the pane chrome reserves.
     private const double SearchBarInset = 8;
@@ -1011,6 +1025,33 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_surfaceDisposed) return;
         _surfaceDisposed = true;
 
+        // Tell the holders of surface-keyed native state first, while nothing
+        // has been unwound yet: what they have to hand back is written through
+        // this surface pointer, so after SurfaceFree below there is no safe
+        // moment left. The latch above is what makes this fire exactly once,
+        // and the handle check is what keeps it from firing for a control
+        // whose surface was never created -- there is nothing installed on a
+        // surface that does not exist, and a subscriber told about one would
+        // be comparing its saved pointer against a zero handle.
+        if (_surface.Handle != IntPtr.Zero)
+        {
+            try
+            {
+                SurfaceDisposing?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                // Swallowed on purpose. Everything below this point frees
+                // native memory, and PaneHost walks the leaves in a loop, so
+                // an escaping exception would strand this surface and skip
+                // every leaf after it. A subscriber that failed to clean up
+                // after itself is a smaller problem than a teardown that
+                // stops half way, so log it and keep tearing down.
+                Ghostty.Logging.StaticLoggers.App.LogWarning(
+                    "SurfaceDisposing subscriber threw during teardown: {Message}", ex.Message);
+            }
+        }
+
         _bellAudio?.Dispose();
         _bellAudio = null;
 
@@ -1047,6 +1088,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         FirstRender = null;
         BellRang = null;
         BellAcknowledged = null;
+        // Already raised above; dropping it here is for a subscriber that did
+        // not detach itself in its handler.
+        SurfaceDisposing = null;
     }
 
     private static IntPtr AllocEmptyUtf8()
