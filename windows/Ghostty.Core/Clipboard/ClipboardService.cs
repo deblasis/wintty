@@ -87,7 +87,7 @@ public sealed class ClipboardService
             // libghostty's setClipboard with confirm=true is OSC 52 write
             // (the only path that asks for confirmation on writes).
             var accepted = await _confirmer.ConfirmAsync(
-                textPlain.Data,
+                textPlain.Text,
                 ClipboardConfirmRequest.Osc52Write,
                 originSurface);
             if (!accepted)

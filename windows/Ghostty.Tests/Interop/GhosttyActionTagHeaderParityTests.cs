@@ -148,6 +148,11 @@ public class GhosttyActionTagHeaderParityTests
             "ghostty_clipboard_request_e", "GHOSTTY_CLIPBOARD_REQUEST_");
 
     [Fact]
+    public void ClipboardReadResult_Ordinals_Match_Header() =>
+        AssertMatchesHeader<GhosttyClipboardReadResult>(
+            "ghostty_clipboard_read_result_e", "GHOSTTY_CLIPBOARD_READ_");
+
+    [Fact]
     public void MouseState_Ordinals_Match_Header() =>
         AssertMatchesHeader<GhosttyMouseState>("ghostty_input_mouse_state_e", "GHOSTTY_MOUSE_");
 

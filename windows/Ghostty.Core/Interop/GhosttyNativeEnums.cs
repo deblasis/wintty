@@ -37,6 +37,7 @@ internal enum GhosttyClipboard
 {
     Standard = 0,
     Selection = 1,
+    Primary = 2,
 }
 
 internal enum GhosttyClipboardRequest
@@ -44,6 +45,21 @@ internal enum GhosttyClipboardRequest
     Paste = 0,
     Osc52Read = 1,
     Osc52Write = 2,
+    KittyRead = 3,
+    KittyWrite = 4,
+    List = 5,
+}
+
+// ghostty_clipboard_read_result_e. The read callback answers with this
+// rather than a bool so libghostty can tell "the clipboard held nothing"
+// apart from "this runtime cannot serve that request" -- the mode 5522
+// report is gated on the difference, so a flat false would advertise the
+// wrong capability to every program that asks.
+internal enum GhosttyClipboardReadResult
+{
+    Started = 0,
+    Unavailable = 1,
+    Unsupported = 2,
 }
 
 internal enum GhosttyMouseState

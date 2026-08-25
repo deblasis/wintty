@@ -73,21 +73,21 @@ public sealed class ClipboardServiceTests
     public async Task HandleWriteAsync_TextPlainOnly_WritesPlainText()
     {
         var (svc, backend, _) = Make();
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextPlain, "hello") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, "hello") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
 
         Assert.NotNull(backend.LastWrite);
         var written = Assert.Single(backend.LastWrite!);
         Assert.Equal(ClipboardMime.TextPlain, written.Mime);
-        Assert.Equal("hello", written.Data);
+        Assert.Equal("hello", written.Text);
     }
 
     [Fact]
     public async Task HandleWriteAsync_TextHtmlOnly_WritesHtml()
     {
         var (svc, backend, _) = Make();
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextHtml, "<b>hi</b>") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>hi</b>") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
 
@@ -106,8 +106,8 @@ public sealed class ClipboardServiceTests
         var (svc, backend, _) = Make();
         var payloads = new[]
         {
-            new ClipboardPayload(ClipboardMime.TextPlain, "hello"),
-            new ClipboardPayload(ClipboardMime.TextHtml, "<b>hello</b>"),
+            ClipboardPayload.FromText(ClipboardMime.TextPlain, "hello"),
+            ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>hello</b>"),
         };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
@@ -115,8 +115,8 @@ public sealed class ClipboardServiceTests
         Assert.Equal(1, backend.WriteCallCount);
         Assert.NotNull(backend.LastWrite);
         Assert.Equal(2, backend.LastWrite!.Count);
-        Assert.Contains(backend.LastWrite, p => p.Mime == ClipboardMime.TextPlain && p.Data == "hello");
-        Assert.Contains(backend.LastWrite, p => p.Mime == ClipboardMime.TextHtml && p.Data == "<b>hello</b>");
+        Assert.Contains(backend.LastWrite, p => p.Mime == ClipboardMime.TextPlain && p.Text == "hello");
+        Assert.Contains(backend.LastWrite, p => p.Mime == ClipboardMime.TextHtml && p.Text == "<b>hello</b>");
     }
 
     [Fact]
@@ -125,8 +125,8 @@ public sealed class ClipboardServiceTests
         var (svc, backend, _) = Make();
         var payloads = new[]
         {
-            new ClipboardPayload(ClipboardMime.TextPlain, "kept"),
-            new ClipboardPayload("application/x-something", "dropped"),
+            ClipboardPayload.FromText(ClipboardMime.TextPlain, "kept"),
+            ClipboardPayload.FromText("application/x-something", "dropped"),
         };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
@@ -142,7 +142,7 @@ public sealed class ClipboardServiceTests
         // Crucially: do NOT clear the clipboard by sending an empty
         // package. Stay quiet.
         var (svc, backend, _) = Make();
-        var payloads = new[] { new ClipboardPayload("image/png", "binary blob") };
+        var payloads = new[] { ClipboardPayload.FromText("image/png", "binary blob") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: false);
 
@@ -164,7 +164,7 @@ public sealed class ClipboardServiceTests
     public async Task HandleWriteAsync_Selection_DoesNotCallBackend()
     {
         var (svc, backend, _) = Make();
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextPlain, "hello") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, "hello") };
 
         await svc.HandleWriteAsync(ClipboardKind.Selection, payloads, confirm: false);
 
@@ -180,8 +180,8 @@ public sealed class ClipboardServiceTests
         confirmer.EnqueueResponse(true);
         var payloads = new[]
         {
-            new ClipboardPayload(ClipboardMime.TextPlain, "preview text"),
-            new ClipboardPayload(ClipboardMime.TextHtml, "<b>preview text</b>"),
+            ClipboardPayload.FromText(ClipboardMime.TextPlain, "preview text"),
+            ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>preview text</b>"),
         };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
@@ -196,7 +196,7 @@ public sealed class ClipboardServiceTests
     {
         var (svc, backend, confirmer) = Make();
         confirmer.EnqueueResponse(true);
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextPlain, "ok") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, "ok") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
 
@@ -208,7 +208,7 @@ public sealed class ClipboardServiceTests
     {
         var (svc, backend, confirmer) = Make();
         confirmer.EnqueueResponse(false);
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextPlain, "nope") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, "nope") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
 
@@ -223,7 +223,7 @@ public sealed class ClipboardServiceTests
         // write rather than show an empty dialog or HTML-only dialog.
         var (svc, backend, confirmer) = Make();
         confirmer.EnqueueResponse(true);
-        var payloads = new[] { new ClipboardPayload(ClipboardMime.TextHtml, "<b>html only</b>") };
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>html only</b>") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
 

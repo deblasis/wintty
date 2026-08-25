@@ -1121,28 +1121,41 @@ internal sealed partial class GhosttyHost : IDisposable
     // GCHandle.FromIntPtr -- any of which can throw, so each guards the
     // boundary and swallows (logs) rather than letting the exception cross
     // the ABI into Zig. The bridge's deferred dispatcher work self-guards.
-    private byte OnReadClipboard(IntPtr userdata, GhosttyClipboard kind, IntPtr state)
+    private GhosttyClipboardReadResult OnReadClipboard(
+        IntPtr userdata,
+        GhosttyClipboard kind,
+        IntPtr state,
+        IntPtr mimeFilter,
+        UIntPtr mimeFilterLen,
+        byte listing)
     {
         try
         {
-            return (_clipboardBridge?.HandleRead(userdata, kind, state) ?? false) ? (byte)1 : (byte)0;
+            return _clipboardBridge?.HandleRead(
+                       userdata, kind, state, mimeFilter, mimeFilterLen, listing != 0)
+                   ?? GhosttyClipboardReadResult.Unsupported;
         }
         catch (Exception ex)
         {
-            // Returning 0 ("not handled") here cannot strand a request:
-            // HandleRead only throws on its synchronous prefix, before it
-            // returns true and takes on the obligation to complete the
-            // clipboard request via SurfaceCompleteClipboardRequest.
+            // Unsupported here cannot strand a request: HandleRead only
+            // throws on its synchronous prefix, before it returns Started and
+            // takes on the obligation to discharge the request via
+            // SurfaceCompleteClipboardRequest or SurfaceDenyClipboardRequest.
+            //
+            // Unsupported rather than Unavailable because we genuinely do not
+            // know what the clipboard held -- claiming it was empty would feed
+            // libghostty a fact we never established, and the mode 5522 report
+            // is derived from this answer.
             _logger.LogError(ex, "OnReadClipboard threw at the native boundary");
-            return 0;
+            return GhosttyClipboardReadResult.Unsupported;
         }
     }
 
-    private void OnConfirmReadClipboard(IntPtr userdata, IntPtr str, IntPtr state, GhosttyClipboardRequest request)
+    private void OnConfirmReadClipboard(IntPtr userdata, IntPtr confirm, IntPtr state, GhosttyClipboardRequest request)
     {
         try
         {
-            _clipboardBridge?.HandleConfirm(userdata, str, state, request);
+            _clipboardBridge?.HandleConfirm(userdata, confirm, state, request);
         }
         catch (Exception ex)
         {

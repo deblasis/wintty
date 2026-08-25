@@ -44,8 +44,18 @@ public class GhosttyStructHeaderParityTests
 
     // `<type> <name>;` with an optional trailing comment. A pointer star may
     // sit on either side of the space.
+    //
+    // The star group is `(\*\s*(const\s*)?)*` rather than a single optional
+    // star so pointer-to-pointer fields parse. The clipboard structs introduced
+    // `const char *const *available`, which the single-star form could not
+    // match at all: it left the name group trying to match `const`, the line
+    // failed to parse, and the field silently vanished from the computed
+    // layout. A field that disappears does not fail this test loudly -- it
+    // shifts every later offset and changes the computed size, which is
+    // exactly the kind of wrong-but-plausible answer this test exists to
+    // prevent, so the parse has to handle the shape rather than skip it.
     private static readonly Regex FieldPattern = new(
-        @"^\s*(?<type>[A-Za-z_][A-Za-z0-9_ ]*?\s*\*?)\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*(?://.*)?$",
+        @"^\s*(?<type>[A-Za-z_][A-Za-z0-9_ ]*?(\s*\*\s*(const\s*)?)*)\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*(?://.*)?$",
         RegexOptions.Compiled);
 
     [Fact]
@@ -75,6 +85,61 @@ public class GhosttyStructHeaderParityTests
     [Fact]
     public void ProgressReport_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionProgressReport>("ghostty_action_progress_report_s");
+
+    // The clipboard trio. These are the highest-value pins in the file: unlike
+    // the action structs, nothing else checks them. Both sides of the clipboard
+    // boundary compile independently, so a drifted layout here produces a
+    // callback that reads the wrong bytes rather than a build failure -- and
+    // upstream ships no test for its own apprt clipboard layer either.
+    [Fact]
+    public void ClipboardContent_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyClipboardContent>("ghostty_clipboard_content_s");
+
+    [Fact]
+    public void ClipboardComplete_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyClipboardComplete>("ghostty_clipboard_complete_s");
+
+    [Fact]
+    public void ClipboardConfirm_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyClipboardConfirm>("ghostty_clipboard_confirm_s");
+
+    // GhosttyClipboardLayout's constants, against the header directly.
+    //
+    // Production code reads and writes these structs by explicit offset
+    // rather than through Marshal, so the constants -- not the managed
+    // structs -- are what actually decides which bytes get read. Checking
+    // them against the managed struct would only prove the two agree with
+    // each other; checking them against the header is what makes them true.
+    [Theory]
+    [InlineData("ghostty_clipboard_content_s", "mime", GhosttyClipboardLayout.ContentMime)]
+    [InlineData("ghostty_clipboard_content_s", "data", GhosttyClipboardLayout.ContentData)]
+    [InlineData("ghostty_clipboard_content_s", "len", GhosttyClipboardLayout.ContentLen)]
+    [InlineData("ghostty_clipboard_complete_s", "contents", GhosttyClipboardLayout.CompleteContents)]
+    [InlineData("ghostty_clipboard_complete_s", "contents_len", GhosttyClipboardLayout.CompleteContentsLen)]
+    [InlineData("ghostty_clipboard_complete_s", "available", GhosttyClipboardLayout.CompleteAvailable)]
+    [InlineData("ghostty_clipboard_complete_s", "available_len", GhosttyClipboardLayout.CompleteAvailableLen)]
+    [InlineData("ghostty_clipboard_complete_s", "confirmed", GhosttyClipboardLayout.CompleteConfirmed)]
+    [InlineData("ghostty_clipboard_complete_s", "remember", GhosttyClipboardLayout.CompleteRemember)]
+    [InlineData("ghostty_clipboard_confirm_s", "contents", GhosttyClipboardLayout.ConfirmContents)]
+    [InlineData("ghostty_clipboard_confirm_s", "contents_len", GhosttyClipboardLayout.ConfirmContentsLen)]
+    [InlineData("ghostty_clipboard_confirm_s", "available", GhosttyClipboardLayout.ConfirmAvailable)]
+    [InlineData("ghostty_clipboard_confirm_s", "available_len", GhosttyClipboardLayout.ConfirmAvailableLen)]
+    [InlineData("ghostty_clipboard_confirm_s", "name", GhosttyClipboardLayout.ConfirmName)]
+    [InlineData("ghostty_clipboard_confirm_s", "can_remember", GhosttyClipboardLayout.ConfirmCanRemember)]
+    public void ClipboardLayout_Offsets_Match_Header(string typedefName, string field, int expected)
+    {
+        var layout = CLayoutOf(typedefName);
+        var match = layout.Fields.SingleOrDefault(f => f.Name == field);
+        Assert.True(match is not null, $"{typedefName} has no field named \"{field}\" in the header");
+        Assert.Equal(expected, match!.Offset);
+    }
+
+    [Theory]
+    [InlineData("ghostty_clipboard_content_s", GhosttyClipboardLayout.ContentSize)]
+    [InlineData("ghostty_clipboard_complete_s", GhosttyClipboardLayout.CompleteSize)]
+    [InlineData("ghostty_clipboard_confirm_s", GhosttyClipboardLayout.ConfirmSize)]
+    public void ClipboardLayout_Sizes_Match_Header(string typedefName, int expected) =>
+        Assert.Equal(expected, CLayoutOf(typedefName).Size);
 
     // The one rename in the set: the header's field carries a `timetime_ms`
     // typo that the managed side spells RuntimeMs. Declared rather than
