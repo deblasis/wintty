@@ -187,7 +187,7 @@ public sealed class ClipboardServiceTests
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
 
         var call = Assert.Single(confirmer.Calls);
-        Assert.Equal("preview text", call.Preview);
+        Assert.Equal("preview text", call.Snapshot.PreviewText);
         Assert.Equal(ClipboardConfirmRequest.Osc52Write, call.Request);
     }
 
@@ -216,16 +216,54 @@ public sealed class ClipboardServiceTests
     }
 
     [Fact]
-    public async Task HandleWriteAsync_ConfirmTrue_NoTextPlainEntry_DoesNotWrite()
+    public async Task HandleWriteAsync_ConfirmTrue_NoTextPlainEntry_StillPrompts()
     {
-        // Without a text/plain payload there is nothing to show in the
-        // confirmation preview, so the safe default is to drop the
-        // write rather than show an empty dialog or HTML-only dialog.
+        // This used to drop the write outright, on the grounds that there
+        // was no text/plain to preview. That silently discarded an
+        // html-only write: the user was never asked, and nothing was
+        // written. The dialog picks its own preview now, so the write is
+        // prompted for like any other.
         var (svc, backend, confirmer) = Make();
         confirmer.EnqueueResponse(true);
         var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>html only</b>") };
 
         await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
+
+        var call = Assert.Single(confirmer.Calls);
+        Assert.Equal(new[] { ClipboardMime.TextHtml }, call.Snapshot.Available);
+        Assert.Equal(1, backend.WriteCallCount);
+    }
+
+    [Fact]
+    public async Task HandleWriteAsync_ConfirmTrue_PromptCarriesEveryRepresentation()
+    {
+        // Allow grants the whole write, so the prompt has to describe the
+        // whole write and not just the entry it happens to preview.
+        var (svc, _, confirmer) = Make();
+        confirmer.EnqueueResponse(true);
+        var payloads = new[]
+        {
+            ClipboardPayload.FromText(ClipboardMime.TextPlain, "plain"),
+            ClipboardPayload.FromText(ClipboardMime.TextHtml, "<b>plain</b>"),
+        };
+
+        await svc.HandleWriteAsync(ClipboardKind.Standard, payloads, confirm: true);
+
+        var call = Assert.Single(confirmer.Calls);
+        Assert.Equal(2, call.Snapshot.Contents.Count);
+        Assert.Equal(new[] { ClipboardMime.TextPlain, ClipboardMime.TextHtml }, call.Snapshot.Available);
+    }
+
+    [Fact]
+    public async Task HandleWriteAsync_PrimaryKind_IsANoOp()
+    {
+        // Windows has no primary selection. Core rejects a Kitty write to
+        // one before any prompt; this is the belt to that braces.
+        var (svc, backend, confirmer) = Make();
+        confirmer.EnqueueResponse(true);
+        var payloads = new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, "nope") };
+
+        await svc.HandleWriteAsync(ClipboardKind.Primary, payloads, confirm: false);
 
         Assert.Equal(0, backend.WriteCallCount);
         Assert.Empty(confirmer.Calls);
@@ -233,41 +271,39 @@ public sealed class ClipboardServiceTests
 
     // Confirm path (libghostty -> dialog -> response)
 
+    private static ClipboardConfirmSnapshot TextSnapshot(string text, bool canRemember = false) =>
+        new(
+            new[] { ClipboardPayload.FromText(ClipboardMime.TextPlain, text) },
+            new[] { ClipboardMime.TextPlain },
+            Name: null,
+            CanRemember: canRemember);
+
     [Fact]
     public async Task HandleConfirmAsync_Paste_AsksConfirmerWithPasteRequest()
     {
         var (svc, _, confirmer) = Make();
         confirmer.EnqueueResponse(true);
 
-        await svc.HandleConfirmAsync("dangerous text", ClipboardConfirmRequest.Paste);
+        await svc.HandleConfirmAsync(TextSnapshot("dangerous text"), ClipboardConfirmRequest.Paste);
 
         var call = Assert.Single(confirmer.Calls);
-        Assert.Equal("dangerous text", call.Preview);
+        Assert.Equal("dangerous text", call.Snapshot.PreviewText);
         Assert.Equal(ClipboardConfirmRequest.Paste, call.Request);
     }
 
-    [Fact]
-    public async Task HandleConfirmAsync_Osc52Read_AsksConfirmerWithOsc52ReadRequest()
+    [Theory]
+    [InlineData(ClipboardConfirmRequest.Osc52Read)]
+    [InlineData(ClipboardConfirmRequest.Osc52Write)]
+    [InlineData(ClipboardConfirmRequest.KittyRead)]
+    [InlineData(ClipboardConfirmRequest.KittyWrite)]
+    public async Task HandleConfirmAsync_PassesTheRequestKindThrough(ClipboardConfirmRequest request)
     {
         var (svc, _, confirmer) = Make();
         confirmer.EnqueueResponse(false);
 
-        await svc.HandleConfirmAsync("clipboard contents", ClipboardConfirmRequest.Osc52Read);
+        await svc.HandleConfirmAsync(TextSnapshot("contents"), request);
 
-        var call = Assert.Single(confirmer.Calls);
-        Assert.Equal(ClipboardConfirmRequest.Osc52Read, call.Request);
-    }
-
-    [Fact]
-    public async Task HandleConfirmAsync_Osc52Write_AsksConfirmerWithOsc52WriteRequest()
-    {
-        var (svc, _, confirmer) = Make();
-        confirmer.EnqueueResponse(true);
-
-        await svc.HandleConfirmAsync("incoming text", ClipboardConfirmRequest.Osc52Write);
-
-        var call = Assert.Single(confirmer.Calls);
-        Assert.Equal(ClipboardConfirmRequest.Osc52Write, call.Request);
+        Assert.Equal(request, Assert.Single(confirmer.Calls).Request);
     }
 
     [Theory]
@@ -278,8 +314,36 @@ public sealed class ClipboardServiceTests
         var (svc, _, confirmer) = Make();
         confirmer.EnqueueResponse(decision);
 
-        var result = await svc.HandleConfirmAsync("text", ClipboardConfirmRequest.Paste);
+        var result = await svc.HandleConfirmAsync(TextSnapshot("text"), ClipboardConfirmRequest.Paste);
 
-        Assert.Equal(decision, result);
+        Assert.Equal(decision, result.Accepted);
+    }
+
+    [Fact]
+    public async Task HandleConfirmAsync_RememberIsCarriedBack()
+    {
+        var (svc, _, confirmer) = Make();
+        confirmer.EnqueueResponse(ClipboardConfirmResult.Allow(remember: true));
+
+        var result = await svc.HandleConfirmAsync(
+            TextSnapshot("text", canRemember: true), ClipboardConfirmRequest.KittyRead);
+
+        Assert.True(result.Accepted);
+        Assert.True(result.Remember);
+    }
+
+    [Fact]
+    public async Task HandleConfirmAsync_DeniedByDefaultWhenConfirmerHasNoAnswer()
+    {
+        // The fake runs its queue dry here on purpose: the production
+        // confirmer returns Denied on every failure path, and a service that
+        // turned a missing answer into an approval would be the worst
+        // possible bug in this file.
+        var (svc, _, _) = Make();
+
+        var result = await svc.HandleConfirmAsync(TextSnapshot("text"), ClipboardConfirmRequest.Paste);
+
+        Assert.False(result.Accepted);
+        Assert.False(result.Remember);
     }
 }
