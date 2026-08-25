@@ -79,7 +79,7 @@ at the message text.
 | 1100-1199 | FrecencyStore (command palette history) |
 | 2000-2099 | Startup (AUMID, jump list) |
 | 2100-2199 | Clipboard (backend + bridge + confirm dialog) |
-| 2200-2299 | ThemePreviewService |
+| 2200-2299 | Theme preview (pipe server, picker routing) |
 | 2300-2399 | WindowState + WindowStateMigration |
 | 2400-2499 | Shell (taskbar host, backdrop) |
 | 2500-2599 | MainWindow |

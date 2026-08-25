@@ -998,6 +998,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     internal void ApplyThemeColors(uint fg, uint bg, uint? cursor, uint? cursorText, uint[] palette)
     {
+        // The same fence Reload takes, for the same reason. The preview
+        // service reaches this from its pipe thread through TryEnqueue, so a
+        // preview or a revert enqueued just before teardown is pumped after
+        // it, and the fan-out below hands every subscriber a config the
+        // shutdown is already unwinding.
+        if (_shuttingDown) return;
+
         ForegroundColor = fg;
         BackgroundColor = bg;
         CursorColor = cursor ?? fg;
