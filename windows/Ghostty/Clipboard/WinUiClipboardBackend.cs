@@ -48,6 +48,127 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         }
     }
 
+    public async ValueTask<IReadOnlyList<string>> GetAvailableMimesAsync()
+    {
+        try
+        {
+            var view = WinClipboard.GetContent();
+            var mimes = new List<string>();
+
+            // Order is preference order, most specific first. A caller with
+            // no filter takes the first thing it can use, and handing it
+            // text/plain for a copied file would lose the paths.
+            if (view.Contains(StandardDataFormats.StorageItems))
+                mimes.Add(ClipboardMime.TextUriList);
+            if (view.Contains(StandardDataFormats.Html))
+                mimes.Add(ClipboardMime.TextHtml);
+            if (view.Contains(StandardDataFormats.Bitmap))
+                mimes.Add(ClipboardMime.ImagePng);
+            if (view.Contains(StandardDataFormats.Text))
+                mimes.Add(ClipboardMime.TextPlain);
+
+            return mimes;
+        }
+        catch (COMException ex)
+        {
+            _logger.LogReadFailed(ex, ex.HResult);
+            return Array.Empty<string>();
+        }
+        finally
+        {
+            await ValueTask.CompletedTask;
+        }
+    }
+
+    public async ValueTask<IReadOnlyList<ClipboardPayload>> ReadAsync(IReadOnlyList<string> accepted)
+    {
+        DataPackageView view;
+        try
+        {
+            view = WinClipboard.GetContent();
+        }
+        catch (COMException ex)
+        {
+            _logger.LogReadFailed(ex, ex.HResult);
+            return Array.Empty<ClipboardPayload>();
+        }
+
+        var wanted = BuildFilter(accepted);
+        var results = new List<ClipboardPayload>();
+
+        // Each representation is read independently and a failure on one
+        // does not sink the others: the clipboard can offer a format whose
+        // source process has since died, and losing the text because the
+        // bitmap went away would be the wrong trade.
+        if (Wants(wanted, ClipboardMime.TextUriList) && view.Contains(StandardDataFormats.StorageItems))
+        {
+            var uriList = await TryReadUriListAsync(view);
+            if (uriList is not null)
+                results.Add(ClipboardPayload.FromText(ClipboardMime.TextUriList, uriList));
+        }
+
+        if (Wants(wanted, ClipboardMime.TextHtml) && view.Contains(StandardDataFormats.Html))
+        {
+            var html = await TryReadAsync(() => view.GetHtmlFormatAsync().AsTask());
+            if (html is not null)
+                results.Add(ClipboardPayload.FromText(ClipboardMime.TextHtml, html));
+        }
+
+        if (Wants(wanted, ClipboardMime.TextPlain) && view.Contains(StandardDataFormats.Text))
+        {
+            var text = await TryReadAsync(() => view.GetTextAsync().AsTask());
+            if (text is not null)
+                results.Add(ClipboardPayload.FromText(ClipboardMime.TextPlain, text));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Files copied in Explorer arrive as StorageItems (CF_HDROP). macOS
+    /// serves the same thing as text/uri-list; this is that mapping.
+    /// </summary>
+    private async ValueTask<string?> TryReadUriListAsync(DataPackageView view)
+    {
+        try
+        {
+            var items = await view.GetStorageItemsAsync();
+            var paths = new List<string>(items.Count);
+            foreach (var item in items)
+            {
+                if (!string.IsNullOrEmpty(item.Path)) paths.Add(item.Path);
+            }
+
+            return UriListFormatter.Format(paths);
+        }
+        catch (Exception ex) when (ex is COMException or UnauthorizedAccessException or ArgumentException)
+        {
+            _logger.LogReadFailed(ex, ex is COMException com ? com.HResult : 0);
+            return null;
+        }
+    }
+
+    private async ValueTask<string?> TryReadAsync(Func<Task<string>> read)
+    {
+        try
+        {
+            return await read();
+        }
+        catch (Exception ex) when (ex is COMException or UnauthorizedAccessException or ArgumentException)
+        {
+            _logger.LogReadFailed(ex, ex is COMException com ? com.HResult : 0);
+            return null;
+        }
+    }
+
+    // An empty filter means "anything"; null marks that case so the
+    // per-format checks below do not each have to special-case it.
+    private static HashSet<string>? BuildFilter(IReadOnlyList<string> accepted) =>
+        accepted.Count == 0 ? null : new HashSet<string>(accepted, StringComparer.OrdinalIgnoreCase);
+
+    private static bool Wants(HashSet<string>? filter, string mime) =>
+        filter is null || filter.Contains(mime);
+
     public ValueTask WriteAsync(IReadOnlyList<ClipboardPayload> payloads)
     {
         try
@@ -88,7 +209,7 @@ internal sealed class WinUiClipboardBackend : IClipboardBackend
         var package = new DataPackage();
         foreach (var payload in payloads)
         {
-            switch (WindowsClipboardFormatMap.FromMime(payload.Mime))
+            switch (WindowsClipboardFormatMap.FromMimeForWrite(payload.Mime))
             {
                 case WindowsClipboardFormat.Text:
                     package.SetText(payload.Text);
