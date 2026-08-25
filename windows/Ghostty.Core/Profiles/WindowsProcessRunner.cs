@@ -43,13 +43,13 @@ internal sealed class WindowsProcessRunner : IProcessRunner
         try
         {
             if (!process.Start())
-                return new ProcessResult(-1, "", "", sw.Elapsed);
+                return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.DidNotStart);
         }
         catch (System.ComponentModel.Win32Exception)
         {
             // File not found / not executable. Match the interface
             // contract: ExitCode = -1 means "did not start".
-            return new ProcessResult(-1, "", "", sw.Elapsed);
+            return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.DidNotStart);
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -72,7 +72,7 @@ internal sealed class WindowsProcessRunner : IProcessRunner
             // immediately.
             try { await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false); }
             catch { }
-            return new ProcessResult(-1, "", "", sw.Elapsed);
+            return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.TimedOut);
         }
 
         // Process exited cleanly; drain the read tasks. If cts was
@@ -88,8 +88,8 @@ internal sealed class WindowsProcessRunner : IProcessRunner
         }
         catch (OperationCanceledException)
         {
-            return new ProcessResult(-1, "", "", sw.Elapsed);
+            return new ProcessResult(-1, "", "", sw.Elapsed, ProcessOutcome.TimedOut);
         }
-        return new ProcessResult(process.ExitCode, stdout, stderr, sw.Elapsed);
+        return new ProcessResult(process.ExitCode, stdout, stderr, sw.Elapsed, ProcessOutcome.Exited);
     }
 }

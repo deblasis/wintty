@@ -20,7 +20,10 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         _output = output;
     }
 
-    [Fact]
+    // SpawnFact because ProbeWsl below cannot tell "wsl is not installed"
+    // apart from "nothing spawns on this host"; without it a host that
+    // cannot spawn takes the silent early-out and reports a false green.
+    [SpawnFact]
     public async Task Track_WslWithDistribution_ReportsAutoForWslDistro()
     {
         // Probe wsl: CI runners often lack it. Silent early-out keeps CI green

@@ -17,7 +17,7 @@ public sealed class WindowsActiveProcessTrackerSmokeTests
         _output = output;
     }
 
-    [Fact]
+    [SpawnFact]
     public async Task Track_PwshThenCmd_ReportsTransition()
     {
         // Spawn pwsh and have it run a long-lived cmd child that waits on
