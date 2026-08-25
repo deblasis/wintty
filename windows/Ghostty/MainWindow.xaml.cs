@@ -4074,6 +4074,17 @@ public sealed partial class MainWindow : Window
         // there is a callback on a collected delegate, which kills the process
         // rather than throwing. Cleaning up after our own picker is a repair
         // for that window, not damage to it.
+        //
+        // Ownership of the picker leaves this window here, before the deinit
+        // rather than after it. The native side only checks the pointer is
+        // non-null and then destroys the allocation, so it is not idempotent,
+        // and a second call through a handle the field was still holding is a
+        // double free. Anything that re-entered ClosePicker while the deinit
+        // was running would find a zero handle and turn back at the early
+        // return above instead.
+        var handle = _pickerHandle;
+        _pickerHandle = IntPtr.Zero;
+
         if (_pickerTerminal is { } terminal)
         {
             // Taken back here rather than left to the control to null when it
@@ -4084,10 +4095,9 @@ public sealed partial class MainWindow : Window
             terminal.SurfaceDisposing -= OnPickerSurfaceDisposing;
 
             if (terminal.SurfaceHandle == _pickerSurface.Handle)
-                NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
+                NativeMethods.SurfaceListThemesDeinit(_pickerSurface, handle);
         }
 
-        _pickerHandle = IntPtr.Zero;
         _pickerSurface = default;
         _pickerTerminal = null;
         _inlineThemeCb = null;
