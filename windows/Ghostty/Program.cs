@@ -526,6 +526,17 @@ public static partial class Program
             Environment.Exit(Cli.CliActions.PrintVersion());
         }
 
+        // +crash <kind> is a debug-only probe for the crash coverage matrix
+        // in docs/2026-08-25-crash-reporting-and-diagnostics-design.md.
+        // Intercepted here for the same reason +version is: it must run
+        // before the libghostty CLI dispatcher. Deliberately not a
+        // CliAliases entry, because that set is parity-tested against the
+        // Action enum in src/cli/ghostty.zig.
+        if (args.Length > 1 && args[0] == "+crash")
+        {
+            Environment.Exit(Cli.CrashTrigger.Run(args[1]));
+        }
+
         // Does the command line lead with a bare Windows subcommand, e.g.
         // `wintty list-themes`? This is the same call InitWideFromProcess
         // makes to perform the rewrite, over the same input, so the gate
