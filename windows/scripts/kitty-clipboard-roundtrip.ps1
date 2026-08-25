@@ -57,6 +57,17 @@ param(
     [int]$Seed = 12345,
     [switch]$Unattended,
 
+    # Write a range of payload sizes and report the cost of each, instead of
+    # round-tripping one. This exists to answer a question a single timing
+    # cannot: whether a slow write is a per-write cost (the clipboard call,
+    # the encoder, one dialog's worth of bookkeeping) or a per-byte one (the
+    # OSC parser, the transport). Those have opposite fixes, and the shape of
+    # cost against size is what tells them apart.
+    #
+    # Writes only, so it does not wait on a read prompt. Set clipboard-write
+    # to allow first, or every size stops for a dialog and measures the human.
+    [switch]$Sweep,
+
     # Exercise the reply parser against synthetic replies. Needs no terminal,
     # no clipboard and no human, so it can run anywhere.
     [switch]$SelfTest,
@@ -316,7 +327,7 @@ function Invoke-SelfTest {
     foreach ($fn in @(
         'Write-Osc', 'ConvertTo-B64', 'ConvertTo-B64Text',
         'Read-Until-Terminal', 'Clear-Input', 'Convert-ReadReply',
-        'Write-ClipboardPayload', 'Read-ClipboardPayload',
+        'Write-ClipboardPayload', 'Read-ClipboardPayload', 'Invoke-Sweep',
         'Get-Sha', 'New-TestPng')) {
         Check "function $fn is defined" ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) 'missing'
     }
@@ -366,7 +377,75 @@ function New-TestPng([int]$w, [int]$h, [int]$seed) {
 
 # ---- run ------------------------------------------------------------------
 
+function Invoke-Sweep {
+    # text/plain, not PNG: the size is then exactly what was asked for, and
+    # no image encoder sits between the harness and the path being measured.
+    $sizes = @(1KB, 4KB, 16KB, 64KB, 256KB)
+    $rows = @()
+
+    Write-Host ''
+    Write-Host 'Write-cost sweep. Reading nothing, so no read prompt.'
+    Write-Host 'Needs clipboard-write = allow, or each size waits on a dialog.'
+    Write-Host ''
+    Write-Host '     size      encode     write    KB/s'
+
+    foreach ($n in $sizes) {
+        $text = -join ((1..$n) | ForEach-Object { [char](97 + ($_ % 26)) })
+        $payload = [Text.Encoding]::UTF8.GetBytes($text)
+
+        # The harness's own share, measured separately so it can be subtracted
+        # rather than argued about. It has been ~2ms for 31KB; if the write
+        # comes back at hundreds of ms, this line is what proves the cost is
+        # not here.
+        $swEnc = [Diagnostics.Stopwatch]::StartNew()
+        $null = [Convert]::ToBase64String($payload)
+        $swEnc.Stop()
+
+        $swW = [Diagnostics.Stopwatch]::StartNew()
+        $null = Write-ClipboardPayload $payload 'text/plain' "sweep-$n"
+        $swW.Stop()
+
+        $ms = [Math]::Max(1, $swW.ElapsedMilliseconds)
+        $kbs = [Math]::Round(($payload.Length / 1KB) / ($ms / 1000.0), 1)
+        Write-Host ('  {0,7}   {1,6}ms  {2,6}ms  {3,7}' -f
+            "$([int]($n/1KB))KB", $swEnc.ElapsedMilliseconds, $swW.ElapsedMilliseconds, $kbs)
+        $rows += [pscustomobject]@{ Bytes = $payload.Length; Ms = $swW.ElapsedMilliseconds }
+    }
+
+    # Two points, two unknowns. Cost per byte comes from the slope between the
+    # smallest and largest sample; the intercept is what every write pays
+    # regardless of size. Crude, but it is the distinction that matters and it
+    # needs no curve fitting to see.
+    $lo = $rows[0]
+    $hi = $rows[-1]
+    $perByte = ($hi.Ms - $lo.Ms) / [double]($hi.Bytes - $lo.Bytes)
+    $fixed = $lo.Ms - ($perByte * $lo.Bytes)
+
+    Write-Host ''
+    Write-Host ('  fixed cost per write : {0:N0}ms' -f [Math]::Max(0, $fixed))
+    Write-Host ('  marginal cost        : {0:N2}ms per KB  ({1:N0} KB/s at the margin)' -f
+        ($perByte * 1KB), $(if ($perByte -gt 0) { 1000.0 / ($perByte * 1KB) } else { 0 }))
+    Write-Host ''
+    if ($fixed -gt 100) {
+        Write-Host '  Reading: cost is dominated by the FIXED part, so this is a'
+        Write-Host '  per-write expense (the clipboard call itself, or work done'
+        Write-Host '  once per transaction). Faster parsing would not move it.'
+    }
+    else {
+        Write-Host '  Reading: cost scales with SIZE, so this is throughput --'
+        Write-Host '  the transport or the parser. Compare the marginal figure'
+        Write-Host '  against upstream before calling it a regression.'
+    }
+    Write-Host ''
+    exit 0
+}
+
+# Dispatched below every function definition, not beside the parameter
+# block: the self-test's roll call asserts each function the live run
+# calls actually exists, and a roll call that runs before the
+# definitions would report them all missing.
 if ($SelfTest) { Invoke-SelfTest }
+if ($Sweep) { Invoke-Sweep }
 
 $findings = @()
 $rng = [Random]::new($Seed)
