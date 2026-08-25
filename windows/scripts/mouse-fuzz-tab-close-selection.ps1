@@ -361,6 +361,23 @@ function Close-TabRow($row, [uint32]$ProcId) {
     Start-Sleep -Milliseconds 700
 }
 
+# Clicking the terminal is what makes the app accept a chord at all: the XAML
+# island drops synthesized keys until a real click lands on its own pixels,
+# and ANY chrome interaction -- the pane toggle, a tab close button -- moves
+# focus off the terminal and un-arms it again.
+#
+# So this is called before every chord rather than once at startup. Arming
+# once was enough to open the first tabs and then silently stopped working
+# after the first close, which surfaced as "the new-tab chord is not landing"
+# and reads exactly like a broken keybinding.
+function Enable-Chords {
+    if (-not $script:ArmPid) { return }
+    if (-not [MzTC]::Click($script:ArmPid, $script:ArmX, $script:ArmY)) {
+        throw 'HARVEST_MISS: could not click the terminal to arm input'
+    }
+    Start-Sleep -Milliseconds 250
+}
+
 function Add-Tab([int64]$Hwnd64) {
     if (-not [MzTC]::Chord([MzTC]::P($Hwnd64), @([MzTC]::VK_CONTROL), [MzTC]::VK_T)) {
         throw 'FOREGROUND_MISS: could not take the foreground to open a tab'
@@ -372,6 +389,7 @@ function Add-Tab([int64]$Hwnd64) {
 # holding the foreground until the suite's wall-clock budget kills it, and the
 # cause would be invisible in the log.
 function Add-TabsUpTo([int64]$Hwnd64, [bool]$Vertical, [int]$Want) {
+    Enable-Chords
     for ($i = 0; $i -lt ($Want * 2 + 4); $i++) {
         $have = (Get-TabRows (Get-UiaRoot $Hwnd64) $Vertical).Count
         if ($have -ge $Want) { return $have }
@@ -509,8 +527,10 @@ function Invoke-Layout([bool]$Vertical) {
         $restX = [int]($rc.L + $rc.W * 0.75)
         $restY = [int]($rc.T + $rc.Hh * 0.75)
         if (-not [MzTC]::Focus([MzTC]::P($hwnd64))) { throw 'FOREGROUND_MISS: window would not come forward' }
-        # Arms the XAML island. Every chord below is dropped without it.
-        if (-not [MzTC]::Click($pid32, $restX, $restY)) { throw 'HARVEST_MISS: could not click the terminal to arm input' }
+        $script:ArmPid = $pid32
+        $script:ArmX = $restX
+        $script:ArmY = $restY
+        Enable-Chords
 
         if ($Vertical) {
             # The per-row close button only exists in the expanded pane, and a
