@@ -3866,6 +3866,19 @@ public sealed partial class MainWindow : Window
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
 
     /// <summary>
+    /// What the palette was before the open picker previewed over it, and
+    /// whether the user has accepted a theme. Ended -- and consumed -- by
+    /// <see cref="ClosePicker"/>, so one instance serves every picker this
+    /// window ever opens.
+    /// </summary>
+    // A preview is process-wide colour, not the picker's own drawing: it goes
+    // through ConfigService and repaints every surface and all the chrome. So
+    // browsing away from a theme and cancelling has to put the old colours
+    // back, and nothing else can -- the picker reports a cancel by setting
+    // should_quit with no final callback at all.
+    private readonly Ghostty.Core.Themes.InlineThemePreviewSession _pickerPreview = new();
+
+    /// <summary>
     /// Open the inline theme picker on this window's active surface. Called
     /// by App when a LIST_THEMES arrives on the preview pipe; App picks the
     /// window. UI thread only.
@@ -3911,17 +3924,11 @@ public sealed partial class MainWindow : Window
                 // ShellThemeService off the stack of a native input
                 // callback, rather than re-entering libghostty while it is
                 // still handling the key that got us here.
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    // Null until OnLaunched builds the service and again
-                    // once the shutdown's finally block clears it; a picker
-                    // keystroke in flight across this dispatch can land in
-                    // either gap. Non-null is not proof the service is still
-                    // live -- the shutdown disposes it well before that
-                    // clearing -- but applying colors after the dispose is
-                    // fenced off by ConfigService's own shutdown flag.
-                    Ghostty.App.ApplyThemePreview?.Invoke(name);
-                });
+                // The flag is what tells a browse from a choice, and it is
+                // carried across the dispatch rather than resolved here:
+                // deciding on this stack would decide before the enqueued
+                // work that acts on it has run.
+                DispatcherQueue.TryEnqueue(() => ApplyPickerTheme(name, confirmed != 0));
             }
             catch { }
         };
@@ -3962,6 +3969,51 @@ public sealed partial class MainWindow : Window
         // input redirect callback.
         StartPickerPoll();
     }
+
+    /// <summary>
+    /// Apply one theme the picker named, recording what it was: a browse, so
+    /// the close knows it has colours to put back, or the user's choice, so it
+    /// knows to leave them. UI thread only.
+    /// </summary>
+    private void ApplyPickerTheme(string name, bool confirmed)
+    {
+        // The callback is enqueued, so one dispatched just before the close
+        // ran is pumped just after it. Applying then would paint the previewed
+        // theme back over the revert the close had already made, and with the
+        // run already ended nothing would be left to undo it a second time. A
+        // zero handle is the picker having been handed back.
+        if (_pickerHandle == IntPtr.Zero) return;
+
+        // Recorded before the apply, and latched rather than decided from the
+        // last callback seen: confirming fires the confirm and then, on that
+        // same key, a preview for the theme just confirmed, so the final
+        // callback of an accepted run says "not confirmed".
+        if (confirmed)
+            _pickerPreview.NoteConfirm();
+        else
+            _pickerPreview.NotePreview(CapturePreviewColors);
+
+        // Null until OnLaunched builds the service and again once the
+        // shutdown's finally block clears it; a picker keystroke in flight
+        // across the dispatch can land in either gap. Non-null is not proof
+        // the service is still live -- the shutdown disposes it well before
+        // that clearing -- but applying colors after the dispose is fenced off
+        // by ConfigService's own shutdown flag.
+        Ghostty.App.ApplyThemePreview?.Invoke(name);
+    }
+
+    /// <summary>
+    /// The live colours, as a snapshot the picker's close can restore.
+    /// </summary>
+    // A method group handed to the session rather than a value computed at the
+    // call site: it must run on the first preview of a run and no other, and
+    // only the session knows which one that is.
+    private Ghostty.Core.Themes.ThemePreviewColors CapturePreviewColors() => new(
+        _configService.ForegroundColor,
+        _configService.BackgroundColor,
+        _configService.CursorColor,
+        _configService.CursorTextColor,
+        _configService.AnsiPalette);
 
     /// <summary>
     /// The surface the picker is installed on is being freed. Close the picker
@@ -4101,6 +4153,35 @@ public sealed partial class MainWindow : Window
         _pickerSurface = default;
         _pickerTerminal = null;
         _inlineThemeCb = null;
+
+        // Put the palette back unless the user accepted a theme. This is the
+        // only place that can: a cancel is silent, because Escape and ^C set
+        // should_quit without any final callback, so there is no "cancelled"
+        // message to act on -- only the close every ending funnels through.
+        //
+        // Unconditional, and deliberately not narrowed to the endings that
+        // look like a user cancelling. A surface freed under the picker is not
+        // the user rejecting the theme, but it is not the user accepting it
+        // either, and the colours are the app's rather than that surface's:
+        // leaving them applied would be the same defect, in every remaining
+        // window, on a tab close. The revert costs one in-memory apply --
+        // nothing is written to the config file on either path -- and
+        // ConfigService fences it once shutdown starts, so on the way out of
+        // the process it is a no-op rather than a hazard.
+        if (_pickerPreview.End() is { } restore)
+        {
+            // Enqueued rather than applied inline, for the reason the pipe
+            // server's revert is: the surface-disposing path reaches here from
+            // inside a control's dispose, and ApplyThemeColors fans
+            // ConfigChanged out across the window -- back into a pane tree
+            // that is part-way through being torn down.
+            DispatcherQueue.TryEnqueue(() => _configService.ApplyThemeColors(
+                restore.Foreground,
+                restore.Background,
+                restore.Cursor,
+                restore.CursorText,
+                restore.Palette));
+        }
     }
 }
 
