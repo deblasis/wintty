@@ -132,6 +132,50 @@ internal sealed class ShellSource
     private static string Normalize(string resourceName) =>
         resourceName.Replace('\\', '.').Replace('/', '.');
 
+    // The two logical-name prefixes the shell and the core project's sources
+    // are embedded under (see Ghostty.Tests.csproj). Core is nested inside the
+    // shell's prefix, so telling them apart is a second StartsWith rather than
+    // one.
+    private const string ShellPrefix = "Ghostty.Tests.Interop.Sources.Ghostty.";
+    private const string CorePrefix = "Ghostty.Tests.Interop.Sources.Ghostty.Core.";
+
+    /// <summary>
+    /// Every embedded WinUI shell source, parsed, as (dotted resource name,
+    /// syntax root).
+    ///
+    /// For scans that have to see the whole project rather than one named
+    /// file: a census can only claim to enumerate windows if it enumerates
+    /// the files first. Deliberately NOT <see cref="Load"/>, which refuses a
+    /// tree with conditional regions it cannot see -- that refusal is right
+    /// for a file a test is about to make claims about, and wrong here, where
+    /// one such file anywhere in the shell would take the whole sweep down.
+    /// A file this finds and a test then wants to read in earnest still goes
+    /// through Load.
+    /// </summary>
+    public static IReadOnlyList<(string Resource, CompilationUnitSyntax Root)> AllShellSources()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
+        var found = new List<(string Resource, CompilationUnitSyntax Root)>();
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            var dotted = Normalize(name);
+            if (!dotted.StartsWith(ShellPrefix, StringComparison.Ordinal)) continue;
+            if (dotted.StartsWith(CorePrefix, StringComparison.Ordinal)) continue;
+            if (!dotted.EndsWith(".cs", StringComparison.Ordinal)) continue;
+
+            using var stream = asm.GetManifestResourceStream(name)!;
+            using var reader = new StreamReader(stream);
+            var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), options);
+            found.Add((dotted, (CompilationUnitSyntax)tree.GetRoot()));
+        }
+
+        // Load-bearing: an empty sweep is a query that stopped matching, and
+        // every caller reads "nothing to check" out of it.
+        Assert.True(found.Count > 0, "no embedded shell sources found under " + ShellPrefix);
+        return found;
+    }
+
     /// <summary>The whole parsed file.</summary>
     public SyntaxNode Root => _root;
 

@@ -36,7 +36,9 @@ CC BY-NC-SA, GPL) must not be added.
 2. Add an entry to `shaders.json`.
 3. Add the license text under `LICENSES/` if it is not original work,
    and an entry in the repo's `THIRD_PARTY_NOTICES.md`.
-4. Run `just gallery-verify` and make sure it reports PASS.
+4. Run `just gallery-lint` (seconds, no GPU and no zioshade build: it is
+   the parse half of the gate, and it is what CI runs on every push).
+5. Run `just gallery-verify` and make sure it reports PASS.
 
 The source must compile under `glslang` verbatim: the gate feeds the same
 file to our compiler and to the reference one, so anything glslang refuses

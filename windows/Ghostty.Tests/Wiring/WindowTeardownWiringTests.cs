@@ -9,28 +9,28 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// Every event MainWindow subscribes to, checked against what its close
+/// Every event each window subscribes to, checked against what its close
 /// takes back.
 ///
-/// Four separate callbacks accumulated behind this gap -- an OS colour-scheme
-/// handler calling into libghostty through the app pointer the close is about
-/// to free, and three dispatcher-driven timers nothing stopped -- and each was
-/// found by hand, one at a time, because nothing enumerated the subscriptions
-/// against the unsubscribe list. Sixty-odd `+=` against a handful of `-=` is
-/// not a list anyone re-reads.
+/// Four separate callbacks accumulated behind this gap in MainWindow -- an OS
+/// colour-scheme handler calling into libghostty through the app pointer the
+/// close is about to free, and three dispatcher-driven timers nothing stopped
+/// -- and each was found by hand, one at a time, because nothing enumerated
+/// the subscriptions against the unsubscribe list. Sixty-odd `+=` against a
+/// handful of `-=` is not a list anyone re-reads.
 ///
 /// The discrimination that matters is who owns the event source:
 ///
 ///   - A source that outlives the window -- the OS, an app-level service, a
 ///     static event, a timer the window created but the dispatcher drives --
 ///     keeps calling after Window.Closed, and keeps the closed window alive
-///     while it does. It must be unsubscribed in OnClosedAsync, or its handler
-///     must return early on _isClosed.
+///     while it does. It must be unsubscribed on the close path, or its
+///     handler must return early on the window's teardown latch.
 ///   - A source the window itself owns and that dies with it -- its own XAML
 ///     elements, its per-window services, its pane tree -- needs neither.
 ///
 /// There is no semantic model here (see ShellSource), so ownership cannot be
-/// inferred; it has to be declared. <see cref="WindowOwned"/> is that
+/// inferred; it has to be declared. <see cref="Censused.Owned"/> is that
 /// declaration, and it is an allow-list rather than a list of sources known to
 /// need proof, because the failure mode being defended against is a
 /// subscription NOBODY classified. A deny-list is silent on the receiver
@@ -39,22 +39,66 @@ namespace Ghostty.Tests.Wiring;
 /// of the line it falls on, and that sentence is the whole product of this
 /// test.
 ///
+/// The same argument applies one level up, to the files. This census covered
+/// MainWindow alone until ShaderPickerWindow -- a window that owns a native
+/// surface, a child process and an autoplay feed -- turned out to be outside
+/// it entirely. So the windows are not named here: they are found, by looking
+/// for every class in the shell that derives from Window, and each one has to
+/// appear in <see cref="Windows"/> or the census fails. Window number four is
+/// covered the day it is written.
+///
 /// What it cannot see: whether a gated handler's gate covers the turns after
-/// an await, whether an unsubscribe runs on every path through OnClosedAsync,
-/// and every subscription made outside this file. It is a census, not a proof
-/// of safety. The per-case guards below carry the reasoning those need.
+/// an await, whether an unsubscribe runs on every path through the close, and
+/// every subscription made outside the window's own file. It is a census, not
+/// a proof of safety. The per-case guards below carry the reasoning those
+/// need.
 /// </summary>
 public class WindowTeardownWiringTests
 {
-    private static ShellSource Window() => ShellSource.Load("Ghostty.MainWindow.xaml.cs");
+    /// <summary>
+    /// One window under census.
+    /// </summary>
+    /// <param name="Class">Class name, which is what discovery matches on.</param>
+    /// <param name="File">Dotted tail for <see cref="ShellSource.Load"/>.</param>
+    /// <param name="ClosedFlag">
+    /// The field a handler reads to bail out once teardown has started, or
+    /// null when the window has no such latch -- in which case only an
+    /// unsubscribe can prove a subscription safe here.
+    /// </param>
+    /// <param name="ClosePath">
+    /// Methods the Closed handler delegates teardown to, whose unsubscribes
+    /// count as the close's. Declared rather than followed automatically: an
+    /// unsubscribe that moved into a helper the close reaches only on one
+    /// branch is a weaker claim than one written in the close itself, and
+    /// somebody has to say so.
+    /// </param>
+    /// <param name="AtLeast">
+    /// How many subscriptions the query must still find. Load-bearing: every
+    /// assertion is over that list, so a query that stops matching would pass
+    /// the whole census while reading nothing.
+    /// </param>
+    /// <param name="Owned">Receivers whose events die with the window, and why.</param>
+    /// <param name="Exempt">
+    /// Individual events on sources that DO outlive the window and are still
+    /// left attached, each with the reason detaching or gating would be wrong.
+    /// Spelled as whole events, not receivers, so the rest of the receiver
+    /// stays under the rule.
+    /// </param>
+    private sealed record Censused(
+        string Class,
+        string File,
+        string? ClosedFlag,
+        string[] ClosePath,
+        int AtLeast,
+        (string Receiver, string Why)[] Owned,
+        (string Event, string Why)[] Exempt);
 
     /// <summary>
-    /// Receivers whose events die with the window, and why. Adding a line here
-    /// is meant to cost a decision: the claim is that when this window is gone
-    /// nothing can raise the event again, so neither an unsubscribe nor a gate
-    /// buys anything.
+    /// Adding a line to one of these is meant to cost a decision: the claim is
+    /// that when this window is gone nothing can raise the event again, so
+    /// neither an unsubscribe nor a gate buys anything.
     /// </summary>
-    private static readonly (string Receiver, string Why)[] WindowOwned =
+    private static readonly (string Receiver, string Why)[] MainWindowOwned =
     {
         ("this", "the Window's own events; the window raises them and stops when it does"),
         ("fe", "this window's XAML content root"),
@@ -84,17 +128,108 @@ public class WindowTeardownWiringTests
                    + "detaches the two subscriptions taken out alongside it"),
     };
 
-    /// <summary>
-    /// Individual events on sources that DO outlive the window and are still
-    /// left attached, each with the reason detaching or gating would be wrong.
-    /// Spelled as whole events, not receivers, so the rest of the receiver
-    /// stays under the rule.
-    /// </summary>
-    private static readonly (string Event, string Why)[] Exempt =
+    private static readonly (string Event, string Why)[] MainWindowExempt =
     {
         ("AppWindow.Closing", "runs during the close by design: it is what turns a quake close "
                               + "into a hide. _isClosed is still false when it fires"),
     };
+
+    private static readonly (string Receiver, string Why)[] ShaderPickerOwned =
+    {
+        ("this", "the Window's own events; the window raises them and stops when it does"),
+        ("RootGrid", "named element of ShaderPickerWindow.xaml"),
+        // The one that is not obvious. FirstRender is raised through the
+        // shared bootstrap host's dispatcher, which outlives this window, so
+        // the subscription is only safe because of what the close does to the
+        // control: DisposePreview calls DisposeSurface, and DisposeSurface
+        // nulls FirstRender along with the control's other events.
+        ("control", "this window's own preview TerminalControl; the close calls DisposePreview, "
+                    + "whose DisposeSurface nulls FirstRender with the rest of the control's events"),
+    };
+
+    private static readonly (string Receiver, string Why)[] SettingsWindowOwned =
+    {
+        ("this", "the Window's own events; the window raises them and stops when it does"),
+        ("ctrlF", "a KeyboardAccelerator this window creates and hands to its own NavView"),
+        ("root", "a settings page's own element, passed into a static helper; the handler "
+                 + "detaches itself on the first fire"),
+    };
+
+    private static readonly (string Receiver, string Why)[] AboutWindowOwned =
+    {
+        ("this", "the Window's own events; the window raises them and stops when it does"),
+    };
+
+    private static readonly (string Receiver, string Why)[] InspectorWindowOwned =
+    {
+        ("this", "the Window's own events; the window raises them and stops when it does"),
+        ("Panel", "named element of InspectorWindow.xaml"),
+    };
+
+    private static readonly (string Event, string Why)[] NoneExempt =
+        Array.Empty<(string Event, string Why)>();
+
+    private static readonly Censused MainWindow = new(
+        Class: "MainWindow",
+        File: "Ghostty.MainWindow.xaml.cs",
+        ClosedFlag: "_isClosed",
+        ClosePath: Array.Empty<string>(),
+        AtLeast: 40,
+        Owned: MainWindowOwned,
+        Exempt: MainWindowExempt);
+
+    private static readonly Censused ShaderPickerWindow = new(
+        Class: "ShaderPickerWindow",
+        File: "Settings.ShaderPickerWindow.xaml.cs",
+        ClosedFlag: "_closed",
+        // The Closed handler latches and delegates; DisposePreview is the
+        // teardown.
+        ClosePath: new[] { "DisposePreview" },
+        AtLeast: 4,
+        Owned: ShaderPickerOwned,
+        Exempt: NoneExempt);
+
+    private static readonly Censused SettingsWindow = new(
+        Class: "SettingsWindow",
+        File: "Settings.SettingsWindow.xaml.cs",
+        ClosedFlag: null,
+        ClosePath: Array.Empty<string>(),
+        AtLeast: 5,
+        Owned: SettingsWindowOwned,
+        Exempt: NoneExempt);
+
+    private static readonly Censused AboutWindow = new(
+        Class: "AboutWindow",
+        File: "Dialogs.AboutWindow.xaml.cs",
+        ClosedFlag: null,
+        ClosePath: Array.Empty<string>(),
+        AtLeast: 2,
+        Owned: AboutWindowOwned,
+        Exempt: NoneExempt);
+
+    private static readonly Censused InspectorWindow = new(
+        Class: "InspectorWindow",
+        File: "InspectorWindow.xaml.cs",
+        ClosedFlag: "_closed",
+        ClosePath: Array.Empty<string>(),
+        AtLeast: 11,
+        Owned: InspectorWindowOwned,
+        Exempt: NoneExempt);
+
+    private static readonly Censused[] Windows =
+    {
+        MainWindow,
+        ShaderPickerWindow,
+        SettingsWindow,
+        AboutWindow,
+        InspectorWindow,
+    };
+
+    /// <summary>The census cases, named by file so xunit can address one.</summary>
+    public static IEnumerable<object[]> CensusedWindows() =>
+        Windows.Select(w => new object[] { w.File });
+
+    private static Censused Find(string file) => Windows.Single(w => w.File == file);
 
     private sealed record Subscription(string Event, string Receiver, string Handler, ExpressionSyntax Rhs);
 
@@ -129,11 +264,46 @@ public class WindowTeardownWiringTests
             .Select(a => new Subscription(Flatten(a.Left), ReceiverOf(a.Left), Flatten(a.Right), a.Right))
             .ToList();
 
-    private static List<Subscription> Subscriptions() =>
-        Assignments(Window().Root, SyntaxKind.AddAssignmentExpression);
+    private static List<Subscription> Subscriptions(ShellSource source) =>
+        Assignments(source.Root, SyntaxKind.AddAssignmentExpression);
 
-    private static List<Subscription> Unsubscribes() =>
-        Assignments(Window().Method("OnClosedAsync"), SyntaxKind.SubtractAssignmentExpression);
+    /// <summary>
+    /// The window's close path: whatever it attaches to its OWN Closed event
+    /// (`newWindow.Closed += ...` is somebody else's), plus the methods
+    /// declared in <see cref="Censused.ClosePath"/>.
+    ///
+    /// Read off the subscription rather than from a method name, so a window
+    /// that renames or inlines its close handler is still measured against the
+    /// handler it actually installs.
+    /// </summary>
+    private static List<SyntaxNode> CloseScopes(Censused window, ShellSource source)
+    {
+        var handlers = Subscriptions(source).Where(s => s.Event == "Closed").ToList();
+        Assert.True(
+            handlers.Count == 1,
+            $"{window.Class}: expected exactly one `Closed +=` on the window itself, found "
+            + $"{handlers.Count}; the close path is what every claim below is measured against");
+
+        SyntaxNode? entry = handlers[0].Rhs switch
+        {
+            LambdaExpressionSyntax lambda => lambda.Body,
+            IdentifierNameSyntax name => source.Method(name.Identifier.ValueText).Body,
+            _ => null,
+        };
+        Assert.True(
+            entry is not null,
+            $"{window.Class}: its Closed handler is neither a lambda nor a method in this file, "
+            + "so nothing here can read what the close takes back");
+
+        var scopes = new List<SyntaxNode> { entry! };
+        scopes.AddRange(window.ClosePath.Select(m => (SyntaxNode)source.Method(m).Body!));
+        return scopes;
+    }
+
+    private static List<Subscription> Unsubscribes(Censused window, ShellSource source) =>
+        CloseScopes(window, source)
+            .SelectMany(scope => Assignments(scope, SyntaxKind.SubtractAssignmentExpression))
+            .ToList();
 
     /// <summary>
     /// <c>if (_isClosed) ... return;</c> and nothing that merely mentions the
@@ -142,8 +312,10 @@ public class WindowTeardownWiringTests
     /// pins on the layout-switch completion -- the two have to agree on what
     /// counts as a gate, or the file grows two kinds.
     /// </summary>
-    private static bool IsClosedGuard(StatementSyntax statement) =>
-        statement is IfStatementSyntax { Condition: IdentifierNameSyntax { Identifier.Text: "_isClosed" } } guard
+    private static bool IsClosedGuard(StatementSyntax statement, string? flag) =>
+        flag is not null
+        && statement is IfStatementSyntax { Condition: IdentifierNameSyntax condition } guard
+        && condition.Identifier.Text == flag
         && guard.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>().Any();
 
     /// <summary>
@@ -152,8 +324,10 @@ public class WindowTeardownWiringTests
     /// branch guards that branch, not the handler, and a gate one call deeper
     /// is a fact about the callee that this cannot see.
     /// </summary>
-    private static bool IsGated(Subscription subscription, ShellSource source)
+    private static bool IsGated(Subscription subscription, ShellSource source, string? flag)
     {
+        if (flag is null) return false;
+
         var body = subscription.Rhs switch
         {
             // An expression-bodied lambda has no statement to gate on.
@@ -179,7 +353,7 @@ public class WindowTeardownWiringTests
         // the first statement that does work, where a preceding early-return
         // guard or a Stop call is not work.
         var statements = body.Statements;
-        var gate = statements.Select((st, i) => (st, i)).FirstOrDefault(x => IsClosedGuard(x.st));
+        var gate = statements.Select((st, i) => (st, i)).FirstOrDefault(x => IsClosedGuard(x.st, flag));
         if (gate.st is null) return false;
 
         var firstWorking = statements.TakeWhile(IsPrelude).Count();
@@ -208,21 +382,41 @@ public class WindowTeardownWiringTests
             .ToList();
     }
 
-    [Fact]
-    public void EverySubscriptionIsOwnedByTheWindowOrSurvivesItsClose()
+    /// <summary>
+    /// Every class in the shell that derives from Window, found rather than
+    /// named. The base type is matched as written, so a window declared
+    /// through an alias would be missed; that is the residual hole, and it is
+    /// a smaller one than a hand-kept list of files.
+    /// </summary>
+    private static List<(string Resource, string Class)> WindowClasses() =>
+        ShellSource.AllShellSources()
+            .SelectMany(file => file.Root.DescendantNodes()
+                .OfType<ClassDeclarationSyntax>()
+                .Where(IsWindowClass)
+                .Select(cls => (file.Resource, Class: cls.Identifier.ValueText)))
+            .ToList();
+
+    private static bool IsWindowClass(ClassDeclarationSyntax cls) =>
+        cls.BaseList is { } bases
+        && bases.Types.Any(t => t.Type.ToString() is "Window" or "Microsoft.UI.Xaml.Window");
+
+    [Theory]
+    [MemberData(nameof(CensusedWindows))]
+    public void EverySubscriptionIsOwnedByTheWindowOrSurvivesItsClose(string file)
     {
-        var source = Window();
-        var subscriptions = Subscriptions();
+        var window = Find(file);
+        var source = ShellSource.Load(file);
+        var subscriptions = Subscriptions(source);
 
-        // Load-bearing. Every assertion below is over this list, so a query
-        // that stops matching passes the whole test while reading nothing.
         Assert.True(
-            subscriptions.Count > 40,
-            $"expected MainWindow's event subscriptions to be found, got {subscriptions.Count}");
+            subscriptions.Count >= window.AtLeast,
+            $"expected at least {window.AtLeast} event subscriptions in {window.Class}, got "
+            + $"{subscriptions.Count}; every assertion below is over that list, so a query that "
+            + "stops matching passes the whole test while reading nothing");
 
-        var owned = WindowOwned.Select(x => x.Receiver).ToHashSet(StringComparer.Ordinal);
-        var exempt = Exempt.Select(x => x.Event).ToHashSet(StringComparer.Ordinal);
-        var detached = Unsubscribes()
+        var owned = window.Owned.Select(x => x.Receiver).ToHashSet(StringComparer.Ordinal);
+        var exempt = window.Exempt.Select(x => x.Event).ToHashSet(StringComparer.Ordinal);
+        var detached = Unsubscribes(window, source)
             .Select(u => (u.Event, u.Handler))
             .ToHashSet();
 
@@ -233,51 +427,121 @@ public class WindowTeardownWiringTests
             .Where(s => !owned.Contains(s.Receiver) && !exempt.Contains(s.Event))
             .ToList();
         var unproven = mustProve
-            .Where(s => !detached.Contains((s.Event, s.Handler)) && !IsGated(s, source))
+            .Where(s => !detached.Contains((s.Event, s.Handler)) && !IsGated(s, source, window.ClosedFlag))
             .Select(s => s.Event)
             .Distinct(StringComparer.Ordinal)
             .ToList();
 
         Assert.True(
             unproven.Count == 0,
-            "these subscriptions are to sources that outlive the window and are neither "
-            + "unsubscribed in OnClosedAsync nor gated on _isClosed, so they keep firing at, and "
-            + "keep alive, a window that is tearing down: "
+            $"these {window.Class} subscriptions are to sources that outlive the window and are "
+            + "neither unsubscribed on its close path nor gated on "
+            + (window.ClosedFlag ?? "a teardown latch (it has none)")
+            + ", so they keep firing at, and keep alive, a window that is tearing down: "
             + string.Join(", ", unproven)
-            + ". Unsubscribe it, gate the handler on _isClosed, or -- if the receiver really does "
-            + "die with the window -- add it to WindowOwned with the reason.");
-
-        // Both ways of satisfying the rule have to be live. Without this, a
-        // regression that classified everything as detached (or everything as
-        // gated) would leave the other branch untested and silently rotten.
-        Assert.Contains(mustProve, s => detached.Contains((s.Event, s.Handler)));
-        Assert.Contains(mustProve, s => IsGated(s, source));
+            + ". Unsubscribe it, gate the handler, or -- if the receiver really does die with the "
+            + "window -- add it to that window's Owned list with the reason.");
     }
 
     /// <summary>
-    /// The allow-list has to stay a description of the file. An entry whose
+    /// Both ways of satisfying the census have to stay live. Without this, a
+    /// regression that classified everything as detached (or everything as
+    /// gated) would leave the other branch untested and silently rotten.
+    ///
+    /// Asserted on MainWindow because it is the window that uses both. A
+    /// window whose every receiver dies with it proves neither, and demanding
+    /// it there would be demanding teardown code with nothing to tear down.
+    /// </summary>
+    [Fact]
+    public void BothWaysOfProvingASubscriptionSafeAreExercised()
+    {
+        var source = ShellSource.Load(MainWindow.File);
+        var owned = MainWindow.Owned.Select(x => x.Receiver).ToHashSet(StringComparer.Ordinal);
+        var exempt = MainWindow.Exempt.Select(x => x.Event).ToHashSet(StringComparer.Ordinal);
+        var detached = Unsubscribes(MainWindow, source).Select(u => (u.Event, u.Handler)).ToHashSet();
+
+        var mustProve = Subscriptions(source)
+            .Where(s => !owned.Contains(s.Receiver) && !exempt.Contains(s.Event))
+            .ToList();
+
+        Assert.Contains(mustProve, s => detached.Contains((s.Event, s.Handler)));
+        Assert.Contains(mustProve, s => IsGated(s, source, MainWindow.ClosedFlag));
+    }
+
+    /// <summary>
+    /// Every window in the shell is under census.
+    ///
+    /// This is the assertion that stops the file from silently narrowing to
+    /// whatever it happened to cover on the day it was written, which is
+    /// exactly what happened between #694 and #710: MainWindow was censused,
+    /// ShaderPickerWindow -- native surface, child process, autoplay feed --
+    /// was not, and nothing said so.
+    /// </summary>
+    [Fact]
+    public void EveryWindowInTheShellIsUnderCensus()
+    {
+        var found = WindowClasses();
+        Assert.True(
+            found.Count > 0,
+            "no Window-derived class found in the shell sources; this scan has stopped matching "
+            + "and every window would now pass by not being seen");
+
+        var declared = Windows.Select(w => w.Class).ToHashSet(StringComparer.Ordinal);
+        var uncensused = found
+            .Where(f => !declared.Contains(f.Class))
+            .Select(f => $"{f.Class} ({f.Resource})")
+            .ToList();
+        Assert.True(
+            uncensused.Count == 0,
+            "these windows are outside the teardown census, so nothing checks that what they "
+            + "subscribe to is either theirs to lose or taken back on close: "
+            + string.Join(", ", uncensused)
+            + ". Add a Censused entry naming its close path and who owns its event sources.");
+
+        var vanished = Windows
+            .Where(w => found.All(f => f.Class != w.Class))
+            .Select(w => w.Class)
+            .ToList();
+        Assert.True(
+            vanished.Count == 0,
+            "these censused classes no longer derive from Window, so their entries describe "
+            + "nothing: " + string.Join(", ", vanished));
+    }
+
+    /// <summary>
+    /// The declarations have to stay a description of the file. An entry whose
     /// receiver no longer subscribes to anything is a claim nobody is checking,
     /// and the next receiver to be spelled that way inherits an exemption
     /// nobody granted it.
     /// </summary>
-    [Fact]
-    public void TheOwnershipDeclarationsStillDescribeTheFile()
+    [Theory]
+    [MemberData(nameof(CensusedWindows))]
+    public void TheOwnershipDeclarationsStillDescribeTheFile(string file)
     {
-        var subscriptions = Subscriptions();
+        var window = Find(file);
+        var source = ShellSource.Load(file);
+        var subscriptions = Subscriptions(source);
         var receivers = subscriptions.Select(s => s.Receiver).ToHashSet(StringComparer.Ordinal);
         var events = subscriptions.Select(s => s.Event).ToHashSet(StringComparer.Ordinal);
 
-        var staleOwners = WindowOwned.Where(x => !receivers.Contains(x.Receiver)).Select(x => x.Receiver);
-        var staleExempt = Exempt.Where(x => !events.Contains(x.Event)).Select(x => x.Event);
+        var staleOwners = window.Owned.Where(x => !receivers.Contains(x.Receiver)).Select(x => x.Receiver);
+        var staleExempt = window.Exempt.Where(x => !events.Contains(x.Event)).Select(x => x.Event);
         var stale = staleOwners.Concat(staleExempt).ToList();
 
         Assert.True(
             stale.Count == 0,
-            "these entries no longer match any subscription in MainWindow and should be removed, "
-            + "so the list keeps meaning what it says: " + string.Join(", ", stale));
+            $"these entries no longer match any subscription in {window.Class} and should be "
+            + "removed, so the list keeps meaning what it says: " + string.Join(", ", stale));
 
-        Assert.All(WindowOwned, x => Assert.False(string.IsNullOrWhiteSpace(x.Why)));
-        Assert.All(Exempt, x => Assert.False(string.IsNullOrWhiteSpace(x.Why)));
+        Assert.All(window.Owned, x => Assert.False(string.IsNullOrWhiteSpace(x.Why)));
+        Assert.All(window.Exempt, x => Assert.False(string.IsNullOrWhiteSpace(x.Why)));
+
+        // A latch that no longer exists would silently turn every gated
+        // handler into an ungated one that still reads as gated here.
+        if (window.ClosedFlag is { } flag) source.Field(flag);
+
+        // Same for the declared close-path helpers.
+        foreach (var method in window.ClosePath) source.Method(method);
     }
 
     /// <summary>
@@ -294,28 +558,30 @@ public class WindowTeardownWiringTests
     [Fact]
     public void TheSystemColorSchemeHandlerIsBothDetachedAndGated()
     {
-        var source = Window();
+        var source = ShellSource.Load(MainWindow.File);
         const string Event = "_systemUiSettings.ColorValuesChanged";
         const string Handler = "OnSystemColorValuesChanged";
 
         // Named, not inline: an anonymous lambda cannot be unsubscribed at all.
-        var subscribed = Subscriptions().Where(s => s.Event == Event).ToList();
+        var subscribed = Subscriptions(source).Where(s => s.Event == Event).ToList();
         Assert.True(
             subscribed.Count == 1 && subscribed[0].Handler == Handler,
             $"expected one `{Event} += {Handler}`; a lambda here cannot be detached");
-        Assert.Contains((Event, Handler), Unsubscribes().Select(u => (u.Event, u.Handler)));
+        Assert.Contains(
+            (Event, Handler),
+            Unsubscribes(MainWindow, source).Select(u => (u.Event, u.Handler)));
 
         var method = source.Method(Handler);
         Assert.True(
-            method.Body!.Statements.Any(IsClosedGuard),
-            $"{Handler} must bail on _isClosed before it reads anything");
+            method.Body!.Statements.Any(s => IsClosedGuard(s, MainWindow.ClosedFlag)),
+            $"{Handler} must bail on {MainWindow.ClosedFlag} before it reads anything");
 
         // The enqueued body is the half that runs late, and it is a separate
         // scope: the entry gate above says nothing about the turn it runs on.
         var enqueued = method.Call("DispatcherQueue.TryEnqueue").ArgumentList.Arguments[0].Expression;
         var queued = Assert.IsType<ParenthesizedLambdaExpressionSyntax>(enqueued).Block!.Statements;
 
-        var gateIndex = queued.TakeWhile(s => !IsClosedGuard(s)).Count();
+        var gateIndex = queued.TakeWhile(s => !IsClosedGuard(s, MainWindow.ClosedFlag)).Count();
         var callIndex = queued
             .TakeWhile(s => !s.Calls("Ghostty.Interop.NativeMethods.AppSetColorScheme").Any())
             .Count();
@@ -347,7 +613,8 @@ public class WindowTeardownWiringTests
     [Fact]
     public void TheDispatcherDrivenTimersAreStoppedByTheClose()
     {
-        var statements = Window().Method("OnClosedAsync").Body!.Statements;
+        var source = ShellSource.Load(MainWindow.File);
+        var statements = source.Method("OnClosedAsync").Body!.Statements;
 
         int IndexOfCall(string call) => statements.TakeWhile(s => !s.Calls(call).Any()).Count();
 
@@ -375,8 +642,7 @@ public class WindowTeardownWiringTests
         // Each tick is gated as well, for the one already queued when the stop
         // lands. Read off the subscriptions rather than by searching the file,
         // so a tick handler moved elsewhere is still the one being checked.
-        var source = Window();
-        var subscriptions = Subscriptions();
+        var subscriptions = Subscriptions(source);
         // The picker poll subscribes through the local it captures rather than
         // through the field, so that a tick queued by a previous poll cannot
         // stop the one that replaced it. That is why this names poll.Tick.
@@ -385,9 +651,100 @@ public class WindowTeardownWiringTests
             var ticks = subscriptions.Where(s => s.Event == timer).ToList();
             Assert.True(ticks.Count == 1, $"expected one {timer} subscription, found {ticks.Count}");
             Assert.True(
-                IsGated(ticks[0], source),
+                IsGated(ticks[0], source, MainWindow.ClosedFlag),
                 $"{timer}'s handler must return early on _isClosed: Stop does not recall a tick "
                 + "already queued on the dispatcher");
         }
     }
+
+    /// <summary>
+    /// ThemePreviewService, the one gap #694 named and did not close.
+    ///
+    /// It is not an event source the census can see: it owns a named-pipe
+    /// server running on a background task, and the close only detached the
+    /// window from its ListThemesRequested. The task then ran for the life of
+    /// the process, holding the per-process pipe name with nobody left
+    /// listening to what arrived on it. Disposing cancels the loop, waits for
+    /// it, and drops the subscribers, so the window is neither rooted by it
+    /// nor outlived by it.
+    /// </summary>
+    [Fact]
+    public void TheThemePreviewServiceIsDisposedByTheClose()
+    {
+        var source = ShellSource.Load(MainWindow.File);
+        var statements = source.Method("OnClosedAsync").Body!.Statements;
+
+        var disposed = statements.TakeWhile(s => !s.Calls("_themePreview.Dispose").Any()).Count();
+        Assert.True(
+            disposed < statements.Count,
+            "OnClosedAsync must dispose _themePreview: unsubscribing alone leaves its pipe server "
+            + "task running for the life of the process");
+    }
+
+    /// <summary>
+    /// The shader picker's close, in the two places the census cannot reach.
+    ///
+    /// The picker is the only other window that owns a native surface, and it
+    /// owns a placeholder child process and an autoplay feed with it. None of
+    /// the three is freed by the visual tree going away, and the order matters
+    /// twice over: the feed writes into the surface, so it has to stop before
+    /// the surface is freed; and the latch has to be set before the teardown,
+    /// because a SelectionChanged arriving during the close reaches
+    /// EnsurePreview, and a surface built after DisposePreview has run would be
+    /// owned by nobody at all.
+    /// </summary>
+    [Fact]
+    public void TheShaderPickerCloseFreesTheSurfaceTheChildAndTheFeed()
+    {
+        var source = ShellSource.Load(ShaderPickerWindow.File);
+
+        var closing = Assert.IsType<BlockSyntax>(CloseScopes(ShaderPickerWindow, source)[0]).Statements;
+        var latch = closing.TakeWhile(s => !SetsLatch(s, ShaderPickerWindow.ClosedFlag)).Count();
+        var handoff = closing.TakeWhile(s => !s.Calls("DisposePreview").Any()).Count();
+        Assert.True(latch < closing.Count, "the Closed handler must latch _closed");
+        Assert.True(handoff < closing.Count, "the Closed handler must call DisposePreview");
+        Assert.True(latch < handoff, "the latch is what EnsurePreview reads, so it has to be set first");
+
+        var teardown = source.Method("DisposePreview").Body!.Statements;
+        int IndexOfCall(string call) => teardown.TakeWhile(s => !s.Calls(call).Any()).Count();
+        var feed = IndexOfCall("_feed?.Dispose");
+        var surface = IndexOfCall("_preview?.DisposeSurface");
+        Assert.True(feed < teardown.Count, "DisposePreview must dispose the autoplay feed");
+        Assert.True(
+            surface < teardown.Count,
+            "DisposePreview must free the preview surface; the placeholder child process goes with it");
+        Assert.True(
+            feed < surface,
+            "the feed writes VT into the preview, so it has to stop before the surface is freed");
+
+        var ensure = source.Method("EnsurePreview").Body!.Statements;
+        var gate = ensure.TakeWhile(s => !IsClosedGuard(s, ShaderPickerWindow.ClosedFlag)).Count();
+        var creation = ensure
+            .TakeWhile(s => !s.DescendantNodesAndSelf()
+                .OfType<ObjectCreationExpressionSyntax>()
+                .Any(o => o.Type.ToString().EndsWith("TerminalControl", StringComparison.Ordinal)))
+            .Count();
+        Assert.True(gate < ensure.Count, "EnsurePreview must return early once the window has closed");
+        Assert.True(creation < ensure.Count, "expected EnsurePreview to construct the preview terminal");
+        Assert.True(
+            gate < creation,
+            "the latch must be read before a native surface and its child process are created: "
+            + "DisposePreview has already run, so nothing would own them");
+    }
+
+    /// <summary>
+    /// <c>_closed = true;</c>, as a statement of its own.
+    /// </summary>
+    private static bool SetsLatch(StatementSyntax statement, string? flag) =>
+        flag is not null
+        && statement is ExpressionStatementSyntax
+        {
+            Expression: AssignmentExpressionSyntax
+            {
+                Left: IdentifierNameSyntax left,
+                Right: LiteralExpressionSyntax right
+            }
+        }
+        && left.Identifier.Text == flag
+        && right.IsKind(SyntaxKind.TrueLiteralExpression);
 }
