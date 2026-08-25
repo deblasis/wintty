@@ -469,6 +469,14 @@
     <NativeLibrary Include="d3d12.lib" />
     <NativeLibrary Include="dxgi.lib" />
     <NativeLibrary Include="dcomp.lib" />
+    <!--
+      sentry-native's Windows sources arrive inside ghostty-static.lib, and
+      pkg/sentry/build.zig declares no system libraries of its own:
+        dbghelp.lib - symbolizer, dbghelp unwinder, modulefinder
+        version.lib - sentry_os.c
+    -->
+    <NativeLibrary Include="dbghelp.lib" />
+    <NativeLibrary Include="version.lib" />
   </ItemGroup>
 
   <!--
