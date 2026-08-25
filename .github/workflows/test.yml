@@ -2011,6 +2011,35 @@ jobs:
             --severity=warning \
             $(find . \( -name "*.sh" -o -name "*.bash" \) -type f ! -path "./zig-out/*" ! -path "./macos/build/*" ! -path "./.git/*" | sort)
 
+  # Parse the bundled gallery shaders with glslang. Nothing else in this
+  # workflow reads GLSL, so a reserved word used as an identifier (`filter`,
+  # `input`, `union`, ... of GLSL 4.60 section 3.6) lands green here and only
+  # fails later, by hand, in `just gallery-verify`, taking that whole gate
+  # down for whoever runs it next. The lint needs neither a renderer build nor
+  # a GPU: it is prefix + shader through glslang, a couple of seconds.
+  #
+  # Unlike every job above, this one is neither gated on the upstream
+  # repository nor run on a namespace profile. The gallery is fork-only
+  # content (windows/Ghostty/Assets/Shaders), so gating it on ghostty-org
+  # would mean it never runs at all, and the fork's own workflows run on
+  # ubuntu-latest.
+  gallery-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: ghostty
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: true
+          useDaemon: false # sometimes fails on short jobs
+      - name: gallery-lint
+        run: nix develop -c just gallery-lint
+
   translations:
     if: github.repository == 'ghostty-org/ghostty' && needs.skip.outputs.skip != 'true'
     needs: skip

@@ -138,7 +138,13 @@ internal sealed partial class SettingsWindow : Window
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
+        // Stop is not enough on its own: the timer runs against the
+        // DispatcherQueue, which outlives this window, and a tick queued in
+        // the same turn as the stop still arrives afterwards and re-enters
+        // ApplyQuery against a torn-down tree. Detaching is what turns that
+        // one away, since the raise reads the invocation list.
         _searchTimer.Stop();
+        _searchTimer.Tick -= OnSearchTimerTick;
 
         // Unsubscribe providers from ConfigChanged to avoid leaking
         // event subscriptions back to the long-lived ConfigService.

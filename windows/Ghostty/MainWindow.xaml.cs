@@ -1436,11 +1436,24 @@ public sealed partial class MainWindow : Window
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
         // The preview service owns a named-pipe server on a background task,
-        // so it raises this from outside the window's own lifetime. The task
-        // itself outlives this window either way -- nothing disposes the
-        // service -- but detaching keeps a LIST_THEMES arriving afterwards
-        // from starting a picker on a window whose surfaces are gone.
+        // so it raises this from outside the window's own lifetime. Detaching
+        // keeps a LIST_THEMES arriving afterwards from starting a picker on a
+        // window whose surfaces are gone; disposing is what ends the task,
+        // which otherwise ran for the life of the process, holding the
+        // per-process pipe name with nobody listening on it. The cancel is
+        // observed by the awaits inside the accept loop, so the synchronous
+        // wait here is bounded.
+        //
+        // The service is per window and the pipe name is per process, so in a
+        // multi-window session only the first one to start ever owns the pipe
+        // (FirstPipeInstance stands the others down at construction). Closing
+        // that window therefore leaves the session with no server rather than
+        // with one whose only subscriber has detached. Both states are broken
+        // for `+list-themes`; this one at least does not leak. The real fix is
+        // to own the service where the bootstrap host lives, the same shape as
+        // the app-targeted config actions, which App owns for that reason.
         _themePreview.ListThemesRequested -= OnListThemesRequested;
+        _themePreview.Dispose();
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
