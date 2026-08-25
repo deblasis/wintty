@@ -434,59 +434,90 @@ function Invoke-Sweep {
 
         Write-Host ('  {0,7}   {1,6}   {2,6:N1}ms  {3,6:N1}ms  {4,6}' -f
             "$([int]($n/1KB))KB", $chunks, $median, $best, $kbs)
-        $rows += [pscustomobject]@{ Bytes = $payload.Length; Ms = $median; Chunks = $chunks }
+        $rows += [pscustomobject]@{ Bytes = $payload.Length; Ms = $median; Best = $best; Chunks = $chunks }
     }
 
     # Least squares over every sample, not the two endpoints. An endpoint fit
     # gives one outlier total control of the answer, which is exactly what
     # went wrong before.
-    $nPts = $rows.Count
-    $sumX = ($rows | Measure-Object -Property Bytes -Sum).Sum
-    $sumY = ($rows | Measure-Object -Property Ms -Sum).Sum
-    $sumXY = 0.0; $sumXX = 0.0
-    foreach ($row in $rows) {
-        $sumXY += [double]$row.Bytes * $row.Ms
-        $sumXX += [double]$row.Bytes * $row.Bytes
-    }
-    $denom = ($nPts * $sumXX) - ($sumX * $sumX)
-    $perByte = if ($denom -ne 0) { (($nPts * $sumXY) - ($sumX * $sumY)) / $denom } else { 0 }
-    $fixed = ($sumY - ($perByte * $sumX)) / $nPts
+    function Get-Fit($points, [string]$field) {
+        $nPts = $points.Count
+        $sumX = 0.0; $sumY = 0.0; $sumXY = 0.0; $sumXX = 0.0
+        foreach ($row in $points) {
+            $x = [double]$row.Bytes
+            $y = [double]$row.$field
+            $sumX += $x; $sumY += $y; $sumXY += $x * $y; $sumXX += $x * $x
+        }
+        $denom = ($nPts * $sumXX) - ($sumX * $sumX)
+        $slope = if ($denom -ne 0) { (($nPts * $sumXY) - ($sumX * $sumY)) / $denom } else { 0 }
+        $intercept = ($sumY - ($slope * $sumX)) / $nPts
 
-    # How well the straight line actually describes the data. Reported because
-    # a fit nobody checked is what produced the last wrong answer: if the
-    # points are not on a line, neither the slope nor the intercept means
-    # anything and this must say so instead of picking one.
-    $meanY = $sumY / $nPts
-    $ssTot = 0.0; $ssRes = 0.0
-    foreach ($row in $rows) {
-        $pred = $fixed + ($perByte * $row.Bytes)
-        $ssRes += [Math]::Pow($row.Ms - $pred, 2)
-        $ssTot += [Math]::Pow($row.Ms - $meanY, 2)
+        $meanY = $sumY / $nPts
+        $ssTot = 0.0; $ssRes = 0.0
+        foreach ($row in $points) {
+            $pred = $intercept + ($slope * $row.Bytes)
+            $ssRes += [Math]::Pow($row.$field - $pred, 2)
+            $ssTot += [Math]::Pow($row.$field - $meanY, 2)
+        }
+        return [pscustomobject]@{
+            Fixed = $intercept
+            PerKB = $slope * 1KB
+            R2 = $(if ($ssTot -gt 0) { 1 - ($ssRes / $ssTot) } else { 0 })
+        }
     }
-    $r2 = if ($ssTot -gt 0) { 1 - ($ssRes / $ssTot) } else { 0 }
+
+    $medFit = Get-Fit $rows 'Ms'
+    $bestFit = Get-Fit $rows 'Best'
+
+    # Both fits, because on a loaded desktop they answer different questions.
+    # The median says what a write costs here and now, with everything else
+    # running. The minimum is the better estimate of what the code actually
+    # costs: noise only ever adds time, so the fastest observed run is the one
+    # least contaminated by whatever else wanted the CPU.
+    Write-Host ''
+    Write-Host ('  fit on medians : {0,5:N0}ms fixed + {1,5:N2}ms/KB  ({2,6:N0} KB/s)  R2={3:N3}' -f
+        $medFit.Fixed, $medFit.PerKB, $(if ($medFit.PerKB -gt 0) { 1000.0 / $medFit.PerKB } else { 0 }), $medFit.R2)
+    Write-Host ('  fit on best    : {0,5:N0}ms fixed + {1,5:N2}ms/KB  ({2,6:N0} KB/s)  R2={3:N3}' -f
+        $bestFit.Fixed, $bestFit.PerKB, $(if ($bestFit.PerKB -gt 0) { 1000.0 / $bestFit.PerKB } else { 0 }), $bestFit.R2)
+
+    # Spread is the machine's contribution, stated rather than left in two
+    # columns for a human to compare. A quiet machine puts these within a few
+    # percent of each other; a busy one does not, and then the median figure
+    # says more about the load than about the clipboard.
+    $worstSpread = 1.0
+    foreach ($row in $rows) {
+        if ($row.Best -gt 0) {
+            $ratio = $row.Ms / $row.Best
+            if ($ratio -gt $worstSpread) { $worstSpread = $ratio }
+        }
+    }
+    Write-Host ''
+    Write-Host ('  worst median/best spread: {0:N1}x' -f $worstSpread)
+
+    if ($worstSpread -gt 2.0) {
+        Write-Host '  The same payload varied by more than 2x across runs, so'
+        Write-Host '  this machine was busy. Trust the best-fit line; the median'
+        Write-Host '  one is measuring the load. Re-run on an idle machine to'
+        Write-Host '  make the two converge.'
+    }
 
     Write-Host ''
-    Write-Host ('  linear fit: {0:N0}ms fixed + {1:N2}ms per KB   (R2 = {2:N3})' -f
-        $fixed, ($perByte * 1KB), $r2)
-    Write-Host ''
-
-    if ($perByte -le 0 -or $r2 -lt 0.9) {
+    if ($bestFit.PerKB -le 0 -or $bestFit.R2 -lt 0.9) {
         # Refusing to answer is a result. A model this poor cannot separate
         # fixed cost from marginal cost, and reporting either number would be
         # inventing precision the data does not have.
         Write-Host '  INCONCLUSIVE: cost is not linear in payload size, so the'
-        Write-Host '  fixed and marginal figures above do not mean what they'
-        Write-Host '  say. Read the per-size KB/s column instead: if it climbs'
-        Write-Host '  with size, a per-transaction cost is being amortised and'
-        Write-Host '  throughput is not the problem.'
+        Write-Host '  figures above do not mean what they say. Read the per-size'
+        Write-Host '  KB/s column instead: if it climbs with size, a'
+        Write-Host '  per-transaction cost is being amortised.'
     }
-    elseif ($fixed -gt 100) {
+    elseif ($bestFit.Fixed -gt 100) {
         Write-Host '  Cost is dominated by the FIXED part, so this is a per-write'
         Write-Host '  expense (the clipboard call itself, or work done once per'
         Write-Host '  transaction). Faster parsing would not move it.'
     }
     else {
-        Write-Host ('  Cost scales with SIZE at {0:N0} KB/s.' -f (1000.0 / ($perByte * 1KB)))
+        Write-Host ('  Cost scales with SIZE at {0:N0} KB/s uncontended.' -f (1000.0 / $bestFit.PerKB))
         Write-Host '  Upstream quoted 1MiB in 446ms (about 2300 KB/s) BEFORE'
         Write-Host '  their SIMD work, so compare against that before calling'
         Write-Host '  anything here a regression.'
