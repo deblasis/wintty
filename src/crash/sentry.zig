@@ -63,13 +63,6 @@ pub fn init(gpa: Allocator, environ_map: std.process.Environ.Map) !void {
         return;
     }
 
-    // Not supported on Windows currently, doesn't build.
-    if (comptime builtin.os.tag == .windows) {
-        var map = environ_map;
-        map.deinit();
-        return;
-    }
-
     // Must only start once
     assert(init_thread == null);
 
@@ -211,8 +204,6 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
 /// our data is flushed.
 pub fn deinit() void {
     if (comptime !build_options.sentry) return;
-
-    if (comptime builtin.os.tag == .windows) return;
 
     // If we're still initializing then wait for init to finish. This
     // is highly unlikely since init is a very fast operation but we want
