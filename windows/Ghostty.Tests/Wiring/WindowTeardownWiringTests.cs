@@ -657,6 +657,86 @@ public class WindowTeardownWiringTests
         }
     }
 
+    private static readonly string[] PickerFields =
+        { "_pickerSurface", "_pickerTerminal", "_inlineThemeCb" };
+
+    /// <summary>
+    /// <c>_pickerHandle == IntPtr.Zero</c>, either way round.
+    /// </summary>
+    private static bool TestsPickerHandleAgainstZero(ExpressionSyntax condition)
+    {
+        if (condition is not BinaryExpressionSyntax equality) return false;
+        if (!equality.IsKind(SyntaxKind.EqualsExpression)) return false;
+
+        var sides = new[] { Flatten(equality.Left), Flatten(equality.Right) };
+        return sides.Contains("_pickerHandle") && sides.Contains("IntPtr.Zero");
+    }
+
+    /// <summary>
+    /// The fields <paramref name="scope"/> assigns null or default to. Read
+    /// off the right-hand side, because an assignment that puts something
+    /// back is not a clear.
+    /// </summary>
+    private static HashSet<string> ClearedIn(SyntaxNode scope) =>
+        scope.DescendantNodesAndSelf()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.IsKind(SyntaxKind.SimpleAssignmentExpression))
+            .Where(a => a.Right.IsKind(SyntaxKind.NullLiteralExpression)
+                        || a.Right.IsKind(SyntaxKind.DefaultLiteralExpression)
+                        || a.Right is DefaultExpressionSyntax)
+            .Select(a => Flatten(a.Left))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The picker open, on the path where libghostty declines to open one.
+    ///
+    /// The three fields the close reads -- the surface copy, the control it
+    /// was opened on, and the callback field that is the only GC root for the
+    /// delegate whose function pointer goes across -- are assigned before the
+    /// native call, and have to be: a local would be collectable while the
+    /// call is still running. So a null return leaves all three set with no
+    /// picker behind them, and ClosePicker returns on the zero handle before
+    /// it reaches the clears. The window is then holding a raw pointer to a
+    /// surface that whoever owns it may free, plus a strong reference to a
+    /// control and its whole pane subtree, until a later picker succeeds.
+    /// ghostty_surface_list_themes returns null on four separate paths, so
+    /// this is not a branch that needs a fault to reach.
+    /// </summary>
+    [Fact]
+    public void AFailedPickerOpenClearsWhatTheCloseWillNotReach()
+    {
+        var source = ShellSource.Load(MainWindow.File);
+        var statements = source.Method("OnListThemesRequested").Body!.Statements;
+
+        var opened = statements
+            .TakeWhile(s => !s.Calls("NativeMethods.SurfaceListThemes").Any())
+            .Count();
+        Assert.True(
+            opened < statements.Count,
+            "expected OnListThemesRequested to open the picker through "
+            + "NativeMethods.SurfaceListThemes; without that call there is no failure path "
+            + "here and this test would pass while reading nothing");
+
+        // After the call only: the same condition written before it would be
+        // testing the previous picker's handle, which is a different claim.
+        var cleared = statements
+            .Skip(opened + 1)
+            .OfType<IfStatementSyntax>()
+            .Where(guard => TestsPickerHandleAgainstZero(guard.Condition))
+            .Where(guard => guard.Statement.DescendantNodesAndSelf()
+                .OfType<ReturnStatementSyntax>().Any())
+            .Where(guard => ClearedIn(guard.Statement).IsSupersetOf(PickerFields))
+            .ToList();
+
+        Assert.True(
+            cleared.Count == 1,
+            "OnListThemesRequested must clear " + string.Join(", ", PickerFields)
+            + " and return when SurfaceListThemes hands back a zero handle. Nothing else will: "
+            + "ClosePicker bails on the zero handle before it reaches those same clears, so the "
+            + "stale surface pointer and the pane subtree behind _pickerTerminal are held until "
+            + "the next successful picker or the window's close.");
+    }
+
     /// <summary>
     /// ThemePreviewService, the one gap #694 named and did not close.
     ///

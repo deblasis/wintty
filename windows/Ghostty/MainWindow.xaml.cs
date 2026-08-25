@@ -3866,13 +3866,13 @@ public sealed partial class MainWindow : Window
     private IntPtr _pickerHandle;
 
     /// <summary>
-    /// The control and tab the picker's surface belongs to.
+    /// The control whose surface the picker was opened on.
     /// <see cref="_pickerSurface"/> is a copy of a raw pointer and nothing
-    /// zeroes it when that surface is freed, so these are what make the
-    /// liveness check in <see cref="ClosePicker"/> possible.
+    /// zeroes it when that surface is freed, so this is what makes the
+    /// liveness check in <see cref="ClosePicker"/> possible: the control
+    /// clears its own handle on disposal.
     /// </summary>
     private Ghostty.Controls.TerminalControl? _pickerTerminal;
-    private Ghostty.Core.Tabs.TabModel? _pickerTab;
     // Held rather than left local to StartPickerPoll: the dispatcher drives
     // the poll, so the window's teardown has no other way to reach it.
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
@@ -3895,7 +3895,6 @@ public sealed partial class MainWindow : Window
 
         _pickerSurface = new GhosttySurface(surfaceHandle);
         _pickerTerminal = terminal;
-        _pickerTab = _tabManager.ActiveTab;
 
         // Theme callback: apply preview/confirm colors on the UI thread.
         _inlineThemeCb = (namePtr, confirmed) =>
@@ -3905,9 +3904,14 @@ public sealed partial class MainWindow : Window
                 var name = Marshal.PtrToStringUTF8(namePtr);
                 if (name is null) return;
 
-                // The callback fires from the Zig/apprt thread. Dispatch
-                // to the UI thread so ConfigService and ShellThemeService
-                // updates happen on the right thread.
+                // Not a thread hop: the picker calls this synchronously from
+                // the surface's input and scroll redirects, so it arrives
+                // inside the key or scroll call the terminal control made,
+                // on the UI thread. The enqueue earns its place for the
+                // other reason -- it keeps ConfigService and
+                // ShellThemeService off the stack of a native input
+                // callback, rather than re-entering libghostty while it is
+                // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     _themePreview.ApplyThemePreview(name);
@@ -3918,18 +3922,33 @@ public sealed partial class MainWindow : Window
         var cbPtr = Marshal.GetFunctionPointerForDelegate(_inlineThemeCb);
 
         _pickerHandle = NativeMethods.SurfaceListThemes(_pickerSurface, cbPtr);
+        if (_pickerHandle == IntPtr.Zero)
+        {
+            // No picker was installed -- no redirects, no allocation -- so
+            // there is nothing to hand back and ClosePicker returns on the
+            // zero handle before it reaches the clears below. Without this
+            // the window keeps a raw copy of a surface pointer that whoever
+            // owns that surface is free to release, and a strong reference
+            // to the control and its whole pane subtree, until some later
+            // picker opens or the window dies.
+            _pickerSurface = default;
+            _pickerTerminal = null;
+            _inlineThemeCb = null;
+            return;
+        }
+
         // Picker is now active. handleKey fires on each key event and
         // sets should_quit when the user confirms/cancels. We poll on
         // a timer to clean up, avoiding a thread that races with the
         // input redirect callback.
-        if (_pickerHandle != IntPtr.Zero)
-            StartPickerPoll();
+        StartPickerPoll();
     }
 
     private void StartPickerPoll()
     {
-        // Use a DispatcherQueue timer so cleanup runs on the UI thread
-        // with no race against the apprt thread's input redirect.
+        // A DispatcherQueue timer rather than a polling thread, so the
+        // cleanup lands on the same thread the input redirect runs the
+        // picker from and cannot tear it down mid-keystroke.
         //
         // One poll at a time: a second picker replaces _pickerHandle, and a
         // leftover timer would then be polling the new picker and could run
@@ -4000,25 +4019,30 @@ public sealed partial class MainWindow : Window
         // frees the surface without touching anything here.
         //
         // The control zeroes its own handle when it disposes the surface, so
-        // a mismatch means the surface is gone. The tab check answers the
-        // other direction: a detached tab carries its live surface to another
-        // window, and deiniting from here would strip the redirects of a
-        // window that never closed.
+        // a mismatch means the surface is gone and nothing can reach the
+        // picker any more. That is the only case where skipping is right, and
+        // it strands the picker allocation, which is what happened before this
+        // path existed at all. Leaking it beats writing through a dangling
+        // pointer.
         //
-        // When neither holds, the picker allocation is stranded, which is
-        // what happened before this path existed at all. Leaking it is the
-        // right trade against writing through a dangling pointer.
+        // Deliberately NOT conditioned on the tab still being ours. A detached
+        // tab carries its live surface to another window with this picker's
+        // input, scroll and resize redirects still installed on it, and this
+        // deinit is the only thing that clears them or frees the picker. Not
+        // running it leaves that window wedged in the picker's alt screen with
+        // its input redirected, and drops the last GC root for the delegate
+        // whose function pointer the picker still holds, so the next keystroke
+        // there is a callback on a collected delegate, which kills the process
+        // rather than throwing. Cleaning up after our own picker is a repair
+        // for that window, not damage to it.
         var live = _pickerTerminal is { } terminal
-            && terminal.SurfaceHandle == _pickerSurface.Handle
-            && _pickerTab is { } tab
-            && _tabManager.Tabs.Contains(tab);
+            && terminal.SurfaceHandle == _pickerSurface.Handle;
         if (live)
             NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
 
         _pickerHandle = IntPtr.Zero;
         _pickerSurface = default;
         _pickerTerminal = null;
-        _pickerTab = null;
         _inlineThemeCb = null;
     }
 }
