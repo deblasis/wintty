@@ -9,6 +9,8 @@
   flatpak-builder,
   gdb,
   cmake,
+  glslang,
+  just,
   #, glxinfo # unused
   ncurses,
   nodejs,
@@ -103,6 +105,9 @@ in
         cmake
         doxygen
         jq
+        # The fork's build and check recipes live in the justfile, and CI
+        # invokes them through `nix develop -c just <recipe>`.
+        just
         llvmPackages_latest.llvm
         minisign
         ncurses
@@ -122,6 +127,10 @@ in
         pinact
         typos
         shellcheck
+        # Parses the bundled gallery shaders (just gallery-lint). The
+        # renderer's own GLSL frontend is lenient on purpose, so glslang is
+        # what holds the shaders we ship to the spec.
+        glslang
 
         # Testing
         parallel
