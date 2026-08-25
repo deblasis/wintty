@@ -248,6 +248,22 @@ fuzz args="": _no-wintty-running build-dll build-win
 [windows]
 fuzzy args="": (fuzz args)
 
+# Randomized round-trip fuzz over the clipboard marshalling boundary.
+#
+# No build of the app, no desktop, safe to run with Wintty open. The ladder
+# already runs these oracles at a cheap iteration count via `just test-win`;
+# this is the deep pass.
+#
+# Oracle: round-trip fidelity, not liveness. It builds real unmanaged memory
+# with the writer, reads it back with the reader, and asserts the bytes match,
+# that the adjacent confirmed/remember pair did not swap, and that a formatted
+# file URI parses back to the path it came from. It does NOT check the live C
+# ABI: the layouts are pinned against include/ghostty.h separately, and
+# callback ordering needs `just run-win`.
+[windows]
+clipboard-fuzz iterations="20000":
+    pwsh -NoProfile -File windows/scripts/clipboard-fuzz.ps1 -Iterations {{iterations}}; exit ($LASTEXITCODE ?? 1)
+
 # No build, no desktop.
 #
 # List the suite: what it runs, what each harness catches, what it costs.
