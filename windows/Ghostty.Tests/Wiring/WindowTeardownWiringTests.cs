@@ -173,7 +173,23 @@ public class WindowTeardownWiringTests
         Class: "MainWindow",
         File: "Ghostty.MainWindow.xaml.cs",
         ClosedFlag: "_isClosed",
-        ClosePath: Array.Empty<string>(),
+        // OnClosedAsync's first teardown act, called unconditionally, and the
+        // only place the picker's per-control subscription is taken back --
+        // the control can outlive this window, so nothing on the control's
+        // side can answer for it.
+        //
+        // Naming it here unions its whole body into the detach set for the
+        // WHOLE census, which is a stronger claim than it looks. ClosePicker
+        // is called unconditionally from the close, but the `-=` inside it is
+        // reached CONDITIONALLY: it bails first on a zero handle. And the
+        // close is not its only caller -- the poll tick and a second
+        // ShowInlineThemePicker both run it. So "the close takes this back"
+        // holds only because a subscription exists only while the handle is
+        // non-zero, which is exactly when ClosePicker runs past that bail.
+        // ThePickerIsClosedWhenTheSurfaceUnderItGoes is what pins that
+        // invariant; widening this list further needs the same argument made
+        // again for whatever is added.
+        ClosePath: new[] { "ClosePicker" },
         AtLeast: 40,
         Owned: MainWindowOwned,
         Exempt: MainWindowExempt);
@@ -735,6 +751,289 @@ public class WindowTeardownWiringTests
             + "ClosePicker bails on the zero handle before it reaches those same clears, so the "
             + "stale surface pointer and the pane subtree behind _pickerTerminal are held until "
             + "the next successful picker or the window's close.");
+    }
+
+    /// <summary>The control that owns the surface the picker installs itself on.</summary>
+    private const string TerminalControlFile = "Controls.TerminalControl.xaml.cs";
+
+    /// <summary>The control event that warns its holders the surface is going.</summary>
+    private const string SurfaceDisposing = "SurfaceDisposing";
+
+    /// <summary>The window's handler for it.</summary>
+    private const string PickerDisposingHandler = "OnPickerSurfaceDisposing";
+
+    /// <summary>
+    /// Matched on the event's own name, whatever the receiver is spelled as: a
+    /// subscription taken out through a local and detached through a field is
+    /// the same subscription, and the census above is what insists the two
+    /// spellings agree.
+    /// </summary>
+    private static bool NamesSurfaceDisposing(string flattened) =>
+        flattened == SurfaceDisposing
+        || flattened.EndsWith("." + SurfaceDisposing, StringComparison.Ordinal);
+
+    /// <summary>
+    /// <c>if (!ReferenceEquals(sender, _pickerTerminal)) return;</c>, either
+    /// argument order and however ReferenceEquals is qualified.
+    ///
+    /// The shape, not the text: the operands are what carry the meaning, and a
+    /// guard comparing the sender against anything else -- `this` is the one
+    /// that reads plausibly -- is never true for a control, so the handler
+    /// returns before ClosePicker on every raise and the picker is stranded
+    /// exactly as it was before this event existed. Same style as
+    /// <see cref="IsClosedGuard"/> and
+    /// <see cref="TestsSurfaceHandleAgainstZero"/>, so the file keeps one idea
+    /// of what a guard is.
+    /// </summary>
+    private static bool IsPickerIdentityGuard(StatementSyntax statement)
+    {
+        if (statement is not IfStatementSyntax guard) return false;
+        if (guard.Condition is not PrefixUnaryExpressionSyntax negation) return false;
+        if (!negation.IsKind(SyntaxKind.LogicalNotExpression)) return false;
+        if (negation.Operand is not InvocationExpressionSyntax call) return false;
+        if (!call.CalleeText().EndsWith("ReferenceEquals", StringComparison.Ordinal)) return false;
+
+        var operands = call.ArgumentList.Arguments.Select(a => Flatten(a.Expression)).ToList();
+        return operands.Count == 2
+            && operands.Contains("sender")
+            && operands.Contains("_pickerTerminal")
+            && guard.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>().Any();
+    }
+
+    /// <summary>
+    /// The warning a control gives before it frees its surface.
+    ///
+    /// The picker's cleanup writes through the surface pointer it saved -- it
+    /// clears three redirects and pushes pty input -- so it is only meaningful
+    /// while the surface is alive. Raised after SurfaceFree it would be
+    /// useless: the liveness check the window makes would already be false and
+    /// the picker, its theme arena, its 50ms poll and the control's whole
+    /// visual subtree would leak for the life of the window, which is exactly
+    /// what a tab close did before this event existed.
+    ///
+    /// Once-only and never-for-a-surface-that-was-not-created are the other
+    /// half. The disposed latch buys the first (DisposeSurface is idempotent
+    /// and callable from both PaneHost and the window's close), the handle
+    /// check the second -- a subscriber told about a surface that never
+    /// existed would be comparing its saved pointer against a zero handle.
+    /// </summary>
+    [Fact]
+    public void TheSurfaceDisposingWarningComesBeforeTheFree()
+    {
+        var source = ShellSource.Load(TerminalControlFile);
+        var dispose = source.Method("DisposeSurface");
+        var statements = dispose.Body!.Statements;
+
+        // Exactly one raise in the whole file: a second one somewhere else
+        // would fire without the latch below and could reach a subscriber
+        // twice, or reach one after the surface is already gone.
+        var raises = source.Root.Calls(SurfaceDisposing + "?.Invoke");
+        Assert.True(
+            raises.Count == 1,
+            $"expected exactly one `{SurfaceDisposing}?.Invoke` in {TerminalControlFile}, found "
+            + $"{raises.Count}; only the raise guarded by the disposed latch is once-only");
+
+        int IndexOfCall(string call) => statements.TakeWhile(s => !s.Calls(call).Any()).Count();
+        var raise = IndexOfCall(SurfaceDisposing + "?.Invoke");
+        var free = IndexOfCall("NativeMethods.SurfaceFree");
+
+        // Both have to be found, or TakeWhile hands back the full count and
+        // the ordering comparison below passes while pinning nothing.
+        Assert.True(raise < statements.Count, "DisposeSurface must raise " + SurfaceDisposing);
+        Assert.True(free < statements.Count, "expected DisposeSurface to free the surface");
+        Assert.True(
+            raise < free,
+            SurfaceDisposing + " must be raised before SurfaceFree: it exists so a holder of "
+            + "surface-keyed native state can hand it back, and after the free there is nothing "
+            + "left to hand back to");
+
+        // The latch, in the two statements that make the raise once-only.
+        Assert.True(
+            IsClosedGuard(statements[0], "_surfaceDisposed"),
+            "DisposeSurface must return early on _surfaceDisposed as its first statement");
+        Assert.True(
+            SetsLatch(statements[1], "_surfaceDisposed"),
+            "DisposeSurface must set _surfaceDisposed before anything else, so the raise below "
+            + "cannot fire twice for one control");
+        Assert.True(raise > 1, "the raise must sit below the latch, or it is not once-only");
+
+        // And the guard that keeps it off a control that never made a surface.
+        //
+        // Every `if` between the raise and the method, not the nearest one:
+        // the nearest-ancestor question is answered just as well by an outer
+        // condition that is never true, and wrapping the handle test in one
+        // leaves every count and every index above intact while the event
+        // stops being raised at all. One enclosing `if`, and it is the handle
+        // test, is the only shape that says the raise runs whenever the
+        // surface exists.
+        var enclosing = raises[0].Ancestors()
+            .OfType<IfStatementSyntax>()
+            .Where(node => dispose.Span.Contains(node.Span))
+            .ToList();
+        Assert.True(
+            enclosing.Count == 1,
+            "expected the raise to sit under exactly one `if` inside DisposeSurface, found "
+            + $"{enclosing.Count}; a second condition around it decides whether the warning is "
+            + "given at all, and nothing here can say what that condition is worth");
+        Assert.True(
+            TestsSurfaceHandleAgainstZero(enclosing[0].Condition),
+            "the raise must be guarded on _surface.Handle != IntPtr.Zero: a control whose surface "
+            + "was never created has nothing installed on it, and a subscriber told about one "
+            + "would be matching its saved pointer against a zero handle");
+
+        // A subscriber that throws must not stop the teardown: everything
+        // below the raise frees native memory, and PaneHost walks the leaves
+        // in a loop, so an escaping exception strands this surface and skips
+        // every leaf after it.
+        var contained = raises[0].Ancestors().OfType<TryStatementSyntax>().FirstOrDefault();
+        Assert.True(
+            contained is not null && contained.Catches.Count > 0,
+            "the raise must be wrapped in try/catch; DisposeSurface is a teardown path and an "
+            + "exception out of a subscriber would leak this surface and every leaf after it");
+        Assert.DoesNotContain(
+            contained!.Catches.SelectMany(c => c.Block.DescendantNodesAndSelf()),
+            n => n.IsKind(SyntaxKind.ThrowStatement));
+    }
+
+    /// <summary>
+    /// <c>_surface.Handle != IntPtr.Zero</c>, either way round.
+    /// </summary>
+    private static bool TestsSurfaceHandleAgainstZero(ExpressionSyntax condition)
+    {
+        if (condition is not BinaryExpressionSyntax comparison) return false;
+        if (!comparison.IsKind(SyntaxKind.NotEqualsExpression)) return false;
+
+        var sides = new[] { Flatten(comparison.Left), Flatten(comparison.Right) };
+        return sides.Contains("_surface.Handle") && sides.Contains("IntPtr.Zero");
+    }
+
+    /// <summary>
+    /// The window following its picker's surface into teardown.
+    ///
+    /// Closing the tab the picker is open in frees the surface through
+    /// TabManager.CloseTab, which calls DisposeAllLeaves BEFORE it raises
+    /// TabRemoved -- so no tab-level notification is early enough, and the
+    /// deinit that clears the picker's redirects and returns its allocation
+    /// was simply skipped, forever, with the poll still ticking every 50ms at
+    /// a picker no key could ever quit.
+    ///
+    /// The subscription is per-control, and the control can outlive this
+    /// window: a detached tab carries it to another window. So it is taken
+    /// back explicitly, and taken out only once the open has succeeded, which
+    /// is what makes that one detach enough -- a subscription exists only
+    /// while _pickerHandle is non-zero, and that is exactly when ClosePicker
+    /// runs past its early return.
+    /// </summary>
+    [Fact]
+    public void ThePickerIsClosedWhenTheSurfaceUnderItGoes()
+    {
+        var source = ShellSource.Load(MainWindow.File);
+
+        var subscribed = Subscriptions(source).Where(s => NamesSurfaceDisposing(s.Event)).ToList();
+        Assert.True(
+            subscribed.Count == 1,
+            $"expected exactly one `{SurfaceDisposing} +=` in {MainWindow.Class}, found "
+            + $"{subscribed.Count}; a second one would outlive the picker it was taken out for");
+        var wire = subscribed[0];
+        Assert.True(
+            wire.Handler == PickerDisposingHandler,
+            $"expected `{SurfaceDisposing} += {PickerDisposingHandler}`; an inline lambda here "
+            + "cannot be detached, and the control outlives this window on a tab detach");
+
+        // Detached, spelled the same way on both sides so the census can pair
+        // them. Nothing on the control's side can answer for this one: nulling
+        // the event during its own disposal is too late for the control that
+        // is carried to another window instead.
+        Assert.Contains(
+            (wire.Event, wire.Handler),
+            Unsubscribes(MainWindow, source).Select(u => (u.Event, u.Handler)));
+
+        // In ClosePicker itself, not merely somewhere the close reaches: every
+        // way the picker ends -- the poll seeing should_quit, a second picker
+        // opening, this very handler -- goes through there, and each of them
+        // has to leave the control clean.
+        var detached = Assignments(source.Method("ClosePicker"), SyntaxKind.SubtractAssignmentExpression)
+            .Where(u => NamesSurfaceDisposing(u.Event))
+            .ToList();
+        Assert.True(
+            detached.Count == 1,
+            $"ClosePicker must take back the one {SurfaceDisposing} subscription, found "
+            + $"{detached.Count}; it is the single exit every picker close funnels through");
+
+        // Taken out after the open SUCCEEDS, which is the invariant behind
+        // that single detach: ClosePicker returns on a zero handle before it
+        // reaches the detach, so a subscription that can survive a failed open
+        // has nothing left able to remove it.
+        //
+        // Measured against the zero-handle bail, not against the native call.
+        // "Below SurfaceListThemes" is satisfied by a `+=` sitting between the
+        // call and the bail, and that is the failing open: a null return then
+        // leaves a subscription on the control with _pickerTerminal null and
+        // the handle zero, and detaching that tab to another window leaves the
+        // closed window reachable from a live control.
+        var statements = source.Method("ShowInlineThemePicker").Body!.Statements;
+        var opened = statements
+            .TakeWhile(s => !s.Calls("NativeMethods.SurfaceListThemes").Any())
+            .Count();
+        var bail = statements
+            .Select((s, i) => (s, i))
+            .Where(x => x.i > opened)
+            .Where(x => x.s is IfStatementSyntax guard
+                        && TestsPickerHandleAgainstZero(guard.Condition)
+                        && guard.Statement.DescendantNodesAndSelf()
+                            .OfType<ReturnStatementSyntax>().Any())
+            .Select(x => x.i)
+            .DefaultIfEmpty(statements.Count)
+            .First();
+        var wired = statements
+            .TakeWhile(s => !Assignments(s, SyntaxKind.AddAssignmentExpression)
+                .Any(a => NamesSurfaceDisposing(a.Event)))
+            .Count();
+        Assert.True(
+            opened < statements.Count,
+            "expected ShowInlineThemePicker to open the picker through NativeMethods.SurfaceListThemes");
+        Assert.True(
+            bail < statements.Count,
+            "expected ShowInlineThemePicker to return on a zero handle after the open; without "
+            + "that statement there is no failure path to measure the subscription against");
+        Assert.True(
+            wired < statements.Count,
+            $"ShowInlineThemePicker must subscribe to the surface's {SurfaceDisposing}");
+        Assert.True(
+            bail < wired,
+            $"the {SurfaceDisposing} subscription must be taken out below the zero-handle return, "
+            + "not merely below the open: ClosePicker bails on a zero handle before it reaches "
+            + "the detach, so one a failed open can reach is stranded on the control for good");
+
+        // Unconditionally, as a statement of the method rather than something
+        // reached through a branch. Every count and every index above survives
+        // wrapping the `+=` in an `if` that is never taken, and the picker
+        // would then have no subscription at all.
+        var wireStatement = wire.Rhs.FirstAncestorOrSelf<StatementSyntax>();
+        Assert.True(
+            wireStatement is not null && statements.Any(s => s.Span == wireStatement.Span),
+            $"the `{SurfaceDisposing} +=` must be a top-level statement of ShowInlineThemePicker; "
+            + "nested inside a branch it is a subscription that may never be taken out while "
+            + "everything here still reads as wired");
+
+        // And the handler hands the picker back rather than doing its own
+        // half of the cleanup, so there is one teardown to keep correct.
+        Assert.Single(source.Method(PickerDisposingHandler).Calls("ClosePicker"));
+
+        // Guarded on the control this picker was opened on, as the handler's
+        // first act. Nothing else reads that condition, and the mutation that
+        // matters is small: compare the sender against `this` instead and the
+        // handler returns on every raise, ClosePicker never runs, and the
+        // picker, its arena, the poll and the control's subtree are stranded
+        // for the life of the window -- which is the defect this whole event
+        // exists to fix, back with every rule above still green.
+        var handler = source.Method(PickerDisposingHandler).Body!.Statements;
+        Assert.True(
+            handler.Count > 0 && IsPickerIdentityGuard(handler[0]),
+            $"{PickerDisposingHandler} must open with "
+            + "`if (!ReferenceEquals(sender, _pickerTerminal)) return;`: it is what keeps a stale "
+            + "raise from tearing down a picker it does not belong to, and what makes the raise "
+            + "for the current one get through");
     }
 
     /// <summary>
