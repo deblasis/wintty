@@ -374,7 +374,8 @@ pub fn build(b: *std.Build) !void {
     // root, and a test binary collects test blocks only from files its own
     // test and comptime blocks reach. src/build/test.zig says which files
     // those are and why they need a root of their own. Always the host, since
-    // build-time code runs on the host whatever the build is targeting.
+    // build-time code runs on the host whatever the build is targeting -- and
+    // outside the emit_lib_vt guard below for the same reason.
     {
         const build_test = b.addTest(.{
             .name = "ghostty-build-test",

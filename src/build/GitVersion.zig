@@ -134,3 +134,8 @@ test "sanitizeBranch keeps only what a pre-release identifier allows" {
     try std.testing.expectEqualStrings("feature-caf---v1-2", name);
     for (name) |c| try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '-');
 }
+
+test "sanitizeBranch keeps a dash the branch name really ends with" {
+    var raw = "wip-\n".*;
+    try std.testing.expectEqualStrings("wip-", sanitizeBranch(&raw));
+}
