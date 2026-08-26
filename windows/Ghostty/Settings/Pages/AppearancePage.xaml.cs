@@ -183,13 +183,9 @@ internal sealed partial class AppearancePage : Page
 
     private void SelectWindowTheme(string theme)
     {
-        // libghostty still accepts the pre-rename "ghostty" spelling and hands
-        // it back verbatim, but the combo only carries the preferred "wintty"
-        // tag. Fold the alias here so an unmigrated config selects the right
-        // item instead of falling through to "auto" below.
-        var wanted = string.Equals(theme, "ghostty", StringComparison.OrdinalIgnoreCase)
-            ? "wintty"
-            : theme;
+        // The combo only carries the preferred spelling, so fold the alias
+        // before matching or an unmigrated config falls through to "auto".
+        var wanted = WindowThemeAlias.Canonicalize(theme);
 
         foreach (ComboBoxItem item in WindowThemeCombo.Items)
         {

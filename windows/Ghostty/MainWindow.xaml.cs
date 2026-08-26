@@ -2142,7 +2142,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Apply palette-derived colors to the window chrome when
-    /// window-theme=ghostty is set.
+    /// window-theme=wintty is set.
     /// </summary>
     private void ApplyShellTheme()
     {
