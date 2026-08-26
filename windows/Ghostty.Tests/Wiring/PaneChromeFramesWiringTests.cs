@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
@@ -17,25 +20,39 @@ namespace Ghostty.Tests.Wiring;
 ///
 /// These are wiring guards. Whether the join actually reads as continuous
 /// is only observable on a live window; what they pin is that the frame is
-/// unconditional, is coloured from the same value as the focus frame, and
-/// that the two never stroke the same rectangle twice.
+/// unconditional, that it is coloured from the same value as the focus
+/// frame, and that it is mounted where neither zoom nor the dim film can
+/// take it down.
 /// </summary>
 public class PaneChromeFramesWiringTests
 {
     private static ShellSource Host() => ShellSource.Load("Panes.PaneHost.cs");
 
-    private static System.Collections.Generic.List<InvocationExpressionSyntax> AddsTo(
+    /// <summary>
+    /// Every call that puts <paramref name="child"/> into
+    /// <paramref name="container"/>'s Children, by Add or by Insert.
+    /// </summary>
+    /// <remarks>
+    /// Matching Add alone would miss Insert, which this same file already
+    /// uses to slide the dim rects under the focus border. A tab frame
+    /// moved onto the overlay with Insert would then read as not being on
+    /// the overlay at all, and the zoom guard below would pass while zoom
+    /// took the frame down.
+    /// </remarks>
+    private static List<InvocationExpressionSyntax> MountsInto(
         ShellSource source, string container, string child) =>
         source.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText() == container + ".Children.Add"
-                        && i.ArgumentList.Arguments.Count == 1
-                        && i.Arg(0) == child)
+            .Where(i => (i.CalleeText() == container + ".Children.Add"
+                         || i.CalleeText() == container + ".Children.Insert")
+                        && i.ArgumentList.Arguments.Any(a => a.ToString() == child))
             .ToList();
 
     private static int ZIndexOf(ShellSource source, string element) =>
-        int.Parse(source.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Single(i => i.CalleeText() == "Canvas.SetZIndex" && i.Arg(0) == element)
-            .Arg(1));
+        int.Parse(
+            source.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Single(i => i.CalleeText() == "Canvas.SetZIndex" && i.Arg(0) == element)
+                .Arg(1),
+            CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Every path that mounts the highlight overlay mounts the tab frame
@@ -48,9 +65,9 @@ public class PaneChromeFramesWiringTests
     {
         var host = Host();
 
-        var overlay = AddsTo(host, "hostGrid", "_highlightOverlay");
+        var overlay = MountsInto(host, "hostGrid", "_highlightOverlay");
         Assert.True(overlay.Count >= 2, "expected the overlay mounted from both constructors");
-        Assert.Equal(overlay.Count, AddsTo(host, "hostGrid", "_tabContentBorderFrame").Count);
+        Assert.Equal(overlay.Count, MountsInto(host, "hostGrid", "_tabContentBorderFrame").Count);
     }
 
     /// <summary>
@@ -62,25 +79,44 @@ public class PaneChromeFramesWiringTests
     [Fact]
     public void TabFrame_DoesNotLiveOnTheOverlayThatZoomCollapses()
     {
-        Assert.Empty(AddsTo(Host(), "_highlightOverlay", "_tabContentBorderFrame"));
+        Assert.Empty(MountsInto(Host(), "_highlightOverlay", "_tabContentBorderFrame"));
     }
 
     /// <summary>
-    /// The frame has no Visibility of its own anywhere in the file. Every
-    /// state that could plausibly hide it -- no split, a zoom, a pane
-    /// being closed -- is a state where the tab is still joined to the
-    /// strip and still needs the line.
+    /// Nothing in the file hides the frame. Every state that could
+    /// plausibly want to -- no split, a zoom, a pane being closed -- is a
+    /// state where the tab is still joined to the strip and still needs
+    /// the line.
     /// </summary>
+    /// <remarks>
+    /// Visibility is only the obvious way down. Opacity and a Children
+    /// removal take the frame off the window just as completely, so a
+    /// rule stated against Visibility alone would pass on a change that
+    /// reopens the hole.
+    /// </remarks>
     [Fact]
     public void TabFrame_IsUnconditional()
     {
-        var writes = Host().Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "_tabContentBorderFrame.Visibility")
-            .ToList();
+        var host = Host();
 
+        var hides = host.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() is "_tabContentBorderFrame.Visibility"
+                                          or "_tabContentBorderFrame.Opacity")
+            .ToList();
         Assert.True(
-            writes.Count == 0,
-            $"the tab frame must always be drawn, found {writes.Count} Visibility write(s)");
+            hides.Count == 0,
+            "the tab frame must always be drawn, found: "
+            + string.Join("; ", hides.Select(h => h.ToString())));
+
+        var removals = host.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => (i.CalleeText().EndsWith(".Children.Remove", StringComparison.Ordinal)
+                         || i.CalleeText().EndsWith(".Children.RemoveAt", StringComparison.Ordinal))
+                        && i.ArgumentList.Arguments.Any(
+                            a => a.ToString() == "_tabContentBorderFrame"))
+            .ToList();
+        Assert.True(
+            removals.Count == 0,
+            $"the tab frame must stay mounted, found {removals.Count} removal(s)");
     }
 
     /// <summary>
@@ -95,7 +131,7 @@ public class PaneChromeFramesWiringTests
 
         var assignments = body.SelectMany(s => s.DescendantNodesAndSelf())
             .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString().EndsWith(".BorderBrush", System.StringComparison.Ordinal))
+            .Where(a => a.Left.ToString().EndsWith(".BorderBrush", StringComparison.Ordinal))
             .ToList();
 
         Assert.Equal(2, assignments.Count);
@@ -104,38 +140,6 @@ public class PaneChromeFramesWiringTests
         Assert.True(
             assignments[0].Right.ToString() == assignments[1].Right.ToString(),
             "both frames must take the same resolved brush, not two separately derived ones");
-    }
-
-    /// <summary>
-    /// The focus frame stands down where it would restroke the tab frame.
-    /// Same colour, same thickness, same rectangle: the second stroke does
-    /// not vanish into the first, it doubles the antialiased edge and the
-    /// frame around a single-pane tab comes out heavier than the frame
-    /// around a split one.
-    /// </summary>
-    [Fact]
-    public void ActiveFrame_StandsDown_WhereItWouldRestrokeTheTabFrame()
-    {
-        var body = Host().Method("PositionActiveBorderOverLeaf").Body!.Statements;
-
-        var guard = body
-            .TakeWhile(s => !s.Calls("Core.Panes.PaneChrome.LeafFillsContent").Any())
-            .Count();
-        Assert.True(
-            guard < body.Count,
-            "PositionActiveBorderOverLeaf must ask PaneChrome whether the tab frame "
-            + "already draws this rectangle");
-
-        var show = body
-            .TakeWhile(s => !s.DescendantNodesAndSelf().OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.Left.ToString() == "_activeBorderFrame.Visibility"
-                          && a.Right.ToString() == "Visibility.Visible"))
-            .Count();
-        Assert.True(show < body.Count, "expected the frame to be shown somewhere in the method");
-        Assert.True(
-            guard < show,
-            "the coincidence check has to run before the frame is shown, or the second "
-            + "stroke is drawn and then left up");
     }
 
     /// <summary>

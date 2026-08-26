@@ -28,54 +28,6 @@ internal static class PaneChrome
     public const double DividerThickness = 1.0;
 
     /// <summary>
-    /// Largest gap, in DIPs, between a leaf's rect and the tab's content
-    /// rect that still counts as the two being the same rectangle.
-    /// </summary>
-    /// <remarks>
-    /// Star-sized cells arrange onto fractional DIPs, so a leaf that does
-    /// fill its tab can still miss the content rect by a rounding
-    /// remainder. Half a DIP is far below anything a stroke can show and
-    /// far above that remainder.
-    /// </remarks>
-    public const double EdgeCoincidenceTolerance = 0.5;
-
-    /// <summary>
-    /// True when a leaf's rect fills the whole tab content rect, so the
-    /// tab content border is already drawing exactly the rectangle the
-    /// active-pane border would.
-    /// </summary>
-    /// <remarks>
-    /// The two frames carry the same colour and the same thickness, so
-    /// stacking them on one edge does not simply stay invisible: the
-    /// stroke is antialiased against the terminal on its inner side, and
-    /// blending it twice makes it darker and a shade wider than the same
-    /// stroke anywhere else in the window. A tab holding one pane -- or a
-    /// zoomed one, where the active leaf fills the host -- has to read as
-    /// a single frame, and this is what tells the caller it is about to
-    /// draw the second stroke.
-    ///
-    /// Only the fully-coincident case. Where a split leaf shares just some
-    /// of its edges with the tab, the two strokes land on identical
-    /// coordinates at identical thickness and composite to the same
-    /// pixels, and suppressing those edges would take the focus frame away
-    /// from the panes that sit against the tab's outside.
-    /// </remarks>
-    public static bool LeafFillsContent(
-        double leafX, double leafY, double leafWidth, double leafHeight,
-        double contentWidth, double contentHeight)
-    {
-        // An unarranged content rect is not something a leaf can fill. The
-        // caller would otherwise drop the focus frame for the frame that
-        // has no size yet, leaving the pane with no chrome at all.
-        if (contentWidth <= 0 || contentHeight <= 0) return false;
-
-        return leafX <= EdgeCoincidenceTolerance
-            && leafY <= EdgeCoincidenceTolerance
-            && leafX + leafWidth >= contentWidth - EdgeCoincidenceTolerance
-            && leafY + leafHeight >= contentHeight - EdgeCoincidenceTolerance;
-    }
-
-    /// <summary>
     /// Gutter reserved between a pane's bounds and its terminal surface.
     ///
     /// Sized to the thickest chrome that can land on a single edge (the

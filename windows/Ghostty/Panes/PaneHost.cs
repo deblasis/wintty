@@ -64,6 +64,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // overlay: it needs no positioning, and it stays up through a zoom,
     // which collapses the overlay.
     //
+    // The two frames are free to overlap. Both are Borders on the same
+    // brush at PaneChrome.ActiveBorderThickness, and layout rounding
+    // snaps each to the same whole device pixels at full opacity, so a
+    // second stroke over the first lands on pixels that are already that
+    // colour. Measured on a live window at 96 DPI: a single-pane tab's
+    // edge, where both frames draw, is the same 2px run of the same RGB
+    // as the edge of a split tab where only one of them does.
+    //
     // Doing highlights as an overlay (instead of per-leaf Borders
     // inside the split tree) avoids splitter occlusion: a splitter in
     // a parent Grid is not a sibling of a leaf's chrome and cannot
@@ -86,8 +94,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // folder shape joinable no matter how the tab is split -- see
     // BuildChrome.
     private Border _tabContentBorderFrame = null!;
-    // Vertical-tab title row sits above the pane; hide the active
-    // border's top stroke so it does not read as a line under caption buttons.
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
@@ -255,10 +261,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void RaiseLayoutChanged() => LayoutChanged?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
-    /// Number of leaves in the tree. Implemented via a tree walk; the
-    /// trees are tiny (typically &lt;10 leaves) so this is cheap.
-    /// </summary>
-    /// <summary>
     /// Override the pane chrome color. Pass null to revert to the default
     /// DodgerBlue.
     /// </summary>
@@ -312,6 +314,10 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
     }
 
+    /// <summary>
+    /// Number of leaves in the tree. Implemented via a tree walk; the
+    /// trees are tiny (typically &lt;10 leaves) so this is cheap.
+    /// </summary>
     public int PaneCount
     {
         get
@@ -1409,21 +1415,6 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
 
         var bounds = LeafLayoutBounds(ctl);
-
-        // One stroke where the two frames coincide. When the tab holds a
-        // single pane the active leaf fills the whole content area, and
-        // the tab frame is already drawing that exact rectangle in the
-        // same colour at the same weight; a second stroke over it reads
-        // as one thicker, darker line than the frame anywhere else.
-        if (Core.Panes.PaneChrome.LeafFillsContent(
-                bounds.X, bounds.Y, bounds.Width, bounds.Height,
-                _tabContentBorderFrame.ActualWidth,
-                _tabContentBorderFrame.ActualHeight))
-        {
-            _activeBorderFrame.Visibility = Visibility.Collapsed;
-            return;
-        }
-
         var t = Core.Panes.PaneChrome.ActiveBorderThickness;
         _activeBorderFrame.BorderThickness = new Thickness(t);
         Canvas.SetLeft(_activeBorderFrame, bounds.X);

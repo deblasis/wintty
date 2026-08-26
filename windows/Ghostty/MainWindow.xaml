@@ -118,13 +118,14 @@
                     IsHitTestVisible="False"/>
         </Grid>
 
-        <!-- Masks the pane top stroke under the OS caption buttons only. -->
+        <!-- Masks the tab content frame's top stroke under the OS caption
+             buttons only. Height and Margin are set in code from the same
+             metrics the stroke itself is placed by; a hand-tuned pair here
+             is how the two drift apart and leave a sliver showing. -->
         <Border x:Name="VerticalCaptionSeamCover"
                 Grid.Row="0" Grid.RowSpan="2"
                 Grid.Column="0" Grid.ColumnSpan="2"
                 Width="146"
-                Height="3"
-                Margin="0,32,0,0"
                 VerticalAlignment="Top"
                 HorizontalAlignment="Right"
                 IsHitTestVisible="False"
