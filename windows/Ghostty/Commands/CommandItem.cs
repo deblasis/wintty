@@ -13,6 +13,9 @@ internal enum CommandCategory
     Custom,
     About,
     Demo,
+    // Destructive developer actions. Last so that grouped mode sorts them
+    // to the bottom, away from anything a user could hit by accident.
+    Debug,
 }
 
 internal record CommandItem
