@@ -226,11 +226,14 @@ pub fn capturePanic(msg: []const u8) void {
     // call and let anything it touches fail silently.
     if (@atomicRmw(bool, &panic_reported, .Xchg, true, .seq_cst)) return;
 
-    _ = sentry.captureEvent(sentry.Value.initMessageEvent(
-        .fatal,
-        "panic",
-        msg,
-    ));
+    const event = sentry.Value.initMessageEvent(.fatal, "panic", msg);
+
+    // A panic report without frames says what happened but not where, which
+    // is most of the value gone. The frames start inside the panic handler,
+    // so the crash site is a few frames up.
+    event.addStacktrace();
+
+    _ = sentry.captureEvent(event);
 }
 
 pub fn deinit() void {

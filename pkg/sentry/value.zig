@@ -24,6 +24,16 @@ pub const Value = struct {
         ) };
     }
 
+    /// Attach the current call stack to an event.
+    ///
+    /// Without this a panic event carries the message but no frames, so a
+    /// report says what happened and not where. Passing null captures the
+    /// stack at the point of call, which is inside the panic handler, so the
+    /// crash site sits a few frames up.
+    pub fn addStacktrace(self: Value) void {
+        c.sentry_event_value_add_stacktrace(self.value, null, 0);
+    }
+
     pub fn initObject() Value {
         return .{ .value = c.sentry_value_new_object() };
     }
