@@ -31,6 +31,11 @@ internal sealed partial class AppearancePage : Page
     // still re-seed normally.
     private int _expectingOwnReloads;
 
+    // The frame-style combo's first entry stands for the key being absent,
+    // which is what "match the backdrop" means. There is no value that says
+    // unset, so the entry carries no tag and choosing it removes the line.
+    private const string MatchBackdropTag = "";
+
     public AppearancePage(IConfigService configService, IConfigFileEditor editor)
     {
         _configService = configService;
@@ -64,6 +69,13 @@ internal sealed partial class AppearancePage : Page
         {
             SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle, BackdropStyles.Default);
 
+            // FrameStyle answers the resolved value, so it cannot tell an
+            // unset key from one set to what the backdrop already says. The
+            // file can, and the two show as different entries here.
+            SelectComboByTag(
+                FrameStyleCombo,
+                cs.IsConfiguredInFile("frame-style") ? cs.FrameStyle : MatchBackdropTag);
+
             // Seed power saver mode from config, defaulting to "auto".
             var powerMode = cs.GetRawFileValue("power-saver-mode");
             if (string.IsNullOrWhiteSpace(powerMode)) powerMode = "auto";
@@ -95,6 +107,7 @@ internal sealed partial class AppearancePage : Page
         else
         {
             SelectComboByTag(BackgroundStyleCombo, BackdropStyles.Default);
+            SelectComboByTag(FrameStyleCombo, MatchBackdropTag);
         }
 
         // Initialize gradient settings from current config.
@@ -556,6 +569,25 @@ internal sealed partial class AppearancePage : Page
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
             OnValueChanged("background-style", item.Tag?.ToString() ?? BackdropStyles.Default);
+    }
+
+    private void FrameStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox { SelectedItem: ComboBoxItem item }) return;
+
+        // OnValueChanged owns the seeding guard for the write; the removal
+        // below bypasses it, and seeding the combo during construction would
+        // otherwise comment the user's frame-style out of their config.
+        if (_loading) return;
+
+        var tag = item.Tag?.ToString();
+        if (string.IsNullOrEmpty(tag))
+        {
+            _writer.Write(() => _editor.RemoveValue("frame-style"), "frame-style");
+            return;
+        }
+
+        OnValueChanged("frame-style", tag);
     }
 
     private void NoColorOverride_SelectionChanged(object sender, SelectionChangedEventArgs e)
