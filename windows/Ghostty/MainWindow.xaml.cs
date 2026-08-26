@@ -618,9 +618,12 @@ public sealed partial class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Top,
             IsHitTestVisible = false,
             Visibility = Visibility.Collapsed,
-            // Deep enough to take the stroke and the hairline above it, both
-            // of which sit inside the pane's own gutter.
-            Height = Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1,
+            // Exactly the gutter every leaf keeps clear, which is what the
+            // stroke is drawn in. Deeper would reach past it and paint the
+            // tab's fill over the first row of cells: harmless while that
+            // fill matches the terminal background, visible the moment a tab
+            // carries a preset colour.
+            Height = Core.Panes.PaneChrome.SurfaceInset,
         };
         Grid.SetRow(_tabSeamCover, 1);
         Grid.SetColumn(_tabSeamCover, 1);
@@ -639,14 +642,14 @@ public sealed partial class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Top,
             IsHitTestVisible = false,
             Visibility = Visibility.Collapsed,
-            // Wide enough to swallow the pane's gutter and its stroke, plus
-            // the overlap below. Erring wide is free: the fill is the
-            // terminal's own colour and the row's own fill is the same, so
-            // any overshoot in either direction lands on the colour that is
-            // already there. Erring narrow is what leaves a line.
-            Width = VerticalSeamOverlap
-                + Core.Panes.PaneChrome.SurfaceInset
-                + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1,
+            // The overlap back into the row, plus exactly the gutter the
+            // stroke is drawn in. Overshooting to the left is free, since
+            // that lands on the row's own fill. Overshooting to the right is
+            // not: past the gutter are live cells, and this fill is the
+            // row's, which for a tab carrying a preset colour is that
+            // colour rather than the terminal's. Erring narrow leaves a
+            // line, so the gutter is the number to match, not to pad.
+            Width = VerticalSeamOverlap + Core.Panes.PaneChrome.SurfaceInset,
         };
         Grid.SetRow(_verticalSeamCover, 0);
         Grid.SetRowSpan(_verticalSeamCover, 2);
