@@ -82,6 +82,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         { "acrylic", "mica", "opaque" };
 
     public string BackgroundStyle { get; private set; } = BackdropStyles.Default;
+
+    /// <summary>
+    /// Material for the window chrome, as opposed to the terminal's own
+    /// backdrop. Never null and never unset downstream: an absent
+    /// <c>frame-style</c> means "match the backdrop", and that is resolved
+    /// once here so no consumer has to know the inheritance exists and a
+    /// later one cannot resolve it differently. An unusable value falls
+    /// back to <see cref="BackdropStyles.Default"/> rather than inheriting,
+    /// because a typo that quietly picked up another key's value reads
+    /// exactly like the typo working.
+    /// </summary>
+    public string FrameStyle { get; private set; } = BackdropStyles.Default;
     public Windows.UI.Color? BackgroundTintColor { get; private set; }
     public float? BackgroundTintOpacity { get; private set; }
     public float? BackgroundLuminosityOpacity { get; private set; }
@@ -920,6 +932,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // schema, so we read it directly from the config file.
         BackgroundStyle = NormalizeStyle(
             "background-style", GetFileValue("background-style", BackdropStyles.Default));
+        // Reads BackgroundStyle, so it has to stay below it: resolved first,
+        // an unset frame-style inherits whatever the previous reload left
+        // behind. Absence is the whole distinction here, which is why this
+        // asks whether the key is present rather than handing GetFileValue a
+        // default it could not tell apart from a configured value.
+        FrameStyle = TryGetFileValue("frame-style", out var rawFrameStyle)
+            ? NormalizeStyle("frame-style", rawFrameStyle)
+            : BackgroundStyle;
         BackgroundTintColor = ParseHexColor(GetFileValue("background-tint-color", ""));
         BackgroundTintOpacity = ParseFloat(GetFileValue("background-tint-opacity", ""));
         BackgroundLuminosityOpacity = ParseFloat(GetFileValue("background-luminosity-opacity", ""));
@@ -1342,6 +1362,30 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             && list.Count > 0
             ? list[0]
             : defaultValue;
+
+    /// <summary>
+    /// Same lookup as <see cref="GetFileValue"/>, reporting whether the key
+    /// was there at all.
+    ///
+    /// A key whose absence means something other than its default needs
+    /// this: <c>frame-style</c> unset means "match background-style", and
+    /// with a default parameter that is indistinguishable from the user
+    /// having written the default down. A sentinel string would only move
+    /// the ambiguity onto whatever value was picked as the sentinel.
+    /// </summary>
+    private bool TryGetFileValue(string key, out string value)
+    {
+        if (_configFileCache is not null
+            && _configFileCache.TryGetValue(key, out var list)
+            && list.Count > 0)
+        {
+            value = list[0];
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
 
     /// <summary>
     /// Fold a raw style value, and say so when it was not one.
