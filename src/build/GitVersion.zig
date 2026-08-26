@@ -55,6 +55,11 @@ pub fn detect(b: *std.Build) !Version {
             .ignore,
         ) catch |err| switch (err) {
             error.FileNotFound => return error.GitNotFound,
+            // Same degradation as the branch lookup above: a git that runs but
+            // fails here means we cannot describe this checkout, which
+            // Config.init turns into a dev version. Without this prong the
+            // error escapes detect() bare and fails the configure phase.
+            error.ExitCodeFailure => return error.GitNotRepository,
             else => return err,
         };
 
