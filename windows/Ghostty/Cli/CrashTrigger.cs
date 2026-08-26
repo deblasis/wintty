@@ -111,9 +111,22 @@ internal static partial class CrashTrigger
             // handler, so NO envelope is expected. The existing handlers in
             // App.xaml.cs are what capture this class, with a managed stack
             // trace, which is more useful than a dump would be.
+            // Thrown from a thread of its own, deliberately. Program.Main
+            // runs MainImpl inside a catch-all that turns any exception into
+            // ReportFatal and a clean exit, so throwing here would exercise
+            // the CLI's error path and never be unhandled at all. The palette
+            // path IS unhandled (App.xaml.cs leaves Handled = false), and the
+            // two front doors have to mean the same thing.
+            //
+            // Join is unreachable: an unhandled exception on any thread tears
+            // the process down.
             case "managed-unhandled":
-                throw new InvalidOperationException(
-                    "crash-trigger: deliberate unhandled managed exception");
+                var unhandled = new Thread(
+                    () => throw new InvalidOperationException(
+                        "crash-trigger: deliberate unhandled managed exception"));
+                unhandled.Start();
+                unhandled.Join();
+                return (int)ExitCode.ManagedUnhandled;
 
             // Explicit fail-fast. Bypasses all handlers by design.
             case "env-failfast":
@@ -205,29 +218,21 @@ internal static partial class CrashTrigger
             return;
         }
 
-        var dir = Path.Combine(
-            Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData),
-            "wintty",
-            // sentry's database path, set by cacheDir in src/crash/sentry.zig.
-            // Not "crash": that is where the managed-side crash.log goes.
-            "sentry");
-
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
+        // Ask libghostty, rather than watching for sentry's database
+        // directory to appear. That directory is created during init, before
+        // the backend's handler is installed, and it outlives the process, so
+        // on every run after the first it is already there and the wait
+        // returns instantly with the reporter not yet armed. Every "no
+        // envelope" row measured that way says nothing.
+        if (NativeMethods.CrashWaitReady((uint)timeout.TotalMilliseconds))
         {
-            if (Directory.Exists(dir))
-            {
-                Console.Error.WriteLine($"crash-trigger: reporter armed ({dir})");
-                return;
-            }
-
-            Thread.Sleep(50);
+            Console.Error.WriteLine("crash-trigger: reporter armed");
+            return;
         }
 
         Console.Error.WriteLine(
-            $"crash-trigger: reporter did not arm within {timeout.TotalSeconds:0.#}s " +
-            $"({dir} never appeared); triggering anyway");
+            $"crash-trigger: reporter did not arm within {timeout.TotalSeconds:0.#}s; " +
+            "triggering anyway, and any absent report below is unproven");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
