@@ -20,6 +20,12 @@
 # keeps the strip above three tabs and kills the process at the end rather than
 # closing the window, so the cancel term keeps the oracle honest for a graceful
 # close rather than recording one this harness drove.
+#
+# All of that only says something when switches actually happened, and every
+# term of it is vacuous when none did. So the run is gated too: the desktop has
+# to accept the layout chords, and a third of them have to begin a switch. A
+# run that toggled nothing leaves with 1 - a chord nobody handled is a corpus
+# this harness could not establish, not a defect in the build.
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [int]$Seed = 0,
@@ -244,6 +250,11 @@ $env:WINTTY_MORPH_TRACE = $log
 $proc = $null
 $actions = @{}
 $chordMisses = 0
+# Layout chords a working build answers with a SWITCH begin: the startup probe
+# plus one per toggle iteration. The interrupting second chord is deliberately
+# left out - it is aimed at a switch still in the air, which the coordinator is
+# meant to swallow, so counting it would water down the floor below.
+$toggleAttempts = 0
 $failures = New-Object System.Collections.Generic.List[string]
 # Above the try so a refusal keeps its own message: with the gate inside, the
 # sweep in the finally would bind a null stamp to a mandatory [datetime] and
@@ -284,9 +295,24 @@ try {
     if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) {
         throw "FOREGROUND_MISS: probe toggle; foreground is $([MFz]::ForegroundNow())"
     }
-    Start-Sleep -Milliseconds 1200
-    if (-not (Test-Path $log)) {
-        throw "no morph trace at $log - the app ignored WINTTY_MORPH_TRACE; this build predates the built-in trace"
+    $toggleAttempts++
+    # Wait for the probe's own SWITCH line, not for the file. A build that
+    # ignores the env var and a build whose layout chord never reaches the
+    # router are the same absent file to Test-Path, and the second is the one
+    # that used to run a whole fuzz to a green verdict having switched nothing.
+    $probed = $false
+    $probeDl = (Get-Date).AddSeconds(6)
+    while ((Get-Date) -lt $probeDl) {
+        Start-Sleep -Milliseconds 200
+        if (-not (Test-Path $log)) { continue }
+        $seen = @(Get-Content $log -ErrorAction SilentlyContinue |
+            Where-Object { $_ -like 'SWITCH begin*' })
+        if ($seen.Count -gt 0) { $probed = $true; break }
+    }
+    if (-not $probed) {
+        throw ("the probe toggle traced no SWITCH begin in $log - either the app " +
+            'ignored WINTTY_MORPH_TRACE (a build older than the trace) or the layout ' +
+            'chord never reached the router')
     }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
@@ -302,9 +328,12 @@ try {
             # nothing.
             [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             Start-Sleep -Milliseconds 90
+            $toggleAttempts++
             if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { $chordMisses++ }
             # Sometimes toggle again before the switch has landed: the
-            # coordinator must not leave a ghost behind when interrupted.
+            # coordinator must not leave a ghost behind when interrupted. Not
+            # counted as an attempt: a switch is normally still running, and
+            # the coordinator is supposed to drop this one.
             if ($rng.Next(100) -lt 30) {
                 Start-Sleep -Milliseconds $rng.Next(40, 320)
                 [void][MFz]::Chord($hwnd, $VK.Comma, $true, $true)
@@ -441,7 +470,7 @@ $cancels = @($lines | Where-Object { $_ -like 'SWITCH cancel*' }).Count
 $leaked = @($lines | Where-Object { $_ -match 'ghosts=[1-9]|morph=LEAKED' })
 
 Write-Host ''
-Write-Host "chord misses   : $chordMisses"
+Write-Host "layout chords  : $toggleAttempts  (refused: $chordMisses)"
 Write-Host "switches begun : $begins"
 Write-Host "switches ended : $ends"
 Write-Host "switches cancel: $cancels"
@@ -470,4 +499,41 @@ if ($failures.Count -gt 0) {
     # that never got to assert anything.
     exit 2
 }
+
+# Everything above is written to catch a switch that went wrong, and every one
+# of those terms is vacuous when no switch happened at all: the begin/end
+# balance reads 0 -ne 0, the immediate term is gated on $begins, and there are
+# no ghost lines to find. A build whose layout chord never reaches the router
+# therefore reported nothing and left with 0. Gate the run itself.
+#
+# Both floors are proportions of the chords sent, because -Iterations decides
+# how many there are.
+#
+# A third is under what a healthy run reaches, but not by much, because a
+# healthy run converts far fewer chords than it sends: measured at 13 and 14 of
+# 34 and at 16 of 31 against a clean build, so 38% to 52%. A chord landing
+# inside the 340ms switch is dropped by design, and an iteration that touched
+# the chrome can leave focus off the terminal for the next one.
+#
+# So this floor is sized for the case it exists to catch - a run that switched
+# nothing at all - and the margin above it is thin: 38% of 34 chords clears a
+# floor of 12 by one. Raise it once the harness stops losing chords, not
+# before; a build is not at fault for a chord that never reached it.
+$MinBeginRatio = 0.33
+$MaxChordMissRatio = 0.2
+# These leave with 1, not 2. A chord the desktop refused, or one the router
+# never saw, is a corpus this harness could not establish rather than a defect
+# in the build, and 1 is the code the runner retries.
+$missCap = [Math]::Max(1, [int][Math]::Floor($toggleAttempts * $MaxChordMissRatio))
+if ($chordMisses -gt $missCap) {
+    throw ("FOREGROUND_MISS: $chordMisses of $toggleAttempts layout chords were refused " +
+        "(cap $missCap) - another window held the foreground, so the switch was never driven")
+}
+$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($toggleAttempts * $MinBeginRatio))
+if ($begins -lt $beginFloor) {
+    throw ("only $begins switch(es) began for $toggleAttempts layout chords (floor " +
+        "$beginFloor) - the chords went out but the router never saw them, so nothing " +
+        'above was measured')
+}
+
 Write-Host "PASS (seed $Seed)"
