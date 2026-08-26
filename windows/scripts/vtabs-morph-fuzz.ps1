@@ -63,6 +63,11 @@ public static class MFz {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
@@ -90,12 +95,45 @@ public static class MFz {
     // handle, and SetForegroundWindow fails silently under the foreground
     // lock. Every send confirms ownership first so a stray chord cannot land
     // in the developer's editor.
+    //
+    // Attaching to the foreground thread first is what lifts that lock. A
+    // bare SetForegroundWindow returns success and does nothing whenever the
+    // caller does not already own the foreground, so the retry loop below
+    // spun twenty times and reported a miss with no way to tell whether the
+    // window was wrong, gone, or simply refused.
+    static uint ThreadOf(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
+
+    public static string Describe(IntPtr h) {
+        if (h == IntPtr.Zero) return "none";
+        if (!IsWindow(h)) return "a destroyed window";
+        var cls = new StringBuilder(256); GetClassName(h, cls, 256);
+        var txt = new StringBuilder(512); GetWindowText(h, txt, 512);
+        uint pid; GetWindowThreadProcessId(h, out pid);
+        return string.Format("class={0} pid={1} title='{2}'", cls, pid, txt);
+    }
+
+    // What is holding the foreground instead of the window we wanted. The
+    // whole point is that a FOREGROUND_MISS should name the thief rather
+    // than leaving it to be guessed from a screenshot that was never taken.
+    public static string ForegroundNow() { return Describe(GetForegroundWindow()); }
+
     public static bool Focus(IntPtr expected) {
-        if (expected == IntPtr.Zero || !IsWindow(expected)) return false;
+        if (expected == IntPtr.Zero) return false;
+        if (!IsWindow(expected)) return false;
         for (int i = 0; i < 20; i++) {
             if (GetForegroundWindow() == expected) return true;
-            SetForegroundWindow(expected);
-            Thread.Sleep(50);
+            var fg = GetForegroundWindow();
+            uint fgThread = fg == IntPtr.Zero ? 0 : ThreadOf(fg);
+            uint me = GetCurrentThreadId();
+            bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+            try {
+                SetForegroundWindow(expected);
+                BringWindowToTop(expected);
+                SetFocus(expected);
+            } finally {
+                if (attached) AttachThreadInput(me, fgThread, false);
+            }
+            Thread.Sleep(60);
         }
         return GetForegroundWindow() == expected;
     }
@@ -230,16 +268,22 @@ try {
     [void][MFz]::MoveWindow($hwnd, 40, 40, 1400, 860, $true)
     Start-Sleep -Milliseconds 700
 
+    Write-Host ("target $([MFz]::Describe($hwnd))")
+
     # Seed the strip so the very first switches already have a crowd.
     foreach ($i in 1..7) {
-        if (-not [MFz]::Chord($hwnd, $VK.T, $true, $false)) { throw 'FOREGROUND_MISS: seed tab' }
+        if (-not [MFz]::Chord($hwnd, $VK.T, $true, $false)) {
+            throw "FOREGROUND_MISS: seed tab; wanted $([MFz]::Describe($hwnd)), foreground is $([MFz]::ForegroundNow())"
+        }
         Start-Sleep -Milliseconds 500
     }
     $tabs = 8
 
     # One deterministic toggle up front proves the oracle is alive before
     # minutes of fuzzing are spent on a build that cannot report it.
-    if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { throw 'FOREGROUND_MISS: probe toggle' }
+    if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) {
+        throw "FOREGROUND_MISS: probe toggle; foreground is $([MFz]::ForegroundNow())"
+    }
     Start-Sleep -Milliseconds 1200
     if (-not (Test-Path $log)) {
         throw "no morph trace at $log - the app ignored WINTTY_MORPH_TRACE; this build predates the built-in trace"
