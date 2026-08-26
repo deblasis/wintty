@@ -16,8 +16,10 @@ namespace Ghostty.Settings;
 /// <summary>
 /// Gallery shader picker window. The combo, the chevron buttons, and the
 /// left/right arrow keys all walk the gallery; a preview terminal
-/// underneath plays a canned, self-typing session (see <see
-/// cref="ShaderPreviewFeed"/>) so every shader, cursor-effect ones
+/// underneath plays the website's fake DOS session (see <see
+/// cref="ShaderPreviewFeed"/>): it types the demo script by itself, and
+/// clicking into it lets the user type freely into the same shell, which
+/// pauses the demo while she types. Every shader, cursor-effect ones
 /// included, has moving content to work on. The preview terminal is
 /// created once and lives for the whole window: flipping entries swaps
 /// only the per-surface shader (never the app config), so its content,
@@ -31,14 +33,15 @@ public sealed partial class ShaderPickerWindow : Window
     /// <summary>
     /// The preview's placeholder child: PowerShell put to sleep writes
     /// nothing, never exits, and never reads stdin, so the pty stays
-    /// silent and the canned feed is the terminal's only writer
-    /// (deterministic content, no banner race, stray clicks into the
-    /// preview cannot produce output). A real shell here would interleave
-    /// its own prompt with the feed. No shell metacharacters on purpose:
-    /// the spawn path wraps commands containing them in cmd.exe, which
-    /// would make the placeholder noisier and quoting-dependent. The sleep
-    /// length is Start-Sleep's documented maximum (~24.8 days); the picker
-    /// closing kills the surface and the child with it.
+    /// silent and the fake DOS shell is the terminal's only writer
+    /// (deterministic content, no banner race, and user keystrokes routed
+    /// to it by PreviewInputSink can never reach a real shell). A real
+    /// shell here would interleave its own prompt with the demo. No shell
+    /// metacharacters on purpose: the spawn path wraps commands containing
+    /// them in cmd.exe, which would make the placeholder noisier and
+    /// quoting-dependent. The sleep length is Start-Sleep's documented
+    /// maximum (~24.8 days); the picker closing kills the surface and the
+    /// child with it.
     /// </summary>
     private const string PreviewPlaceholderCommand =
         "powershell.exe -NoLogo -NoProfile -Command Start-Sleep -Seconds 2147483";
@@ -114,11 +117,11 @@ public sealed partial class ShaderPickerWindow : Window
             DisposePreview();
         };
 
-        // Arrows flip shaders unless the terminal preview holds focus: the
-        // terminal forwards keys to the shell without marking them handled,
-        // so its arrow KeyDown still bubbles up here, and keys that move a
-        // shell cursor must not also flip the gallery. The chevron buttons
-        // beside the combo switch regardless of focus.
+        // Arrows flip shaders unless the terminal preview holds focus:
+        // keys the preview's fake shell does not consume (Left and Right,
+        // which are text-cursor keys) still bubble up here unhandled, and
+        // they must not also flip the gallery. The chevron buttons beside
+        // the combo switch regardless of focus.
         RootGrid.KeyDown += OnRootKeyDown;
     }
 
@@ -337,6 +340,13 @@ public sealed partial class ShaderPickerWindow : Window
                 control.WriteVt(bytes);
             },
             Logging.StaticLoggers.ShaderPreviewFeed);
+        // Route the preview's keyboard into the same fake shell the feed
+        // drives: clicking into the terminal then types freely (line
+        // editing, history recall, Insert cursor flips), the demo pauses
+        // while the user types, and the keystrokes never reach the
+        // sleeping placeholder child. Set on this control only; regular
+        // panes keep the full keyboard path.
+        control.PreviewInputSink = _feed;
         control.FirstRender += OnPreviewFirstRender;
     }
 
@@ -349,6 +359,10 @@ public sealed partial class ShaderPickerWindow : Window
 
     private void DisposePreview()
     {
+        // Unwire the keyboard sink before anything else: a keystroke in
+        // flight during teardown must find no sink rather than a feed
+        // that is about to go away.
+        if (_preview is not null) _preview.PreviewInputSink = null;
         _feed?.Dispose();
         _feed = null;
         _preview?.DisposeSurface();

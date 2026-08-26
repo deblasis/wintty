@@ -8,6 +8,7 @@ using Ghostty.Core.Interop;
 using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
+using Ghostty.Core.Settings;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Interop;
@@ -180,6 +181,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// resolved command.
     /// </summary>
     public string? PreviewCommand { get; set; }
+
+    /// <summary>
+    /// Keyboard sink for a preview surface. When set, key presses and
+    /// characters are delivered here INSTEAD of the pty: the preview's
+    /// placeholder child is asleep (see <see cref="PreviewCommand"/>),
+    /// so its stdin is exactly where keystrokes should stop. The shader
+    /// picker sets this so clicking into the preview lets the user type
+    /// freely into the fake DOS session the autoplay feed drives. Null
+    /// on regular terminal panes, whose keyboard path is unchanged.
+    /// </summary>
+    internal IPreviewInputSink? PreviewInputSink { get; set; }
 
     /// <summary>
     /// Take keyboard focus as soon as the surface loads. Real terminal
@@ -1705,6 +1717,39 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // after the user clicks back into the surface.
         if (SearchBar.ContainsFocus) return;
 
+        // A preview surface is a fake session (the shader picker's DOS
+        // demo): the whole keyboard belongs to that session and nothing
+        // belongs to the pty. The return is keyed on the preview flag
+        // alone, not on the sink, so a future preview surface that sets
+        // no sink still cannot fire pane chords into the real surface.
+        // Pane concerns below (chord matching, key stamping, bell
+        // acknowledgment) never fire from inside a preview; a
+        // WindowsOnly chord dispatching a pane action there would be a
+        // bug, not a feature.
+        if (_isPreviewSurface)
+        {
+            if (PreviewInputSink is { } sink)
+            {
+                // Every key press re-arms the quiet window, mapped or
+                // not: the site stamps its idle clock on every keydown,
+                // so holding Left or Right pauses the demo too, not
+                // just keys the fake shell consumes.
+                sink.NoteKeyDown();
+                var mods = CurrentChordModifiers();
+                if (PreviewKeyMap.TryMap(
+                        (int)e.Key,
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Control),
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Shift),
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Menu),
+                        out var shellKey) &&
+                    sink.KeyDown(shellKey))
+                {
+                    e.Handled = true;
+                }
+            }
+            return;
+        }
+
         // Stamp the shared host so VerticalTabHost's hover-expand
         // suppression knows the user is mid-typing and holds back
         // the sidebar pop-open. Unconditional: we want every key
@@ -1746,6 +1791,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // key-up too so libghostty never sees a release for a press it
         // never received.
         if (SearchBar.ContainsFocus) return;
+
+        // The press never went to libghostty (the preview branch of
+        // OnKeyDown returns before SendKey, sink or not); forwarding
+        // this release would hand libghostty a release for a press it
+        // never saw. Swallow every key-up on a preview surface.
+        if (_isPreviewSurface) return;
 
         // Same short-circuit so the matching key-up never reaches
         // libghostty either. Without this, libghostty would see a
@@ -1866,6 +1917,25 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             return;
         }
 
+        // WM_CHAR goes to the fake session as typed text. Control units
+        // never type into the fake line: their keys (Enter, Backspace,
+        // Ctrl+C) already arrived through KeyDown, and delivering the
+        // character too would double-execute them. DEL joins them because
+        // it is not text. This also sidesteps depending on which of the
+        // two events a given control key raises: the character path is
+        // printable-only, full stop. Like the KeyDown branch, the return
+        // is keyed on the preview flag alone: a preview surface without
+        // a sink drops the character, it never forwards it to the pty.
+        if (_isPreviewSurface)
+        {
+            if (PreviewInputSink is { } sink &&
+                e.Character is >= (char)0x20 and not (char)0x7f)
+            {
+                sink.Character(e.Character);
+            }
+            return;
+        }
+
         // Forward WM_CHAR unchanged, but assemble surrogate pairs first.
         // WinUI 3 raises CharacterReceived once per UTF-16 unit; encoding
         // each unit with new Rune(ch) throws on D800–DFFF and kills the
@@ -1921,6 +1991,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var text = ImeSink.Text;
         if (string.IsNullOrEmpty(text)) return;
 
+        // A preview surface's keyboard belongs to its fake session, so
+        // committed IME text goes through the sink like any other
+        // printable (same filtering as OnCharacterReceived), never to
+        // the sleeping placeholder child through SurfaceText.
+        if (_isPreviewSurface)
+        {
+            if (PreviewInputSink is { } sink)
+            {
+                foreach (var ch in text)
+                {
+                    if (ch is >= (char)0x20 and not (char)0x7f)
+                        sink.Character(ch);
+                }
+            }
+            ImeSink.Text = string.Empty;
+            return;
+        }
+
         Span<byte> buf = stackalloc byte[4];
         foreach (var ch in text)
         {
@@ -1939,6 +2027,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void UpdateSurfacePreedit(string? text)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+
+        // A preview surface has no preedit story: its session is canned,
+        // nothing behind it reads a composition, and drawing one on the
+        // real grid would put IME state where it cannot be committed.
+        // Suppress entirely; the matching null clear below is then a
+        // no-op, which is exactly right since we never set one.
+        if (_isPreviewSurface) return;
+
         if (string.IsNullOrEmpty(text))
         {
             NativeMethods.SurfacePreedit(_surface, IntPtr.Zero, UIntPtr.Zero);
