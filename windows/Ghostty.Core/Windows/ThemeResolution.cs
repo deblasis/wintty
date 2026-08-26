@@ -133,6 +133,81 @@ public static class ThemeResolution
     }
 
     /// <summary>
+    /// CIE L* for a relative luminance: 0 for black, 100 for white, spaced
+    /// so that equal differences look equal.
+    /// </summary>
+    private static double Lightness(double luminance)
+        => luminance > 0.008856
+            ? (116.0 * Math.Cbrt(luminance)) - 16.0
+            : 903.3 * luminance;
+
+    /// <summary>
+    /// A tint of <paramref name="rgb"/> that sits <paramref name="deltaLStar"/>
+    /// away from it perceptually: positive for lighter, negative for darker.
+    /// Both argument and result are packed 0x00RRGGBB.
+    /// </summary>
+    /// <remarks>
+    /// <para>Perceptual rather than a step per channel, because those are not
+    /// the same thing. sRGB is gamma encoded, so a fixed number of counts
+    /// buys markedly more visible separation down at the black end than up
+    /// at the white end. Anything tuned to look right on a dark background
+    /// and then reused on a light one comes out weaker than intended, which
+    /// is how a texture calibrated in dark mode ends up nearly invisible in
+    /// light mode.</para>
+    ///
+    /// <para>Every channel moves by the same number of counts, so the result
+    /// stays a tint of the input rather than becoming a colour of its own.
+    /// Near either end of the range the target is unreachable and the result
+    /// is the closest step available, but never the input itself: a tint
+    /// equal to its background draws nothing.</para>
+    /// </remarks>
+    public static uint StepLightness(uint rgb, double deltaLStar)
+    {
+        const int maxChannelStep = 48;
+
+        var r = (int)((rgb >> 16) & 0xFF);
+        var g = (int)((rgb >> 8) & 0xFF);
+        var b = (int)(rgb & 0xFF);
+
+        var direction = deltaLStar >= 0 ? 1 : -1;
+        var target = Lightness(LuminanceOf(r, g, b)) + deltaLStar;
+
+        // Walk out a count at a time and stop on the first step that has
+        // covered the distance. Lightness is monotonic in the step, so the
+        // first hit is the closest one at or past the target, and the range
+        // is small enough that searching it beats solving it.
+        var step = maxChannelStep;
+        for (var candidate = 1; candidate <= maxChannelStep; candidate++)
+        {
+            var offset = direction * candidate;
+            var lightness = Lightness(LuminanceOf(
+                Clamp(r + offset), Clamp(g + offset), Clamp(b + offset)));
+
+            if (direction > 0 ? lightness >= target : lightness <= target)
+            {
+                step = candidate;
+                break;
+            }
+        }
+
+        step *= direction;
+        return (uint)((Clamp(r + step) << 16) | (Clamp(g + step) << 8) | Clamp(b + step));
+
+        static int Clamp(int value) => value < 0 ? 0 : value > 255 ? 255 : value;
+    }
+
+    private static double LuminanceOf(int r, int g, int b)
+    {
+        static double Linearize(int channel)
+        {
+            var c = channel / 255.0;
+            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        return (0.2126 * Linearize(r)) + (0.7152 * Linearize(g)) + (0.0722 * Linearize(b));
+    }
+
+    /// <summary>
     /// Pick a legible foreground for text drawn over
     /// <paramref name="background"/>. Keeps <paramref name="desired"/> when it
     /// already clears the WCAG AA contrast threshold (4.5:1); otherwise falls

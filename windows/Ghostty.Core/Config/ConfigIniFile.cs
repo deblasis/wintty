@@ -33,11 +33,26 @@ public static class ConfigIniFile
     /// </remarks>
     public static Dictionary<string, List<string>> Load(string? path)
     {
-        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
-            return dict;
+            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var line in File.ReadLines(path))
+        return Parse(File.ReadLines(path));
+    }
+
+    /// <summary>
+    /// Parse ini text that is already in memory, by the same rules as
+    /// <see cref="Load"/>. Used for the built-in theme libghostty hands back
+    /// as a string rather than a file.
+    /// </summary>
+    public static Dictionary<string, List<string>> ParseText(string? text)
+        => string.IsNullOrEmpty(text)
+            ? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
+            : Parse(text.Split('\n'));
+
+    private static Dictionary<string, List<string>> Parse(IEnumerable<string> lines)
+    {
+        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines)
         {
             var trimmed = line.TrimStart();
             if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;

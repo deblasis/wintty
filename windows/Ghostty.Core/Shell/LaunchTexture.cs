@@ -27,13 +27,18 @@ namespace Ghostty.Core.Shell;
 public static class LaunchTexture
 {
     /// <summary>
-    /// How far the ink sits from the background, per channel. This is the
-    /// dial for how visible the texture is.
+    /// How far the ink sits from the background, in CIE L* units. This is
+    /// the dial for how visible the texture is.
     /// </summary>
     /// <remarks>
-    /// <para>A fixed step rather than a fraction of the remaining headroom.
-    /// A fraction lands very differently on a near-black background than on
-    /// a mid-grey one, and the point is that it reads the same on both.</para>
+    /// <para>Measured perceptually rather than as a step per channel, which
+    /// is what this used to be. A fixed channel step is not a fixed amount
+    /// of visible difference: sRGB is gamma encoded, so the same ten counts
+    /// buy far more separation down at the black end than up at the white
+    /// end. Off a near-black background it came to dL* 5.0 and off a
+    /// near-white one to dL* 3.5, so the same texture that read as a faint
+    /// grain in dark mode all but vanished in light mode. Holding L*
+    /// constant is what actually makes it read the same on both.</para>
     ///
     /// <para>The sheet does not spend all of this. It is a mask that tops
     /// out below full, so the strongest mark on screen lands at roughly
@@ -41,7 +46,8 @@ public static class LaunchTexture
     /// visible; the sheet needs no regenerating for it, since the tint is
     /// applied at draw time.</para>
     /// </remarks>
-    public const int Contrast = 10;
+    public const double ContrastLStar = 5.0;
+
 
     /// <summary>
     /// The narrowest crop, as a fraction of the sheet's shorter edge.
@@ -141,16 +147,15 @@ public static class LaunchTexture
         var g = (int)((backgroundRgb >> 8) & 0xFF);
         var b = (int)(backgroundRgb & 0xFF);
 
-        // Rec. 601 luma. Which side of mid the background falls on is the
-        // only question being asked, so the cheap weighting is enough: a
-        // gamma-correct one would only move the answer on colours where
-        // either direction reads about the same anyway.
+        // Which way to step. Rec. 601 luma is enough for the direction: the
+        // only question is which side of mid the background falls on, and a
+        // gamma-correct weighting would only move the answer on colours
+        // where either direction reads about the same anyway.
         var luma = ((299 * r) + (587 * g) + (114 * b)) / 1000;
-        var step = luma < 128 ? Contrast : -Contrast;
 
-        return (uint)((Channel(r + step) << 16) | (Channel(g + step) << 8) | Channel(b + step));
-
-        static int Channel(int value) => value < 0 ? 0 : value > 255 ? 255 : value;
+        return Ghostty.Core.Windows.ThemeResolution.StepLightness(
+            backgroundRgb & 0x00FFFFFFu,
+            luma < 128 ? ContrastLStar : -ContrastLStar);
     }
 
     /// <summary>

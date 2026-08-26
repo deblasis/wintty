@@ -277,23 +277,75 @@ public sealed class LaunchTextureTests
     [Theory]
     [InlineData(0x000000u, true)]      // black has only one direction to go
     [InlineData(0xFFFFFFu, false)]     // and so does white
-    [InlineData(0x1E1E2Eu, true)]      // the default dark background
+    [InlineData(0x131620u, true)]      // the built-in dark background
+    [InlineData(0xF4F6FBu, false)]     // the built-in light background
     [InlineData(0x808080u, false)]     // mid grey, just past the luma split
     public void Ink_steps_away_from_the_background(uint background, bool expectLighter)
     {
-        // Derived from the constant rather than written out, because the
-        // constant is a dial: it gets turned whenever the texture reads as
-        // too faint or too loud, and a test that hard-codes the answer turns
-        // every such adjustment into a failing test with nothing wrong.
-        var step = expectLighter ? LaunchTexture.Contrast : -LaunchTexture.Contrast;
         var ink = LaunchTexture.ResolveInkRgb(background);
 
         foreach (var shift in new[] { 16, 8, 0 })
         {
             var before = (int)((background >> shift) & 0xFF);
             var after = (int)((ink >> shift) & 0xFF);
-            Assert.Equal(Math.Clamp(before + step, 0, 255), after);
+            if (expectLighter) Assert.True(after >= before);
+            else Assert.True(after <= before);
         }
+    }
+
+    [Theory]
+    [InlineData(0x131620u)]            // the built-in dark background
+    [InlineData(0xF4F6FBu)]            // the built-in light background
+    [InlineData(0x282C34u)]            // libghostty's compile-time default
+    [InlineData(0x808080u)]
+    [InlineData(0x404040u)]
+    [InlineData(0xE0E0E0u)]
+    public void Ink_sits_the_same_perceptual_distance_from_any_background(uint background)
+    {
+        // The whole point of the L* solve. A per-channel step gave dL* 5.0
+        // off the dark background and 3.5 off the light one, so the texture
+        // that read as a grain in dark mode was nearly gone in light mode.
+        //
+        // Half a unit of slack: the step is a whole number of counts, so it
+        // lands on the first count at or past the target rather than exactly
+        // on it. Compared against the constant rather than a written-out
+        // number, because the constant is a dial and turning it must not
+        // fail a test with nothing wrong.
+        var delta = Math.Abs(
+            LStar(LaunchTexture.ResolveInkRgb(background)) - LStar(background));
+
+        Assert.InRange(
+            delta,
+            LaunchTexture.ContrastLStar - 0.5,
+            LaunchTexture.ContrastLStar + 0.5);
+    }
+
+    [Theory]
+    [InlineData(0x000000u)]            // nothing below to step down to
+    [InlineData(0xFFFFFFu)]            // nothing above to step up to
+    [InlineData(0x020202u)]
+    [InlineData(0xFDFDFDu)]
+    public void Ink_at_the_ends_still_differs_from_the_background(uint background)
+    {
+        // The solve cannot reach its target from here, and must not answer
+        // with the background itself: an ink equal to the background draws
+        // nothing at all.
+        Assert.NotEqual(background, LaunchTexture.ResolveInkRgb(background));
+    }
+
+    private static double LStar(uint rgb)
+    {
+        static double Linearize(uint channel)
+        {
+            var c = channel / 255.0;
+            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
+        }
+
+        var y = (0.2126 * Linearize((rgb >> 16) & 0xFF))
+            + (0.7152 * Linearize((rgb >> 8) & 0xFF))
+            + (0.0722 * Linearize(rgb & 0xFF));
+
+        return y > 0.008856 ? (116.0 * Math.Cbrt(y)) - 16.0 : 903.3 * y;
     }
 
     [Fact]

@@ -357,6 +357,15 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigLoadDefaultFiles(GhosttyConfig config);
 
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_set_color_scheme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigSetColorScheme(
+        GhosttyConfig config, GhosttyColorScheme scheme);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_builtin_theme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigBuiltinTheme(GhosttyColorScheme scheme);
+
     [LibraryImport(Dll, EntryPoint = "ghostty_config_finalize")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigFinalize(GhosttyConfig config);
