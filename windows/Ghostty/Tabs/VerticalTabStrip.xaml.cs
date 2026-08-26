@@ -40,6 +40,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     private SolidColorBrush? _defaultActiveTextBrush;
     private bool _selectionRefreshScheduled;
     private bool _placementSettleHooked;
+    private bool _selectionSyncDeferred;
     private uint _stripBackdropPacked = 0x0C0C0C;
 
     private static readonly SolidColorBrush TransparentBrush =
@@ -117,7 +118,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         SizeChanged += (_, _) => UpdateSelectionRow();
         NavView.SizeChanged += (_, _) => UpdateSelectionRow();
         NavView.Loaded += (_, _) => RefreshSelectionChrome();
-        Loaded += (_, _) => RefreshSelectionChrome();
+        Loaded += (_, _) =>
+        {
+            // Everything SyncSelectionFromManager declined to do while this
+            // strip had no template, now that it has one.
+            if (_selectionSyncDeferred)
+            {
+                _selectionSyncDeferred = false;
+                SyncSelectionFromManager();
+            }
+
+            RefreshSelectionChrome();
+        };
 
         _manager.Tabs.CollectionChanged += OnTabsCollectionChanged;
         _manager.ActiveTabChanged += (_, _) => SyncSelectionFromManager();
@@ -625,9 +637,29 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// Collapsed -- MUXC can drop <see cref="NavigationView.SelectedItem"/>
     /// and leave the active row off-screen in the pane scroller.
     /// </summary>
+    /// <remarks>
+    /// Does nothing while this strip has never been loaded, which in
+    /// horizontal-tab mode is the whole session: the coordinator collapses
+    /// this host and deliberately does not prime it, because showing a
+    /// never-laid-out NavigationView from the constructor crashed XAML's
+    /// measure walk. Assigning SelectedItem is where MUXC resolves the
+    /// selected item's container and selection indicator, and on a control
+    /// with no template there is nothing to resolve -- which is where an
+    /// access violation inside set_SelectedItem has been reported from.
+    /// The work is latched and replayed on Loaded instead; every path that
+    /// makes this strip visible already calls back in here afterwards, so
+    /// the latch only has to cover the case where nothing else does.
+    /// </remarks>
     internal void SyncSelectionFromManager()
     {
         if (_syncing) return;
+
+        if (!IsLoaded)
+        {
+            _selectionSyncDeferred = true;
+            return;
+        }
+
         if (_manager.ActiveTab is null) return;
         if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
 
@@ -639,6 +671,53 @@ internal sealed partial class VerticalTabStrip : UserControl
         RecolorNavItems();
         EnsureActiveItemVisible();
         ScheduleSelectionLayoutPass(retryIfZeroBounds: true);
+    }
+
+    // The scroller the rows live inside, out of the NavigationView's
+    // template. Null until that template has been applied.
+    private FrameworkElement? _menuItemsScroller;
+
+    /// <summary>
+    /// Vertical bounds of the scrolling row list, in RootGrid-relative
+    /// coordinates via <paramref name="reference"/>, or null while the
+    /// template has not been applied.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the scroller and not this control: with more tabs than
+    /// fit, the selected row scrolls out of the list while its layout offset
+    /// still reports where it would have been. A caller clipping to the
+    /// control instead clips to something that always contains the row, so
+    /// the clamp does nothing and a cover gets drawn across the pane at a
+    /// height with no tab beside it.
+    /// </remarks>
+    internal (double Top, double Bottom)? SelectionViewport(UIElement reference)
+    {
+        _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
+        if (_menuItemsScroller is not { ActualHeight: > 0 } scroller) return null;
+
+        try
+        {
+            var top = scroller.TransformToVisual(reference)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            return (top, top + scroller.ActualHeight);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return null;
+        }
+    }
+
+    private static FrameworkElement? FindDescendantByName(DependencyObject root, string name)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is FrameworkElement fe && fe.Name == name) return fe;
+            if (FindDescendantByName(child, name) is { } found) return found;
+        }
+        return null;
     }
 
     private void EnsureActiveItemVisible()
@@ -846,10 +925,22 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         _items[tab] = item;
         _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
-        if (index >= 0 && index <= NavView.MenuItems.Count)
-            NavView.MenuItems.Insert(index, item);
-        else
-            NavView.MenuItems.Add(item);
+
+        // Fenced because an Insert before the current selection shifts what
+        // MUXC considers selected and raises SelectionChanged for a tab the
+        // user did not pick. Unfenced, that reaches OnNavSelectionChanged,
+        // activates the wrong tab, and comes back around to assign
+        // SelectedItem while MUXC is still inside its own notification.
+        _syncing = true;
+        try
+        {
+            if (index >= 0 && index <= NavView.MenuItems.Count)
+                NavView.MenuItems.Insert(index, item);
+            else
+                NavView.MenuItems.Add(item);
+        }
+        finally { _syncing = false; }
+
         ApplyItemTabColor(item, tab);
     }
 
@@ -876,7 +967,14 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void RemoveItem(TabModel tab)
     {
         if (!_items.TryGetValue(tab, out var item)) return;
-        NavView.MenuItems.Remove(item);
+
+        // Fenced for the same reason as the insert in AddItem: removing the
+        // selected row moves MUXC's selection to a neighbour and reports it
+        // as the user's choice.
+        _syncing = true;
+        try { NavView.MenuItems.Remove(item); }
+        finally { _syncing = false; }
+
         _items.Remove(tab);
         if (_hooks.Remove(tab, out var hooks))
             hooks.Dispose();

@@ -308,6 +308,14 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     internal void RefreshSelectionChrome() => _strip.RefreshSelectionChrome();
 
+    /// <summary>
+    /// Vertical bounds of the scrolling row list, relative to
+    /// <paramref name="reference"/>, or null before the strip's template
+    /// has been applied.
+    /// </summary>
+    internal (double Top, double Bottom)? SelectionViewport(UIElement reference)
+        => _strip.SelectionViewport(reference);
+
     internal void SyncSelectionFromManager() => _strip.SyncSelectionFromManager();
 
     internal void RefreshTabColors() => _strip.RefreshTabColors();

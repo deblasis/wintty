@@ -1052,8 +1052,6 @@ public sealed partial class MainWindow : Window
             if (_isClosed) return;
 
             RefreshTabHostChrome();
-            if (vertical)
-                _verticalTabHost.SyncSelectionFromManager();
 
             // Place the seam only now. The switch is animated, so the strip
             // that is arriving has no final geometry until it lands -- a
@@ -1061,7 +1059,12 @@ public sealed partial class MainWindow : Window
             // the strip had before it, which are non-zero and therefore look
             // valid, and the cover ends up rubbing out a stretch of border
             // nowhere near the tab.
-            _horizontalTabHost.RefreshSeam();
+            //
+            // Only the strip that arrived. Asking the one that just left
+            // would arm its layout retry against a collapsed control that
+            // reports zero bounds and never stops.
+            if (vertical) _verticalTabHost.SyncSelectionFromManager();
+            else _horizontalTabHost.RefreshSeam();
             _titleBar.ApplyForCurrentMode();
             var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
             if (leaf is not null)
@@ -1503,6 +1506,12 @@ public sealed partial class MainWindow : Window
         _configService.ConfigChanged -= OnConfigReloaded;
         _configService.ConfigChanged -= OnConfigReloadedChrome;
         _shellTheme.ThemeChanged -= OnShellThemeChanged;
+        // Both hosts are owned by this window, so leaving these attached
+        // leaks nothing. Detached anyway: they are the only two raised from
+        // dispatcher-queued and layout callbacks, which are exactly the ones
+        // that can still land after the tree starts coming down.
+        _horizontalTabHost.SelectedTabSeamChanged -= OnSelectedTabSeamChanged;
+        _verticalTabHost.SelectionRowChanged -= OnVerticalSeamChanged;
         // UISettings is an OS object and calls back on a thread-pool thread.
         // Left attached, an OS light/dark flip, accent change or high-contrast
         // toggle during teardown puts AppSetColorScheme through the app
@@ -2398,12 +2407,6 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Update config-driven chrome colors: pane border and the vertical tab
-    /// accent bar track cursor-color; the horizontal selected-tab background
-    /// blends with the terminal background so the active tab connects to the
-    /// pane below it. Called on every config reload so theme changes apply.
-    /// </summary>
-    /// <summary>
     /// Copy the resolved terminal background into the window state for the
     /// next cold start's splash, which runs before any theme is resolved and
     /// would otherwise have to guess. Returns true when anything moved, so a
@@ -2457,7 +2460,7 @@ public sealed partial class MainWindow : Window
         // few frames. Reading it here meant the first placement of every
         // session decided it was in vertical layout and hid the cover, and
         // nothing re-fired until the window happened to be resized.
-        if (width <= 0 || fill is null || _verticalTabsVisible)
+        if (width <= 0 || fill is null || _verticalTabsVisible || _stripForciblyHidden)
         {
             _tabSeamCover.Visibility = Visibility.Collapsed;
             return;
@@ -2488,6 +2491,7 @@ public sealed partial class MainWindow : Window
         // Same reasoning as the horizontal gate: the layout MainWindow last
         // applied, not the host's Visibility.
         if (!_verticalTabsVisible
+            || _stripForciblyHidden
             || row.Visibility != Visibility.Visible
             || row.ActualWidth <= 0
             || row.ActualHeight <= 2
@@ -2505,7 +2509,8 @@ public sealed partial class MainWindow : Window
             start = row.TransformToVisual(RootGrid)
                 .TransformPoint(new Windows.Foundation.Point(row.ActualWidth, 0));
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
         {
             // The row is not in the tree yet, or is being torn out of it.
             // The next SelectionRowChanged places it.
@@ -2525,22 +2530,18 @@ public sealed partial class MainWindow : Window
         var top = start.Y + edgeStroke;
         var bottom = start.Y + row.ActualHeight - edgeStroke;
 
-        // Clip to the strip. With more tabs than fit, the selected row can be
-        // scrolled out of the list while its layout offset still reports
-        // where it would have been, and a cover placed there is a bar of
-        // terminal colour drawn across the pane at a height with no tab
-        // beside it.
-        try
+        // Clip to the scrolling row list. With more tabs than fit, the
+        // selected row can be scrolled out of it while its layout offset
+        // still reports where it would have been, and a cover placed there
+        // is a bar of terminal colour drawn across the pane at a height with
+        // no tab beside it.
+        //
+        // The list, not the host: the host is Row 0 with RowSpan 2, so it
+        // covers the whole window and clamping to it does nothing at all.
+        if (_verticalTabHost.SelectionViewport(RootGrid) is { } viewport)
         {
-            var stripTop = _verticalTabHost.TransformToVisual(RootGrid)
-                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
-            top = Math.Max(top, stripTop);
-            bottom = Math.Min(bottom, stripTop + _verticalTabHost.ActualHeight);
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
-        {
-            _verticalSeamCover.Visibility = Visibility.Collapsed;
-            return;
+            top = Math.Max(top, viewport.Top);
+            bottom = Math.Min(bottom, viewport.Bottom);
         }
 
         if (bottom - top <= 0)
@@ -2556,6 +2557,12 @@ public sealed partial class MainWindow : Window
         _verticalSeamCover.Visibility = Visibility.Visible;
     }
 
+    /// <summary>
+    /// Update config-driven chrome colors: pane border and the vertical tab
+    /// accent bar track cursor-color; the horizontal selected-tab background
+    /// blends with the terminal background so the active tab connects to the
+    /// pane below it. Called on every config reload so theme changes apply.
+    /// </summary>
     private void UpdateCursorAccentColors()
     {
         var bg = _configService.BackgroundColor;
@@ -3160,8 +3167,34 @@ public sealed partial class MainWindow : Window
         // ordering accident in another method, not a guard here.
         if (_isClosed) return;
         if (!IsQuickTerminal) return;
-        _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
+
+        var hidden = _tabManager.Tabs.Count <= 1;
+        _layout.SetStripHidden(hidden, _verticalTabsVisible);
+        _stripForciblyHidden = hidden;
+
+        // The seam covers join the selected tab to the pane, so with no
+        // strip there is nothing to join and the cover is a bar of tab
+        // colour lying across the terminal. Neither seam event re-fires on
+        // its own here: the strip is collapsed rather than relaid out.
+        if (hidden)
+        {
+            _tabSeamCover.Visibility = Visibility.Collapsed;
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            if (_verticalTabsVisible) _verticalTabHost.RefreshSelectionChrome();
+            else _horizontalTabHost.RefreshSeam();
+        }
     }
+
+    /// <summary>
+    /// Quake-only: the strip is forced hidden regardless of layout mode, so
+    /// the seam covers have nothing to join to. Distinct from the hosts'
+    /// Visibility, which is not a layout signal -- see
+    /// <see cref="OnSelectedTabSeamChanged"/>.
+    /// </summary>
+    private bool _stripForciblyHidden;
 
     private void OnQuakePinChanged(object sender, RoutedEventArgs e)
     {

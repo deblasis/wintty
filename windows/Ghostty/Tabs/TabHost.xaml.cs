@@ -349,17 +349,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
             return;
         }
 
+        // The tab has bounds, so the retry budget did its job and resets for
+        // the next tab that arrives without any.
+        _bridgeRetries = 0;
+
         Windows.Foundation.Point origin;
         try
         {
             origin = item.TransformToVisual(this)
                 .TransformPoint(new Windows.Foundation.Point(0, 0));
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
         {
             // The item is not in the tree yet, or is being pulled out of it
-            // (a close, or a drag to another window). The next refresh places
-            // it.
+            // (a close, or a drag to another window). COM and null are the
+            // shapes XAML interop throws once the tree is already going
+            // down, and this runs from a dispatcher callback, where an
+            // escaping exception is an unhandled one on the UI thread.
+            // The next refresh places it.
             SelectedTabSeamChanged?.Invoke(0, 0, null);
             return;
         }
@@ -419,7 +427,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
             return new Windows.Foundation.Rect(
                 tl.X, tl.Y, list.ActualWidth, list.ActualHeight);
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
         {
             return null;
         }
@@ -453,18 +462,48 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// subscription, which fires for every layout pass anywhere in the
     /// window.
     /// </remarks>
+    private bool _bridgeUpdateQueued;
+
     private void QueueBridgeUpdate()
     {
+        // Coalesced. A single new tab reaches here from TabAdded and again
+        // from ActiveTabChanged, and each pass walks the visual tree twice
+        // and re-places the cover, all to the same answer.
+        if (_bridgeUpdateQueued) return;
+        _bridgeUpdateQueued = true;
+
         DispatcherQueue.TryEnqueue(
             Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-            UpdateSelectedTabBridge);
+            () =>
+            {
+                _bridgeUpdateQueued = false;
+                UpdateSelectedTabBridge();
+            });
     }
 
     private bool _bridgeRetryArmed;
 
+    /// <summary>
+    /// How many times a single placement may re-arm the layout retry before
+    /// giving up.
+    /// </summary>
+    /// <remarks>
+    /// The retry exists for a tab that has no bounds yet and gets them on a
+    /// later pass. A strip that is collapsed and was never primed reports
+    /// zero forever, so without a cap the bail re-arms on every layout pass
+    /// anywhere in the window, permanently, and each one re-runs the
+    /// placement. Small because the legitimate case settles in one or two
+    /// passes; anything past that is the strip having no layout to wait for.
+    /// </remarks>
+    private const int MaxBridgeRetries = 4;
+    private int _bridgeRetries;
+
     private void ArmBridgeRetry()
     {
         if (_bridgeRetryArmed) return;
+        if (Visibility != Visibility.Visible) return;
+        if (_bridgeRetries >= MaxBridgeRetries) return;
+
         _bridgeRetryArmed = true;
         LayoutUpdated += OnBridgeRetryLayout;
     }
@@ -473,6 +512,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         LayoutUpdated -= OnBridgeRetryLayout;
         _bridgeRetryArmed = false;
+        _bridgeRetries++;
         UpdateSelectedTabBridge();
     }
 
@@ -522,9 +562,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void SetAccentColor(Windows.UI.Color color)
     {
-        var next = new SolidColorBrush(color);
-        if (_selectedBorderBrush?.Color == next.Color) return;
-        _selectedBorderBrush = next;
+        if (_selectedBorderBrush?.Color == color) return;
+        _selectedBorderBrush = new SolidColorBrush(color);
         RefreshTabColors();
     }
 
