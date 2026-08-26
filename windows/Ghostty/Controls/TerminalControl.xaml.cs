@@ -1717,25 +1717,35 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // after the user clicks back into the surface.
         if (SearchBar.ContainsFocus) return;
 
-        // A preview surface with an input sink is a fake session (the
-        // shader picker's DOS demo): the whole keyboard belongs to the
-        // sink and nothing belongs to the pty. This returns in every
-        // case, so pane concerns below (chord matching, key stamping,
-        // bell acknowledgment) never fire from inside the picker; a
+        // A preview surface is a fake session (the shader picker's DOS
+        // demo): the whole keyboard belongs to that session and nothing
+        // belongs to the pty. The return is keyed on the preview flag
+        // alone, not on the sink, so a future preview surface that sets
+        // no sink still cannot fire pane chords into the real surface.
+        // Pane concerns below (chord matching, key stamping, bell
+        // acknowledgment) never fire from inside a preview; a
         // WindowsOnly chord dispatching a pane action there would be a
         // bug, not a feature.
-        if (_isPreviewSurface && PreviewInputSink is { } sink)
+        if (_isPreviewSurface)
         {
-            var mods = CurrentChordModifiers();
-            if (PreviewKeyMap.TryMap(
-                    (int)e.Key,
-                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Control),
-                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Shift),
-                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Menu),
-                    out var shellKey) &&
-                sink.KeyDown(shellKey))
+            if (PreviewInputSink is { } sink)
             {
-                e.Handled = true;
+                // Every key press re-arms the quiet window, mapped or
+                // not: the site stamps its idle clock on every keydown,
+                // so holding Left or Right pauses the demo too, not
+                // just keys the fake shell consumes.
+                sink.NoteKeyDown();
+                var mods = CurrentChordModifiers();
+                if (PreviewKeyMap.TryMap(
+                        (int)e.Key,
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Control),
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Shift),
+                        mods.HasFlag(Windows.System.VirtualKeyModifiers.Menu),
+                        out var shellKey) &&
+                    sink.KeyDown(shellKey))
+                {
+                    e.Handled = true;
+                }
             }
             return;
         }
@@ -1782,10 +1792,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // never received.
         if (SearchBar.ContainsFocus) return;
 
-        // The press went to the fake session, not libghostty; forwarding
-        // this release would hand libghostty a press it never saw. Swallow
-        // every key-up while the sink owns the preview's keyboard.
-        if (_isPreviewSurface && PreviewInputSink is not null) return;
+        // The press never went to libghostty (the preview branch of
+        // OnKeyDown returns before SendKey, sink or not); forwarding
+        // this release would hand libghostty a release for a press it
+        // never saw. Swallow every key-up on a preview surface.
+        if (_isPreviewSurface) return;
 
         // Same short-circuit so the matching key-up never reaches
         // libghostty either. Without this, libghostty would see a
@@ -1912,10 +1923,13 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // character too would double-execute them. DEL joins them because
         // it is not text. This also sidesteps depending on which of the
         // two events a given control key raises: the character path is
-        // printable-only, full stop.
-        if (_isPreviewSurface && PreviewInputSink is { } sink)
+        // printable-only, full stop. Like the KeyDown branch, the return
+        // is keyed on the preview flag alone: a preview surface without
+        // a sink drops the character, it never forwards it to the pty.
+        if (_isPreviewSurface)
         {
-            if (e.Character is >= (char)0x20 and not (char)0x7f)
+            if (PreviewInputSink is { } sink &&
+                e.Character is >= (char)0x20 and not (char)0x7f)
             {
                 sink.Character(e.Character);
             }
@@ -1977,6 +1991,24 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         var text = ImeSink.Text;
         if (string.IsNullOrEmpty(text)) return;
 
+        // A preview surface's keyboard belongs to its fake session, so
+        // committed IME text goes through the sink like any other
+        // printable (same filtering as OnCharacterReceived), never to
+        // the sleeping placeholder child through SurfaceText.
+        if (_isPreviewSurface)
+        {
+            if (PreviewInputSink is { } sink)
+            {
+                foreach (var ch in text)
+                {
+                    if (ch is >= (char)0x20 and not (char)0x7f)
+                        sink.Character(ch);
+                }
+            }
+            ImeSink.Text = string.Empty;
+            return;
+        }
+
         Span<byte> buf = stackalloc byte[4];
         foreach (var ch in text)
         {
@@ -1995,6 +2027,14 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private void UpdateSurfacePreedit(string? text)
     {
         if (_surface.Handle == IntPtr.Zero) return;
+
+        // A preview surface has no preedit story: its session is canned,
+        // nothing behind it reads a composition, and drawing one on the
+        // real grid would put IME state where it cannot be committed.
+        // Suppress entirely; the matching null clear below is then a
+        // no-op, which is exactly right since we never set one.
+        if (_isPreviewSurface) return;
+
         if (string.IsNullOrEmpty(text))
         {
             NativeMethods.SurfacePreedit(_surface, IntPtr.Zero, UIntPtr.Zero);

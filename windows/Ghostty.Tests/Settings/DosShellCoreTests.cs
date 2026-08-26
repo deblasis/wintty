@@ -81,6 +81,48 @@ public class DosShellCoreTests
         Assert.Equal("r", core.SendChar('r'));
     }
 
+    // An astral scalar arrives from WinUI as two character events, one
+    // per UTF-16 unit. Forwarded naively each half encodes as its own
+    // U+FFFD and the visible line corrupts, so the shell assembles the
+    // pair: one character into the line, one echo.
+    private const string Rocket = "🚀";
+
+    [Fact]
+    public void AstralScalarsEchoAsOneCharacterNotTwoReplacements()
+    {
+        var core = NewCore();
+        // The high half is held, not echoed...
+        Assert.Equal("", core.SendChar(Rocket[0]));
+        // ...until the low half completes the pair.
+        Assert.Equal(Rocket, core.SendChar(Rocket[1]));
+
+        // The assembled pair is on the line: recall prints it back as
+        // one character, and nothing in the echo is U+FFFD.
+        core.SendKey(DosShellKey.Enter);
+        Assert.Equal(Rocket, core.SendKey(DosShellKey.Up));
+    }
+
+    [Fact]
+    public void LoneSurrogateHalvesNeverEnterTheLine()
+    {
+        var core = NewCore();
+        // A low half with no high before it is dropped outright.
+        Assert.Equal("", core.SendChar(Rocket[1]));
+        // A high half is only completed by the immediately following
+        // low half; any other character drops it and types itself.
+        Assert.Equal("", core.SendChar(Rocket[0]));
+        Assert.Equal("x", core.SendChar('x'));
+        // A key press breaks a pair too: the high held across this
+        // Enter is dropped, and the low that follows it is not spliced
+        // onto it.
+        Assert.Equal("", core.SendChar(Rocket[0]));
+        core.SendKey(DosShellKey.Enter);
+        Assert.Equal("", core.SendChar(Rocket[1]));
+        core.SendKey(DosShellKey.Enter);
+        // Only "x" ever reached the line, so only "x" is in history.
+        Assert.Equal("x", core.SendKey(DosShellKey.Up));
+    }
+
     [Fact]
     public void BackspaceErasesOneCharacterPerPress()
     {
@@ -245,6 +287,18 @@ public class DosShellCoreTests
         Assert.Equal(
             "\r\n\r\nCurrent date is Tue Aug 25 2026\r\n\r\n" + Prompt,
             Run(NewCore(), "date"));
+    }
+
+    [Fact]
+    public void DateZeroPadsSingleDigitDaysLikeTheWebsite()
+    {
+        // The website's toDateString pads the day to two digits; "d"
+        // formatting would print "Tue Sep 1 2026" and the two demos
+        // would read as different machines.
+        var core = new DosShellCore(() => new DateTime(2026, 9, 1, 15, 4, 5));
+        Assert.Equal(
+            "\r\n\r\nCurrent date is Tue Sep 01 2026\r\n\r\n" + Prompt,
+            Run(core, "date"));
     }
 
     [Fact]

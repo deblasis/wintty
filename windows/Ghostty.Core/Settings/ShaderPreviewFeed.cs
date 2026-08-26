@@ -157,6 +157,18 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
         return true;
     }
 
+    /// <summary>
+    /// Any key press into the preview, whether or not the shell maps it.
+    /// The website stamps its idle clock on every keydown, consumed or
+    /// not, so holding a key the fake shell ignores (Left, Right) pauses
+    /// the demo exactly like typing does.
+    /// </summary>
+    public void NoteKeyDown()
+    {
+        if (_disposed) return;
+        _quiet.Arm();
+    }
+
     /// <summary>A character the user typed into the preview.</summary>
     public void Character(char ch)
     {
@@ -174,9 +186,10 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
             // Boot text lands at once (it is a machine booting, not a
             // person), then the first command comes after a beat so the
             // window has settled and the shader is already visible.
+            // 1500ms, the website's opening beat.
             Write(Vt(_core.Boot()));
             Write(Vt(_core.NewPrompt()));
-            await _delay(1200, ct);
+            await _delay(1500, ct);
 
             while (true)
             {
@@ -191,7 +204,6 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
                     if (step is { } command)
                     {
                         await TypeAsync(command, ct);
-                        await _delay(350, ct);
                         ct.ThrowIfCancellationRequested();
                         await WaitForQuietAsync(ct);
                         // One write: Enter returns the newline, the shell's
@@ -199,16 +211,20 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
                         // exactly what one keyed Enter produces through the
                         // core.
                         Write(Vt(_core.SendKey(DosShellKey.Enter)));
+                        // The website dwells AFTER the reply, before the
+                        // next step: the reply sits on screen while the
+                        // pause runs, not before its own newline.
+                        await _delay(350, ct);
                     }
                     else
                     {
-                        // A flip is a keypress: pause before it so the
-                        // cursor-shape animation has time to read; the gap
-                        // after it is the next step's own pause.
-                        await _delay(650, ct);
                         ct.ThrowIfCancellationRequested();
                         await WaitForQuietAsync(ct);
                         Write(Vt(_core.SendKey(DosShellKey.Insert)));
+                        // The website dwells AFTER the flip: the pause is
+                        // when the cursor-shape animation plays, which is
+                        // the whole reason a flip is in the script at all.
+                        await _delay(650, ct);
                     }
                 }
 

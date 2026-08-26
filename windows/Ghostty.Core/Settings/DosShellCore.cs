@@ -127,9 +127,33 @@ internal sealed class DosShellCore
         return PromptText;
     }
 
-    /// <summary>A printable character: append to the line, echo verbatim.</summary>
+    // High surrogate held across SendChar calls. WinUI delivers an
+    // astral scalar as two character events; the pair must reach the
+    // line and the echo as one character, or each half encodes as its
+    // own U+FFFD and the visible line corrupts.
+    private char _pendingHighSurrogate;
+
+    /// <summary>
+    /// A printable character: append to the line, echo verbatim. A
+    /// surrogate pair is assembled first and echoes as the one character
+    /// it is; a lone half is not text and never enters the line.
+    /// </summary>
     public string SendChar(char ch)
     {
+        if (char.IsHighSurrogate(ch))
+        {
+            _pendingHighSurrogate = ch;
+            return "";
+        }
+        if (char.IsLowSurrogate(ch))
+        {
+            if (_pendingHighSurrogate == '\0') return "";
+            var pair = string.Concat(_pendingHighSurrogate.ToString(), ch.ToString());
+            _pendingHighSurrogate = '\0';
+            _input += pair;
+            return pair;
+        }
+        _pendingHighSurrogate = '\0';
         _input += ch;
         return ch.ToString();
     }
@@ -141,6 +165,11 @@ internal sealed class DosShellCore
     /// </summary>
     public string SendKey(DosShellKey key)
     {
+        // A key press ends any half-delivered pair: a high surrogate
+        // must be completed by the immediately following character, so
+        // one held across an Enter or a Backspace is dropped, not
+        // spliced into the next line.
+        _pendingHighSurrogate = '\0';
         switch (key)
         {
             case DosShellKey.Enter:
@@ -216,7 +245,10 @@ internal sealed class DosShellCore
             case "TIME":
                 return $"\r\nCurrent time is {_clock().ToString("h:mm:ss tt", CultureInfo.InvariantCulture)}\r\n\r\n";
             case "DATE":
-                return $"\r\nCurrent date is {_clock().ToString("ddd MMM d yyyy", CultureInfo.InvariantCulture)}\r\n\r\n";
+                // dd, not d: the website's toDateString zero-pads the day
+                // ("Tue Sep 01 2026"), and a single-digit day must read the
+                // same here.
+                return $"\r\nCurrent date is {_clock().ToString("ddd MMM dd yyyy", CultureInfo.InvariantCulture)}\r\n\r\n";
             case "ECHO":
                 return $"\r\n{(arg.Length > 0 ? arg : "ECHO is on")}\r\n\r\n";
             case "CLS":

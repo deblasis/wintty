@@ -20,6 +20,13 @@ internal interface IPreviewInputSink
     /// </summary>
     bool KeyDown(DosShellKey key);
 
+    /// <summary>
+    /// Any key press into the preview, whether or not the shell maps it.
+    /// The website stamps its idle clock on every keydown, consumed or
+    /// not, so holding a key the fake shell ignores pauses the demo too.
+    /// </summary>
+    void NoteKeyDown();
+
     /// <summary>One text unit (the WM_CHAR path).</summary>
     void Character(char ch);
 }
