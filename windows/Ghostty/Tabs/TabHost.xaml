@@ -42,7 +42,7 @@
          both tab hosts can share a single container without ever
          reparenting the SwapChainPanels. This UserControl now renders
          only the tab strip chrome. -->
-    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Top">
+    <Grid x:Name="StripRoot" HorizontalAlignment="Stretch" VerticalAlignment="Top">
         <!-- Trim the default 8px top gap above the tab strip
              (TabViewHeaderPadding) so the strip is not taller than it
              needs to be. The vertical-mode title bar height and the
@@ -95,5 +95,6 @@
                 </Grid>
             </controls:TabView.TabStripFooter>
         </controls:TabView>
+
     </Grid>
 </UserControl>

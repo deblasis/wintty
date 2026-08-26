@@ -190,10 +190,24 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         ApplyDefaultSelectedTabResources();
 
+        // Unselected rows sit on the strip, which is a theme surface, so
+        // they go back to following the element theme.
         ClearNavResource("NavigationViewItemForeground");
         ClearNavResource("NavigationViewItemForegroundPointerOver");
-        ClearNavResource("NavigationViewItemForegroundSelected");
-        ClearNavResource("NavigationViewItemForegroundSelectedPointerOver");
+
+        // The selected row does not: it is painted with the terminal
+        // background, so its title has to keep the brush
+        // ApplyDefaultSelectedTabResources just calibrated against that
+        // background. Clearing it unconditionally, two lines after applying
+        // it, put the title back on the element theme's foreground -- which
+        // was survivable only while the terminal was always dark and that
+        // foreground was always white. Against the light half of the theme
+        // it came out white on #F4F6FB, at 1.11:1.
+        if (_defaultActiveTextBrush is null)
+        {
+            ClearNavResource("NavigationViewItemForegroundSelected");
+            ClearNavResource("NavigationViewItemForegroundSelectedPointerOver");
+        }
 
         RefreshNavViewTheme();
         RecolorNavItems();
@@ -313,11 +327,22 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private bool _selectionRowSuppressed;
 
+    /// <summary>
+    /// The filled row behind the selected tab. Exposed so MainWindow can
+    /// measure where it ends and cover the pane border for exactly that
+    /// span, the way the horizontal strip's seam is covered.
+    /// </summary>
+    internal FrameworkElement SelectionRowElement => SelectionRow;
+
+    /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
+    internal event Action? SelectionRowChanged;
+
     private void UpdateSelectionRow()
     {
         if (_selectionRowSuppressed)
         {
             SelectionRow.Visibility = Visibility.Collapsed;
+            SelectionRowChanged?.Invoke();
             return;
         }
 
@@ -328,6 +353,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             || ActualWidth <= 0)
         {
             SelectionRow.Visibility = Visibility.Collapsed;
+            SelectionRowChanged?.Invoke();
             return;
         }
 
@@ -342,7 +368,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         Canvas.SetTop(SelectionRow, topLeft.Y + RowInsetVertical);
         SelectionRow.CornerRadius = new CornerRadius(0);
         SelectionRow.Background = ResolveSelectionRowFill(_manager.ActiveTab);
+
+        // The same folder stroke the horizontal strip gets, rotated: the row
+        // meets the pane along its right edge, so that is the side left open
+        // and the other three carry the pane's own border colour. A tab with
+        // a preset colour is stroked in that colour, matching its pane.
+        SelectionRow.BorderBrush = _manager.ActiveTab.Color != TabColor.None
+            ? TabColorBrush.From(TabColorPalette.Border(_manager.ActiveTab.Color))
+            : AccentBrush;
+        SelectionRow.BorderThickness = new Thickness(1, 1, 0, 1);
+
         SelectionRow.Visibility = Visibility.Visible;
+        SelectionRowChanged?.Invoke();
     }
 
     /// <summary>

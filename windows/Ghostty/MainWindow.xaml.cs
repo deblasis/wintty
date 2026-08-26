@@ -607,6 +607,54 @@ public sealed partial class MainWindow : Window
         Canvas.SetZIndex(_verticalTabHost, -1);
         RootGrid.Children.Add(_verticalTabHost);
 
+        // Covers the active pane's top border across the selected tab, so
+        // the tab's fill runs into the terminal with no line between them.
+        // Lives in the pane's row rather than the strip's: drawn from the
+        // strip it would have to overhang its own parent to reach the
+        // border, and that overhang is clipped.
+        _tabSeamCover = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            // Deep enough to take the stroke and the hairline above it, both
+            // of which sit inside the pane's own gutter.
+            Height = Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1,
+        };
+        Grid.SetRow(_tabSeamCover, 1);
+        Grid.SetColumn(_tabSeamCover, 1);
+        RootGrid.Children.Add(_tabSeamCover);
+        _horizontalTabHost.SelectedTabSeamChanged += OnSelectedTabSeamChanged;
+
+        // The same seam on the vertical strip, rotated: there the selected
+        // row meets the pane along its right edge, so the cover is a
+        // vertical bar over the pane's left border. Placed across the whole
+        // RootGrid rather than in one cell, because the vertical strip spans
+        // both rows and a per-cell margin would need the row heights to
+        // convert; a margin in the grid's own space needs nothing.
+        _verticalSeamCover = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            // Wide enough to swallow the pane's gutter and its stroke, plus
+            // the overlap below. Erring wide is free: the fill is the
+            // terminal's own colour and the row's own fill is the same, so
+            // any overshoot in either direction lands on the colour that is
+            // already there. Erring narrow is what leaves a line.
+            Width = VerticalSeamOverlap
+                + Core.Panes.PaneChrome.SurfaceInset
+                + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1,
+        };
+        Grid.SetRow(_verticalSeamCover, 0);
+        Grid.SetRowSpan(_verticalSeamCover, 2);
+        Grid.SetColumn(_verticalSeamCover, 0);
+        Grid.SetColumnSpan(_verticalSeamCover, 2);
+        RootGrid.Children.Add(_verticalSeamCover);
+        _verticalTabHost.SelectionRowChanged += OnVerticalSeamChanged;
+
         // Apply initial shell theme now that tab hosts exist, then
         // paint RootGrid.Background from the resolved state.
         ApplyShellTheme();
@@ -658,12 +706,7 @@ public sealed partial class MainWindow : Window
             // or crashes never runs the close path, and the splash would
             // then keep falling back to the built-in default and flash a
             // mismatched colour on every subsequent start.
-            var splashBackground = _configService.BackgroundColor & 0x00FFFFFFu;
-            if (_windowState.BackgroundRgb != splashBackground)
-            {
-                _windowState.BackgroundRgb = splashBackground;
-                _windowState.Save();
-            }
+            if (RecordSplashBackground()) _windowState.Save();
         }
 
         _tabManager.TabAdded += (_, t) =>
@@ -722,6 +765,22 @@ public sealed partial class MainWindow : Window
         ApplyCaptionButtonChrome();
         if (_verticalTabsVisible)
             _verticalTabHost.SyncSelectionFromManager();
+
+        // Tell both strips the terminal's colours. This only ever ran from
+        // OnConfigReloadedChrome, so a session whose config was never
+        // reloaded left both hosts on their own fallbacks -- survivable in
+        // the horizontal strip, but the vertical strip's fallback calibrates
+        // the selected row's title against the system accent rather than the
+        // row it is drawn on, which put a white title on the light half of
+        // the theme at 1.11:1.
+        //
+        // Deliberately here and not earlier beside ApplyShellTheme. It drives
+        // the vertical strip's NavigationView (theme refresh, per-item
+        // brushes, selection chrome), and doing that before Snap has decided
+        // which strip is live -- and before the control is loaded -- left
+        // MUXC in a state where a later SelectedItem assignment took an
+        // access violation inside NavigationView.
+        UpdateCursorAccentColors();
 
         _titleBar = new TitleBarCoordinator(
             this,
@@ -958,6 +1017,12 @@ public sealed partial class MainWindow : Window
         _pendingLayoutTarget = null;
         _verticalTabsVisible = vertical;
         _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
+        // The seam covers are gated on the flag just set, and the strip that
+        // is coming back may not raise anything on its own (a switch does not
+        // resize it or move its selection). Ask both for a fresh placement so
+        // whichever one now owns the seam draws it, and the other hides.
+        _tabSeamCover.Visibility = Visibility.Collapsed;
+        _verticalSeamCover.Visibility = Visibility.Collapsed;
         // Paint caption/title chrome before the cross-fade so the OS
         // buttons and drag row do not flash stale horizontal colors.
         ApplyVerticalTitleBarChrome();
@@ -989,6 +1054,14 @@ public sealed partial class MainWindow : Window
             RefreshTabHostChrome();
             if (vertical)
                 _verticalTabHost.SyncSelectionFromManager();
+
+            // Place the seam only now. The switch is animated, so the strip
+            // that is arriving has no final geometry until it lands -- a
+            // placement made when the switch was requested reads the offsets
+            // the strip had before it, which are non-zero and therefore look
+            // valid, and the cover ends up rubbing out a stretch of border
+            // nowhere near the tab.
+            _horizontalTabHost.RefreshSeam();
             _titleBar.ApplyForCurrentMode();
             var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
             if (leaf is not null)
@@ -1494,7 +1567,7 @@ public sealed partial class MainWindow : Window
             // Carried purely for the next cold start's splash, which runs
             // before any theme has been resolved and would otherwise have
             // to guess this colour.
-            _windowState.BackgroundRgb = _configService.BackgroundColor & 0x00FFFFFFu;
+            RecordSplashBackground();
             _windowState.Save();
         }
 
@@ -2330,6 +2403,159 @@ public sealed partial class MainWindow : Window
     /// blends with the terminal background so the active tab connects to the
     /// pane below it. Called on every config reload so theme changes apply.
     /// </summary>
+    /// <summary>
+    /// Copy the resolved terminal background into the window state for the
+    /// next cold start's splash, which runs before any theme is resolved and
+    /// would otherwise have to guess. Returns true when anything moved, so a
+    /// caller can skip a write.
+    /// </summary>
+    /// <remarks>
+    /// One place for both callers because they used to be two, and the one
+    /// that ran at startup wrote the colour without the flag beside it. That
+    /// left every session claiming a background the desktop could not flip
+    /// out from under, and the splash went on trusting a stale colour.
+    /// </remarks>
+    private bool RecordSplashBackground()
+    {
+        var background = _configService.BackgroundColor & 0x00FFFFFFu;
+
+        // Neither a configured background nor a configured theme means the
+        // colour is the built-in theme's, which tracks the desktop and so is
+        // only good for as long as that does not move.
+        var followsOs = !_configService.IsConfiguredInFile("background")
+            && string.IsNullOrEmpty(_configService.CurrentTheme);
+
+        if (_windowState.BackgroundRgb == background
+            && _windowState.BackgroundFollowsOsTheme == followsOs)
+        {
+            return false;
+        }
+
+        _windowState.BackgroundRgb = background;
+        _windowState.BackgroundFollowsOsTheme = followsOs;
+        return true;
+    }
+
+    private readonly Microsoft.UI.Xaml.Shapes.Rectangle _tabSeamCover;
+
+    /// <summary>
+    /// Place the seam cover under the selected tab, or hide it when the
+    /// strip has nothing to join to (vertical layout, or before the strip
+    /// has arranged).
+    /// </summary>
+    private void OnSelectedTabSeamChanged(double left, double width, Brush? fill)
+    {
+        if (_isClosed) return;
+
+        // Only meaningful in horizontal layout: in vertical the strip is
+        // beside the pane, not above it, and the seam is a different edge.
+        //
+        // Gated on the layout MainWindow last applied, NOT on the hosts'
+        // Visibility. Visibility is not a layout signal: both hosts are
+        // Visible by default until the first Snap, and PrimeHiddenStrip
+        // deliberately makes the collapsed one Visible at zero opacity for a
+        // few frames. Reading it here meant the first placement of every
+        // session decided it was in vertical layout and hid the cover, and
+        // nothing re-fired until the window happened to be resized.
+        if (width <= 0 || fill is null || _verticalTabsVisible)
+        {
+            _tabSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _tabSeamCover.Margin = new Thickness(left, 0, 0, 0);
+        _tabSeamCover.Width = width;
+        _tabSeamCover.Fill = fill;
+        _tabSeamCover.Visibility = Visibility.Visible;
+    }
+
+    private readonly Microsoft.UI.Xaml.Shapes.Rectangle _verticalSeamCover;
+
+    /// <summary>
+    /// How far back into the selected row the vertical seam cover starts.
+    /// </summary>
+    private const double VerticalSeamOverlap = 4.0;
+
+    /// <summary>
+    /// Place the vertical strip's seam cover over the pane's left border,
+    /// for the height of the selected row.
+    /// </summary>
+    private void OnVerticalSeamChanged()
+    {
+        if (_isClosed) return;
+
+        var row = _verticalTabHost.SelectionRowElement;
+        // Same reasoning as the horizontal gate: the layout MainWindow last
+        // applied, not the host's Visibility.
+        if (!_verticalTabsVisible
+            || row.Visibility != Visibility.Visible
+            || row.ActualWidth <= 0
+            || row.ActualHeight <= 2
+            || row is not Border { Background: { } fill })
+        {
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        // Start at the row's own right edge, which is already the terminal
+        // colour, so the cover cannot bleed back over the strip.
+        Windows.Foundation.Point start;
+        try
+        {
+            start = row.TransformToVisual(RootGrid)
+                .TransformPoint(new Windows.Foundation.Point(row.ActualWidth, 0));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // The row is not in the tree yet, or is being torn out of it.
+            // The next SelectionRowChanged places it.
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        // Started a few pixels back inside the row rather than exactly at its
+        // edge: the row's right edge and the pane border are not flush, and
+        // the strip's own surface shows through whatever is left between
+        // them. Backing into the row costs nothing since both are filled
+        // with the same colour.
+        //
+        // Inside the row's top and bottom strokes, so those still close onto
+        // the pane border the way the horizontal tab's corners do.
+        const double edgeStroke = 1.0;
+        var top = start.Y + edgeStroke;
+        var bottom = start.Y + row.ActualHeight - edgeStroke;
+
+        // Clip to the strip. With more tabs than fit, the selected row can be
+        // scrolled out of the list while its layout offset still reports
+        // where it would have been, and a cover placed there is a bar of
+        // terminal colour drawn across the pane at a height with no tab
+        // beside it.
+        try
+        {
+            var stripTop = _verticalTabHost.TransformToVisual(RootGrid)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            top = Math.Max(top, stripTop);
+            bottom = Math.Min(bottom, stripTop + _verticalTabHost.ActualHeight);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (bottom - top <= 0)
+        {
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _verticalSeamCover.Margin = new Thickness(
+            start.X - VerticalSeamOverlap, top, 0, 0);
+        _verticalSeamCover.Height = bottom - top;
+        _verticalSeamCover.Fill = fill;
+        _verticalSeamCover.Visibility = Visibility.Visible;
+    }
+
     private void UpdateCursorAccentColors()
     {
         var bg = _configService.BackgroundColor;
@@ -2345,6 +2571,10 @@ public sealed partial class MainWindow : Window
         var cc = _configService.CursorColor ?? _configService.ForegroundColor;
         var wuiColor = Windows.UI.Color.FromArgb(0xFF,
             (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
+        // Both hosts, from the one value that also draws the pane border
+        // below: the selected tab is stroked in it on the three sides that
+        // do not meet the pane, so tab and pane read as a single shape.
+        _horizontalTabHost.SetAccentColor(wuiColor);
         _verticalTabHost.SetAccentColor(wuiColor);
 
         ApplyPerTabChrome();

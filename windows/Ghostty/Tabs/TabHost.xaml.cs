@@ -68,10 +68,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
         foreach (var t in _manager.Tabs) AddItem(t);
         SelectActive();
 
-        _manager.TabAdded += (_, t) => { AddItem(t); SelectActive(); };
-        _manager.TabRemoved += (_, t) => RemoveItem(t);
-        _manager.TabMoved += (_, e) => MoveItem(e.tab, e.to);
-        _manager.ActiveTabChanged += (_, _) => SelectActive();
+        _manager.TabAdded += (_, t) => { AddItem(t); SelectActive(); QueueBridgeUpdate(); };
+        _manager.TabRemoved += (_, t) => { RemoveItem(t); QueueBridgeUpdate(); };
+        _manager.TabMoved += (_, e) => { MoveItem(e.tab, e.to); QueueBridgeUpdate(); };
+        _manager.ActiveTabChanged += (_, _) => { SelectActive(); QueueBridgeUpdate(); };
+
+        // Every one of the calls above can run before the strip has arranged,
+        // and the bridge is placed from the selected item's layout slot, so
+        // it needs a pass once bounds exist. Width changes move every tab
+        // under Equal sizing, so the strip resizing moves it too.
+        Loaded += (_, _) => QueueBridgeUpdate();
+        TabViewControl.SizeChanged += (_, _) => UpdateSelectedTabBridge();
     }
 
     private void AddItem(TabModel tab)
@@ -286,6 +293,187 @@ internal sealed partial class TabHost : UserControl, ITabHost
         RefreshTabViewTheme();
         if (selectedItem is not null)
             NudgeTabViewItemVisual(selectedItem);
+        UpdateSelectedTabBridge();
+    }
+
+    /// <summary>
+    /// Where the selected tab sits horizontally, and what colour it is
+    /// filled with. Raised whenever either could have moved.
+    /// </summary>
+    /// <remarks>
+    /// MainWindow uses this to cover the active pane's top border for
+    /// exactly that span, so the selected tab reads as continuous with the
+    /// terminal rather than having a line ruled between them. It is
+    /// MainWindow's to draw and not this control's: the border belongs to
+    /// the pane, which lives in the row below, and a cover drawn from up
+    /// here has to overhang its own parent to reach it -- where it is
+    /// clipped and never appears. Width is zero when there is nothing to
+    /// cover.
+    /// </remarks>
+    internal event Action<double, double, Brush?>? SelectedTabSeamChanged;
+
+    /// <summary>
+    /// Re-raise the seam position. For callers that change something the
+    /// strip cannot observe -- a layout switch does not resize it or move
+    /// its selection, so nothing here would fire on its own.
+    /// </summary>
+    /// <remarks>
+    /// Also arms the layout retry. A strip arriving from a cross-fade can
+    /// still be settling, and unlike the not-yet-arranged case its offsets
+    /// are non-zero, so the placement looks valid and would never be
+    /// revisited.
+    /// </remarks>
+    internal void RefreshSeam()
+    {
+        QueueBridgeUpdate();
+        ArmBridgeRetry();
+    }
+
+    private void UpdateSelectedTabBridge()
+    {
+        var active = _manager.ActiveTab;
+        if (active is null
+            || !_itemByModel.TryGetValue(active, out var item)
+            || _selectedTabFillBrush is null)
+        {
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
+            return;
+        }
+
+        if (item.ActualWidth <= 0)
+        {
+            // Not arranged yet. Hide rather than place from a stale offset,
+            // and come back on the pass that gives it bounds.
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
+            ArmBridgeRetry();
+            return;
+        }
+
+        Windows.Foundation.Point origin;
+        try
+        {
+            origin = item.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // The item is not in the tree yet, or is being pulled out of it
+            // (a close, or a drag to another window). The next refresh places
+            // it.
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
+            return;
+        }
+
+        // Span the tab's full footprint. The side strokes sit at its outer
+        // edges and stop at the strip's bottom, so the border pixels that
+        // close the folder's two bottom corners are the ones just outside
+        // this span -- not inside it. Insetting by the stroke width instead
+        // leaves a pixel of border showing within the tab at each end, and
+        // that reads as a notch rather than a corner.
+        var left = origin.X;
+        var right = origin.X + item.ActualWidth;
+
+        // Clip to the list the tabs scroll inside. Once there are more tabs
+        // than fit, the selected one can be scrolled half out of view or
+        // right out of it, and its layout offset keeps reporting where the
+        // tab would be rather than where it is drawn. Uncovered, that walks
+        // the cover along the pane border and rubs out a stretch of it
+        // nowhere near the tab.
+        if (TabStripViewport() is { } viewport)
+        {
+            left = Math.Max(left, viewport.Left);
+            right = Math.Min(right, viewport.Right);
+        }
+
+        var width = right - left;
+        if (width <= 0)
+        {
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
+            return;
+        }
+
+        var fill = active.Color != TabColor.None
+            ? TabColorBrush.From(TabColorPalette.Background(active.Color, selected: true))
+            : _selectedTabFillBrush;
+
+        SelectedTabSeamChanged?.Invoke(left, width, fill);
+    }
+
+    // The list the tab items scroll inside, looked up once out of the
+    // TabView's template. Null until the template has been applied.
+    private FrameworkElement? _tabListView;
+
+    /// <summary>
+    /// Bounds of the scrolling tab list, in this control's coordinates, or
+    /// null while the template has not been applied yet.
+    /// </summary>
+    private Windows.Foundation.Rect? TabStripViewport()
+    {
+        _tabListView ??= FindDescendantByName(TabViewControl, "TabListView");
+        if (_tabListView is not { ActualWidth: > 0 } list) return null;
+
+        try
+        {
+            var tl = list.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0));
+            return new Windows.Foundation.Rect(
+                tl.X, tl.Y, list.ActualWidth, list.ActualHeight);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static FrameworkElement? FindDescendantByName(DependencyObject root, string name)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is FrameworkElement { } fe && fe.Name == name) return fe;
+            if (FindDescendantByName(child, name) is { } found) return found;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Re-place the seam after the next layout pass, for the calls that land
+    /// before the strip has arranged (construction, a tab added or removed, a
+    /// drag reorder).
+    /// </summary>
+    /// <remarks>
+    /// A dispatcher hop alone is not enough and the gap it leaves is not
+    /// cosmetic. A tab added at run time has no bounds by the time even a Low
+    /// priority callback runs, so the placement bails -- and nothing else
+    /// fires afterwards, because the strip's own size did not change. The
+    /// seam then stays uncovered until something unrelated moves. So the
+    /// bail arms a one-shot LayoutUpdated and the placement happens on the
+    /// pass that gives the tab its bounds. One-shot rather than a standing
+    /// subscription, which fires for every layout pass anywhere in the
+    /// window.
+    /// </remarks>
+    private void QueueBridgeUpdate()
+    {
+        DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            UpdateSelectedTabBridge);
+    }
+
+    private bool _bridgeRetryArmed;
+
+    private void ArmBridgeRetry()
+    {
+        if (_bridgeRetryArmed) return;
+        _bridgeRetryArmed = true;
+        LayoutUpdated += OnBridgeRetryLayout;
+    }
+
+    private void OnBridgeRetryLayout(object? sender, object e)
+    {
+        LayoutUpdated -= OnBridgeRetryLayout;
+        _bridgeRetryArmed = false;
+        UpdateSelectedTabBridge();
     }
 
     /// <summary>Force MUXC to re-read TabView/item header resources.</summary>
@@ -313,6 +501,34 @@ internal sealed partial class TabHost : UserControl, ITabHost
     ];
 
     /// <summary>
+    /// Stroke around the selected tab: the same colour that frames the
+    /// active pane, so the tab and the pane it belongs to read as one shape
+    /// rather than as two pieces of chrome that happen to touch.
+    /// </summary>
+    /// <remarks>
+    /// The folder shape itself is already in the WinUI template, which sets
+    /// the selected item's border thickness to <c>1,1,1,0</c> -- three sides
+    /// and nothing along the edge that meets the pane. It is invisible only
+    /// because the default brush is transparent, so painting that one brush
+    /// is the whole of the effect. Nothing here needs the strip to have a
+    /// surface of its own, which is why this works where recolouring the
+    /// strip did not: the strip is the window's Mica backdrop.
+    /// </remarks>
+    private SolidColorBrush? _selectedBorderBrush;
+
+    /// <summary>
+    /// Set the stroke colour for the selected tab. Same value MainWindow
+    /// gives the active pane border, so the two cannot disagree.
+    /// </summary>
+    internal void SetAccentColor(Windows.UI.Color color)
+    {
+        var next = new SolidColorBrush(color);
+        if (_selectedBorderBrush?.Color == next.Color) return;
+        _selectedBorderBrush = next;
+        RefreshTabColors();
+    }
+
+    /// <summary>
     /// Paint the full TabViewItem handle via per-item header resources.
     /// The inner header panel stays transparent so the pill, close
     /// button chrome, and progress bar share one surface.
@@ -334,6 +550,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
 
         ApplyTabViewItemHeaderBrushes(viewItem, normalHandle, selectedHandle);
+
+        // A tab carrying a preset colour takes that colour's border, the same
+        // way its pane does, so the stroke keeps identifying which pane the
+        // tab belongs to instead of flattening every tab to the accent.
+        SolidColorBrush? selectedBorder = null;
+        if (selected)
+        {
+            selectedBorder = tab.Color != TabColor.None
+                ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
+                : _selectedBorderBrush;
+        }
+        SetItemHeaderBrush(viewItem, "TabViewSelectedItemBorderBrush", selectedBorder);
+
         headerPanel.Background = TransparentHeaderSelected;
     }
 
