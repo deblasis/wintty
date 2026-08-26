@@ -202,6 +202,37 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
 
 /// Process-wide deinitialization of our Sentry client. This ensures all
 /// our data is flushed.
+/// Set once a panic has been reported, so a panic raised while reporting a
+/// panic cannot recurse into the reporter.
+var panic_reported: bool = false;
+
+/// Report a panic to sentry, best effort, before the process goes down.
+///
+/// This exists because a Zig panic on Windows raises no exception that the
+/// in-process backend can see. `std.debug.defaultPanic` ends in
+/// `std.process.abort`, and on Windows that is `ntdll.RtlExitUserProcess`, a
+/// clean process exit. sentry-native's inproc backend hooks
+/// `SetUnhandledExceptionFilter`, which a clean exit never invokes, so without
+/// this the panic is invisible: no exception, no WER record, no envelope.
+///
+/// POSIX needs nothing here. There `abort` is `posix.raise(.ABRT)` and the
+/// backend's SIGABRT handler already captures the panic, so reporting again
+/// would duplicate every crash report.
+pub fn capturePanic(msg: []const u8) void {
+    if (comptime !build_options.sentry) return;
+    if (comptime builtin.os.tag != .windows) return;
+
+    // Reporting runs in an already broken process, so keep it to the one
+    // call and let anything it touches fail silently.
+    if (@atomicRmw(bool, &panic_reported, .Xchg, true, .seq_cst)) return;
+
+    _ = sentry.captureEvent(sentry.Value.initMessageEvent(
+        .fatal,
+        "panic",
+        msg,
+    ));
+}
+
 pub fn deinit() void {
     if (comptime !build_options.sentry) return;
 
