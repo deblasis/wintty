@@ -362,6 +362,16 @@ pub const DllMain = if (builtin.os.tag == .windows) struct {
     const __xt_a = @extern([*]?PVFV, .{ .name = "__xt_a" });
     const __xt_z = @extern([*]?PVFV, .{ .name = "__xt_z" });
 
+    /// Whether attach brought the CRT all the way up.
+    ///
+    /// Windows calls DllMain(DLL_PROCESS_DETACH) after an attach that
+    /// returned FALSE, so without this a partial init is torn down as though
+    /// it were a complete one: uninitializers run against a CRT that was
+    /// never finished, and the `.CRT$XP`/`.CRT$XT` tables are walked when no
+    /// constructor ever ran. Real MSVC guards the same window with
+    /// `__scrt_current_native_startup_state` in `dll_dllmain.cpp`.
+    var crt_up: bool = false;
+
     pub fn handler(_: HINSTANCE, fdwReason: DWORD, _: LPVOID) callconv(.winapi) BOOL {
         // Only MSVC needs to bootstrap the CRT; MinGW handles it via dllcrt2.obj.
         if (builtin.abi != .msvc) return TRUE;
@@ -371,12 +381,22 @@ pub const DllMain = if (builtin.os.tag == .windows) struct {
                 // negative value, so a `< 0` test let a failed CRT init
                 // through silently.
                 if (__vcrt_initialize() == 0) return FALSE;
-                if (__acrt_initialize() == 0) return FALSE;
-                if (_initterm_e(__xi_a, __xi_z) != 0) return FALSE;
+                if (__acrt_initialize() == 0) {
+                    _ = __vcrt_uninitialize(1);
+                    return FALSE;
+                }
+                if (_initterm_e(__xi_a, __xi_z) != 0) {
+                    _ = __acrt_uninitialize(1);
+                    _ = __vcrt_uninitialize(1);
+                    return FALSE;
+                }
                 _initterm(__xc_a, __xc_z);
+                crt_up = true;
                 return TRUE;
             },
             DLL_PROCESS_DETACH => {
+                if (!crt_up) return TRUE;
+                crt_up = false;
                 _initterm(__xp_a, __xp_z);
                 _initterm(__xt_a, __xt_z);
                 _ = __acrt_uninitialize(1);

@@ -94,13 +94,18 @@ internal sealed record CrashKind
 /// know, or a CLI-only kind a developer cannot reach from inside a running
 /// window. Both read this list; neither keeps its own.
 ///
-/// Metadata only. Nothing here crashes anything, and nothing here is
-/// wrapped in <c>#if DEBUG</c>: the mechanisms are (see
-/// <c>Ghostty.Cli.CrashTrigger</c>) and so is the palette source that
-/// offers them, so a Release build carries these strings with nothing able
-/// to invoke them. Keeping the catalogue unconditional is what lets the
-/// parity tests exercise the real list in any configuration, rather than
-/// asserting against an empty one and passing.
+/// Metadata only: nothing here crashes anything. Nothing here is wrapped in
+/// <c>#if DEBUG</c>, and neither are the mechanisms
+/// (<c>Ghostty.Cli.CrashTrigger</c>) or the palette source that offers them.
+/// A Release build carries these strings AND can invoke them, deliberately:
+/// capture has to be provable in the configuration users install, and a
+/// trigger compiled out of Release leaves that as the one configuration
+/// nobody can test.
+///
+/// What keeps them out of the way is not the compiler. The rows are
+/// <c>CommandCategory.Debug</c>, which sorts last and matches only on its
+/// title, so a destructive row has to be asked for by name. See
+/// <c>CommandPaletteViewModel.ApplyFilter</c>.
 /// </summary>
 internal static class CrashKinds
 {

@@ -18,10 +18,11 @@ namespace Ghostty.Commands;
 /// verifiable in the builds users actually run, and a trigger that is
 /// compiled out of Release makes the one configuration that matters the one
 /// configuration nobody can test. The entries are prefixed "Debug:" and sort
-/// last, so reaching one takes a deliberate search.
-/// itself. There is no Release build in which these rows can be built, so
-/// no runtime gate is needed and none is offered: a flag a user could flip
-/// is a flag that ends up flipped.
+/// last, and they match only on their title, so reaching one takes a
+/// deliberate search rather than a word that happens to appear in a
+/// description. There is no runtime gate and none is offered: a flag a user
+/// could flip is a flag that ends up flipped, and a gate would put the
+/// shipped build back out of reach of the harness.
 /// </summary>
 internal sealed class CrashCommandSource : ICommandSource
 {

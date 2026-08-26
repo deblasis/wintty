@@ -15,6 +15,11 @@ const log = std.log.scoped(.sentry);
 /// handling is a global process-wide thing.
 var init_thread: ?std.Thread = null;
 
+/// Set once `sentry_init` has returned, so the backend's handler is
+/// installed. `waitReady` is what the crash triggers use to know the reporter
+/// is actually armed rather than merely started.
+var init_done: std.atomic.Value(bool) = .init(false);
+
 /// Directory memory, holds the cache and state dirs persistently. This
 /// prevents any sort of crashes due to initialization races.
 var dir_mem: [std.fs.max_path_bytes * 2]u8 = undefined;
@@ -168,6 +173,14 @@ fn initThread(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
     // Initialize
     if (sentry.c.sentry_init(opts) != 0) return error.SentryInitFailed;
 
+    // Only once sentry_init has returned is the backend's exception handler
+    // installed. Anything that means to provoke a crash and watch it be
+    // captured has to wait for this, and cannot infer it from the database
+    // directory appearing: sentry creates that during init, before the
+    // handler exists, and it outlives the process, so on every run after the
+    // first it is already there before we start.
+    init_done.store(true, .release);
+
     // Setup some basic tags that we always want present
     sentry.setTag("build-mode", build_config.mode_string);
     sentry.setTag("app-runtime", @tagName(build_config.app_runtime));
@@ -206,6 +219,10 @@ fn cacheDir(io: std.Io, alloc: Allocator, environ_map: *const std.process.Enviro
 /// panic cannot recurse into the reporter.
 var panic_reported: bool = false;
 
+/// Set once the thread that won `panic_reported` has finished writing. Threads
+/// that lost wait on this rather than racing ahead into abort.
+var panic_capture_done: std.atomic.Value(bool) = .init(false);
+
 /// Report a panic to sentry, best effort, before the process goes down.
 ///
 /// This exists because a Zig panic on Windows raises no exception that the
@@ -224,7 +241,21 @@ pub fn capturePanic(msg: []const u8) void {
 
     // Reporting runs in an already broken process, so keep it to the one
     // call and let anything it touches fail silently.
-    if (@atomicRmw(bool, &panic_reported, .Xchg, true, .seq_cst)) return;
+    //
+    // The latch also stops a panic inside captureEvent from recursing: the
+    // exchange happens before any sentry call, so the re-entry loses it and
+    // falls through to defaultPanic.
+    if (@atomicRmw(bool, &panic_reported, .Xchg, true, .seq_cst)) {
+        // A second thread panicking concurrently must not race us to
+        // abort(). std.debug.defaultPanic serialises panics against each
+        // other, but only once a thread is inside it, and the winner is
+        // still here writing a report. Losing that race truncates the file
+        // the winner is in the middle of writing. Wait for the winner to
+        // finish, then let this thread continue into defaultPanic, which
+        // takes over the serialising from there.
+        while (!panic_capture_done.load(.acquire)) std.Thread.yield() catch {};
+        return;
+    }
 
     const event = sentry.Value.initMessageEvent(.fatal, "panic", msg);
 
@@ -234,6 +265,8 @@ pub fn capturePanic(msg: []const u8) void {
     event.addStacktrace();
 
     _ = sentry.captureEvent(event);
+
+    panic_capture_done.store(true, .release);
 }
 
 pub fn deinit() void {
@@ -243,8 +276,36 @@ pub fn deinit() void {
     // is highly unlikely since init is a very fast operation but we want
     // to avoid the possibility.
     const thr = init_thread orelse return;
+    init_thread = null;
     thr.join();
     _ = sentry.c.sentry_close();
+}
+
+/// Block until the crash reporter is armed, or until `timeout_ms` elapses.
+/// Returns whether it is armed.
+///
+/// Exists for the crash triggers, which are worthless if they fire before the
+/// handler is installed: the report then does not appear, and the honest
+/// reading of that ("the backend cannot capture this class") is the opposite
+/// of the truth. A probe that reports success on an error condition is worse
+/// than one that fails.
+pub fn waitReady(timeout_ms: u64) bool {
+    // Nothing to arm, so nothing to wait for. Callers still get a truthful
+    // answer: no reporter is going to appear later.
+    if (comptime !build_options.sentry) return false;
+
+    var io_threaded: std.Io.Threaded = .init_single_threaded;
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
+
+    var waited: u64 = 0;
+    while (!init_done.load(.acquire)) {
+        if (waited >= timeout_ms) return false;
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch return false;
+        waited += 5;
+    }
+
+    return true;
 }
 
 fn beforeSend(
@@ -354,9 +415,19 @@ fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
 
         // The value ends at the first quote that is not escaped. Paths carry
         // no escaped quotes in practice, but a filename legally could.
+        // A quote is the terminator only when the run of backslashes before
+        // it is even: `\\` is an escaped backslash and the quote after it is
+        // real, while `\"` is an escaped quote and it is not. Testing only
+        // the single preceding byte gets `"C:\\dir\\"` wrong and swallows the
+        // rest of the object.
         var i: usize = value_start;
         const value_end = while (i < rest.len) : (i += 1) {
-            if (rest[i] == '"' and (i == 0 or rest[i - 1] != '\\')) break i;
+            if (rest[i] != '"') continue;
+            var slashes: usize = 0;
+            while (i - slashes > value_start and rest[i - slashes - 1] == '\\') {
+                slashes += 1;
+            }
+            if (slashes % 2 == 0) break i;
         } else rest.len;
 
         const value = rest[value_start..value_end];
@@ -381,6 +452,157 @@ fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
     try out.appendSlice(alloc, rest);
 
     return try out.toOwnedSlice(alloc);
+}
+
+/// Scrub image paths across a whole serialized envelope, keeping the framing
+/// intact.
+///
+/// An envelope is a header line followed by items, and each item is its own
+/// header line carrying `"length":N` followed by exactly N payload bytes.
+/// Scrubbing shortens `code_file`, so rewriting payload bytes without
+/// correcting N produces a file that declares more bytes than it holds. Our
+/// own reader (`sentry_envelope.zig`, `streamExact`) then fails with
+/// `EnvelopeItemPayloadTooShort`, and so does anything else that reads the
+/// format. This walks the framing so the lengths stay true.
+///
+/// Returns a slice owned by `alloc`, or the input unchanged when there is
+/// nothing to rewrite.
+fn scrubEnvelope(alloc: Allocator, bytes: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, bytes, "\"code_file\":\"") == null) return bytes;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    // The envelope header line, which carries no module paths.
+    var rest = bytes;
+    const first_break = std.mem.indexOfScalar(u8, rest, '\n') orelse
+        return bytes;
+    try out.appendSlice(alloc, rest[0 .. first_break + 1]);
+    rest = rest[first_break + 1 ..];
+
+    while (rest.len > 0) {
+        const head_end = std.mem.indexOfScalar(u8, rest, '\n') orelse {
+            // Trailing bytes with no item header. Nothing claims a length
+            // over them, so pass them through untouched.
+            try out.appendSlice(alloc, rest);
+            break;
+        };
+        const header = rest[0..head_end];
+        rest = rest[head_end + 1 ..];
+
+        // A length-less item runs to the next newline. Nothing to correct.
+        const declared = parseItemLength(header) orelse {
+            const body_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+            const scrubbed = try scrubImagePaths(alloc, rest[0..body_end]);
+            defer if (scrubbed.ptr != rest.ptr) alloc.free(scrubbed);
+            try out.appendSlice(alloc, header);
+            try out.append(alloc, '\n');
+            try out.appendSlice(alloc, scrubbed);
+            if (body_end < rest.len) try out.append(alloc, '\n');
+            rest = rest[@min(body_end + 1, rest.len)..];
+            continue;
+        };
+
+        // A declared length longer than what is left means the envelope was
+        // already truncated. Copy the remainder rather than inventing one.
+        if (declared > rest.len) {
+            try out.appendSlice(alloc, header);
+            try out.append(alloc, '\n');
+            try out.appendSlice(alloc, rest);
+            break;
+        }
+
+        const payload = rest[0..declared];
+        const scrubbed = try scrubImagePaths(alloc, payload);
+        defer if (scrubbed.ptr != payload.ptr) alloc.free(scrubbed);
+
+        try writeItemHeader(alloc, &out, header, scrubbed.len);
+        try out.append(alloc, '\n');
+        try out.appendSlice(alloc, scrubbed);
+
+        rest = rest[declared..];
+        if (rest.len > 0 and rest[0] == '\n') {
+            try out.append(alloc, '\n');
+            rest = rest[1..];
+        }
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
+/// The `length` field of an item header, or null when it has none.
+fn parseItemLength(header: []const u8) ?usize {
+    const needle = "\"length\":";
+    const at = std.mem.indexOf(u8, header, needle) orelse return null;
+    var i = at + needle.len;
+    while (i < header.len and header[i] == ' ') i += 1;
+    const start = i;
+    while (i < header.len and header[i] >= '0' and header[i] <= '9') i += 1;
+    if (i == start) return null;
+    return std.fmt.parseInt(usize, header[start..i], 10) catch null;
+}
+
+/// Re-emit an item header with `length` replaced by the post-scrub value.
+fn writeItemHeader(
+    alloc: Allocator,
+    out: *std.ArrayList(u8),
+    header: []const u8,
+    length: usize,
+) !void {
+    const needle = "\"length\":";
+    const at = std.mem.indexOf(u8, header, needle) orelse {
+        try out.appendSlice(alloc, header);
+        return;
+    };
+    var i = at + needle.len;
+    while (i < header.len and header[i] == ' ') i += 1;
+    const digits_start = i;
+    while (i < header.len and header[i] >= '0' and header[i] <= '9') i += 1;
+    if (i == digits_start) {
+        try out.appendSlice(alloc, header);
+        return;
+    }
+
+    var digits: [24]u8 = undefined;
+    try out.appendSlice(alloc, header[0..digits_start]);
+    try out.appendSlice(alloc, std.fmt.bufPrint(&digits, "{d}", .{length}) catch
+        return error.LengthTooLarge);
+    try out.appendSlice(alloc, header[i..]);
+}
+
+test "a scrubbed envelope still parses" {
+    // The regression this exists for: scrubbing shortens `code_file`, and an
+    // envelope item is length-prefixed, so a scrub that rewrites the payload
+    // without correcting the header leaves every report unreadable by our own
+    // parser and by anything else that reads the format. Substring assertions
+    // over a bare JSON fragment cannot see it; only a round trip can.
+    const alloc = std.testing.allocator;
+
+    const payload =
+        \\{"images":[{"code_file":"C:\\Users\\alex\\wintty.dll","type":"pe"}]}
+    ;
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(alloc);
+    var head: [64]u8 = undefined;
+    try raw.appendSlice(alloc, "{}\n");
+    try raw.appendSlice(alloc, try std.fmt.bufPrint(
+        &head,
+        "{{\"type\":\"event\",\"length\":{d}}}\n",
+        .{payload.len},
+    ));
+    try raw.appendSlice(alloc, payload);
+    try raw.appendSlice(alloc, "\n");
+
+    const scrubbed = try scrubEnvelope(alloc, raw.items);
+    defer if (scrubbed.ptr != raw.items.ptr) alloc.free(scrubbed);
+
+    try std.testing.expect(std.mem.indexOf(u8, scrubbed, "wintty.dll") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scrubbed, "alex") == null);
+
+    var reader: std.Io.Reader = .fixed(scrubbed);
+    var parsed = try crash.Envelope.parse(alloc, &reader);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.items.items.len);
 }
 
 test "scrubImagePaths keeps the file name and drops the directory" {
@@ -465,7 +687,7 @@ pub const Transport = struct {
         defer file.close(single_threaded.io());
         var buf: [4096]u8 = undefined;
         var file_writer = file.writer(single_threaded.io(), &buf);
-        try file_writer.interface.writeAll(try scrubImagePaths(alloc, json));
+        try file_writer.interface.writeAll(try scrubEnvelope(alloc, json));
         try file_writer.end();
 
         log.warn("crash report written to disk path={s}", .{path});

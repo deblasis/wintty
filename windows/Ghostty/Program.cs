@@ -526,7 +526,7 @@ public static partial class Program
             Environment.Exit(Cli.CliActions.PrintVersion());
         }
 
-        // +crash <kind> is a debug-only probe for the crash coverage matrix
+        // +crash <kind> is the probe behind the crash coverage matrix
         // in docs/2026-08-25-crash-reporting-and-diagnostics-design.md.
         // Intercepted here for the same reason +version is: it must run
         // before the libghostty CLI dispatcher. Deliberately not a

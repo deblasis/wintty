@@ -215,13 +215,26 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
         }
         else
         {
+            // Debug rows match on their title only. Their descriptions
+            // explain what they destroy, in ordinary words, so matching those
+            // puts "crash the renderer" in front of someone who typed
+            // "select" and meant Select All. A destructive row has to be
+            // asked for by name.
             filtered = _allCommands.Where(c =>
                 c.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                c.Description.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                (c.Subtitle?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                (c.ActionKey?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false));
+                (c.Category != CommandCategory.Debug && (
+                    c.Description.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    (c.Subtitle?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                    (c.ActionKey?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))));
         }
 
+        // Debug sorts last in BOTH branches. Category ordering used to apply
+        // only when grouping was on, and grouping defaults off, so the one
+        // thing keeping a crash row away from the top was its title's
+        // alphabetical luck. Frecency cannot be the first key for these
+        // either: executing one records the use before it takes the process
+        // down, so a single accident promotes that row for every later
+        // launch.
         FilteredCommands = _groupByCategory
             ? filtered
                 .OrderBy(c => c.Category)
@@ -229,7 +242,8 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
                 .ThenBy(c => c.Title, StringComparer.OrdinalIgnoreCase)
                 .ToList()
             : filtered
-                .OrderByDescending(c => _frecency.Score(c.Id))
+                .OrderBy(c => c.Category == CommandCategory.Debug ? 1 : 0)
+                .ThenByDescending(c => _frecency.Score(c.Id))
                 .ThenBy(c => c.Title, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
