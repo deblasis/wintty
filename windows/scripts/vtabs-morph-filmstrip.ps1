@@ -20,7 +20,13 @@ param(
     [switch]$Vertical,
     # The pinned rail is where the column tween has real distance to cover,
     # so it is where the strip lagging behind the ghost shows up.
-    [switch]$Pinned
+    [switch]$Pinned,
+    # Drop the theme pin below and let the app fall back to its built-in
+    # light/dark pair. The pinned theme is always dark, so without this the
+    # switch is only ever exercised over a dark terminal -- and the frame
+    # where the strip resolves its own surface is exactly where a light one
+    # would show up.
+    [switch]$ZeroConfig
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
@@ -141,12 +147,15 @@ function Start-Burst([IntPtr]$hwnd, [string]$tag) {
 $tempXdg = Join-Path $env:TEMP "wintty-morph-$([guid]::NewGuid())"
 $cfgDir = Join-Path $tempXdg 'wintty'
 New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+$themePin = if ($ZeroConfig) { '' } else { @"
+
+window-theme = wintty
+theme = Catppuccin Mocha
+"@ }
 @"
 vertical-tabs = $($Vertical.IsPresent.ToString().ToLower())
 vertical-tabs-pinned = $($Pinned.IsPresent.ToString().ToLower())
-windows-single-instance = false
-window-theme = wintty
-theme = Catppuccin Mocha
+windows-single-instance = false$themePin
 "@ | Set-Content -Path (Join-Path $cfgDir 'config.wintty') -Encoding utf8
 
 $origXdg = $env:XDG_CONFIG_HOME
