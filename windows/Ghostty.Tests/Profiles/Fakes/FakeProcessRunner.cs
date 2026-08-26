@@ -32,7 +32,8 @@ internal sealed class FakeProcessRunner : IProcessRunner
         var key = Key(fileName, args);
         if (_canned.TryGetValue(key, out var result))
             return Task.FromResult(result);
-        return Task.FromResult(new ProcessResult(-1, "", "", TimeSpan.Zero));
+        return Task.FromResult(
+            new ProcessResult(-1, "", "", TimeSpan.Zero, ProcessOutcome.DidNotStart));
     }
 
     private static string Key(string fileName, IEnumerable<string> args)

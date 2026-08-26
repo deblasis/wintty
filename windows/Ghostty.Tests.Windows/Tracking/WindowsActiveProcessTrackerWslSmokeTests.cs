@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Profiles;
 using Ghostty.Core.Profiles.Tracking;
@@ -20,17 +18,15 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         _output = output;
     }
 
-    [Fact]
+    // WslFact rather than an early-out inside the body: CI runners often lack
+    // wsl, and a test that returns early is recorded as a pass, which is the
+    // same green as a test that proved something. The gate also spawns pwsh
+    // first, so "wsl is not installed" stays distinct from "nothing spawns on
+    // this host" -- the two the old check could not tell apart.
+    [WslFact]
     public async Task Track_WslWithDistribution_ReportsAutoForWslDistro()
     {
-        // Probe wsl: CI runners often lack it. Silent early-out keeps CI green
-        // while still exercising the full path on a dev machine with wsl set up.
-        var (ok, distro) = ProbeWsl();
-        if (!ok || string.IsNullOrEmpty(distro))
-        {
-            _output.WriteLine("wsl not available - skipping");
-            return;
-        }
+        var distro = WslDistro.Name!;
         _output.WriteLine($"probed distro: {distro}");
 
         // Spawn pwsh -> wsl.exe --distribution <distro> -- sleep 5
@@ -95,42 +91,6 @@ public sealed class WindowsActiveProcessTrackerWslSmokeTests
         finally
         {
             try { pwsh.Kill(entireProcessTree: true); } catch { }
-        }
-    }
-
-    /// <summary>
-    /// Probes whether wsl is installed and at least one distro exists.
-    /// <c>wsl --list --quiet</c> emits UTF-16 LE with a BOM on Windows, so the
-    /// raw stdout has interleaved null bytes when read as the default encoding.
-    /// We strip those before splitting; the result is the first non-empty line.
-    /// </summary>
-    private static (bool ok, string? distro) ProbeWsl()
-    {
-        try
-        {
-            var p = Process.Start(new ProcessStartInfo
-            {
-                FileName = "wsl.exe",
-                Arguments = "--list --quiet",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            });
-            if (p is null) return (false, null);
-            if (!p.WaitForExit(2000)) return (false, null);
-            if (p.ExitCode != 0) return (false, null);
-
-            var raw = p.StandardOutput.ReadToEnd();
-            var cleaned = new string(raw.Where(c => c != '\0' && c != '﻿').ToArray());
-            var first = cleaned
-                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(s => s.Trim())
-                .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
-            return string.IsNullOrEmpty(first) ? (false, null) : (true, first);
-        }
-        catch
-        {
-            return (false, null);
         }
     }
 }
