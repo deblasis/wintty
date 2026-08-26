@@ -18,7 +18,7 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\sentry"
+    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\crash"
 )
 
 $ErrorActionPreference = 'Stop'
