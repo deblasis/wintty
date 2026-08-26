@@ -33,19 +33,7 @@ pub fn detect(b: *std.Build) !Version {
             else => return err,
         };
 
-        // Trim before sanitizing, not after: git terminates the ref name with
-        // a newline, and the loop below would rewrite that into a "-" that no
-        // later trim can tell apart from one the branch name really contains.
-        const trimmed = tmp[0..std.mem.trimEnd(u8, tmp, "\r\n ").len];
-
-        // Replace characters that are not valid in semantic version
-        // pre-release identifiers (which only allow [0-9A-Za-z-]).
-        // Slashes would also mess up dist tarball paths.
-        for (trimmed) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '-') c.* = '-';
-        }
-
-        break :b trimmed;
+        break :b sanitizeBranch(tmp);
     };
 
     const short_hash = short_hash: {
@@ -116,4 +104,33 @@ pub fn detect(b: *std.Build) !Version {
         .tag = if (tag.len > 0) std.mem.trimEnd(u8, tag, "\r\n ") else null,
         .branch = branch,
     };
+}
+
+/// Git's raw `rev-parse --abbrev-ref HEAD` output, rewritten in place into a
+/// name usable as a semantic version pre-release identifier, which only allows
+/// [0-9A-Za-z-]. Slashes would also mess up dist tarball paths.
+///
+/// Trim before sanitizing, not after: git terminates the ref name with a
+/// newline, and the loop would rewrite that into a "-" that no later trim can
+/// tell apart from one the branch name really ends with.
+fn sanitizeBranch(raw: []u8) []u8 {
+    const trimmed = raw[0..std.mem.trimEnd(u8, raw, "\r\n ").len];
+    for (trimmed) |*c| {
+        if (!std.ascii.isAlphanumeric(c.*) and c.* != '-') c.* = '-';
+    }
+    return trimmed;
+}
+
+test "sanitizeBranch trims git's line ending before rewriting it" {
+    var raw = "fix/zero-config\n".*;
+    try std.testing.expectEqualStrings("fix-zero-config", sanitizeBranch(&raw));
+}
+
+test "sanitizeBranch keeps only what a pre-release identifier allows" {
+    // The rewrite is byte-wise, so the two bytes of the non-ASCII codepoint
+    // become two dashes rather than one.
+    var raw = "feature/caf\u{e8}_v1.2\r\n".*;
+    const name = sanitizeBranch(&raw);
+    try std.testing.expectEqualStrings("feature-caf---v1-2", name);
+    for (name) |c| try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '-');
 }

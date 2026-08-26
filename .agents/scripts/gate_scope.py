@@ -72,16 +72,16 @@ PREFIX_RULES = (
 )
 
 EXACT_RULES = {
-    # Both of these are checked by a gates-leg script rather than by a zig
-    # test, because the Zig legs cannot see a BEHAVIOR change in either.
-    # zig-fmt still sees formatting and the suite still sees a compile
-    # error, but nothing runs the code: src/build_config.zig imports
-    # build/Config.zig only to call fromOptions(), and Zig analyses at
-    # decl level, so Config.init -- which is what decides that `tip` and
-    # `vX.Y.Z` are the only names a version may have -- is never reached
-    # from a test root (issue 748). GitVersion.zig runs in build.zig only.
-    # The selftest hardcodes that same contract, so it has to run when
-    # either side of it moves, or the two drift apart in silence.
+    # Both of these carry a gates-leg check on top of the Zig legs. What
+    # decides that `tip` and `vX.Y.Z` are the only names a version may have
+    # is the describe filter, and only real `git describe` against real tag
+    # layouts can say whether it still holds. The selftest reads the argument
+    # list out of GitVersion.zig, so it has to run when either side of that
+    # contract moves, or the two drift apart in silence.
+    #
+    # No test root reaches Config.init: src/build_config.zig imports
+    # build/Config.zig only to call fromOptions(). GitVersion.zig is reached,
+    # through src/build/test.zig.
     "src/build/GitVersion.zig": ZIG_LEGS + (LEG_GATES,),
     "src/build/Config.zig": ZIG_LEGS + (LEG_GATES,),
     "build.zig": ZIG_LEGS,
