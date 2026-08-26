@@ -11,10 +11,19 @@
 
   Requires a DEBUG build: +crash is compiled out of Release.
 #>
+# Two directories are easy to confuse. Crash envelopes are written by
+# ghostty's own transport (src/crash/sentry.zig sendInternal) to the STATE
+# dir, xdg.state with subdir "wintty/crash". The sentry database, which is
+# where sentry-native keeps its .run bookkeeping and session.json, is the
+# CACHE dir, %LOCALAPPDATA%\wintty\sentry. Watching the database counts a
+# new .run.lock on every launch and reports an envelope for runs that never
+# crashed.
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\sentry",
-    [string]$CrashLog = "$env:LOCALAPPDATA\Wintty\crash.log"
+    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\crash",
+    # The managed handler writes next to the binary, not under LOCALAPPDATA:
+    # Program.cs uses Path.Combine(AppContext.BaseDirectory, "ghostty-crash.log").
+    [string]$CrashLog = (Join-Path (Split-Path -Parent $ExePath) 'ghostty-crash.log')
 )
 
 $ErrorActionPreference = 'Stop'
