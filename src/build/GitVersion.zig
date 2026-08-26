@@ -33,14 +33,19 @@ pub fn detect(b: *std.Build) !Version {
             else => return err,
         };
 
+        // Trim before sanitizing, not after: git terminates the ref name with
+        // a newline, and the loop below would rewrite that into a "-" that no
+        // later trim can tell apart from one the branch name really contains.
+        const trimmed = tmp[0..std.mem.trimEnd(u8, tmp, "\r\n ").len];
+
         // Replace characters that are not valid in semantic version
         // pre-release identifiers (which only allow [0-9A-Za-z-]).
         // Slashes would also mess up dist tarball paths.
-        for (tmp) |*c| {
+        for (trimmed) |*c| {
             if (!std.ascii.isAlphanumeric(c.*) and c.* != '-') c.* = '-';
         }
 
-        break :b tmp;
+        break :b trimmed;
     };
 
     const short_hash = short_hash: {
@@ -50,6 +55,11 @@ pub fn detect(b: *std.Build) !Version {
             .ignore,
         ) catch |err| switch (err) {
             error.FileNotFound => return error.GitNotFound,
+            // Same degradation as the branch lookup above: a git that runs but
+            // fails here means we cannot describe this checkout, which
+            // Config.init turns into a dev version. Without this prong the
+            // error escapes detect() bare and fails the configure phase.
+            error.ExitCodeFailure => return error.GitNotRepository,
             else => return err,
         };
 
@@ -104,6 +114,6 @@ pub fn detect(b: *std.Build) !Version {
         .short_hash = short_hash,
         .changes = changes,
         .tag = if (tag.len > 0) std.mem.trimEnd(u8, tag, "\r\n ") else null,
-        .branch = std.mem.trimEnd(u8, branch, "\r\n "),
+        .branch = branch,
     };
 }
