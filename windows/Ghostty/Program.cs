@@ -532,9 +532,22 @@ public static partial class Program
         // before the libghostty CLI dispatcher. Deliberately not a
         // CliAliases entry, because that set is parity-tested against the
         // Action enum in src/cli/ghostty.zig.
-        if (args.Length > 1 && args[0] == "+crash")
+        // A bare `+crash` is handled too: without it the argument falls
+        // through to the libghostty dispatcher, which reports an unknown
+        // action rather than the list of kinds the caller was reaching for.
+        if (args.Length > 0 && args[0] == "+crash")
         {
-            Environment.Exit(Cli.CrashTrigger.Run(args[1]));
+            // Arm crash reporting first. This interception happens before
+            // InitGhostty, and ghostty_init is what brings sentry up, so a
+            // trigger fired here would otherwise crash a process with no
+            // reporter attached and every envelope row would read as absent
+            // for a reason that has nothing to do with the backend.
+            if (args.Length > 1)
+            {
+                Cli.CrashTrigger.ArmCrashReporting(TimeSpan.FromSeconds(10));
+            }
+
+            Environment.Exit(Cli.CrashTrigger.Run(args.Length > 1 ? args[1] : ""));
         }
 
         // Does the command line lead with a bare Windows subcommand, e.g.

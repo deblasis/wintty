@@ -1,6 +1,10 @@
 using System;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using Ghostty.Core.Diagnostics;
+using Ghostty.Interop;
 
 namespace Ghostty.Cli;
 
@@ -15,6 +19,12 @@ namespace Ghostty.Cli;
 /// Each kind uses the exact mechanism its matrix row names. Do not
 /// substitute a convenient proxy: the whole value of the harness is that
 /// a result says something about the real mechanism.
+///
+/// The set of kinds is <see cref="CrashKinds"/>, not the switch below.
+/// Two front doors reach this: <c>wintty +crash &lt;kind&gt;</c> from
+/// <c>Program.cs</c>, and the palette entries built by
+/// <c>CrashCommandSource</c>. They share one catalogue and one
+/// implementation so a kind cannot exist for one and not the other.
 /// </summary>
 internal static partial class CrashTrigger
 {
@@ -30,15 +40,57 @@ internal static partial class CrashTrigger
         IntPtr lpArguments);
 
     /// <summary>
-    /// Runs the named trigger. Never returns for a crashing kind.
-    /// Returns a non-zero exit code for an unknown kind.
+    /// Runs the named trigger. Never returns for a crashing kind that runs
+    /// in-process. Returns a non-zero exit code for an unknown kind, and
+    /// for a kind this caller cannot reach.
     /// </summary>
-    internal static int Run(string kind)
+    /// <param name="bindingAction">
+    /// Dispatches a libghostty binding action against the active surface,
+    /// returning whether it reached one. Null from the CLI, where no
+    /// window exists yet, which is exactly why the surface-bound kinds are
+    /// refused there rather than silently doing nothing.
+    /// </param>
+    internal static int Run(string kind, Func<string, bool>? bindingAction = null)
     {
-        Console.Error.WriteLine($"crash-trigger: {kind}");
+        var entry = CrashKinds.Find(kind);
+        if (entry is null)
+        {
+            Console.Error.WriteLine($"crash-trigger: unknown kind '{kind}'");
+            Console.Error.WriteLine($"crash-trigger: kinds: {CrashKinds.Ids}");
+            return 2;
+        }
+
+        Console.Error.WriteLine($"crash-trigger: {entry.Id}");
         Console.Error.Flush();
 
-        switch (kind)
+        if (entry.BindingAction is { } action)
+        {
+            if (bindingAction is null)
+            {
+                Console.Error.WriteLine(
+                    $"crash-trigger: '{entry.Id}' faults inside libghostty and needs "
+                    + "a live surface. Run it from the command palette in a running "
+                    + "window; the CLI has no surface to dispatch it against.");
+                return 3;
+            }
+
+            // Reporting a crash for a call that reached no surface is the one
+            // outcome a crash probe must not produce: the operator would read
+            // the absent envelope as "the reporter missed it".
+            if (!bindingAction(action))
+            {
+                Console.Error.WriteLine(
+                    $"crash-trigger: libghostty did not accept '{action}'");
+                return 4;
+            }
+
+            // Only crash:main panics on this thread. crash:io and crash:render
+            // are mailbox pushes, so control comes back here and the panic
+            // lands on the other thread a moment later.
+            return 0;
+        }
+
+        switch (entry.Id)
         {
             // A genuine native SEH exception, dispatched by Windows through
             // normal exception handling, so sentry's
@@ -99,11 +151,82 @@ internal static partial class CrashTrigger
                 Console.Error.WriteLine("crash-trigger: handled-storm survived");
                 return 0;
 
+            // A catalogue entry with no binding action and no arm here. A
+            // parity test in Ghostty.Tests fails before this can ship, so
+            // reaching it means the catalogue was edited and the test was
+            // not run; say so rather than crashing in a way that looks like
+            // a result.
             default:
                 Console.Error.WriteLine(
-                    $"crash-trigger: unknown kind '{kind}'");
+                    $"crash-trigger: '{entry.Id}' is in the catalogue but has no "
+                    + "mechanism here");
                 return 2;
         }
+    }
+
+    /// <summary>
+    /// Bring libghostty's crash reporting up before a trigger fires.
+    /// </summary>
+    /// <remarks>
+    /// Without this the matrix measures nothing: every crash kind is
+    /// intercepted in Program.MainImpl before ghostty_init runs, and
+    /// ghostty_init is what reaches crash.init and so sentry_init (see
+    /// src/global.zig). A trigger fired first crashes a process that has no
+    /// reporter attached, so an absent envelope says nothing about what the
+    /// backend can capture.
+    ///
+    /// The command line passed here is synthetic, and deliberately not this
+    /// process's own. libghostty parses argv, and "+crash" is not one of its
+    /// actions, so handing it the real command line fails init and exits
+    /// before the trigger ever runs.
+    ///
+    /// sentry_init happens on a background thread (the "sentry-init" thread
+    /// in src/crash/sentry.zig), so returning from ghostty_init does not mean
+    /// the reporter is armed. Wait for the database directory sentry is
+    /// configured with, and give up rather than hang: a trigger that fires a
+    /// little early is a visible failed row, a trigger that never fires is a
+    /// stuck harness.
+    /// </remarks>
+    internal static void ArmCrashReporting(TimeSpan timeout)
+    {
+        // argv[0] only, so there is no action for libghostty to reject.
+        // A real Windows command line leads with the executable path, and
+        // the args iterator skips that first token before looking for an
+        // action. A bare word is not a valid command line in that shape.
+        var cmdline = "\"" + Environment.ProcessPath + "\"";
+        var buf = Marshal.StringToHGlobalUni(cmdline);
+        var status = NativeMethods.InitWide(buf, (UIntPtr)cmdline.Length);
+        if (status != 0)
+        {
+            Console.Error.WriteLine(
+                $"crash-trigger: ghostty_init failed (status {status}); " +
+                "continuing with no reporter attached");
+            return;
+        }
+
+        var dir = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "wintty",
+            // sentry's database path, set by cacheDir in src/crash/sentry.zig.
+            // Not "crash": that is where the managed-side crash.log goes.
+            "sentry");
+
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (Directory.Exists(dir))
+            {
+                Console.Error.WriteLine($"crash-trigger: reporter armed ({dir})");
+                return;
+            }
+
+            Thread.Sleep(50);
+        }
+
+        Console.Error.WriteLine(
+            $"crash-trigger: reporter did not arm within {timeout.TotalSeconds:0.#}s " +
+            $"({dir} never appeared); triggering anyway");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -116,7 +239,7 @@ internal static partial class CrashTrigger
         return Recurse(depth + 1) + pad[0];
     }
 #else
-    internal static int Run(string kind)
+    internal static int Run(string kind, Func<string, bool>? bindingAction = null)
     {
         Console.Error.WriteLine(
             "crash-trigger is compiled out of Release builds");

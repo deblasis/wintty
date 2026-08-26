@@ -13,7 +13,7 @@
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
-    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\crash",
+    [string]$CrashDir = "$env:LOCALAPPDATA\wintty\sentry",
     [string]$CrashLog = "$env:LOCALAPPDATA\Wintty\crash.log"
 )
 
@@ -24,6 +24,14 @@ if (-not (Test-Path $ExePath)) {
 }
 
 # Kind, whether a crash envelope is expected, whether crash.log should grow.
+#
+# Only the kinds that run in-process. The surface-bound kinds
+# (libghostty-main, libghostty-io, renderer-thread) fault inside libghostty
+# via a binding action, which has no surface to land on before a window
+# exists, so `+crash` refuses them with exit 3 and they are driven from the
+# command palette instead. Adding them here would assert absence for a
+# trigger that never ran, which is the one result this harness must not
+# produce. See CrashKinds in windows/Ghostty.Core/Diagnostics.
 $matrix = @(
     @{ Kind = 'native-seh';        Envelope = $true;  CrashLog = $false }
     @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $true  }
