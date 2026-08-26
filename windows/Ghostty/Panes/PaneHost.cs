@@ -59,6 +59,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     //     the visual effect of the active pane being "brighter" than
     //     its siblings without touching the terminal contents.
     //
+    // Above both sits _tabContentBorderFrame, which frames the tab's
+    // whole terminal area rather than any one leaf. It is not part of the
+    // overlay: it needs no positioning, and it stays up through a zoom,
+    // which collapses the overlay.
+    //
     // Doing highlights as an overlay (instead of per-leaf Borders
     // inside the split tree) avoids splitter occlusion: a splitter in
     // a parent Grid is not a sibling of a leaf's chrome and cannot
@@ -76,6 +81,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     // rather than the ctor body itself.
     private Canvas _highlightOverlay = null!;
     private Border _activeBorderFrame = null!;
+    // Frames the whole tab's terminal area. Always present and always
+    // touching the tab strip, which is what makes the selected tab's
+    // folder shape joinable no matter how the tab is split -- see
+    // BuildChrome.
+    private Border _tabContentBorderFrame = null!;
     // Vertical-tab title row sits above the pane; hide the active
     // border's top stroke so it does not read as a line under caption buttons.
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
@@ -249,12 +259,20 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// trees are tiny (typically &lt;10 leaves) so this is cheap.
     /// </summary>
     /// <summary>
-    /// Override the active pane border color. Pass null to revert
-    /// to the default DodgerBlue.
+    /// Override the pane chrome color. Pass null to revert to the default
+    /// DodgerBlue.
     /// </summary>
+    /// <remarks>
+    /// Both frames, from the one value. The tab frame is the line the
+    /// selected tab's folder shape closes onto, so a per-tab preset that
+    /// reached only the focus frame would show as a tab stroked in the
+    /// preset meeting a pane framed in the cursor colour.
+    /// </remarks>
     public void SetActiveBorderBrush(Brush? brush)
     {
-        _activeBorderFrame.BorderBrush = brush ?? DefaultActiveBorderBrush;
+        var resolved = brush ?? DefaultActiveBorderBrush;
+        _activeBorderFrame.BorderBrush = resolved;
+        _tabContentBorderFrame.BorderBrush = resolved;
     }
 
     /// <summary>
@@ -355,6 +373,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _treeRoot = BuildVisual(_root);
         hostGrid.Children.Add(_treeRoot);
         hostGrid.Children.Add(_highlightOverlay);
+        hostGrid.Children.Add(_tabContentBorderFrame);
         hostGrid.Children.Add(_restoreZoomButton);
         Content = hostGrid;
 
@@ -403,6 +422,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         _treeRoot = BuildVisual(_root);
         hostGrid.Children.Add(_treeRoot);
         hostGrid.Children.Add(_highlightOverlay);
+        hostGrid.Children.Add(_tabContentBorderFrame);
         hostGrid.Children.Add(_restoreZoomButton);
         Content = hostGrid;
 
@@ -451,6 +471,34 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // the chrome never gets composited under the terminal.
         Canvas.SetZIndex(_highlightOverlay, 999);
 
+        // The tab's own frame, around the whole terminal area rather than
+        // around a leaf. The selected tab is drawn as a folder joined to
+        // this line, so the line has to be there wherever the focus is:
+        // with only the active leaf framed, the join existed by
+        // coincidence -- a single pane fills its tab, so its top edge
+        // happened to land under the strip. Split the tab, focus a pane
+        // away from the top edge, and the tab joined to nothing while the
+        // seam cover rubbed out a border that was not there.
+        //
+        // Stretched in the host Grid rather than placed on the overlay
+        // Canvas: it needs no coordinates of its own, so it cannot drift
+        // from the area it frames, and it survives a zoom, which collapses
+        // the overlay.
+        _tabContentBorderFrame = new Border
+        {
+            BorderBrush = DefaultActiveBorderBrush,
+            BorderThickness = new Thickness(t),
+            Background = null,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        // Over the overlay, not under it. The inactive-pane dim film lives
+        // there and runs to those panes' outer edges, which are this
+        // frame's edges too -- beneath it the tab frame comes out visibly
+        // darkened for exactly the stretch an unfocused pane occupies.
+        Canvas.SetZIndex(_tabContentBorderFrame, 1000);
+
         // Restore-from-zoom affordance. Mirrors the quake pin button:
         // transparent, borderless, top-right, 32x28. Hidden until a pane
         // is zoomed (ToggleSplitZoom shows it). Sits above the floated
@@ -476,7 +524,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         };
         ToolTipService.SetToolTip(_restoreZoomButton, "Zoomed in — click to restore");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_restoreZoomButton, "Restore zoomed pane");
-        Canvas.SetZIndex(_restoreZoomButton, 1000);
+        // One above the tab frame, keeping the "topmost chrome" it had
+        // before that frame existed. Its margin clears the stroke today,
+        // so this is about the ordering staying deliberate rather than
+        // about a pixel currently in dispute.
+        Canvas.SetZIndex(_restoreZoomButton, 1001);
         // These handlers capture `this`, but the button is owned solely by
         // this PaneHost (a child of its host Grid), so the reference is an
         // internal cycle that dies with the PaneHost - not a leak across the
@@ -1357,6 +1409,21 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         }
 
         var bounds = LeafLayoutBounds(ctl);
+
+        // One stroke where the two frames coincide. When the tab holds a
+        // single pane the active leaf fills the whole content area, and
+        // the tab frame is already drawing that exact rectangle in the
+        // same colour at the same weight; a second stroke over it reads
+        // as one thicker, darker line than the frame anywhere else.
+        if (Core.Panes.PaneChrome.LeafFillsContent(
+                bounds.X, bounds.Y, bounds.Width, bounds.Height,
+                _tabContentBorderFrame.ActualWidth,
+                _tabContentBorderFrame.ActualHeight))
+        {
+            _activeBorderFrame.Visibility = Visibility.Collapsed;
+            return;
+        }
+
         var t = Core.Panes.PaneChrome.ActiveBorderThickness;
         _activeBorderFrame.BorderThickness = new Thickness(t);
         Canvas.SetLeft(_activeBorderFrame, bounds.X);
