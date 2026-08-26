@@ -229,11 +229,23 @@ function Enable-Chords {
     if (-not $script:ArmPid) {
         throw 'FOREGROUND_MISS: asked to arm input before the window under test was known'
     }
+    # Rect swallows GetWindowRect's return, so a window that has gone away
+    # comes back as zeros rather than as an error. Left unchecked that aims the
+    # click at the top-left of the screen, hits whatever lives there, and
+    # reports a foreground miss for what is actually a window that no longer
+    # exists - a cause the caller reports as PRODUCT_FAIL.
+    if (-not [MFz]::IsWindow($script:ArmHwnd)) {
+        throw 'PRODUCT_FAIL: the window under test vanished before its input could be armed'
+    }
     $rc = [MFz]::Rect($script:ArmHwnd)
+    if ($rc.R -le $rc.L -or $rc.B -le $rc.T) {
+        throw "PRODUCT_FAIL: the window under test has a degenerate rect ($($rc.L),$($rc.T))-($($rc.R),$($rc.B))"
+    }
     $x = [int]($rc.L + ($rc.R - $rc.L) * 0.75)
     $y = [int]($rc.T + ($rc.B - $rc.T) * 0.75)
     if (-not [MFz]::Click([uint32]$script:ArmPid, $x, $y, $false)) {
-        throw "FOREGROUND_MISS: could not click the terminal at $x,$y to arm input"
+        throw ("FOREGROUND_MISS: could not click the terminal at $x,$y to arm input; " +
+            "foreground is $([MFz]::ForegroundNow())")
     }
     Start-Sleep -Milliseconds 250
 }
@@ -459,17 +471,21 @@ try {
                         } else { $act = 'tab-color-miss' }
                         Start-Sleep -Milliseconds 250
                         [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
-                        # UIA leaves focus on the swatch it clicked, and the
-                        # layout chord only reaches the router from the
-                        # terminal surface. Without this the fuzz spends the
-                        # rest of the run sending toggles nobody handles.
-                        Enable-Chords
                     } else { $act = 'tab-color-skipped' }
                 }
             } catch {
                 $act = 'tab-color-error'
                 [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             }
+            # Outside the catch on purpose. UIA leaves focus on the swatch it
+            # clicked, and the layout chord only reaches the router from the
+            # terminal surface, so this is what lets the rest of the run drive
+            # anything at all. Swallowed as one more 'tab-color-error' it would
+            # leave the island unarmed, and the iterations after it would send
+            # chords nobody handles while the actions table recorded them as
+            # having happened - none of those are asserted on, so the run would
+            # go quietly useless until the next toggle threw.
+            Enable-Chords
         }
 
         $actions[$act] = 1 + ($actions[$act] ?? 0)
@@ -557,8 +573,9 @@ if ($failures.Count -gt 0) {
 # no ghost lines to find. A build whose layout chord never reaches the router
 # therefore reported nothing and left with 0. Gate the run itself.
 #
-# Both floors are proportions of the chords sent, because -Iterations decides
-# how many there are.
+# Both are proportions rather than counts, because -Iterations decides how many
+# chords there are. They divide by different things on purpose: the cap by
+# every chord attempted, the floor by only those the desktop actually took.
 #
 # One switch per chord, because that is now what a chord does. Measured against
 # a clean build at 49 switches for 34 chords, 39 for 26 and 51 for 31, so 1.44
@@ -584,9 +601,16 @@ if ($chordMisses -gt $missCap) {
     throw ("FOREGROUND_MISS: $chordMisses of $toggleAttempts layout chords were refused " +
         "(cap $missCap) - another window held the foreground, so the switch was never driven")
 }
-$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($toggleAttempts * $MinBeginRatio))
+# Delivered, not attempted. A chord the desktop refused never reached the app,
+# and the build cannot be asked to have answered it - counting it here would
+# charge a foreground steal to the product and then say "the router never saw
+# them" about chords that were never sent. Safe as a denominator only because
+# the cap above has already rejected a run that lost most of them: on its own,
+# every chord refused would leave zero delivered and a floor of nothing.
+$delivered = $toggleAttempts - $chordMisses
+$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($delivered * $MinBeginRatio))
 if ($begins -lt $beginFloor) {
-    throw ("only $begins switch(es) began for $toggleAttempts layout chords (floor " +
+    throw ("only $begins switch(es) began for $delivered delivered layout chords (floor " +
         "$beginFloor) - the chords went out but the router never saw them, so nothing " +
         'above was measured')
 }
