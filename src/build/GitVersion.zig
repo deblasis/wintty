@@ -53,8 +53,16 @@ pub fn detect(b: *std.Build) !Version {
         break :short_hash std.mem.trimEnd(u8, output, "\r\n ");
     };
 
+    // Only a release tag names a version. With no match pattern this returns
+    // whatever tag happens to sit on HEAD, and Config.init panics on a tag it
+    // does not recognise -- so a tag in an unrelated namespace makes the
+    // commit unbuildable. This fork tags every published sync series/vN,
+    // which lands on exactly such a commit.
+    //
+    // These two patterns filter by namespace; they do not validate. Whether
+    // a v* tag is one Config.init accepts stays Config.init's call.
     const tag = b.runAllowFail(
-        &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags" },
+        &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip" },
         &code,
         .ignore,
     ) catch |err| switch (err) {
