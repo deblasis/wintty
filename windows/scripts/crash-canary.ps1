@@ -14,7 +14,9 @@
   This is a MEASUREMENT, not a gate: it exits 0 whether or not canaries are
   found, and only fails if it could not measure at all.
 
-  Requires a DEBUG build: +crash is compiled out of Release.
+  Runs against any configuration. +crash used to be compiled out of Release;
+  it now ships everywhere, and pointing this at a published build is the
+  point, because that is the one whose reports users would be sending.
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
@@ -39,6 +41,29 @@ function Get-EnvelopeSet {
         Select-Object -ExpandProperty Name)
 }
 
+# A launch that arms the reporter, does not crash, and exits. See below for
+# why this is needed twice.
+function Invoke-Drain {
+    Start-Process -FilePath $ExePath -ArgumentList '+crash', 'handled-storm' `
+        -PassThru -Wait -NoNewWindow | Out-Null
+    Start-Sleep -Milliseconds 300
+}
+
+# A crash report arrives ONE LAUNCH LATE. sentry-native's inproc backend does
+# not call our transport at crash time; it writes into its own run directory,
+# and only the next sentry_init replays it. So a canary-carrying crash leaves
+# NOTHING in the crash directory when its process dies.
+#
+# This script used to snapshot around the crash alone and read $new[0]. What
+# it actually read was whatever the crashing launch DRAINED on the way up,
+# i.e. the report from whichever crash came before it. Run after
+# crash-matrix.ps1, or after any real crash, it opened a canary-free envelope
+# and printed "no canary found" -- which is the input to decision D3, so the
+# answer would have been arrived at from the wrong file.
+#
+# Drain first so the directory is quiet, then crash, then drain again to bring
+# THIS crash's report through.
+Invoke-Drain
 $before = Get-EnvelopeSet
 
 $env:WINTTY_CANARY = $canaryEnv
@@ -50,15 +75,19 @@ try {
     Remove-Item Env:\WINTTY_CANARY -ErrorAction SilentlyContinue
 }
 
-# The envelope is written by the crashing process before it dies; give the
-# filesystem a beat to settle before enumerating.
-Start-Sleep -Milliseconds 500
+Invoke-Drain
 
 $after = Get-EnvelopeSet
 $new   = @($after | Where-Object { $_ -notin $before })
 
 if ($new.Count -eq 0) {
     throw 'canary: no envelope was produced, so nothing could be measured. Run crash-matrix.ps1 first to confirm native-seh is captured at all.'
+}
+if ($new.Count -gt 1) {
+    # More than one means something else crashed alongside this, and $new[0]
+    # would be an arbitrary pick. Say so rather than measure the wrong file.
+    throw ("canary: {0} envelopes appeared, so which one belongs to this " +
+        "crash is ambiguous: {1}" -f $new.Count, ($new -join ', '))
 }
 
 # Envelopes are part text, part binary; scan raw bytes decoded as Latin1

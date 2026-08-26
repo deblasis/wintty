@@ -211,7 +211,17 @@ internal partial class CommandPaletteViewModel : INotifyPropertyChanged
 
         if (string.IsNullOrEmpty(query))
         {
-            filtered = _allCommands;
+            // Debug rows are absent from the unfiltered list, not merely last
+            // in it. Sorting them last governs position, and title-only
+            // matching needs a query to apply, so both mitigations miss this
+            // branch by construction: open the palette, press End, press
+            // Enter, and the window goes down with whatever was in the
+            // terminal, on a shipped build, with no confirmation.
+            //
+            // The invariant is that a destructive row has to be asked for by
+            // name. Excluding them here is what makes it true. Typing any part
+            // of the title still finds them, and `+crash` is untouched.
+            filtered = _allCommands.Where(c => c.Category != CommandCategory.Debug);
         }
         else
         {

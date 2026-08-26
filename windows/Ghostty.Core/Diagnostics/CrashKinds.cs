@@ -198,4 +198,18 @@ internal static class CrashKinds
 
     /// <summary>Every id, comma-separated, for a CLI usage line.</summary>
     internal static string Ids => string.Join(", ", All.Select(k => k.Id));
+
+    /// <summary>
+    /// The ids the CLI can actually run, comma-separated.
+    ///
+    /// Printed alongside <see cref="Ids"/> so a third consumer can read the
+    /// catalogue rather than keep its own copy of it. That third consumer is
+    /// <c>windows/scripts/crash-matrix.ps1</c>: it is a .ps1, so no wiring
+    /// test can scan it, and it hardcoded these five. A kind added to the
+    /// catalogue got a palette row and a working `+crash`, and the harness
+    /// went on reporting five green rows without ever running it. The row
+    /// nobody measured is the one that regresses.
+    /// </summary>
+    internal static string CliIds =>
+        string.Join(", ", All.Where(k => !k.NeedsSurface).Select(k => k.Id));
 }

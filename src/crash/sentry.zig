@@ -100,7 +100,20 @@ pub fn init(gpa: Allocator, environ_map: std.process.Environ.Map) !void {
     init_thread = thr;
 }
 
-fn initThread(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
+fn initThread(gpa: Allocator, environ_map_: std.process.Environ.Map) void {
+    // Report here rather than returning the error. std.Thread.spawn swallows a
+    // thread function's error into std.debug.print, which is raw stderr: not
+    // logFn, not the app's log sink. In a NativeAOT windowed process there is
+    // no stderr at all, so an unwritable database directory produced a silent
+    // failure, waitReady burning its whole timeout, and "reporter did not arm"
+    // with nothing to diagnose it from. global.zig's catch only ever covered
+    // the spawn, which practically never fails.
+    initThreadImpl(gpa, environ_map_) catch |err| {
+        log.warn("sentry init failed, no crash capture available err={}", .{err});
+    };
+}
+
+fn initThreadImpl(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
     var environ_map = environ_map_;
     defer environ_map.deinit();
 
@@ -173,19 +186,23 @@ fn initThread(gpa: Allocator, environ_map_: std.process.Environ.Map) !void {
     // Initialize
     if (sentry.c.sentry_init(opts) != 0) return error.SentryInitFailed;
 
+    // Setup some basic tags that we always want present
+    sentry.setTag("build-mode", build_config.mode_string);
+    sentry.setTag("app-runtime", @tagName(build_config.app_runtime));
+    sentry.setTag("font-backend", @tagName(build_config.font_backend));
+    sentry.setTag("renderer", @tagName(build_config.renderer));
+
     // Only once sentry_init has returned is the backend's exception handler
     // installed. Anything that means to provoke a crash and watch it be
     // captured has to wait for this, and cannot infer it from the database
     // directory appearing: sentry creates that during init, before the
     // handler exists, and it outlives the process, so on every run after the
     // first it is already there before we start.
+    //
+    // Stored AFTER the tags, not before. A trigger that waits for ready and
+    // crashes at once would otherwise race them and produce a report missing
+    // all four, which reads as a flaky row rather than as a race.
     init_done.store(true, .release);
-
-    // Setup some basic tags that we always want present
-    sentry.setTag("build-mode", build_config.mode_string);
-    sentry.setTag("app-runtime", @tagName(build_config.app_runtime));
-    sentry.setTag("font-backend", @tagName(build_config.font_backend));
-    sentry.setTag("renderer", @tagName(build_config.renderer));
 
     // Log some information about sentry
     log.debug("sentry initialized database={s}", .{cache_dir});
@@ -239,12 +256,27 @@ pub fn capturePanic(msg: []const u8) void {
     if (comptime !build_options.sentry) return;
     if (comptime builtin.os.tag != .windows) return;
 
+    // Re-entry on THIS thread means reporting the panic itself panicked, and
+    // there is nothing left to try: return immediately so panicImpl falls
+    // through to defaultPanic.
+    //
+    // Checked before the cross-thread latch, and it has to be. The earlier
+    // version relied on the latch alone and claimed the re-entry "loses the
+    // exchange and falls through". It does lose it, and then waits on a flag
+    // that only the winner sets, which on a same-thread re-entry is this
+    // thread, still inside captureEvent. That is not a fall-through, it is a
+    // deadlock: the process hangs with no report, no abort, and no WER
+    // record, which is strictly worse than having no hook at all.
+    //
+    // Reachable, not theoretical. beforeSend runs synchronously on this
+    // thread and dereferences a surface whose data the comment there already
+    // admits may be torn; a zero cell width makes GridSize.update divide to
+    // inf, and @intFromFloat(inf) is a safety panic in Debug and ReleaseSafe.
+    if (in_capture) return;
+    in_capture = true;
+
     // Reporting runs in an already broken process, so keep it to the one
     // call and let anything it touches fail silently.
-    //
-    // The latch also stops a panic inside captureEvent from recursing: the
-    // exchange happens before any sentry call, so the re-entry loses it and
-    // falls through to defaultPanic.
     if (@atomicRmw(bool, &panic_reported, .Xchg, true, .seq_cst)) {
         // A second thread panicking concurrently must not race us to
         // abort(). std.debug.defaultPanic serialises panics against each
@@ -253,7 +285,18 @@ pub fn capturePanic(msg: []const u8) void {
         // the winner is in the middle of writing. Wait for the winner to
         // finish, then let this thread continue into defaultPanic, which
         // takes over the serialising from there.
-        while (!panic_capture_done.load(.acquire)) std.Thread.yield() catch {};
+        //
+        // Bounded, because the winner can stall rather than finish:
+        // sendInternal creates a directory and writes a file, and a hung or
+        // redirected state directory turns "wait for the winner" into "hang
+        // the process". A truncated report is a worse report; a hung process
+        // is no report and no exit. Prefer the truncated one.
+        var spins: usize = 0;
+        while (!panic_capture_done.load(.acquire)) {
+            if (spins >= panic_wait_spins) break;
+            spins += 1;
+            std.Thread.yield() catch {};
+        }
         return;
     }
 
@@ -264,10 +307,28 @@ pub fn capturePanic(msg: []const u8) void {
     // so the crash site is a few frames up.
     event.addStacktrace();
 
-    _ = sentry.captureEvent(event);
+    // Nil means the event was dropped rather than captured: the SDK is not
+    // initialised yet, before_send returned null, or it was rate limited.
+    // Discarding that turns "the panic hook fired and the event went nowhere"
+    // into something indistinguishable from "Zig panics are not captured on
+    // Windows", which is the conclusion this whole hook exists to overturn.
+    // defaultPanic is about to write to stderr regardless, so saying so costs
+    // nothing.
+    if (sentry.captureEvent(event) == null) {
+        log.warn("panic report was dropped rather than captured", .{});
+    }
 
     panic_capture_done.store(true, .release);
 }
+
+/// Set for the duration of a panic capture on the capturing thread, so a
+/// panic raised while reporting a panic is recognised as re-entry rather than
+/// waiting on itself.
+threadlocal var in_capture: bool = false;
+
+/// How long a thread that lost the panic latch will wait for the winner. Not
+/// a duration: a panicking process is the wrong place to ask for a clock.
+const panic_wait_spins: usize = 100_000;
 
 pub fn deinit() void {
     if (comptime !build_options.sentry) return;
@@ -279,6 +340,11 @@ pub fn deinit() void {
     init_thread = null;
     thr.join();
     _ = sentry.c.sentry_close();
+
+    // The handler is gone, so stop telling callers it is armed. Without this
+    // a trigger fired during shutdown is told the reporter is ready when it
+    // is not, which is precisely the lie waitReady exists to prevent.
+    init_done.store(false, .release);
 }
 
 /// Block until the crash reporter is armed, or until `timeout_ms` elapses.
@@ -298,11 +364,18 @@ pub fn waitReady(timeout_ms: u64) bool {
     defer io_threaded.deinit();
     const io = io_threaded.io();
 
-    var waited: u64 = 0;
+    // Measured against the clock, not by counting sleeps. Adding 5 per
+    // iteration assumes the scheduler returns on time, so an overshooting one
+    // makes the real wait longer than the caller asked for, and the caller
+    // then reports the timeout it believed it used.
+    //
+    // `.awake` rather than `.real`: this is an elapsed-time question, and a
+    // wall clock that steps backwards would extend the wait indefinitely.
+    const start = std.Io.Timestamp.now(io, .awake).toMilliseconds();
     while (!init_done.load(.acquire)) {
-        if (waited >= timeout_ms) return false;
+        const elapsed = std.Io.Timestamp.now(io, .awake).toMilliseconds() - start;
+        if (elapsed >= timeout_ms) return false;
         std.Io.sleep(io, .fromMilliseconds(5), .awake) catch return false;
-        waited += 5;
     }
 
     return true;
@@ -404,6 +477,11 @@ fn beforeSend(
 fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
     var out: []const u8 = json;
     var owned = false;
+    // Without this, a key that fails after an earlier one allocated leaks the
+    // earlier buffer. sendInternal runs on an arena so production does not
+    // notice, but this function documents itself as returning owned memory,
+    // and a leak that only an arena hides is still a leak in the contract.
+    errdefer if (owned) alloc.free(out);
     for (image_path_keys) |key| {
         const next = try scrubKey(alloc, out, key);
         if (owned and next.ptr != out.ptr) alloc.free(out);
@@ -411,6 +489,15 @@ fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
         out = next;
     }
     return out;
+}
+
+/// Whether any key in `image_path_keys` appears, so the envelope-level fast
+/// path cannot fall out of step with the list it is supposed to enforce.
+fn containsAnyPathKey(bytes: []const u8) bool {
+    inline for (image_path_keys) |key| {
+        if (std.mem.indexOf(u8, bytes, "\"" ++ key ++ "\":\"") != null) return true;
+    }
+    return false;
 }
 
 /// Every module field that carries a filesystem path.
@@ -422,10 +509,24 @@ fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
 /// forgetting one visible.
 const image_path_keys = [_][]const u8{ "code_file", "debug_file" };
 
+/// Sized for `"<key>":"`, asserted against `image_path_keys` in `scrubKey`.
+const needle_buf_len = 64;
+
 fn scrubKey(alloc: Allocator, json: []const u8, key: []const u8) ![]const u8 {
-    var needle_buf: [64]u8 = undefined;
+    // The keys are compile-time constants, so a key too long for the buffer
+    // is a build-time mistake, not a runtime condition. Asserting it says so;
+    // the earlier `catch return json` turned it into "leak the paths quietly",
+    // which is the one outcome this function must never choose.
+    comptime {
+        for (image_path_keys) |k| {
+            if (k.len + 4 > needle_buf_len) @compileError(
+                "image_path_keys entry too long for scrubKey's needle buffer",
+            );
+        }
+    }
+    var needle_buf: [needle_buf_len]u8 = undefined;
     const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":\"", .{key}) catch
-        return json;
+        unreachable;
     if (std.mem.indexOf(u8, json, needle) == null) return json;
 
     var out: std.ArrayList(u8) = .empty;
@@ -455,13 +556,17 @@ fn scrubKey(alloc: Allocator, json: []const u8, key: []const u8) ![]const u8 {
 
         const value = rest[value_start..value_end];
 
-        // Backslashes arrive escaped in JSON, so the separator is two bytes.
-        const cut = if (std.mem.lastIndexOf(u8, value, "\\\\")) |b|
-            b + 2
-        else if (std.mem.lastIndexOfScalar(u8, value, '/')) |b|
-            b + 1
-        else
-            0;
+        // Backslashes arrive escaped in JSON, so that separator is two bytes.
+        //
+        // The LAST separator of either kind, not the last backslash falling
+        // back to the last slash. Preferring one kind keeps whatever follows
+        // the other: "C:\\Program Files\\x/Users/alex/a.dll" cut at the
+        // backslash leaves "x/Users/alex/a.dll", username intact. Contrived
+        // on Windows, but this is the function whose whole job is not to
+        // fail open.
+        const back = if (std.mem.lastIndexOf(u8, value, "\\\\")) |b| b + 2 else 0;
+        const fwd = if (std.mem.lastIndexOfScalar(u8, value, '/')) |b| b + 1 else 0;
+        const cut = @max(back, fwd);
 
         if (cut == 0) {
             try out.appendSlice(alloc, value);
@@ -491,7 +596,14 @@ fn scrubKey(alloc: Allocator, json: []const u8, key: []const u8) ![]const u8 {
 /// Returns a slice owned by `alloc`, or the input unchanged when there is
 /// nothing to rewrite.
 fn scrubEnvelope(alloc: Allocator, bytes: []const u8) ![]const u8 {
-    if (std.mem.indexOf(u8, bytes, "\"code_file\":\"") == null) return bytes;
+    // The fast path has to agree with image_path_keys, or the list is not
+    // authoritative and its doc comment lies. This used to test `code_file`
+    // alone, so an envelope whose only path field was `debug_file` was
+    // returned byte-identical with the username in it: exactly the bug
+    // adding `debug_file` to the list was meant to fix, surviving one layer
+    // up. sentry_modulefinder_windows.c happens to always emit both today,
+    // which is what made it latent rather than shipping.
+    if (!containsAnyPathKey(bytes)) return bytes;
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
@@ -626,6 +738,68 @@ test "a scrubbed envelope still parses" {
     var parsed = try crash.Envelope.parse(alloc, &reader);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.items.items.len);
+}
+
+test "every path key is scrubbed at the envelope level, not just code_file" {
+    // scrubEnvelope had its own fast path keyed on `code_file` alone, so an
+    // envelope whose only path field was `debug_file` was returned
+    // byte-identical with the username in it. image_path_keys said otherwise
+    // and the guard below could not see it, because that one calls
+    // scrubImagePaths directly and never goes through the gate.
+    //
+    // Driven off image_path_keys so a key added to the list is covered here
+    // the day it is added, rather than the day someone remembers.
+    const alloc = std.testing.allocator;
+
+    inline for (image_path_keys) |key| {
+        var payload_buf: [128]u8 = undefined;
+        const payload = try std.fmt.bufPrint(
+            &payload_buf,
+            "{{\"images\":[{{\"{s}\":\"C:\\\\\\\\Users\\\\\\\\alex\\\\\\\\a.bin\"}}]}}",
+            .{key},
+        );
+
+        var raw: std.ArrayList(u8) = .empty;
+        defer raw.deinit(alloc);
+        var head: [64]u8 = undefined;
+        try raw.appendSlice(alloc, "{}\n");
+        try raw.appendSlice(alloc, try std.fmt.bufPrint(
+            &head,
+            "{{\"type\":\"event\",\"length\":{d}}}\n",
+            .{payload.len},
+        ));
+        try raw.appendSlice(alloc, payload);
+        try raw.appendSlice(alloc, "\n");
+
+        const scrubbed = try scrubEnvelope(alloc, raw.items);
+        defer if (scrubbed.ptr != raw.items.ptr) alloc.free(scrubbed);
+
+        try std.testing.expect(std.mem.indexOf(u8, scrubbed, "a.bin") != null);
+        try std.testing.expect(std.mem.indexOf(u8, scrubbed, "alex") == null);
+        try std.testing.expect(std.mem.indexOf(u8, scrubbed, "Users") == null);
+
+        // And it still parses, so the gate fix did not shorten a payload
+        // without correcting its header.
+        var reader: std.Io.Reader = .fixed(scrubbed);
+        var parsed = try crash.Envelope.parse(alloc, &reader);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 1), parsed.items.items.len);
+    }
+}
+
+test "the last separator wins, whichever kind it is" {
+    // Preferring backslashes kept everything after the last one when a
+    // forward slash came later, which on a mixed path leaves the username in.
+    const alloc = std.testing.allocator;
+    const input =
+        \\{"code_file":"C:\\Program Files\\x/Users/alex/a.dll"}
+    ;
+    const out = try scrubImagePaths(alloc, input);
+    defer if (out.ptr != input.ptr) alloc.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "a.dll") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "alex") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Users") == null);
 }
 
 test "scrubImagePaths keeps the file name and drops the directory" {
