@@ -12,9 +12,11 @@ namespace Ghostty.Cli;
 /// Deliberate crash triggers, one per class in the coverage matrix of
 /// docs/2026-08-25-crash-reporting-and-diagnostics-design.md.
 ///
-/// Compiled out of Release entirely: this exists to prove which crash
-/// classes the in-process sentry backend can and cannot see, and several
-/// of the expected results are deliberately "nothing is captured".
+/// Present in every build, including shipped installers. This exists to
+/// prove which crash classes the in-process sentry backend can and cannot
+/// see, and several of the expected results are deliberately "nothing is
+/// captured". A trigger compiled out of Release would leave the one
+/// configuration users actually run as the one nobody can verify.
 ///
 /// Each kind uses the exact mechanism its matrix row names. Do not
 /// substitute a convenient proxy: the whole value of the harness is that
@@ -28,7 +30,6 @@ namespace Ghostty.Cli;
 /// </summary>
 internal static partial class CrashTrigger
 {
-#if DEBUG
     private const uint EXCEPTION_NONCONTINUABLE = 0x1;
     private const uint FACILITY_TEST_EXCEPTION = 0xE0000001;
 
@@ -238,12 +239,4 @@ internal static partial class CrashTrigger
         pad[0] = (byte)depth;
         return Recurse(depth + 1) + pad[0];
     }
-#else
-    internal static int Run(string kind, Func<string, bool>? bindingAction = null)
-    {
-        Console.Error.WriteLine(
-            "crash-trigger is compiled out of Release builds");
-        return 2;
-    }
-#endif
 }
