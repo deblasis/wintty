@@ -3537,6 +3537,18 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+        // Deliberate crash triggers, the same kinds and the same
+        // implementation as `wintty +crash <kind>`. Registered in every
+        // build: the shipped installer is the configuration whose capture
+        // most needs proving, and a Debug-only trigger cannot prove it.
+        //
+        // Deferred to the next tick like every other source: the fault then
+        // lands after the palette popup has torn down, so the captured stack
+        // is the trigger's own rather than WinUI's teardown on top of it.
+        sources.Add(new CrashCommandSource(
+            kind => DispatcherQueue.TryEnqueue(
+                () => Cli.CrashTrigger.Run(kind, TryExecuteBindingAction))));
+
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
         // the var unset leaves the palette unchanged. Defer to the next tick so
@@ -3645,10 +3657,33 @@ public sealed partial class MainWindow : Window
     {
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
+        _ = TryExecuteBindingAction(actionKey);
+    }
+
+    /// <summary>
+    /// Dispatch a binding action against the active surface, reporting
+    /// whether it was performed.
+    ///
+    /// The crash triggers are what need the answer: "crash:render" that
+    /// found no surface, or that libghostty did not recognise, is a no-op,
+    /// and reporting a crash for it would have the operator read the absent
+    /// report as a miss by the reporter.
+    ///
+    /// The split is shaped by the tier machinery rather than by taste. Three
+    /// patch stacks carry hunks whose context is
+    /// <see cref="ExecuteBindingAction"/>'s opening three lines, and plain
+    /// `git apply` is what materialises them, so those three lines cannot
+    /// move. Everything below them can, which is why the body lives here and
+    /// the original method keeps its signature and its first three lines.
+    /// </summary>
+    private bool TryExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return false;
 
         var terminal = leaf.Terminal();
         var surfaceHandle = terminal.SurfaceHandle;
-        if (surfaceHandle == IntPtr.Zero) return;
+        if (surfaceHandle == IntPtr.Zero) return false;
 
         var surface = new GhosttySurface(surfaceHandle);
         var actionBytes = Encoding.UTF8.GetBytes(actionKey);
@@ -3656,7 +3691,8 @@ public sealed partial class MainWindow : Window
         {
             fixed (byte* p = actionBytes)
             {
-                NativeMethods.SurfaceBindingAction(surface, p, (UIntPtr)actionBytes.Length);
+                return NativeMethods.SurfaceBindingAction(
+                    surface, p, (UIntPtr)actionBytes.Length);
             }
         }
     }
