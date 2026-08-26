@@ -23,13 +23,15 @@ public sealed class RootGridBackgroundWiringTests
             .Method("ApplyRootGridBackground")
             .Call("RootBackgroundResolver.Resolve");
 
-        var polarity = call.Arg(3);
-        Assert.Contains("OsTheme.IsDark", polarity, StringComparison.Ordinal);
+        // Asserted on the node: a substring match here reads the same
+        // against `!OsTheme.IsDark(...)`, so it would have passed the whole
+        // resolution through inverted and reported the wiring intact.
+        var polarity = call.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
 
         // The window already holds a UISettings and subscribes to it. A
         // freshly activated one answers for a different moment, which is
         // the drift OsTheme's overload exists to prevent.
-        Assert.Contains("_systemUiSettings", polarity, StringComparison.Ordinal);
+        Assert.Equal("_systemUiSettings", polarity.Arg(0));
     }
 
     /// <summary>
@@ -43,7 +45,10 @@ public sealed class RootGridBackgroundWiringTests
         var source = ShellSource.Load("MainWindow.xaml.cs");
         var estimate = Assert.Single(
             source.Root.Calls("Core.Shell.BackdropGround.Estimate"));
-        Assert.Contains("OsTheme.IsDark", estimate.Arg(1), StringComparison.Ordinal);
+        // Same node-level assertion as above and for the same reason: told
+        // the negation of the desktop polarity, Estimate stays just as pure
+        // and answers for the wrong desktop.
+        estimate.ArgExpression(1).AssertCallTo("OsTheme.IsDark");
 
         var core = ShellSource.Load("Core.Shell.BackdropGround.cs");
         Assert.DoesNotContain(
