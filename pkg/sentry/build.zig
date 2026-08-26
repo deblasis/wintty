@@ -32,6 +32,24 @@ pub fn build(b: *std.Build) !void {
     // decorate its API with __declspec(dllimport); without this every
     // sentry_* symbol comes out as an unresolved dllimport on Windows.
     try flags.append(b.allocator, "-DSENTRY_BUILD_STATIC=1");
+    // Zig's ubsan runtime cannot be bundled on Windows (LNK4229), so every
+    // C object built with the default sanitizer settings leaves
+    // __ubsan_handle_* undefined. That is invisible while Zig links the
+    // artifact and fatal the moment an external linker consumes the archive,
+    // which on Windows is exactly what happens: ghostty-static.lib is linked
+    // into the NativeAOT image by MSVC link.exe. src/build/SharedDeps.zig
+    // already does this for ghostty's own C sources; sentry's were the set
+    // that did not go through it.
+    //
+    // Nothing in a `zig build` or a `dotnet build` catches this. Both link
+    // with Zig or run on CoreCLR; only `dotnet publish` reaches link.exe, so
+    // the whole four-tier gate stayed green while no release could link.
+    if (target.result.abi == .msvc) {
+        try flags.appendSlice(b.allocator, &.{
+            "-fno-sanitize=undefined",
+            "-fno-sanitize-trap=undefined",
+        });
+    }
     if (target.result.os.tag == .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-DSENTRY_WITH_UNWINDER_DBGHELP",
