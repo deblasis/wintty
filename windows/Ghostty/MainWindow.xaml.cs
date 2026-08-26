@@ -3653,19 +3653,28 @@ public sealed partial class MainWindow : Window
         window.Activate();
     }
 
-    // Every caller but one passes this as an Action<string>, and a
-    // bool-returning method group does not convert to that, so the void
-    // wrapper stays and the answer lives next door.
-    private void ExecuteBindingAction(string actionKey) =>
+    private void ExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return;
         _ = TryExecuteBindingAction(actionKey);
+    }
 
     /// <summary>
     /// Dispatch a binding action against the active surface, reporting
-    /// whether it reached one.
+    /// whether it was performed.
     ///
     /// The crash triggers are what need the answer: "crash:render" that
-    /// found no surface is a no-op, and reporting a crash for it would have
-    /// the operator read the absent report as a miss by the reporter.
+    /// found no surface, or that libghostty did not recognise, is a no-op,
+    /// and reporting a crash for it would have the operator read the absent
+    /// report as a miss by the reporter.
+    ///
+    /// The split is shaped by the tier machinery rather than by taste. Three
+    /// patch stacks carry hunks whose context is
+    /// <see cref="ExecuteBindingAction"/>'s opening three lines, and plain
+    /// `git apply` is what materialises them, so those three lines cannot
+    /// move. Everything below them can, which is why the body lives here and
+    /// the original method keeps its signature and its first three lines.
     /// </summary>
     private bool TryExecuteBindingAction(string actionKey)
     {
