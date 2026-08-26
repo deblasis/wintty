@@ -239,20 +239,34 @@ public sealed class FrameStyleWiringTests
     }
 
     /// <summary>
-    /// High Contrast is the one place the two keys are not orthogonal, and it
-    /// is pinned in one expression rather than re-tested at each painter.
-    /// Asserted on the arms, because swapping them makes High Contrast the
-    /// only mode that goes translucent and leaves every other mode unable to.
+    /// Two places pin the frame solid, and both live in this one expression
+    /// rather than being re-tested at each painter.
+    ///
+    /// High Contrast is the first: translucency over a backdrop nobody
+    /// controls is what that mode exists to remove. Asserted on the arms,
+    /// because swapping them makes High Contrast the only mode that goes
+    /// translucent and leaves every other mode unable to.
+    ///
+    /// A solid background is the second, and it is the fold below. Dropping
+    /// it renders a window with no chrome in it: there is one backdrop per
+    /// window, so a frame resolved transparent over a solid one exposes
+    /// RootGrid, which under window-theme=wintty is the terminal's own
+    /// colour. Asserted through the call rather than on the property's text,
+    /// because the two arguments are both style strings and the fold accepts
+    /// them either way round.
     /// </summary>
     [Fact]
-    public void High_contrast_pins_the_frame_solid()
+    public void The_frame_is_pinned_solid_where_translucency_has_nothing_behind_it()
     {
         var body = Property(Window(), "EffectiveFrameStyle").ExpressionBody?.Expression;
         var choice = Assert.IsType<ConditionalExpressionSyntax>(body);
 
         Assert.Equal("HighContrastChromeActive", choice.Condition.ToString());
         Assert.Equal("BackdropStyles.Solid", choice.WhenTrue.ToString());
-        Assert.Equal("_currentFrameStyle", choice.WhenFalse.ToString());
+
+        var fold = choice.WhenFalse.AssertCallTo("BackdropStyles.FrameOver");
+        Assert.Equal("_currentFrameStyle", fold.Arg(0));
+        Assert.Equal("_currentBackdropStyle", fold.Arg(1));
     }
 
     /// <summary>

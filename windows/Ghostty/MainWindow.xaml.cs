@@ -2324,12 +2324,17 @@ public sealed partial class MainWindow : Window
     ///
     /// High Contrast pins it solid. Translucency over a backdrop nobody
     /// controls is the thing that mode exists to remove, so the key stops
-    /// being observable there -- which is the one place the two keys are not
-    /// orthogonal, and it is deliberate.
+    /// being observable there.
+    ///
+    /// A solid background pins it solid too, and for the opposite reason:
+    /// there is nothing behind the frame to come through. Both pins sit in
+    /// this one expression rather than at each painter, because every
+    /// consumer of the frame's material wants the same answer and three of
+    /// them re-deriving it is three chances to disagree.
     /// </summary>
     private string EffectiveFrameStyle => HighContrastChromeActive
         ? BackdropStyles.Solid
-        : _currentFrameStyle;
+        : BackdropStyles.FrameOver(_currentFrameStyle, _currentBackdropStyle);
 
     /// <summary>
     /// The fill the chrome takes, packed ARGB, where fully transparent means
@@ -2342,6 +2347,10 @@ public sealed partial class MainWindow : Window
     /// take. Pinning it off was what made frame-style unobservable under
     /// window-theme=wintty, which is the combination the key exists to
     /// create.
+    ///
+    /// Asked with the frame's effective material, so the transparent answer
+    /// is only ever given where something is behind the chrome to come
+    /// through.
     /// </summary>
     private uint ChromeFillArgb => RootBackgroundResolver.Resolve(
         EffectiveFrameStyle,
@@ -2518,9 +2527,10 @@ public sealed partial class MainWindow : Window
     /// The strips are the same surface as the title row, so they take the
     /// same answer: the palette's shade under a solid frame, the desktop's
     /// under a solid frame with no palette, and nothing at all under a
-    /// frosted or crystal one. window-theme is asked here now -- it names
-    /// the hue, and refusing to pass it on is what left the strips opaque
-    /// on the one combination frame-style exists to create.
+    /// frosted or crystal frame that has a backdrop to reveal. window-theme
+    /// is asked here now -- it names the hue, and refusing to pass it on is
+    /// what left the strips opaque on the one combination frame-style exists
+    /// to create.
     ///
     /// High Contrast without the palette is the one answer the window does
     /// not have. That surface comes from an HC-overridable theme resource,
@@ -2549,11 +2559,11 @@ public sealed partial class MainWindow : Window
     /// Contrast paints from Windows' colours, window-theme=wintty from the
     /// terminal palette.
     ///
-    /// But window-theme only paints while the frame is solid. Ask it for a
-    /// frosted frame and the rows go to the backdrop the way any other bare
-    /// chrome does, and the shade that was dividing them goes with it -- so
-    /// that case wants the stroke back rather than inheriting the palette
-    /// path's exemption.
+    /// But window-theme only paints while the frame is solid enough to carry
+    /// it. Ask it for a frosted frame over a translucent backdrop and the
+    /// rows go to the backdrop the way any other bare chrome does, and the
+    /// shade that was dividing them goes with it -- so that case wants the
+    /// stroke back rather than inheriting the palette path's exemption.
     /// </summary>
     private bool ChromeSeparatorsWanted =>
         !ChromePaintedFromPalette && !HighContrastChromeActive;

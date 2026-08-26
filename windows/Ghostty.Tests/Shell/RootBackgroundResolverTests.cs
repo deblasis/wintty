@@ -127,6 +127,62 @@ public sealed class RootBackgroundResolverTests
     }
 
     /// <summary>
+    /// The regression the fold above exists to stop, asserted on the colour
+    /// rather than on the style, because the colour is what was captured:
+    /// background-style=solid with frame-style=frosted rendered a window
+    /// with no chrome in it at all, one flat #131620 from the title row down
+    /// into the terminal and across the tab strip.
+    ///
+    /// Resolving the frame transparent has nothing to expose there. There is
+    /// one SystemBackdrop per window, so what shows through is RootGrid,
+    /// which under window-theme=wintty is the palette background and is
+    /// therefore the terminal's own colour. All four corners are covered
+    /// because the opaque answer comes from two different places: the
+    /// palette when window-theme is driving it, the desktop otherwise.
+    /// </summary>
+    [Theory]
+    [InlineData(BackdropStyles.Frosted, false, true, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Frosted, false, false, 0xFFF3F3F3u)]
+    [InlineData(BackdropStyles.Frosted, true, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Frosted, true, false, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Crystal, false, true, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Crystal, false, false, 0xFFF3F3F3u)]
+    [InlineData(BackdropStyles.Crystal, true, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Crystal, true, false, ArbitraryShellBg)]
+    public void A_translucent_frame_over_a_solid_backdrop_takes_the_opaque_colour(
+        string frameStyle, bool shellThemeEnabled, bool isDesktopDark, uint expected)
+    {
+        var effective = BackdropStyles.FrameOver(frameStyle, BackdropStyles.Solid);
+
+        Assert.Equal(
+            expected,
+            RootBackgroundResolver.Resolve(
+                effective, shellThemeEnabled, ArbitraryShellBg, isDesktopDark));
+    }
+
+    /// <summary>
+    /// And the frame still reaches the backdrop while there is a backdrop to
+    /// reach. This is the row the key exists to create, so the degradation
+    /// has to be the narrow one it claims to be rather than a frame-style
+    /// that is never translucent anywhere.
+    /// </summary>
+    [Theory]
+    [InlineData(BackdropStyles.Frosted, BackdropStyles.Frosted)]
+    [InlineData(BackdropStyles.Crystal, BackdropStyles.Frosted)]
+    [InlineData(BackdropStyles.Frosted, BackdropStyles.Crystal)]
+    [InlineData(BackdropStyles.Crystal, BackdropStyles.Crystal)]
+    public void A_translucent_frame_over_a_translucent_backdrop_still_goes_bare(
+        string frameStyle, string backdropStyle)
+    {
+        var effective = BackdropStyles.FrameOver(frameStyle, backdropStyle);
+
+        Assert.Equal(
+            RootBackgroundResolver.TransparentArgb,
+            RootBackgroundResolver.Resolve(
+                effective, shellThemeEnabled: true, ArbitraryShellBg, isDesktopDark: true));
+    }
+
+    /// <summary>
     /// Both halves are fully opaque. A chrome colour that let the backdrop
     /// through would defeat the one thing the solid style is for, and the
     /// value is fed to GDI as well as to XAML.
