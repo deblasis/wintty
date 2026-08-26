@@ -12,6 +12,9 @@ const lib_version = "0.1.0-dev";
 /// Minimum required zig version.
 const minimum_zig_version = @import("build.zig.zon").minimum_zig_version;
 
+/// Install prefix subdirectory for the `test-binaries` step.
+const test_binaries_dir = "test-binaries";
+
 comptime {
     buildpkg.requireZig(minimum_zig_version);
 }
@@ -77,6 +80,21 @@ pub fn build(b: *std.Build) !void {
         "test-lib-vt-schema",
         "Validate the libghostty-vt ABI type manifest",
     );
+    // Every test binary the steps above run, built and installed side by
+    // side without being run. A test binary is the only thing that can say
+    // which `test` blocks it actually collected, so the reachability check
+    // asks each one directly rather than inferring it from the import graph.
+    //
+    // Every `addTest` below must be registered here, and the check counts the
+    // `addTest` calls in this file and refuses to report anything if the
+    // count does not match the binaries it was handed. It cannot see the
+    // other direction: a binary registered here but hung off no run step
+    // would vouch for its files without ever running them.
+    const test_binaries_step = b.step(
+        "test-binaries",
+        "Build every test binary without running it",
+    );
+    var test_binary_roots: std.ArrayList(u8) = .empty;
     const test_valgrind_step = b.step(
         "test-valgrind",
         "Run tests under valgrind",
@@ -371,20 +389,24 @@ pub fn build(b: *std.Build) !void {
     // Zig module tests
     {
         const mod_vt_test = b.addTest(.{
+            .name = "ghostty-vt-test",
             .root_module = mod.vt,
             .filters = test_filters,
         });
         const mod_vt_test_run = b.addRunArtifact(mod_vt_test);
         test_lib_vt_step.dependOn(&mod_vt_test_run.step);
         test_lib_vt_build_step.dependOn(&mod_vt_test.step);
+        _ = installTestBinary(b, test_binaries_step, &test_binary_roots, mod_vt_test);
 
         const mod_vt_c_test = b.addTest(.{
+            .name = "ghostty-vt-c-test",
             .root_module = mod.vt_c,
             .filters = test_filters,
         });
         const mod_vt_c_test_run = b.addRunArtifact(mod_vt_c_test);
         test_lib_vt_step.dependOn(&mod_vt_c_test_run.step);
         test_lib_vt_build_step.dependOn(&mod_vt_c_test.step);
+        _ = installTestBinary(b, test_binaries_step, &test_binary_roots, mod_vt_c_test);
     }
 
     // Build-time code tests.
@@ -406,6 +428,7 @@ pub fn build(b: *std.Build) !void {
             }),
         });
         test_step.dependOn(&b.addRunArtifact(build_test).step);
+        _ = installTestBinary(b, test_binaries_step, &test_binary_roots, build_test);
     }
 
     // Tests (skip when building libghostty-vt)
@@ -431,6 +454,10 @@ pub fn build(b: *std.Build) !void {
             test_step.dependOn(&test_exe_install.step);
         }
         _ = try deps.add(test_exe);
+        config.addPatchElf(
+            test_exe,
+            installTestBinary(b, test_binaries_step, &test_binary_roots, test_exe),
+        );
 
         addGhosttyH(b, test_exe.root_module, config.baselineTarget(b.graph.io), .Debug);
 
@@ -456,6 +483,9 @@ pub fn build(b: *std.Build) !void {
         test_valgrind_step.dependOn(&valgrind_run.step);
     }
 
+    // After the last installTestBinary above: this freezes the manifest.
+    installTestBinaryRoots(b, test_binaries_step, &test_binary_roots);
+
     // update-translations does what it sounds like and updates the "pot"
     // files. These should be committed to the repo.
     if (i18n) |v| {
@@ -463,6 +493,56 @@ pub fn build(b: *std.Build) !void {
     } else {
         try translations_step.addError("cannot update translations when i18n is disabled", .{});
     }
+}
+
+/// Install a test binary into its own prefix subdirectory and record where
+/// its root module is rooted. Returns the install step, for callers that need
+/// to hang anything else off it.
+///
+/// The root path is what lets a qualified test name be turned back into a
+/// file: names are relative to the module root, so `src/main.zig` and
+/// `src/terminal/main.zig` both answer to `main` without it.
+fn installTestBinary(
+    b: *std.Build,
+    step: *std.Build.Step,
+    roots: *std.ArrayList(u8),
+    compile: *std.Build.Step.Compile,
+) *std.Build.Step {
+    const dir: std.Build.Step.InstallArtifact.Options.Dir = .{
+        .override = .{ .custom = test_binaries_dir },
+    };
+    const install = b.addInstallArtifact(compile, .{
+        .dest_dir = dir,
+        .pdb_dir = dir,
+    });
+    step.dependOn(&install.step);
+
+    const root = compile.root_module.root_source_file orelse
+        @panic("test binary has no root source file");
+    const sub_path = switch (root) {
+        .src_path => |src| src.sub_path,
+        else => @panic("test binary is rooted outside the source tree"),
+    };
+    roots.appendSlice(
+        b.allocator,
+        b.fmt("{s}\t{s}\n", .{ compile.name, sub_path }),
+    ) catch @panic("OOM");
+
+    return &install.step;
+}
+
+/// Write the recorded module roots next to the binaries they describe.
+fn installTestBinaryRoots(
+    b: *std.Build,
+    step: *std.Build.Step,
+    roots: *const std.ArrayList(u8),
+) void {
+    const wf = b.addWriteFiles();
+    step.dependOn(&b.addInstallFileWithDir(
+        wf.add("roots.tsv", roots.items),
+        .{ .custom = test_binaries_dir },
+        "roots.tsv",
+    ).step);
 }
 
 fn addGhosttyH(
