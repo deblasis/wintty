@@ -168,8 +168,8 @@ public sealed partial class MainWindow : Window
     // skips allocating a new SolidColorBrush when nothing changed.
     private Windows.UI.Color? _lastRootBackground;
 
-    // Vertical-mode title row: opaque fills over Mica so the top bar
-    // matches the terminal palette instead of Fluent grey.
+    // Vertical-mode title row fills. Transparent on the default path so
+    // the backdrop reaches the row; painted only for window-theme=wintty.
     private Windows.UI.Color? _lastVerticalTitleDragBg;
     private Windows.UI.Color? _lastVerticalTitleStripMirrorBg;
     private Windows.UI.Color? _lastVerticalTitleCaptionBg;
@@ -730,6 +730,7 @@ public sealed partial class MainWindow : Window
         {
             SwapActivePane();
             ApplyPerTabChrome();
+            RefreshBackdropChrome();
         };
 
         foreach (var tab in _tabManager.Tabs)
@@ -2225,12 +2226,105 @@ public sealed partial class MainWindow : Window
     private bool _impactNudgeActive;
 
     /// <summary>
-    /// Opaque title-row fills for vertical-tab mode. Without this the
-    /// transparent drag region shows Mica grey over the terminal palette.
+    /// True while the High Contrast override is layered onto the config,
+    /// which makes the terminal palette the system's own HC surface
+    /// colours.
+    ///
+    /// Translucency over a backdrop nobody controls is the thing High
+    /// Contrast exists to remove, so every surface that goes to the
+    /// backdrop elsewhere keeps painting opaquely here, out of colours
+    /// Windows chose. Recomputed per call rather than cached: an HC toggle
+    /// arrives as a config reload, and the reload is what calls this.
     /// </summary>
+    private bool HighContrastChromeActive =>
+        Core.Accessibility.HighContrastState.ShouldApply(
+            Accessibility.HighContrastDetector.IsActive(),
+            userOptOut: !_configService.WindowsHighContrast);
 
+    /// <summary>
+    /// Ink for the vertical title row's excluded pieces -- the window title
+    /// and the caption glyphs -- packed 0x00RRGGBB.
+    ///
+    /// They sit on the backdrop now, which is neither the palette nor the
+    /// desktop but a blend of both, so the pole is chosen by contrast
+    /// against an estimate of that blend rather than by asking one input.
+    /// Asking the palette put white glyphs on the mid grey a dark theme
+    /// makes of a light desktop; asking the element theme put white text on
+    /// a light row whenever window-theme disagreed with the palette. The
+    /// element theme is still the preference, and it survives whenever it
+    /// clears AA against the ground.
+    ///
+    /// Under High Contrast the row is painted rather than bare, so the
+    /// ground is the palette itself -- which there is Windows' own colour.
+    /// </summary>
+    private uint VerticalTitleInk => ThemeResolution.EnsureReadableForeground(
+        HighContrastChromeActive ? _configService.BackgroundColor : EstimatedBackdropGround,
+        _themeManager.ElementTheme == ElementTheme.Dark ? 0xFFFFFFu : 0x000000u);
+
+    /// <summary>
+    /// The surface the bare-backdrop chrome sits on, packed 0x00RRGGBB.
+    /// Fed the resolved tint opacity rather than the default constant: the
+    /// user can set background-tint-opacity, and at 0.9 the palette all but
+    /// replaces the base.
+    /// </summary>
+    private uint EstimatedBackdropGround => Core.Shell.BackdropGround.Estimate(
+        _configService.BackgroundColor,
+        Services.OsTheme.IsDark(),
+        _currentBackdropStyle,
+        ResolveAcrylicTuning().tintOpacity);
+
+    /// <summary>
+    /// Re-derive everything calibrated against the backdrop: the title row's
+    /// ink, the caption glyphs, and the row separators.
+    ///
+    /// Every input that can move the ground has to reach this. The ground is
+    /// a blend of the palette and the desktop, so it moves on a config
+    /// reload, on an OS light/dark flip, on an active-tab or tab-colour
+    /// change, and on any backdrop switch -- including the power saver's,
+    /// which swaps acrylic for Mica without touching what libghostty
+    /// renders. Missing one leaves two inks of the same row disagreeing,
+    /// which is what an OS flip did: the caption glyphs re-derived from the
+    /// new desktop and the title text stayed on the old one.
+    ///
+    /// Idempotent and brush-cached, so a site that did not need it pays a
+    /// few comparisons.
+    /// </summary>
+    private void RefreshBackdropChrome()
+    {
+        if (_isClosed) return;
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+    }
+
+    /// <summary>
+    /// Title-row fills for vertical-tab mode.
+    ///
+    /// window-theme=wintty paints the whole row from the terminal palette,
+    /// which is the whole point of that mode. Everything else leaves the
+    /// row unpainted so the window backdrop reaches it, the way the
+    /// horizontal strip already works -- there the strip is the backdrop
+    /// and only the selected tab is painted.
+    ///
+    /// A row painted from the palette is a slab of a colour the desktop
+    /// never agreed to: the backdrop tints from the wallpaper while the
+    /// palette does not, so any palette that disagrees with the desktop
+    /// puts a band of the wrong shade across the top. Re-tuning that
+    /// shade only moves the failure to a different palette.
+    ///
+    /// The pieces that have to stay readable against a backdrop nobody
+    /// controls are excluded, not the row: the app icon (its own art),
+    /// the title text (TextFillColorPrimaryBrush, which the element theme
+    /// already calibrates) and the caption glyphs (see
+    /// <see cref="ApplyCaptionButtonChrome"/>).
+    /// </summary>
     private void ApplyVerticalTitleBarChrome()
     {
+        // Transparent as a colour, not the absence of a brush. The drag
+        // region has to keep swallowing the clicks that would otherwise
+        // reach the strip behind it, and a null Background is not
+        // hit-testable.
+        var unpainted = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+
         Windows.UI.Color dragBg;
         Windows.UI.Color stripMirrorBg;
         if (_shellTheme.IsEnabled)
@@ -2246,7 +2340,9 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            dragBg = UnpackTerminalColor(_configService.BackgroundColor);
+            dragBg = HighContrastChromeActive
+                ? UnpackTerminalColor(_configService.BackgroundColor)
+                : unpainted;
             stripMirrorBg = dragBg;
         }
 
@@ -2256,12 +2352,24 @@ public sealed partial class MainWindow : Window
             VerticalTitleDragRegion.Background = new SolidColorBrush(dragBg);
         }
 
+        // The title is one of the excluded pieces, so it is calibrated
+        // against the row rather than left on TextFillColorPrimaryBrush.
+        // That resource follows the element theme alone, which is right
+        // only while the element theme and the row agree.
+        if (!_shellTheme.IsEnabled)
+            VerticalTitleText.Foreground = TabColorBrush.FromPackedRgb(VerticalTitleInk);
+
         if (_lastVerticalTitleStripMirrorBg != stripMirrorBg)
         {
             _lastVerticalTitleStripMirrorBg = stripMirrorBg;
             VerticalTitleStripMirrorFill.Background = new SolidColorBrush(stripMirrorBg);
         }
 
+        // The seam cover extends the row down over the caption lane, so it
+        // takes the row's fill. Transparent on the default path is the
+        // right answer and not a lost cover: measured on both builds, the
+        // pane's top stroke shows through it either way, because the pane
+        // host is declared after it and draws over it.
         if (_lastVerticalTitleCaptionBg != dragBg)
         {
             _lastVerticalTitleCaptionBg = dragBg;
@@ -2277,9 +2385,10 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Caption min/max/close colors. Vertical mode uses the same opaque
-    /// title-bar fill as the drag region; horizontal keeps transparent
-    /// buttons over the tab strip or Mica.
+    /// Caption min/max/close colors. Vertical mode matches whatever the
+    /// title row is: the tab-bar shade under window-theme=wintty, the bare
+    /// backdrop otherwise. Horizontal keeps transparent buttons over the
+    /// tab strip.
     /// </summary>
     private void ApplyCaptionButtonChrome()
     {
@@ -2305,12 +2414,14 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                titleBg = UnpackTerminalColor(_configService.BackgroundColor);
-                var dark = ThemeResolution.PreferLightForeground(
-                    _configService.BackgroundColor);
-                fg = dark
-                    ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
-                    : Windows.UI.Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+                // Transparent so the buttons sit on the same backdrop the
+                // rest of the row does, except under High Contrast, where
+                // the row is still painted from Windows' own colours.
+                titleBg = HighContrastChromeActive
+                    ? UnpackTerminalColor(_configService.BackgroundColor)
+                    : Windows.UI.Color.FromArgb(0, 0, 0, 0);
+                fg = UnpackTerminalColor(VerticalTitleInk);
+                var dark = fg.R > 0x7F;
                 hoverBg = dark
                     ? Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)
                     : Windows.UI.Color.FromArgb(0x33, 0x00, 0x00, 0x00);
@@ -2609,6 +2720,10 @@ public sealed partial class MainWindow : Window
     /// Pane borders follow the active tab's preset color when set; tab strip
     /// backgrounds refresh in both orientations.
     /// </summary>
+    /// <summary>
+    /// Pane borders follow the active tab's preset color when set; tab strip
+    /// backgrounds refresh in both orientations.
+    /// </summary>
     private void ApplyPerTabChrome()
     {
         var cc = _configService.CursorColor ?? _configService.ForegroundColor;
@@ -2650,7 +2765,10 @@ public sealed partial class MainWindow : Window
         PropertyChangedEventHandler handler = (_, e) =>
         {
             if (e.PropertyName == nameof(TabModel.Color))
+            {
                 ApplyPerTabChrome();
+                RefreshBackdropChrome();
+            }
         };
         ((INotifyPropertyChanged)tab).PropertyChanged += handler;
         _tabColorWired[tab] = handler;
@@ -2782,6 +2900,7 @@ public sealed partial class MainWindow : Window
                 UpdateAcrylicTuning();
                 ApplyGradientTint();
                 ApplyRootGridBackground();
+                RefreshBackdropChrome();
                 RefreshPowerSaverIcon();
             }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
@@ -2965,6 +3084,13 @@ public sealed partial class MainWindow : Window
             // `dark` that drove the two calls above, so libghostty and
             // the config caches cannot describe different schemes.
             _configService.RefreshForOsColorScheme(dark);
+
+            // Not covered by the reload above. RefreshForOsColorScheme only
+            // reaches the chrome when the config it resolves actually
+            // changed, and a palette that is pinned in the file does not --
+            // but the backdrop still re-tints off the new desktop, so
+            // everything scored against it is stale until this runs.
+            RefreshBackdropChrome();
         });
     }
 
@@ -3135,6 +3261,7 @@ public sealed partial class MainWindow : Window
         // icon sits above the tabs instead. Layout toggle stays available via
         // the Ctrl+Shift+, chord.
         _layout.SuppressVerticalTitleBar(true, _verticalTabsVisible);
+        RefreshBackdropChrome();
 
         // Show the session-only pin button so the user can keep the quake
         // window open on focus loss. Invisible on regular windows by default.
@@ -3189,6 +3316,7 @@ public sealed partial class MainWindow : Window
         var hidden = _tabManager.Tabs.Count <= 1;
         _layout.SetStripHidden(hidden, _verticalTabsVisible);
         _stripForciblyHidden = hidden;
+        RefreshBackdropChrome();
 
         // The seam covers join the selected tab to the pane, so with no
         // strip there is nothing to join and the cover is a bar of tab
