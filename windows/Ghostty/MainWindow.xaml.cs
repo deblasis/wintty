@@ -3537,11 +3537,10 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
-#if DEBUG
         // Deliberate crash triggers, the same kinds and the same
-        // implementation as `wintty +crash <kind>`. CrashCommandSource and
-        // CrashTrigger are both #if DEBUG in their entirety, so a Release
-        // build has nothing here to gate at runtime.
+        // implementation as `wintty +crash <kind>`. Registered in every
+        // build: the shipped installer is the configuration whose capture
+        // most needs proving, and a Debug-only trigger cannot prove it.
         //
         // Deferred to the next tick like every other source: the fault then
         // lands after the palette popup has torn down, so the captured stack
@@ -3549,7 +3548,6 @@ public sealed partial class MainWindow : Window
         sources.Add(new CrashCommandSource(
             kind => DispatcherQueue.TryEnqueue(
                 () => Cli.CrashTrigger.Run(kind, TryExecuteBindingAction))));
-#endif
 
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with

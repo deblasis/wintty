@@ -1,4 +1,3 @@
-#if DEBUG
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -15,7 +14,11 @@ namespace Ghostty.Commands;
 /// only way to reach the surface-bound kinds at all, because a binding
 /// action has no surface to land on before a window exists.
 ///
-/// The whole file is <c>#if DEBUG</c>, matching <c>CrashTrigger</c>
+/// Present in every build, including shipped installers. Capture has to be
+/// verifiable in the builds users actually run, and a trigger that is
+/// compiled out of Release makes the one configuration that matters the one
+/// configuration nobody can test. The entries are prefixed "Debug:" and sort
+/// last, so reaching one takes a deliberate search.
 /// itself. There is no Release build in which these rows can be built, so
 /// no runtime gate is needed and none is offered: a flag a user could flip
 /// is a flag that ends up flipped.
@@ -55,4 +58,3 @@ internal sealed class CrashCommandSource : ICommandSource
 
     public void Refresh() { /* static entries */ }
 }
-#endif

@@ -87,39 +87,61 @@ public class CrashTriggerWiringTests
         Assert.DoesNotContain("Environment.FailFast", text, StringComparison.Ordinal);
     }
 
-    // -- Gating ----------------------------------------------------------
+    // -- Availability ----------------------------------------------------
+    //
+    // These guards were inverted deliberately. They used to assert the
+    // triggers were Debug-only. Capture has to be provable in the build
+    // users actually install, and a trigger compiled out of Release leaves
+    // the one configuration that matters as the one nobody can test. So the
+    // invariant now is the opposite: the triggers must reach every build.
 
     [Fact]
-    public void PaletteSource_IsWhollyDebugGated()
+    public void PaletteSource_IsNotBuildGated()
     {
         var lines = ShellText("Commands.CrashCommandSource.cs")
-            .Split('\n')
-            .Select(l => l.TrimEnd('\r').Trim())
+            .Split('
+')
+            .Select(l => l.TrimEnd('').Trim())
             .Where(l => l.Length > 0)
             .ToList();
 
-        // Not "contains an #if DEBUG": a file whose first half is gated and
-        // whose second half is not would satisfy that.
-        Assert.Equal("#if DEBUG", lines[0]);
-        Assert.Equal("#endif", lines[^1]);
-        Assert.Single(lines.Where(l => l.StartsWith("#if", StringComparison.Ordinal)));
+        Assert.DoesNotContain(lines, l => l.StartsWith("#if", StringComparison.Ordinal));
         Assert.DoesNotContain("#else", lines);
     }
 
     [Fact]
-    public void NothingConstructsThePaletteSourceOutsideADebugRegion()
+    public void TheTriggerItselfIsNotBuildGated()
     {
-        // The claim that matters: no Release build can offer these rows.
+        // The palette rows are worth nothing if Run() stubs itself out: the
+        // entries would appear in a shipped build and quietly do nothing,
+        // which is worse than not shipping them.
+        var lines = ShellText("Cli.CrashTrigger.cs")
+            .Split('
+')
+            .Select(l => l.TrimEnd('').Trim())
+            .Where(l => l.Length > 0)
+            .ToList();
+
+        Assert.DoesNotContain(lines, l => l.StartsWith("#if", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            "crash-trigger is compiled out of Release builds",
+            ShellText("Cli.CrashTrigger.cs"),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NothingGatesThePaletteSourceRegistration()
+    {
         // Swept over the whole shell rather than over MainWindow, because a
         // second registration site added later is exactly the one nobody
-        // would think to gate.
+        // would think about.
         var sites = new List<string>();
         foreach (var (tail, text) in ShellSource.AllUnder(ShellPrefix))
         {
             foreach (var conditions in EnclosingConditions(text, "new CrashCommandSource("))
             {
                 sites.Add(tail);
-                Assert.Equal(new[] { "DEBUG" }, conditions);
+                Assert.Empty(conditions);
             }
         }
 
