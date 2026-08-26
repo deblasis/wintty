@@ -480,12 +480,21 @@
     <NativeLibrary Include="d3d12.lib" />
     <NativeLibrary Include="dxgi.lib" />
     <NativeLibrary Include="dcomp.lib" />
-    <!--
-      sentry-native's Windows sources arrive inside ghostty-static.lib, and
-      pkg/sentry/build.zig declares no system libraries of its own:
-        dbghelp.lib - symbolizer, dbghelp unwinder, modulefinder
-        version.lib - sentry_os.c
-    -->
+  </ItemGroup>
+
+  <!--
+    sentry-native's Windows sources arrive inside ghostty-static.lib, and
+    pkg/sentry/build.zig declares no system libraries of its own:
+      dbghelp.lib - symbolizer, dbghelp unwinder, modulefinder
+      version.lib - sentry_os.c
+
+    A separate ItemGroup rather than two more lines in the one above, which
+    is deliberate. The pro-legacy patch stack rewrites that group to add
+    d3d11.lib and matches on its closing lines, and tools/materialize.py
+    applies patches with plain git apply, so appending inside it takes the
+    tier build down. MSBuild treats consecutive ItemGroups as one.
+  -->
+  <ItemGroup>
     <NativeLibrary Include="dbghelp.lib" />
     <NativeLibrary Include="version.lib" />
   </ItemGroup>
