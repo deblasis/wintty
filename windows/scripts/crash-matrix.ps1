@@ -49,7 +49,19 @@ $matrix = @(
     # records it. Measured, not assumed: the design predicted an envelope here
     # and was wrong.
     @{ Kind = 'native-seh';        Envelope = $false; CrashLog = $true  }
-    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $true  }
+    # No crash log, and that is the CLI telling the truth rather than a gap.
+    # The handler that writes one is registered in App.xaml.cs, which is the
+    # GUI. The CLI path runs in Program.MainImpl before any App exists, so a
+    # genuinely unhandled exception reaches no handler of ours.
+    #
+    # This row used to expect a log, and got one, because the throw was caught
+    # by Main's catch-all and turned into ReportFatal: the process never
+    # crashed and the row passed for the wrong reason. The trigger now throws
+    # from its own thread. Installing the GUI's handler here would make the
+    # row pass again while measuring a CLI that does not exist; what an
+    # unhandled exception does in the shipped app is measured through the
+    # palette, the way the libghostty rows are.
+    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $false }
     @{ Kind = 'env-failfast';      Envelope = $false; CrashLog = $false }
     @{ Kind = 'stack-overflow';    Envelope = $false; CrashLog = $false }
     @{ Kind = 'handled-storm';     Envelope = $false; CrashLog = $false }

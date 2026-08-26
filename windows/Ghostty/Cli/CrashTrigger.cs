@@ -126,7 +126,9 @@ internal static partial class CrashTrigger
                         "crash-trigger: deliberate unhandled managed exception"));
                 unhandled.Start();
                 unhandled.Join();
-                return (int)ExitCode.ManagedUnhandled;
+                // Unreachable: the runtime tears the process down before the
+                // join returns. Present because the compiler cannot know it.
+                return 5;
 
             // Explicit fail-fast. Bypasses all handlers by design.
             case "env-failfast":
