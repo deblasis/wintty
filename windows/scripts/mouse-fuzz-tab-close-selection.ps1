@@ -35,7 +35,9 @@
     describes a strip that has not finished deciding - which is not a defect,
     and reporting it as one costs a person an afternoon. Settling is on the
     strip holding still, never on it holding the expected answer, so a
-    selection that lands wrong and stays wrong is still a finding.
+    selection that lands wrong and stays wrong is still a finding. A strip
+    that never holds still is exit 1, because a read taken off one is not a
+    claim about the build either way.
 
     Both layouts get their own launch with their own config rather than a
     runtime toggle: the switch is animated and has its own harness (morph), and
@@ -170,8 +172,19 @@ public static class MzTC {
 
     static uint ThreadOf(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
 
+    // A refused injection -- UIPI against a window running higher, BlockInput,
+    // a secure-desktop transition -- returns a short count and no exception,
+    // and the harness then blames the app for not reacting to a keystroke it
+    // never received. Six seconds later that reads as "the shell is not
+    // reporting titles".
     static void Send(INPUT[] inputs) {
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        if (sent != inputs.Length) {
+            throw new InvalidOperationException(
+                "HARVEST_MISS: SendInput delivered " + sent + " of " + inputs.Length +
+                " event(s), win32 error " + Marshal.GetLastWin32Error() +
+                "; the input never reached the app, so nothing the app did next is evidence");
+        }
     }
 
     static INPUT Key(ushort vk, bool up) {
@@ -413,7 +426,12 @@ function Close-TabRow($row, [uint32]$ProcId) {
 # after the first close, which surfaced as "the new-tab chord is not landing"
 # and reads exactly like a broken keybinding.
 function Enable-Chords {
-    if (-not $script:ArmPid) { return }
+    # Not a silent return: a call before the window is known would leave the
+    # island unarmed and surface later as "the new-tab chord is not landing",
+    # which reads as a product defect.
+    if (-not $script:ArmPid) {
+        throw 'HARVEST_MISS: asked to arm input before the window under test was known'
+    }
     if (-not [MzTC]::Click($script:ArmPid, $script:ArmX, $script:ArmY)) {
         throw 'HARVEST_MISS: could not click the terminal to arm input'
     }
@@ -478,6 +496,12 @@ function Set-RowTitles([int64]$Hwnd64, [bool]$Vertical, [uint32]$ProcId) {
             }
         }
     }
+    # The passes ran out, which is not the same as work left over: a pass that
+    # titled the last plain row exits the loop having finished. Re-read before
+    # blaming the strip, or a clean run ends on a message about a defect that
+    # is not there.
+    $rows = Get-TabRows (Get-UiaRoot $Hwnd64) $Vertical
+    if (@($rows | Where-Object { $_.Name -notmatch $TitleMark }).Count -eq 0) { return $rows }
     throw 'HARVEST_MISS: tabs kept arriving untitled'
 }
 
@@ -505,24 +529,52 @@ function Assert-DistinctTitles($rows, [string]$Where) {
     that agree, whatever they say, so a strip that settles on the wrong tab
     still fails every check below; only the transit is skipped. Waiting for
     the expected answer instead would be an oracle that cannot fail.
+
+    Row geometry is part of holding still, not just names and selection. The
+    rects in the settling read are the probe points the paint check samples,
+    and both strips drop the closed item from the collection before the
+    survivors finish sliding up - so a read that agrees on names alone can
+    hand the paint check the coordinates of a slot a row has already left, and
+    a probe landing on a row boundary reads as two unselected rows painted
+    differently. That is the harness manufacturing the finding this harness
+    exists to catch.
+
+    A strip that never stops changing is exit 1 and not a verdict. Returning
+    that read and asserting on it anyway lets a busy machine report a defect
+    in the build, which is the failure this whole helper is here to remove.
+
+    What the transit held is not thrown away. TransientOff says whether the
+    tab that was active was ever not the selected row while the strip was
+    still moving. It is recorded per round, never asserted on: a selection
+    that is wrong mid-removal and right at rest is not something this harness
+    can tell from a repaint, but a round carrying transientOff with no verdict
+    is where to look if that ever stops being true.
 #>
-function Wait-StripSettled([int64]$Hwnd64, [bool]$Vertical) {
+function Wait-StripSettled([int64]$Hwnd64, [bool]$Vertical, [string]$ExpectedName) {
     $prev = $null
+    $transientOff = $false
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt 2500) {
+    while ($sw.ElapsedMilliseconds -lt 5000) {
         $rows = Get-TabRows (Get-UiaRoot $Hwnd64) $Vertical
-        $shape = (($rows | ForEach-Object { "$($_.Name)=$($_.Selected)" }) -join '|')
+        $shape = (($rows | ForEach-Object {
+            "$($_.Name)=$($_.Selected)@$([int]$_.Rect.X),$([int]$_.Rect.Y)"
+        }) -join '|')
         if ($shape -eq $prev) {
-            return [pscustomobject]@{ Rows = $rows; SettleMs = [int]$sw.ElapsedMilliseconds }
+            return [pscustomobject]@{
+                Rows         = $rows
+                SettleMs     = [int]$sw.ElapsedMilliseconds
+                TransientOff = $transientOff
+            }
+        }
+        if ($ExpectedName) {
+            $sel = @($rows | Where-Object { $_.Selected })
+            if ($sel.Count -ne 1 -or $sel[0].Name -ne $ExpectedName) { $transientOff = $true }
         }
         $prev = $shape
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 200
     }
-    # Still changing. Measured anyway, on the last read, with -1 in the record
-    # so the log says the numbers came off a strip that never held still.
-    return [pscustomobject]@{
-        Rows = (Get-TabRows (Get-UiaRoot $Hwnd64) $Vertical); SettleMs = -1
-    }
+    throw ('HARVEST_MISS: the strip was still changing 5s after a close, so nothing read ' +
+           'off it is a claim about the build')
 }
 
 function Get-WindowShot([int64]$Hwnd64) {
@@ -698,7 +750,11 @@ function Invoke-Layout([bool]$Vertical) {
         foreach ($r in $before) { $keyByTitle[$r.Name] = $r.Key }
         Close-TabRow $before[0] $pid32
 
-        $after = Get-TabRows (Get-UiaRoot $hwnd64) $Vertical
+        # Through the same settle as the rounds. Read straight after the close
+        # and a closing row still in the tree makes the title sets differ,
+        # which lands as "titles did not survive a shifting removal" - a
+        # HARVEST_MISS that blames the build for the harness reading early.
+        $after = (Wait-StripSettled $hwnd64 $Vertical).Rows
         Assert-DistinctTitles $after 'the strip after the control close'
         $wantTitles = @($before | Select-Object -Skip 1 | ForEach-Object { $_.Name })
         $gotTitles = @($after | ForEach-Object { $_.Name })
@@ -732,6 +788,10 @@ function Invoke-Layout([bool]$Vertical) {
             Select-TabRow $rows[$keep] $pid32 $hwnd64
 
             $rows = Get-TabRows (Get-UiaRoot $hwnd64) $Vertical
+            # This read defines what "the tab that was active" means for the
+            # whole round, so it has to be checked like the others: identity
+            # is only identity while it is unique.
+            Assert-DistinctTitles $rows "round $round after choosing the tab to keep"
             $expected = @($rows | Where-Object { $_.Selected })
             if ($expected.Count -ne 1) {
                 throw "HARVEST_MISS: $($expected.Count) rows selected after asking for one"
@@ -746,7 +806,7 @@ function Invoke-Layout([bool]$Vertical) {
             foreach ($r in $rows) { $keyByTitle[$r.Name] = $r.Key }
             Close-TabRow $victim $pid32
 
-            $settled = Wait-StripSettled $hwnd64 $Vertical
+            $settled = Wait-StripSettled $hwnd64 $Vertical $expectedName
             $rows = $settled.Rows
             Assert-DistinctTitles $rows "round $round after the close"
             # Recorded per round, not asserted on, so the log carries the
@@ -788,6 +848,7 @@ function Invoke-Layout([bool]$Vertical) {
                 closed = $victimName
                 closedAbove = $victimAbove; remaining = $rows.Count
                 idDrift = $idDrift; settleMs = $settled.SettleMs
+                transientOff = $settled.TransientOff
                 verdicts = @($verdicts)
             })
             foreach ($v in $verdicts) {
@@ -796,6 +857,7 @@ function Invoke-Layout([bool]$Vertical) {
             Write-Host ("$label round $round kept='$expectedName' closed='$victimName' " +
                         "closedAbove=$victimAbove remaining=$($rows.Count) " +
                         "idDrift=$idDrift settleMs=$($settled.SettleMs) " +
+                        "transientOff=$($settled.TransientOff) " +
                         "verdicts=$($verdicts.Count)")
         }
     }
