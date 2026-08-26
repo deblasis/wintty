@@ -28,6 +28,7 @@ const Conditional = conditional.Conditional;
 const file_load = @import("file_load.zig");
 const formatterpkg = @import("formatter.zig");
 const themepkg = @import("theme.zig");
+const wintty_theme = @import("wintty_theme.zig");
 const url = @import("url.zig");
 pub const Key = @import("key.zig").Key;
 const MetricModifier = fontpkg.Metrics.Modifier;
@@ -4695,6 +4696,38 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     const file = themefile.file;
     defer file.close(global.io());
 
+    var buf: [2048]u8 = undefined;
+    var file_reader = file.reader(global.io(), &buf);
+    var iter: cli.args.LineIterator = .{
+        .r = &file_reader.interface,
+        .filepath = path,
+    };
+    try self.applyThemeOverlay(&iter);
+}
+
+/// Load the built-in Wintty theme for the current conditional theme state.
+///
+/// Goes through the same overlay as a user theme file, so the user's own
+/// config still overrides it and the replay steps are made conditional the
+/// same way. See `wintty_theme.zig` for why a default pair exists at all.
+fn loadBuiltinTheme(self: *Config) !void {
+    var reader: std.Io.Reader = .fixed(
+        wintty_theme.forScheme(self._conditional_state.theme),
+    );
+    var iter: cli.args.LineIterator = .{
+        .r = &reader,
+        .filepath = "<built-in theme>",
+    };
+    try self.applyThemeOverlay(&iter);
+}
+
+/// Load a theme from `iter` underneath the config already loaded into self.
+///
+/// Split out of loadTheme so the built-in theme, which is a string rather
+/// than a file, gets byte-for-byte the same precedence and replay handling.
+/// Warning: this deinits self and replaces it, so anything borrowed from
+/// self before the call is freed after it.
+fn applyThemeOverlay(self: *Config, iter: *cli.args.LineIterator) !void {
     // From this point onwards, we load the theme and do a bit of a dance
     // to achieve two separate goals:
     //
@@ -4714,11 +4747,7 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     errdefer new_config.deinit();
 
     // Load our theme
-    var buf: [2048]u8 = undefined;
-    var file_reader = file.reader(global.io(), &buf);
-    const reader = &file_reader.interface;
-    var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-    try new_config.loadIter(alloc_gpa, &iter);
+    try new_config.loadIter(alloc_gpa, iter);
 
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
@@ -4800,6 +4829,18 @@ pub fn finalize(self: *Config) !void {
             // Mark that we use a conditional theme
             self._conditional_set.insert(.theme);
         }
+    } else if (comptime wintty_theme.enabled) {
+        // No theme configured, so fall back to the built-in pair rather
+        // than to the compile-time colour defaults. See wintty_theme.zig
+        // for why this fork has a default theme where upstream has none.
+        try self.loadBuiltinTheme();
+
+        // Same reasoning as the different-light-and-dark branch above:
+        // auto derives the window theme from the terminal background, which
+        // now moves with the desktop, so it would fight the desktop instead
+        // of following it.
+        if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+        self._conditional_set.insert(.theme);
     }
 
     // Used for a variety of defaults. See the function docs as well the
@@ -11945,26 +11986,85 @@ test "issue 228: non-empty foreground still overrides theme" {
     }, cfg.foreground);
 }
 
-test "issue 228: empty foreground with no theme stays compile-time default" {
+test "issue 228: empty foreground with no theme defers to the layer below" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
 
-    // With no theme there is no lower layer to defer to, so an empty value
-    // keeps the compile-time default (#FFFFFF). This guards against the skip
-    // logic leaking into the non-theme path.
+    // An empty value defers to whatever is underneath it. What that is
+    // depends on the build: on a build with a built-in theme the theme is
+    // the layer below, and everywhere else there is no layer at all and the
+    // compile-time default stands. Either way this guards the same thing as
+    // before, that the skip logic does not turn an empty value into
+    // something other than the layer below it.
+    const expected: Color = if (comptime wintty_theme.enabled)
+        // The light half, since that is Config.default's conditional state.
+        .{ .r = 0x1E, .g = 0x23, .b = 0x33 }
+    else
+        .{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
+
     var it: TestIterator = .{ .data = &.{
         "--foreground=",
     } };
     try cfg.loadIter(alloc, &it);
     try cfg.finalize();
 
+    try testing.expectEqual(expected, cfg.foreground);
+}
+
+test "built-in theme applies when nothing is configured" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]struct { theme: conditional.State.Theme, bg: Color }{
+        .{ .theme = .light, .bg = .{ .r = 0xF4, .g = 0xF6, .b = 0xFB } },
+        .{ .theme = .dark, .bg = .{ .r = 0x13, .g = 0x16, .b = 0x20 } },
+    }) |tc| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        cfg._conditional_state.theme = tc.theme;
+        try cfg.finalize();
+
+        try testing.expectEqual(tc.bg, cfg.background);
+
+        // window-theme must stop deriving itself from the background, which
+        // now moves with the desktop, and follow the desktop directly.
+        try testing.expectEqual(WindowTheme.system, cfg.@"window-theme");
+
+        // Registered as conditional, or an OS light/dark flip would not
+        // rebuild the config and the pair would never switch.
+        try testing.expect(cfg._conditional_set.contains(.theme));
+    }
+}
+
+test "built-in theme loses to an explicit setting" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#abcdef"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
     try testing.expectEqual(Color{
-        .r = 0xFF,
-        .g = 0xFF,
-        .b = 0xFF,
+        .r = 0xAB,
+        .g = 0xCD,
+        .b = 0xEF,
+    }, cfg.background);
+
+    // Only the key the user set is theirs; the rest still comes from the
+    // built-in theme.
+    try testing.expectEqual(Color{
+        .r = 0x1E,
+        .g = 0x23,
+        .b = 0x33,
     }, cfg.foreground);
 }
 

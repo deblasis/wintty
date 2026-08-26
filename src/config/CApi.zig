@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const apprt = @import("../apprt.zig");
 const inputpkg = @import("../input.zig");
 const global = @import("../global.zig");
 const String = @import("../main_c.zig").String;
@@ -8,6 +9,7 @@ const Config = @import("Config.zig");
 const c_get = @import("c_get.zig");
 const edit = @import("edit.zig");
 const Key = @import("key.zig").Key;
+const wintty_theme = @import("wintty_theme.zig");
 
 const log = std.log.scoped(.config);
 
@@ -82,6 +84,43 @@ export fn ghostty_config_load_recursive_files(self: *Config) void {
     self.loadRecursiveFiles(global.alloc()) catch |err| {
         log.err("error loading config err={}", .{err});
     };
+}
+
+/// Set the desktop colour scheme this config resolves against, for the
+/// conditional `theme = light:...,dark:...` form and for the built-in
+/// theme pair. Must be called before ghostty_config_finalize to have any
+/// effect, since that is where the theme is applied.
+///
+/// Without this an embedder holding its own config handle resolves every
+/// conditional against the default scheme (light) no matter what the
+/// desktop is set to, and reads back colours the terminal never renders.
+export fn ghostty_config_set_color_scheme(self: *Config, scheme_raw: c_int) void {
+    const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse {
+        log.warn("invalid color scheme value={}", .{scheme_raw});
+        return;
+    };
+    self._conditional_state.theme = switch (scheme) {
+        .light => .light,
+        .dark => .dark,
+    };
+}
+
+/// The built-in theme applied when no theme is configured, in config file
+/// syntax, or an empty string on a build that has no built-in theme.
+///
+/// Exists so an embedder drawing chrome around the terminal can resolve the
+/// same colours the terminal resolved without a second copy of the palette
+/// to keep in step. Points at static storage; the caller must not free it.
+export fn ghostty_config_builtin_theme(scheme_raw: c_int) String {
+    if (comptime !wintty_theme.enabled) return .empty;
+    const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse {
+        log.warn("invalid color scheme value={}", .{scheme_raw});
+        return .empty;
+    };
+    return .fromSlice(wintty_theme.forScheme(switch (scheme) {
+        .light => .light,
+        .dark => .dark,
+    }));
 }
 
 export fn ghostty_config_finalize(self: *Config) void {
