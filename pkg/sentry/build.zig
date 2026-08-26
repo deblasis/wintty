@@ -71,12 +71,19 @@ pub fn build(b: *std.Build) !void {
 
         // Symbolizer + Unwinder
         if (target.result.os.tag == .windows) {
-            // dbghelp: symbolizer, dbghelp unwinder, modulefinder.
+            // dbghelp:  symbolizer, dbghelp unwinder, modulefinder.
             // version:  sentry_os.c version lookup.
+            // advapi32: sentry_os.c reads the OS build from the registry with
+            //           RegGetValueA. The app pulls advapi32 in by other
+            //           routes, so this only shows up as an undefined symbol
+            //           in targets that link sentry and little else, which is
+            //           what the test target is.
             lib.root_module.linkSystemLibrary("dbghelp", .{});
             lib.root_module.linkSystemLibrary("version", .{});
+            lib.root_module.linkSystemLibrary("advapi32", .{});
             module.linkSystemLibrary("dbghelp", .{});
             module.linkSystemLibrary("version", .{});
+            module.linkSystemLibrary("advapi32", .{});
             lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = &.{

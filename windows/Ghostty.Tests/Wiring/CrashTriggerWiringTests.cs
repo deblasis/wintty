@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Diagnostics;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
 namespace Ghostty.Tests.Wiring;
@@ -10,13 +11,17 @@ namespace Ghostty.Tests.Wiring;
 /// That the crash triggers are reachable from both front doors, in every
 /// build.
 ///
-/// Text-level rather than parsed, which is the exception <c>ShellSource</c>
-/// describes rather than a shortcut. The claim here is about preprocessor
-/// directives themselves: that the trigger and the palette source contain
-/// none. A parse cannot make that claim, because which half of a conditional
-/// it can see is decided by the symbols it defines, and the regions are
-/// resolved away before any rule could read them. The lines are what carry
-/// the claim, so the lines are what is read.
+/// The availability guards are text-level, which is the exception
+/// <c>ShellSource</c> describes rather than a shortcut. Their claim is about
+/// preprocessor directives themselves: that the trigger and the palette
+/// source contain none. A parse cannot make that claim, because which half of
+/// a conditional it can see is decided by the symbols it defines, and the
+/// regions are resolved away before any rule could read them. The lines are
+/// what carry the claim, so the lines are what is read.
+///
+/// The palette guards at the bottom are parsed, because their claim is the
+/// opposite kind: which expression guards which, where a substring match
+/// cannot tell a live guard from one inside a comment.
 ///
 /// The direction is deliberate. These guards used to assert the opposite,
 /// that the triggers were Debug-only. Capture has to be provable in the
@@ -171,22 +176,28 @@ public class CrashTriggerWiringTests
             var line = raw.TrimEnd('\r');
             var trimmed = line.TrimStart();
 
-            if (trimmed.StartsWith("#if ", StringComparison.Ordinal))
+            // Matched without requiring the trailing space, and closed
+            // without requiring an exact line. `#if(DEBUG)` is legal C# and
+            // walked straight through a `"#if "` prefix test, leaving the
+            // registration reading as ungated while Release lost it. So did
+            // `#endif // DEBUG`, in the other direction: the condition stayed
+            // on the stack and every later line read as gated.
+            if (trimmed.StartsWith("#if", StringComparison.Ordinal))
             {
-                stack.Add(trimmed[4..].Trim());
+                stack.Add(trimmed[3..].Trim());
                 continue;
             }
-            if (trimmed.StartsWith("#elif ", StringComparison.Ordinal) && stack.Count > 0)
+            if (trimmed.StartsWith("#elif", StringComparison.Ordinal) && stack.Count > 0)
             {
-                stack[^1] = trimmed[6..].Trim();
+                stack[^1] = trimmed[5..].Trim();
                 continue;
             }
-            if (trimmed == "#else" && stack.Count > 0)
+            if (trimmed.StartsWith("#else", StringComparison.Ordinal) && stack.Count > 0)
             {
                 stack[^1] = "!(" + stack[^1] + ")";
                 continue;
             }
-            if (trimmed == "#endif" && stack.Count > 0)
+            if (trimmed.StartsWith("#endif", StringComparison.Ordinal) && stack.Count > 0)
             {
                 stack.RemoveAt(stack.Count - 1);
                 continue;
@@ -201,4 +212,84 @@ public class CrashTriggerWiringTests
 
         return found;
     }
+
+    // -- Keeping a destructive row out of reach ---------------------------
+    //
+    // These triggers ship in Release, so the compiler is not what stands
+    // between a user and a deliberate crash. Two properties of the palette
+    // are, and both were absent when the rows first landed: a fresh profile,
+    // the query "select", and Enter took the window down, because Debug rows
+    // matched on their description ("...this build selected") and the default
+    // ordering ignored Category entirely.
+    //
+    // Parsed, not text: the claim is about which expressions guard which, and
+    // a substring match cannot tell a live guard from one inside a comment.
+
+    [Fact]
+    public void DebugRows_MatchOnTitleOnly()
+    {
+        var filter = ShellSource
+            .Load("Commands.CommandPaletteViewModel.cs")
+            .Method("ApplyFilter");
+
+        var descriptionMatches = filter.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString().EndsWith(
+                "Description.Contains", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(
+            descriptionMatches.Count > 0,
+            "ApplyFilter no longer matches on Description at all. If that is "
+                + "deliberate, delete this test; it exists to prove the match "
+                + "excludes Debug rows, not to require the match.");
+
+        foreach (var match in descriptionMatches)
+        {
+            var guarded = match.Ancestors()
+                .OfType<BinaryExpressionSyntax>()
+                .Any(b => b.ToString().Contains(
+                    "Category != CommandCategory.Debug", StringComparison.Ordinal));
+            Assert.True(
+                guarded,
+                "a Description match in ApplyFilter is not behind "
+                    + "'Category != CommandCategory.Debug'. Debug rows describe "
+                    + "what they destroy in ordinary words, so matching their "
+                    + "descriptions puts 'crash the renderer' in front of "
+                    + "someone who typed 'select'.");
+        }
+    }
+
+    [Fact]
+    public void DebugRows_SortLastInBothBranches()
+    {
+        var filter = ShellSource
+            .Load("Commands.CommandPaletteViewModel.cs")
+            .Method("ApplyFilter");
+
+        // Every ordering chain built in this method, whether or not grouping
+        // is on. The grouped branch sorts by Category directly; the other has
+        // to name Debug explicitly, and used not to.
+        var chains = filter.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString().EndsWith(".OrderBy", StringComparison.Ordinal)
+                || i.Expression.ToString().EndsWith(".OrderByDescending", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(chains.Count >= 2, $"expected both ordering branches, found {chains.Count}");
+
+        foreach (var chain in chains)
+        {
+            var key = chain.ArgumentList.Arguments.ToString();
+            var demotesDebug =
+                key.Contains("c.Category", StringComparison.Ordinal)
+                && (key.Contains("CommandCategory.Debug", StringComparison.Ordinal)
+                    || key.Trim() == "c => c.Category");
+            Assert.True(
+                demotesDebug,
+                $"an ordering branch leads with '{key}', which does not put "
+                    + "Debug last. Frecency cannot be the first key for these: "
+                    + "executing one records the use before the process dies, "
+                    + "so one accident promotes that row for every later launch.");
+        }
+    }
+
 }

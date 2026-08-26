@@ -10,6 +10,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const objc = @import("objc");
 const apprt = @import("../apprt.zig");
+const crash = @import("../crash/main.zig");
 const font = @import("../font/main.zig");
 const global = @import("../global.zig");
 const input = @import("../input.zig");
@@ -2160,6 +2161,20 @@ pub const CAPI = struct {
         if (builtin.os.tag == .windows) {
             _ = Windows;
         }
+    }
+
+    /// Block until the crash reporter is armed, or until `timeout_ms`
+    /// elapses. Returns true when it is armed.
+    ///
+    /// For deliberate crash triggers. The reporter initialises on its own
+    /// thread, so a trigger fired straight after ghostty_init can beat the
+    /// handler into place and produce no report, which reads as "this class
+    /// cannot be captured" when the truth is "nobody was listening yet".
+    /// Callers must not infer readiness from the database directory: sentry
+    /// creates it during init, before the handler exists, and it outlives the
+    /// process.
+    export fn ghostty_crash_wait_ready(timeout_ms: u32) bool {
+        return crash.sentry.waitReady(timeout_ms);
     }
 
     /// Create a new app.
