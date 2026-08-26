@@ -79,6 +79,10 @@ public partial class App : Application
     /// </summary>
     internal Window? SettingsWindow => _settingsWindow;
 
+    // The +list-themes pipe server. One per process, because the pipe name it
+    // claims is per process; see OnLaunched.
+    private Ghostty.Services.ThemePreviewService? _themePreview;
+
     private Ghostty.Session.SessionManager? _sessionManager;
     private Ghostty.Hosting.WindowsGlobalHotKey? _quakeHotKey;
     private Ghostty.Hosting.WindowsSystemMenuHook? _systemMenuHook;
@@ -125,6 +129,28 @@ public partial class App : Application
     internal static void NoteRegularWindowActivated(MainWindow window)
         => LastRegularWindow = window;
 
+    /// <summary>
+    /// A regular window has become able to host process-wide work: its
+    /// XamlRoot is live and it is going into the registry. Called from the
+    /// window's one-shot content Loaded handler.
+    /// </summary>
+    internal static void NoteRegularWindowRegistered(MainWindow window)
+    {
+        if (window.RegisteredRoot is not { } root) return;
+        WindowsByRoot[root] = window;
+
+        // Only now may the +list-themes pipe exist. `wintty +list-themes`
+        // probes for it with File.Exists and counts a successful write as
+        // delivery, never waiting for an answer, so a pipe advertised before
+        // any window can draw a picker makes the CLI exit 0 having done
+        // nothing -- and skips the libghostty TUI picker it falls back to
+        // when it finds no pipe. The service is built in OnLaunched, which
+        // returns before the message loop can raise any window's Loaded, so
+        // construction is always too early to start listening. Start is
+        // idempotent, so every window may say this.
+        (Application.Current as App)?._themePreview?.Start();
+    }
+
     // How many recently-closed tabs / windows the reopen stacks retain.
     private const int ClosedItemCapacity = 25;
 
@@ -140,6 +166,20 @@ public partial class App : Application
     internal static readonly Core.Panes.ClosedStack<Core.Session.WindowSession> ClosedWindows = new(ClosedItemCapacity);
 
     internal static GhosttyHost? BootstrapHost { get; private set; }
+
+    /// <summary>
+    /// Apply a browsed theme's colors, from the process-wide preview
+    /// service. Null before OnLaunched runs; null again once the shutdown's
+    /// finally block has cleared it.
+    /// </summary>
+    // The one verb the inline theme picker needs, rather than the service
+    // itself. A window that can reach the service can also Dispose it, and a
+    // dispose on one window's close ends the accept loop and drops the
+    // subscription for every window still open -- exactly the defect this
+    // ownership move removed, and it would go back in a single line with
+    // every rule in ThemePreviewOwnershipWiringTests still green.
+    internal static Action<string>? ApplyThemePreview { get; private set; }
+
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
     internal static Ghostty.Session.SessionManager? SessionManager { get; private set; }
@@ -726,6 +766,25 @@ public partial class App : Application
         // the teardown below can take them back.
         _bootstrapHost.OpenConfigRequested += OnAppOpenConfigRequested;
         _bootstrapHost.ReloadConfigRequested += OnAppReloadConfigRequested;
+
+        // The +list-themes server, one for the process. The pipe name it
+        // claims carries the process id and it is created with
+        // FirstPipeInstance, so a second service in this process cannot open
+        // the pipe at all: it stood down at construction and never came back.
+        // A service per window therefore meant only the first window served
+        // `wintty +list-themes`, and closing that window released the name
+        // without anything reclaiming it, leaving the rest of the session with
+        // no server for the CLI to find. Constructed unconditionally and
+        // subscribed to a named method, so the shutdown can take it back.
+        // Built here but not started here: NoteRegularWindowRegistered opens
+        // the pipe, because the pipe is what the CLI reads as "a window is
+        // ready to show you a picker".
+        _themePreview = new Ghostty.Services.ThemePreviewService(
+            _configService,
+            DispatcherQueue.GetForCurrentThread(),
+            factory.CreateLogger<Ghostty.Services.ThemePreviewService>());
+        _themePreview.ListThemesRequested += OnAppListThemesRequested;
+        ApplyThemePreview = _themePreview.ApplyThemePreview;
 
         // App-level: High Contrast is a system-wide state and config is
         // applied app-wide, so a single monitor drives the surface override.
@@ -1443,6 +1502,32 @@ public partial class App : Application
         _configService?.Reload();
 
     /// <summary>
+    /// A LIST_THEMES arriving on the preview pipe. The picker is drawn by
+    /// libghostty into a surface, so it needs a window even though the
+    /// request is process-wide: it goes to the one the user was last in,
+    /// skipping any window whose close has started, because its surfaces are
+    /// on their way out. The predicate also refuses the quake window, which
+    /// the shell never registers and never records as last-activated -- that
+    /// half is a backstop for a helper in Core that cannot see either fact.
+    /// ThemePreviewService raises this on the UI thread.
+    /// </summary>
+    private void OnAppListThemesRequested(object? sender, EventArgs e)
+    {
+        var target = Ghostty.Core.Windows.ActiveWindowTarget.Choose(
+            LastRegularWindow, AllWindows, w => !w.IsQuickTerminal && !w.IsClosing);
+        if (target is null)
+        {
+            // Every window is closing. Nothing to draw the picker on, and
+            // the CLI already wrote its line and moved on, so there is
+            // nobody to tell.
+            Ghostty.Logging.StaticLoggers.App.LogNoWindowForThemePicker();
+            return;
+        }
+
+        target.ShowInlineThemePicker();
+    }
+
+    /// <summary>
     /// Show the app-wide settings window, or focus the existing one if it is
     /// already open. One settings window serves the whole process, so opening
     /// it from any window reuses the same instance. The caller guards on
@@ -1707,6 +1792,17 @@ public partial class App : Application
                 // a native access violation (issue #208 switch-then-close).
                 _configService.BeginShutdown();
 
+                // Same reason, one line down: the preview pipe server runs on
+                // a background task and can still enqueue a picker onto a
+                // window that is already tearing down. Detach first so a
+                // LIST_THEMES that beat the cancel finds no handler, then
+                // dispose, which cancels the accept loop and waits for it.
+                if (_themePreview is not null)
+                {
+                    _themePreview.ListThemesRequested -= OnAppListThemesRequested;
+                    _themePreview.Dispose();
+                }
+
                 // Stop the process tracker before any tab teardown could
                 // race its Timer callback. Dispose unsubscribes the
                 // Changed handler in addition to cancelling the timer,
@@ -1871,6 +1967,8 @@ public partial class App : Application
                 NotificationService = null;
                 _configEditor = null;
                 ConfigFileEditor = null;
+                _themePreview = null;
+                ApplyThemePreview = null;
                 _bootstrapHost = null;
                 BootstrapHost = null;
                 _lifetimeSupervisor = null;
@@ -1929,6 +2027,11 @@ internal static partial class AppLogExtensions
                    Message = "Failed to open config file {ConfigPath}")]
     internal static partial void LogConfigOpenFailed(
         this ILogger<App> logger, System.Exception ex, string configPath);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.ThemePreview.NoWindowForThemePicker,
+                   Level = LogLevel.Debug,
+                   Message = "LIST_THEMES arrived with no window able to host the picker")]
+    internal static partial void LogNoWindowForThemePicker(this ILogger<App> logger);
 
     [LoggerMessage(EventId = Ghostty.Logging.LogEvents.Startup.StaleAumidRemoved,
                    Level = LogLevel.Information,
