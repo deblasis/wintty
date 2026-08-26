@@ -156,13 +156,22 @@ public static class ThemeResolution
     /// light mode.</para>
     ///
     /// <para>Every channel moves by the same number of counts, so the result
-    /// stays a tint of the input rather than becoming a colour of its own.
-    /// Near either end of the range the target is unreachable and the result
-    /// is the closest step available, but never the input itself: a tint
-    /// equal to its background draws nothing.</para>
+    /// normally stays a tint of the input rather than becoming a colour of
+    /// its own. Two things stop holding once a channel hits a rail, since a
+    /// clamped channel stops moving while the others keep going: the hue
+    /// drifts (stepping #F4F6FB up far enough reaches #FFFFFF, and the blue
+    /// cast is gone), and a colour with no headroom at all in the requested
+    /// direction comes back unchanged. Callers that cannot use the input
+    /// itself must pick the direction with room -- which is what
+    /// <c>LaunchTexture.ResolveInkRgb</c> does with its luma split.</para>
     /// </remarks>
     public static uint StepLightness(uint rgb, double deltaLStar)
     {
+        // Caps the walk below. Comfortable for a deltaLStar in single digits
+        // (the worst case, pure black, needs 17 counts for 5.0), but it is a
+        // ceiling on the dial as well as on the loop: past roughly 15 the
+        // walk starts running out for mid greys and quietly under-delivering
+        // rather than failing. Raise it alongside any larger step.
         const int maxChannelStep = 48;
 
         var r = (int)((rgb >> 16) & 0xFF);
@@ -197,15 +206,7 @@ public static class ThemeResolution
     }
 
     private static double LuminanceOf(int r, int g, int b)
-    {
-        static double Linearize(int channel)
-        {
-            var c = channel / 255.0;
-            return c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
-        }
-
-        return (0.2126 * Linearize(r)) + (0.7152 * Linearize(g)) + (0.0722 * Linearize(b));
-    }
+        => RelativeLuminance((uint)((r << 16) | (g << 8) | b));
 
     /// <summary>
     /// Pick a legible foreground for text drawn over

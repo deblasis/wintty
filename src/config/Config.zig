@@ -4014,6 +4014,13 @@ _conditional_state: conditional.State = .{},
 /// loading. This is used to speed up the conditional evaluation process.
 _conditional_set: std.EnumSet(conditional.Key) = .{},
 
+/// Whether finalize has run on this config.
+///
+/// Only used to refuse the C API's set-color-scheme after the point where
+/// it would silently do nothing. Not copied by clone: a clone is expected
+/// to be finalized again.
+_finalized: bool = false,
+
 /// The steps we can use to reload the configuration after it has been loaded
 /// without reopening the files. This is used in very specific cases such
 /// as loadTheme which has more details on why.
@@ -4705,6 +4712,23 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     try self.applyThemeOverlay(&iter);
 }
 
+/// Everything finalize does when no theme is configured, in one call so the
+/// upstream theme block stays a one-line diff and rebases cleanly.
+fn applyBuiltinTheme(self: *Config) !void {
+    // Warning: this deinits our existing config and replaces it, so all
+    // memory from self prior to this point is freed.
+    try self.loadBuiltinTheme();
+
+    // Same reasoning as the different-light-and-dark themes above: auto
+    // derives the window theme from the terminal background, which now
+    // moves with the desktop, so it would fight the desktop rather than
+    // follow it.
+    if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+
+    // Mark that we use a conditional theme.
+    self._conditional_set.insert(.theme);
+}
+
 /// Load the built-in Wintty theme for the current conditional theme state.
 ///
 /// Goes through the same overlay as a user theme file, so the user's own
@@ -4830,17 +4854,7 @@ pub fn finalize(self: *Config) !void {
             self._conditional_set.insert(.theme);
         }
     } else if (comptime wintty_theme.enabled) {
-        // No theme configured, so fall back to the built-in pair rather
-        // than to the compile-time colour defaults. See wintty_theme.zig
-        // for why this fork has a default theme where upstream has none.
-        try self.loadBuiltinTheme();
-
-        // Same reasoning as the different-light-and-dark branch above:
-        // auto derives the window theme from the terminal background, which
-        // now moves with the desktop, so it would fight the desktop instead
-        // of following it.
-        if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
-        self._conditional_set.insert(.theme);
+        try self.applyBuiltinTheme();
     }
 
     // Used for a variety of defaults. See the function docs as well the
@@ -5036,6 +5050,8 @@ pub fn finalize(self: *Config) !void {
 
     // Finalize key remapping set for efficient lookups
     self.@"key-remap".finalize();
+
+    self._finalized = true;
 }
 
 /// Callback for src/cli/args.zig to allow us to handle special cases

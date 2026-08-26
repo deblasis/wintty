@@ -284,6 +284,12 @@ public sealed class LaunchTextureTests
     {
         var ink = LaunchTexture.ResolveInkRgb(background);
 
+        // Per-channel the assertion can only be one-sided, since a channel
+        // that is already at the rail does not move. Something has to move
+        // though, or the texture is invisible and every check below still
+        // passes -- so pin that separately.
+        Assert.NotEqual(background, ink);
+
         foreach (var shift in new[] { 16, 8, 0 })
         {
             var before = (int)((background >> shift) & 0xFF);
@@ -300,24 +306,26 @@ public sealed class LaunchTextureTests
     [InlineData(0x808080u)]
     [InlineData(0x404040u)]
     [InlineData(0xE0E0E0u)]
+    [InlineData(0x0A0A0Au)]            // near black, where one count is worth most
     public void Ink_sits_the_same_perceptual_distance_from_any_background(uint background)
     {
         // The whole point of the L* solve. A per-channel step gave dL* 5.0
         // off the dark background and 3.5 off the light one, so the texture
         // that read as a grain in dark mode was nearly gone in light mode.
         //
-        // Half a unit of slack: the step is a whole number of counts, so it
-        // lands on the first count at or past the target rather than exactly
-        // on it. Compared against the constant rather than a written-out
-        // number, because the constant is a dial and turning it must not
-        // fail a test with nothing wrong.
+        // At or past the target, never more than one count past it. The step
+        // is a whole number of counts, so it overshoots, and near black one
+        // count is worth over half a unit of L* -- a symmetric window around
+        // the target fails there with nothing wrong. Compared against the
+        // constant rather than a written-out number, because the constant is
+        // a dial and turning it must not fail a test either.
         var delta = Math.Abs(
             LStar(LaunchTexture.ResolveInkRgb(background)) - LStar(background));
 
         Assert.InRange(
             delta,
-            LaunchTexture.ContrastLStar - 0.5,
-            LaunchTexture.ContrastLStar + 0.5);
+            LaunchTexture.ContrastLStar,
+            LaunchTexture.ContrastLStar + 1.0);
     }
 
     [Theory]

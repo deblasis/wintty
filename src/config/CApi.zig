@@ -88,21 +88,47 @@ export fn ghostty_config_load_recursive_files(self: *Config) void {
 
 /// Set the desktop colour scheme this config resolves against, for the
 /// conditional `theme = light:...,dark:...` form and for the built-in
-/// theme pair. Must be called before ghostty_config_finalize to have any
-/// effect, since that is where the theme is applied.
+/// theme pair. Returns false if the call did nothing.
 ///
 /// Without this an embedder holding its own config handle resolves every
 /// conditional against the default scheme (light) no matter what the
 /// desktop is set to, and reads back colours the terminal never renders.
-export fn ghostty_config_set_color_scheme(self: *Config, scheme_raw: c_int) void {
+///
+/// Must be called before ghostty_config_finalize, which is where the theme
+/// is applied, and is refused afterwards rather than accepted-and-ignored.
+/// Accepting it would be worse than useless: the recorded scheme would then
+/// disagree with the colours already resolved, and the next real desktop
+/// change would compare equal to it and be dropped as "no change", leaving
+/// the config stuck on the wrong half until the user flipped twice. To
+/// react to a scheme change after finalize, rebuild the config instead.
+export fn ghostty_config_set_color_scheme(self: *Config, scheme_raw: c_int) bool {
     const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse {
         log.warn("invalid color scheme value={}", .{scheme_raw});
-        return;
+        return false;
     };
+
+    if (self._finalized) {
+        log.warn("color scheme set after finalize, ignoring", .{});
+        return false;
+    }
+
     self._conditional_state.theme = switch (scheme) {
         .light => .light,
         .dark => .dark,
     };
+    return true;
+}
+
+/// Whether this config resolved its colours from the built-in theme pair,
+/// i.e. whether nothing anywhere in the loaded config set `theme`.
+///
+/// An embedder cannot answer this by reading the user's config file itself:
+/// `theme` can be set in a file pulled in by `config-file`, and following
+/// that recursion means reimplementing the loader's include rules. Ask the
+/// config that actually did the loading instead.
+export fn ghostty_config_theme_is_builtin(self: *Config) bool {
+    if (comptime !wintty_theme.enabled) return false;
+    return self.theme == null;
 }
 
 /// The built-in theme applied when no theme is configured, in config file
@@ -110,7 +136,12 @@ export fn ghostty_config_set_color_scheme(self: *Config, scheme_raw: c_int) void
 ///
 /// Exists so an embedder drawing chrome around the terminal can resolve the
 /// same colours the terminal resolved without a second copy of the palette
-/// to keep in step. Points at static storage; the caller must not free it.
+/// to keep in step.
+///
+/// Unlike every other ghostty_string_s producer, this one points at static
+/// storage and must NOT be passed to ghostty_string_free. Freeing it hands
+/// the allocator a pointer it never owned. The ptr is null on a build with
+/// no built-in theme, so callers must check before reading.
 export fn ghostty_config_builtin_theme(scheme_raw: c_int) String {
     if (comptime !wintty_theme.enabled) return .empty;
     const scheme = std.enums.fromInt(apprt.ColorScheme, scheme_raw) orelse {

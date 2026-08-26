@@ -386,9 +386,20 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             // App.OnLaunched with no window and no message.
             //
             // Every value it would have set has a default, so a failed read
-            // leaves a usable snapshot rather than a torn one, and the
+            // leaves a consistent snapshot rather than a torn one, and the
             // first successful reload replaces it wholesale.
             StaticLoggers.ConfigService.LogSnapshotRefreshFailed(ex);
+
+            // Consistent is not the same as usable, and the retry has to
+            // stay open. ReadFlags records the scheme its caches hold as its
+            // last act, so a throw leaves the field at its default of false.
+            // On a light desktop that is accidentally the truth, and
+            // RefreshForOsColorScheme's "already on this scheme" guard would
+            // then decline every retry for the life of the process, leaving
+            // the chrome on field defaults that no build renders. Point the
+            // flag at the scheme we do not have so the next flip goes
+            // through.
+            _themedValuesAreForDarkOs = !isOsDark;
         }
     }
 
@@ -469,6 +480,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // teardown, so _shuttingDown is the only guard against the freed app.
         if (_app.Handle == IntPtr.Zero) return false;
 
+        // Sampled once for the whole reload. Sampling again for ReadFlags
+        // would let a desktop flip between the two land a config resolved
+        // against one scheme in caches recorded as holding the other, and
+        // the second sample is the one the retry guard believes -- so the
+        // first would never be corrected.
+        var isOsDark = OsTheme.IsDark();
+
         GhosttyConfig newConfig;
         try
         {
@@ -483,7 +501,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 if (hcPath is not null)
                     NativeMethods.ConfigLoadFile(newConfig, hcPath);
             }
-            NativeMethods.ConfigSetColorScheme(newConfig, ToScheme(OsTheme.IsDark()));
+            NativeMethods.ConfigSetColorScheme(newConfig, ToScheme(isOsDark));
             NativeMethods.ConfigFinalize(newConfig);
         }
         catch (Exception ex)
@@ -517,7 +535,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         try
         {
             CacheDiagnostics();
-            ReadFlags(OsTheme.IsDark());
+            ReadFlags(isOsDark);
         }
         catch (Exception ex)
         {
@@ -780,21 +798,32 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // these caches, so the whole reload is bounded by at most two
         // File.ReadLines calls regardless of how many keys we probe.
         _configFileCache = LoadIniFile(ConfigFilePath);
-        var activeTheme = ResolveActiveThemeName(isOsDark);
         // No theme configured is not "no theme": libghostty applies its
         // built-in light/dark pair in that case, so the chrome has to
         // resolve against the same one or it frames a pane in colours the
         // pane is not filled with. Asked for by scheme rather than cached,
         // because a flip re-enters here with the other one.
         //
+        // Whether that happened is asked of libghostty, not of the config
+        // file. `theme` can be set in a file pulled in by `config-file`,
+        // which ResolveActiveThemeName cannot see, and reading it as "no
+        // theme" would paint the chrome from the built-in pair while the
+        // terminal renders the theme the user actually asked for.
+        //
         // A configured-but-unresolvable theme deliberately does not land
         // here: libghostty leaves the compile-time colours in place for
         // that, and substituting the built-in pair would drift again.
-        _activeThemeFileCache = string.IsNullOrEmpty(activeTheme)
-            ? LoadBuiltinTheme(isOsDark)
-            : ResolveThemePath(activeTheme) is { } themePath
+        if (NativeMethods.ConfigThemeIsBuiltin(_config))
+        {
+            _activeThemeFileCache = LoadBuiltinTheme(isOsDark);
+        }
+        else
+        {
+            var activeTheme = ResolveActiveThemeName(isOsDark);
+            _activeThemeFileCache = ResolveThemePath(activeTheme) is { } themePath
                 ? LoadIniFile(themePath)
                 : null;
+        }
 
         // Immediately after the assignment it certifies, so the two cannot
         // disagree. Both failure legs then stay consistent: a throw from

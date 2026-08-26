@@ -18,12 +18,18 @@
 //! the ghost's glow is the accent, the ghost's own silver is the dark-mode
 //! foreground, and the near-black indigo of the icon's corners is the
 //! dark-mode field. Every colour here clears WCAG AA (4.5:1) against its
-//! background except palette slot 0, which is the "black" slot and is
-//! deliberately close to the background: programs use it as a fill, not as
-//! text. `wintty_theme_test.zig` asserts that property so a future palette
-//! tweak cannot quietly regress it.
+//! background, except the two or three slots programs use as a fill rather
+//! than as text: slot 0 in the dark half, slots 7 and 15 in the light half.
+//! Those are held to the other half of the same bargain instead -- they must
+//! stay distinguishable from the background, and text in the foreground
+//! colour drawn on top of them must itself clear AA.
+//!
+//! Which slots those are flips with the polarity, which is the trap here. A
+//! light theme whose "white" slots are dark passes a naive
+//! every-slot-against-the-background check and then renders `ESC[47m` as
+//! dark-on-dark. `wintty_theme_test.zig` encodes the polarity-aware rule, and
+//! separately pins that slot 0 and slot 15 can never collide.
 
-const std = @import("std");
 const builtin = @import("builtin");
 const conditional = @import("conditional.zig");
 
@@ -82,7 +88,7 @@ pub const light: []const u8 =
     \\palette = 4=#1668c4
     \\palette = 5=#7a3fbf
     \\palette = 6=#0f6e80
-    \\palette = 7=#4a5265
+    \\palette = 7=#b4bacb
     \\palette = 8=#666e81
     \\palette = 9=#a82a3e
     \\palette = 10=#186540
@@ -90,7 +96,7 @@ pub const light: []const u8 =
     \\palette = 12=#0f55a6
     \\palette = 13=#65329f
     \\palette = 14=#0b5a69
-    \\palette = 15=#1e2333
+    \\palette = 15=#cfd5e3
     \\
 ;
 

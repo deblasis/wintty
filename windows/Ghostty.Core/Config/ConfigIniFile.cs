@@ -36,7 +36,23 @@ public static class ConfigIniFile
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
             return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-        return Parse(File.ReadLines(path));
+        // FileShare.ReadWrite rather than File.ReadLines' default of
+        // FileShare.Read. This file has writers: the settings UI rewrites it,
+        // and libghostty holds a write handle across its own config edits. A
+        // reader that refuses to share writes turns any of those into a
+        // sharing violation on a file that is merely open, not locked.
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return Parse(ReadLines(reader));
+    }
+
+    private static IEnumerable<string> ReadLines(StreamReader reader)
+    {
+        while (reader.ReadLine() is { } line) yield return line;
     }
 
     /// <summary>

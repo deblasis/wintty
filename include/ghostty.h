@@ -1217,8 +1217,13 @@ GHOSTTY_API void ghostty_config_load_cli_args(ghostty_config_t);
 GHOSTTY_API void ghostty_config_load_file(ghostty_config_t, const char*);
 GHOSTTY_API void ghostty_config_load_default_files(ghostty_config_t);
 GHOSTTY_API void ghostty_config_load_recursive_files(ghostty_config_t);
-GHOSTTY_API void ghostty_config_set_color_scheme(ghostty_config_t,
+// Must be called before ghostty_config_finalize. Returns false if it was
+// not, or if the scheme is out of range, in which case nothing changed.
+GHOSTTY_API bool ghostty_config_set_color_scheme(ghostty_config_t,
                                                  ghostty_color_scheme_e);
+GHOSTTY_API bool ghostty_config_theme_is_builtin(ghostty_config_t);
+// Static storage: do NOT pass the result to ghostty_string_free. The ptr is
+// NULL on a build with no built-in theme.
 GHOSTTY_API ghostty_string_s ghostty_config_builtin_theme(ghostty_color_scheme_e);
 GHOSTTY_API void ghostty_config_finalize(ghostty_config_t);
 GHOSTTY_API bool ghostty_config_get(ghostty_config_t, void*, const char*, uintptr_t);

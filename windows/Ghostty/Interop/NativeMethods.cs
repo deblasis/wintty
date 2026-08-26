@@ -359,9 +359,39 @@ internal static partial class NativeMethods
 
     [LibraryImport(Dll, EntryPoint = "ghostty_config_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-    internal static partial void ConfigSetColorScheme(
+    private static partial byte ConfigSetColorSchemeNative(
         GhosttyConfig config, GhosttyColorScheme scheme);
 
+    /// <summary>
+    /// Tell the config which desktop colour scheme to resolve against.
+    /// Returns false if nothing changed, which for a well-formed scheme
+    /// means the config was already finalized and the call came too late.
+    /// </summary>
+    internal static bool ConfigSetColorScheme(GhosttyConfig config, GhosttyColorScheme scheme)
+        => ConfigSetColorSchemeNative(config, scheme) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_theme_is_builtin")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte ConfigThemeIsBuiltinNative(GhosttyConfig config);
+
+    /// <summary>
+    /// Whether the config resolved its colours from the built-in theme pair,
+    /// i.e. nothing anywhere in the loaded config set <c>theme</c>. Asked of
+    /// libghostty rather than of the config file, because <c>theme</c> can be
+    /// set in a file reached through <c>config-file</c>.
+    /// </summary>
+    internal static bool ConfigThemeIsBuiltin(GhosttyConfig config)
+        => ConfigThemeIsBuiltinNative(config) != 0;
+
+    /// <summary>
+    /// The built-in theme text for a scheme, in config file syntax.
+    /// </summary>
+    /// <remarks>
+    /// The returned string points at static storage on the native side. It
+    /// must not be freed, which makes it the one exception among this file's
+    /// <see cref="GhosttyString"/> producers -- see the note on the
+    /// declaration in ghostty.h.
+    /// </remarks>
     [LibraryImport(Dll, EntryPoint = "ghostty_config_builtin_theme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial GhosttyString ConfigBuiltinTheme(GhosttyColorScheme scheme);

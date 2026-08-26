@@ -39,12 +39,16 @@ fn parseHex(s: []const u8) ![3]u8 {
     };
 }
 
+/// Every field is optional and every field is required. A theme that drops
+/// a line has to fail parsing: left as `undefined`, a missing colour is
+/// whatever the stack held, and 0xAA-filled bytes happen to clear every
+/// ratio below, so the test would pass by not testing anything.
 const Parsed = struct {
-    background: [3]u8 = undefined,
-    foreground: [3]u8 = undefined,
-    cursor: [3]u8 = undefined,
-    selection_background: [3]u8 = undefined,
-    selection_foreground: [3]u8 = undefined,
+    background: ?[3]u8 = null,
+    foreground: ?[3]u8 = null,
+    cursor: ?[3]u8 = null,
+    selection_background: ?[3]u8 = null,
+    selection_foreground: ?[3]u8 = null,
     palette: [16][3]u8 = undefined,
     palette_seen: [16]bool = @splat(false),
 };
@@ -55,7 +59,6 @@ const Parsed = struct {
 /// a colour at its compile-time default.
 fn parse(source: []const u8) !Parsed {
     var out: Parsed = .{};
-    var seen_background = false;
 
     var lines = std.mem.tokenizeScalar(u8, source, '\n');
     while (lines.next()) |raw| {
@@ -69,7 +72,6 @@ fn parse(source: []const u8) !Parsed {
 
         if (std.mem.eql(u8, key, "background")) {
             out.background = try parseHex(value);
-            seen_background = true;
         } else if (std.mem.eql(u8, key, "foreground")) {
             out.foreground = try parseHex(value);
         } else if (std.mem.eql(u8, key, "cursor-color")) {
@@ -90,7 +92,11 @@ fn parse(source: []const u8) !Parsed {
         }
     }
 
-    if (!seen_background) return error.MissingBackground;
+    if (out.background == null) return error.MissingBackground;
+    if (out.foreground == null) return error.MissingForeground;
+    if (out.cursor == null) return error.MissingCursor;
+    if (out.selection_background == null) return error.MissingSelectionBackground;
+    if (out.selection_foreground == null) return error.MissingSelectionForeground;
     for (out.palette_seen) |seen| if (!seen) return error.IncompletePalette;
     return out;
 }
@@ -110,30 +116,56 @@ fn expectAtLeast(actual: f64, minimum: f64) !void {
 
 fn checkTheme(source: []const u8) !void {
     const t = try parse(source);
+    const background = t.background.?;
+    const foreground = t.foreground.?;
 
-    try expectAtLeast(contrast(t.background, t.foreground), aa_text);
-    try expectAtLeast(contrast(t.background, t.cursor), aa_text);
+    try expectAtLeast(contrast(background, foreground), aa_text);
+    try expectAtLeast(contrast(background, t.cursor.?), aa_text);
     try expectAtLeast(
-        contrast(t.selection_background, t.selection_foreground),
+        contrast(t.selection_background.?, t.selection_foreground.?),
         aa_text,
     );
 
-    // Slot 0 is the "black" slot. Programs use it as a fill behind other
-    // colours rather than as text, and on a dark theme it sits close to the
-    // background by convention, so it cannot be held to the text rule. It
-    // still has to be told apart from the background, which is the failure
-    // that would actually matter: a slot 0 equal to the background makes
-    // anything drawn in it disappear.
+    // Some slots are fills, not text. Programs paint them behind other
+    // colours, so by convention they sit near the background and cannot be
+    // held to the text rule. Which slots those are depends on the polarity:
+    // on a dark theme it is the "black" end, on a light theme the "white"
+    // end. Getting this backwards is the bug this exists to catch, since a
+    // light theme whose white slots are dark clears an every-slot-against-
+    // the-background check and still renders `ESC[47m` as dark-on-dark.
+    const dark_theme = luminance(background) < 0.5;
+    const fill_slots: []const usize = if (dark_theme) &.{0} else &.{ 7, 15 };
+
     for (t.palette, 0..) |color, i| {
-        if (i == 0) {
-            try testing.expect(contrast(t.background, color) > 1.2);
+        if (std.mem.indexOfScalar(usize, fill_slots, i) != null) {
+            // A fill has the opposite job to text, so it is held to the
+            // opposite pair of rules: it must be distinguishable from the
+            // background (or anything drawn in it vanishes), and text in the
+            // foreground colour on top of it must itself be readable.
+            testing.expect(contrast(background, color) > 1.2) catch |err| {
+                std.debug.print("fill slot {d} is invisible against the background\n", .{i});
+                return err;
+            };
+            expectAtLeast(contrast(color, foreground), aa_text) catch |err| {
+                std.debug.print("fill slot {d} cannot carry foreground text\n", .{i});
+                return err;
+            };
             continue;
         }
-        expectAtLeast(contrast(t.background, color), aa_text) catch |err| {
+        expectAtLeast(contrast(background, color), aa_text) catch |err| {
             std.debug.print("palette slot {d} failed\n", .{i});
             return err;
         };
     }
+
+    // Slot 0 is "black" and slot 15 is "bright white". Whatever the polarity,
+    // a program that pairs them expects opposites: powerline segments and
+    // `fzf --color=bw` both do. They collided once already, when the light
+    // half pushed 15 dark to clear the text rule against a light background.
+    expectAtLeast(contrast(t.palette[0], t.palette[15]), aa_text) catch |err| {
+        std.debug.print("palette slot 0 and slot 15 are not opposites\n", .{});
+        return err;
+    };
 }
 
 test "built-in dark theme is legible" {
@@ -150,8 +182,8 @@ test "the two halves actually differ in polarity" {
 
     // A pair whose halves are both dark would pass every contrast test
     // above and still defeat the entire point of having a pair.
-    try testing.expect(luminance(d.background) < 0.1);
-    try testing.expect(luminance(l.background) > 0.7);
+    try testing.expect(luminance(d.background.?) < 0.1);
+    try testing.expect(luminance(l.background.?) > 0.7);
 }
 
 test "forScheme selects the matching half" {
