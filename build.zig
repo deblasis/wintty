@@ -368,6 +368,27 @@ pub fn build(b: *std.Build) !void {
         test_lib_vt_build_step.dependOn(&mod_vt_c_test.step);
     }
 
+    // Build-time code tests.
+    //
+    // src/build/ hangs off this file rather than off the src/main.zig test
+    // root, and a test binary collects test blocks only from files its own
+    // test and comptime blocks reach. src/build/test.zig says which files
+    // those are and why they need a root of their own. Always the host, since
+    // build-time code runs on the host whatever the build is targeting -- and
+    // outside the emit_lib_vt guard below for the same reason.
+    {
+        const build_test = b.addTest(.{
+            .name = "ghostty-build-test",
+            .filters = test_filters,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/build/test.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(build_test).step);
+    }
+
     // Tests (skip when building libghostty-vt)
     if (!config.emit_lib_vt) {
         // Full unit tests
