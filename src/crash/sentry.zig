@@ -402,7 +402,30 @@ fn beforeSend(
 /// Returns a slice owned by `alloc`, or the input unchanged if there is
 /// nothing to rewrite.
 fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
-    const needle = "\"code_file\":\"";
+    var out: []const u8 = json;
+    var owned = false;
+    for (image_path_keys) |key| {
+        const next = try scrubKey(alloc, out, key);
+        if (owned and next.ptr != out.ptr) alloc.free(out);
+        owned = owned or next.ptr != out.ptr;
+        out = next;
+    }
+    return out;
+}
+
+/// Every module field that carries a filesystem path.
+///
+/// `debug_file` is here because leaving it out is what shipped: `code_file`
+/// was scrubbed, the report was checked for a username, and it passed,
+/// because the username had moved next door into the PDB path. Any new
+/// path-bearing field belongs in this list, and the test below is what makes
+/// forgetting one visible.
+const image_path_keys = [_][]const u8{ "code_file", "debug_file" };
+
+fn scrubKey(alloc: Allocator, json: []const u8, key: []const u8) ![]const u8 {
+    var needle_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":\"", .{key}) catch
+        return json;
     if (std.mem.indexOf(u8, json, needle) == null) return json;
 
     var out: std.ArrayList(u8) = .empty;
@@ -609,15 +632,35 @@ test "scrubImagePaths keeps the file name and drops the directory" {
     const alloc = std.testing.allocator;
     // Multiline: contents are literal, so these backslashes are the
     // doubled ones real JSON carries.
+    //
+    // Both path fields, because a real module entry carries both and only
+    // one of them used to be scrubbed. The report then passed a username
+    // check on code_file while debug_file still spelled it out.
     const input =
-        \\{"images":[{"code_file":"C:\\Users\\alex\\conpty.dll"}]}
+        \\{"images":[{"code_file":"C:\\Users\\alex\\conpty.dll","debug_file":"C:\\Users\\alex\\conpty.pdb"}]}
     ;
     const out = try scrubImagePaths(alloc, input);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "conpty.dll") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "conpty.pdb") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "alex") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Users") == null);
+}
+
+test "no module field carries a path out of the scrub" {
+    // A standing check rather than a case: the leak was not a wrong rule, it
+    // was a field nobody had listed. This fails the day a module entry gains
+    // another path field and image_path_keys does not.
+    const alloc = std.testing.allocator;
+    const input =
+        \\{"images":[{"code_file":"C:\\Users\\alex\\a.dll","debug_file":"C:\\Users\\alex\\a.pdb","code_id":"abc","type":"pe"}]}
+    ;
+    const out = try scrubImagePaths(alloc, input);
+    defer alloc.free(out);
+
+    // Nothing that still looks like an absolute Windows path survives.
+    try std.testing.expect(std.mem.indexOf(u8, out, ":\\\\") == null);
 }
 
 test "scrubImagePaths leaves an envelope with no module paths alone" {
