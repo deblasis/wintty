@@ -9,7 +9,13 @@ pub const c = @cImport({
     // Suppress the include and supply a stand-in for that field.
     if (builtin.target.os.tag == .windows) {
         @cDefine("_WINDOWS_", "1");
-        @cDefine("EXCEPTION_POINTERS", "struct { int _unused; }");
+        // Two pointers, matching the real EXCEPTION_POINTERS
+        // (PEXCEPTION_RECORD, PCONTEXT). The stand-in used to be a single
+        // int, which made Zig's view of sentry_ucontext_s four bytes where
+        // the C side's is sixteen. Nothing on the Zig side references that
+        // field today, which is the only reason it worked; getting the size
+        // right costs nothing and removes a landmine for whoever does.
+        @cDefine("EXCEPTION_POINTERS", "struct { void *_record; void *_context; }");
     }
     // Matches -DSENTRY_BUILD_STATIC in build.zig: without it sentry.h
     // decorates every function with __declspec(dllimport).

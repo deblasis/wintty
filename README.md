@@ -360,7 +360,7 @@ crash report was generated.
 > reports. A future version of Ghostty will make the contents of the crash
 > reports more easily viewable through the CLI and GUI.
 
-Crash reports end in the `.ghosttycrash` extension. The crash reports are in
+Crash reports end in the `.winttycrash` extension. The crash reports are in
 [Sentry envelope format](https://develop.sentry.dev/sdk/envelopes/). You can
 upload these to your own Sentry account to view their contents, but the format
 is also publicly documented so any other available tools can also be used.
