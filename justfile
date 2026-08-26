@@ -553,14 +553,21 @@ sync-bootstrap:
 # would re-merge and could resolve differently than the replay did - so the
 # commit is built directly with commit-tree.
 #
-# The push is deliberately not forced. If windows gained a PR mid-sync the
-# push is rejected as non-fast-forward, the tag is rolled back, and re-running
-# 'just sync' folds the new commits into the standing replay. It is atomic
-# across the branch and the series tag so a half-published sync cannot exist
-# on the remote.
+# Because the tree arrives wholesale, two assertions gate the stamp itself:
+# containment (windows holds nothing the replay lacks, else the stamp drops
+# it forever) and unreviewed work (the replay carries nothing windows has
+# never seen through a PR, unless acknowledged with a reason that is written
+# into the merge message). Both re-run here at publish time; the replay being
+# hours old is the normal case, not an anomaly.
+#
+# The push is deliberately not forced. If windows gained a PR between the
+# publish-time fetch and the push, the push is rejected as non-fast-forward,
+# the tag is rolled back, and re-running 'just sync' folds the new commits
+# into the standing replay. It is atomic across the branch and the series tag
+# so a half-published sync cannot exist on the remote.
 #
 # Publish the verified replay onto windows as a snapshot merge.
-sync-publish:
+sync-publish ack="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "$(git branch --show-current)" != "series-wip" ]; then
@@ -581,6 +588,12 @@ sync-publish:
     # Same explicit namespace fetch as sync: the next generation is numbered
     # from these tags, and a stale set would mint a duplicate number.
     git fetch origin 'refs/tags/series/*:refs/tags/series/*'
+    # Fetched here, not inherited from the last 'just sync', because both
+    # assertions below measure against the windows the remote actually has.
+    # The push rejects a race that lands between this fetch and the push; the
+    # gap these checks close is the one that cannot be caught at push time -
+    # a replay built hours ago that a PR merged in between would stamp out.
+    git fetch origin windows
     prev_n=$(git tag --list 'series/v*' | sed 's|^series/v||' | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
     if [ -z "$prev_n" ]; then
         echo "REFUSING: no series/v* tag; run 'just sync-bootstrap' first."
@@ -601,12 +614,149 @@ sync-publish:
         echo "newer generation folded in. Re-run 'just sync'."
         exit 1
     fi
+    # Both assertions below are re-evaluated HERE, at publish time, because the
+    # gap that bit series v2 was the hours between 'just sync' and this
+    # command: four merged PRs were stamped out by a replay that predated
+    # them, and once stamped they became ancestors of the snapshot merge, so
+    # no later sync ever re-folded them. A publish joins two surfaces that
+    # moved independently since the replay was built, and must prove two
+    # things about them:
+    #
+    #   containment  windows holds nothing this replay lacks. This is the
+    #                fold-in computation from 'just sync', pointed at the
+    #                replay: anything sync would fold in right now is exactly
+    #                what this publish would drop.
+    #   unreviewed   the replay carries nothing windows has never reviewed.
+    #                This command lands on windows without passing pr_gate -
+    #                that is its design - so it pays a toll instead: every
+    #                commit entering windows that is not a replay of an
+    #                already-merged PR and not a patch upstream absorbed is
+    #                named, and the publish refuses unless each is explicitly
+    #                acknowledged with a reason that lands in history.
+    prev="refs/tags/series/v${prev_n}"
+    mprev=$(git rev-list --min-parents=2 --first-parent -1 refs/remotes/upstream/main..refs/remotes/origin/windows)
+    if [ -z "$mprev" ]; then
+        mprev=$(git rev-parse "${prev}^{commit}")
+    fi
+    # The same baseline sync validates, re-checked here because publish
+    # reads it after its own fetch: a bogus snapshot marker would make the
+    # containment check below measure nothing while appearing to pass.
+    if ! git merge-base --is-ancestor "$mprev" refs/remotes/origin/windows; then
+        echo "REFUSING: the snapshot baseline (${mprev:0:9}) is not on origin/windows."
+        exit 1
+    fi
+    if [ "$(git rev-parse "${mprev}^{tree}")" != "$(git rev-parse "${prev}^{tree}")" ]; then
+        echo "REFUSING: the last snapshot on windows (${mprev:0:9}) does not carry the"
+        echo "tree of series/v${prev_n}. The published branch and the series diverged."
+        exit 1
+    fi
+    # Containment: windows holds nothing this replay lacks. Pairing is by
+    # range-diff, not patch-id, because a fold-in resolved by hand carries a
+    # different patch than the PR it folds, and patch-id alone would refuse
+    # that publish forever while its own remedy ('re-run just sync') re-folds
+    # the same conflict - an impassable release path. range-diff is the one
+    # instrument that pairs hand-resolved work; it is what sync-verify
+    # already trusts for its dropped-commit check.
+    dropped=""
+    if [ "$(git rev-list --count "${mprev}..refs/remotes/origin/windows")" -gt 0 ]; then
+        if ! rd_windows=$(git range-diff --no-color \
+                "${mprev}..refs/remotes/origin/windows" \
+                "refs/remotes/upstream/main..HEAD" 2>&1); then
+            echo "REFUSING: range-diff could not pair the replay against windows:"
+            printf '%s\n' "$rd_windows" | head -3
+            exit 1
+        fi
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            sha=$(printf '%s' "$line" | awk '{print $2}')
+            # Upstream absorbing a fork PR legitimately removes it from the
+            # fold set: the patch is already arriving through parent 2.
+            if [ "$(git cherry refs/remotes/upstream/main "$sha" "${sha}^" 2>/dev/null | cut -c1)" = "-" ]; then
+                continue
+            fi
+            dropped="${dropped}$(git log -1 --oneline "$sha")"$'\n'
+        done <<< "$(printf '%s\n' "$rd_windows" | grep -E '^ *[0-9]+: *[0-9a-f]+ *< ' || true)"
+    fi
+    if [ -n "$dropped" ]; then
+        echo "REFUSING: windows has commits this replay does not carry. Publishing now"
+        echo "would stamp a tree without them, and after the stamp they are ancestors"
+        echo "of the merge, so no later sync re-folds them. Re-run 'just sync' (it"
+        echo "folds these in), verify, then publish again:"
+        printf '%s' "$dropped"
+        exit 1
+    fi
+    # Unreviewed: the replay carries nothing windows has never reviewed.
+    # Candidates come from patch-id (git cherry over commits newer than the
+    # last series tag). Classification then runs, in order: upstream's own
+    # commits are skipped (they enter through parent 2 by design); patches
+    # upstream absorbed pass (the absorbed mark only fires when upstream
+    # carries the patch under a different sha, which is why reachability is
+    # checked first); commits whose subject matches a PR windows merged
+    # since the last snapshot pass (the pool is RECENT commits only, read
+    # into a variable once - piping git log into grep under pipefail flips
+    # the test false when git log SIGPIPEs, and matches near the top are
+    # exactly the folded-PR case; a full-history pool would let new work
+    # hide behind any old subject); and finally commits range-diff pairs
+    # with the standing series stack pass, which is what clears a
+    # hand-resolved replay of an old patch. Anything left is named.
+    recent_subjects=$(git log --format=%s "${mprev}..refs/remotes/origin/windows")
+    old_base=$(git merge-base "${prev}^{commit}" refs/remotes/upstream/main 2>/dev/null || true)
+    paired=""
+    if [ -n "$old_base" ]; then
+        # range-diff prints abbreviated shas; resolved to full ones so the
+        # membership test below compares like with like.
+        paired=$(git range-diff --no-color \
+                "${old_base}..${prev}^{commit}" \
+                "refs/remotes/upstream/main..HEAD" 2>/dev/null \
+            | awk '$3 == "=" || $3 == "!" { print $5 }' \
+            | while IFS= read -r p; do git rev-parse "$p"; done \
+            || true)
+    fi
+    unreviewed=""
+    reviewed_rewrites=0
+    for sha in $(git cherry refs/remotes/origin/windows HEAD "$prev" | awk '$1 == "+" { print $2 }'); do
+        if git merge-base --is-ancestor "$sha" refs/remotes/upstream/main 2>/dev/null; then
+            continue
+        elif [ "$(git cherry refs/remotes/upstream/main "$sha" "${sha}^" 2>/dev/null | cut -c1)" = "-" ]; then
+            reviewed_rewrites=$((reviewed_rewrites + 1))
+        elif [ -n "$(printf '%s\n' "$recent_subjects" | grep -Fx "$(git log -1 --format=%s "$sha")" || true)" ]; then
+            reviewed_rewrites=$((reviewed_rewrites + 1))
+        elif [ -n "$(printf '%s\n' "$paired" | grep -Fx "$sha" || true)" ]; then
+            reviewed_rewrites=$((reviewed_rewrites + 1))
+        else
+            unreviewed="${unreviewed}$(git log -1 --oneline "$sha")"$'\n'
+        fi
+    done
+    if [ "$reviewed_rewrites" -gt 0 ]; then
+        echo "${reviewed_rewrites} rewritten patch(es) entering windows (each reviewed where it first landed)."
+    fi
+    if [ -n "$unreviewed" ]; then
+        # ack is a fixed token, not freeform prose: just interpolates
+        # arguments into the script text verbatim, so a prose reason would
+        # be code the recipe executes. The named commits below are the
+        # permanent record; the token only says the operator read them.
+        if [ '{{ ack }}' = yes ]; then
+            echo ""
+            echo "ACKNOWLEDGED unreviewed work entering windows; recorded in the merge message:"
+            printf '%s' "$unreviewed"
+        else
+            echo "REFUSING: this publish would carry commits into windows that no PR"
+            echo "reviewed (not replays of merged PRs, not absorbed upstream):"
+            printf '%s' "$unreviewed"
+            echo "Land them through a PR, or acknowledge explicitly after reading them:"
+            echo "  just sync-publish yes"
+            exit 1
+        fi
+    fi
     next=$((10#$prev_n + 1))
     base=$(git rev-parse refs/remotes/origin/windows)
     up=$(git rev-parse refs/remotes/upstream/main)
     tree=$(git rev-parse 'HEAD^{tree}')
-    m=$(git commit-tree "$tree" -p "$base" -p "$up" \
-        -m "sync: merge upstream $(git rev-parse --short "$up") (series v${next})")
+    msg=(-m "sync: merge upstream $(git rev-parse --short "$up") (series v${next})")
+    if [ -n "$unreviewed" ]; then
+        msg+=(-m "unreviewed work entering windows, acknowledged at publish:"$'\n'"$(printf '%s' "$unreviewed" | sed 's/^/  /')")
+    fi
+    m=$(git commit-tree "$tree" -p "$base" -p "$up" "${msg[@]}")
     # By construction, and still checked: tier pins, the next sync's fold-in,
     # and sync-verify all ride on this equality.
     if [ "$(git rev-parse "${m}^{tree}")" != "$tree" ]; then
