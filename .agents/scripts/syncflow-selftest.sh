@@ -113,7 +113,11 @@ J sync
 check "series rebased onto upstream" git -C work merge-base --is-ancestor refs/remotes/upstream/main series-wip
 check_eq "series-wip stamped with its generation" "$(git -C work config --get branch.series-wip.seriesbase)" "series/v0"
 quiet "sync-verify fast (first sync)" J sync-verify fast
-J sync-publish
+if out=$(J sync-publish 2>&1) && ! printf '%s' "$out" | grep -q "REFUSING\|unreviewed"; then
+  ok "a clean publish is quiet about unreviewed work"
+else
+  nope "a clean publish is quiet about unreviewed work"
+fi
 M1=$(git -C origin.git rev-parse refs/heads/windows)
 check_eq "snapshot M1 is a merge of old tip + upstream" \
   "$(git -C work rev-parse "$M1^1" "$M1^2" | tr '\n' ' ')" \
@@ -225,15 +229,66 @@ if git -C work rev-parse --verify -q refs/tags/series/v7 >/dev/null; then
 else
   ok "series/v7 not minted by a refused publish"
 fi
-J sync-publish fixture-direct-work-may-ride-the-snapshot
+J sync-publish yes
 check "series/v7 pushed on the acknowledged publish" git -C origin.git rev-parse --verify refs/tags/series/v7
 check "acknowledged work reached windows" git -C work cat-file -e 'refs/remotes/origin/windows:direct.txt'
 M8=$(git -C origin.git rev-parse refs/heads/windows)
 if git -C work log -1 --format=%B "$M8" | grep -q "w1: direct work"; then
-  ok "the ack is recorded in the snapshot merge message"
+  ok "the acknowledged commit is recorded in the snapshot merge message"
 else
-  nope "the ack is recorded in the snapshot merge message"
+  nope "the acknowledged commit is recorded in the snapshot merge message"
 fi
+if git -C work log -1 --format=%B "$M8" | grep -q "acknowledged at publish"; then
+  ok "the merge message marks the acknowledgement itself"
+else
+  nope "the merge message marks the acknowledgement itself"
+fi
+
+say "test 9: a hand-resolved fold-in still publishes (pairing, not patch-id)"
+( cd up && echo lib9 >> lib.txt && $G add -A && $G commit -qm "u10: resolved-fold era" )
+J sync
+( cd work
+  git checkout -q windows
+  printf 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\nbase7\nbase8\nfork1\nfork2\nfork3\nfork4\nfork5\nfork6\np4-line\n' > a.txt
+  $G add -A && $G commit -qm "p4: PR that conflicts with the stack's f2"
+  git push -q origin windows
+)
+# The fold-in of p4 onto the standing replay conflicts (the recovery path
+# SKILL.md documents); resolve by hand and continue the pick. The resolved
+# carry has a different patch-id than p4 - patch-id containment would refuse
+# this publish forever; range-diff pairing must let it through.
+( cd work
+  git checkout -q series-wip
+  git cherry-pick refs/remotes/origin/windows >/dev/null 2>&1 || true
+  printf 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\nbase7\nbase8\nfork1\nfork2\nfork3\nfork4\nfork5\nfork6\np4-line\n' > a.txt
+  $G add a.txt
+  GIT_EDITOR=true $G cherry-pick --continue >/dev/null 2>&1 || true
+)
+if out=$(J sync-publish 2>&1) && ! printf '%s' "$out" | grep -q "REFUSING"; then
+  ok "a hand-resolved fold-in publishes"
+else
+  nope "a hand-resolved fold-in publishes ($(printf '%s' "$out" | tail -3 | tr '\n' ' '))"
+fi
+check "the resolved fold's content reached windows" \
+  git -C work cat-file -e 'refs/remotes/origin/windows:a.txt'
+if git -C work show 'refs/remotes/origin/windows:a.txt' | grep -q "p4-line"; then
+  ok "the resolved fold's change is in the published tree"
+else
+  nope "the resolved fold's change is in the published tree"
+fi
+
+say "test 10: new work cannot hide behind an old fork commit's subject"
+( cd up && echo lib10 >> lib.txt && $G add -A && $G commit -qm "u11: sneaky era" )
+J sync
+( cd work
+  git checkout -q series-wip
+  echo sneaky > sneaky.txt
+  $G add -A && $G commit -qm "f1: fork file"
+)
+expect_fail "a reused deep-history subject is still refused" "f1: fork file" J sync-publish
+( cd work && git checkout -q windows && git branch -q -D series-wip )
+# The guards below need a standing wip; rebuild one without the sneaky work.
+J sync
 
 say "guards"
 ( cd work && git checkout -q -b random "$M4" )

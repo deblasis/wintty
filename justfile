@@ -638,53 +638,113 @@ sync-publish ack="":
     if [ -z "$mprev" ]; then
         mprev=$(git rev-parse "${prev}^{commit}")
     fi
-    dropped=$(git cherry HEAD refs/remotes/origin/windows "$mprev" | awk '$1 == "+" { print $2 }')
+    # The same baseline sync validates, re-checked here because publish
+    # reads it after its own fetch: a bogus snapshot marker would make the
+    # containment check below measure nothing while appearing to pass.
+    if ! git merge-base --is-ancestor "$mprev" refs/remotes/origin/windows; then
+        echo "REFUSING: the snapshot baseline (${mprev:0:9}) is not on origin/windows."
+        exit 1
+    fi
+    if [ "$(git rev-parse "${mprev}^{tree}")" != "$(git rev-parse "${prev}^{tree}")" ]; then
+        echo "REFUSING: the last snapshot on windows (${mprev:0:9}) does not carry the"
+        echo "tree of series/v${prev_n}. The published branch and the series diverged."
+        exit 1
+    fi
+    # Containment: windows holds nothing this replay lacks. Pairing is by
+    # range-diff, not patch-id, because a fold-in resolved by hand carries a
+    # different patch than the PR it folds, and patch-id alone would refuse
+    # that publish forever while its own remedy ('re-run just sync') re-folds
+    # the same conflict - an impassable release path. range-diff is the one
+    # instrument that pairs hand-resolved work; it is what sync-verify
+    # already trusts for its dropped-commit check.
+    dropped=""
+    if [ "$(git rev-list --count "${mprev}..refs/remotes/origin/windows")" -gt 0 ]; then
+        if ! rd_windows=$(git range-diff --no-color \
+                "${mprev}..refs/remotes/origin/windows" \
+                "refs/remotes/upstream/main..HEAD" 2>&1); then
+            echo "REFUSING: range-diff could not pair the replay against windows:"
+            printf '%s\n' "$rd_windows" | head -3
+            exit 1
+        fi
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            sha=$(printf '%s' "$line" | awk '{print $2}')
+            # Upstream absorbing a fork PR legitimately removes it from the
+            # fold set: the patch is already arriving through parent 2.
+            if [ "$(git cherry refs/remotes/upstream/main "$sha" "${sha}^" 2>/dev/null | cut -c1)" = "-" ]; then
+                continue
+            fi
+            dropped="${dropped}$(git log -1 --oneline "$sha")"$'\n'
+        done <<< "$(printf '%s\n' "$rd_windows" | grep -E '^ *[0-9]+: *[0-9a-f]+ *< ' || true)"
+    fi
     if [ -n "$dropped" ]; then
         echo "REFUSING: windows has commits this replay does not carry. Publishing now"
         echo "would stamp a tree without them, and after the stamp they are ancestors"
         echo "of the merge, so no later sync re-folds them. Re-run 'just sync' (it"
         echo "folds these in), verify, then publish again:"
-        git log --no-walk --oneline $dropped
+        printf '%s' "$dropped"
         exit 1
     fi
-    # Patch-id flags every hand-resolved replay as new, because resolving
-    # changes the patch, so equivalence is established by name instead: a
-    # replay keeps the subject of the commit it replays, and squash-merged
-    # subjects are unique per PR. Only commits newer than the last snapshot
-    # are considered; the previous series stack is excluded by the limit.
-    # Upstream's own commits are skipped outright: they enter windows through
-    # the merge's second parent, which is the entire point of the publish.
+    # Unreviewed: the replay carries nothing windows has never reviewed.
+    # Candidates come from patch-id (git cherry over commits newer than the
+    # last series tag). Classification then runs, in order: upstream's own
+    # commits are skipped (they enter through parent 2 by design); patches
+    # upstream absorbed pass (the absorbed mark only fires when upstream
+    # carries the patch under a different sha, which is why reachability is
+    # checked first); commits whose subject matches a PR windows merged
+    # since the last snapshot pass (the pool is RECENT commits only, read
+    # into a variable once - piping git log into grep under pipefail flips
+    # the test false when git log SIGPIPEs, and matches near the top are
+    # exactly the folded-PR case; a full-history pool would let new work
+    # hide behind any old subject); and finally commits range-diff pairs
+    # with the standing series stack pass, which is what clears a
+    # hand-resolved replay of an old patch. Anything left is named.
+    recent_subjects=$(git log --format=%s "${mprev}..refs/remotes/origin/windows")
+    old_base=$(git merge-base "${prev}^{commit}" refs/remotes/upstream/main 2>/dev/null || true)
+    paired=""
+    if [ -n "$old_base" ]; then
+        # range-diff prints abbreviated shas; resolved to full ones so the
+        # membership test below compares like with like.
+        paired=$(git range-diff --no-color \
+                "${old_base}..${prev}^{commit}" \
+                "refs/remotes/upstream/main..HEAD" 2>/dev/null \
+            | awk '$3 == "=" || $3 == "!" { print $5 }' \
+            | while IFS= read -r p; do git rev-parse "$p"; done \
+            || true)
+    fi
     unreviewed=""
-    entering=""
+    reviewed_rewrites=0
     for sha in $(git cherry refs/remotes/origin/windows HEAD "$prev" | awk '$1 == "+" { print $2 }'); do
         if git merge-base --is-ancestor "$sha" refs/remotes/upstream/main 2>/dev/null; then
             continue
         elif [ "$(git cherry refs/remotes/upstream/main "$sha" "${sha}^" 2>/dev/null | cut -c1)" = "-" ]; then
-            entering="${entering}$(git log -1 --oneline "$sha") [absorbed upstream]"$'\n'
-        elif git log --format=%s "refs/remotes/upstream/main..refs/remotes/origin/windows" \
-                | grep -Fxq "$(git log -1 --format=%s "$sha")"; then
-            entering="${entering}$(git log -1 --oneline "$sha") [replay of a merged PR]"$'\n'
+            reviewed_rewrites=$((reviewed_rewrites + 1))
+        elif [ -n "$(printf '%s\n' "$recent_subjects" | grep -Fx "$(git log -1 --format=%s "$sha")" || true)" ]; then
+            reviewed_rewrites=$((reviewed_rewrites + 1))
+        elif [ -n "$(printf '%s\n' "$paired" | grep -Fx "$sha" || true)" ]; then
+            reviewed_rewrites=$((reviewed_rewrites + 1))
         else
             unreviewed="${unreviewed}$(git log -1 --oneline "$sha")"$'\n'
         fi
     done
-    if [ -n "$entering" ]; then
-        echo "rewritten patches entering windows (each reviewed where it first landed):"
-        printf '%s' "$entering"
+    if [ "$reviewed_rewrites" -gt 0 ]; then
+        echo "${reviewed_rewrites} rewritten patch(es) entering windows (each reviewed where it first landed)."
     fi
     if [ -n "$unreviewed" ]; then
-        if [ -n "{{ ack }}" ]; then
+        # ack is a fixed token, not freeform prose: just interpolates
+        # arguments into the script text verbatim, so a prose reason would
+        # be code the recipe executes. The named commits below are the
+        # permanent record; the token only says the operator read them.
+        if [ '{{ ack }}' = yes ]; then
             echo ""
-            echo "ACKNOWLEDGED unreviewed work entering windows (reason: {{ ack }}):"
+            echo "ACKNOWLEDGED unreviewed work entering windows; recorded in the merge message:"
             printf '%s' "$unreviewed"
-            echo "Recorded in the snapshot merge message."
         else
             echo "REFUSING: this publish would carry commits into windows that no PR"
             echo "reviewed (not replays of merged PRs, not absorbed upstream):"
             printf '%s' "$unreviewed"
-            echo "Land them through a PR, or acknowledge explicitly - the reason is"
-            echo "recorded permanently in the snapshot merge message:"
-            echo "  just sync-publish ack=\"<reason>\""
+            echo "Land them through a PR, or acknowledge explicitly after reading them:"
+            echo "  just sync-publish yes"
             exit 1
         fi
     fi
@@ -694,7 +754,7 @@ sync-publish ack="":
     tree=$(git rev-parse 'HEAD^{tree}')
     msg=(-m "sync: merge upstream $(git rev-parse --short "$up") (series v${next})")
     if [ -n "$unreviewed" ]; then
-        msg+=(-m "unreviewed work entering windows (ack: {{ ack }}):$(printf '\n%s' "$unreviewed" | sed 's/^/  /')")
+        msg+=(-m "unreviewed work entering windows, acknowledged at publish:"$'\n'"$(printf '%s' "$unreviewed" | sed 's/^/  /')")
     fi
     m=$(git commit-tree "$tree" -p "$base" -p "$up" "${msg[@]}")
     # By construction, and still checked: tier pins, the next sync's fold-in,
