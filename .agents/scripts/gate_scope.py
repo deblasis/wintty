@@ -43,6 +43,7 @@ RECIPE_LEGS = {
     "test-win": (LEG_WIN,),
     "build-win": (LEG_WIN,),
     "gates-selftest": (LEG_GATES,),
+    "gitversion-selftest": (LEG_GATES,),
 }
 
 # Ordered, first match wins, so a more specific prefix must precede its
@@ -71,6 +72,18 @@ PREFIX_RULES = (
 )
 
 EXACT_RULES = {
+    # Both of these are checked by a gates-leg script rather than by a zig
+    # test, because the Zig legs cannot see a BEHAVIOR change in either.
+    # zig-fmt still sees formatting and the suite still sees a compile
+    # error, but nothing runs the code: src/build_config.zig imports
+    # build/Config.zig only to call fromOptions(), and Zig analyses at
+    # decl level, so Config.init -- which is what decides that `tip` and
+    # `vX.Y.Z` are the only names a version may have -- is never reached
+    # from a test root (issue 748). GitVersion.zig runs in build.zig only.
+    # The selftest hardcodes that same contract, so it has to run when
+    # either side of it moves, or the two drift apart in silence.
+    "src/build/GitVersion.zig": ZIG_LEGS + (LEG_GATES,),
+    "src/build/Config.zig": ZIG_LEGS + (LEG_GATES,),
     "build.zig": ZIG_LEGS,
     "build.zig.zon": ZIG_LEGS,
     "build.zig.zon.json": ZIG_LEGS,

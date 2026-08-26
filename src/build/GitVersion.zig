@@ -56,17 +56,23 @@ pub fn detect(b: *std.Build) !Version {
         break :short_hash std.mem.trimEnd(u8, output, "\r\n ");
     };
 
-    // Only a release tag names a version. With no match pattern this returns
-    // whatever tag happens to sit on HEAD, and Config.init panics on a tag it
-    // does not recognise -- so a tag in an unrelated namespace makes the
-    // commit unbuildable. This fork tags every published sync series/vN,
-    // which lands on exactly such a commit.
+    // Only a release tag names a version. With no filter this returns whatever
+    // tag happens to sit on HEAD, and Config.init panics on a tag it does not
+    // recognise -- so a tag in an unrelated namespace makes the commit
+    // unbuildable. This fork tags every published sync series/vN, which lands
+    // on exactly such a commit.
     //
-    // These two patterns filter by namespace; they do not validate. Whether
-    // a v* tag is one Config.init accepts stays Config.init's call.
+    // --match globs the tag name with refs/tags/ stripped, and it does NOT
+    // stop at a slash: `v*` rejects series/v2 only because that name starts
+    // with `s`, and would accept vendor/v2 or v-old/v2 just fine. So --exclude
+    // carries the namespace rule and --match carries the name rule; drop
+    // either and a tag that is not a release can name a version again.
+    //
+    // They filter; they do not validate. Whether a v* tag is one Config.init
+    // accepts stays Config.init's call.
     var tag_code: u8 = 0;
     const tag = b.runAllowFail(
-        &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip" },
+        &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip", "--exclude", "*/*" },
         &tag_code,
         .ignore,
     ) catch |err| switch (err) {

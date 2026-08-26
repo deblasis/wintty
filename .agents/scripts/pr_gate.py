@@ -503,6 +503,8 @@ def self_test():
         ([".gitignore"], False, []),
         ([".agents/scripts/pr_gate.py"], False, ["gates-selftest"]),
         (["src/main.zig"], False, ["zig-fmt", "zig-tests"]),
+        (["src/build/GitVersion.zig"], False, ["gates-selftest", "zig-fmt", "zig-tests"]),
+        (["src/build/Config.zig"], False, ["gates-selftest", "zig-fmt", "zig-tests"]),
         (["windows/App.xaml.cs"], False, ["windows-tests"]),
         (["src/a.zig", "windows/b.cs"], False, ["windows-tests", "zig-fmt", "zig-tests"]),
         (["brand/new/dir/thing.bin"], False, sorted(gate_scope.ALL_LEGS)),

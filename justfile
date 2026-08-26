@@ -1235,10 +1235,36 @@ pr-gate pr:
 doctor:
     python .agents/scripts/doctor.py
 
-# Prove the gates still catch what they exist for (recorded-PR replays,
-# matcher escapes, exemption anchoring) and that the nightly scripts'
-# helpers roundtrip.
-gates-selftest:
+# Runs real `git describe` against a throwaway repo, over ten tag layouts:
+# `series/vN`, a namespace renamed to a `v` name, plain non-release names, a
+# release tag on an ancestor rather than on HEAD, real releases, and `tip`.
+# The argument list is read out of GitVersion.zig rather than copied here,
+# because a copy keeps passing after the source stops matching it. Three
+# broken argument lists must also be caught, so the check cannot silently
+# stop checking. About eight seconds, no build, no desktop.
+#
+# Why it exists: `sync-publish` tags every published snapshot `series/vN` and
+# Config.init panics on a tag that is neither `tip` nor `vX.Y.Z`, so the
+# version lookup filters with `--match v* --match tip --exclude */*`. The
+# subtlety is that `--match` does not stop at a slash: `v*` rejects
+# `series/v2` only because that name starts with `s`, and lets `vendor/v2`
+# through. `--exclude */*` is what carries the namespace rule, and dropping
+# it turns a release build into a pre-release version string silently.
+#
+# Deliberately not gated to Windows and deliberately not using the
+# `exit ($LASTEXITCODE ?? 1)` idiom the fuzz recipes use: `gates-selftest`
+# depends on this, and that idiom is a syntax error under sh. A gate needs
+# pass or fail, not the fuzz suite's finding-versus-broken-harness split.
+#
+# Prove a tag outside the release namespace cannot name a version.
+gitversion-selftest:
+    pwsh -NoProfile -File .agents/scripts/gitversion_selftest.ps1
+
+# Recorded-PR replays, matcher escapes, exemption anchoring, and the nightly
+# scripts' helpers roundtripping. `gitversion-selftest` runs first.
+#
+# Prove the gates still catch what they exist for.
+gates-selftest: gitversion-selftest
     python .agents/scripts/pr_gate.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
     python .agents/scripts/doctor.py --self-test
