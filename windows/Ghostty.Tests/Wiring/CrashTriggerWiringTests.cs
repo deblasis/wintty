@@ -7,16 +7,21 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// That the crash triggers are reachable from both front doors, and only
-/// from a Debug build.
+/// That the crash triggers are reachable from both front doors, in every
+/// build.
 ///
 /// Text-level rather than parsed, which is the exception <c>ShellSource</c>
-/// describes rather than a shortcut. The trigger's real body and the whole
-/// palette source live inside <c>#if DEBUG</c>, and the half a parse cannot
-/// see is decided by which symbols the parse defines; a rule about "is this
-/// inside a DEBUG region" cannot be written against a tree that has already
-/// resolved the regions away. The lines are what carry the claim, so the
-/// lines are what is read.
+/// describes rather than a shortcut. The claim here is about preprocessor
+/// directives themselves: that the trigger and the palette source contain
+/// none. A parse cannot make that claim, because which half of a conditional
+/// it can see is decided by the symbols it defines, and the regions are
+/// resolved away before any rule could read them. The lines are what carry
+/// the claim, so the lines are what is read.
+///
+/// The direction is deliberate. These guards used to assert the opposite,
+/// that the triggers were Debug-only. Capture has to be provable in the
+/// build users install, and a trigger compiled out of Release leaves the one
+/// configuration that matters as the one nobody can test.
 ///
 /// What this cannot see: whether a case arm does what its comment says, and
 /// whether the palette rows reach a live surface. Neither is observable
@@ -99,9 +104,8 @@ public class CrashTriggerWiringTests
     public void PaletteSource_IsNotBuildGated()
     {
         var lines = ShellText("Commands.CrashCommandSource.cs")
-            .Split('
-')
-            .Select(l => l.TrimEnd('').Trim())
+            .Split('\n')
+            .Select(l => l.TrimEnd('\r').Trim())
             .Where(l => l.Length > 0)
             .ToList();
 
@@ -116,9 +120,8 @@ public class CrashTriggerWiringTests
         // entries would appear in a shipped build and quietly do nothing,
         // which is worse than not shipping them.
         var lines = ShellText("Cli.CrashTrigger.cs")
-            .Split('
-')
-            .Select(l => l.TrimEnd('').Trim())
+            .Split('\n')
+            .Select(l => l.TrimEnd('\r').Trim())
             .Where(l => l.Length > 0)
             .ToList();
 
