@@ -26,12 +26,15 @@ public class DosShellCoreTests
 
     private static DosShellCore NewCore() => new(() => FixedNow);
 
-    /// <summary>Type a command and press Enter, returning everything it wrote.</summary>
+    /// <summary>
+    /// Type a command and press Enter, returning only the Enter's bytes
+    /// (newline, reply, next prompt). The character echo is discarded
+    /// here: it is TypedCharactersEchoVerbatim's job to pin it.
+    /// </summary>
     private static string Run(DosShellCore core, string command)
     {
-        var output = "";
-        foreach (var ch in command) output += core.SendChar(ch);
-        return output + core.SendKey(DosShellKey.Enter);
+        foreach (var ch in command) core.SendChar(ch);
+        return core.SendKey(DosShellKey.Enter);
     }
 
     // Boot and prompt ---------------------------------------------------
