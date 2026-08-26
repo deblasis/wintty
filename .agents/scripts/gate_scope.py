@@ -39,6 +39,7 @@ RECIPE_LEGS = {
     "test-lib-vt": (LEG_ZIG,),
     "test-full": (LEG_ZIG,),
     "test-pkg": (LEG_ZIG,),
+    "test-reachability": (LEG_ZIG,),
     "build-dll": (LEG_ZIG, LEG_WIN),
     "test-win": (LEG_WIN,),
     "build-win": (LEG_WIN,),
@@ -72,6 +73,10 @@ PREFIX_RULES = (
 )
 
 EXACT_RULES = {
+    # The gates leg runs this script's selftest, which needs no build.
+    # Editing it must also run the check itself, and that needs the Zig
+    # toolchain, so it rides the Zig leg through `just test`.
+    ".agents/scripts/test_reachability.py": (LEG_GATES, LEG_ZIG),
     # Both of these carry a gates-leg check on top of the Zig legs, because
     # the contract they share -- that `tip` and `vX.Y.Z` are the only names a
     # version may have -- is split across them and only real `git describe`

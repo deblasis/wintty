@@ -18,4 +18,5 @@
 
 test {
     _ = @import("GitVersion.zig");
+    _ = @import("wasm_patch_growable_table.zig");
 }
