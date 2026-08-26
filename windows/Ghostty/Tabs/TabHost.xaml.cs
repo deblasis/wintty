@@ -813,17 +813,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!theme.IsEnabled) return;
 
         var accentBrush = new SolidColorBrush(theme.AccentColor);
-        var tabBgBrush = new SolidColorBrush(theme.TabBarBackground);
         _selectedTabFillBrush = accentBrush;
         _stripBackdropPacked = PackColor(theme.TabBarBackground);
 
-        // Background resources on TabViewControl work with a theme toggle.
-        TabViewControl.Resources["TabViewBackground"] = tabBgBrush;
-        // The strip is the palette's now, so the frame's own fill no longer
-        // describes what is installed. Left stale, SetChromeFill would decline
-        // to re-apply the value it thinks is already there once the shell
-        // theme is switched back off.
-        _chromeFillRgb = null;
+        // TabViewBackground is deliberately not written here. The strip's
+        // surface has one owner, SetChromeFill, which the window always calls
+        // after this and which knows the frame's material as well as the
+        // palette's shade. Painting it from here too is what made the palette
+        // path opaque whatever frame-style said.
+        //
         // Selected fill is painted on the header panel so preset tab colors
         // can replace the accent per tab.
         TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = TransparentHeaderSelected;
@@ -933,8 +931,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void ClearShellTheme()
     {
-        // Same reason as in ApplyShellTheme: the cache has to describe what is
-        // installed, and this removes it.
+        // The cache has to describe what is installed, and this removes it.
+        // Left stale, the SetChromeFill that follows would decline to write a
+        // fill it thinks is already there.
         _chromeFillRgb = null;
         TabViewControl.Resources.Remove("TabViewBackground");
         _shellActiveTextBrush = null;
@@ -980,15 +979,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// this takes a nullable: writing a transparent brush would still shadow
     /// whatever the TabView's own theme resource resolves to.
     ///
+    /// The one owner of TabViewBackground, palette or not. The window resolves
+    /// the shade -- the tab bar's under window-theme=wintty, the desktop's
+    /// otherwise -- and the frame decides whether it is painted at all, so a
+    /// second writer here could only disagree with one of the two.
+    ///
     /// Only the strip's surface. The selected header keeps the terminal's
     /// background in every combination, so the active tab reads as continuous
     /// with the pane below it.
     /// </summary>
     internal void SetChromeFill(uint? fillRgb)
     {
-        // The shell theme owns TabViewBackground while it is on, the same way
-        // it owns the selected fill in SetSelectedTabColors.
-        if (_shellActiveTextBrush is not null) return;
         if (_chromeFillRgb == fillRgb) return;
         _chromeFillRgb = fillRgb;
 

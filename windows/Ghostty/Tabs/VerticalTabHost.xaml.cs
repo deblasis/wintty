@@ -247,12 +247,10 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
         if (!theme.IsEnabled) return;
 
         _shellThemeActive = true;
-        var tabBgBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(
-            theme.TabBarBackground.A, theme.TabBarBackground.R,
-            theme.TabBarBackground.G, theme.TabBarBackground.B));
-        Background = tabBgBrush;
-        StripRoot.Background = tabBgBrush;
-        _strip.ApplyShellChrome(theme, tabBgBrush);
+        // The two surfaces are SetChromeFill's, here as on the default path.
+        // The palette names their shade and the frame decides whether they
+        // take it at all, and only that call has both answers.
+        _strip.ApplyShellChrome(theme);
     }
 
     internal void ClearShellTheme()
@@ -284,7 +282,34 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     internal void SetRowSeparator(uint? separatorRgb, uint groundRgb, bool highContrast)
         => _strip.SetRowSeparator(separatorRgb, groundRgb, highContrast);
 
-    internal void SetChromeFill(uint? fillRgb) => _strip.SetChromeFill(fillRgb);
+    /// <summary>
+    /// The frame's fill for the host's own two surfaces and for the strip,
+    /// or null to leave them to the backdrop.
+    ///
+    /// Only touched while the palette is driving the pane. Off that path
+    /// ClearShellTheme has already put both where they belong and the strip
+    /// paints itself, so writing them here would take the default layout's
+    /// pane fill off the one owner it has.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (_shellThemeActive)
+        {
+            if (fillRgb is { } rgb)
+            {
+                var brush = TabColorBrush.FromPackedRgb(rgb);
+                Background = brush;
+                StripRoot.Background = brush;
+            }
+            else
+            {
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+                StripRoot.ClearValue(Grid.BackgroundProperty);
+            }
+        }
+
+        _strip.SetChromeFill(fillRgb);
+    }
 
     internal void SetAccentColor(Windows.UI.Color color)
     {

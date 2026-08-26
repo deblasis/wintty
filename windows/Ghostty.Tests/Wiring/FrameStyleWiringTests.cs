@@ -206,31 +206,84 @@ public sealed class FrameStyleWiringTests
     }
 
     /// <summary>
-    /// The chrome's fill is resolved from the frame's material and from the
-    /// desktop the window is actually on.
+    /// The chrome's fill is resolved from the frame's material, from the
+    /// palette, and from the desktop the window is actually on.
     ///
-    /// The shell-theme argument is pinned false on purpose: window-theme
-    /// decides where the chrome's colour comes from and frame-style decides
-    /// how solid it is. Letting the palette in here would paint the row from
-    /// it on a path that has never been painted, which is the slab of a
-    /// colour the desktop never agreed to that the bare row exists to avoid.
+    /// The shell-theme argument used to be pinned false, on the reasoning
+    /// that window-theme owns the hue and frame-style owns the material. The
+    /// reasoning is right and the pin was not: it made the resolver answer
+    /// "solid" for every frame the palette was driving, so frosted, crystal
+    /// and solid produced one identical opaque window under
+    /// window-theme=wintty -- the one combination the key exists to create.
+    /// Asserted on the argument being the live read, since a literal `true`
+    /// resolves the other three rows wrong just as quietly.
     /// </summary>
     [Fact]
-    public void The_chrome_fill_comes_from_the_frames_material()
+    public void The_chrome_fill_comes_from_the_frames_material_and_the_palette()
     {
-        var resolve = Property(Window(), "BareChromeFillArgb")
+        var resolve = Property(Window(), "ChromeFillArgb")
             .Call("RootBackgroundResolver.Resolve");
 
-        Assert.Equal("_currentFrameStyle", resolve.Arg(0));
-        Assert.True(
-            resolve.ArgExpression(1).IsKind(SyntaxKind.FalseLiteralExpression),
-            $"the chrome fill asks the resolver with shellThemeEnabled = "
-                + $"{resolve.ArgExpression(1)}; window-theme owns that decision elsewhere.");
+        Assert.Equal("EffectiveFrameStyle", resolve.Arg(0));
+        Assert.Equal("_shellTheme.IsEnabled", resolve.Arg(1));
+
+        // The tab bar's shade, not the title bar's. Both are palette-derived
+        // and only one of them is what the row, the caption lane and the
+        // strips have always been painted; RootGrid keeps the other.
+        Assert.Equal("ShellThemeChromeArgb", resolve.Arg(2));
 
         // Node, not text: `!OsTheme.IsDark(...)` reads the same to a
         // substring match and hands the light desktop the dark colour.
         var polarity = resolve.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
         Assert.Equal("_systemUiSettings", polarity.Arg(0));
+    }
+
+    /// <summary>
+    /// High Contrast is the one place the two keys are not orthogonal, and it
+    /// is pinned in one expression rather than re-tested at each painter.
+    /// Asserted on the arms, because swapping them makes High Contrast the
+    /// only mode that goes translucent and leaves every other mode unable to.
+    /// </summary>
+    [Fact]
+    public void High_contrast_pins_the_frame_solid()
+    {
+        var body = Property(Window(), "EffectiveFrameStyle").ExpressionBody?.Expression;
+        var choice = Assert.IsType<ConditionalExpressionSyntax>(body);
+
+        Assert.Equal("HighContrastChromeActive", choice.Condition.ToString());
+        Assert.Equal("BackdropStyles.Solid", choice.WhenTrue.ToString());
+        Assert.Equal("_currentFrameStyle", choice.WhenFalse.ToString());
+    }
+
+    /// <summary>
+    /// "The palette is painting the chrome" is both keys agreeing, and every
+    /// painter branches on it. Dropping either half is a whole table row:
+    /// without the frame test the palette paints a frosted window opaque
+    /// again, and without the window-theme test a solid frame claims a
+    /// palette that was never asked for.
+    ///
+    /// The frame half is asserted as a `!=` against transparent rather than
+    /// on the words, because the inverted test compiles and reads fine.
+    /// </summary>
+    [Fact]
+    public void The_palette_paints_only_while_the_frame_is_solid_enough()
+    {
+        var body = Property(Window(), "ChromePaintedFromPalette").ExpressionBody?.Expression;
+        var conjunction = Assert.IsType<BinaryExpressionSyntax>(body);
+        Assert.True(
+            conjunction.IsKind(SyntaxKind.LogicalAndExpression),
+            $"the test reads `{conjunction}`; it has to require both keys, not either.");
+
+        var operands = new[] { conjunction.Left, conjunction.Right };
+        Assert.Contains(operands, o => o.ToString() == "_shellTheme.IsEnabled");
+
+        var frame = Assert.Single(operands.OfType<BinaryExpressionSyntax>());
+        Assert.True(
+            frame.IsKind(SyntaxKind.NotEqualsExpression),
+            $"the frame test reads `{frame}`; an equality there paints the palette "
+                + "onto exactly the frames that asked for the backdrop.");
+        Assert.Equal("ChromeFillArgb", frame.Left.ToString());
+        Assert.Equal("RootBackgroundResolver.TransparentArgb", frame.Right.ToString());
     }
 
     /// <summary>
@@ -275,7 +328,7 @@ public sealed class FrameStyleWiringTests
             c => c.Condition.ToString() == "HighContrastChromeActive");
 
         Assert.Contains("UnpackTerminalColor", choice.WhenTrue.ToString());
-        Assert.Contains("BareChromeFillArgb", choice.WhenFalse.ToString());
+        Assert.Contains("ChromeFillArgb", choice.WhenFalse.ToString());
     }
 
     /// <summary>
@@ -297,16 +350,56 @@ public sealed class FrameStyleWiringTests
             ReadsAnyOf(method, pushes[0].ArgExpression(0), "ChromeStripFill"),
             $"the strips are pushed `{argument}`, which is not the frame's fill.");
 
-        // The two paths that paint their own strips are not asked, the same
-        // way the title row does not ask them.
+        // One path yields null, and it is High Contrast without the palette:
+        // that surface comes from an HC-overridable theme resource the window
+        // cannot name. window-theme=wintty must NOT yield null -- it names a
+        // shade, and dropping it here is what left the strips opaque under
+        // every frame-style. Asserted on the operands rather than on the
+        // words: an `||` between the same two names is the old behaviour back.
         var choice = Assert.Single(
             Behind(method, pushes[0].ArgExpression(0)).OfType<ConditionalExpressionSyntax>());
         Assert.True(
             choice.WhenTrue.IsKind(SyntaxKind.NullLiteralExpression),
-            $"window-theme and High Contrast must yield `null`, not `{choice.WhenTrue}`: "
-                + "a colour there takes the strip back off the palette that owns it.");
-        Assert.Contains("_shellTheme.IsEnabled", choice.Condition.ToString());
-        Assert.Contains("HighContrastChromeActive", choice.Condition.ToString());
+            $"the opted-out path must yield `null`, not `{choice.WhenTrue}`.");
+
+        var gate = Assert.IsType<BinaryExpressionSyntax>(choice.Condition);
+        Assert.True(
+            gate.IsKind(SyntaxKind.LogicalAndExpression),
+            $"the strips opt out on `{gate}`; either-of makes window-theme opt out "
+                + "again, which is the bug this key could not be seen through.");
+
+        var operands = new[] { gate.Left, gate.Right };
+        Assert.Contains(operands, o => o.ToString() == "HighContrastChromeActive");
+        var palette = Assert.Single(operands.OfType<PrefixUnaryExpressionSyntax>());
+        Assert.True(
+            palette.IsKind(SyntaxKind.LogicalNotExpression),
+            $"the window-theme half reads `{palette}`; unnegated it opts the palette out.");
+        Assert.Equal("_shellTheme.IsEnabled", palette.Operand.ToString());
+    }
+
+    /// <summary>
+    /// And the strips have to accept it. Both used to refuse a fill while the
+    /// palette was on -- an early return on one side, a one-armed `if` on the
+    /// other -- which is where a correctly resolved bare fill went to die.
+    ///
+    /// Asserted on the shapes that did the refusing, because either one comes
+    /// back as a plausible-looking guard against the palette being overwritten.
+    /// </summary>
+    [Fact]
+    public void The_strips_accept_the_fill_while_the_palette_is_on()
+    {
+        var host = ShellSource.Load("Tabs.TabHost.xaml.cs").Method("SetChromeFill");
+        foreach (var bail in host.DescendantNodes().OfType<ReturnStatementSyntax>())
+        {
+            var gate = Assert.IsType<IfStatementSyntax>(bail.Parent);
+            Assert.DoesNotContain("_shellActiveTextBrush", gate.Condition.ToString());
+        }
+
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs").Method("SetChromeFill");
+        var branch = Assert.Single(
+            strip.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Condition.ToString().Contains("_shellThemeActive"));
+        Assert.NotNull(branch.Else);
     }
 
     /// <summary>

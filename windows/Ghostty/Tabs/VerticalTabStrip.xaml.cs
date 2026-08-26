@@ -141,12 +141,15 @@ internal sealed partial class VerticalTabStrip : UserControl
             : new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
 
     /// <summary>
-    /// Opaque pane chrome from the terminal palette when window-theme=wintty.
+    /// Pane chrome from the terminal palette when window-theme=wintty.
+    ///
+    /// Everything except the lane's own surface, which is SetChromeFill's:
+    /// the palette names its shade, frame-style decides whether it is painted
+    /// at all, and only the window has both answers.
     /// </summary>
-    internal void ApplyShellChrome(ShellThemeService theme, SolidColorBrush paneBg)
+    internal void ApplyShellChrome(ShellThemeService theme)
     {
         _shellThemeActive = true;
-        Background = paneBg;
         _stripBackdropPacked = PackColor(theme.TabBarBackground);
         ApplyTransparentNavPaneSurface();
 
@@ -383,6 +386,12 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// <summary>
     /// Paint the strip lane, or leave it to the window backdrop.
     ///
+    /// Both modes, because the palette path can be asked for a bare lane too:
+    /// window-theme names the shade and frame-style decides whether it is
+    /// painted. The default path rebuilds the whole pane chrome around the
+    /// new surface; the palette path swaps the surface alone, because
+    /// window-theme still owns the accent and the foregrounds either way.
+    ///
     /// Only the lane's own surface. The selected row keeps its fill from the
     /// terminal in every combination: the seam cover is cut from that fill,
     /// and a translucent one reopens the join with the pane that the row
@@ -392,8 +401,22 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_chromeFillRgb == fillRgb) return;
         _chromeFillRgb = fillRgb;
-        if (!_shellThemeActive) ApplyDefaultPaneChrome(_elementTheme);
+        if (_shellThemeActive) ApplyShellPaneSurface();
+        else ApplyDefaultPaneChrome(_elementTheme);
     }
+
+    /// <summary>
+    /// The lane's surface on the palette path.
+    ///
+    /// No High Contrast arm, unlike the default path: that mode pins the
+    /// frame solid at the window, so the fill that arrives here is the
+    /// palette's own shade -- which under High Contrast is Windows' colour
+    /// already, because the palette is.
+    /// </summary>
+    private void ApplyShellPaneSurface() =>
+        Background = _chromeFillRgb is { } fill
+            ? TabColorBrush.FromPackedRgb(fill)
+            : TransparentBrush;
 
     /// <summary>
     /// Colour for the lines between rows, or null to draw none.

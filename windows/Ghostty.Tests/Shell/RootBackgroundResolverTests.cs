@@ -76,6 +76,57 @@ public sealed class RootBackgroundResolverTests
     }
 
     /// <summary>
+    /// The whole window-theme x frame-style table in one place, because the
+    /// two keys are orthogonal and the resolver is where that is decided:
+    /// window-theme picks the hue, frame-style picks the material, and every
+    /// combination has to mean something.
+    ///
+    /// The row that was missing is palette + frosted. Asked with the palette
+    /// pinned off, the resolver answered "solid" for it, and all three frame
+    /// styles came out one identical opaque window under
+    /// window-theme=wintty -- the combination the key exists to create.
+    /// </summary>
+    [Theory]
+    // window-theme=system: desktop-derived when solid, backdrop when not.
+    [InlineData(BackdropStyles.Solid, false, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Frosted, false, RootBackgroundResolver.TransparentArgb)]
+    [InlineData(BackdropStyles.Crystal, false, RootBackgroundResolver.TransparentArgb)]
+    // window-theme=wintty: the palette when solid, the backdrop when not.
+    [InlineData(BackdropStyles.Solid, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Frosted, true, RootBackgroundResolver.TransparentArgb)]
+    [InlineData(BackdropStyles.Crystal, true, RootBackgroundResolver.TransparentArgb)]
+    public void The_hue_comes_from_the_theme_and_the_material_from_the_frame(
+        string frameStyle, bool shellThemeEnabled, uint expected)
+    {
+        Assert.Equal(
+            expected,
+            RootBackgroundResolver.Resolve(
+                frameStyle, shellThemeEnabled, ArbitraryShellBg, isDesktopDark: true));
+    }
+
+    /// <summary>
+    /// The two keys never collapse into each other: for one frame style the
+    /// palette has to change the answer, and for one window-theme the frame
+    /// has to. A resolver that satisfied the table above by ignoring an
+    /// argument would pass every row of it and still be the bug.
+    /// </summary>
+    [Fact]
+    public void Neither_key_can_be_ignored()
+    {
+        Assert.NotEqual(
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: false, ArbitraryShellBg, true),
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg, true));
+
+        Assert.NotEqual(
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg, true),
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Frosted, shellThemeEnabled: true, ArbitraryShellBg, true));
+    }
+
+    /// <summary>
     /// Both halves are fully opaque. A chrome colour that let the backdrop
     /// through would defeat the one thing the solid style is for, and the
     /// value is fed to GDI as well as to XAML.
