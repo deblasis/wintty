@@ -158,8 +158,10 @@ public class DosShellCoreTests
         Run(core, "mem");
         core.SendKey(DosShellKey.Up);
         core.SendKey(DosShellKey.Up);
-        // Already at the oldest: pressing Up again changes nothing.
-        Assert.Equal("", core.SendKey(DosShellKey.Up));
+        // Already at the oldest: pressing Up again stays on it. Like the
+        // website, recall always replaces the line, so the same entry is
+        // erased and reprinted rather than the press going silent.
+        Assert.Equal("\b \b\b \b\b \bver", core.SendKey(DosShellKey.Up));
     }
 
     [Fact]
@@ -209,7 +211,7 @@ public class DosShellCoreTests
             " COMMAND   COM     54,619     8/25/2026\r\n" +
             " AUTOEXEC  BAT        214     8/25/2026\r\n" +
             " CONFIG    SYS        168     8/25/2026\r\n" +
-            " WINTTY             <DIR>     8/25/2026\r\n" +
+            " WINTTY         <DIR>     8/25/2026\r\n" +
             " CRT       GLS      1,842     8/25/2026\r\n" +
             " SCANLINE  GLS        916     8/25/2026\r\n" +
             " SNOWFALL  GLS      1,024     8/25/2026\r\n" +
