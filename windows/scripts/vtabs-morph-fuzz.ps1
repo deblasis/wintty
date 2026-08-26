@@ -23,9 +23,13 @@
 #
 # All of that only says something when switches actually happened, and every
 # term of it is vacuous when none did. So the run is gated too: the desktop has
-# to accept the layout chords, and a third of them have to begin a switch. A
+# to accept the layout chords, and every one of them has to begin a switch. A
 # run that toggled nothing leaves with 1 - a chord nobody handled is a corpus
 # this harness could not establish, not a defect in the build.
+#
+# That gate is only affordable because the harness arms the XAML island before
+# every chord. The island drops synthesized keys until a real click lands on
+# its own pixels, and without that this harness lost most of what it sent.
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [int]$Seed = 0,
@@ -205,6 +209,47 @@ $Colors = @('Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Blue', 'Purple', 'Pink'
 # and the morph ghost has to copy something other than a default cmd tab.
 $Shells = @('powershell -NoLogo', 'cmd', 'powershell -NoLogo -Command "$host.UI.RawUI.WindowTitle=''fuzz''; cmd"')
 
+# Clicking the terminal is what makes the app accept a chord at all: the XAML
+# island drops synthesized keys until a real click lands on its own pixels, and
+# a chrome interaction -- a tab color picked off a flyout -- moves focus off the
+# terminal and un-arms it again. Same shape as Enable-Chords in
+# mouse-fuzz-tab-close-selection.ps1, which learned it the same way.
+#
+# Three quarters across and down lands in the terminal under either layout: the
+# vertical rail owns the left edge and the horizontal header the top, and
+# neither reaches here. The window center does too, but only while the strip is
+# narrow, and this harness spends its whole run changing that.
+$script:ArmPid = 0
+$script:ArmHwnd = [IntPtr]::Zero
+function Enable-Chords {
+    # Not a silent return. Arming before the window is known leaves the island
+    # unarmed, and that resurfaces later as a layout chord nobody handled -
+    # which reads as a broken keybinding rather than as a harness that was
+    # never allowed to type.
+    if (-not $script:ArmPid) {
+        throw 'FOREGROUND_MISS: asked to arm input before the window under test was known'
+    }
+    # Rect swallows GetWindowRect's return, so a window that has gone away
+    # comes back as zeros rather than as an error. Left unchecked that aims the
+    # click at the top-left of the screen, hits whatever lives there, and
+    # reports a foreground miss for what is actually a window that no longer
+    # exists - a cause the caller reports as PRODUCT_FAIL.
+    if (-not [MFz]::IsWindow($script:ArmHwnd)) {
+        throw 'PRODUCT_FAIL: the window under test vanished before its input could be armed'
+    }
+    $rc = [MFz]::Rect($script:ArmHwnd)
+    if ($rc.R -le $rc.L -or $rc.B -le $rc.T) {
+        throw "PRODUCT_FAIL: the window under test has a degenerate rect ($($rc.L),$($rc.T))-($($rc.R),$($rc.B))"
+    }
+    $x = [int]($rc.L + ($rc.R - $rc.L) * 0.75)
+    $y = [int]($rc.T + ($rc.B - $rc.T) * 0.75)
+    if (-not [MFz]::Click([uint32]$script:ArmPid, $x, $y, $false)) {
+        throw ("FOREGROUND_MISS: could not click the terminal at $x,$y to arm input; " +
+            "foreground is $([MFz]::ForegroundNow())")
+    }
+    Start-Sleep -Milliseconds 250
+}
+
 function Get-UiaRoot([int64]$h) {
     return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($h))
 }
@@ -281,6 +326,10 @@ try {
 
     Write-Host ("target $([MFz]::Describe($hwnd))")
 
+    $script:ArmPid = $proc.Id
+    $script:ArmHwnd = $hwnd
+    Enable-Chords
+
     # Seed the strip so the very first switches already have a crowd.
     foreach ($i in 1..7) {
         if (-not [MFz]::Chord($hwnd, $VK.T, $true, $false)) {
@@ -292,6 +341,7 @@ try {
 
     # One deterministic toggle up front proves the oracle is alive before
     # minutes of fuzzing are spent on a build that cannot report it.
+    Enable-Chords
     if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) {
         throw "FOREGROUND_MISS: probe toggle; foreground is $([MFz]::ForegroundNow())"
     }
@@ -328,6 +378,7 @@ try {
             # nothing.
             [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             Start-Sleep -Milliseconds 90
+            Enable-Chords
             $toggleAttempts++
             if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { $chordMisses++ }
             # Sometimes toggle again before the switch has landed: the
@@ -420,28 +471,44 @@ try {
                         } else { $act = 'tab-color-miss' }
                         Start-Sleep -Milliseconds 250
                         [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
-                        # UIA leaves focus on the swatch it clicked, and the
-                        # layout chord only reaches the router from the
-                        # terminal surface. Without this the fuzz spends the
-                        # rest of the run sending toggles nobody handles.
-                        $wr = [MFz]::Rect($hwnd)
-                        [void][MFz]::Click([uint32]$proc.Id,
-                            [int](($wr.L + $wr.R) / 2), [int](($wr.T + $wr.B) / 2), $false)
-                        Start-Sleep -Milliseconds 200
                     } else { $act = 'tab-color-skipped' }
                 }
             } catch {
                 $act = 'tab-color-error'
                 [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             }
+            # Outside the catch on purpose. UIA leaves focus on the swatch it
+            # clicked, and the layout chord only reaches the router from the
+            # terminal surface, so this is what lets the rest of the run drive
+            # anything at all. Swallowed as one more 'tab-color-error' it would
+            # leave the island unarmed, and the iterations after it would send
+            # chords nobody handles while the actions table recorded them as
+            # having happened - none of those are asserted on, so the run would
+            # go quietly useless until the next toggle threw.
+            Enable-Chords
         }
 
         $actions[$act] = 1 + ($actions[$act] ?? 0)
         Start-Sleep -Milliseconds $rng.Next(160, 700)
     }
 
-    # Let the last switch land before reading the trace.
-    Start-Sleep -Milliseconds 1200
+    # Let the last switch land before the finally kills the process, because
+    # the verdict reads the trace afterwards and a switch still in the air at
+    # kill time is a begin with no end - which the oracle would report as a
+    # switch that never finished.
+    #
+    # Waited on rather than slept through. A chord that arrives mid-switch is
+    # held as _pendingLayoutTarget and replayed when that switch completes, so
+    # the tail can be two switches deep, and arming the island made those
+    # chains common enough that a fixed settle started losing the race.
+    $settleDl = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $settleDl) {
+        Start-Sleep -Milliseconds 200
+        $tail = @(Get-Content $log -ErrorAction SilentlyContinue)
+        $b = @($tail | Where-Object { $_ -like 'SWITCH begin*' }).Count
+        $e = @($tail | Where-Object { $_ -like 'SWITCH end*' -or $_ -like 'SWITCH cancel*' }).Count
+        if ($b -eq $e) { break }
+    }
 }
 finally {
     if ($proc -and -not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
@@ -506,20 +573,25 @@ if ($failures.Count -gt 0) {
 # no ghost lines to find. A build whose layout chord never reaches the router
 # therefore reported nothing and left with 0. Gate the run itself.
 #
-# Both floors are proportions of the chords sent, because -Iterations decides
-# how many there are.
+# Both are proportions rather than counts, because -Iterations decides how many
+# chords there are. They divide by different things on purpose: the cap by
+# every chord attempted, the floor by only those the desktop actually took.
 #
-# A third is under what a healthy run reaches, but not by much, because a
-# healthy run converts far fewer chords than it sends: measured at 13 and 14 of
-# 34 and at 16 of 31 against a clean build, so 38% to 52%. A chord landing
-# inside the 340ms switch is dropped by design, and an iteration that touched
-# the chrome can leave focus off the terminal for the next one.
+# One switch per chord, because that is now what a chord does. Measured against
+# a clean build at 49 switches for 34 chords, 39 for 26 and 51 for 31, so 1.44
+# to 1.65 - every chord lands, and a chord that arrives mid-switch is held as
+# _pendingLayoutTarget and replayed on completion, which is where the surplus
+# comes from.
 #
-# So this floor is sized for the case it exists to catch - a run that switched
-# nothing at all - and the margin above it is thin: 38% of 34 chords clears a
-# floor of 12 by one. Raise it once the harness stops losing chords, not
-# before; a build is not at fault for a chord that never reached it.
-$MinBeginRatio = 0.33
+# The surplus is the margin, and it is not guaranteed: two chords inside one
+# switch share the single pending slot, so the second is lost and that run
+# converts nearer to 1. Hence exactly 1 rather than something above it.
+#
+# This floor only reads as a product statement because the harness now arms the
+# XAML island before every chord. Before that it converted 38% to 52%, the loss
+# was entirely its own, and a floor anywhere near this would have failed clean
+# builds all day.
+$MinBeginRatio = 1.0
 $MaxChordMissRatio = 0.2
 # These leave with 1, not 2. A chord the desktop refused, or one the router
 # never saw, is a corpus this harness could not establish rather than a defect
@@ -529,9 +601,16 @@ if ($chordMisses -gt $missCap) {
     throw ("FOREGROUND_MISS: $chordMisses of $toggleAttempts layout chords were refused " +
         "(cap $missCap) - another window held the foreground, so the switch was never driven")
 }
-$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($toggleAttempts * $MinBeginRatio))
+# Delivered, not attempted. A chord the desktop refused never reached the app,
+# and the build cannot be asked to have answered it - counting it here would
+# charge a foreground steal to the product and then say "the router never saw
+# them" about chords that were never sent. Safe as a denominator only because
+# the cap above has already rejected a run that lost most of them: on its own,
+# every chord refused would leave zero delivered and a floor of nothing.
+$delivered = $toggleAttempts - $chordMisses
+$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($delivered * $MinBeginRatio))
 if ($begins -lt $beginFloor) {
-    throw ("only $begins switch(es) began for $toggleAttempts layout chords (floor " +
+    throw ("only $begins switch(es) began for $delivered delivered layout chords (floor " +
         "$beginFloor) - the chords went out but the router never saw them, so nothing " +
         'above was measured')
 }
