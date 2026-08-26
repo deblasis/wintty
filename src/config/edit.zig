@@ -47,17 +47,24 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
             dir.close(global.io());
         }
 
-        // Try to create file and go on if it already exists
-        _ = std.Io.Dir.createFileAbsolute(
+        // Try to create file and go on if it already exists. The handle is
+        // closed immediately: all this call needs is for the file to exist.
+        //
+        // Holding it open costs nothing on POSIX but is fatal on Windows,
+        // where the create denies read sharing for as long as the handle
+        // lives. Every later read of the config in the same process then
+        // fails with a sharing violation on a file no other process is
+        // touching, which on a first run is every read there is.
+        if (std.Io.Dir.createFileAbsolute(
             global.io(),
             config_path.name,
             .{ .exclusive = true },
-        ) catch |err| {
-            switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            }
-        };
+        )) |file| {
+            file.close(global.io());
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        }
     }
 
     return try alloc_gpa.dupeZ(u8, config_path.name);
