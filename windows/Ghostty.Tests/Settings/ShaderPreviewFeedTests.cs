@@ -117,6 +117,102 @@ public class ShaderPreviewFeedTests
         Assert.Empty(recorder.Writes);
     }
 
+    // User input ----------------------------------------------------------
+
+    [Fact]
+    public void UserCharactersEchoThroughTheSink()
+    {
+        // The feed is not started: free typing must work even while the
+        // autoplay loop has not begun (or is waiting out its pause).
+        var recorder = new Recorder();
+        var feed = NewFeed(recorder);
+
+        feed.Character('z');
+
+        Assert.Equal(new[] { "z" }, recorder.Writes.Select(Decode));
+    }
+
+    [Fact]
+    public void UserKeysRunTheSameCommandTableAsTheDemo()
+    {
+        // Demo and user keystrokes go through one shell, so a command the
+        // user types herself gets the demo's canned reply. That single
+        // path is what keeps user text and scripted text indistinguishable
+        // to the surface (and to the shader).
+        var recorder = new Recorder();
+        var feed = NewFeed(recorder);
+
+        foreach (var ch in "mem") feed.Character(ch);
+        feed.KeyDown(DosShellKey.Enter);
+
+        Assert.Contains("bytes total conventional memory", recorder.Text);
+    }
+
+    [Fact]
+    public void UserKeysAfterDisposeAreDroppedNotCrashed()
+    {
+        // The picker unwires the sink when it closes, but a keystroke
+        // already in flight can still arrive; it must not throw into the
+        // UI thread.
+        var recorder = new Recorder();
+        var feed = NewFeed(recorder);
+        feed.Dispose();
+
+        feed.Character('x');
+        feed.KeyDown(DosShellKey.Enter);
+
+        Assert.Empty(recorder.Writes);
+    }
+
+    [Fact]
+    public void UserTypingPausesTheDemoUntilTheQuietWindowExpires()
+    {
+        // A fake clock the pacing hook advances with every delay, plus a
+        // keystroke injected mid-demo from inside that hook (the feed is
+        // suspended awaiting it, exactly like a user typing while autoplay
+        // waits), reproduces the pause deterministically: no wall clock,
+        // no sleeps.
+        var now = new DateTime(2026, 8, 25, 12, 0, 0);
+        var writes = new List<string>();
+        var writeTimes = new List<DateTime>();
+        var injected = false;
+        ShaderPreviewFeed feed = null!;
+
+        void Sink(ReadOnlySpan<byte> bytes)
+        {
+            writes.Add(Encoding.UTF8.GetString(bytes));
+            writeTimes.Add(now);
+            if (writes.Count >= 9) feed.Dispose();
+        }
+
+        Task Delay(int milliseconds, CancellationToken ct)
+        {
+            now = now.AddMilliseconds(milliseconds);
+            // After the demo has typed "di" of "dir", the user lands an
+            // Insert. The write lands mid-word, before the "r".
+            if (!injected && writes.Count >= 4)
+            {
+                injected = true;
+                feed.KeyDown(DosShellKey.Insert);
+            }
+            return Task.CompletedTask;
+        }
+
+        feed = new ShaderPreviewFeed(
+            Sink, NullLogger<ShaderPreviewFeed>.Instance, Delay, () => now);
+        feed.Start();
+
+        Assert.True(injected);
+        // The user's flip reached the surface as its own write...
+        Assert.Equal("\x1b[5 q", writes[4]);
+        // ...and the demo held its next character until the full 10s quiet
+        // window elapsed, then resumed mid-word where it stopped.
+        Assert.Equal("r", writes[5]);
+        Assert.True(
+            writeTimes[5] - writeTimes[4] >= TimeSpan.FromSeconds(10),
+            "the demo resumed before the quiet window expired");
+    }
+
     private static ShaderPreviewFeed NewFeed(Recorder recorder)
     {
         var feed = new ShaderPreviewFeed(

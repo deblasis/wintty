@@ -28,7 +28,7 @@ namespace Ghostty.Core.Settings;
 /// <c>WriteVt</c> is UI-thread-only. Start the feed on the UI thread so
 /// every continuation resumes there.
 /// </remarks>
-internal sealed partial class ShaderPreviewFeed : IDisposable
+internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
 {
     /// <summary>
     /// Where the feed's VT bytes go: the preview terminal in the app, a
@@ -164,12 +164,20 @@ internal sealed partial class ShaderPreviewFeed : IDisposable
     internal ShaderPreviewFeed(
         VtSink sink,
         ILogger<ShaderPreviewFeed> logger,
-        PacingDelay? delay = null)
+        PacingDelay? delay = null,
+        Func<DateTime>? clock = null)
     {
         _sink = sink;
         _logger = logger;
         _delay = delay ?? ((ms, ct) => Task.Delay(ms, ct));
+        _clock = clock;
     }
+
+    private readonly Func<DateTime>? _clock;
+
+    public bool KeyDown(DosShellKey key) => throw new NotImplementedException();
+
+    public void Character(char ch) => throw new NotImplementedException();
 
     /// <summary>
     /// Begin autoplay. Idempotent, and a no-op after <see cref="Dispose"/>:
