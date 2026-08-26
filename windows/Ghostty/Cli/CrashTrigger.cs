@@ -31,7 +31,29 @@ namespace Ghostty.Cli;
 internal static partial class CrashTrigger
 {
     private const uint EXCEPTION_NONCONTINUABLE = 0x1;
-    private const uint FACILITY_TEST_EXCEPTION = 0xE0000001;
+
+    /// <summary>
+    /// The exception code <c>native-seh</c> raises. Customer bit set, so it
+    /// cannot collide with a system code or with the CLR's 0xE0434352.
+    /// </summary>
+    /// <remarks>
+    /// Named for what it is. It was <c>FACILITY_TEST_EXCEPTION</c>, which
+    /// misdirects: this is a whole exception code, not a facility, and the
+    /// harness reads the value back as a process exit code.
+    /// </remarks>
+    private const uint CRASH_TEST_EXCEPTION_CODE = 0xE0000001;
+
+    // The trigger's own exit codes, kept clear of Program.ExitCode, which
+    // uses 1, 2 and 3. They collided: ReportFatal returns 3 for anything
+    // escaping MainImpl, and 3 here meant "the CLI refused a surface-bound
+    // kind", so a developer reading exit 3 could not tell a refusal from a
+    // trigger the catch-all had eaten from a failure to load ghostty.dll.
+    // 64+ follows sysexits, purely to be somewhere nothing else is.
+    private const int ExitUnknownKind = 64;
+    private const int ExitNeedsSurface = 65;
+    private const int ExitBindingRefused = 66;
+    private const int ExitTriggerReturned = 67;
+    private const int ExitNoMechanism = 68;
 
     [LibraryImport("kernel32.dll")]
     private static partial void RaiseException(
@@ -58,7 +80,11 @@ internal static partial class CrashTrigger
         {
             Console.Error.WriteLine($"crash-trigger: unknown kind '{kind}'");
             Console.Error.WriteLine($"crash-trigger: kinds: {CrashKinds.Ids}");
-            return 2;
+            // The subset this front door can run, so the acceptance harness
+            // can read the catalogue instead of keeping its own copy. It is a
+            // .ps1, so no wiring test can scan it for drift.
+            Console.Error.WriteLine($"crash-trigger: cli-kinds: {CrashKinds.CliIds}");
+            return ExitUnknownKind;
         }
 
         Console.Error.WriteLine($"crash-trigger: {entry.Id}");
@@ -72,7 +98,7 @@ internal static partial class CrashTrigger
                     $"crash-trigger: '{entry.Id}' faults inside libghostty and needs "
                     + "a live surface. Run it from the command palette in a running "
                     + "window; the CLI has no surface to dispatch it against.");
-                return 3;
+                return ExitNeedsSurface;
             }
 
             // Reporting a crash for a call that reached no surface is the one
@@ -82,7 +108,7 @@ internal static partial class CrashTrigger
             {
                 Console.Error.WriteLine(
                     $"crash-trigger: libghostty did not accept '{action}'");
-                return 4;
+                return ExitBindingRefused;
             }
 
             // Only crash:main panics on this thread. crash:io and crash:render
@@ -101,20 +127,23 @@ internal static partial class CrashTrigger
             //
             // Raised from a thread of its own, for the same reason
             // managed-unhandled is. Measured, not assumed: raising it inline
-            // produced no crash at all. NativeAOT wraps the P/Invoke in an SEH
-            // frame that translates the exception into a managed
-            // SEHException, Program.Main's catch-all caught it, ReportFatal
-            // wrote a log, and the process exited 3. The row went red for
-            // "no envelope" while the reporter had never been given anything
-            // to capture.
+            // produced no crash at all under CoreCLR, which is what
+            // `dotnet build` and `dotnet run` give you. There the runtime
+            // wraps the P/Invoke in an SEH frame that translates the exception
+            // into a managed SEHException, Program.Main's catch-all caught it,
+            // ReportFatal wrote a log, and the process exited 3. The row went
+            // red for "no envelope" while the reporter had never been given
+            // anything to capture.
             //
-            // What this row measures, then, is a native fault as it reaches a
-            // NativeAOT process: translated, and unhandled from there on. A
-            // fault in a frame the runtime is NOT wrapping is a different
-            // path, and the libghostty kinds are the ones that measure it.
+            // Naming the runtime matters here. Under NativeAOT, which is what
+            // ships, the exception is NOT translated: it goes unhandled and
+            // exits 0xE0000001, which is what the harness expects. A reader
+            // who believed the CoreCLR behaviour was the AOT one could
+            // reasonably conclude the catch-all covers native faults and
+            // delete this thread. The thread is correct under both.
             case "native-seh":
                 var seh = new Thread(() => RaiseException(
-                    FACILITY_TEST_EXCEPTION,
+                    CRASH_TEST_EXCEPTION_CODE,
                     EXCEPTION_NONCONTINUABLE,
                     0,
                     IntPtr.Zero));
@@ -126,15 +155,24 @@ internal static partial class CrashTrigger
 
             // An unhandled managed exception. In NativeAOT this reaches
             // RaiseFailFastException, which bypasses every user-mode
-            // handler, so NO envelope is expected. The existing handlers in
-            // App.xaml.cs are what capture this class, with a managed stack
-            // trace, which is more useful than a dump would be.
-            // Thrown from a thread of its own, deliberately. Program.Main
-            // runs MainImpl inside a catch-all that turns any exception into
+            // handler, so NO envelope is expected.
+            //
+            // Thrown from a thread of its own, deliberately. Program.Main runs
+            // MainImpl inside a catch-all that turns any exception into
             // ReportFatal and a clean exit, so throwing here would exercise
-            // the CLI's error path and never be unhandled at all. The palette
-            // path IS unhandled (App.xaml.cs leaves Handled = false), and the
-            // two front doors have to mean the same thing.
+            // the CLI's error path and never be unhandled at all.
+            //
+            // What that thread does and does NOT reach, stated precisely
+            // because an earlier version of this comment got it wrong. A bare
+            // Thread is not the XAML UI thread, so
+            // Application.UnhandledException in App.xaml.cs never fires for
+            // it; only AppDomain.CurrentDomain.UnhandledException can see it,
+            // and that one cannot mark the exception handled. So this row
+            // measures the AppDomain path and the AOT fail-fast, on both front
+            // doors, and it does NOT measure the XAML handler that covers a
+            // UI-thread throw in the shipped app. That path has no automated
+            // coverage; it needs a throw dispatched onto the DispatcherQueue,
+            // which only the palette can do.
             //
             // Join is unreachable: an unhandled exception on any thread tears
             // the process down.
@@ -146,7 +184,7 @@ internal static partial class CrashTrigger
                 unhandled.Join();
                 // Unreachable: the runtime tears the process down before the
                 // join returns. Present because the compiler cannot know it.
-                return 5;
+                return ExitTriggerReturned;
 
             // Explicit fail-fast. Bypasses all handlers by design.
             case "env-failfast":
@@ -194,7 +232,7 @@ internal static partial class CrashTrigger
                 Console.Error.WriteLine(
                     $"crash-trigger: '{entry.Id}' is in the catalogue but has no "
                     + "mechanism here");
-                return 2;
+                return ExitNoMechanism;
         }
     }
 
@@ -227,11 +265,30 @@ internal static partial class CrashTrigger
         // A real Windows command line leads with the executable path, and
         // the args iterator skips that first token before looking for an
         // action. A bare word is not a valid command line in that shape.
-        var cmdline = "\"" + Environment.ProcessPath + "\"";
+        // ProcessPath is nullable, and this is the one path whose entire job
+        // is not to fail silently: a null would build `""`, hand libghostty an
+        // empty argv[0], and the args iterator would skip a token that is not
+        // there.
+        var exe = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exe))
+        {
+            Console.Error.WriteLine(
+                "crash-trigger: Environment.ProcessPath is unavailable; " +
+                "continuing with no reporter attached");
+            return;
+        }
+
+        var cmdline = "\"" + exe + "\"";
         var buf = Marshal.StringToHGlobalUni(cmdline);
         var status = NativeMethods.InitWide(buf, (UIntPtr)cmdline.Length);
         if (status != 0)
         {
+            // Freed only on the failure path. On success libghostty borrows
+            // this buffer for the process lifetime (see InitWideFromProcess,
+            // which spends eleven lines saying so), so the leak there is
+            // required rather than an oversight. Here global.init's errdefer
+            // has already unwound and nothing borrows it any more.
+            Marshal.FreeHGlobal(buf);
             Console.Error.WriteLine(
                 $"crash-trigger: ghostty_init failed (status {status}); " +
                 "continuing with no reporter attached");
@@ -244,7 +301,13 @@ internal static partial class CrashTrigger
         // on every run after the first it is already there and the wait
         // returns instantly with the reporter not yet armed. Every "no
         // envelope" row measured that way says nothing.
-        if (NativeMethods.CrashWaitReady((uint)timeout.TotalMilliseconds))
+        // checked: a negative or absurd TimeSpan wraps rather than throwing,
+        // and a wrapped timeout silently turns the wait into a no-op, which
+        // is the failure this whole method exists to prevent.
+        uint timeoutMs;
+        checked { timeoutMs = (uint)timeout.TotalMilliseconds; }
+
+        if (NativeMethods.CrashWaitReady(timeoutMs))
         {
             Console.Error.WriteLine("crash-trigger: reporter armed");
             return;
