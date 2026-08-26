@@ -48,7 +48,13 @@ public sealed class RootGridBackgroundWiringTests
         // Same node-level assertion as above and for the same reason: told
         // the negation of the desktop polarity, Estimate stays just as pure
         // and answers for the wrong desktop.
-        estimate.ArgExpression(1).AssertCallTo("OsTheme.IsDark");
+        var polarity = estimate.ArgExpression(1).AssertCallTo("OsTheme.IsDark");
+
+        // And the same UISettings the root grid asked. While this one
+        // activated a fresh instance, the two readers could answer for
+        // different moments of the same frame: the grid painted for the
+        // desktop it saw and the ink was scored against the other one.
+        Assert.Equal("_systemUiSettings", polarity.Arg(0));
 
         var core = ShellSource.Load("Core.Shell.BackdropGround.cs");
         Assert.DoesNotContain(

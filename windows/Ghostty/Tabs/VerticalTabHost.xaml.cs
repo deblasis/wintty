@@ -284,6 +284,8 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     internal void SetRowSeparator(uint? separatorRgb, uint groundRgb, bool highContrast)
         => _strip.SetRowSeparator(separatorRgb, groundRgb, highContrast);
 
+    internal void SetChromeFill(uint? fillRgb) => _strip.SetChromeFill(fillRgb);
+
     internal void SetAccentColor(Windows.UI.Color color)
     {
         if (_strip.Resources.TryGetValue("StripAccentBrush", out var res)

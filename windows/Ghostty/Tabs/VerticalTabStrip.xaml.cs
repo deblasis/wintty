@@ -206,8 +206,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         // clearing the surface there leaves the lane with nothing painting it
         // at all. LayerFillColorDefaultBrush is HC-overridable and resolves
         // to a system colour, which is the surface that mode wants.
+        //
+        // And except when frame-style asks for a solid frame, which is the
+        // one case where the strip is meant to be a surface again. That fill
+        // is the same one the title row takes, so the two rows stay one
+        // piece; the strokes still separate them, because a uniform fill
+        // divides them no better than a uniform backdrop did.
         var hc = _highContrast;
-        Background = hc ? ResolveThemeBrush("LayerFillColorDefaultBrush") : TransparentBrush;
+        Background = hc
+            ? ResolveThemeBrush("LayerFillColorDefaultBrush")
+            : _chromeFillRgb is { } chromeFill
+                ? TabColorBrush.FromPackedRgb(chromeFill)
+                : TransparentBrush;
         _stripBackdropPacked = hc ? PackColor(((SolidColorBrush)Background).Color)
                                   : _chromeGroundPacked;
         ApplyTransparentNavPaneSurface();
@@ -363,8 +373,27 @@ internal sealed partial class VerticalTabStrip : UserControl
     // path lets the backdrop through. Pushed in rather than detected here so
     // the strip and the window cannot disagree about which mode is live.
     private bool _highContrast;
+    // The frame's own fill, or null while the strip is left to the backdrop.
+    // Pushed in for the same reason the flag above is: frame-style is a
+    // window-level answer and the strip must not re-derive it.
+    private uint? _chromeFillRgb;
     private SolidColorBrush? _rowSeparatorBrush;
     private readonly List<Border> _rowSeparators = new();
+
+    /// <summary>
+    /// Paint the strip lane, or leave it to the window backdrop.
+    ///
+    /// Only the lane's own surface. The selected row keeps its fill from the
+    /// terminal in every combination: the seam cover is cut from that fill,
+    /// and a translucent one reopens the join with the pane that the row
+    /// exists to close.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (_chromeFillRgb == fillRgb) return;
+        _chromeFillRgb = fillRgb;
+        if (!_shellThemeActive) ApplyDefaultPaneChrome(_elementTheme);
+    }
 
     /// <summary>
     /// Colour for the lines between rows, or null to draw none.
