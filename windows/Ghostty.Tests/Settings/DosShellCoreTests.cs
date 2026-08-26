@@ -217,7 +217,7 @@ public class DosShellCoreTests
             " PIPBOY    GLS      1,536     8/25/2026\r\n" +
             "         10 file(s)      141,271 bytes\r\n" +
             "          2 dir(s)  33,554,432 bytes free\r\n" +
-            "\r\n",
+            "\r\n" + Prompt,
             output);
     }
 
@@ -225,7 +225,7 @@ public class DosShellCoreTests
     public void VerRepliesWithTheDOSVersion()
     {
         Assert.Equal(
-            "\r\n\r\nMS-DOS Version 6.22\r\nwintty shader gallery, live preview\r\n\r\n",
+            "\r\n\r\nMS-DOS Version 6.22\r\nwintty shader gallery, live preview\r\n\r\n" + Prompt,
             Run(NewCore(), "ver"));
     }
 
@@ -233,7 +233,7 @@ public class DosShellCoreTests
     public void TimeRepliesFromTheClock()
     {
         Assert.Equal(
-            "\r\n\r\nCurrent time is 3:04:05 PM\r\n\r\n",
+            "\r\n\r\nCurrent time is 3:04:05 PM\r\n\r\n" + Prompt,
             Run(NewCore(), "time"));
     }
 
@@ -241,7 +241,7 @@ public class DosShellCoreTests
     public void DateRepliesFromTheClock()
     {
         Assert.Equal(
-            "\r\n\r\nCurrent date is Tue Aug 25 2026\r\n\r\n",
+            "\r\n\r\nCurrent date is Tue Aug 25 2026\r\n\r\n" + Prompt,
             Run(NewCore(), "date"));
     }
 
@@ -249,20 +249,20 @@ public class DosShellCoreTests
     public void EchoPrintsItsArgumentWithCaseAndInnerSpacingIntact()
     {
         Assert.Equal(
-            "\r\n\r\nHello   World\r\n\r\n",
+            "\r\n\r\nHello   World\r\n\r\n" + Prompt,
             Run(NewCore(), "echo Hello   World"));
     }
 
     [Fact]
     public void EchoWithoutAnArgumentSaysEchoIsOn()
     {
-        Assert.Equal("\r\n\r\nECHO is on\r\n\r\n", Run(NewCore(), "echo"));
+        Assert.Equal("\r\n\r\nECHO is on\r\n\r\n" + Prompt, Run(NewCore(), "echo"));
     }
 
     [Fact]
     public void ClsClearsTheScreenAndHomesTheCursor()
     {
-        Assert.Equal("\r\n\x1b[2J\x1b[H", Run(NewCore(), "cls"));
+        Assert.Equal("\r\n\x1b[2J\x1b[H" + Prompt, Run(NewCore(), "cls"));
     }
 
     [Fact]
@@ -280,7 +280,7 @@ public class DosShellCoreTests
             "  CLS        Clear the screen\r\n" +
             "  HELP       This list\r\n" +
             "\r\n" +
-            "Up/Down arrows recall previous commands.\r\n",
+            "Up/Down arrows recall previous commands.\r\n" + Prompt,
             Run(NewCore(), "help"));
     }
 
@@ -299,7 +299,7 @@ public class DosShellCoreTests
             "PROMPT $p$g\r\n" +
             "SET SHADER=CRT.GLS\r\n" +
             "LH C:\\WINTTY\\SHADERLAB.EXE /GALLERY\r\n" +
-            "\r\n",
+            "\r\n" + Prompt,
             Run(NewCore(), "type autoexec.bat"));
     }
 
@@ -313,7 +313,7 @@ public class DosShellCoreTests
     public void TypeWithoutAParameterReportsItMissing()
     {
         Assert.Equal(
-            "\r\n\r\nRequired parameter missing\r\n\r\n",
+            "\r\n\r\nRequired parameter missing\r\n\r\n" + Prompt,
             Run(NewCore(), "type"));
     }
 
@@ -321,16 +321,16 @@ public class DosShellCoreTests
     public void TypeOfAnUnknownFileSaysSo()
     {
         Assert.Equal(
-            "\r\n\r\nFile not found - nope.txt\r\n\r\n",
+            "\r\n\r\nFile not found - nope.txt\r\n\r\n" + Prompt,
             Run(NewCore(), "type nope.txt"));
     }
 
     [Fact]
     public void ModeCursorSetsEachShape()
     {
-        Assert.Equal("\r\n\x1b[4 q", Run(NewCore(), "mode cursor=underline"));
-        Assert.Equal("\r\n\x1b[2 q", Run(NewCore(), "MODE CURSOR=BLOCK"));
-        Assert.Equal("\r\n\x1b[5 q", Run(NewCore(), "mode cursor=bar"));
+        Assert.Equal("\r\n\x1b[4 q" + Prompt, Run(NewCore(), "mode cursor=underline"));
+        Assert.Equal("\r\n\x1b[2 q" + Prompt, Run(NewCore(), "MODE CURSOR=BLOCK"));
+        Assert.Equal("\r\n\x1b[5 q" + Prompt, Run(NewCore(), "mode cursor=bar"));
     }
 
     [Fact]
@@ -338,7 +338,7 @@ public class DosShellCoreTests
     {
         // The website's table has no sequence for HELP and writes nothing;
         // a literal "undefined" here would type garbage into the preview.
-        Assert.DoesNotContain("\x1b[", Run(NewCore(), "mode cursor=help"), StringComparison.Ordinal);
+        Assert.Equal("\r\n" + Prompt, Run(NewCore(), "mode cursor=help"));
     }
 
     [Fact]
@@ -346,7 +346,7 @@ public class DosShellCoreTests
     {
         Assert.Equal(
             "\r\n\r\nInvalid parameters - cursor\r\n" +
-            "\r\nUsage: MODE CURSOR=BAR|BLOCK|UNDERLINE\r\n\r\n",
+            "\r\nUsage: MODE CURSOR=BAR|BLOCK|UNDERLINE\r\n\r\n" + Prompt,
             Run(NewCore(), "mode cursor"));
     }
 
@@ -355,7 +355,7 @@ public class DosShellCoreTests
     {
         Assert.Equal(
             "\r\n\r\nInvalid parameters - \r\n" +
-            "\r\nUsage: MODE CURSOR=BAR|BLOCK|UNDERLINE\r\n\r\n",
+            "\r\nUsage: MODE CURSOR=BAR|BLOCK|UNDERLINE\r\n\r\n" + Prompt,
             Run(NewCore(), "mode"));
     }
 
@@ -365,7 +365,7 @@ public class DosShellCoreTests
         Assert.Equal(
             "\r\n\r\n  655,360 bytes total conventional memory\r\n" +
             "  655,360 bytes available to MS-DOS\r\n" +
-            "  633,168 largest executable program size\r\n\r\n",
+            "  633,168 largest executable program size\r\n\r\n" + Prompt,
             Run(NewCore(), "mem"));
     }
 
@@ -373,7 +373,7 @@ public class DosShellCoreTests
     public void UnknownCommandIsBadCommandOrFileName()
     {
         Assert.Equal(
-            "\r\n\r\nBad command or file name\r\n\r\n",
+            "\r\n\r\nBad command or file name\r\n\r\n" + Prompt,
             Run(NewCore(), "del *.*"));
     }
 
