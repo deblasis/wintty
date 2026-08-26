@@ -50,6 +50,23 @@ pub const Value = struct {
         return .{ .value = c.sentry_value_new_int32(value) };
     }
 
+    /// Number of entries in a list or object.
+    pub fn len(self: Value) usize {
+        return c.sentry_value_get_length(self.value);
+    }
+
+    /// Borrowed element of a list. Not owned: do not decref the result.
+    pub fn getIndex(self: Value, index: usize) Value {
+        return .{ .value = c.sentry_value_get_by_index(self.value, index) };
+    }
+
+    /// The string contents of a value, or null if it is not a string.
+    /// Borrowed from the value and only valid while it lives.
+    pub fn asString(self: Value) ?[]const u8 {
+        const ptr = c.sentry_value_as_string(self.value) orelse return null;
+        return std.mem.span(ptr);
+    }
+
     pub fn decref(self: Value) void {
         c.sentry_value_decref(self.value);
     }

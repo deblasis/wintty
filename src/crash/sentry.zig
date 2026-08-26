@@ -257,14 +257,6 @@ fn beforeSend(
     // handler to set thread-specific data such as window size, grid size,
     // etc. that we can use to debug crashes.
 
-    // If we don't have thread state we can't reliably determine
-    // metadata such as surface dimensions. In the future we can probably
-    // drop full app state (all surfaces, all windows, etc.).
-    const thr_state = thread_state orelse {
-        log.debug("no thread state, skipping crash metadata", .{});
-        return event_val;
-    };
-
     // Get our event contexts. At this point Sentry has already merged
     // all the contexts so we should have this key. If not, we create it.
     const event: sentry.Value = .{ .value = event_val };
@@ -277,6 +269,17 @@ fn beforeSend(
         const obj = sentry.Value.initObject();
         event.set("tags", obj);
         break :tags obj;
+    };
+
+    // If we have no thread state we cannot determine surface dimensions.
+    // Record that rather than returning: a missing tag is indistinguishable
+    // from a crash that never reached this code, and every call that arrives
+    // through the C API in src/apprt/embedded.zig has no thread state, which
+    // for an embedder is most of them.
+    const thr_state = thread_state orelse {
+        tags.set("thread-type", sentry.Value.initString("unknown"));
+        log.debug("no thread state, crash metadata limited", .{});
+        return event_val;
     };
 
     // Store our thread type
@@ -319,6 +322,87 @@ fn beforeSend(
     }
 
     return event_val;
+}
+
+/// Rewrite `"code_file":"<dir>/<name>"` to `"code_file":"<dir>/name"` in a
+/// serialized envelope, keeping only the file name.
+///
+/// sentry records the runtime path of every loaded module. Wintty installs
+/// under `%LOCALAPPDATA%`, so on a real machine those read
+/// `C:\Users\<name>\AppData\Local\Wintty\...`: the report we ask the user to
+/// send us would carry their username. Symbolication needs the file name to
+/// match a module, not the directory it happened to load from.
+///
+/// This runs on the serialized bytes rather than on the event, because the
+/// module list cannot be edited: `sentry_modulefinder_windows.c` calls
+/// `sentry_value_freeze` on it, so `set` from a `before_send` hook is silently
+/// a no-op. The bytes are ours; the value is not.
+///
+/// Returns a slice owned by `alloc`, or the input unchanged if there is
+/// nothing to rewrite.
+fn scrubImagePaths(alloc: Allocator, json: []const u8) ![]const u8 {
+    const needle = "\"code_file\":\"";
+    if (std.mem.indexOf(u8, json, needle) == null) return json;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var rest = json;
+    while (std.mem.indexOf(u8, rest, needle)) |at| {
+        const value_start = at + needle.len;
+        try out.appendSlice(alloc, rest[0..value_start]);
+
+        // The value ends at the first quote that is not escaped. Paths carry
+        // no escaped quotes in practice, but a filename legally could.
+        var i: usize = value_start;
+        const value_end = while (i < rest.len) : (i += 1) {
+            if (rest[i] == '"' and (i == 0 or rest[i - 1] != '\\')) break i;
+        } else rest.len;
+
+        const value = rest[value_start..value_end];
+
+        // Backslashes arrive escaped in JSON, so the separator is two bytes.
+        const cut = if (std.mem.lastIndexOf(u8, value, "\\\\")) |b|
+            b + 2
+        else if (std.mem.lastIndexOfScalar(u8, value, '/')) |b|
+            b + 1
+        else
+            0;
+
+        if (cut == 0) {
+            try out.appendSlice(alloc, value);
+        } else {
+            try out.appendSlice(alloc, "<dir>/");
+            try out.appendSlice(alloc, value[cut..]);
+        }
+
+        rest = rest[value_end..];
+    }
+    try out.appendSlice(alloc, rest);
+
+    return try out.toOwnedSlice(alloc);
+}
+
+test "scrubImagePaths keeps the file name and drops the directory" {
+    const alloc = std.testing.allocator;
+    // Multiline: contents are literal, so these backslashes are the
+    // doubled ones real JSON carries.
+    const input =
+        \\{"images":[{"code_file":"C:\\Users\\alex\\conpty.dll"}]}
+    ;
+    const out = try scrubImagePaths(alloc, input);
+    defer alloc.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "conpty.dll") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "alex") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Users") == null);
+}
+
+test "scrubImagePaths leaves an envelope with no module paths alone" {
+    const alloc = std.testing.allocator;
+    const input = "{\"level\":\"fatal\"}";
+    const out = try scrubImagePaths(alloc, input);
+    try std.testing.expectEqualStrings(input, out);
 }
 
 pub const Transport = struct {
@@ -381,7 +465,7 @@ pub const Transport = struct {
         defer file.close(single_threaded.io());
         var buf: [4096]u8 = undefined;
         var file_writer = file.writer(single_threaded.io(), &buf);
-        try file_writer.interface.writeAll(json);
+        try file_writer.interface.writeAll(try scrubImagePaths(alloc, json));
         try file_writer.end();
 
         log.warn("crash report written to disk path={s}", .{path});
