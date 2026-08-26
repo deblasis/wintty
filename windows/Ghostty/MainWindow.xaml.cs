@@ -3228,7 +3228,10 @@ public sealed partial class MainWindow : Window
             bg.B;
 
         var argb = RootBackgroundResolver.Resolve(
-            _currentBackdropStyle, _shellTheme.IsEnabled, shellBgArgb);
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            shellBgArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
         var next = Windows.UI.Color.FromArgb(
             (byte)(argb >> 24),
