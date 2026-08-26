@@ -29,7 +29,15 @@ human) working in this repo uses the same contract:
   instead of silently absent.
 - `just gates-selftest` - prove the gates still catch what they exist for
   (recorded-PR replays, matcher escapes, exemption anchoring) and that the
-  nightly scripts' helpers roundtrip.
+  nightly scripts' helpers roundtrip. Runs `gitversion-selftest` first.
+- `just gitversion-selftest` - prove a tag outside the release namespace
+  cannot name a version. `sync-publish` tags each published snapshot
+  `series/vN` and Config.init panics on a tag it does not recognise, so
+  the version lookup filters with `--match v* --match tip --exclude */*`.
+  `--match` does not stop at a slash, so `--exclude` is what carries the
+  namespace rule. This runs real `git describe` against a throwaway repo
+  over ten tag layouts, with the argument list read out of
+  GitVersion.zig, and requires three broken argument lists to be caught.
 - `nightly_fuzz.ps1` / `nightly_control.ps1` / `register_nightly_fuzz.ps1` -
   the 23:00 nightly run (tests + fuzz in a dedicated worktree, deduped P1
   issues on breaks, optional hibernate-after) and its control panel.
