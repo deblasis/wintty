@@ -28,6 +28,10 @@ pub fn build(b: *std.Build) !void {
 
     var flags: std.ArrayList([]const u8) = .empty;
     defer flags.deinit(b.allocator);
+    // The library is built with .linkage = .static, so sentry.h must not
+    // decorate its API with __declspec(dllimport); without this every
+    // sentry_* symbol comes out as an unresolved dllimport on Windows.
+    try flags.append(b.allocator, "-DSENTRY_BUILD_STATIC=1");
     if (target.result.os.tag == .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-DSENTRY_WITH_UNWINDER_DBGHELP",
@@ -67,6 +71,12 @@ pub fn build(b: *std.Build) !void {
 
         // Symbolizer + Unwinder
         if (target.result.os.tag == .windows) {
+            // dbghelp: symbolizer, dbghelp unwinder, modulefinder.
+            // version:  sentry_os.c version lookup.
+            lib.root_module.linkSystemLibrary("dbghelp", .{});
+            lib.root_module.linkSystemLibrary("version", .{});
+            module.linkSystemLibrary("dbghelp", .{});
+            module.linkSystemLibrary("version", .{});
             lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = &.{
