@@ -98,13 +98,31 @@ internal static partial class CrashTrigger
             // SetUnhandledExceptionFilter WILL see it. This is the one row
             // that must go green for the in-process backend to be worth
             // anything at all.
+            //
+            // Raised from a thread of its own, for the same reason
+            // managed-unhandled is. Measured, not assumed: raising it inline
+            // produced no crash at all. NativeAOT wraps the P/Invoke in an SEH
+            // frame that translates the exception into a managed
+            // SEHException, Program.Main's catch-all caught it, ReportFatal
+            // wrote a log, and the process exited 3. The row went red for
+            // "no envelope" while the reporter had never been given anything
+            // to capture.
+            //
+            // What this row measures, then, is a native fault as it reaches a
+            // NativeAOT process: translated, and unhandled from there on. A
+            // fault in a frame the runtime is NOT wrapping is a different
+            // path, and the libghostty kinds are the ones that measure it.
             case "native-seh":
-                RaiseException(
+                var seh = new Thread(() => RaiseException(
                     FACILITY_TEST_EXCEPTION,
                     EXCEPTION_NONCONTINUABLE,
                     0,
-                    IntPtr.Zero);
-                return 1; // unreachable
+                    IntPtr.Zero));
+                seh.Start();
+                seh.Join();
+                // Unreachable: the translated exception is unhandled on that
+                // thread and tears the process down before the join returns.
+                return 1;
 
             // An unhandled managed exception. In NativeAOT this reaches
             // RaiseFailFastException, which bypasses every user-mode
