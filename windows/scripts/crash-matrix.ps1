@@ -42,7 +42,11 @@ if (-not (Test-Path $ExePath)) {
 # trigger that never ran, which is the one result this harness must not
 # produce. See CrashKinds in windows/Ghostty.Core/Diagnostics.
 $matrix = @(
-    @{ Kind = 'native-seh';        Envelope = $true;  CrashLog = $false }
+    # native-seh surfaces as a managed SEHException, so the CLR claims it
+    # before sentry's unhandled filter runs and the managed handler is what
+    # records it. Measured, not assumed: the design predicted an envelope here
+    # and was wrong.
+    @{ Kind = 'native-seh';        Envelope = $false; CrashLog = $true  }
     @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $true  }
     @{ Kind = 'env-failfast';      Envelope = $false; CrashLog = $false }
     @{ Kind = 'stack-overflow';    Envelope = $false; CrashLog = $false }
@@ -55,15 +59,21 @@ function Get-EnvelopeSet {
         Select-Object -ExpandProperty Name)
 }
 
-function Get-CrashLogLength {
-    if (-not (Test-Path $CrashLog)) { return 0 }
-    (Get-Item $CrashLog).Length
+# The managed handler uses File.WriteAllText, which OVERWRITES. Detecting a
+# crash log by growth therefore misses every row after the first: a shorter
+# exception replaces a longer one and the length goes down. Identify the file
+# by its contents instead, so "was it rewritten" is what gets measured.
+function Get-CrashLogStamp {
+    if (-not (Test-Path $CrashLog)) { return '<absent>' }
+    $item = Get-Item $CrashLog
+    "$($item.LastWriteTimeUtc.Ticks):$($item.Length):" +
+        (Get-FileHash $CrashLog -Algorithm SHA256).Hash
 }
 
 $results = @()
 foreach ($row in $matrix) {
     $before    = Get-EnvelopeSet
-    $logBefore = Get-CrashLogLength
+    $logBefore = Get-CrashLogStamp
 
     $proc = Start-Process -FilePath $ExePath `
         -ArgumentList '+crash', $row.Kind `
@@ -77,7 +87,7 @@ foreach ($row in $matrix) {
     $after    = Get-EnvelopeSet
     $newFiles = @($after | Where-Object { $_ -notin $before })
     $gotEnv   = $newFiles.Count -gt 0
-    $gotLog   = (Get-CrashLogLength) -gt $logBefore
+    $gotLog   = (Get-CrashLogStamp) -ne $logBefore
 
     $results += [pscustomobject]@{
         Kind             = $row.Kind
