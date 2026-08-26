@@ -166,7 +166,7 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
     [ordered]@{ name = 'tab-colors';     script = 'mouse-fuzz-tab-colors.ps1';     tags = @('tabs');           outDir = $true;  seed = $false; minutes = 3
                 oracle = 'drives every preset plus None, recolor and a layout round-trip, and asserts the swatches were findable and the layout switched; it compares no pixel, so a build that paints them all alike passes' }
     [ordered]@{ name = 'tab-close-selection'; script = 'mouse-fuzz-tab-close-selection.ps1'; tags = @('tabs'); outDir = $true; seed = $true; minutes = 4
-                oracle = 'closes a randomly chosen OTHER tab in both strips and checks two things about the tab that was active: UIA still reports that same container selected (matched on RuntimeId, after proving RuntimeId survives a removal in this build), and the fill painted under the selected row differs from every unselected row while the unselected rows all match each other. The second is what catches a selection fill left on a vacated slot. It compares no absolute color, so a build that paints the right row in the wrong color passes; it samples one pixel per row, so a fill that is misplaced by less than a row height passes; and it never closes the ACTIVE tab, so the successor-selection rule is not exercised' }
+                oracle = 'closes a randomly chosen OTHER tab in both strips and checks two things about the tab that was active, once the strip has stopped changing: UIA still reports it selected (matched on the tab title, which the harness seeds distinct because every tab here runs the same shell and would otherwise be named alike), and the fill painted under the selected row differs from every unselected row while the unselected rows all match each other. The second is what catches a selection fill left on a vacated slot. It compares no absolute color, so a build that paints the right row in the wrong color passes; it samples one pixel per row, so a fill that is misplaced by less than a row height passes; it settles before it measures, so a selection that is briefly wrong and right at rest is recorded as transientOff rather than failed; and it never closes the ACTIVE tab, so the successor-selection rule is not exercised. A strip that never stops changing is exit 1 rather than a verdict. Container RuntimeIds are measured over the same closes and reported as idDrift rather than asserted on: they name a slot, not a tab' }
     [ordered]@{ name = 'morph';          script = 'vtabs-morph-fuzz.ps1';          tags = @('tabs');           outDir = $false; seed = $true;  minutes = 3
                 oracle = 'randomized layout switching against a full strip, checked against a trace the product emits; a seed replays the sequence' }
     [ordered]@{ name = 'inspector';      script = 'mouse-fuzz-inspector.ps1';      tags = @('inspector');      outDir = $true;  seed = $false; minutes = 3
@@ -814,6 +814,108 @@ function Write-NewLines {
 # telling the .NET side, which nothing here does, and every path a harness is
 # handed is absolute - so it costs nothing today. It is named because a harness
 # that starts reading a relative path is where it stops being free.
+
+# Minimizes every other window, and reports what would not go.
+#
+# The harnesses click at screen coordinates and refuse the click when
+# WindowFromPoint says the pixel belongs to somebody else. That guard is
+# right -- clicking blind into another app is worse than failing -- but with
+# nothing clearing the desktop first, whatever the developer left on screen
+# decides how much of the suite runs. One round lost 10 of 21 harnesses that
+# way, and the reason was a HARVEST_MISS buried in a single harness's stderr,
+# which reads as a product problem rather than a desktop one.
+#
+# Shell.Application's MinimizeAll was the obvious tool and does not work here:
+# it returned without error and left all ten windows exactly where they were.
+# ShowWindow per window does work, so this drives each one directly and then
+# CHECKS, because the first version of this reported the before-count as its
+# achievement and claimed ten successes having minimized nothing.
+#
+# The console this run prints into goes down with everything else: it belongs
+# to the terminal host, not to this process, and a terminal parked over the
+# app under test refuses a harness click like any other window. skipPid only
+# spares a window this process owns, and at the one call site there are none.
+function Clear-Desktop {
+    if (-not ('DesktopClear' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class DesktopClear {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+    public delegate bool EnumProc(IntPtr h, IntPtr lp);
+
+    public const int SW_MINIMIZE = 6;
+    const int DWMWA_CLOAKED = 14;
+
+    // A cloaked window answers IsWindowVisible with true while being nowhere
+    // on screen: a window on another virtual desktop, or a suspended UWP
+    // shell. It can neither steal a click nor be minimized, so counting it
+    // would put a permanent false entry under WOULD NOT MINIMIZE.
+    static bool OnScreen(IntPtr h) {
+        int cloaked;
+        if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    public static IntPtr[] TopLevel(uint skipPid) {
+        var found = new System.Collections.Generic.List<IntPtr>();
+        IntPtr shell = GetShellWindow();
+        EnumProc cb = (h, lp) => {
+            if (h == shell || !IsWindowVisible(h) || IsIconic(h) || !OnScreen(h)) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            if (pid == skipPid) return true;
+            var sb = new StringBuilder(256);
+            if (GetWindowText(h, sb, 256) <= 0) return true;
+            found.Add(h);
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    // Asked of the handles that were actually driven, which a second
+    // enumeration cannot answer: it scores a window that closed itself as a
+    // success, counts one that opened during the wait as a refusal, and can
+    // come out negative.
+    public static bool StillUp(IntPtr h) {
+        return IsWindow(h) && IsWindowVisible(h) && !IsIconic(h) && OnScreen(h);
+    }
+
+    public static string TitleOf(IntPtr h) {
+        var sb = new StringBuilder(256); GetWindowText(h, sb, 256); return sb.ToString();
+    }
+}
+'@
+    }
+
+    $before = @([DesktopClear]::TopLevel([uint32]$PID))
+    foreach ($h in $before) { [void][DesktopClear]::ShowWindow($h, [DesktopClear]::SW_MINIMIZE) }
+    Start-Sleep -Milliseconds 700
+
+    $stuck = @($before | Where-Object { [DesktopClear]::StillUp($_) })
+    Write-Host ("desktop: minimized {0} of {1} window(s)" -f ($before.Count - $stuck.Count), $before.Count)
+
+    if ($stuck.Count -gt 0) {
+        # Whatever refuses to minimize is the most likely thief of a later
+        # click: always-on-top overlays, and anything that re-raises itself.
+        # Named now rather than inferred from a harness failure much later.
+        $names = @($stuck | ForEach-Object { [DesktopClear]::TitleOf($_) } | Where-Object { $_ })
+        Write-Host ("  WOULD NOT MINIMIZE: {0}" -f ($names -join ', ')) -ForegroundColor Yellow
+        Write-Host '  a harness that clicks under one of these will be refused'
+    }
+}
+
 function Start-HarnessProcess {
     param(
         [Parameter(Mandatory)][string[]]$Argv,
@@ -1284,6 +1386,7 @@ if ($useFixtures) {
     # the start of a 40-minute run rather than 30 minutes in is the point.
     Assert-NoWintty -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
+    Clear-Desktop
 }
 
 # ---- run ------------------------------------------------------------------
