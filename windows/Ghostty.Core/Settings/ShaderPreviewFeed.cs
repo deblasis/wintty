@@ -8,25 +8,32 @@ using Microsoft.Extensions.Logging;
 namespace Ghostty.Core.Settings;
 
 /// <summary>
-/// Drives the shader picker's preview terminal with a canned session: a
-/// scripted MS-DOS box that types itself, forever, with human-ish pacing.
+/// Drives the shader picker's preview terminal with the website's fake
+/// MS-DOS session (wintty.io/shaders): an autoplay loop types the demo
+/// script forever with human-ish pacing, and the user can click into the
+/// preview and type freely. Both go through one <see cref="DosShellCore"/>,
+/// so scripted text and human text are indistinguishable to the surface.
 /// The preview surface runs a silent placeholder child, so these VT bytes
-/// are the only thing that ever reaches the grid: the content is
-/// deterministic, it starts playing the moment the picker opens, and it
-/// survives every shader flip (the feed never rebuilds the surface).
-/// Mirrors the wintty.io/shaders demo: same DOS flavor, same pacing, same
-/// cursor-shape flips that exercise the mode-change cursor shaders.
+/// are the only thing that ever reaches the grid: the content stays
+/// deterministic in shape, it starts playing the moment the picker opens,
+/// and it survives every shader flip (the feed never rebuilds the
+/// surface). Every user keystroke pauses the autoplay for a quiet window
+/// (see <see cref="UserQuietWindow"/>); the loop resumes where it stopped
+/// once the user goes quiet.
 /// </summary>
 /// <remarks>
 /// UI-free and dependency-free, like <c>CustomShaderNoticeSource</c>: the
 /// feed writes to a <see cref="VtSink"/> delegate and paces itself through a
-/// <see cref="PacingDelay"/>, so the script, the ordering, and the
-/// cancellation unit-test without a WinUI runtime or a UI thread. The WinUI
-/// side supplies <c>TerminalControl.WriteVt</c> and <c>Task.Delay</c>.
+/// <see cref="PacingDelay"/>, and reads the clock through a delegate so the
+/// pause logic unit-tests without sleeping. The WinUI side supplies
+/// <c>TerminalControl.WriteVt</c> and <c>Task.Delay</c>.
 ///
 /// Not thread-safe, and the sink it is given generally is not either:
 /// <c>WriteVt</c> is UI-thread-only. Start the feed on the UI thread so
-/// every continuation resumes there.
+/// every continuation resumes there, and route user keystrokes (WinUI
+/// input events, same thread) through <see cref="KeyDown"/> and
+/// <see cref="Character"/>; nothing here needs a lock because all of it
+/// runs on that one thread.
 /// </remarks>
 internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
 {
@@ -46,112 +53,43 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
     /// </summary>
     internal delegate Task PacingDelay(int milliseconds, CancellationToken ct);
 
-    // SGR foregrounds only, never a background: the terminal theme is the
-    // only background, so fullscreen shaders light up where text is drawn
-    // instead of stopping at a palette-resolved bg cell (website lesson).
-    private const string FgGray = "\x1b[37m";
-    private const string FgBright = "\x1b[1;37m";
-    private const string FgBlue = "\x1b[34;1m";
-
-    // DECSCUSR: cursor shape flips are the exact event the mode-change
-    // cursor shaders (ripple, boom) animate on.
-    private const string CursorBlock = "\x1b[2 q";
-    private const string CursorBar = "\x1b[5 q";
-    private const string CursorUnderline = "\x1b[4 q";
-
-    private const string Prompt = FgBlue + "C:\\>" + FgGray + " ";
-
-    private const string Banner =
-        "\r\n" +
-        "Starting MS-DOS...\r\n" +
-        "\r\n" +
-        FgBright + "Microsoft(R) MS-DOS(R) Version 6.22\r\n" + FgGray +
-        "(C)Copyright Microsoft Corp 1981-1994.\r\n" +
-        "\r\n" +
-        "WINTTY Shader Lab Extension v1.0 installed.\r\n" +
-        "\r\n" +
-        "Type HELP for the command list.\r\n" +
-        "\r\n";
-
-    private const string DirListing =
-        "\r\n Volume in drive C is WINTTY\r\n" +
-        "\r\n" +
-        " IO       SYS      40,766  06-22-94\r\n" +
-        " MSDOS    SYS      38,138  06-22-94\r\n" +
-        " COMMAND  COM      54,619  06-22-94\r\n" +
-        " AUTOEXEC BAT        214  06-22-94\r\n" +
-        " CONFIG   SYS        168  06-22-94\r\n" +
-        " WINTTY      <DIR>          06-22-94\r\n" +
-        " CRT      GLS      1,842  06-22-94\r\n" +
-        " SCANLINE GLS        916  06-22-94\r\n" +
-        " SNOWFALL GLS      1,024  06-22-94\r\n" +
-        " AURORA   GLS      2,048  06-22-94\r\n" +
-        " PIPBOY   GLS      1,536  06-22-94\r\n" +
-        "        10 file(s)     141,271 bytes\r\n" +
-        "         2 dir(s)   33,554,432 bytes free\r\n" +
-        "\r\n";
-
-    private const string Autoexec =
-        "\r\n" +
-        "@ECHO OFF\r\n" +
-        "PROMPT $p$g\r\n" +
-        "SET SHADER=CRT.GLS\r\n" +
-        "LH C:\\WINTTY\\SHADERLAB.EXE /GALLERY\r\n" +
-        "\r\n";
-
-    private const string VerReply =
-        "\r\nMS-DOS Version 6.22\r\nwintty shader gallery, live preview\r\n\r\n";
-
-    private const string EchoReply =
-        "\r\nshaders make terminals fun\r\n\r\n";
-
-    // The loop is endless, so every constant it writes is encoded once at
-    // type load rather than re-encoded on every pass forever.
-    //
-    // "..."u8 literals are not available here: these constants are built by
-    // const string concatenation, and u8 literals are neither const nor
-    // concatenable, so static readonly byte[] is the shape that exists.
-    private static readonly byte[] CrLfVt = Vt("\r\n");
-    private static readonly byte[] PromptVt = Vt(Prompt);
-    private static readonly byte[] BannerVt = Vt(Banner);
-    private static readonly byte[] DirListingVt = Vt(DirListing);
-    private static readonly byte[] AutoexecVt = Vt(Autoexec);
-    private static readonly byte[] VerReplyVt = Vt(VerReply);
-    private static readonly byte[] EchoReplyVt = Vt(EchoReply);
-    private static readonly byte[] CursorBlockVt = Vt(CursorBlock);
-    private static readonly byte[] CursorBarVt = Vt(CursorBar);
-    private static readonly byte[] CursorUnderlineVt = Vt(CursorUnderline);
-
-    private static byte[] Vt(string text) => Encoding.UTF8.GetBytes(text);
-
     /// <summary>
-    /// One beat of the loop: the command to type at the prompt (null for a
-    /// bare cursor flip) and the VT bytes to emit once Enter lands. The
-    /// echo of the typed characters is part of the beat.
+    /// How long the demo holds still after the most recent user
+    /// keystroke before autoplay resumes (the website's 10s quiet
+    /// window).
     /// </summary>
-    private readonly record struct Beat(string? Command, byte[] Response);
+    private static readonly TimeSpan UserQuietSpan = TimeSpan.FromSeconds(10);
+
+    /// <summary>How often a held demo re-checks the quiet window.</summary>
+    private const int UserQuietPollMs = 400;
 
     // Same shape as the website's demo script: a couple of listings, then
-    // repeated cursor-shape flips (each one fires the cursor shaders), a
-    // MODE pair that walks underline to block, and a closing echo.
-    private static readonly Beat[] Script =
+    // repeated Insert presses (each one fires the cursor shaders), a MODE
+    // pair that walks underline to block, and a closing echo. A null
+    // entry is a bare Insert press; the shell owns every reply.
+    private static readonly string?[] Script =
     [
-        new("dir", DirListingVt),
-        new("type autoexec.bat", AutoexecVt),
-        new(null, CursorBarVt),
-        new(null, CursorBlockVt),
-        new(null, CursorBarVt),
-        new("ver", VerReplyVt),
-        new(null, CursorBlockVt),
-        new("mode cursor=underline", CursorUnderlineVt),
-        new("mode cursor=block", CursorBlockVt),
-        new("echo shaders make terminals fun", EchoReplyVt),
-        new(null, CursorBarVt),
+        "dir",
+        "type autoexec.bat",
+        null,
+        null,
+        null,
+        "ver",
+        null,
+        null,
+        "mode cursor=underline",
+        "mode cursor=block",
+        "echo shaders make terminals fun",
+        null,
     ];
 
     private readonly VtSink _sink;
     private readonly PacingDelay _delay;
     private readonly ILogger<ShaderPreviewFeed> _logger;
+    private readonly Func<DateTime> _clock;
+    private readonly DosShellCore _core;
+    private readonly UserQuietWindow _quiet;
+
     // Fixed seed so the typing jitter is reproducible instead of a fresh
     // random walk per window. Reproducible within a runtime version, not
     // across them: Random(int) makes no cross-version stability promise, and
@@ -170,14 +108,15 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
         _sink = sink;
         _logger = logger;
         _delay = delay ?? ((ms, ct) => Task.Delay(ms, ct));
-        _clock = clock;
+        _clock = clock ?? DefaultClock;
+        // One shell for both writers: the demo script and the user's own
+        // keystrokes type into the same input line, recall the same
+        // history, and flip the same cursor.
+        _core = new DosShellCore(_clock);
+        _quiet = new UserQuietWindow(_clock, UserQuietSpan);
     }
 
-    private readonly Func<DateTime>? _clock;
-
-    public bool KeyDown(DosShellKey key) => throw new NotImplementedException();
-
-    public void Character(char ch) => throw new NotImplementedException();
+    private static DateTime DefaultClock() => DateTime.Now;
 
     /// <summary>
     /// Begin autoplay. Idempotent, and a no-op after <see cref="Dispose"/>:
@@ -200,6 +139,34 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
         _cts = null;
     }
 
+    // User input (IPreviewInputSink) -------------------------------------
+
+    /// <summary>
+    /// A non-printable key the user pressed into the preview. Same shell
+    /// as the autoplay script (so her keys echo and execute exactly like
+    /// the demo's), and every keystroke re-arms the quiet window that
+    /// holds autoplay off.
+    /// </summary>
+    public bool KeyDown(DosShellKey key)
+    {
+        // After Dispose (the picker closing) a keystroke still in flight
+        // must be dropped, not thrown into the UI thread.
+        if (_disposed) return false;
+        _quiet.Arm();
+        Write(Vt(_core.SendKey(key)));
+        return true;
+    }
+
+    /// <summary>A character the user typed into the preview.</summary>
+    public void Character(char ch)
+    {
+        if (_disposed) return;
+        _quiet.Arm();
+        Write(Vt(_core.SendChar(ch)));
+    }
+
+    // Autoplay ------------------------------------------------------------
+
     private async Task RunAsync(CancellationToken ct)
     {
         try
@@ -207,13 +174,13 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
             // Boot text lands at once (it is a machine booting, not a
             // person), then the first command comes after a beat so the
             // window has settled and the shader is already visible.
-            Write(BannerVt);
-            Write(PromptVt);
+            Write(Vt(_core.Boot()));
+            Write(Vt(_core.NewPrompt()));
             await _delay(1200, ct);
 
             while (true)
             {
-                foreach (var beat in Script)
+                foreach (var step in Script)
                 {
                     // Observe cancellation here rather than waiting for the
                     // next _delay to throw it. Without these checks the loop
@@ -221,25 +188,27 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
                     // the sink's own disposed guard for correctness; one
                     // guard carrying that weight is enough.
                     ct.ThrowIfCancellationRequested();
-                    if (beat.Command is { } command)
+                    if (step is { } command)
                     {
                         await TypeAsync(command, ct);
                         await _delay(350, ct);
                         ct.ThrowIfCancellationRequested();
-                        // Three writes rather than a concatenation: the
-                        // newline, the response and the prompt are already
-                        // encoded, so this beat allocates nothing.
-                        Write(CrLfVt);
-                        Write(beat.Response);
-                        Write(PromptVt);
+                        await WaitForQuietAsync(ct);
+                        // One write: Enter returns the newline, the shell's
+                        // reply, and the next prompt together, which is
+                        // exactly what one keyed Enter produces through the
+                        // core.
+                        Write(Vt(_core.SendKey(DosShellKey.Enter)));
                     }
                     else
                     {
-                        // A flip is a keypress: pause before and after so
-                        // the cursor-shape animation has time to read.
+                        // A flip is a keypress: pause before it so the
+                        // cursor-shape animation has time to read; the gap
+                        // after it is the next step's own pause.
                         await _delay(650, ct);
                         ct.ThrowIfCancellationRequested();
-                        Write(beat.Response);
+                        await WaitForQuietAsync(ct);
+                        Write(Vt(_core.SendKey(DosShellKey.Insert)));
                     }
                 }
 
@@ -262,30 +231,35 @@ internal sealed partial class ShaderPreviewFeed : IDisposable, IPreviewInputSink
     }
 
     // Type one character at a time so it looks hand-keyed, with the same
-    // jitter band the website uses.
+    // jitter band the website uses. The quiet window is checked per
+    // character, so a keystroke lands between any two characters, not
+    // between commands.
     private async Task TypeAsync(string text, CancellationToken ct)
     {
         foreach (var ch in text)
         {
             ct.ThrowIfCancellationRequested();
-            WriteChar(ch);
+            await WaitForQuietAsync(ct);
+            Write(Vt(_core.SendChar(ch)));
             await _delay(55 + _random.Next(70), ct);
+        }
+    }
+
+    // Hold the demo while the user is typing: poll the quiet window until
+    // it expires. Polling rather than sleeping the remaining span is what
+    // makes a keystroke landing mid-hold extend it.
+    private async Task WaitForQuietAsync(CancellationToken ct)
+    {
+        while (!_quiet.Expired)
+        {
+            ct.ThrowIfCancellationRequested();
+            await _delay(UserQuietPollMs, ct);
         }
     }
 
     private void Write(ReadOnlySpan<byte> vt) => _sink(vt);
 
-    // One keystroke, encoded onto the stack: the typing path runs a few times
-    // a second forever, and a string plus a byte[] per character is two
-    // allocations for at most four bytes. Four is the ceiling for one char: a
-    // BMP scalar encodes to at most three, and a lone surrogate encodes as
-    // U+FFFD, which is three.
-    private void WriteChar(char ch)
-    {
-        Span<byte> buffer = stackalloc byte[4];
-        var written = Encoding.UTF8.GetBytes(new ReadOnlySpan<char>(in ch), buffer);
-        _sink(buffer[..written]);
-    }
+    private static byte[] Vt(string text) => Encoding.UTF8.GetBytes(text);
 
     // Its own category, not a borrowed one: raising the config writer's
     // category to Debug to chase a config bug must not also turn on shader

@@ -8,6 +8,7 @@ using Ghostty.Core.Interop;
 using Ghostty.Core.ResizeOverlay;
 using Ghostty.Core.Windows;
 using Ghostty.Core.Search;
+using Ghostty.Core.Settings;
 using Ghostty.Hosting;
 using Ghostty.Input;
 using Ghostty.Interop;
@@ -180,6 +181,17 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// resolved command.
     /// </summary>
     public string? PreviewCommand { get; set; }
+
+    /// <summary>
+    /// Keyboard sink for a preview surface. When set, key presses and
+    /// characters are delivered here INSTEAD of the pty: the preview's
+    /// placeholder child is asleep (see <see cref="PreviewCommand"/>),
+    /// so its stdin is exactly where keystrokes should stop. The shader
+    /// picker sets this so clicking into the preview lets the user type
+    /// freely into the fake DOS session the autoplay feed drives. Null
+    /// on regular terminal panes, whose keyboard path is unchanged.
+    /// </summary>
+    internal IPreviewInputSink? PreviewInputSink { get; set; }
 
     /// <summary>
     /// Take keyboard focus as soon as the surface loads. Real terminal
@@ -1705,6 +1717,29 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // after the user clicks back into the surface.
         if (SearchBar.ContainsFocus) return;
 
+        // A preview surface with an input sink is a fake session (the
+        // shader picker's DOS demo): the whole keyboard belongs to the
+        // sink and nothing belongs to the pty. This returns in every
+        // case, so pane concerns below (chord matching, key stamping,
+        // bell acknowledgment) never fire from inside the picker; a
+        // WindowsOnly chord dispatching a pane action there would be a
+        // bug, not a feature.
+        if (_isPreviewSurface && PreviewInputSink is { } sink)
+        {
+            var mods = CurrentChordModifiers();
+            if (PreviewKeyMap.TryMap(
+                    (int)e.Key,
+                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Control),
+                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Shift),
+                    mods.HasFlag(Windows.System.VirtualKeyModifiers.Menu),
+                    out var shellKey) &&
+                sink.KeyDown(shellKey))
+            {
+                e.Handled = true;
+            }
+            return;
+        }
+
         // Stamp the shared host so VerticalTabHost's hover-expand
         // suppression knows the user is mid-typing and holds back
         // the sidebar pop-open. Unconditional: we want every key
@@ -1746,6 +1781,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         // key-up too so libghostty never sees a release for a press it
         // never received.
         if (SearchBar.ContainsFocus) return;
+
+        // The press went to the fake session, not libghostty; forwarding
+        // this release would hand libghostty a press it never saw. Swallow
+        // every key-up while the sink owns the preview's keyboard.
+        if (_isPreviewSurface && PreviewInputSink is not null) return;
 
         // Same short-circuit so the matching key-up never reaches
         // libghostty either. Without this, libghostty would see a
@@ -1863,6 +1903,22 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         if (_suppressNextCharacter)
         {
             _suppressNextCharacter = false;
+            return;
+        }
+
+        // WM_CHAR goes to the fake session as typed text. Control units
+        // never type into the fake line: their keys (Enter, Backspace,
+        // Ctrl+C) already arrived through KeyDown, and delivering the
+        // character too would double-execute them. DEL joins them because
+        // it is not text. This also sidesteps depending on which of the
+        // two events a given control key raises: the character path is
+        // printable-only, full stop.
+        if (_isPreviewSurface && PreviewInputSink is { } sink)
+        {
+            if (e.Character is >= (char)0x20 and not (char)0x7f)
+            {
+                sink.Character(e.Character);
+            }
             return;
         }
 
