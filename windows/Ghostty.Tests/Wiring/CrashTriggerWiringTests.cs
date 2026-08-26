@@ -139,6 +139,81 @@ public class CrashTriggerWiringTests
     }
 
     [Fact]
+    public void TheCliFrontDoorIsNotBuildGated()
+    {
+        // Program.cs, not just CrashTrigger.cs. The line-level scans above
+        // cover the trigger and the palette source; the `+crash` interception
+        // that reaches the trigger was covered by nothing. Wrapping that one
+        // `if` in `#if DEBUG` compiles `+crash` out of Release, makes
+        // crash-matrix.ps1 unrunnable against the shipped build, and left
+        // every test in this file green.
+        //
+        // Text, not a parse, for the reason at the top of this file: which
+        // half of a conditional a parse can see depends on the symbols it
+        // defines, and the claim here is about the directives themselves.
+        var text = ShellText("Program.cs");
+        var needle = "args[0] == \"+crash\"";
+        Assert.Contains(needle, text, StringComparison.Ordinal);
+
+        foreach (var conditions in EnclosingConditions(text, needle))
+        {
+            Assert.Empty(conditions);
+        }
+    }
+
+    [Fact]
+    public void NoMSBuildConditionRemovesTheCrashSourcesFromABuild()
+    {
+        // The scans in this file read EMBEDDED resources, and the embedding
+        // is an unconditional wildcard over ..\Ghostty\**\*.cs. So a
+        // <Compile Remove> under a Configuration condition takes the triggers
+        // out of the shipped build without touching a single line those scans
+        // can see. Not hypothetical: Ghostty.csproj already does exactly that
+        // for Demo\**\*.cs, and this project's own comments describe the
+        // mismatch.
+        var csproj = ShellSource.AllUnder(ShellPrefix)
+            .Any(f => f.Tail == "Program.cs");
+        Assert.True(csproj, "the shell corpus is empty; this test proves nothing");
+
+        var text = System.IO.File.ReadAllText(ShellProjectPath);
+        foreach (var name in new[]
+                 {
+                     "Cli\\CrashTrigger.cs",
+                     "Commands\\CrashCommandSource.cs",
+                     "Diagnostics\\CrashKinds.cs",
+                 })
+        {
+            Assert.DoesNotContain(
+                $"Compile Remove=\"{name}\"",
+                text,
+                StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// The shell project file, located from the test assembly rather than
+    /// embedded, because the claim is about the build rules themselves.
+    /// </summary>
+    private static string ShellProjectPath
+    {
+        get
+        {
+            var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory);
+            while (dir is not null)
+            {
+                var candidate = System.IO.Path.Combine(
+                    dir.FullName, "windows", "Ghostty", "Ghostty.csproj");
+                if (System.IO.File.Exists(candidate)) return candidate;
+                dir = dir.Parent;
+            }
+
+            throw new System.IO.FileNotFoundException(
+                "could not locate windows/Ghostty/Ghostty.csproj from "
+                + AppContext.BaseDirectory);
+        }
+    }
+
+    [Fact]
     public void NothingGatesThePaletteSourceRegistration()
     {
         // Swept over the whole shell rather than over MainWindow, because a
