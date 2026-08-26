@@ -19,7 +19,7 @@ default: test build-dll
 # === Testing ===
 
 # Run all Zig tests
-test: test-lib-vt test-full test-pkg
+test: test-lib-vt test-full test-pkg test-reachability
 
 # Test libghostty-vt (fastest feedback loop)
 test-lib-vt:
@@ -42,6 +42,27 @@ test-full:
 # business, and duplicating a different list here would leave two to maintain.
 test-pkg:
     cd pkg/wuffs && zig build test --summary all
+
+# Zig collects `test` blocks from the files a test binary's own test and
+# comptime blocks reach, so a file can carry assertions that no test step has
+# ever executed. That reads as coverage and is worse than no tests: it is what
+# happened to src/build/GitVersion.zig and to every block in
+# src/build/wasm_patch_growable_table.zig.
+#
+# So this compiles every test binary the build runs and asks each one, over
+# the std.zig.Server protocol the stock test runner speaks on `--listen=-`,
+# for the qualified name of every test it carries. Names are module-relative
+# paths, so they map back onto files. A file with test blocks and no name in
+# any binary is a finding. What is knowingly out of reach is registered file
+# by file with its reason, and the check prints all of it on every run.
+#
+# It costs a full test-binary build, which is why it rides here with the rest
+# of the Zig ladder rather than with the cheap gates. The part that runs
+# without a build is wired into `gates-selftest`.
+#
+# Prove that no file's test blocks are dead.
+test-reachability:
+    python .agents/scripts/test_reachability.py
 
 # Cross-platform sanity check (on demand)
 # Uses the cross-platform-test Claude Code skill for native SSH-based testing.
@@ -1268,5 +1289,6 @@ gates-selftest: gitversion-selftest
     python .agents/scripts/pr_gate.py --self-test
     python .agents/scripts/workspace_guard.py --self-test
     python .agents/scripts/doctor.py --self-test
+    python .agents/scripts/test_reachability.py --self-test
     pwsh -NoProfile -File .agents/scripts/nightly_fuzz.ps1 -SelfTest
     pwsh -NoProfile -File .agents/scripts/nightly_control.ps1 -SelfTest
