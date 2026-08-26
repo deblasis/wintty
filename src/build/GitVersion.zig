@@ -18,11 +18,14 @@ branch: []const u8,
 /// allocates using the build allocator and doesn't free.
 pub fn detect(b: *std.Build) !Version {
     // Execute a bunch of git commands to determine the automatic version.
-    var code: u8 = 0;
+    // runAllowFail needs an out-param but only writes it when the child
+    // fails, and both lookups below return on every failure, so nothing
+    // ever reads this back.
+    var discard_code: u8 = 0;
     const branch: []const u8 = b: {
         const tmp: []u8 = b.runAllowFail(
             &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "rev-parse", "--abbrev-ref", "HEAD" },
-            &code,
+            &discard_code,
             .ignore,
         ) catch |err| switch (err) {
             error.FileNotFound => return error.GitNotFound,
@@ -43,7 +46,7 @@ pub fn detect(b: *std.Build) !Version {
     const short_hash = short_hash: {
         const output = b.runAllowFail(
             &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "-c", "log.showSignature=false", "log", "--pretty=format:%h", "-n", "1" },
-            &code,
+            &discard_code,
             .ignore,
         ) catch |err| switch (err) {
             error.FileNotFound => return error.GitNotFound,
@@ -61,9 +64,10 @@ pub fn detect(b: *std.Build) !Version {
     //
     // These two patterns filter by namespace; they do not validate. Whether
     // a v* tag is one Config.init accepts stays Config.init's call.
+    var tag_code: u8 = 0;
     const tag = b.runAllowFail(
         &[_][]const u8{ "git", "-C", b.build_root.path orelse ".", "describe", "--exact-match", "--tags", "--match", "v*", "--match", "tip" },
-        &code,
+        &tag_code,
         .ignore,
     ) catch |err| switch (err) {
         error.FileNotFound => return error.GitNotFound,
@@ -71,6 +75,11 @@ pub fn detect(b: *std.Build) !Version {
         else => return err,
     };
 
+    // Its own out-param: runAllowFail writes a code only when the child fails,
+    // so sharing one would leave the describe failure above still sitting in it
+    // -- 128 whenever HEAD carries no v* or tip tag -- and report a clean
+    // tree as dirty.
+    var diff_code: u8 = 0;
     _ = b.runAllowFail(&[_][]const u8{
         "git",
         "-C",
@@ -78,12 +87,12 @@ pub fn detect(b: *std.Build) !Version {
         "diff",
         "--quiet",
         "--exit-code",
-    }, &code, .ignore) catch |err| switch (err) {
+    }, &diff_code, .ignore) catch |err| switch (err) {
         error.FileNotFound => return error.GitNotFound,
         error.ExitCodeFailure => {}, // expected
         else => return err,
     };
-    const changes = code != 0;
+    const changes = diff_code != 0;
 
     return .{
         .short_hash = short_hash,
