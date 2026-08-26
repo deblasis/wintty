@@ -1204,6 +1204,15 @@ GHOSTTY_API int ghostty_init(uintptr_t, char**);
 // outlive the process's use of the args.
 GHOSTTY_API int ghostty_init_wide(const uint16_t*, uintptr_t);
 #endif
+// Block until the crash reporter's handler is installed, or until the
+// timeout elapses. Returns whether it is armed.
+//
+// sentry_init runs on a background thread, so returning from ghostty_init
+// does not mean a crash raised now would be captured. Anything that means to
+// provoke a crash and watch it be reported has to wait for this, and cannot
+// infer it from the database directory appearing: that is created during
+// init, before the handler exists, and it outlives the process.
+GHOSTTY_API bool ghostty_crash_wait_ready(uint32_t);
 GHOSTTY_API void ghostty_cli_try_action(void);
 GHOSTTY_API void ghostty_build_info(ghostty_build_info_s *out);
 GHOSTTY_API ghostty_info_s ghostty_info(void);

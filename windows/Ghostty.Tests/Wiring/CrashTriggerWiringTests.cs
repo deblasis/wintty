@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Ghostty.Core.Diagnostics;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -232,31 +233,142 @@ public class CrashTriggerWiringTests
             .Load("Commands.CommandPaletteViewModel.cs")
             .Method("ApplyFilter");
 
-        var descriptionMatches = filter.DescendantNodes()
+        // Every field a query is matched against EXCEPT Title. Title is the
+        // one a Debug row is allowed to match on, which is the whole rule.
+        //
+        // Classified by the property the call hangs off, not by the callee
+        // text: `c.Subtitle?.Contains(...)` is a conditional access, so the
+        // invocation's own Expression is a bare `.Contains` and matching on
+        // "Subtitle?.Contains" silently found nothing.
+        // By the invoked member's name, not by the node's text. The enclosing
+        // `Where(...)` is itself an invocation and stringifies to the whole
+        // lambda, so a text match picked it up and then reported it as an
+        // unguarded Contains.
+        var matches = filter.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(i => i.Expression.ToString().EndsWith(
-                "Description.Contains", StringComparison.Ordinal))
+            .Where(i => CalleeName(i.Expression) == "Contains")
+            .Select(i => (Node: (SyntaxNode)i, Owner: MatchOwner(i)))
+            .ToList();
+
+        var secondaryMatches = matches
+            .Where(m => !m.Owner.StartsWith("c.Title", StringComparison.Ordinal))
             .ToList();
         Assert.True(
-            descriptionMatches.Count > 0,
-            "ApplyFilter no longer matches on Description at all. If that is "
-                + "deliberate, delete this test; it exists to prove the match "
-                + "excludes Debug rows, not to require the match.");
+            secondaryMatches.Count >= 3,
+            "ApplyFilter no longer matches on Description, Subtitle and "
+                + "ActionKey. If that is deliberate, delete this test; it "
+                + $"exists to prove those matches exclude Debug rows. Found "
+                + $"{secondaryMatches.Count}.");
 
-        foreach (var match in descriptionMatches)
+        // The guard, located exactly: the '&&' whose LEFT side is the Debug
+        // check. Anything the rule protects has to sit in its RIGHT side.
+        //
+        // The earlier version walked every BinaryExpressionSyntax ancestor and
+        // passed if ANY of them stringified to something containing the Debug
+        // check. The whole lambda body is one '||' chain, so the outermost
+        // expression always contains it, and the test passed no matter where
+        // the match sat. Hoisting the Description match up a level, which is
+        // precisely the regression, left it green.
+        var debugGuards = filter.DescendantNodes()
+            .OfType<BinaryExpressionSyntax>()
+            .Where(b => b.OperatorToken.Text == "&&"
+                && b.Left.ToString().Replace(" ", "")
+                    == "c.Category!=CommandCategory.Debug")
+            .ToList();
+        Assert.True(
+            debugGuards.Count == 1,
+            $"expected exactly one 'c.Category != CommandCategory.Debug &&' "
+                + $"guard in ApplyFilter, found {debugGuards.Count}. The tests "
+                + "below locate the protected matches by it.");
+        var guardedRegion = debugGuards[0].Right;
+
+        foreach (var match in secondaryMatches)
         {
-            var guarded = match.Ancestors()
-                .OfType<BinaryExpressionSyntax>()
-                .Any(b => b.ToString().Contains(
-                    "Category != CommandCategory.Debug", StringComparison.Ordinal));
             Assert.True(
-                guarded,
-                "a Description match in ApplyFilter is not behind "
-                    + "'Category != CommandCategory.Debug'. Debug rows describe "
-                    + "what they destroy in ordinary words, so matching their "
-                    + "descriptions puts 'crash the renderer' in front of "
-                    + "someone who typed 'select'.");
+                guardedRegion.Contains(match.Node),
+                $"'{match.Owner}' in ApplyFilter is not inside the right side "
+                    + "of 'c.Category != CommandCategory.Debug &&'. Debug rows "
+                    + "describe what they destroy in ordinary words, so "
+                    + "matching their descriptions puts 'crash the renderer' "
+                    + "in front of someone who typed 'select'.");
         }
+    }
+
+    /// <summary>
+    /// The `c.&lt;Property&gt;...` expression a Contains call hangs off, found by
+    /// walking up rather than by reading the callee, so a conditional access
+    /// is classified the same way a plain member access is.
+    /// </summary>
+    /// <summary>
+    /// The name of the member being invoked, for a plain member access
+    /// (<c>c.Title.Contains</c>) or a conditional one (<c>?.Contains</c>).
+    /// Null for anything else.
+    /// </summary>
+    private static string? CalleeName(ExpressionSyntax callee) => callee switch
+    {
+        MemberAccessExpressionSyntax m => m.Name.Identifier.Text,
+        MemberBindingExpressionSyntax m => m.Name.Identifier.Text,
+        _ => null,
+    };
+
+    private static string MatchOwner(SyntaxNode node)
+    {
+        for (var cur = node; cur is not null; cur = cur.Parent)
+        {
+            var text = cur.ToString();
+            if (text.StartsWith("c.", StringComparison.Ordinal)) return text;
+        }
+
+        return node.ToString();
+    }
+
+    [Fact]
+    public void TheUnfilteredList_ExcludesDebugRows()
+    {
+        var filter = ShellSource
+            .Load("Commands.CommandPaletteViewModel.cs")
+            .Method("ApplyFilter");
+
+        // Sorting Debug last governs position, and title-only matching needs a
+        // query, so neither reaches the empty-query branch. Without an
+        // exclusion here, opening the palette and pressing End then Enter
+        // takes the window down on a shipped build with no confirmation.
+        var emptyBranch = filter.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .FirstOrDefault(i => i.Condition.ToString()
+                .Contains("IsNullOrEmpty", StringComparison.Ordinal));
+        Assert.True(
+            emptyBranch is not null,
+            "ApplyFilter no longer has an empty-query branch; this test "
+                + "locates the unfiltered list by it.");
+
+        Assert.Contains(
+            "c.Category != CommandCategory.Debug",
+            emptyBranch!.Statement.ToString().Replace("  ", " "));
+    }
+
+    [Fact]
+    public void DebugIsLastInTheCategoryEnum()
+    {
+        // The grouped ordering branch sorts by Category directly, so its
+        // entire correctness rests on Debug being the last member. Nothing
+        // else asserts it, and moving Debug above Demo silently puts crash
+        // rows at the top of every grouped list.
+        var text = ShellText("Commands.CommandItem.cs");
+        var body = text[text.IndexOf("enum CommandCategory", StringComparison.Ordinal)..];
+        body = body[..body.IndexOf('}')];
+
+        var members = body
+            .Split(',', '\n')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0
+                && !s.StartsWith("//", StringComparison.Ordinal)
+                && !s.StartsWith("enum", StringComparison.Ordinal)
+                && !s.StartsWith("{", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.NotEmpty(members);
+        Assert.Equal("Debug", members[^1]);
     }
 
     [Fact]
@@ -276,19 +388,38 @@ public class CrashTriggerWiringTests
             .ToList();
         Assert.True(chains.Count >= 2, $"expected both ordering branches, found {chains.Count}");
 
+        // Exact shapes, not substrings. The earlier version asked whether the
+        // key text mentioned c.Category and CommandCategory.Debug, which is
+        // as true of `? 0 : 1` as of `? 1 : 0`, and it accepted
+        // OrderByDescending(c => c.Category) because that trims to the same
+        // string as the ascending form. Both inversions put Debug FIRST and
+        // both left the test green.
+        //
+        // Brittle on purpose. A reformulated guard on destructive rows should
+        // stop and make someone look, not pattern-match its way through.
         foreach (var chain in chains)
         {
-            var key = chain.ArgumentList.Arguments.ToString();
-            var demotesDebug =
-                key.Contains("c.Category", StringComparison.Ordinal)
-                && (key.Contains("CommandCategory.Debug", StringComparison.Ordinal)
-                    || key.Trim() == "c => c.Category");
+            var ascending = chain.Expression.ToString()
+                .EndsWith(".OrderBy", StringComparison.Ordinal);
+            var key = chain.ArgumentList.Arguments.ToString().Replace(" ", "");
+
+            var demotesDebug = ascending && (
+                // Ungrouped: name Debug explicitly, sort it after the rest.
+                key == "c=>c.Category==CommandCategory.Debug?1:0"
+                // Grouped: sort by the enum, which puts Debug last only
+                // because it is the last member. DebugIsLastInTheCategoryEnum
+                // is what holds up this half.
+                || key == "c=>c.Category");
+
             Assert.True(
                 demotesDebug,
-                $"an ordering branch leads with '{key}', which does not put "
+                $"an ordering branch orders {(ascending ? "ascending" : "descending")} "
+                    + $"by '{key}', which is not one of the two shapes known to put "
                     + "Debug last. Frecency cannot be the first key for these: "
-                    + "executing one records the use before the process dies, "
-                    + "so one accident promotes that row for every later launch.");
+                    + "executing one records the use before the process dies, so one "
+                    + "accident promotes that row for every later launch. If this is "
+                    + "a deliberate reformulation, verify it demotes Debug and add "
+                    + "its shape here.");
         }
     }
 

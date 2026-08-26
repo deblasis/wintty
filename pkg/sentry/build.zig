@@ -44,7 +44,11 @@ pub fn build(b: *std.Build) !void {
     // Nothing in a `zig build` or a `dotnet build` catches this. Both link
     // with Zig or run on CoreCLR; only `dotnet publish` reaches link.exe, so
     // the whole four-tier gate stayed green while no release could link.
-    if (target.result.abi == .msvc) {
+    // Gated on the OS, not the ABI. src/build/SharedDeps.zig states the rule
+    // for this repo and says why: it affects both the MSVC and GNU ABIs.
+    // Gating on .msvc alone re-opens the same link failure for windows-gnu,
+    // which is the last thing to do in the commit that fixes it.
+    if (target.result.os.tag == .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-fno-sanitize=undefined",
             "-fno-sanitize-trap=undefined",

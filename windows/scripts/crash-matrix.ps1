@@ -78,11 +78,18 @@ if (-not (Test-Path $ExePath)) {
 # trigger that never ran, which is the one result this harness must not
 # produce. See CrashKinds in windows/Ghostty.Core/Diagnostics.
 $matrix = @(
+    # ExitCode is asserted, not merely printed. Without it the one row whose
+    # entire claim is "this does not crash" could not tell a clean exit from a
+    # fail-fast: both produce no envelope and no crash log, so handled-storm
+    # passed either way. Since the drain launch IS handled-storm, a mutation
+    # that made it crash would have taken down every drain in the run while
+    # the table reported all rows matching.
+    #
     # The row the in-process backend has to win, and it does: exit 0xE0000001,
     # a crash event and a session marked "crashed", both on the next launch.
     # No managed crash log, and none is wanted: the filter takes the process
     # down, and the CLI has no handler registered anyway.
-    @{ Kind = 'native-seh';        Envelope = $true;  CrashLog = $false }
+    @{ Kind = 'native-seh';        Envelope = $true;  CrashLog = $false; ExitCode = -536870911 }
     # An unhandled managed exception, which NativeAOT turns into a fail-fast
     # (exit 0xC0000409, STATUS_STACK_BUFFER_OVERRUN) rather than an exception,
     # so SetUnhandledExceptionFilter never runs and nothing is captured. Same
@@ -99,10 +106,13 @@ $matrix = @(
     # by Main's catch-all and turned into ReportFatal: the process never
     # crashed and the row passed for the wrong reason. The trigger now throws
     # from its own thread.
-    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $false }
-    @{ Kind = 'env-failfast';      Envelope = $false; CrashLog = $false }
-    @{ Kind = 'stack-overflow';    Envelope = $false; CrashLog = $false }
-    @{ Kind = 'handled-storm';     Envelope = $false; CrashLog = $false }
+    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $false; ExitCode = -1073740791 }
+    @{ Kind = 'env-failfast';      Envelope = $false; CrashLog = $false; ExitCode = -1073740791 }
+    @{ Kind = 'stack-overflow';    Envelope = $false; CrashLog = $false; ExitCode = -1073741571 }
+    # Zero, and it is load-bearing: this row exists to prove a thousand
+    # handled exceptions produce no report, which is only meaningful if the
+    # process survived to say so.
+    @{ Kind = 'handled-storm';     Envelope = $false; CrashLog = $false; ExitCode = 0 }
 )
 
 # Parse the envelope framing rather than grepping the bytes. The framing is
@@ -158,8 +168,25 @@ function Read-Envelope([string]$path) {
         $pos += $len
         if ($pos -lt $bytes.Length -and $bytes[$pos] -eq 10) { $pos++ }
 
+        # A payload that no JSON parser will read is a corrupted report, and
+        # this function exists to say so. Swallowing the failure and then
+        # classifying the item from its HEADER meant an event whose payload
+        # the scrub had mangled still counted as an event and the row passed.
+        # That is the one corruption class the writer can still produce, now
+        # that it always recomputes the length header.
+        #
+        # Attachments are exempt: they are not JSON and never claimed to be.
         $body = $null
-        try { $body = $payload | ConvertFrom-Json } catch { }
+        $jsonError = $null
+        try { $body = $payload | ConvertFrom-Json }
+        catch { $jsonError = $_.Exception.Message }
+        if ($jsonError -and $parsedHeader.type -ne 'attachment') {
+            return [pscustomobject]@{
+                Malformed = ("item '{0}' payload is not JSON: {1}" -f `
+                    $parsedHeader.type, $jsonError)
+                Items = $items
+            }
+        }
 
         # An event without an exception is normal (a message event has none),
         # and so is an attachment that is not JSON at all, so reach for the
@@ -252,11 +279,72 @@ function Get-Report([string[]]$names) {
         Events   = ($events   -join ',')
         Sessions = ($sessions -join ',')
         Malformed = ($bad -join '; ')
+        Leaks    = (Get-PrivacyLeaks $names)
     }
+}
+
+# Whether a report that actually got written carries anything it should not.
+#
+# Nothing in this branch checked a real envelope for a username. The scrub's
+# unit tests feed it hand-authored JSON containing exactly the keys someone
+# already thought of, which is why the shipped leak (`code_file` scrubbed,
+# `debug_file` next door still spelling out the home directory) passed a
+# "contains no username" check. Only bytes off disk can see that.
+#
+# Deliberately not keyed on the scrub's own list: this asks whether ANY
+# absolute path or the current username survived, so a field nobody has
+# thought of yet fails here rather than shipping.
+function Get-PrivacyLeaks([string[]]$names) {
+    $found = @()
+    foreach ($name in $names) {
+        $text = [System.IO.File]::ReadAllText((Join-Path $CrashDir $name))
+
+        if ($env:USERNAME -and $text.Contains($env:USERNAME)) {
+            $found += "$name carries the username"
+        }
+        # Both spellings: JSON escapes a backslash, so a Windows path arrives
+        # as "C:\\Users\\...", and a raw one would arrive as "C:\Users\...".
+        foreach ($pattern in @('[A-Za-z]:\\\\', '[A-Za-z]:\\[^\\]')) {
+            if ($text -match $pattern) {
+                $sample = ([regex]::Match($text, "$pattern[^`"]{0,40}")).Value
+                $found += "$name carries an absolute path ($sample)"
+                break
+            }
+        }
+    }
+
+    $found -join '; '
 }
 
 $results = @()
 $notes   = @()
+
+# The table above is a third copy of the catalogue, and the only one no test
+# can scan: CrashKinds guards the CLI and the palette against drifting apart,
+# but this is a .ps1. Ask the binary what it knows rather than trusting the
+# table. An unknown kind exits 2 after printing both lists.
+$probe = Invoke-Wintty '__list__'
+$cliKinds = @()
+if ($probe.Stderr -match 'crash-trigger: cli-kinds:\s*(.+)') {
+    $cliKinds = @($Matches[1] -split ',' | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ })
+}
+if ($cliKinds.Count -eq 0) {
+    $notes += "could not read the kind catalogue from the binary, so this " +
+        "run cannot tell whether the table below still covers it"
+} else {
+    $tableKinds = @($matrix | ForEach-Object { $_.Kind })
+    $missing = @($cliKinds | Where-Object { $_ -notin $tableKinds })
+    $extra   = @($tableKinds | Where-Object { $_ -notin $cliKinds })
+    if ($missing.Count -gt 0) {
+        $notes += ("the catalogue has CLI kind(s) this table never runs: {0}" -f
+            ($missing -join ', '))
+    }
+    if ($extra.Count -gt 0) {
+        $notes += ("this table names kind(s) the catalogue does not: {0}" -f
+            ($extra -join ', '))
+    }
+}
 
 foreach ($row in $matrix) {
     # Drain first. Anything that shows up here belongs to the row before,
@@ -291,8 +379,13 @@ foreach ($row in $matrix) {
         $notes += ("'{0}': {1}") -f $row.Kind, $report.Malformed
     }
 
+    if ($report.Leaks) {
+        $notes += ("'{0}': {1}") -f $row.Kind, $report.Leaks
+    }
+
     $results += [pscustomobject]@{
         Kind             = $row.Kind
+        ExitExpected     = $row.ExitCode
         ExitCode         = $run.ExitCode
         EnvelopeExpected = $row.Envelope
         EnvelopeGot      = $report.HasEvent
@@ -302,7 +395,9 @@ foreach ($row in $matrix) {
         CrashLogGot      = $gotLog
         Pass             = (($report.HasEvent -eq $row.Envelope) -and
                             ($gotLog -eq $row.CrashLog) -and
-                            (-not $report.Malformed))
+                            ($run.ExitCode -eq $row.ExitCode) -and
+                            (-not $report.Malformed) -and
+                            (-not $report.Leaks))
     }
 }
 
@@ -316,8 +411,8 @@ if ($tailLate.Count -gt 0) {
         $tailLate.Count, ($tailLate -join ',')
 }
 
-$results | Format-Table -AutoSize Kind, ExitCode, EnvelopeExpected, EnvelopeGot,
-    Captured, Sessions, CrashLogExpected, CrashLogGot, Pass
+$results | Format-Table -AutoSize Kind, ExitExpected, ExitCode, EnvelopeExpected,
+    EnvelopeGot, Captured, Sessions, CrashLogExpected, CrashLogGot, Pass
 
 foreach ($note in $notes) { Write-Warning $note }
 
