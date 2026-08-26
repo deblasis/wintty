@@ -4,8 +4,10 @@
 # working clones in a temp dir and drives the real recipes from this repo's
 # justfile through: bootstrap, a plain sync, a fold-in sync, a publish that
 # loses a race to a mid-sync PR merge, a conflicted replay, a second clone
-# joining mid-series with stale tags, and a stale leftover replay that must
-# be refused rather than published. The fixture upstream carries a merge
+# joining mid-series with stale tags, a stale leftover replay that must
+# be refused rather than published, and a publish carrying work no PR
+# reviewed that must be named, refused, and only land with an acknowledgement
+# recorded in the merge message. The fixture upstream carries a merge
 # commit on purpose: the snapshot detection must not mistake upstream's own
 # PR merges for the fork's snapshots.
 #
@@ -148,7 +150,7 @@ git clone -q "$ROOT/origin.git" "$ROOT/rc"
   $G add -A && $G commit -qm "p2: raced PR"
   git push -q origin windows
 )
-expect_fail "raced publish rejected" "Push rejected" J sync-publish
+expect_fail "raced publish refused before the push, naming the PR" "p2: raced PR" J sync-publish
 if git -C work rev-parse --verify -q refs/tags/series/v3 >/dev/null; then nope "series/v3 rolled back after rejection"; else ok "series/v3 rolled back after rejection"; fi
 J sync
 check "p2 folded on resume" git -C work cat-file -e 'series-wip:late.txt'
@@ -207,6 +209,30 @@ if out=$(J sync-publish 2>&1) && printf '%s' "$out" | grep -q "nothing to publis
   ok "publish no-ops when windows already carries the tree"
 else
   nope "publish no-ops when windows already carries the tree"
+fi
+
+say "test 8: unreviewed work on the wip is named, refused, and needs an ack"
+( cd up && echo lib8 >> lib.txt && $G add -A && $G commit -qm "u9: unreviewed era" )
+J sync
+( cd work
+  git checkout -q series-wip
+  echo direct > direct.txt
+  $G add -A && $G commit -qm "w1: direct work, never through a PR"
+)
+expect_fail "unreviewed publish refused and the commit named" "w1: direct work" J sync-publish
+if git -C work rev-parse --verify -q refs/tags/series/v7 >/dev/null; then
+  nope "series/v7 not minted by a refused publish"
+else
+  ok "series/v7 not minted by a refused publish"
+fi
+J sync-publish fixture-direct-work-may-ride-the-snapshot
+check "series/v7 pushed on the acknowledged publish" git -C origin.git rev-parse --verify refs/tags/series/v7
+check "acknowledged work reached windows" git -C work cat-file -e 'refs/remotes/origin/windows:direct.txt'
+M8=$(git -C origin.git rev-parse refs/heads/windows)
+if git -C work log -1 --format=%B "$M8" | grep -q "w1: direct work"; then
+  ok "the ack is recorded in the snapshot merge message"
+else
+  nope "the ack is recorded in the snapshot merge message"
 fi
 
 say "guards"
