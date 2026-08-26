@@ -9,7 +9,9 @@
   NO envelope are load-bearing: they pin known gaps so a future change cannot
   silently widen them, and they are why this harness asserts absence.
 
-  Requires a DEBUG build: +crash is compiled out of Release.
+  Runs against any configuration. +crash used to be compiled out of Release,
+  which left the build users install as the one nobody could measure; it now
+  ships everywhere, and pointing this at a Release build is the point.
 #>
 # Two directories are easy to confuse. Crash envelopes are written by
 # ghostty's own transport (src/crash/sentry.zig sendInternal) to the STATE
