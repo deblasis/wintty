@@ -11,18 +11,32 @@ namespace Ghostty.Tests.Settings;
 /// </summary>
 public class PreviewKeyMapTests
 {
-    [Theory]
-    [InlineData(0x0D, DosShellKey.Enter)]
-    [InlineData(0x08, DosShellKey.Backspace)]
-    [InlineData(0x26, DosShellKey.Up)]
-    [InlineData(0x28, DosShellKey.Down)]
-    [InlineData(0x1B, DosShellKey.Escape)]
-    [InlineData(0x2D, DosShellKey.Insert)]
-    public void BareEditingKeysMap(int virtualKey, DosShellKey expected)
+    private static void MapsTo(int virtualKey, DosShellKey expected)
     {
         Assert.True(PreviewKeyMap.TryMap(virtualKey, ctrl: false, shift: false, alt: false, out var key));
         Assert.Equal(expected, key);
     }
+
+    private static void DoesNotMap(int virtualKey, bool ctrl = false, bool shift = false, bool alt = false)
+        => Assert.False(PreviewKeyMap.TryMap(virtualKey, ctrl, shift, alt, out _));
+
+    [Fact]
+    public void EnterMaps() => MapsTo(0x0D, DosShellKey.Enter);
+
+    [Fact]
+    public void BackspaceMaps() => MapsTo(0x08, DosShellKey.Backspace);
+
+    [Fact]
+    public void ArrowUpMaps() => MapsTo(0x26, DosShellKey.Up);
+
+    [Fact]
+    public void ArrowDownMaps() => MapsTo(0x28, DosShellKey.Down);
+
+    [Fact]
+    public void EscapeMaps() => MapsTo(0x1B, DosShellKey.Escape);
+
+    [Fact]
+    public void InsertMaps() => MapsTo(0x2D, DosShellKey.Insert);
 
     [Fact]
     public void CtrlCMapsToTheDosInterrupt()
@@ -31,21 +45,23 @@ public class PreviewKeyMapTests
         Assert.Equal(DosShellKey.CtrlC, key);
     }
 
-    [Theory]
-    [InlineData(0x43)]                     // plain C types a character
-    [InlineData(0x0D)]                     // Ctrl+Enter is not a shell key
-    [InlineData(0x26)]                     // Shift+Up belongs to the host
-    [InlineData(0x1B)]                     // Alt+Escape belongs to the host
-    [InlineData(0x51)]                     // Q is text, not a key
-    public void ModifiedOrTextualKeysDoNotMap(int virtualKey)
-    {
-        Assert.False(PreviewKeyMap.TryMap(virtualKey, ctrl: true, shift: true, alt: true, out _));
-    }
+    [Fact]
+    public void PlainCDoesNotMapBecauseItIsText() => DoesNotMap(0x43);
 
     [Fact]
     public void ShiftedCDoesNotMap()
-    {
         // Shift+C is the capital letter, delivered as a character.
-        Assert.False(PreviewKeyMap.TryMap(0x43, ctrl: false, shift: true, alt: false, out _));
-    }
+        => DoesNotMap(0x43, shift: true);
+
+    [Fact]
+    public void CtrlEnterDoesNotMap() => DoesNotMap(0x0D, ctrl: true);
+
+    [Fact]
+    public void ShiftUpDoesNotMap() => DoesNotMap(0x26, shift: true);
+
+    [Fact]
+    public void AltEscapeDoesNotMap() => DoesNotMap(0x1B, alt: true);
+
+    [Fact]
+    public void PlainLetterDoesNotMap() => DoesNotMap(0x51);
 }
