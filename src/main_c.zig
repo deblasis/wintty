@@ -16,7 +16,26 @@ const main = @import("main_ghostty.zig");
 const global = @import("global.zig");
 const apprt = @import("apprt.zig");
 const internal_os = @import("os/main.zig");
+const crash = @import("crash/main.zig");
 const windows = @import("os/windows.zig");
+
+/// Panic handler for the library.
+///
+/// A Zig panic on Windows raises no exception the in-process crash backend can
+/// observe: `std.debug.defaultPanic` ends in `std.process.abort`, which on
+/// Windows is `ntdll.RtlExitUserProcess`, a clean exit. sentry hooks
+/// `SetUnhandledExceptionFilter`, which a clean exit never invokes, so a panic
+/// would otherwise leave no exception, no WER record and no crash report.
+/// Report it explicitly, then panic exactly as the default handler would.
+///
+/// `capturePanic` is a no-op off Windows, where the backend's SIGABRT handler
+/// already sees the panic and reporting again would duplicate it.
+pub const panic = std.debug.FullPanic(panicImpl);
+
+fn panicImpl(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    crash.sentry.capturePanic(msg);
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
 
 // Some comptime assertions that our C API depends on.
 comptime {
