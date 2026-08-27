@@ -152,4 +152,49 @@ public sealed class BackdropGroundTests
                 < ThemeResolution.ContrastRatio(light, DarkPalette),
             "at 0.9 the ground should sit much closer to the palette");
     }
+
+    /// <summary>
+    /// The colour the estimate blends is the tint the compositor lays down,
+    /// which is the user's background-tint-color when one is set, not the
+    /// palette. Mirrors how the shell feeds it: the resolver resolves, the
+    /// estimate consumes the resolved RGB and opacity together. A diverging
+    /// tint on a light desktop moves the ground a long way from what the
+    /// palette alone would have predicted, and the ink still has to clear
+    /// AA against it.
+    /// </summary>
+    [Fact]
+    public void A_diverging_tint_color_is_the_ground_not_the_palette()
+    {
+        const uint tintOverride = 0xF2E8DCu;
+        var tuning = AcrylicTintResolver.Resolve(
+            tintOverrideArgb: tintOverride,
+            themeBackgroundRgb: DarkPalette,
+            tintOpacityOverride: null,
+            luminosityOpacityOverride: null,
+            blurFollowsOpacity: false,
+            backgroundOpacity: 1.0);
+
+        var ground = BackdropGround.Estimate(
+            tuning.TintArgb & 0x00FFFFFFu,
+            osDark: false,
+            BackdropStyles.Frosted,
+            tuning.TintOpacity);
+
+        Assert.Equal(
+            BackdropGround.Estimate(tintOverride, osDark: false, BackdropStyles.Frosted),
+            ground);
+        Assert.NotEqual(
+            BackdropGround.Estimate(DarkPalette, osDark: false, BackdropStyles.Frosted),
+            ground);
+
+        foreach (var elementDark in new[] { true, false })
+        {
+            var ink = ThemeResolution.EnsureReadableForeground(
+                ground, elementDark ? 0xFFFFFFu : 0x000000u);
+            Assert.True(
+                ThemeResolution.ContrastRatio(ground, ink) >= 4.5,
+                $"elementDark {elementDark}: ground {ground:X6} against ink {ink:X6} is "
+                + $"{ThemeResolution.ContrastRatio(ground, ink):F2}:1");
+        }
+    }
 }

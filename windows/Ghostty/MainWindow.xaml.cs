@@ -137,7 +137,6 @@ public sealed partial class MainWindow : Window
     private readonly TabBellAnnouncer _bellAnnouncer;
     private readonly WindowThemeManager _themeManager;
     private readonly ShellThemeService _shellTheme;
-    private readonly ThemePreviewService _themePreview;
 
     // Set at the top of OnClosedAsync. Theme callbacks route through the
     // dispatcher, so a switch-then-close can leave an ApplyTheme queued to
@@ -280,6 +279,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal bool IsQuickTerminal { get; }
 
+    /// <summary>
+    /// True once this window's close has started. Process-wide services that
+    /// route work to a window read this so they do not pick one whose panes
+    /// and surfaces are already being torn down.
+    /// </summary>
+    internal bool IsClosing => _isClosed;
+
     internal MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,
@@ -321,8 +327,7 @@ public sealed partial class MainWindow : Window
     /// shared-app ctor. <paramref name="loggerFactory"/> is the
     /// process-wide factory built in App.OnLaunched; MainWindow holds
     /// it to construct loggers for the per-window components it owns
-    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop,
-    /// ThemePreviewService).
+    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop).
     /// </summary>
     private MainWindow(
         ConfigService configService,
@@ -431,7 +436,10 @@ public sealed partial class MainWindow : Window
                 RegisteredRoot = fe.XamlRoot;
                 if (RegisteredRoot != null)
                 {
-                    App.WindowsByRoot[RegisteredRoot] = this;
+                    // App does the insert, because registering is also the
+                    // moment process-wide services may start acting on a
+                    // window and only App knows which those are.
+                    App.NoteRegularWindowRegistered(this);
                 }
             }
         }
@@ -509,11 +517,10 @@ public sealed partial class MainWindow : Window
 
         _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
-        _themePreview = new ThemePreviewService(
-            configService,
-            DispatcherQueue,
-            loggerFactory.CreateLogger<ThemePreviewService>());
-        _themePreview.ListThemesRequested += OnListThemesRequested;
+
+        // The +list-themes pipe server is process-wide, not per window: its
+        // pipe name is per process. App owns the one service and routes the
+        // request here; see App.OnLaunched.
 
         _factory = new PaneHostFactory(_host, configService);
         // Restore a saved session into this window when one was passed and
@@ -1530,25 +1537,6 @@ public sealed partial class MainWindow : Window
         // toggle during teardown puts AppSetColorScheme through the app
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
-        // The preview service owns a named-pipe server on a background task,
-        // so it raises this from outside the window's own lifetime. Detaching
-        // keeps a LIST_THEMES arriving afterwards from starting a picker on a
-        // window whose surfaces are gone; disposing is what ends the task,
-        // which otherwise ran for the life of the process, holding the
-        // per-process pipe name with nobody listening on it. The cancel is
-        // observed by the awaits inside the accept loop, so the synchronous
-        // wait here is bounded.
-        //
-        // The service is per window and the pipe name is per process, so in a
-        // multi-window session only the first one to start ever owns the pipe
-        // (FirstPipeInstance stands the others down at construction). Closing
-        // that window therefore leaves the session with no server rather than
-        // with one whose only subscriber has detached. Both states are broken
-        // for `+list-themes`; this one at least does not leak. The real fix is
-        // to own the service where the bootstrap host lives, the same shape as
-        // the app-targeted config actions, which App owns for that reason.
-        _themePreview.ListThemesRequested -= OnListThemesRequested;
-        _themePreview.Dispose();
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
@@ -2263,15 +2251,24 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// The surface the bare-backdrop chrome sits on, packed 0x00RRGGBB.
-    /// Fed the resolved tint opacity rather than the default constant: the
-    /// user can set background-tint-opacity, and at 0.9 the palette all but
-    /// replaces the base.
+    /// Fed the resolver's tuning rather than the palette or the default
+    /// constants: the compositor blends the user's background-tint-color
+    /// at the user's background-tint-opacity, and scoring the ink against
+    /// any other pair means scoring it against a ground that is not on
+    /// screen.
     /// </summary>
-    private uint EstimatedBackdropGround => Core.Shell.BackdropGround.Estimate(
-        _configService.BackgroundColor,
-        Services.OsTheme.IsDark(),
-        _currentBackdropStyle,
-        ResolveAcrylicTuning().tintOpacity);
+    private uint EstimatedBackdropGround
+    {
+        get
+        {
+            var (tint, _, tintOpacity) = ResolveAcrylicTuning();
+            return Core.Shell.BackdropGround.Estimate(
+                ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
+                Services.OsTheme.IsDark(),
+                _currentBackdropStyle,
+                tintOpacity);
+        }
+    }
 
     /// <summary>
     /// Re-derive everything calibrated against the backdrop: the title row's
@@ -2761,10 +2758,6 @@ public sealed partial class MainWindow : Window
         ApplyPerTabChrome();
     }
 
-    /// <summary>
-    /// Pane borders follow the active tab's preset color when set; tab strip
-    /// backgrounds refresh in both orientations.
-    /// </summary>
     /// <summary>
     /// The accent the tab-and-pane shape is stroked in, held to a visible
     /// minimum against the terminal it is drawn on.
@@ -4025,6 +4018,18 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+        // Deliberate crash triggers, the same kinds and the same
+        // implementation as `wintty +crash <kind>`. Registered in every
+        // build: the shipped installer is the configuration whose capture
+        // most needs proving, and a Debug-only trigger cannot prove it.
+        //
+        // Deferred to the next tick like every other source: the fault then
+        // lands after the palette popup has torn down, so the captured stack
+        // is the trigger's own rather than WinUI's teardown on top of it.
+        sources.Add(new CrashCommandSource(
+            kind => DispatcherQueue.TryEnqueue(
+                () => Cli.CrashTrigger.Run(kind, TryExecuteBindingAction))));
+
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
         // the var unset leaves the palette unchanged. Defer to the next tick so
@@ -4133,10 +4138,33 @@ public sealed partial class MainWindow : Window
     {
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
+        _ = TryExecuteBindingAction(actionKey);
+    }
+
+    /// <summary>
+    /// Dispatch a binding action against the active surface, reporting
+    /// whether it was performed.
+    ///
+    /// The crash triggers are what need the answer: "crash:render" that
+    /// found no surface, or that libghostty did not recognise, is a no-op,
+    /// and reporting a crash for it would have the operator read the absent
+    /// report as a miss by the reporter.
+    ///
+    /// The split is shaped by the tier machinery rather than by taste. Three
+    /// patch stacks carry hunks whose context is
+    /// <see cref="ExecuteBindingAction"/>'s opening three lines, and plain
+    /// `git apply` is what materialises them, so those three lines cannot
+    /// move. Everything below them can, which is why the body lives here and
+    /// the original method keeps its signature and its first three lines.
+    /// </summary>
+    private bool TryExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return false;
 
         var terminal = leaf.Terminal();
         var surfaceHandle = terminal.SurfaceHandle;
-        if (surfaceHandle == IntPtr.Zero) return;
+        if (surfaceHandle == IntPtr.Zero) return false;
 
         var surface = new GhosttySurface(surfaceHandle);
         var actionBytes = Encoding.UTF8.GetBytes(actionKey);
@@ -4144,7 +4172,8 @@ public sealed partial class MainWindow : Window
         {
             fixed (byte* p = actionBytes)
             {
-                NativeMethods.SurfaceBindingAction(surface, p, (UIntPtr)actionBytes.Length);
+                return NativeMethods.SurfaceBindingAction(
+                    surface, p, (UIntPtr)actionBytes.Length);
             }
         }
     }
@@ -4342,19 +4371,30 @@ public sealed partial class MainWindow : Window
     private IntPtr _pickerHandle;
 
     /// <summary>
-    /// The control and tab the picker's surface belongs to.
+    /// The control whose surface the picker was opened on.
     /// <see cref="_pickerSurface"/> is a copy of a raw pointer and nothing
-    /// zeroes it when that surface is freed, so these are what make the
-    /// liveness check in <see cref="ClosePicker"/> possible.
+    /// zeroes it when that surface is freed, so this is what makes the
+    /// liveness check in <see cref="ClosePicker"/> possible: the control
+    /// clears its own handle on disposal.
     /// </summary>
     private Ghostty.Controls.TerminalControl? _pickerTerminal;
-    private Ghostty.Core.Tabs.TabModel? _pickerTab;
     // Held rather than left local to StartPickerPoll: the dispatcher drives
     // the poll, so the window's teardown has no other way to reach it.
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
 
-    private void OnListThemesRequested(object? sender, EventArgs e)
+    /// <summary>
+    /// Open the inline theme picker on this window's active surface. Called
+    /// by App when a LIST_THEMES arrives on the preview pipe; App picks the
+    /// window. UI thread only.
+    /// </summary>
+    internal void ShowInlineThemePicker()
     {
+        // App filters closing windows out of the routing, but the request
+        // crosses a thread hop to get here, so one enqueued before this
+        // window's close is delivered after it -- and every surface the
+        // picker would install itself into is already freed by then.
+        if (_isClosed) return;
+
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
 
@@ -4371,7 +4411,6 @@ public sealed partial class MainWindow : Window
 
         _pickerSurface = new GhosttySurface(surfaceHandle);
         _pickerTerminal = terminal;
-        _pickerTab = _tabManager.ActiveTab;
 
         // Theme callback: apply preview/confirm colors on the UI thread.
         _inlineThemeCb = (namePtr, confirmed) =>
@@ -4381,12 +4420,24 @@ public sealed partial class MainWindow : Window
                 var name = Marshal.PtrToStringUTF8(namePtr);
                 if (name is null) return;
 
-                // The callback fires from the Zig/apprt thread. Dispatch
-                // to the UI thread so ConfigService and ShellThemeService
-                // updates happen on the right thread.
+                // Not a thread hop: the picker calls this synchronously from
+                // the surface's input and scroll redirects, so it arrives
+                // inside the key or scroll call the terminal control made,
+                // on the UI thread. The enqueue earns its place for the
+                // other reason -- it keeps ConfigService and
+                // ShellThemeService off the stack of a native input
+                // callback, rather than re-entering libghostty while it is
+                // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
-                    _themePreview.ApplyThemePreview(name);
+                    // Null until OnLaunched builds the service and again
+                    // once the shutdown's finally block clears it; a picker
+                    // keystroke in flight across this dispatch can land in
+                    // either gap. Non-null is not proof the service is still
+                    // live -- the shutdown disposes it well before that
+                    // clearing -- but applying colors after the dispose is
+                    // fenced off by ConfigService's own shutdown flag.
+                    Ghostty.App.ApplyThemePreview?.Invoke(name);
                 });
             }
             catch { }
@@ -4394,18 +4445,62 @@ public sealed partial class MainWindow : Window
         var cbPtr = Marshal.GetFunctionPointerForDelegate(_inlineThemeCb);
 
         _pickerHandle = NativeMethods.SurfaceListThemes(_pickerSurface, cbPtr);
+        if (_pickerHandle == IntPtr.Zero)
+        {
+            // No picker was installed -- no redirects, no allocation -- so
+            // there is nothing to hand back and ClosePicker returns on the
+            // zero handle before it reaches the clears below. Without this
+            // the window keeps a raw copy of a surface pointer that whoever
+            // owns that surface is free to release, and a strong reference
+            // to the control and its whole pane subtree, until some later
+            // picker opens or the window dies.
+            _pickerSurface = default;
+            _pickerTerminal = null;
+            _inlineThemeCb = null;
+            return;
+        }
+
+        // The only warning that this surface is about to go. Closing the
+        // picker's tab frees its leaves before it announces the tab is gone,
+        // so nothing tab-level runs early enough: by then the deinit below
+        // can no longer run, and the picker allocation, its theme arena, the
+        // 50ms poll and the control's whole visual subtree are stranded for
+        // the life of the window.
+        //
+        // Taken out after the open succeeds, not alongside the field
+        // assignments above, so the single detach in ClosePicker is enough: a
+        // subscription then only ever exists while _pickerHandle is non-zero,
+        // which is exactly when ClosePicker runs past its early return.
+        terminal.SurfaceDisposing += OnPickerSurfaceDisposing;
+
         // Picker is now active. handleKey fires on each key event and
         // sets should_quit when the user confirms/cancels. We poll on
         // a timer to clean up, avoiding a thread that races with the
         // input redirect callback.
-        if (_pickerHandle != IntPtr.Zero)
-            StartPickerPoll();
+        StartPickerPoll();
+    }
+
+    /// <summary>
+    /// The surface the picker is installed on is being freed. Close the picker
+    /// now, while the deinit can still reach it: this runs above
+    /// <c>SurfaceFree</c>, so the redirects come off and the allocation comes
+    /// back instead of being stranded.
+    /// </summary>
+    private void OnPickerSurfaceDisposing(object? sender, EventArgs e)
+    {
+        // Act on the control this picker was opened on, never on whatever
+        // raised the event: a stale subscription -- one taken out for a picker
+        // that has since been replaced -- must not tear down the current one.
+        if (!ReferenceEquals(sender, _pickerTerminal)) return;
+
+        ClosePicker();
     }
 
     private void StartPickerPoll()
     {
-        // Use a DispatcherQueue timer so cleanup runs on the UI thread
-        // with no race against the apprt thread's input redirect.
+        // A DispatcherQueue timer rather than a polling thread, so the
+        // cleanup lands on the same thread the input redirect runs the
+        // picker from and cannot tear it down mid-keystroke.
         //
         // One poll at a time: a second picker replaces _pickerHandle, and a
         // leftover timer would then be polling the new picker and could run
@@ -4472,29 +4567,56 @@ public sealed partial class MainWindow : Window
         // A non-zero handle does not mean the surface behind it is still
         // there. Deinit writes through that pointer -- it clears three
         // redirects and pushes pty input -- so running it against a freed
-        // surface is a write into freed memory, and closing the picker's tab
-        // frees the surface without touching anything here.
+        // surface is a write into freed memory.
+        //
+        // The control now says so before it frees anything, which is what
+        // gets a tab close here while the deinit still means something. The
+        // mismatch below is the residual case: any path that reaches the free
+        // without this window being told.
         //
         // The control zeroes its own handle when it disposes the surface, so
-        // a mismatch means the surface is gone. The tab check answers the
-        // other direction: a detached tab carries its live surface to another
-        // window, and deiniting from here would strip the redirects of a
-        // window that never closed.
+        // a mismatch means the surface is gone and nothing can reach the
+        // picker any more. That is the only case where skipping is right, and
+        // it strands the picker allocation, which is what happened before this
+        // path existed at all. Leaking it beats writing through a dangling
+        // pointer.
         //
-        // When neither holds, the picker allocation is stranded, which is
-        // what happened before this path existed at all. Leaking it is the
-        // right trade against writing through a dangling pointer.
-        var live = _pickerTerminal is { } terminal
-            && terminal.SurfaceHandle == _pickerSurface.Handle
-            && _pickerTab is { } tab
-            && _tabManager.Tabs.Contains(tab);
-        if (live)
-            NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
-
+        // Deliberately NOT conditioned on the tab still being ours. A detached
+        // tab carries its live surface to another window with this picker's
+        // input, scroll and resize redirects still installed on it, and this
+        // deinit is the only thing that clears them or frees the picker. Not
+        // running it leaves that window wedged in the picker's alt screen with
+        // its input redirected, and drops the last GC root for the delegate
+        // whose function pointer the picker still holds, so the next keystroke
+        // there is a callback on a collected delegate, which kills the process
+        // rather than throwing. Cleaning up after our own picker is a repair
+        // for that window, not damage to it.
+        //
+        // Ownership of the picker leaves this window here, before the deinit
+        // rather than after it. The native side only checks the pointer is
+        // non-null and then destroys the allocation, so it is not idempotent,
+        // and a second call through a handle the field was still holding is a
+        // double free. Anything that re-entered ClosePicker while the deinit
+        // was running would find a zero handle and turn back at the early
+        // return above instead.
+        var handle = _pickerHandle;
         _pickerHandle = IntPtr.Zero;
+
+        if (_pickerTerminal is { } terminal)
+        {
+            // Taken back here rather than left to the control to null when it
+            // disposes, because the control can outlive this window: a
+            // detached tab carries it to another window, and a subscription
+            // left on it would keep this closed window reachable from a
+            // control it no longer owns.
+            terminal.SurfaceDisposing -= OnPickerSurfaceDisposing;
+
+            if (terminal.SurfaceHandle == _pickerSurface.Handle)
+                NativeMethods.SurfaceListThemesDeinit(_pickerSurface, handle);
+        }
+
         _pickerSurface = default;
         _pickerTerminal = null;
-        _pickerTab = null;
         _inlineThemeCb = null;
     }
 }

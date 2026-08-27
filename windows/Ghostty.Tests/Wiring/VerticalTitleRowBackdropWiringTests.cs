@@ -76,6 +76,27 @@ public class VerticalTitleRowBackdropWiringTests
     }
 
     /// <summary>
+    /// The colour the estimate blends is the tint the compositor actually
+    /// lays down, which is the user's background-tint-color when one is set,
+    /// not the palette. The resolver returns that colour beside the opacity
+    /// the estimate already consumes; a call site that takes the resolver's
+    /// opacity but keeps the palette for the colour scores the ink against
+    /// a ground that is not on screen, and only shows once a tint diverges
+    /// from the palette far enough to matter.
+    /// </summary>
+    [Fact]
+    public void TheGround_BlendsTheResolvedTint_NotThePalette()
+    {
+        var window = Window();
+        var property = window.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "EstimatedBackdropGround");
+        var estimate = property.Call("Core.Shell.BackdropGround.Estimate");
+
+        Assert.DoesNotContain("_configService.BackgroundColor", estimate.Arg(0));
+        Assert.Contains("ResolveAcrylicTuning", property.ToString());
+    }
+
+    /// <summary>
     /// The title text is written from that ink rather than left on the
     /// element theme's resource, which is right only while the theme and
     /// the row agree.
