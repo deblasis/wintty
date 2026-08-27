@@ -45,6 +45,15 @@ internal sealed class WindowState
     // until the first close; the splash falls back to the config default.
     public uint? BackgroundRgb { get; set; }
 
+    // Whether the background above came from the built-in theme rather than
+    // from anything the user set, which makes it a value that can go stale
+    // while the app is not running: the built-in theme follows the desktop's
+    // light/dark setting, and that can be flipped between two launches. The
+    // splash re-derives instead of trusting the saved colour when this is
+    // set, which is the difference between coming up in the colour the
+    // terminal is about to be and flashing the one it used to be.
+    public bool BackgroundFollowsOsTheme { get; set; }
+
     // User-resized height of the quake / drop-down window, remembered
     // per-user so a manual resize survives restarts. Null until the user
     // first resizes. Distinct from WindowHeight (regular window placement);
