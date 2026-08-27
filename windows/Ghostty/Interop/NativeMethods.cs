@@ -346,16 +346,26 @@ internal static partial class NativeMethods
     /// this method returns.
     ///
     /// This is also the choke point where a bare Windows subcommand becomes
-    /// its <c>+action</c> form, so no caller can forget it. The rewrite is
-    /// assigned back through <c>cmdline</c> on purpose: the string that gets
-    /// marshalled and the string that gets measured must be the same object,
-    /// or libghostty is handed a buffer longer than the length it is told and
-    /// silently drops the last character of the last argument.
+    /// its <c>+action</c> form, and where the Wintty config flags become the
+    /// libghostty keys they stand for, so no caller can forget either. Each
+    /// rewrite is assigned back through <c>cmdline</c> on purpose: the string
+    /// that gets marshalled and the string that gets measured must be the
+    /// same object, or libghostty is handed a buffer longer than the length
+    /// it is told and silently drops the last character of the last argument.
     /// </remarks>
-    internal static int InitWideFromProcess()
+    /// <param name="overrides">
+    /// What the command line asked of the configuration. Reported back
+    /// because the rewrite alone does not settle it: the shell reads several
+    /// Windows-only keys off the config file without libghostty, and has to
+    /// know to stop.
+    /// </param>
+    internal static int InitWideFromProcess(
+        out Ghostty.Core.Cli.ConfigOverrides overrides)
     {
         var cmdline = Environment.CommandLine;
         Ghostty.Core.Cli.CliAliases.TryRewrite(cmdline, out cmdline, out _);
+        overrides = Ghostty.Core.Cli.CliAliases.RewriteConfigFlags(cmdline);
+        cmdline = overrides.CommandLine;
         var buf = Marshal.StringToHGlobalUni(cmdline);
         return InitWide(buf, (UIntPtr)cmdline.Length);
     }
@@ -373,6 +383,37 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigLoadDefaultFiles(GhosttyConfig config);
+
+    /// <summary>
+    /// Layer this process's command line over the config, as
+    /// <c>Config.load</c> does between the default files and the recursive
+    /// ones.
+    /// </summary>
+    /// <remarks>
+    /// Reads the args libghostty was initialized with, not any it is passed
+    /// here, so the command line handed to <c>ghostty_init_wide</c> is what
+    /// takes effect. Order is not a preference: <c>loadCliArgs</c> resets
+    /// <c>config-default-files</c>, records a replay marker, and rebuilds
+    /// from that marker when the flag is unset, so it can only discard what
+    /// was loaded before it. Called first, the discard finds nothing to drop
+    /// and the flag becomes a silent no-op.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_cli_args")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadCliArgs(GhosttyConfig config);
+
+    /// <summary>
+    /// Load the files named by <c>config-file</c>, from the config itself or
+    /// from the command line, recursively to libghostty's own depth limit.
+    /// </summary>
+    /// <remarks>
+    /// Without this the key is parsed and then ignored, so a
+    /// <c>config-file</c> in the user's own config file has never taken
+    /// effect on Windows either - not just one passed as a flag.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_recursive_files")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadRecursiveFiles(GhosttyConfig config);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_config_set_color_scheme")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
