@@ -67,12 +67,36 @@ public class VerticalTitleRowBackdropWiringTests
         Assert.Equal("_configService.BackgroundColor", ground.WhenTrue.ToString());
         Assert.Equal("EstimatedBackdropGround", ground.WhenFalse.ToString());
 
-        // And that estimate is a real one, fed the live backdrop style rather
-        // than a constant: a solid backdrop is not a blend at all.
+        // And that estimate is a real one, fed the live material rather than
+        // a constant: a solid frame is not a blend at all. The material is
+        // the chrome's own, not the terminal's -- see ChromeGroundStyle,
+        // which falls back to the backdrop whenever the frame is not
+        // covering it.
         var estimate = window.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
             .Single(p => p.Identifier.ValueText == "EstimatedBackdropGround")
             .Call("Core.Shell.BackdropGround.Estimate");
-        Assert.Equal("_currentBackdropStyle", estimate.Arg(2));
+        Assert.Equal("ChromeGroundStyle", estimate.Arg(2));
+    }
+
+    /// <summary>
+    /// The colour the estimate blends is the tint the compositor actually
+    /// lays down, which is the user's background-tint-color when one is set,
+    /// not the palette. The resolver returns that colour beside the opacity
+    /// the estimate already consumes; a call site that takes the resolver's
+    /// opacity but keeps the palette for the colour scores the ink against
+    /// a ground that is not on screen, and only shows once a tint diverges
+    /// from the palette far enough to matter.
+    /// </summary>
+    [Fact]
+    public void TheGround_BlendsTheResolvedTint_NotThePalette()
+    {
+        var window = Window();
+        var property = window.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "EstimatedBackdropGround");
+        var estimate = property.Call("Core.Shell.BackdropGround.Estimate");
+
+        Assert.DoesNotContain("_configService.BackgroundColor", estimate.Arg(0));
+        Assert.Contains("ResolveAcrylicTuning", property.ToString());
     }
 
     /// <summary>

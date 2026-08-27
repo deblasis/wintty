@@ -6,6 +6,7 @@ using Ghostty.Controls.Settings;
 using Ghostty.Core.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.DirectWrite;
+using Ghostty.Core.Shell;
 using Ghostty.Core.Settings;
 using Ghostty.Logging;
 using Ghostty.Services;
@@ -29,6 +30,11 @@ internal sealed partial class AppearancePage : Page
     // we just wrote). External config file edits never touch this so they
     // still re-seed normally.
     private int _expectingOwnReloads;
+
+    // The frame-style combo's first entry stands for the key being absent,
+    // which is what "match the backdrop" means. There is no value that says
+    // unset, so the entry carries no tag and choosing it removes the line.
+    private const string MatchBackdropTag = "";
 
     public AppearancePage(IConfigService configService, IConfigFileEditor editor)
     {
@@ -61,7 +67,14 @@ internal sealed partial class AppearancePage : Page
         // runtime type is different (e.g. in tests).
         if (configService is ConfigService cs)
         {
-            SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle);
+            SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle, BackdropStyles.Default);
+
+            // FrameStyle answers the resolved value, so it cannot tell an
+            // unset key from one set to what the backdrop already says. The
+            // file can, and the two show as different entries here.
+            SelectComboByTag(
+                FrameStyleCombo,
+                cs.IsConfiguredInFile("frame-style") ? cs.FrameStyle : MatchBackdropTag);
 
             // Seed power saver mode from config, defaulting to "auto".
             var powerMode = cs.GetRawFileValue("power-saver-mode");
@@ -93,7 +106,8 @@ internal sealed partial class AppearancePage : Page
         }
         else
         {
-            SelectComboByTag(BackgroundStyleCombo, "frosted");
+            SelectComboByTag(BackgroundStyleCombo, BackdropStyles.Default);
+            SelectComboByTag(FrameStyleCombo, MatchBackdropTag);
         }
 
         // Initialize gradient settings from current config.
@@ -169,13 +183,9 @@ internal sealed partial class AppearancePage : Page
 
     private void SelectWindowTheme(string theme)
     {
-        // libghostty still accepts the pre-rename "ghostty" spelling and hands
-        // it back verbatim, but the combo only carries the preferred "wintty"
-        // tag. Fold the alias here so an unmigrated config selects the right
-        // item instead of falling through to "auto" below.
-        var wanted = string.Equals(theme, "ghostty", StringComparison.OrdinalIgnoreCase)
-            ? "wintty"
-            : theme;
+        // The combo only carries the preferred spelling, so fold the alias
+        // before matching or an unmigrated config falls through to "auto".
+        var wanted = WindowThemeAlias.Canonicalize(theme);
 
         foreach (ComboBoxItem item in WindowThemeCombo.Items)
         {
@@ -189,7 +199,16 @@ internal sealed partial class AppearancePage : Page
         WindowThemeCombo.SelectedIndex = 0;
     }
 
-    private static void SelectComboByTag(ComboBox combo, string tag)
+    /// <summary>
+    /// Select the item carrying <paramref name="tag"/>, falling back to
+    /// <paramref name="fallbackTag"/> and only then to the first item.
+    ///
+    /// The first item is not a neutral landing place. On the backdrop
+    /// combo it is solid, so a value this page could not match -- a
+    /// misspelling, or a key the config knows and the combo does not --
+    /// showed the user a material the window was not drawing.
+    /// </summary>
+    private static void SelectComboByTag(ComboBox combo, string tag, string? fallbackTag = null)
     {
         foreach (ComboBoxItem item in combo.Items)
         {
@@ -199,6 +218,14 @@ internal sealed partial class AppearancePage : Page
                 return;
             }
         }
+
+        if (fallbackTag is not null
+            && !string.Equals(fallbackTag, tag, StringComparison.OrdinalIgnoreCase))
+        {
+            SelectComboByTag(combo, fallbackTag);
+            return;
+        }
+
         combo.SelectedIndex = 0;
     }
 
@@ -537,7 +564,26 @@ internal sealed partial class AppearancePage : Page
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
-            OnValueChanged("background-style", item.Tag?.ToString() ?? "frosted");
+            OnValueChanged("background-style", item.Tag?.ToString() ?? BackdropStyles.Default);
+    }
+
+    private void FrameStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox { SelectedItem: ComboBoxItem item }) return;
+
+        // OnValueChanged owns the seeding guard for the write; the removal
+        // below bypasses it, and seeding the combo during construction would
+        // otherwise comment the user's frame-style out of their config.
+        if (_loading) return;
+
+        var tag = item.Tag?.ToString();
+        if (string.IsNullOrEmpty(tag))
+        {
+            _writer.Write(() => _editor.RemoveValue("frame-style"), "frame-style");
+            return;
+        }
+
+        OnValueChanged("frame-style", tag);
     }
 
     private void NoColorOverride_SelectionChanged(object sender, SelectionChangedEventArgs e)

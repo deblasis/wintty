@@ -4888,6 +4888,23 @@ fn showMouse(self: *Surface) void {
 /// will ever return false. We can expand this in the future if it becomes
 /// useful. We did previous/next tab so we could implement #498.
 pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool {
+    // Tag the thread the way every surface callback does. Callbacks set this
+    // on the way in, but a binding action can also arrive straight from the
+    // C API (ghostty_surface_binding_action in src/apprt/embedded.zig), which
+    // goes through no callback at all. Without this a crash on that path
+    // reaches beforeSend with no thread state and loses its thread type and
+    // surface dimensions, which is most crashes for an embedder.
+    //
+    // Restore rather than clear, because unlike every other site that sets
+    // this, we are not always the outermost frame: keyCallback and
+    // mouseButtonCallback set it and then reach here through
+    // maybeHandleBinding. Clearing to null on the way out would leave the
+    // rest of those callbacks, the inspector append and the encode and the
+    // render queue, running untagged.
+    const prev_thread_state = crash.sentry.thread_state;
+    crash.sentry.thread_state = self.crashThreadState();
+    defer crash.sentry.thread_state = prev_thread_state;
+
     // Forward app-scoped actions to the app. Some app-scoped actions are
     // special-cased here because they do some special things when performed
     // from the surface.

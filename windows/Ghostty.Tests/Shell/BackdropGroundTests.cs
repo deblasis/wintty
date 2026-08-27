@@ -69,16 +69,23 @@ public sealed class BackdropGroundTests
     /// opaque chrome colour and the chrome is drawn straight onto it. Read as
     /// a composite it came out near-white, which put black ink on #0C0C0C at
     /// 1.1:1 on a live window.
+    ///
+    /// The opaque chrome colour follows the desktop, so the ink flips with
+    /// it. Asserted on both poles because a ground that ignored the desktop
+    /// is exactly what put a near-black row on a light one.
     /// </summary>
     [Theory]
-    [InlineData(BackdropStyles.Solid)]
-    [InlineData("something-nobody-has-added-yet")]
-    public void A_solid_backdrop_is_the_root_fill_not_a_blend(string style)
+    [InlineData(BackdropStyles.Solid, true, 0xFFFFFFu)]
+    [InlineData(BackdropStyles.Solid, false, 0x000000u)]
+    [InlineData("something-nobody-has-added-yet", true, 0xFFFFFFu)]
+    [InlineData("something-nobody-has-added-yet", false, 0x000000u)]
+    public void A_solid_backdrop_is_the_root_fill_not_a_blend(
+        string style, bool osDark, uint expectedInk)
     {
-        var ground = BackdropGround.Estimate(LightPalette, osDark: false, style);
-        Assert.Equal(RootBackgroundResolver.OpaqueChromeArgb & 0x00FFFFFFu, ground);
+        var ground = BackdropGround.Estimate(LightPalette, osDark, style);
+        Assert.Equal(RootBackgroundResolver.OpaqueChromeArgb(osDark) & 0x00FFFFFFu, ground);
         Assert.Equal(
-            0xFFFFFFu,
+            expectedInk,
             ThemeResolution.EnsureReadableForeground(ground, 0x000000u));
     }
 
@@ -151,5 +158,50 @@ public sealed class BackdropGroundTests
             ThemeResolution.ContrastRatio(heavy, DarkPalette)
                 < ThemeResolution.ContrastRatio(light, DarkPalette),
             "at 0.9 the ground should sit much closer to the palette");
+    }
+
+    /// <summary>
+    /// The colour the estimate blends is the tint the compositor lays down,
+    /// which is the user's background-tint-color when one is set, not the
+    /// palette. Mirrors how the shell feeds it: the resolver resolves, the
+    /// estimate consumes the resolved RGB and opacity together. A diverging
+    /// tint on a light desktop moves the ground a long way from what the
+    /// palette alone would have predicted, and the ink still has to clear
+    /// AA against it.
+    /// </summary>
+    [Fact]
+    public void A_diverging_tint_color_is_the_ground_not_the_palette()
+    {
+        const uint tintOverride = 0xF2E8DCu;
+        var tuning = AcrylicTintResolver.Resolve(
+            tintOverrideArgb: tintOverride,
+            themeBackgroundRgb: DarkPalette,
+            tintOpacityOverride: null,
+            luminosityOpacityOverride: null,
+            blurFollowsOpacity: false,
+            backgroundOpacity: 1.0);
+
+        var ground = BackdropGround.Estimate(
+            tuning.TintArgb & 0x00FFFFFFu,
+            osDark: false,
+            BackdropStyles.Frosted,
+            tuning.TintOpacity);
+
+        Assert.Equal(
+            BackdropGround.Estimate(tintOverride, osDark: false, BackdropStyles.Frosted),
+            ground);
+        Assert.NotEqual(
+            BackdropGround.Estimate(DarkPalette, osDark: false, BackdropStyles.Frosted),
+            ground);
+
+        foreach (var elementDark in new[] { true, false })
+        {
+            var ink = ThemeResolution.EnsureReadableForeground(
+                ground, elementDark ? 0xFFFFFFu : 0x000000u);
+            Assert.True(
+                ThemeResolution.ContrastRatio(ground, ink) >= 4.5,
+                $"elementDark {elementDark}: ground {ground:X6} against ink {ink:X6} is "
+                + $"{ThemeResolution.ContrastRatio(ground, ink):F2}:1");
+        }
     }
 }
