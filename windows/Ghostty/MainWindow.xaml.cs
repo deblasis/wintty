@@ -752,8 +752,17 @@ public sealed partial class MainWindow : Window
         // XAML values are design-time defaults, and a comment claiming they
         // match the constant is exactly how the two drift apart.
         VerticalTitleBar.Height = Shell.TabChromeMetrics.TitleRowHeight;
+
+        // Same for the caption seam cover. Placed in the grid's own space
+        // rather than in a cell, it has to be told both where the pane row
+        // starts and how deep the stroke it hides runs. Deriving those from
+        // the values that place the stroke is what keeps the cover from
+        // ending short of it, which a hand-tuned top-and-height pair did by
+        // half a DIP.
         VerticalCaptionSeamCover.Margin = new Thickness(
-            0, Shell.TabChromeMetrics.TitleRowHeight - 2, 0, 0);
+            0, Shell.TabChromeMetrics.TitleRowHeight - CaptionSeamOverlap, 0, 0);
+        VerticalCaptionSeamCover.Height = CaptionSeamOverlap
+            + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1;
 
         _layout = new LayoutCoordinator(
             StripColumn,
@@ -2469,6 +2478,12 @@ public sealed partial class MainWindow : Window
     /// How far back into the selected row the vertical seam cover starts.
     /// </summary>
     private const double VerticalSeamOverlap = 4.0;
+
+    /// <summary>
+    /// How far up into the title row the caption seam cover starts, so it
+    /// also hides the hairline the strip draws against the pane.
+    /// </summary>
+    private const double CaptionSeamOverlap = 2.0;
 
     /// <summary>
     /// Place the vertical strip's seam cover over the pane's left border,
