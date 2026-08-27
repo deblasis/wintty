@@ -218,6 +218,15 @@ $NotInSuite = [ordered]@{
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
     'clipboard-fuzz.ps1'            = 'no desktop and no app; it drives the marshalling round-trip oracles in Ghostty.Tests, which the build ladder already runs at a cheaper iteration count'
     'kitty-clipboard-roundtrip.ps1' = 'runs INSIDE Wintty rather than launching it, and its attended mode waits on a human at the permission prompt; -Unattended needs clipboard-read and clipboard-write set to allow, which is a config this suite does not stage'
+    # Both crash harnesses are written against a published NativeAOT build and
+    # are pointed at one by their own usage text: the coverage map crash-matrix
+    # asserts is the NativeAOT answer, and under the CoreCLR binary this suite
+    # hands out, Main's catch-all swallows native-seh and captures
+    # managed-unhandled, so the rows would fail on the build and not the
+    # product. Neither leaves a 2, so a coverage failure could not be told from
+    # a harness that could not run even if the build were right.
+    'crash-matrix.ps1'              = 'gates a published NativeAOT build against the crash coverage map; pointed at the Debug build this suite stages, CoreCLR answers differently and every row fails for the build rather than the product. Its exits are 0 for the map holding, 1 for it not holding or for a launch that could not happen, and nothing for findings'
+    'crash-canary.ps1'              = 'a measurement, not a gate: it exits 0 whether canaries are found or not, so a pass rules nothing out and would read as more than it is here. It also needs a crash the Debug build this suite stages does not produce, since CoreCLR swallows native-seh; no envelope means exit 1, and there is no findings exit'
 }
 
 # The one form every check compares a script path in: the path relative to this
