@@ -504,6 +504,75 @@ public sealed class FrameStyleWiringTests
     }
 
     /// <summary>
+    /// High Contrast without the palette is the one bare lane that is a
+    /// colour at all, and the window cannot name it: the surface is an
+    /// HC-overridable theme resource, which is why ApplyStripChromeFill
+    /// pushes null there and the strip resolves it for the middle row. The
+    /// host's own two rows -- the icon lane and the new-tab band -- took the
+    /// null literally and stayed transparent, splitting the lane into two
+    /// surfaces in the one mode whose entire point is a surface Windows
+    /// controls.
+    ///
+    /// They paint from the strip's resolved brush now. Asserted on the
+    /// shapes that reproduce the split: a bare arm that goes straight to
+    /// transparent, a second resolution of the resource instead of the
+    /// shared read, and the host painting before the strip has resolved,
+    /// which is the previous frame's answer on a High Contrast toggle.
+    /// </summary>
+    [Fact]
+    public void The_bare_HighContrast_lane_is_one_surface()
+    {
+        var host = ShellSource.Load("Tabs.VerticalTabHost.xaml.cs").Method("SetChromeFill");
+
+        // The strip resolves first; both of the host's lane-surface writes
+        // paint from that answer.
+        var stripPush = host.Call("_strip.SetChromeFill");
+        var writes = host.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() is "Background" or "StripRoot.Background")
+            .ToList();
+        Assert.Equal(2, writes.Count);
+
+        var brush = Assert.Single(
+            host.DescendantNodes().OfType<VariableDeclaratorSyntax>(),
+            v => v.Identifier.ValueText == "brush");
+        foreach (var write in writes)
+        {
+            Assert.True(
+                write.SpanStart > stripPush.SpanStart,
+                $"`{write}` paints before `_strip.SetChromeFill`, so a bare lane "
+                    + "reads the brush the previous frame resolved.");
+            Assert.Equal("brush", write.Right.ToString());
+        }
+
+        // The bare arm falls back to the strip's own High Contrast surface
+        // and only then to transparent. Straight to transparent is the split;
+        // a resource resolved here is the same split one hop away, because
+        // two resolutions can disagree.
+        var fill = Assert.IsType<ConditionalExpressionSyntax>(brush.Initializer?.Value);
+        Assert.Contains("TabColorBrush.FromPackedRgb", fill.WhenTrue.ToString());
+        var bare = Assert.IsType<BinaryExpressionSyntax>(fill.WhenFalse);
+        Assert.True(
+            bare.IsKind(SyntaxKind.CoalesceExpression),
+            $"the bare lane reads `{bare}`; it has to be the strip's surface or "
+                + "transparent, nothing painted in between.");
+        Assert.Equal("_strip.HighContrastLaneSurface", bare.Left.ToString());
+        Assert.Equal("TransparentBrush", bare.Right.ToString());
+
+        // And that property answers with the surface the strip already
+        // resolved, and only under High Contrast. Every other bare lane is
+        // the backdrop's, which is the non-HC behaviour this must not move.
+        var surface = Property(
+            ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs"), "HighContrastLaneSurface");
+        var gate = Assert.IsType<ConditionalExpressionSyntax>(
+            surface.ExpressionBody?.Expression);
+        Assert.Equal("_highContrast", gate.Condition.ToString());
+        Assert.Equal("Background", gate.WhenTrue.ToString());
+        Assert.True(
+            gate.WhenFalse.IsKind(SyntaxKind.NullLiteralExpression),
+            $"without High Contrast the lane is the backdrop's, not `{gate.WhenFalse}`.");
+    }
+
+    /// <summary>
     /// The key the strip's surface is filed under, as an argument or as an
     /// indexer. Matched on the literal so a comment mentioning it is not a
     /// write and a variable holding it is not missed for being one.
