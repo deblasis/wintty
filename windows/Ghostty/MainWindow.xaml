@@ -64,11 +64,11 @@
             OS caption buttons.
 
             Col 0 uses a non-hit-testable fill so the strip-lane band
-            matches the tab bar while clicks still reach the icon /
-            chevron in VerticalTabHost below. A fixed-width icon lane
-            at the left stays unpainted so the wintty badge in the
-            strip (z-order below) remains visible. Col 1 is the draggable
-            title region, painted from the terminal palette in code.
+            can match the tab bar while clicks still reach the icon /
+            chevron in VerticalTabHost below. Fills for all three
+            columns come from ApplyVerticalTitleBarChrome, which leaves
+            them transparent unless window-theme=wintty is painting the
+            row. The default row is the window backdrop.
         -->
         <!-- Height matches the horizontal TabView strip so the wintty
              icon and the terminal top edge stay put when toggling
@@ -111,8 +111,8 @@
                            IsHitTestVisible="False"/>
             </Grid>
 
-            <!-- Caption-button column: same opaque fill as the drag
-                 region so Mica does not bleed through under min/max/close. -->
+            <!-- Caption-button column: same fill as the drag region, so
+                 the two never disagree across the row. -->
             <Border x:Name="VerticalTitleCaptionFill"
                     Grid.Column="2"
                     IsHitTestVisible="False"/>
