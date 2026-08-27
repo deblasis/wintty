@@ -474,16 +474,6 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
-        // The splash painted itself before this process had a config, from
-        // the colour the terminal came up as last session. This is the first
-        // moment the real one is known -- the constructor above resolves the
-        // theme and the palette, it is not lazy -- and the app frame is still
-        // roughly a second away, so a correction has room to finish before
-        // anything is revealed. Nothing waits on it: the splash takes this on
-        // its own thread's next pass, and does nothing at all when the colour
-        // it already painted turns out to have been right.
-        Ghostty.Shell.SplashWindow.AdoptBackground(_configService.BackgroundColor);
-
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
@@ -746,6 +736,20 @@ public partial class App : Application
         // renders (no flash of the user's colors when HC is already on).
         _highContrastMonitor = new Ghostty.Accessibility.HighContrastMonitor(
             _configService, DispatcherQueue.GetForCurrentThread());
+
+        // The splash painted itself before this process had a config, from
+        // the colour the terminal came up as last session. This is the first
+        // moment the real one is final: the ConfigService constructor
+        // resolves the theme, and the monitor just above is the write that
+        // can still change the answer -- under High Contrast its constructor
+        // layers COLOR_WINDOW over the theme and reloads, and publishing
+        // before that hands the splash the pre-HC colour so the reveal
+        // uncovers a window it does not match. Nothing waits on the
+        // correction: the splash takes it on its own thread's next pass,
+        // does nothing at all when the colour it already painted turns out
+        // to have been right, and the first window is still below, so there
+        // is room to land before anything is revealed.
+        Ghostty.Shell.SplashWindow.AdoptBackground(_configService.BackgroundColor);
 
         // Session manager: owns restore decision + debounced persistence.
         // Constructed before window creation so we can decide whether to

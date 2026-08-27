@@ -19,14 +19,18 @@ public class SplashThemeCorrectionWiringTests
     private static ShellSource Splash() => ShellSource.Load("Shell.SplashWindow.cs");
 
     /// <summary>
-    /// The resolved background reaches the splash from where config is
-    /// built, which is the earliest point in the process that knows it.
-    /// Moving this call later is the mutation that matters: further down
-    /// <c>OnLaunched</c> the window is already being constructed, and the
-    /// correction would land under a frame instead of before one.
+    /// The resolved background reaches the splash once config has finished
+    /// deciding what it is. Config resolves the theme, and the High Contrast
+    /// monitor layered on top of it is the last write that can change the
+    /// answer: under HC its constructor reloads with COLOR_WINDOW, and a
+    /// hand-over published before that crossfades the splash to the pre-HC
+    /// colour while the reveal uncovers the HC one. Either half of the
+    /// ordering is the mutation that matters -- above the monitor is the
+    /// HC mismatch, below the first window is a correction landing under
+    /// a frame instead of before one.
     /// </summary>
     [Fact]
-    public void TheResolvedBackground_IsHandedOver_AsSoonAsConfigExists()
+    public void TheResolvedBackground_IsHandedOver_AfterHighContrastLands_AndBeforeTheFirstWindow()
     {
         var launched = ShellSource.Load("App.xaml.cs").Method("OnLaunched");
         var adopt = launched.Call("Ghostty.Shell.SplashWindow.AdoptBackground");
@@ -34,22 +38,29 @@ public class SplashThemeCorrectionWiringTests
         // The terminal's colour, not the desktop's and not a constant.
         Assert.Equal("_configService.BackgroundColor", adopt.Arg(0));
 
-        // Statement order inside the method body, so "as soon as" is checked
+        // Statement order inside the method body, so the ordering is checked
         // rather than merely "somewhere in here".
         var statements = launched.Body!.Statements;
         var configBuilt = statements.TakeWhile(
             s => !s.ToString().Contains("new ConfigService(")).Count();
+        var hcLanded = statements.TakeWhile(
+            s => !s.ToString().Contains("new Ghostty.Accessibility.HighContrastMonitor(")).Count();
         var handedOver = statements.TakeWhile(
             s => !s.ToString().Contains("SplashWindow.AdoptBackground")).Count();
         var firstWindow = statements.TakeWhile(
             s => !s.ToString().Contains("new MainWindow(")).Count();
 
         // TakeWhile returns the whole list when it never matches, which would
-        // make both comparisons below true by accident and pin nothing.
+        // make the comparisons below true by accident and pin nothing.
         Assert.True(firstWindow < statements.Count, "no window is built in this method");
         Assert.True(handedOver < statements.Count, "the hand-over is not a statement of this method");
+        Assert.True(hcLanded < statements.Count, "no High Contrast monitor is built in this method");
 
         Assert.True(configBuilt < handedOver, "the colour is read before config resolves it");
+        Assert.True(
+            hcLanded < handedOver,
+            "the correction is published before the High Contrast override lands, so the "
+                + "splash adopts the pre-HC colour and the reveal uncovers another one");
         Assert.True(
             handedOver < firstWindow,
             "the correction is published after the first window is built, which is too "
