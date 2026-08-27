@@ -224,10 +224,14 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     config.sentry = b.option(
         bool,
         "sentry",
-        "Build with Sentry crash reporting. Default for macOS is true, false for any other system.",
+        "Build with Sentry crash reporting. Default is true for macOS and Windows, false for any other system.",
     ) orelse sentry: {
         switch (target.result.os.tag) {
             .macos, .ios => break :sentry true,
+
+            // Windows uses the in-process backend; see SharedDeps.zig. The
+            // capture is local-only, exactly as on macOS.
+            .windows => break :sentry true,
 
             // Note its false for linux because the crash reports on Linux
             // don't have much useful information.

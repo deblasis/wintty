@@ -31,6 +31,17 @@
          version it was built against (the referenced package) instead of
          whatever Windows App Runtime happens to be installed system-wide. -->
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!--
+      IconGen is referenced only to run it as a build-time tool
+      (ReferenceOutputAssembly="false"), but the SDK still validates it as an
+      executable reference and fails a RID publish with NETSDK1150, because a
+      self-contained executable may not reference a non self-contained one.
+      Nothing links IconGen, so the invariant the check protects does not
+      apply. Without this, `dotnet publish -r win-x64` cannot run at all,
+      which means the NativeAOT build that the installer ships is the one
+      build nobody can test.
+    -->
+    <ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -469,6 +480,23 @@
     <NativeLibrary Include="d3d12.lib" />
     <NativeLibrary Include="dxgi.lib" />
     <NativeLibrary Include="dcomp.lib" />
+  </ItemGroup>
+
+  <!--
+    sentry-native's Windows sources arrive inside ghostty-static.lib, and
+    pkg/sentry/build.zig declares no system libraries of its own:
+      dbghelp.lib - symbolizer, dbghelp unwinder, modulefinder
+      version.lib - sentry_os.c
+
+    A separate ItemGroup rather than two more lines in the one above, which
+    is deliberate. The pro-legacy patch stack rewrites that group to add
+    d3d11.lib and matches on its closing lines, and tools/materialize.py
+    applies patches with plain git apply, so appending inside it takes the
+    tier build down. MSBuild treats consecutive ItemGroups as one.
+  -->
+  <ItemGroup>
+    <NativeLibrary Include="dbghelp.lib" />
+    <NativeLibrary Include="version.lib" />
   </ItemGroup>
 
   <!--

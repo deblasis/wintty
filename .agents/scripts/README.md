@@ -38,6 +38,17 @@ human) working in this repo uses the same contract:
   namespace rule. This runs real `git describe` against a throwaway repo
   over ten tag layouts, with the argument list read out of
   GitVersion.zig, and requires three broken argument lists to be caught.
+- `just test-reachability` - prove no file's `test` blocks are dead. Zig
+  collects test blocks from the files a test binary's own test and
+  comptime blocks reach, so a file can carry assertions no test step has
+  ever run, which reads as coverage. This compiles every test binary the
+  build runs, asks each one over the protocol the stock test runner speaks
+  on `--listen=-` which tests it carries, and matches the qualified names
+  back onto files. What is knowingly out of reach is registered file by
+  file with its reason, and an entry whose tests start running fails the
+  check so the line has to go. All of it prints on every run. It needs a
+  full test-binary build, so it runs in the Zig leg via `just test`; its
+  build-free selftest runs in `gates-selftest`.
 - `nightly_fuzz.ps1` / `nightly_control.ps1` / `register_nightly_fuzz.ps1` -
   the 23:00 nightly run (tests + fuzz in a dedicated worktree, deduped P1
   issues on breaks, optional hibernate-after) and its control panel.
