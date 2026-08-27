@@ -28,6 +28,7 @@ public class SettingsIndexTests
         "no-color-override",
         "custom-shader",
         "background-style",
+        "frame-style",
         "background-blur-follows-opacity",
         "background-tint-color",
         "background-tint-opacity",

@@ -150,6 +150,19 @@
                         <ComboBoxItem Content="Crystal (Zero blur)" Tag="crystal" />
                     </ComboBox>
                 </ctrl:SettingsCard>
+                <ctrl:SettingsCard Header="Window frame material"
+                                   Description="Material for the title bar and tab strip."
+                                   ctrl:SettingsCard.ConfigKey="frame-style">
+                    <ComboBox x:Name="FrameStyleCombo" MinWidth="180"
+                              SelectionChanged="FrameStyle_SelectionChanged">
+                        <!-- The empty tag is the key being absent, not a
+                             value for it: picking it removes the line. -->
+                        <ComboBoxItem Content="Match backdrop" Tag="" />
+                        <ComboBoxItem Content="Solid (Mica)" Tag="solid" />
+                        <ComboBoxItem Content="Frosted (Acrylic)" Tag="frosted" />
+                        <ComboBoxItem Content="Crystal (Zero blur)" Tag="crystal" />
+                    </ComboBox>
+                </ctrl:SettingsCard>
                 <ctrl:SettingsCard Header="Blur follows opacity"
                                    Description="Reduce blur automatically as opacity rises."
                                    ctrl:SettingsCard.ConfigKey="background-blur-follows-opacity">

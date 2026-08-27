@@ -813,12 +813,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!theme.IsEnabled) return;
 
         var accentBrush = new SolidColorBrush(theme.AccentColor);
-        var tabBgBrush = new SolidColorBrush(theme.TabBarBackground);
         _selectedTabFillBrush = accentBrush;
-        _stripBackdropPacked = PackColor(theme.TabBarBackground);
 
-        // Background resources on TabViewControl work with a theme toggle.
-        TabViewControl.Resources["TabViewBackground"] = tabBgBrush;
+        // TabViewBackground is deliberately not written here. The strip's
+        // surface has one owner, SetChromeFill, which the window always calls
+        // after this and which knows the frame's material as well as the
+        // palette's shade. Painting it from here too is what made the palette
+        // path opaque whatever frame-style said.
+        //
         // Selected fill is painted on the header panel so preset tab colors
         // can replace the accent per tab.
         TabViewControl.Resources["TabViewItemHeaderBackgroundSelected"] = TransparentHeaderSelected;
@@ -836,10 +838,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // every tab rendered its type name "Ghostty.Core.Tabs.TabModel"
         // instead of the title.
         //
-        // Inactive tabs sit on the near-bg tab-bar background, not the
-        // accent background, so the active brush gives them zero contrast
-        // (#342). Pick a luminance-readable foreground over the tab-bar
-        // background and mute it to ~70% so inactive reads as inactive.
+        // Inactive tabs sit on the strip rather than on the accent, so the
+        // active brush gives them zero contrast. RefreshShellInactiveInk picks
+        // their pole against whatever the strip actually is.
         //
         // Calibrate the active title against the accent it sits on. The raw
         // ActiveTabText (cursor-text, or the bg fallback) can land at the
@@ -851,13 +852,63 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
 
-        uint tabBgPacked = PackColor(theme.TabBarBackground);
-        var inactiveColor = ThemeResolution.PreferLightForeground(tabBgPacked)
-            ? Windows.UI.Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)  // white @ ~70%
-            : Windows.UI.Color.FromArgb(0xB3, 0x00, 0x00, 0x00); // black @ ~70%
-        _shellInactiveTextBrush = new SolidColorBrush(inactiveColor);
+        RefreshShellInactiveInk();
         RefreshTabColors();
     }
+
+    /// <summary>
+    /// Unselected tabs are muted rather than given a second colour, so the
+    /// selected tab is the only one carrying full-strength ink.
+    /// </summary>
+    private const byte InactiveInkAlpha = 0xB3;
+
+    /// <summary>
+    /// Recalibrate the unselected titles' ink, and the ground the preset tab
+    /// colours are mixed against, on the surface the text actually lands on.
+    ///
+    /// Which is the strip's own fill only while there is one. A frosted or
+    /// crystal frame leaves the strip bare so the backdrop shows through, and
+    /// the palette's tab-bar shade is then a colour nothing paints: ink
+    /// picked against it was measured at 2.37:1 on the shade the strip really
+    /// rendered, with the other pole sitting at 4.62:1.
+    ///
+    /// Scored by ThemeResolution at the ink's own alpha rather than by
+    /// PreferLightForeground, because 70% ink is a blend of the pole and the
+    /// ground and the pole that wins opaque is not always the pole that wins
+    /// blended.
+    /// </summary>
+    private void RefreshShellInactiveInk()
+    {
+        // Nothing to calibrate off the palette path: there the unselected
+        // titles are left on the element theme's own foreground.
+        if (_shellActiveTextBrush is null) return;
+
+        _stripBackdropPacked = _chromeFillRgb ?? _chromeGroundPacked;
+        _shellInactiveTextBrush = new SolidColorBrush(
+            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
+                ? Windows.UI.Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
+                : Windows.UI.Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        RecolorTabText();
+    }
+
+    /// <summary>
+    /// The backdrop estimate for the surface behind a bare strip, pushed from
+    /// the window because the estimate is a blend of the palette and the
+    /// desktop and only the window has both.
+    ///
+    /// Separate from <see cref="SetChromeFill"/> so the strip is told what is
+    /// behind it whether or not the frame is painting over it: the two answers
+    /// change on different inputs, and folding them into one call would drop
+    /// an OS light/dark flip that never moved the fill.
+    /// </summary>
+    internal void SetChromeGround(uint groundRgb)
+    {
+        if (_chromeGroundPacked == groundRgb) return;
+        _chromeGroundPacked = groundRgb;
+        RefreshShellInactiveInk();
+    }
+
+    private uint _chromeGroundPacked = 0x0C0C0C;
 
     private SolidColorBrush? _shellActiveTextBrush;
     private SolidColorBrush? _shellInactiveTextBrush;
@@ -928,7 +979,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void ClearShellTheme()
     {
-        TabViewControl.Resources.Remove("TabViewBackground");
+        // The cache has to describe what is installed, and the SetChromeFill
+        // that follows is about to replace it. Left stale, that call would
+        // decline to write a fill it thinks is already there.
+        //
+        // TabViewBackground itself is deliberately not removed here: it has
+        // one owner, and a clear from a second place is an answer about the
+        // frame's material given by code that does not know it.
+        _chromeFillRgb = null;
         _shellActiveTextBrush = null;
         _shellInactiveTextBrush = null;
 
@@ -964,6 +1022,47 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _cachedTheme = theme;
         RequestedTheme = theme;
     }
+
+    /// <summary>
+    /// Paint the strip, or leave it to the window backdrop.
+    ///
+    /// Bare is the absence of the override rather than a colour, which is why
+    /// this takes a nullable: writing a transparent brush would still shadow
+    /// whatever the TabView's own theme resource resolves to.
+    ///
+    /// The one owner of TabViewBackground, palette or not. The window resolves
+    /// the shade -- the tab bar's under window-theme=wintty, the desktop's
+    /// otherwise -- and the frame decides whether it is painted at all, so a
+    /// second writer here could only disagree with one of the two.
+    ///
+    /// Only the strip's surface. The selected header keeps the terminal's
+    /// background in every combination, so the active tab reads as continuous
+    /// with the pane below it.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (_chromeFillRgb == fillRgb) return;
+        _chromeFillRgb = fillRgb;
+
+        // The surface the titles sit on just changed, and on the palette path
+        // this call is where that happens: the window resolves the fill after
+        // it hands over the palette, so the ink ApplyShellTheme picked is one
+        // frame behind until here.
+        RefreshShellInactiveInk();
+
+        if (fillRgb is { } rgb)
+            TabViewControl.Resources["TabViewBackground"] = TabColorBrush.FromPackedRgb(rgb);
+        else
+            TabViewControl.Resources.Remove("TabViewBackground");
+
+        // Background resources are only re-read on a theme change; same toggle
+        // ApplyShellTheme needs, and the memoisation above is what keeps it off
+        // every chrome refresh.
+        TabViewControl.RequestedTheme = ElementTheme.Light;
+        TabViewControl.RequestedTheme = _cachedTheme;
+    }
+
+    private uint? _chromeFillRgb;
 
     /// <summary>
     /// Set the default-path selected-tab background and active-title colours.

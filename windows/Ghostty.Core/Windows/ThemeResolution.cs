@@ -133,6 +133,39 @@ public static class ThemeResolution
     }
 
     /// <summary>
+    /// <paramref name="ink"/> laid over <paramref name="ground"/> at
+    /// <paramref name="alpha"/>, packed 0x00RRGGBB. Source-over onto an
+    /// opaque ground, which is what the compositor leaves on screen when a
+    /// translucent brush paints a surface.
+    /// </summary>
+    public static uint CompositeOver(uint ink, byte alpha, uint ground)
+    {
+        var r = Blend((ink >> 16) & 0xFF, (ground >> 16) & 0xFF);
+        var g = Blend((ink >> 8) & 0xFF, (ground >> 8) & 0xFF);
+        var b = Blend(ink & 0xFF, ground & 0xFF);
+        return (r << 16) | (g << 8) | b;
+
+        uint Blend(uint over, uint under)
+            => ((over * alpha) + (under * (255u - alpha)) + 127u) / 255u;
+    }
+
+    /// <summary>
+    /// Whether white or black reads better as ink drawn over
+    /// <paramref name="background"/> at <paramref name="alpha"/>.
+    ///
+    /// Scored with <see cref="ContrastRatio"/> on the composited colour, not
+    /// with <see cref="PreferLightForeground"/>. That helper answers "is this
+    /// surface dark" off a BT.709 luminance split, which is a fair proxy only
+    /// for opaque ink: muted ink is a blend of the pole and the ground, so
+    /// both candidates are pulled towards the ground and the winner can
+    /// change. The two also disagree either side of mid luminance, and mid
+    /// luminance is precisely what a translucent frame makes of the chrome.
+    /// </summary>
+    public static bool PreferLightForegroundAtAlpha(uint background, byte alpha)
+        => ContrastRatio(background, CompositeOver(0xFFFFFFu, alpha, background))
+            >= ContrastRatio(background, CompositeOver(0x000000u, alpha, background));
+
+    /// <summary>
     /// CIE L* for a relative luminance: 0 for black, 100 for white, spaced
     /// so that equal differences look equal.
     /// </summary>

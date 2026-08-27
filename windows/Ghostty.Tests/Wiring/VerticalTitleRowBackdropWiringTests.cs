@@ -67,12 +67,15 @@ public class VerticalTitleRowBackdropWiringTests
         Assert.Equal("_configService.BackgroundColor", ground.WhenTrue.ToString());
         Assert.Equal("EstimatedBackdropGround", ground.WhenFalse.ToString());
 
-        // And that estimate is a real one, fed the live backdrop style rather
-        // than a constant: a solid backdrop is not a blend at all.
+        // And that estimate is a real one, fed the live material rather than
+        // a constant: a solid frame is not a blend at all. The material is
+        // the chrome's own, not the terminal's -- see ChromeGroundStyle,
+        // which falls back to the backdrop whenever the frame is not
+        // covering it.
         var estimate = window.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
             .Single(p => p.Identifier.ValueText == "EstimatedBackdropGround")
             .Call("Core.Shell.BackdropGround.Estimate");
-        Assert.Equal("_currentBackdropStyle", estimate.Arg(2));
+        Assert.Equal("ChromeGroundStyle", estimate.Arg(2));
     }
 
     /// <summary>
