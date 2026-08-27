@@ -41,10 +41,13 @@ namespace Ghostty.Shell;
 /// </summary>
 internal static unsafe partial class SplashWindow
 {
-    // Fallback background when no colour has been persisted yet (first
-    // ever launch). Matches ConfigService's default background so the
-    // handoff to the real window is not a visible colour jump.
-    private const uint DefaultBackgroundRgb = 0x1E1E2E;
+    // Fallback backgrounds when no colour has been persisted yet (first
+    // ever launch). These are the backgrounds of libghostty's built-in
+    // theme pair, so the handoff to the real window is not a visible
+    // colour jump -- which now means picking the half the desktop is on,
+    // because the terminal will.
+    private const uint DefaultDarkBackgroundRgb = 0x131620;
+    private const uint DefaultLightBackgroundRgb = 0xF4F6FB;
 
     // Fallback rect when there is no saved window state, in physical
     // pixels. Close enough to the app's default window that the splash
@@ -1181,8 +1184,42 @@ internal static unsafe partial class SplashWindow
 
     private static uint ResolveBackgroundRgb(Ghostty.Settings.WindowState? state)
     {
-        if (state?.BackgroundRgb is uint saved) return saved & 0x00FFFFFFu;
-        return DefaultBackgroundRgb;
+        // The saved colour is the better answer whenever it can still be
+        // right: it is what the terminal actually came up as last time,
+        // config and all. It stops being right when it was the built-in
+        // theme's and the desktop has flipped since, because the terminal is
+        // about to come up in the other half of the pair.
+        if (state is { BackgroundFollowsOsTheme: false, BackgroundRgb: uint saved })
+            return saved & 0x00FFFFFFu;
+
+        return IsSystemDark()
+            ? DefaultDarkBackgroundRgb
+            : DefaultLightBackgroundRgb;
+    }
+
+    /// <summary>
+    /// The OS light/dark setting, read straight from the registry.
+    /// </summary>
+    /// <remarks>
+    /// Not <c>OsTheme.IsDark</c>: this runs before the XAML application
+    /// exists, and activating a <c>UISettings</c> here costs more than the
+    /// whole splash is allowed. Defaults to dark on any failure, matching
+    /// what the splash did unconditionally before.
+    /// </remarks>
+    private static bool IsSystemDark()
+    {
+        try
+        {
+            var value = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "AppsUseLightTheme",
+                null);
+            return value is int i ? i == 0 : true;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
     }
 
     private static bool RegisterWindowClass()
