@@ -21,6 +21,8 @@ public static class WindowsOnlyKeys
     [
         new("background-style",
             "Backdrop material preset (solid/frosted/crystal)."),
+        new("frame-style",
+            "Window chrome material (solid/frosted/crystal). Defaults to background-style."),
         new("background-tint-color",
             "Tint color overlaid on the acrylic backdrop."),
         new("background-tint-opacity",
