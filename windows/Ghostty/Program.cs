@@ -526,6 +526,30 @@ public static partial class Program
             Environment.Exit(Cli.CliActions.PrintVersion());
         }
 
+        // +crash <kind> is the probe behind the crash coverage matrix
+        // in docs/2026-08-25-crash-reporting-and-diagnostics-design.md.
+        // Intercepted here for the same reason +version is: it must run
+        // before the libghostty CLI dispatcher. Deliberately not a
+        // CliAliases entry, because that set is parity-tested against the
+        // Action enum in src/cli/ghostty.zig.
+        // A bare `+crash` is handled too: without it the argument falls
+        // through to the libghostty dispatcher, which reports an unknown
+        // action rather than the list of kinds the caller was reaching for.
+        if (args.Length > 0 && args[0] == "+crash")
+        {
+            // Arm crash reporting first. This interception happens before
+            // InitGhostty, and ghostty_init is what brings sentry up, so a
+            // trigger fired here would otherwise crash a process with no
+            // reporter attached and every envelope row would read as absent
+            // for a reason that has nothing to do with the backend.
+            if (args.Length > 1)
+            {
+                Cli.CrashTrigger.ArmCrashReporting(TimeSpan.FromSeconds(10));
+            }
+
+            Environment.Exit(Cli.CrashTrigger.Run(args.Length > 1 ? args[1] : ""));
+        }
+
         // Does the command line lead with a bare Windows subcommand, e.g.
         // `wintty list-themes`? This is the same call InitWideFromProcess
         // makes to perform the rewrite, over the same input, so the gate

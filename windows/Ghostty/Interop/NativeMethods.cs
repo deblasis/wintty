@@ -317,6 +317,23 @@ internal static partial class NativeMethods
     internal static partial int InitWide(IntPtr cmdline, UIntPtr len);
 
     /// <summary>
+    /// Block until the crash reporter is armed, returning whether it is.
+    /// </summary>
+    /// <remarks>
+    /// Only for the deliberate crash triggers. The reporter initialises on
+    /// its own thread, so a trigger fired straight after init can beat the
+    /// handler into place; the missing report then reads as "this class
+    /// cannot be captured" when nobody was listening yet. Do not substitute
+    /// a check that sentry's database directory exists: it is created during
+    /// init, before the handler, and it outlives the process, so after the
+    /// first run it is always already there.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_crash_wait_ready")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool CrashWaitReady(uint timeoutMs);
+
+    /// <summary>
     /// Initialize libghostty from this process's own command line.
     /// </summary>
     /// <remarks>
@@ -882,8 +899,11 @@ internal static partial class NativeMethods
 
     // ---- inline theme picker ---------------------------------------------
 
-    // Callback for the inline theme picker. Fired from the Zig/apprt
-    // thread for each preview/confirm event.
+    // Callback for the inline theme picker, fired for each preview/confirm
+    // event. Synchronous, on the calling thread: the picker only ever runs
+    // from the surface's input and scroll redirects, so this arrives inside
+    // the key or scroll call the embedder made -- the UI thread, not an
+    // apprt one.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void InlineThemeCallback(IntPtr namePtr, byte confirmed);
 

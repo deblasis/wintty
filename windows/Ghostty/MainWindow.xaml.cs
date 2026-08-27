@@ -137,7 +137,6 @@ public sealed partial class MainWindow : Window
     private readonly TabBellAnnouncer _bellAnnouncer;
     private readonly WindowThemeManager _themeManager;
     private readonly ShellThemeService _shellTheme;
-    private readonly ThemePreviewService _themePreview;
 
     // Set at the top of OnClosedAsync. Theme callbacks route through the
     // dispatcher, so a switch-then-close can leave an ApplyTheme queued to
@@ -148,12 +147,24 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
+    // The chrome's own material, after the low-power override. Separate from
+    // the field above because background-style answers what the terminal is
+    // made of and frame-style what the window frame is made of; they are the
+    // same value only for as long as nobody sets the second key.
+    private string _currentFrameStyle = "";
+
     // Win32 class-brush kind currently applied via SetClassLongPtr.
     // Cached so repeated reloads on the same style don't re-invoke
     // the Win32 call (and, for the opaque case, don't leak a fresh
     // GDI brush per reload).
     private enum ClassBrushKind { Transparent, Opaque }
     private ClassBrushKind? _lastClassBrushKind;
+
+    // Colour half of the class-brush cache key. The opaque fill is derived
+    // from the palette and the desktop polarity, so a reload can change it
+    // while the kind stays put, and keying on the kind alone meant GDI kept
+    // the colour the window started with.
+    private uint _lastClassBrushArgb;
 
     // True when the HBRUSH currently installed as GCLP_HBRBACKGROUND
     // was allocated by CreateSolidBrush (and therefore must be
@@ -280,6 +291,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal bool IsQuickTerminal { get; }
 
+    /// <summary>
+    /// True once this window's close has started. Process-wide services that
+    /// route work to a window read this so they do not pick one whose panes
+    /// and surfaces are already being torn down.
+    /// </summary>
+    internal bool IsClosing => _isClosed;
+
     internal MainWindow(
         ConfigService configService,
         GhosttyHost bootstrapHost,
@@ -321,8 +339,7 @@ public sealed partial class MainWindow : Window
     /// shared-app ctor. <paramref name="loggerFactory"/> is the
     /// process-wide factory built in App.OnLaunched; MainWindow holds
     /// it to construct loggers for the per-window components it owns
-    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop,
-    /// ThemePreviewService).
+    /// (GhosttyHost's clipboard trio, TaskbarHost, AcrylicBackdrop).
     /// </summary>
     private MainWindow(
         ConfigService configService,
@@ -388,6 +405,16 @@ public sealed partial class MainWindow : Window
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
         _configService = configService;
+
+        // Position is load-bearing, so this does not belong down with the
+        // other service construction. ApplyBackdropStyle resolves the Win32
+        // class brush colour from the shell theme further down this
+        // constructor, and this field is what it reads. Built here it is a
+        // pure derivation of the config that has just been assigned: no
+        // XAML, no HWND, no dispatcher, nothing that InitializeComponent or
+        // the tab hosts have to have run first.
+        _shellTheme = new ShellThemeService(configService);
+
         _configEditor = App.ConfigFileEditor
             ?? throw new InvalidOperationException(
                 "MainWindow: App.ConfigFileEditor is null. " +
@@ -431,7 +458,10 @@ public sealed partial class MainWindow : Window
                 RegisteredRoot = fe.XamlRoot;
                 if (RegisteredRoot != null)
                 {
-                    App.WindowsByRoot[RegisteredRoot] = this;
+                    // App does the insert, because registering is also the
+                    // moment process-wide services may start acting on a
+                    // window and only App knows which those are.
+                    App.NoteRegularWindowRegistered(this);
                 }
             }
         }
@@ -507,13 +537,11 @@ public sealed partial class MainWindow : Window
         ApplyTheme();
         _themeManager.ThemeChanged += OnWindowThemeChanged;
 
-        _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
-        _themePreview = new ThemePreviewService(
-            configService,
-            DispatcherQueue,
-            loggerFactory.CreateLogger<ThemePreviewService>());
-        _themePreview.ListThemesRequested += OnListThemesRequested;
+
+        // The +list-themes pipe server is process-wide, not per window: its
+        // pipe name is per process. App owns the one service and routes the
+        // request here; see App.OnLaunched.
 
         _factory = new PaneHostFactory(_host, configService);
         // Restore a saved session into this window when one was passed and
@@ -1530,25 +1558,6 @@ public sealed partial class MainWindow : Window
         // toggle during teardown puts AppSetColorScheme through the app
         // pointer _host.Dispose is about to free at the end of this method.
         _systemUiSettings.ColorValuesChanged -= OnSystemColorValuesChanged;
-        // The preview service owns a named-pipe server on a background task,
-        // so it raises this from outside the window's own lifetime. Detaching
-        // keeps a LIST_THEMES arriving afterwards from starting a picker on a
-        // window whose surfaces are gone; disposing is what ends the task,
-        // which otherwise ran for the life of the process, holding the
-        // per-process pipe name with nobody listening on it. The cancel is
-        // observed by the awaits inside the accept loop, so the synchronous
-        // wait here is bounded.
-        //
-        // The service is per window and the pipe name is per process, so in a
-        // multi-window session only the first one to start ever owns the pipe
-        // (FirstPipeInstance stands the others down at construction). Closing
-        // that window therefore leaves the session with no server rather than
-        // with one whose only subscriber has detached. Both states are broken
-        // for `+list-themes`; this one at least does not leak. The real fix is
-        // to own the service where the bootstrap host lives, the same shape as
-        // the app-targeted config actions, which App owns for that reason.
-        _themePreview.ListThemesRequested -= OnListThemesRequested;
-        _themePreview.Dispose();
 
         // CompositionTarget.Rendering is static, so a window closed before
         // its first composed frame would otherwise stay subscribed.
@@ -2121,7 +2130,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Apply palette-derived colors to the window chrome when
-    /// window-theme=ghostty is set.
+    /// window-theme=wintty is set.
     /// </summary>
     private void ApplyShellTheme()
     {
@@ -2148,12 +2157,20 @@ public sealed partial class MainWindow : Window
         // Caption buttons: transparent in horizontal mode, opaque in
         // vertical -- see ApplyCaptionButtonChrome().
 
-        VerticalTitleText.Foreground = new SolidColorBrush(
-            Microsoft.UI.ColorHelper.FromArgb(
-                _shellTheme.TitleBarForeground.A,
-                _shellTheme.TitleBarForeground.R,
-                _shellTheme.TitleBarForeground.G,
-                _shellTheme.TitleBarForeground.B));
+        // Only while the palette is actually painting the row. The colour was
+        // picked against the tab-bar shade, and a frosted frame does not put
+        // that shade behind it -- ApplyVerticalTitleBarChrome scores the ink
+        // against the backdrop for that case, the way it does for every other
+        // bare row.
+        if (ChromePaintedFromPalette)
+        {
+            VerticalTitleText.Foreground = new SolidColorBrush(
+                Microsoft.UI.ColorHelper.FromArgb(
+                    _shellTheme.TitleBarForeground.A,
+                    _shellTheme.TitleBarForeground.R,
+                    _shellTheme.TitleBarForeground.G,
+                    _shellTheme.TitleBarForeground.B));
+        }
 
         // Push theme to both tab hosts. RootGrid.Background is owned
         // by ApplyRootGridBackground and refreshed by the caller.
@@ -2263,15 +2280,114 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// The surface the bare-backdrop chrome sits on, packed 0x00RRGGBB.
-    /// Fed the resolved tint opacity rather than the default constant: the
-    /// user can set background-tint-opacity, and at 0.9 the palette all but
-    /// replaces the base.
+    /// Fed the resolver's tuning rather than the palette or the default
+    /// constants: the compositor blends the user's background-tint-color
+    /// at the user's background-tint-opacity, and scoring the ink against
+    /// any other pair means scoring it against a ground that is not on
+    /// screen.
     /// </summary>
-    private uint EstimatedBackdropGround => Core.Shell.BackdropGround.Estimate(
-        _configService.BackgroundColor,
-        Services.OsTheme.IsDark(),
-        _currentBackdropStyle,
-        ResolveAcrylicTuning().tintOpacity);
+    private uint EstimatedBackdropGround
+    {
+        get
+        {
+            var (tint, _, tintOpacity) = ResolveAcrylicTuning();
+            return Core.Shell.BackdropGround.Estimate(
+                ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
+                // The window's own UISettings, the one the root grid is painted from.
+                // A freshly activated instance answers for whatever moment it was
+                // created in, so an OS flip could leave the row painted for one
+                // desktop and its ink scored against the other.
+                Services.OsTheme.IsDark(_systemUiSettings),
+                ChromeGroundStyle,
+                tintOpacity);
+        }
+    }
+
+    /// <summary>
+    /// The material actually behind the chrome.
+    ///
+    /// frame-style can cover the backdrop; it cannot replace it. A solid
+    /// frame is its own ground, and the other two leave whatever
+    /// background-style put there showing -- which is why frosted and crystal
+    /// are indistinguishable as frames: both mean "let the backdrop through",
+    /// and there is one backdrop per window.
+    /// </summary>
+    private string ChromeGroundStyle => _currentFrameStyle == BackdropStyles.Solid
+        ? BackdropStyles.Solid
+        : _currentBackdropStyle;
+
+    /// <summary>
+    /// The frame's material as the chrome actually gets it.
+    ///
+    /// High Contrast pins it solid. Translucency over a backdrop nobody
+    /// controls is the thing that mode exists to remove, so the key stops
+    /// being observable there.
+    ///
+    /// A solid background pins it solid too, and for the opposite reason:
+    /// there is nothing behind the frame to come through. Both pins sit in
+    /// this one expression rather than at each painter, because every
+    /// consumer of the frame's material wants the same answer and three of
+    /// them re-deriving it is three chances to disagree.
+    /// </summary>
+    private string EffectiveFrameStyle => HighContrastChromeActive
+        ? BackdropStyles.Solid
+        : BackdropStyles.FrameOver(_currentFrameStyle, _currentBackdropStyle);
+
+    /// <summary>
+    /// The fill the chrome takes, packed ARGB, where fully transparent means
+    /// "leave it to the backdrop".
+    ///
+    /// The two keys are orthogonal: window-theme picks the hue and
+    /// frame-style picks the material. So the palette is handed to the
+    /// resolver rather than pinned off -- it answers for a solid frame, and a
+    /// frosted or crystal one is transparent whichever hue it was going to
+    /// take. Pinning it off was what made frame-style unobservable under
+    /// window-theme=wintty, which is the combination the key exists to
+    /// create.
+    ///
+    /// Asked with the frame's effective material, so the transparent answer
+    /// is only ever given where something is behind the chrome to come
+    /// through.
+    /// </summary>
+    private uint ChromeFillArgb => RootBackgroundResolver.Resolve(
+        EffectiveFrameStyle,
+        _shellTheme.IsEnabled,
+        ShellThemeChromeArgb,
+        Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+
+    /// <summary>
+    /// True while the terminal palette is actually painting the chrome: the
+    /// window asked for palette-hued chrome and the frame is solid enough to
+    /// carry it.
+    ///
+    /// A frosted or crystal frame answers no. The row is the backdrop there
+    /// whatever hue it was going to take, so everything calibrated against a
+    /// painted row -- the title ink, the caption glyphs, the row separators
+    /// -- has to go back to the bare-chrome answer.
+    /// </summary>
+    private bool ChromePaintedFromPalette =>
+        _shellTheme.IsEnabled
+        && ChromeFillArgb != RootBackgroundResolver.TransparentArgb;
+
+    /// <summary>
+    /// The same fill for the tab strips, packed 0x00RRGGBB, or null when they
+    /// are left to the backdrop.
+    ///
+    /// Nullable rather than a transparent colour because for a strip "bare"
+    /// is the absence of an override rather than a colour with no alpha in
+    /// it: the horizontal strip's surface is a theme resource, and putting it
+    /// back means removing the entry, not writing #00000000 over it.
+    /// </summary>
+    private uint? ChromeStripFill
+    {
+        get
+        {
+            var argb = ChromeFillArgb;
+            return argb == RootBackgroundResolver.TransparentArgb
+                ? null
+                : argb & 0x00FFFFFFu;
+        }
+    }
 
     /// <summary>
     /// Re-derive everything calibrated against the backdrop: the title row's
@@ -2327,7 +2443,7 @@ public sealed partial class MainWindow : Window
 
         Windows.UI.Color dragBg;
         Windows.UI.Color stripMirrorBg;
-        if (_shellTheme.IsEnabled)
+        if (ChromePaintedFromPalette)
         {
             // One shade for the whole row, and it is the sidebar's. The
             // horizontal header paints TabBarBackground, so this row
@@ -2340,9 +2456,20 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            // High Contrast ignores frame-style: translucency over a backdrop
+            // nobody controls is what that mode exists to remove, so the row
+            // stays painted out of Windows' own colours whatever the key says.
+            // It only reaches here without the palette; with it the branch
+            // above already painted the row from the shade HC put in it.
+            //
+            // Otherwise the fill is the frame's material, and for frosted and
+            // crystal that is transparent as a colour rather than the absence
+            // of a brush: the drag region has to keep swallowing the clicks
+            // that would otherwise reach the strip behind it, and a null
+            // Background is not hit-testable.
             dragBg = HighContrastChromeActive
                 ? UnpackTerminalColor(_configService.BackgroundColor)
-                : unpainted;
+                : UnpackArgb(ChromeFillArgb);
             stripMirrorBg = dragBg;
         }
 
@@ -2356,7 +2483,13 @@ public sealed partial class MainWindow : Window
         // against the row rather than left on TextFillColorPrimaryBrush.
         // That resource follows the element theme alone, which is right
         // only while the element theme and the row agree.
-        if (!_shellTheme.IsEnabled)
+        //
+        // A bare frame under window-theme=wintty lands here too: the palette
+        // still names a title colour, but the row it was picked against is
+        // not being painted, so the ink is scored against the backdrop like
+        // any other bare chrome. ApplyShellTheme leaves it to this for the
+        // same reason.
+        if (!ChromePaintedFromPalette)
             VerticalTitleText.Foreground = TabColorBrush.FromPackedRgb(VerticalTitleInk);
 
         if (_lastVerticalTitleStripMirrorBg != stripMirrorBg)
@@ -2384,17 +2517,59 @@ public sealed partial class MainWindow : Window
                 : Visibility.Collapsed;
 
         ApplyChromeSeparators();
+        // After the separators, not before: that call is what tells the strips
+        // the live High Contrast flag and the ground they calibrate against,
+        // and a fill pushed ahead of it repaints them from the previous
+        // frame's answer to both.
+        ApplyStripChromeFill();
     }
 
     /// <summary>
-    /// True when the chrome is bare backdrop and therefore needs its
-    /// boundaries drawn. window-theme=wintty paints its surfaces from the
-    /// palette and High Contrast paints its own from Windows' colours; both
-    /// separate by shade already, and a stroke over either is a second
-    /// boundary where there is one edge.
+    /// Push the chrome's own fill to both tab strips.
+    ///
+    /// The strips are the same surface as the title row, so they take the
+    /// same answer: the palette's shade under a solid frame, the desktop's
+    /// under a solid frame with no palette, and nothing at all under a
+    /// frosted or crystal frame that has a backdrop to reveal. window-theme
+    /// is asked here now -- it names the hue, and refusing to pass it on is
+    /// what left the strips opaque on the one combination frame-style exists
+    /// to create.
+    ///
+    /// High Contrast without the palette is the one answer the window does
+    /// not have. That surface comes from an HC-overridable theme resource,
+    /// which is Windows' own colour rather than one derived from it, so the
+    /// strips are left to resolve it themselves.
+    ///
+    /// Both strips take the same value from the same read. Resolving them
+    /// separately is how the two layouts end up different materials for one
+    /// config, which only shows up mid-switch when they are both on screen.
+    /// </summary>
+    private void ApplyStripChromeFill()
+    {
+        var fill = HighContrastChromeActive && !_shellTheme.IsEnabled
+            ? null
+            : ChromeStripFill;
+        _verticalTabHost.SetChromeFill(fill);
+        _horizontalTabHost.SetChromeFill(fill);
+    }
+
+    /// <summary>
+    /// True when the chrome is one uniform surface and therefore needs its
+    /// boundaries drawn.
+    ///
+    /// Both painted paths separate the rows by shade already, and a stroke
+    /// over either is a second boundary where there is one edge: High
+    /// Contrast paints from Windows' colours, window-theme=wintty from the
+    /// terminal palette.
+    ///
+    /// But window-theme only paints while the frame is solid enough to carry
+    /// it. Ask it for a frosted frame over a translucent backdrop and the
+    /// rows go to the backdrop the way any other bare chrome does, and the
+    /// shade that was dividing them goes with it -- so that case wants the
+    /// stroke back rather than inheriting the palette path's exemption.
     /// </summary>
     private bool ChromeSeparatorsWanted =>
-        !_shellTheme.IsEnabled && !HighContrastChromeActive;
+        !ChromePaintedFromPalette && !HighContrastChromeActive;
 
     /// <summary>
     /// Draw the boundary the backdrop cannot.
@@ -2423,13 +2598,20 @@ public sealed partial class MainWindow : Window
             ChromeSeparatorsWanted ? Core.Shell.ChromeSeparator.Resolve(ground) : null,
             ground,
             HighContrastChromeActive);
+
+        // The horizontal strip draws no lines -- its rows are side by side and
+        // the TabView already edges them -- but it sits on the same ground and
+        // scores its own titles against it. One read feeds both, so the two
+        // layouts cannot come out calibrated against different surfaces for
+        // one config, which only shows up mid-switch with both on screen.
+        _horizontalTabHost.SetChromeGround(ground);
     }
 
     /// <summary>
     /// Caption min/max/close colors. Vertical mode matches whatever the
-    /// title row is: the tab-bar shade under window-theme=wintty, the bare
-    /// backdrop otherwise. Horizontal keeps transparent buttons over the
-    /// tab strip.
+    /// title row is: the tab-bar shade under a palette-painted row, the
+    /// frame's own material otherwise. Horizontal keeps transparent buttons
+    /// over the tab strip.
     /// </summary>
     private void ApplyCaptionButtonChrome()
     {
@@ -2443,7 +2625,7 @@ public sealed partial class MainWindow : Window
             Windows.UI.Color fg;
             Windows.UI.Color hoverBg;
             Windows.UI.Color pressedBg;
-            if (_shellTheme.IsEnabled)
+            if (ChromePaintedFromPalette)
             {
                 // Matches ApplyVerticalTitleBarChrome: the row is uniformly
                 // the tab-bar shade, so hover needs the OTHER theme color to
@@ -2455,12 +2637,13 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                // Transparent so the buttons sit on the same backdrop the
-                // rest of the row does, except under High Contrast, where
-                // the row is still painted from Windows' own colours.
+                // The same fill the rest of the row takes, so the caption lane
+                // cannot end up a different material from the row it is part
+                // of: bare under a frosted or crystal frame, painted under a
+                // solid one, and Windows' own colours under High Contrast.
                 titleBg = HighContrastChromeActive
                     ? UnpackTerminalColor(_configService.BackgroundColor)
-                    : Windows.UI.Color.FromArgb(0, 0, 0, 0);
+                    : UnpackArgb(ChromeFillArgb);
                 fg = UnpackTerminalColor(VerticalTitleInk);
                 var dark = fg.R > 0x7F;
                 hoverBg = dark
@@ -2505,6 +2688,17 @@ public sealed partial class MainWindow : Window
             (byte)(packed >> 16),
             (byte)(packed >> 8),
             (byte)packed);
+
+    /// <summary>
+    /// 0xAARRGGBB to a colour, alpha included -- what the resolvers hand out,
+    /// as opposed to the alpha-less terminal palette above.
+    /// </summary>
+    private static Windows.UI.Color UnpackArgb(uint argb)
+        => Windows.UI.Color.FromArgb(
+            (byte)(argb >> 24),
+            (byte)(argb >> 16),
+            (byte)(argb >> 8),
+            (byte)argb);
 
     /// <summary>
     /// Re-apply tab-host chrome after a horizontal/vertical layout switch.
@@ -2852,6 +3046,11 @@ public sealed partial class MainWindow : Window
     /// Apply the window backdrop based on background-style and
     /// background-opacity config values. Dispatches to the correct
     /// SystemBackdrop implementation for each preset.
+    ///
+    /// Also resolves the chrome's own material from frame-style, which is a
+    /// different question with the same three answers: background-style says
+    /// what the terminal is made of, frame-style what the frame around it is.
+    /// Both live here so the low-power override lands on them from one place.
     /// </summary>
     private void ApplyBackdropStyle()
     {
@@ -2872,40 +3071,68 @@ public sealed partial class MainWindow : Window
                 ? BackdropStyles.Solid
                 : configStyle);
 
-        // Skip if the effective style hasn't changed.
-        if (style == _currentBackdropStyle && SystemBackdrop is not null)
-            return;
+        // Low power flattens the frame for the same reason it flattens the
+        // backdrop: the composition cost is in the translucency, not in which
+        // surface is carrying it. The opacity rule above is deliberately not
+        // repeated here -- background-opacity is the terminal's, and a frame
+        // has no cells to see through.
+        var frameStyle = lowPowerActive
+            ? BackdropStyles.Solid
+            : _configService.FrameStyle;
 
+        // Two decisions, not one. Swapping the SystemBackdrop is expensive and
+        // is worth skipping when the material has not moved; the colours below
+        // are palette-derived and move on a reload that leaves both styles
+        // alone. While one early return covered both, a reload that repainted
+        // the terminal without changing its style never reached the class
+        // brush, which kept the colour the window started with.
+        var backdropChanged = style != _currentBackdropStyle || SystemBackdrop is null;
         _currentBackdropStyle = style;
+        _currentFrameStyle = frameStyle;
 
-        var hwnd = WindowNative.GetWindowHandle(this);
-
-        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
+        // The class brush is the Win32 fill that lands before XAML composes,
+        // so it has to be the colour RootGrid is about to settle on or the
+        // frame flashes on the way there. Same resolver, same inputs, read
+        // after _currentBackdropStyle is already the effective style. It
+        // follows the backdrop rather than the frame: RootGrid is what it has
+        // to agree with, and RootGrid is behind the terminal too.
+        var classBrushArgb = RootBackgroundResolver.Resolve(
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
         switch (style)
         {
             case BackdropStyles.Frosted:
                 if (DesktopAcrylicController.IsSupported())
-                    SystemBackdrop = new AcrylicBackdrop(
-                        tintColor, tintOpacity, luminosityOpacity,
-                        _newAcrylicLogger());
+                {
+                    if (backdropChanged)
+                    {
+                        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
+                        SystemBackdrop = new AcrylicBackdrop(
+                            tintColor, tintOpacity, luminosityOpacity,
+                            _newAcrylicLogger());
+                    }
+                }
                 else
+                {
                     goto case BackdropStyles.Solid;
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                }
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Crystal:
-                SystemBackdrop = new CrystalBackdrop(hwnd);
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                if (backdropChanged)
+                    SystemBackdrop = new CrystalBackdrop(WindowNative.GetWindowHandle(this));
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Solid:
             default:
-                if (MicaController.IsSupported())
-                    SystemBackdrop = new MicaBackdrop();
-                else
-                    SystemBackdrop = null;
-                ApplyWindowClassBrush(ClassBrushKind.Opaque);
+                if (backdropChanged)
+                    SystemBackdrop = MicaController.IsSupported() ? new MicaBackdrop() : null;
+                ApplyWindowClassBrush(ClassBrushKind.Opaque, classBrushArgb);
                 break;
         }
     }
@@ -3076,10 +3303,18 @@ public sealed partial class MainWindow : Window
     /// must not. <see cref="_classBrushOwned"/> tracks that
     /// distinction.
     /// </summary>
-    private void ApplyWindowClassBrush(ClassBrushKind kind)
+    /// <param name="kind">Whether the frame is filled or left to the backdrop.</param>
+    /// <param name="argb">
+    /// The fill colour, packed the way the resolver hands it out. Ignored
+    /// for the transparent kind, but still part of the memoisation key: the
+    /// colour is derived from the palette now, so keying on the kind alone
+    /// swallowed a reload that repainted the same solid frame a new colour.
+    /// </param>
+    private void ApplyWindowClassBrush(ClassBrushKind kind, uint argb)
     {
-        if (_lastClassBrushKind == kind) return;
+        if (_lastClassBrushKind == kind && _lastClassBrushArgb == argb) return;
         _lastClassBrushKind = kind;
+        _lastClassBrushArgb = argb;
 
         var hwnd = WindowNative.GetWindowHandle(this);
         var (brush, owned) = kind switch
@@ -3087,7 +3322,7 @@ public sealed partial class MainWindow : Window
             ClassBrushKind.Transparent =>
                 (Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH), false),
             ClassBrushKind.Opaque =>
-                (CreateSolidBrush(0x000C0C0Cu), true),
+                (CreateSolidBrush(Core.Shell.ColorRef.ToColorRef(argb)), true),
             _ => throw new System.Diagnostics.UnreachableException(
                 $"Unknown ClassBrushKind: {kind}"),
         };
@@ -3212,6 +3447,29 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The shell theme's title bar color packed as ARGB, which is what the
+    /// resolver speaks. Both the Win32 class brush and RootGrid.Background
+    /// feed it this; packing it twice is how the two start disagreeing.
+    /// </summary>
+    private uint ShellThemeBackgroundArgb => PackArgb(_shellTheme.TitleBarBackground);
+
+    /// <summary>
+    /// The shade the palette gives the chrome, packed ARGB.
+    ///
+    /// The tab bar's rather than the title bar's: the title row, the caption
+    /// lane and both strips are one surface, and the tab bar's shade is the
+    /// one they have always taken. RootGrid sits behind the terminal instead
+    /// of beside it and keeps the title bar's, above.
+    /// </summary>
+    private uint ShellThemeChromeArgb => PackArgb(_shellTheme.TabBarBackground);
+
+    private static uint PackArgb(Windows.UI.Color color) =>
+        ((uint)color.A << 24) |
+        ((uint)color.R << 16) |
+        ((uint)color.G << 8) |
+        color.B;
+
+    /// <summary>
     /// Paint RootGrid.Background based on current backdrop style and
     /// shell-theme state. Single source of truth so
     /// ApplyBackdropStyle and ApplyShellTheme never write this
@@ -3220,21 +3478,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyRootGridBackground()
     {
-        var bg = _shellTheme.TitleBarBackground;
-        uint shellBgArgb =
-            ((uint)bg.A << 24) |
-            ((uint)bg.R << 16) |
-            ((uint)bg.G << 8) |
-            bg.B;
-
         var argb = RootBackgroundResolver.Resolve(
-            _currentBackdropStyle, _shellTheme.IsEnabled, shellBgArgb);
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
-        var next = Windows.UI.Color.FromArgb(
-            (byte)(argb >> 24),
-            (byte)(argb >> 16),
-            (byte)(argb >> 8),
-            (byte)argb);
+        var next = UnpackArgb(argb);
 
         if (_lastRootBackground == next) return;
         _lastRootBackground = next;
@@ -4025,6 +4275,18 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+        // Deliberate crash triggers, the same kinds and the same
+        // implementation as `wintty +crash <kind>`. Registered in every
+        // build: the shipped installer is the configuration whose capture
+        // most needs proving, and a Debug-only trigger cannot prove it.
+        //
+        // Deferred to the next tick like every other source: the fault then
+        // lands after the palette popup has torn down, so the captured stack
+        // is the trigger's own rather than WinUI's teardown on top of it.
+        sources.Add(new CrashCommandSource(
+            kind => DispatcherQueue.TryEnqueue(
+                () => Cli.CrashTrigger.Run(kind, TryExecuteBindingAction))));
+
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
         // the var unset leaves the palette unchanged. Defer to the next tick so
@@ -4133,10 +4395,33 @@ public sealed partial class MainWindow : Window
     {
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
+        _ = TryExecuteBindingAction(actionKey);
+    }
+
+    /// <summary>
+    /// Dispatch a binding action against the active surface, reporting
+    /// whether it was performed.
+    ///
+    /// The crash triggers are what need the answer: "crash:render" that
+    /// found no surface, or that libghostty did not recognise, is a no-op,
+    /// and reporting a crash for it would have the operator read the absent
+    /// report as a miss by the reporter.
+    ///
+    /// The split is shaped by the tier machinery rather than by taste. Three
+    /// patch stacks carry hunks whose context is
+    /// <see cref="ExecuteBindingAction"/>'s opening three lines, and plain
+    /// `git apply` is what materialises them, so those three lines cannot
+    /// move. Everything below them can, which is why the body lives here and
+    /// the original method keeps its signature and its first three lines.
+    /// </summary>
+    private bool TryExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return false;
 
         var terminal = leaf.Terminal();
         var surfaceHandle = terminal.SurfaceHandle;
-        if (surfaceHandle == IntPtr.Zero) return;
+        if (surfaceHandle == IntPtr.Zero) return false;
 
         var surface = new GhosttySurface(surfaceHandle);
         var actionBytes = Encoding.UTF8.GetBytes(actionKey);
@@ -4144,7 +4429,8 @@ public sealed partial class MainWindow : Window
         {
             fixed (byte* p = actionBytes)
             {
-                NativeMethods.SurfaceBindingAction(surface, p, (UIntPtr)actionBytes.Length);
+                return NativeMethods.SurfaceBindingAction(
+                    surface, p, (UIntPtr)actionBytes.Length);
             }
         }
     }
@@ -4342,19 +4628,30 @@ public sealed partial class MainWindow : Window
     private IntPtr _pickerHandle;
 
     /// <summary>
-    /// The control and tab the picker's surface belongs to.
+    /// The control whose surface the picker was opened on.
     /// <see cref="_pickerSurface"/> is a copy of a raw pointer and nothing
-    /// zeroes it when that surface is freed, so these are what make the
-    /// liveness check in <see cref="ClosePicker"/> possible.
+    /// zeroes it when that surface is freed, so this is what makes the
+    /// liveness check in <see cref="ClosePicker"/> possible: the control
+    /// clears its own handle on disposal.
     /// </summary>
     private Ghostty.Controls.TerminalControl? _pickerTerminal;
-    private Ghostty.Core.Tabs.TabModel? _pickerTab;
     // Held rather than left local to StartPickerPoll: the dispatcher drives
     // the poll, so the window's teardown has no other way to reach it.
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _pickerPoll;
 
-    private void OnListThemesRequested(object? sender, EventArgs e)
+    /// <summary>
+    /// Open the inline theme picker on this window's active surface. Called
+    /// by App when a LIST_THEMES arrives on the preview pipe; App picks the
+    /// window. UI thread only.
+    /// </summary>
+    internal void ShowInlineThemePicker()
     {
+        // App filters closing windows out of the routing, but the request
+        // crosses a thread hop to get here, so one enqueued before this
+        // window's close is delivered after it -- and every surface the
+        // picker would install itself into is already freed by then.
+        if (_isClosed) return;
+
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
 
@@ -4371,7 +4668,6 @@ public sealed partial class MainWindow : Window
 
         _pickerSurface = new GhosttySurface(surfaceHandle);
         _pickerTerminal = terminal;
-        _pickerTab = _tabManager.ActiveTab;
 
         // Theme callback: apply preview/confirm colors on the UI thread.
         _inlineThemeCb = (namePtr, confirmed) =>
@@ -4381,12 +4677,24 @@ public sealed partial class MainWindow : Window
                 var name = Marshal.PtrToStringUTF8(namePtr);
                 if (name is null) return;
 
-                // The callback fires from the Zig/apprt thread. Dispatch
-                // to the UI thread so ConfigService and ShellThemeService
-                // updates happen on the right thread.
+                // Not a thread hop: the picker calls this synchronously from
+                // the surface's input and scroll redirects, so it arrives
+                // inside the key or scroll call the terminal control made,
+                // on the UI thread. The enqueue earns its place for the
+                // other reason -- it keeps ConfigService and
+                // ShellThemeService off the stack of a native input
+                // callback, rather than re-entering libghostty while it is
+                // still handling the key that got us here.
                 DispatcherQueue.TryEnqueue(() =>
                 {
-                    _themePreview.ApplyThemePreview(name);
+                    // Null until OnLaunched builds the service and again
+                    // once the shutdown's finally block clears it; a picker
+                    // keystroke in flight across this dispatch can land in
+                    // either gap. Non-null is not proof the service is still
+                    // live -- the shutdown disposes it well before that
+                    // clearing -- but applying colors after the dispose is
+                    // fenced off by ConfigService's own shutdown flag.
+                    Ghostty.App.ApplyThemePreview?.Invoke(name);
                 });
             }
             catch { }
@@ -4394,18 +4702,62 @@ public sealed partial class MainWindow : Window
         var cbPtr = Marshal.GetFunctionPointerForDelegate(_inlineThemeCb);
 
         _pickerHandle = NativeMethods.SurfaceListThemes(_pickerSurface, cbPtr);
+        if (_pickerHandle == IntPtr.Zero)
+        {
+            // No picker was installed -- no redirects, no allocation -- so
+            // there is nothing to hand back and ClosePicker returns on the
+            // zero handle before it reaches the clears below. Without this
+            // the window keeps a raw copy of a surface pointer that whoever
+            // owns that surface is free to release, and a strong reference
+            // to the control and its whole pane subtree, until some later
+            // picker opens or the window dies.
+            _pickerSurface = default;
+            _pickerTerminal = null;
+            _inlineThemeCb = null;
+            return;
+        }
+
+        // The only warning that this surface is about to go. Closing the
+        // picker's tab frees its leaves before it announces the tab is gone,
+        // so nothing tab-level runs early enough: by then the deinit below
+        // can no longer run, and the picker allocation, its theme arena, the
+        // 50ms poll and the control's whole visual subtree are stranded for
+        // the life of the window.
+        //
+        // Taken out after the open succeeds, not alongside the field
+        // assignments above, so the single detach in ClosePicker is enough: a
+        // subscription then only ever exists while _pickerHandle is non-zero,
+        // which is exactly when ClosePicker runs past its early return.
+        terminal.SurfaceDisposing += OnPickerSurfaceDisposing;
+
         // Picker is now active. handleKey fires on each key event and
         // sets should_quit when the user confirms/cancels. We poll on
         // a timer to clean up, avoiding a thread that races with the
         // input redirect callback.
-        if (_pickerHandle != IntPtr.Zero)
-            StartPickerPoll();
+        StartPickerPoll();
+    }
+
+    /// <summary>
+    /// The surface the picker is installed on is being freed. Close the picker
+    /// now, while the deinit can still reach it: this runs above
+    /// <c>SurfaceFree</c>, so the redirects come off and the allocation comes
+    /// back instead of being stranded.
+    /// </summary>
+    private void OnPickerSurfaceDisposing(object? sender, EventArgs e)
+    {
+        // Act on the control this picker was opened on, never on whatever
+        // raised the event: a stale subscription -- one taken out for a picker
+        // that has since been replaced -- must not tear down the current one.
+        if (!ReferenceEquals(sender, _pickerTerminal)) return;
+
+        ClosePicker();
     }
 
     private void StartPickerPoll()
     {
-        // Use a DispatcherQueue timer so cleanup runs on the UI thread
-        // with no race against the apprt thread's input redirect.
+        // A DispatcherQueue timer rather than a polling thread, so the
+        // cleanup lands on the same thread the input redirect runs the
+        // picker from and cannot tear it down mid-keystroke.
         //
         // One poll at a time: a second picker replaces _pickerHandle, and a
         // leftover timer would then be polling the new picker and could run
@@ -4472,29 +4824,56 @@ public sealed partial class MainWindow : Window
         // A non-zero handle does not mean the surface behind it is still
         // there. Deinit writes through that pointer -- it clears three
         // redirects and pushes pty input -- so running it against a freed
-        // surface is a write into freed memory, and closing the picker's tab
-        // frees the surface without touching anything here.
+        // surface is a write into freed memory.
+        //
+        // The control now says so before it frees anything, which is what
+        // gets a tab close here while the deinit still means something. The
+        // mismatch below is the residual case: any path that reaches the free
+        // without this window being told.
         //
         // The control zeroes its own handle when it disposes the surface, so
-        // a mismatch means the surface is gone. The tab check answers the
-        // other direction: a detached tab carries its live surface to another
-        // window, and deiniting from here would strip the redirects of a
-        // window that never closed.
+        // a mismatch means the surface is gone and nothing can reach the
+        // picker any more. That is the only case where skipping is right, and
+        // it strands the picker allocation, which is what happened before this
+        // path existed at all. Leaking it beats writing through a dangling
+        // pointer.
         //
-        // When neither holds, the picker allocation is stranded, which is
-        // what happened before this path existed at all. Leaking it is the
-        // right trade against writing through a dangling pointer.
-        var live = _pickerTerminal is { } terminal
-            && terminal.SurfaceHandle == _pickerSurface.Handle
-            && _pickerTab is { } tab
-            && _tabManager.Tabs.Contains(tab);
-        if (live)
-            NativeMethods.SurfaceListThemesDeinit(_pickerSurface, _pickerHandle);
-
+        // Deliberately NOT conditioned on the tab still being ours. A detached
+        // tab carries its live surface to another window with this picker's
+        // input, scroll and resize redirects still installed on it, and this
+        // deinit is the only thing that clears them or frees the picker. Not
+        // running it leaves that window wedged in the picker's alt screen with
+        // its input redirected, and drops the last GC root for the delegate
+        // whose function pointer the picker still holds, so the next keystroke
+        // there is a callback on a collected delegate, which kills the process
+        // rather than throwing. Cleaning up after our own picker is a repair
+        // for that window, not damage to it.
+        //
+        // Ownership of the picker leaves this window here, before the deinit
+        // rather than after it. The native side only checks the pointer is
+        // non-null and then destroys the allocation, so it is not idempotent,
+        // and a second call through a handle the field was still holding is a
+        // double free. Anything that re-entered ClosePicker while the deinit
+        // was running would find a zero handle and turn back at the early
+        // return above instead.
+        var handle = _pickerHandle;
         _pickerHandle = IntPtr.Zero;
+
+        if (_pickerTerminal is { } terminal)
+        {
+            // Taken back here rather than left to the control to null when it
+            // disposes, because the control can outlive this window: a
+            // detached tab carries it to another window, and a subscription
+            // left on it would keep this closed window reachable from a
+            // control it no longer owns.
+            terminal.SurfaceDisposing -= OnPickerSurfaceDisposing;
+
+            if (terminal.SurfaceHandle == _pickerSurface.Handle)
+                NativeMethods.SurfaceListThemesDeinit(_pickerSurface, handle);
+        }
+
         _pickerSurface = default;
         _pickerTerminal = null;
-        _pickerTab = null;
         _inlineThemeCb = null;
     }
 }

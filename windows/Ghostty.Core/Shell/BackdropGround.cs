@@ -73,7 +73,7 @@ public static class BackdropGround
         // disagreeing is how chrome ends up calibrated against a surface it is
         // not actually drawn on: black ink on #0C0C0C, measured at 1.1:1.
         var root = RootBackgroundResolver.Resolve(
-            backdropStyle, shellThemeEnabled: false, shellThemeBgArgb: 0);
+            backdropStyle, shellThemeEnabled: false, shellThemeBgArgb: 0, osDark);
         if (root != RootBackgroundResolver.TransparentArgb)
             return root & 0x00FFFFFFu;
 

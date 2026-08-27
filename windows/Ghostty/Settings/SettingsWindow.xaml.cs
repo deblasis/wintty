@@ -93,7 +93,7 @@ internal sealed partial class SettingsWindow : Window
         // Settings UI follows the OS theme unless window-theme is
         // explicitly "light" or "dark". Unlike the terminal chrome,
         // the config pane should feel OS-native by default; a user on
-        // window-theme=ghostty with a dark palette might still prefer
+        // window-theme=wintty with a dark palette might still prefer
         // a bright settings window if their OS is in light mode.
         _themeManager = new WindowThemeManager(
             _configService, DispatcherQueue, ThemeFallbackStyle.System);

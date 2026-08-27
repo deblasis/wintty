@@ -141,13 +141,15 @@ internal sealed partial class VerticalTabStrip : UserControl
             : new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
 
     /// <summary>
-    /// Opaque pane chrome from the terminal palette when window-theme=wintty.
+    /// Pane chrome from the terminal palette when window-theme=wintty.
+    ///
+    /// Everything except the lane's own surface, which is SetChromeFill's:
+    /// the palette names its shade, frame-style decides whether it is painted
+    /// at all, and only the window has both answers.
     /// </summary>
-    internal void ApplyShellChrome(ShellThemeService theme, SolidColorBrush paneBg)
+    internal void ApplyShellChrome(ShellThemeService theme)
     {
         _shellThemeActive = true;
-        Background = paneBg;
-        _stripBackdropPacked = PackColor(theme.TabBarBackground);
         ApplyTransparentNavPaneSurface();
 
         // Match horizontal TabHost: accent fill on the selected row.
@@ -162,14 +164,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
 
-        uint tabBgPacked = PackColor(theme.TabBarBackground);
-        _shellInactiveTextBrush = new SolidColorBrush(
-            ThemeResolution.PreferLightForeground(tabBgPacked)
-                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+        RefreshShellInactiveInk();
 
         ApplySelectedForegroundResources(_shellActiveTextBrush);
-        ApplyInactiveForegroundResources(_shellInactiveTextBrush);
 
         var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
         var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
@@ -179,6 +176,39 @@ internal sealed partial class VerticalTabStrip : UserControl
         RefreshNavViewTheme();
         RecolorNavItems();
         RefreshSelectionChrome();
+    }
+
+    /// <summary>
+    /// Unselected rows are muted rather than given a second colour, so the
+    /// selected row is the only one carrying full-strength ink.
+    /// </summary>
+    private const byte InactiveInkAlpha = 0xB3;
+
+    /// <summary>
+    /// Recalibrate the unselected rows' ink, and the ground the preset tab
+    /// colours are mixed against, on the surface the text actually lands on.
+    ///
+    /// Which is the lane's own fill only while there is one. A frosted or
+    /// crystal frame leaves the lane bare so the backdrop shows through, and
+    /// the palette's tab-bar shade is then a colour nothing paints: ink
+    /// picked against it was measured at 2.37:1 on the shade the strip really
+    /// rendered, with the other pole sitting at 4.62:1.
+    ///
+    /// Scored by ThemeResolution at the ink's own alpha rather than by
+    /// PreferLightForeground, because 70% ink is a blend of the pole and the
+    /// ground and the pole that wins opaque is not always the pole that wins
+    /// blended.
+    /// </summary>
+    private void RefreshShellInactiveInk()
+    {
+        if (!_shellThemeActive) return;
+
+        _stripBackdropPacked = _chromeFillRgb ?? _chromeGroundPacked;
+        _shellInactiveTextBrush = new SolidColorBrush(
+            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
+                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        ApplyInactiveForegroundResources(_shellInactiveTextBrush);
     }
 
     /// <summary>
@@ -206,8 +236,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         // clearing the surface there leaves the lane with nothing painting it
         // at all. LayerFillColorDefaultBrush is HC-overridable and resolves
         // to a system colour, which is the surface that mode wants.
+        //
+        // And except when frame-style asks for a solid frame, which is the
+        // one case where the strip is meant to be a surface again. That fill
+        // is the same one the title row takes, so the two rows stay one
+        // piece; the strokes still separate them, because a uniform fill
+        // divides them no better than a uniform backdrop did.
         var hc = _highContrast;
-        Background = hc ? ResolveThemeBrush("LayerFillColorDefaultBrush") : TransparentBrush;
+        Background = hc
+            ? ResolveThemeBrush("LayerFillColorDefaultBrush")
+            : _chromeFillRgb is { } chromeFill
+                ? TabColorBrush.FromPackedRgb(chromeFill)
+                : TransparentBrush;
         _stripBackdropPacked = hc ? PackColor(((SolidColorBrush)Background).Color)
                                   : _chromeGroundPacked;
         ApplyTransparentNavPaneSurface();
@@ -363,8 +403,56 @@ internal sealed partial class VerticalTabStrip : UserControl
     // path lets the backdrop through. Pushed in rather than detected here so
     // the strip and the window cannot disagree about which mode is live.
     private bool _highContrast;
+    // The frame's own fill, or null while the strip is left to the backdrop.
+    // Pushed in for the same reason the flag above is: frame-style is a
+    // window-level answer and the strip must not re-derive it.
+    private uint? _chromeFillRgb;
     private SolidColorBrush? _rowSeparatorBrush;
     private readonly List<Border> _rowSeparators = new();
+
+    /// <summary>
+    /// Paint the strip lane, or leave it to the window backdrop.
+    ///
+    /// Both modes, because the palette path can be asked for a bare lane too:
+    /// window-theme names the shade and frame-style decides whether it is
+    /// painted. The default path rebuilds the whole pane chrome around the
+    /// new surface; the palette path swaps the surface alone, because
+    /// window-theme still owns the accent and the foregrounds either way.
+    ///
+    /// Only the lane's own surface. The selected row keeps its fill from the
+    /// terminal in every combination: the seam cover is cut from that fill,
+    /// and a translucent one reopens the join with the pane that the row
+    /// exists to close.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (_chromeFillRgb == fillRgb) return;
+        _chromeFillRgb = fillRgb;
+        if (_shellThemeActive)
+        {
+            ApplyShellPaneSurface();
+            // The surface the rows' text sits on just changed, and on the
+            // palette path this call is where that happens: the window
+            // resolves the fill after it hands over the palette, so the ink
+            // ApplyShellChrome picked is one frame behind until here.
+            RefreshShellInactiveInk();
+            RecolorNavItems();
+        }
+        else ApplyDefaultPaneChrome(_elementTheme);
+    }
+
+    /// <summary>
+    /// The lane's surface on the palette path.
+    ///
+    /// No High Contrast arm, unlike the default path: that mode pins the
+    /// frame solid at the window, so the fill that arrives here is the
+    /// palette's own shade -- which under High Contrast is Windows' colour
+    /// already, because the palette is.
+    /// </summary>
+    private void ApplyShellPaneSurface() =>
+        Background = _chromeFillRgb is { } fill
+            ? TabColorBrush.FromPackedRgb(fill)
+            : TransparentBrush;
 
     /// <summary>
     /// Colour for the lines between rows, or null to draw none.
@@ -380,7 +468,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         _rowSeparatorBrush = separatorRgb is { } rgb
             ? TabColorBrush.FromPackedRgb(rgb)
             : null;
-        if (!_shellThemeActive) _stripBackdropPacked = groundRgb;
+        // The palette path is on the backdrop too whenever the frame is
+        // translucent, so it takes the same ground rather than staying on the
+        // shade the palette named for a lane that is not being painted.
+        if (_shellThemeActive) RefreshShellInactiveInk();
+        else _stripBackdropPacked = groundRgb;
         // The lane's own surface depends on the HC flag that just landed.
         if (!_shellThemeActive) ApplyDefaultPaneChrome(_elementTheme);
         UpdateSelectionRow();
@@ -653,9 +745,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_shellInactiveTextBrush is not null)
             return _shellInactiveTextBrush;
         return new SolidColorBrush(
-            ThemeResolution.PreferLightForeground(_stripBackdropPacked)
-                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
+                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
     }
 
     private static readonly string[] NavItemForegroundKeys =

@@ -247,19 +247,19 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
         if (!theme.IsEnabled) return;
 
         _shellThemeActive = true;
-        var tabBgBrush = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(
-            theme.TabBarBackground.A, theme.TabBarBackground.R,
-            theme.TabBarBackground.G, theme.TabBarBackground.B));
-        Background = tabBgBrush;
-        StripRoot.Background = tabBgBrush;
-        _strip.ApplyShellChrome(theme, tabBgBrush);
+        // The two surfaces are SetChromeFill's, here as on the default path.
+        // The palette names their shade and the frame decides whether they
+        // take it at all, and only that call has both answers.
+        _strip.ApplyShellChrome(theme);
     }
 
     internal void ClearShellTheme()
     {
         _shellThemeActive = false;
-        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        StripRoot.ClearValue(Grid.BackgroundProperty);
+        // The lane's two surfaces are deliberately not written here. They are
+        // SetChromeFill's, which the window always calls after this and which
+        // knows the frame's material; a clear from here is a second answer
+        // that only ever disagrees.
         _strip.ApplyDefaultPaneChrome(RequestedTheme);
     }
 
@@ -268,7 +268,6 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
         RequestedTheme = theme;
         if (!_shellThemeActive)
         {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             _strip.ApplyDefaultPaneChrome(theme);
         }
         else
@@ -283,6 +282,43 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// </summary>
     internal void SetRowSeparator(uint? separatorRgb, uint groundRgb, bool highContrast)
         => _strip.SetRowSeparator(separatorRgb, groundRgb, highContrast);
+
+    /// <summary>
+    /// The frame's fill for the host's own two surfaces and for the strip,
+    /// or null to leave them to the backdrop.
+    ///
+    /// Asked on both paths, because both have a lane to paint. The strip
+    /// control only covers the middle row of StripRoot -- the icon lane and
+    /// the pane toggle above it and the new-tab button below it are the
+    /// host's own two surfaces -- so gating these on window-theme left the
+    /// larger part of the lane on the backdrop whatever frame-style said,
+    /// while the title row an inch above it went opaque. window-theme names
+    /// the shade and frame-style decides whether it is painted; neither of
+    /// those questions is asked again here.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (fillRgb is { } rgb)
+        {
+            var brush = TabColorBrush.FromPackedRgb(rgb);
+            Background = brush;
+            StripRoot.Background = brush;
+        }
+        else
+        {
+            // Transparent rather than cleared: StripRoot carries the lane's
+            // ContextRequested handler, and a null Background is not
+            // hit-testable, so clearing it takes the strip's context menu
+            // with it everywhere the rows do not reach.
+            Background = TransparentBrush;
+            StripRoot.Background = TransparentBrush;
+        }
+
+        _strip.SetChromeFill(fillRgb);
+    }
+
+    private static readonly SolidColorBrush TransparentBrush =
+        new(Microsoft.UI.Colors.Transparent);
 
     internal void SetAccentColor(Windows.UI.Color color)
     {
