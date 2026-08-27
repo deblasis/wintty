@@ -88,6 +88,26 @@
 # row AND a tab strip as separate surfaces; the horizontal strip is not
 # sampled.
 #
+# THEME AXIS (#792). Each case stages a `theme` alongside `window-theme` and
+# `frame-style`, and the spanning set runs twice: once per half of the built-in
+# pair, staged as real theme files under the same root the config lives in.
+# A name is the only thing both halves of the app can resolve - libghostty
+# loads `theme = <name>` from the XDG themes directory (theme.zig) and the C#
+# shell resolves the same name against the config root's themes directories
+# (ThemeSearchPath) - so the palette that fills the terminal also frames it.
+# The catalogue is enumerated under that same staging, which makes it the
+# catalogue the launched processes can actually reach rather than the user's
+# own; a name the staging cannot resolve was exactly how the theme axis used
+# to be silently inert.
+#
+# The launches pass `--config-file=<staged path>` (#787) so the config reaches
+# libghostty by name as well as by discovery. The XDG_CONFIG_HOME override
+# STAYS, and not out of sentiment: the Windows shell - the half that owns
+# window-theme, frame-style and the vertical layout - reads every file-derived
+# key through ghostty_config_open_path, which is computed from the XDG default
+# path and does not know `--config-file` exists. Drop the override and the two
+# halves of one window read two different configs.
+#
 # Seeded: -Seed replays the case order and every randomized draw.
 #
 # Exit codes: 0 clean, 2 findings in the build under test, 1 could not run.
@@ -96,7 +116,7 @@ param(
     [Parameter(Mandatory)][string]$OutDir,
     [int]$Seed = 0,
     # Extra cases beyond the spanning set, drawn from the seeded RNG: a theme
-    # from the real catalogue and the three keys from their value sets. They
+    # from the staged catalogue and the three keys from their value sets. They
     # get the contrast layer and liveness only - the material layer needs a
     # matched pair of configs, which a random draw does not give.
     [int]$Random = 0
@@ -778,12 +798,83 @@ $polarity = Get-DesktopPolarity
 $highContrast = [FSz]::HighContrastOn()
 Write-Host "desktop=$polarity highContrast=$highContrast (both read, neither set)"
 
+# ---- config staging -------------------------------------------------------
+#
+# Created before the catalogue below, because the catalogue is taken under it.
+
+$stage = Join-Path $env:TEMP ('wintty-frame-fuzz-{0:HHmmss}' -f (Get-Date))
+$tempXdg = Join-Path $stage 'xdg'
+New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
+$configPath = Join-Path $tempXdg 'wintty\config.wintty'
+
+# The built-in pair, staged as theme files. The colours are wintty_theme.zig's
+# own (the pair the product overlays when no theme is configured), written
+# under the themes directory both halves of the app search:
+#   libghostty   $XDG_CONFIG_HOME/wintty/themes      (theme.zig, Location.user)
+#   C# chrome    <config root>/wintty/themes         (ThemeSearchPath)
+# which are the same directory under this staging. Without these files a
+# `theme =` line names something neither half can resolve, and the theme axis
+# measures nothing while looking like it ran.
+$themesDir = Join-Path $tempXdg 'wintty\themes'
+New-Item -ItemType Directory -Force -Path $themesDir | Out-Null
+
+$winttyThemeLight = @'
+background = #f4f6fb
+foreground = #1e2333
+cursor-color = #1668c4
+selection-background = #cfe0f5
+selection-foreground = #141828
+palette = 0=#1e2333
+palette = 1=#c0334a
+palette = 2=#1f7a4d
+palette = 3=#8a6410
+palette = 4=#1668c4
+palette = 5=#7a3fbf
+palette = 6=#0f6e80
+palette = 7=#b4bacb
+palette = 8=#666e81
+palette = 9=#a82a3e
+palette = 10=#186540
+palette = 11=#73530c
+palette = 12=#0f55a6
+palette = 13=#65329f
+palette = 14=#0b5a69
+palette = 15=#cfd5e3
+'@
+$winttyThemeDark = @'
+background = #131620
+foreground = #d5d9e5
+cursor-color = #4babef
+selection-background = #2b3350
+selection-foreground = #f2f4fa
+palette = 0=#2a2f3d
+palette = 1=#f0787f
+palette = 2=#7fd69b
+palette = 3=#edc77a
+palette = 4=#4babef
+palette = 5=#b98cf0
+palette = 6=#5bd5e8
+palette = 7=#d5d9e5
+palette = 8=#7a8296
+palette = 9=#ff9aa0
+palette = 10=#9ce6b4
+palette = 11=#ffd99a
+palette = 12=#7bc5ff
+palette = 13=#d3abff
+palette = 14=#8ae7f5
+palette = 15=#f2f4fa
+'@
+[IO.File]::WriteAllText((Join-Path $themesDir 'wintty-light'), $winttyThemeLight + "`r`n")
+[IO.File]::WriteAllText((Join-Path $themesDir 'wintty-dark'), $winttyThemeDark + "`r`n")
+
 # ---- theme catalogue ------------------------------------------------------
-# Enumerated BEFORE XDG_CONFIG_HOME is overridden. The override is what hides
-# the user's own theme directories from the process, so a catalogue taken after
-# it is a catalogue of what this harness can no longer reach. --plain is
-# load-bearing: without it the TUI takes over as soon as stdout is a terminal,
-# and what comes back is a screenful of escape sequences.
+# Enumerated UNDER the staging, by handing the child the same XDG_CONFIG_HOME
+# the case launches get. The catalogue this answers is the one the launched
+# processes can actually resolve; enumerating the user's own instead was how a
+# theme name the staging could not resolve got into the config, leaving the
+# axis silently inert. --plain is load-bearing: without it the TUI takes over
+# as soon as stdout is a terminal, and what comes back is a screenful of
+# escape sequences.
 function Get-ThemeCatalogue([string]$Exe) {
     $names = [System.Collections.Generic.List[string]]::new()
     $out = ''
@@ -796,6 +887,9 @@ function Get-ThemeCatalogue([string]$Exe) {
         $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
         $psi.ArgumentList.Add('+list-themes')
         $psi.ArgumentList.Add('--plain')
+        # The child reads this dictionary rather than the harness process's
+        # own environment, so the staging never leaks into anything else here.
+        $psi.EnvironmentVariables['XDG_CONFIG_HOME'] = $tempXdg
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
@@ -821,20 +915,30 @@ function Get-ThemeCatalogue([string]$Exe) {
 $catalogue = @(Get-ThemeCatalogue $ExePath)
 Write-Host "themes=$($catalogue.Count)"
 
+# The pair has to be IN that catalogue. This is the acceptance gate for the
+# whole theme axis: a staging that cannot enumerate its own themes is the old
+# defect wearing a new directory, and every case after this would measure
+# defaults while claiming to measure themes.
+foreach ($must in @('wintty-light', 'wintty-dark')) {
+    if ($catalogue -notcontains $must) {
+        throw ("HARVEST_MISS: the staged theme '$must' is not in the catalogue the process sees under " +
+               "the staging ($($catalogue.Count) name(s)$(if ($catalogue.Count -gt 0) { ': ' + ($catalogue -join ', ') })), " +
+               'so no case could load it and the theme axis would be silently inert')
+    }
+}
+
 # ---- the gate -------------------------------------------------------------
 # Above the top-level try and above the staged config and every case launch:
 # refusing over an open Wintty is the most common way this run ends.
 Assert-NoWintty
 
-$stage = Join-Path $env:TEMP ('wintty-frame-fuzz-{0:HHmmss}' -f (Get-Date))
-$tempXdg = Join-Path $stage 'xdg'
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-$configPath = Join-Path $tempXdg 'wintty\config.wintty'
-
 <#
     One case is one config plus what this harness expects of it.
 
-    theme         a name from the catalogue, or $null to write no theme line
+    theme         a name from the staged catalogue, or $null to write no theme
+                  line. Every staged name resolves for BOTH halves of the app:
+                  libghostty and the C# chrome search the same staged themes
+                  directory (see the staging block above).
     windowTheme   'system' or 'wintty'
     frameStyle    'solid' | 'frosted' | 'crystal', or $null to leave it unset
                   so it inherits background-style
@@ -953,7 +1057,15 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         # what got measured that nothing in the report would explain. Cleared
         # for the children and restored in the outer finally, same as XDG.
         Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
-        $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path $Exe)
+        # --config-file hands libghostty the staged config by name (#787; long
+        # `=` form only), on top of the XDG discovery below it. Started through
+        # ProcessStartInfo rather than Start-Process because ArgumentList
+        # quoting of paths with spaces is the .NET side's to do: Start-Process
+        # joins the list with spaces and passes them through unquoted.
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($Exe)
+        $psi.ArgumentList.Add("--config-file=$configPath")
+        $psi.WorkingDirectory = Split-Path $Exe
+        $proc = [System.Diagnostics.Process]::Start($psi)
         [void](Wait-Ready $proc)
         $main = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
         if (-not $main) { throw 'HARVEST_MISS: window vanished after ready' }
@@ -974,6 +1086,27 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         # Off the same capture as the chrome, so the palette and the chrome it
         # is estimated against are the same instant of the same window.
         $paletteSample = Get-PaletteSample $shotA $surfaces
+
+        # A capture of a window that has not drawn yet. The terminal body is
+        # the theme's own background, and neither half of the staged pair is
+        # near black (#f4f6fb, #131620), so a sample reading at pure black is
+        # not a colour anything chose: the surface had not been composited
+        # when the screen was read. Scoring regions off that capture filed
+        # contrast defects on a working build (2026-08-28: two consecutive
+        # cases at ink 0,0,0 on fill 0,0,0, both clean on the relaunch), so it
+        # is refused rather than judged and the case loop below retries it
+        # once before the run gives the area up.
+        #
+        # Not under High Contrast: there the terminal can legitimately paint a
+        # system scheme colour, black included, and the material layer this
+        # sample feeds has already stood down - refusing cases over a colour
+        # the OS chose would turn the HC stand-down into an exit 1.
+        if (-not $highContrast -and $null -ne $paletteSample -and $paletteSample.R -le 8 -and
+            $paletteSample.G -le 8 -and $paletteSample.B -le 8) {
+            throw ("HARVEST_MISS: unpainted window - the terminal body read " +
+                   "$($paletteSample.R),$($paletteSample.G),$($paletteSample.B), which no theme this " +
+                   'staging loads paints, so the window had not drawn when the screen was captured')
+        }
 
         # Where each region sat ON THE SCREEN, kept so the material layer can
         # come back to the same rectangle after every window is down and read
@@ -1074,27 +1207,21 @@ function New-Case([string]$Id, [string]$WindowTheme, $FrameStyle, [string]$Backg
     }
 }
 
-# One theme for the whole spanning set, chosen to sit on the same side as the
-# desktop so the chrome is not fighting the caption buttons for the whole run.
-# The built-in wintty-light / wintty-dark pair is NOT reachable from this
-# branch - it is registered by a change that is not in this stack - so the
-# catalogue is asked for a name instead, and a run with no catalogue at all
-# writes no theme line and says so.
-function Select-SpanningTheme($Catalogue, [string]$Polarity) {
-    if ($Catalogue.Count -eq 0) { return $null }
-    $wanted = if ($Polarity -eq 'dark') { @('wintty-dark', 'Builtin Dark', 'Builtin Solarized Dark') }
-              else { @('wintty-light', 'Builtin Light', 'Builtin Solarized Light') }
-    foreach ($w in $wanted) {
-        $hit = @($Catalogue | Where-Object { $_ -eq $w })
-        if ($hit.Count -gt 0) { return $hit[0] }
-    }
-    # Nothing recognised: take the first name in the catalogue rather than a
-    # random one, so the spanning set stays deterministic across seeds.
-    return ($Catalogue | Sort-Object)[0]
-}
-
-$spanTheme = Select-SpanningTheme $catalogue $polarity
-Write-Host "spanning theme=$(if ($spanTheme) { $spanTheme } else { '<none: no catalogue>' })"
+# The spanning set takes the half of the pair OPPOSITE the desktop, and the
+# choice is measured rather than aesthetic: a translucent frame composites the
+# palette over the system base for the active polarity, so a palette sitting on
+# the same side as the desktop lands within a few counts of the opaque frame's
+# own shade (wintty-dark on a dark desktop: the tint at the default opacity
+# composites to 28,29,32 against an opaque 12,12,12 - a separation the
+# comparator's own 20-count threshold cannot resolve, verified live 2026-08-28
+# where a build matching its own model to within 2 counts still scored 18).
+# The opposite half moves the composite 70+ counts, which is the side the
+# must-differ rules can actually judge. The matching half still runs, as the
+# mirrored set below, for the contrast layer and the degrade rule, which are
+# palette-independent.
+$spanTheme = if ($polarity -eq 'dark') { 'wintty-light' } else { 'wintty-dark' }
+$altTheme = if ($polarity -eq 'dark') { 'wintty-dark' } else { 'wintty-light' }
+Write-Host "spanning theme=$spanTheme (opposite the $polarity desktop), mirrored theme=$altTheme"
 
 $spanning = @(
     New-Case 'sys-solid'      'system' 'solid'   'frosted' $spanTheme
@@ -1106,6 +1233,22 @@ $spanning = @(
     New-Case 'wt-inherit'     'wintty' $null     'frosted' $spanTheme
     New-Case 'wt-over-solid'  'wintty' 'frosted' 'solid'   $spanTheme
     New-Case 'wt-solid-solid' 'wintty' 'solid'   'solid'   $spanTheme
+)
+
+# The same nine configs on the other half of the pair: the theme axis across
+# the whole grid. Every case differs from its un-suffixed twin in `theme` and
+# nothing else, so a theme comparison is a matched pair the same way a material
+# comparison is, and the material rules below can be judged within one theme.
+$spanning += @(
+    New-Case 'sys-solid-alt'      'system' 'solid'   'frosted' $altTheme
+    New-Case 'sys-frosted-alt'    'system' 'frosted' 'frosted' $altTheme
+    New-Case 'sys-crystal-alt'    'system' 'crystal' 'frosted' $altTheme
+    New-Case 'wt-solid-alt'       'wintty' 'solid'   'frosted' $altTheme
+    New-Case 'wt-frosted-alt'     'wintty' 'frosted' 'frosted' $altTheme
+    New-Case 'wt-crystal-alt'     'wintty' 'crystal' 'frosted' $altTheme
+    New-Case 'wt-inherit-alt'     'wintty' $null     'frosted' $altTheme
+    New-Case 'wt-over-solid-alt'  'wintty' 'frosted' 'solid'   $altTheme
+    New-Case 'wt-solid-solid-alt' 'wintty' 'solid'   'solid'   $altTheme
 )
 
 $frameValues = @('solid', 'frosted', 'crystal')
@@ -1384,15 +1527,33 @@ try {
     Write-Host ('order=' + (($order | ForEach-Object { $_.id }) -join ','))
 
     foreach ($case in $order) {
-        $label = "$($case.id) window-theme=$($case.windowTheme) frame-style=$(if ($case.frameStyle) { $case.frameStyle } else { '<unset>' }) background-style=$($case.background)"
+        $label = "$($case.id) window-theme=$($case.windowTheme) frame-style=$(if ($case.frameStyle) { $case.frameStyle } else { '<unset>' }) background-style=$($case.background) theme=$(if ($case.theme) { $case.theme } else { '<none>' })"
         Write-Host "--- $label"
 
         # Per case, so one case that could not run does not throw away what the
         # cases before it found. Findings outrank a case that could not run,
-        # which is the order fuzz-suite.ps1 puts them in too.
+        # which is the order fuzz-suite.ps1 puts them in too. A HARVEST_MISS is
+        # relaunched once before it is given up on: with a launch per case the
+        # exposure is to the machine's races - a window captured before it drew
+        # (2026-08-28: ink 0,0,0 on fill 0,0,0 on two consecutive cases), a
+        # UIA tree asked for its NavView before it was populated - and a
+        # second read of the same config settles them. PRODUCT_FAIL is never
+        # retried: that is the build answering, not the machine.
         $res = $null
         try {
-            $res = Invoke-Case $case $ExePath
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                try {
+                    $res = Invoke-Case $case $ExePath
+                    break
+                }
+                catch {
+                    if ($attempt -eq 1 -and "$_" -like 'HARVEST_MISS:*') {
+                        Write-Host "    case '$($case.id)' could not be read (racing the machine); relaunching once: $_" -ForegroundColor Yellow
+                        continue
+                    }
+                    throw
+                }
+            }
         }
         catch {
             $note = "case '$($case.id)': $_"
@@ -1462,7 +1623,9 @@ try {
     # frosted frame is meant to be, only whether it is the solid one - which is
     # what makes this a check on the key being wired through rather than on the
     # theme.
-    function Compare-Material([string]$A, [string]$B, [string]$Rule, [bool]$MustDiffer) {
+    # -Defect names the config key a failed must-differ comparison indicts, so
+    # the finding says what actually broke for a theme comparison too.
+    function Compare-Material([string]$A, [string]$B, [string]$Rule, [bool]$MustDiffer, [string]$Defect = 'frame-style') {
         if (-not $measuredByCase.ContainsKey($A) -or -not $measuredByCase.ContainsKey($B)) {
             $caseErrors.Add("material '$Rule' needs both '$A' and '$B' and one of them did not run")
             return
@@ -1591,8 +1754,8 @@ try {
                                  (($behind.Keys | ForEach-Object { "$_=$($behind[$_])" }) -join ', ')))
                 return
             }
-            $findings.Add(("frame-style is not reaching the chrome: '$A' and '$B' differ only in " +
-                           "frame-style and paint the same chrome (max channel delta $maxDelta, needs " +
+            $findings.Add(("$Defect is not reaching the chrome: '$A' and '$B' differ only in " +
+                           "$Defect and paint the same chrome (max channel delta $maxDelta, needs " +
                            "$ChannelDelta; " + (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') +
                            "), and a translucent frame here was meant to composite to " +
                            "$(Format-Rgb $ground) from palette $(Format-Rgb $palette), clear of the shade " +
@@ -1612,6 +1775,106 @@ try {
     # The degrade rule, as an equality: a translucent frame over a solid
     # background has nothing behind it to reveal and takes its opaque shade.
     Compare-Material 'wt-over-solid' 'wt-solid-solid' 'a translucent frame over a solid backdrop degrades to solid' $false
+
+    # The degrade rule on the mirrored (desktop-matching) half of the pair too:
+    # it is an equality between two solid backgrounds, so the palette does not
+    # enter it and it is judgeable on either half.
+    Compare-Material 'wt-over-solid-alt' 'wt-solid-solid-alt' 'a translucent frame over a solid backdrop degrades to solid (mirrored theme)' $false
+
+    # Solid against frosted on the MIRRORED half is measured and reported, not
+    # asserted. The mirrored theme sits on the same side as the desktop, and
+    # the estimate above predicts what that does: the tint composites the
+    # palette back to within the comparator's own resolution of the opaque
+    # frame's shade (measured live 2026-08-28: maxDelta 18 against a model that
+    # puts the intended separation at exactly the 20-count threshold). Filing
+    # that as a defect would be scoring the threshold, not the build.
+    foreach ($pair in @(
+        @{ a = 'sys-solid-alt'; b = 'sys-frosted-alt'; what = 'window-theme=system' }
+        @{ a = 'wt-solid-alt';  b = 'wt-frosted-alt';  what = 'window-theme=wintty' })) {
+        if (-not $measuredByCase.ContainsKey($pair.a) -or -not $measuredByCase.ContainsKey($pair.b)) { continue }
+        $deltas = [ordered]@{}
+        foreach ($rgn in @('titleBare', 'stripBare')) {
+            $deltas[$rgn] = Get-MeanDelta $measuredByCase[$pair.a][$rgn] $measuredByCase[$pair.b][$rgn]
+        }
+        $materials.Add([ordered]@{
+            layer = 'material'
+            rule = "solid against frosted on the desktop-matching theme under $($pair.what), reported only: the tint composites this palette to within the threshold of the opaque shade"
+            a = $pair.a; b = $pair.b; mustDiffer = $null
+            deltas = $deltas; maxDelta = ($deltas.Values | Measure-Object -Maximum).Maximum
+            needs = $ChannelDelta; asserted = $false; verdict = 'not asserted'
+        })
+        Write-Host ("    $($pair.a) vs $($pair.b): " +
+                    (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') + ' [reported only: matching-theme composite]')
+    }
+
+    # ---- the theme layer ---------------------------------------------------
+    #
+    # Same config, both halves of the pair. This is the axis #792 added, and
+    # it gets its own comparator for the solid frame because the composite
+    # excuse the material layer leans on does not apply there: under
+    # window-theme=wintty a solid frame is PAINTED from the theme
+    # (RootBackgroundResolver answers the shell-theme background directly, not
+    # a blend), and the staged pair's backgrounds (#f4f6fb, #131620) are more
+    # than 140 counts apart in every channel. A build where the two themes
+    # paint the same solid wintty chrome has not applied the theme, full stop.
+    #
+    # Under High Contrast the frame is pinned and the layer stands down and
+    # reports, exactly like the material one.
+    function Compare-ThemeAxis([string]$A, [string]$B, [string]$Rule) {
+        if (-not $measuredByCase.ContainsKey($A) -or -not $measuredByCase.ContainsKey($B)) {
+            $caseErrors.Add("theme '$Rule' needs both '$A' and '$B' and one of them did not run")
+            return
+        }
+        $deltas = [ordered]@{}
+        $maxDelta = -1
+        foreach ($rgn in @('titleBare', 'stripBare')) {
+            $d = Get-MeanDelta $measuredByCase[$A][$rgn] $measuredByCase[$B][$rgn]
+            $deltas[$rgn] = $d
+            if ($d -gt $maxDelta) { $maxDelta = $d }
+        }
+        $verdict = if ($maxDelta -ge $ChannelDelta) { 'ok' } else { 'failed' }
+        $materials.Add([ordered]@{
+            layer = 'theme'; rule = $Rule; a = $A; b = $B; mustDiffer = $true
+            deltas = $deltas; maxDelta = $maxDelta; needs = $ChannelDelta
+            asserted = (-not $highContrast); verdict = $verdict
+        })
+        Write-Host ("    theme $Rule ($A vs $B): maxDelta=$maxDelta needs=$ChannelDelta -> $verdict" +
+                    $(if ($highContrast) { ' [reported only: High Contrast]' } else { '' }))
+        if ($highContrast -or $verdict -eq 'ok') { return }
+        $findings.Add(("theme is not reaching the chrome: '$A' and '$B' differ only in theme and paint " +
+                       "the same chrome (max channel delta $maxDelta, needs $ChannelDelta; " +
+                       (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') +
+                       "). Under window-theme=wintty a solid frame is painted from the theme's own " +
+                       'background rather than composited, so a light and a dark palette measuring alike ' +
+                       'means neither reached the chrome'))
+    }
+
+    Write-Host '--- theme'
+    Compare-ThemeAxis 'wt-solid' 'wt-solid-alt' 'the light and dark halves of the pair paint different wintty chrome'
+    # Frosted chrome IS a composite, so its theme comparison goes through the
+    # material layer, where the palette-tinted estimate can still say a pair
+    # was never meant to be distinguishable.
+    Compare-Material 'wt-frosted' 'wt-frosted-alt' 'the light and dark halves of the pair tint the frosted wintty chrome differently' $true 'theme'
+    # Under window-theme=system the chrome hue is the desktop's, so the theme
+    # is not asserted on: measured for the record, because a theme that moved
+    # the desktop-driven chrome is worth seeing in the artifact even though
+    # nothing here promises it cannot.
+    foreach ($pair in @(@('sys-solid', 'sys-solid-alt'), @('sys-frosted', 'sys-frosted-alt'))) {
+        if (-not $measuredByCase.ContainsKey($pair[0]) -or -not $measuredByCase.ContainsKey($pair[1])) { continue }
+        $deltas = [ordered]@{}
+        foreach ($rgn in @('titleBare', 'stripBare')) {
+            $deltas[$rgn] = Get-MeanDelta $measuredByCase[$pair[0]][$rgn] $measuredByCase[$pair[1]][$rgn]
+        }
+        $materials.Add([ordered]@{
+            layer = 'theme'
+            rule = 'theme under window-theme=system, reported only: the chrome hue is the desktop''s, not the palette''s'
+            a = $pair[0]; b = $pair[1]; mustDiffer = $null
+            deltas = $deltas; maxDelta = ($deltas.Values | Measure-Object -Maximum).Maximum
+            needs = $ChannelDelta; asserted = $false; verdict = 'not asserted'
+        })
+        Write-Host ("    theme $($pair[0]) vs $($pair[1]): " +
+                    (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') + ' [reported only]')
+    }
 
     # frosted against crystal, both ways round, MEASURED and never asserted.
     # They are one material: there is one SystemBackdrop per window and both
@@ -1666,6 +1929,15 @@ finally {
         materialAsserted = (-not $highContrast)
         themeCatalogueCount = $catalogue.Count
         spanningTheme = $spanTheme
+        altTheme = $altTheme
+        # The theme axis's staging, recorded so a run can be audited for which
+        # names the launched processes could actually resolve.
+        themeStaging = [ordered]@{
+            themesDir = $themesDir
+            staged = @('wintty-light', 'wintty-dark')
+            configFile = $configPath
+            catalogueUnderStaging = $catalogue
+        }
         contrastFloor = $ContrastFloor
         channelDelta = $ChannelDelta
         # The model the material layer judges a failed comparison by. Recorded
