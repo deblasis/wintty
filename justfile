@@ -246,16 +246,17 @@ shader-notice-fuzz args="": _no-wintty-running build-dll build-win
         -OutDir windows/scripts/shader-notice-fuzz {{args}}; exit ($LASTEXITCODE ?? 1)
 
 # Fuzz frame-style against window-theme and background-style over a fixed
-# spanning set, plus `-Random <n>` extra cases drawn from the real theme
-# catalogue. Two oracles: WCAG contrast of the title row's and tab strip's own
+# spanning set run once per half of the built-in theme pair, plus `-Random <n>`
+# extra cases drawn from the staged theme catalogue. Two oracles: WCAG
+# contrast of the title row's and tab strip's own
 # text against their own fill, and a relative check that solid does not paint
 # the same chrome as frosted. frosted against crystal is reported and never
 # asserted - one SystemBackdrop per window means they are the same frame.
 #
 # Reads the desktop light/dark setting and High Contrast; sets neither.
 #
-# Launches Wintty ten times, so it needs an interactive desktop and takes the
-# foreground for several minutes.
+# Launches Wintty nineteen times, so it needs an interactive desktop and takes
+# the foreground for several minutes.
 #
 # Exit codes: 0 clean, 2 product findings (see the JSON and shots under
 # windows/scripts/frame-style-fuzz/), 1 the harness could not run.
