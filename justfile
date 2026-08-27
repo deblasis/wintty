@@ -172,10 +172,14 @@ run-win-release: build-dll-release build-win-release
 # Ghostty.Core's CsWin32 bindings include pointer-size-dependent structs
 # (SHFILEINFOW) that cannot generate for AnyCPU, so an unqualified build
 # fails before any test runs.
+# --blame-hang: a hung testhost self-recovers with a dump after 5m instead of
+# stalling a signoff. Added after a proven FakeTransport pipe deadlock hung
+# the whole Ghostty.Tests host at zero CPU; the pipe-buffer fix removed that
+# hang, and blame-hang turns any future one into evidence.
 [windows]
 test-win:
-    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64
-    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64
+    dotnet test windows/Ghostty.Tests/Ghostty.Tests.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
+    dotnet test windows/Ghostty.Tests.Windows/Ghostty.Tests.Windows.csproj /p:Platform=x64 --blame-hang --blame-hang-timeout 5m
 
 # Launch two instances a few hundred ms apart and watch for a launch splash
 # owned by the one that should be forwarding itself to the other. Opens real

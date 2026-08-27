@@ -43,10 +43,24 @@ public sealed class FakeTransport : ITransport
         string inputPipe  = $"fake-transport-in-{Guid.NewGuid():N}";
         string outputPipe = $"fake-transport-out-{Guid.NewGuid():N}";
 
-        _inputServer = new NamedPipeServerStream(inputPipe,  PipeDirection.In,  maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte);
+        // Explicit nonzero kernel buffer sizes. The default constructors pass
+        // 0, which on Windows named pipes means no store-and-forward: a
+        // WriteFile only completes against an outstanding reader. That
+        // deadlocked the bench tests whenever the harness reader cancelled
+        // before its first read: the IO thread blocked forever in its first
+        // scripted response write and the test thread blocked forever
+        // writing payload. 64 KB comfortably holds every response and payload
+        // these tests use (max 4 KB), so writes complete immediately.
+        // The client constructors have no buffer-size parameters: the kernel
+        // buffer is fixed by the server's CreateNamedPipe call, and the
+        // clients deliberately stay synchronous because Runner's sync
+        // Input.Write path already works against them and the deadline tests
+        // prove ReadAsync cancellation needs no FILE_FLAG_OVERLAPPED here.
+        const int PipeBufferSize = 64 * 1024;
+        _inputServer = new NamedPipeServerStream(inputPipe,  PipeDirection.In,  maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte, PipeOptions.None, PipeBufferSize, PipeBufferSize);
         _inputClient = new NamedPipeClientStream(".", inputPipe,  PipeDirection.Out);
 
-        _outputServer = new NamedPipeServerStream(outputPipe, PipeDirection.Out, maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte);
+        _outputServer = new NamedPipeServerStream(outputPipe, PipeDirection.Out, maxNumberOfServerInstances: 1, PipeTransmissionMode.Byte, PipeOptions.None, PipeBufferSize, PipeBufferSize);
         _outputClient = new NamedPipeClientStream(".", outputPipe, PipeDirection.In);
 
         // Connect both pairs synchronously before starting the IO thread.
