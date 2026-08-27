@@ -822,8 +822,8 @@ $catalogue = @(Get-ThemeCatalogue $ExePath)
 Write-Host "themes=$($catalogue.Count)"
 
 # ---- the gate -------------------------------------------------------------
-# Above the top-level try and above everything that writes to disk: refusing
-# over an open Wintty is the most common way this run ends.
+# Above the top-level try and above the staged config and every case launch:
+# refusing over an open Wintty is the most common way this run ends.
 Assert-NoWintty
 
 $stage = Join-Path $env:TEMP ('wintty-frame-fuzz-{0:HHmmss}' -f (Get-Date))
@@ -937,6 +937,13 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     $proc = $null
     $shotA = $null
     $shotB = $null
+    # Set only on the return statement, so the finally below can tell a live
+    # handoff from a throw: -KeepOpen transfers ownership to the caller via the
+    # return value, and a throw never assigns it there, so an un-set flag means
+    # nobody owns the window and this function is the last one that can take
+    # it down. Otherwise one flaky splash drop strands a Wintty that blocks
+    # every later harness's Assert-NoWintty.
+    $handedOff = $false
     $stamp = Get-WinttyLaunchStamp
     try {
         $env:XDG_CONFIG_HOME = $tempXdg
@@ -1008,6 +1015,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
             }
         }
 
+        $handedOff = $true
         return [pscustomobject]@{
             Hwnd = $hwnd64
             Proc = $proc
@@ -1027,7 +1035,10 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
     }
     finally {
         Close-Shot $shotB
-        if (-not $KeepOpen) {
+        # -not $KeepOpen: this function owns the window. -KeepOpen without the
+        # handoff: the return never ran, so the caller never received the
+        # process and cannot take it down itself.
+        if (-not $KeepOpen -or -not $handedOff) {
             if ($null -ne $proc) {
                 $proc.Refresh()
                 if (-not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
