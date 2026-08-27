@@ -37,10 +37,14 @@
 #     Detected and reported; the material layer stands down rather than
 #     reporting the pin as a defect.
 #
-# Anti-vacuity: the controls run FIRST, against a real capture, before any case
-# is judged. A run whose detector is broken passes everything by finding
-# nothing, which is the failure this suite exists not to have.
+# Anti-vacuity: the controls run FIRST, before any case is judged, and all but
+# the first against a real capture. A run whose detector is broken passes
+# everything by finding nothing, which is the failure this suite exists not to
+# have.
 #
+#   ground       this harness's copy of BackdropGround.Estimate answers what the
+#                one in the build under test answers, over both desktop poles,
+#                every backdrop style and every tint opacity the config reaches
 #   stability    two captures of one unchanged window differ in no chrome pixel
 #   comparator   the selected tab's fill differs from an unselected tab's by
 #                more than the delta the material layer asserts on
@@ -62,6 +66,19 @@
 #   mid-transition and reports colours the app never chose. Opaque chrome is
 #   unaffected, which is exactly why a short settle looks fine until the case
 #   that is not opaque.
+#
+# A translucent frame is a composite, and the third constraint is that the
+# composite can legitimately be the opaque frame's own shade. The palette tints
+# it and the luminosity blend pulls it back to the system base for the active
+# desktop polarity, so a palette sitting near that base - a dark one on a dark
+# desktop, a near-white one on a light desktop - makes solid and frosted agree
+# on a build that wired frame-style through perfectly. A failed material
+# comparison is therefore judged against what the product MEANS the composite
+# to be, estimated with BackdropGround.Estimate's own arithmetic off the
+# palette the case actually loaded, and a comparison where nothing was meant to
+# move leaves with 1 rather than being filed as a defect. The raw screen behind
+# the window is reported and decides nothing: it is one input to the acrylic
+# and the weakest, and turning on it is what filed a working build as broken.
 #
 # This harness READS the desktop polarity and High Contrast and never sets
 # either. It runs unattended as part of the suite, and a harness that flips the
@@ -439,6 +456,7 @@ function Measure-Region($shot, $Region) {
         Pixels   = $st.Count
         Mean     = [pscustomobject]@{ R = $st.MeanR; G = $st.MeanG; B = $st.MeanB }
         Fill     = [pscustomobject]@{ R = $st.FillR; G = $st.FillG; B = $st.FillB }
+        FillCount = $st.FillCount
         Ink      = [pscustomobject]@{ R = $st.InkR;  G = $st.InkG;  B = $st.InkB  }
         InkCount = $st.InkCount
         Contrast = [Math]::Round($st.Contrast, 3)
@@ -469,15 +487,106 @@ function Get-ScreenMeanAt([int]$X, [int]$Y, [int]$W, [int]$H) {
     finally { $bmp.Dispose() }
 }
 
-function Get-MeanDelta($a, $b) {
+function New-Rgb([int]$R, [int]$G, [int]$B) { return [pscustomobject]@{ R = $R; G = $G; B = $B } }
+
+function Get-ChannelDelta($a, $b) {
     if ($null -eq $a -or $null -eq $b) { return -1 }
-    $dr = [Math]::Abs($a.Mean.R - $b.Mean.R)
-    $dg = [Math]::Abs($a.Mean.G - $b.Mean.G)
-    $db = [Math]::Abs($a.Mean.B - $b.Mean.B)
+    $dr = [Math]::Abs($a.R - $b.R)
+    $dg = [Math]::Abs($a.G - $b.G)
+    $db = [Math]::Abs($a.B - $b.B)
     return [Math]::Max($dr, [Math]::Max($dg, $db))
 }
 
+function Get-MeanDelta($a, $b) {
+    if ($null -eq $a -or $null -eq $b) { return -1 }
+    return Get-ChannelDelta $a.Mean $b.Mean
+}
+
 function Format-Rgb($c) { return ('{0},{1},{2}' -f $c.R, $c.G, $c.B) }
+
+# ---- what a translucent frame will composite to ---------------------------
+#
+# A frosted frame does not paint a colour, it paints a COMPOSITE: the terminal
+# palette laid over Fluent's base colour for the active desktop polarity, at
+# the configured tint opacity. The material layer needs that number, because a
+# composite that lands on the shade a solid frame already paints makes the two
+# frames indistinguishable on a build that wired frame-style through perfectly.
+#
+# Mirrored from Ghostty.Core.Shell.BackdropGround.Estimate, which is the
+# product's own model of the same surface, down to the resolvers it defers to:
+# RootBackgroundResolver for the styles that are painted rather than
+# composited, and AcrylicTintResolver for the default tint opacity. It has to
+# be the product's arithmetic rather than a plausible one of this harness's
+# own: the two quantities compared below sit a handful of counts apart in
+# exactly the case that matters, so a model off by a little files defects the
+# build does not have, or excuses ones it does. A control cross-checks this
+# copy against the shipped Ghostty.Core.dll before any case is judged.
+
+# Fluent's SolidBackgroundFillColorBase, the colour the luminosity blend pulls
+# an acrylic surface back towards. BackdropGround.SystemBaseLight/Dark.
+$SystemBaseLight = (New-Rgb 0xF3 0xF3 0xF3)
+$SystemBaseDark = (New-Rgb 0x20 0x20 0x20)
+
+# RootBackgroundResolver.OpaqueChromeArgb: what a painted root grid takes when
+# the terminal palette is not driving it.
+$OpaqueChromeLight = (New-Rgb 0xF3 0xF3 0xF3)
+$OpaqueChromeDark = (New-Rgb 0x0C 0x0C 0x0C)
+
+# AcrylicTintResolver.DefaultTintOpacity. Correct only while nothing staged
+# here writes a key that moves it, which Write-CaseConfig refuses to do.
+$DefaultTintOpacity = 0.3
+
+# BackdropGround's own Mix. Truncation after adding a half, which is NOT what
+# [Math]::Round does with this input - that one sends a .5 to the even
+# neighbour and would disagree with the product on every second channel.
+function Get-MixChannel([int]$Over, [int]$Under, [double]$Alpha) {
+    return [int][Math]::Floor(($Alpha * $Over) + ((1.0 - $Alpha) * $Under) + 0.5)
+}
+
+function Get-BackdropGround($Palette, [bool]$OsDark, [string]$GroundStyle, [double]$TintOpacity) {
+    if ($null -eq $Palette) { return $null }
+    $base = if ($OsDark) { $SystemBaseDark } else { $SystemBaseLight }
+
+    # Case-SENSITIVE, all the way down. Every comparison the product makes on a
+    # backdrop style is ordinal against a value BackdropStyles.TryNormalize has
+    # already lowercased, so a style that is not lowercase is not frosted there.
+    # PowerShell's -eq is case-insensitive and answered that 'Frosted' was,
+    # which is this copy drifting from the model it exists to reproduce - the
+    # control below is what caught it.
+    #
+    # Nothing tints the chrome under crystal - no tint, no luminosity blend, no
+    # Fluent base underneath - so there is no composite and the base stands
+    # alone. Not a prediction of what is behind the window, which is why the
+    # product does not claim crystal is estimated either.
+    if ($GroundStyle -ceq 'crystal') { return $base }
+
+    # RootBackgroundResolver leaves the root transparent for frosted and
+    # crystal only. Every other style paints it, and a painted root IS the
+    # ground rather than something to blend towards.
+    if ($GroundStyle -cne 'frosted') {
+        return $(if ($OsDark) { $OpaqueChromeDark } else { $OpaqueChromeLight })
+    }
+
+    $t = [Math]::Min(1.0, [Math]::Max(0.0, $TintOpacity))
+    return (New-Rgb (Get-MixChannel $Palette.R $base.R $t) `
+                    (Get-MixChannel $Palette.G $base.G $t) `
+                    (Get-MixChannel $Palette.B $base.B $t))
+}
+
+# MainWindow.ChromeGroundStyle: frame-style can cover the backdrop, not replace
+# it. A solid FRAME is its own ground; the other two leave whatever
+# background-style put behind them showing. An unset frame-style inherits
+# background-style, the same fold the config layer applies upstream.
+#
+# Not modelled: low power and background-opacity both flatten the effective
+# backdrop to solid without touching the config. Neither is staged by this
+# harness, and a run under low power would be estimating a surface the window
+# is not drawn on.
+function Get-ChromeGroundStyle($Case) {
+    $frame = if ($Case.frameStyle) { $Case.frameStyle } else { $Case.background }
+    if ($frame -eq 'solid') { return 'solid' }
+    return $Case.background
+}
 
 # ---- the surfaces this harness samples ------------------------------------
 #
@@ -564,6 +673,29 @@ function Get-Surfaces([int64]$Hwnd64) {
     $lastRow = $rows[$rows.Count - 1]
     $lb = ToLocal $lastRow.Rect
 
+    # The terminal body, which is painted straight from `background` - the same
+    # value BackdropGround.Estimate takes as its palette. Read off the window
+    # rather than out of a theme file because only the process knows what its
+    # config actually resolved to: a theme name that does not resolve leaves the
+    # palette somewhere the name does not predict, and an estimate built on the
+    # name would then be an estimate of a different window.
+    #
+    # Centred, because the prompt sits top left and the status band along the
+    # bottom, and the middle of an idle terminal is bare background. Deliberately
+    # NOT one of Regions: the stability control asserts that no chrome pixel
+    # moves between two captures, and the terminal is not chrome.
+    $termX0 = $n[0] + $n[2] + 8
+    $termY0 = $t[1] + $t[3] + 8
+    $termX1 = $rc.W - 8
+    $termY1 = $rc.Hh - 8
+    $palette = $null
+    if (($termX1 - $termX0) -ge 64 -and ($termY1 - $termY0) -ge 64) {
+        $pw = [Math]::Min(160, [int](($termX1 - $termX0) / 2))
+        $ph = [Math]::Min(120, [int](($termY1 - $termY0) / 2))
+        $palette = New-Region 'terminalBody' `
+            ([int](($termX0 + $termX1 - $pw) / 2)) ([int](($termY0 + $termY1 - $ph) / 2)) $pw $ph
+    }
+
     # Left of the title text and right of the strip column, inset so neither the
     # icon badge nor the text's own antialiasing can reach it. Falls back to the
     # band right of the text when the layout leaves no room on the left, and
@@ -580,6 +712,7 @@ function Get-Surfaces([int64]$Hwnd64) {
         TabRowName = $tabRow.Name
         TabRowCount = $rows.Count
         Rows = $rows
+        Palette = $palette
         Regions = @(
             (New-Region 'titleText' $t[0] $t[1] $t[2] $t[3])
             $bare
@@ -589,6 +722,23 @@ function Get-Surfaces([int64]$Hwnd64) {
             (New-Region 'stripBare' ($n[0] + 4) ($lb[1] + $lb[3] + 6) ([Math]::Max(8, $n[2] - 8)) 40)
         )
     }
+}
+
+# The palette the process actually loaded, read off the terminal body.
+#
+# Answers the region's FILL - the colour most of it is - rather than its mean,
+# so a glyph or the cursor that wandered into the box cannot drag the number.
+# Refuses outright when that fill does not cover most of the region, because a
+# region that is not mostly one colour is not bare terminal background and what
+# it would answer is not the palette. A refusal makes the material layer say it
+# cannot judge, which is the honest outcome: an estimate off a colour that is
+# not the palette is worse than no estimate.
+function Get-PaletteSample($shot, $surfaces) {
+    if ($null -eq $surfaces.Palette) { return $null }
+    if ($null -eq (Get-ClippedBounds $shot $surfaces.Palette)) { return $null }
+    $m = Measure-Region $shot $surfaces.Palette
+    if ($m.Pixels -le 0 -or $m.FillCount -lt [int]($m.Pixels * 0.75)) { return $null }
+    return (New-Rgb $m.Fill.R $m.Fill.G $m.Fill.B)
 }
 
 function Measure-Surfaces($shot, $surfaces) {
@@ -710,6 +860,21 @@ function Write-CaseConfig($Case) {
     $body.Add('window-theme = ' + $Case.windowTheme)
     $body.Add('background-style = ' + $Case.background)
     if ($Case.frameStyle) { $body.Add('frame-style = ' + $Case.frameStyle) }
+
+    # The material layer estimates what a translucent frame composites to, and
+    # that estimate is pinned to AcrylicTintResolver's DEFAULT tint opacity and
+    # to the tint colour falling back to the palette. Both are only the right
+    # numbers while nothing staged here moves them, so this is checked rather
+    # than remembered - a key added above would otherwise leave the estimate
+    # quietly describing a window nobody launched.
+    foreach ($line in $body) {
+        $key = ("$line" -split '=', 2)[0].Trim()
+        if ($key -in @('background-tint-opacity', 'background-tint-color',
+                       'background-opacity', 'background-blur-follows-opacity')) {
+            throw ("HARVEST_MISS: the staged config writes '$key', which moves the acrylic tuning the " +
+                   'material layer estimates against; teach Get-BackdropGround about it before staging it')
+        }
+    }
     [IO.File]::WriteAllText($configPath, ($body -join "`r`n") + "`r`n")
 }
 
@@ -799,6 +964,9 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
         $surfaces = Get-Surfaces $hwnd64
         $shotA = Get-Shot $hwnd64
         $measured = Measure-Surfaces $shotA $surfaces
+        # Off the same capture as the chrome, so the palette and the chrome it
+        # is estimated against are the same instant of the same window.
+        $paletteSample = Get-PaletteSample $shotA $surfaces
 
         # Where each region sat ON THE SCREEN, kept so the material layer can
         # come back to the same rectangle after every window is down and read
@@ -846,6 +1014,7 @@ function Invoke-Case($Case, [string]$Exe, [int]$ExtraTabs = 0, [switch]$Stabilit
             Stamp = $stamp
             Surfaces = $surfaces
             Measured = $measured
+            Palette = $paletteSample
             AbsRegions = $abs
             Stability = $stabilityReport
             Shot = $shotA
@@ -950,6 +1119,8 @@ $materials = [System.Collections.Generic.List[object]]::new()
 $pipeReport = [ordered]@{ attempted = $false }
 $measuredByCase = @{}
 $absByCase = @{}
+$paletteByCase = @{}
+$caseById = @{}
 $detectorProven = $false
 
 # ---- named pipe theme preview --------------------------------------------
@@ -1003,6 +1174,68 @@ function Test-ThemePipe([int]$ProcId, [string]$ThemeName, $Before, $Surfaces, [i
     return $result
 }
 
+# ---- control: the backdrop estimate against the product's own -------------
+#
+# Get-BackdropGround decides whether a failed material comparison is a defect
+# or a run this harness cannot judge, and it does that with a COPY of
+# BackdropGround.Estimate's arithmetic. A copy that has drifted from the
+# original is worse than no guard at all: it excuses defects the build has, or
+# files ones it does not. So the copy is run against the shipped
+# Ghostty.Core.dll before any case is judged, over a spread that covers both
+# desktop poles, all three backdrop styles, a style nobody has added yet, the
+# palettes that sit on top of the system base and either side of it, and every
+# tint opacity the config can reach.
+#
+# The assembly is loaded from beside the exe under test, so what is checked is
+# the model in the BUILD being fuzzed rather than one in some other checkout.
+# When it cannot be loaded the run says so and carries on with the copy: a
+# harness that refuses to run because a dll moved is a harness nobody runs.
+function Test-BackdropGroundMirror([string]$Exe) {
+    $report = [ordered]@{ loaded = $false; error = $null; checked = 0; mismatches = @() }
+    $dll = Join-Path (Split-Path $Exe) 'Ghostty.Core.dll'
+    $method = $null
+    try {
+        $asm = [System.Reflection.Assembly]::LoadFrom($dll)
+        $type = $asm.GetType('Ghostty.Core.Shell.BackdropGround')
+        if ($null -eq $type) { throw 'no Ghostty.Core.Shell.BackdropGround in the assembly' }
+        $method = $type.GetMethod('Estimate')
+        if ($null -eq $method) { throw 'BackdropGround has no Estimate' }
+        $report.loaded = $true
+    }
+    catch {
+        $report.error = "$dll : $_"
+        return $report
+    }
+
+    $bad = [System.Collections.Generic.List[string]]::new()
+    # 'solid' and the unknown style are both here on purpose: the product folds
+    # everything that is not frosted or crystal to the painted root, and a copy
+    # that only handled the three named styles would agree on all three and
+    # disagree on the fourth. 'Frosted' is here because that is the drift this
+    # control actually caught - PowerShell's -eq called it frosted and the
+    # product's ordinal comparison did not.
+    foreach ($rgb in @(0x000000, 0xFFFFFF, 0x282C34, 0xF4F6FB, 0x1E1E2E, 0xF3F3F3, 0x202020, 0x0C0C0C, 0x808080)) {
+        foreach ($osDark in @($true, $false)) {
+            foreach ($style in @('frosted', 'crystal', 'solid', 'Frosted', 'CRYSTAL', 'something-nobody-has-added-yet')) {
+                foreach ($op in @(0.0, 0.3, 0.5, 0.9, 1.0)) {
+                    $report.checked++
+                    $theirs = [uint32]$method.Invoke($null, @([uint32]$rgb, [bool]$osDark, [string]$style, [double]$op))
+                    $mine = Get-BackdropGround (New-Rgb (($rgb -shr 16) -band 0xFF) (($rgb -shr 8) -band 0xFF) ($rgb -band 0xFF)) `
+                                               $osDark $style $op
+                    $minePacked = [uint32](($mine.R -shl 16) -bor ($mine.G -shl 8) -bor $mine.B)
+                    if ($minePacked -ne $theirs) {
+                        $bad.Add(('palette {0:X6} osDark={1} style={2} tint={3}: this harness says {4:X6}, the product says {5:X6}' `
+                                  -f $rgb, $osDark, $style, $op, $minePacked, $theirs))
+                    }
+                }
+            }
+        }
+    }
+    $report.mismatches = @($bad | Select-Object -First 8)
+    $report.mismatchCount = $bad.Count
+    return $report
+}
+
 # ---- run ------------------------------------------------------------------
 try {
     # ---- controls, before anything is judged ------------------------------
@@ -1013,6 +1246,25 @@ try {
     # cannot show all four leaves with 1: what follows would be a page of
     # absences from a detector that never demonstrated it can see a presence.
     Write-Host '--- controls'
+
+    # Runs first because it needs no window and gates everything the material
+    # layer's ambiguity path is built on.
+    $controls.backdropGroundMirror = Test-BackdropGroundMirror $ExePath
+    if ($controls.backdropGroundMirror.loaded) {
+        if ($controls.backdropGroundMirror.mismatchCount -gt 0) {
+            throw ("HARVEST_MISS: this harness's copy of BackdropGround.Estimate disagrees with the one in " +
+                   "the build under test on $($controls.backdropGroundMirror.mismatchCount) of " +
+                   "$($controls.backdropGroundMirror.checked) inputs, so it cannot tell a frame-style defect " +
+                   'from a composite that legitimately matches the opaque frame. First disagreements: ' +
+                   ($controls.backdropGroundMirror.mismatches -join '; '))
+        }
+        Write-Host ("    backdrop-ground mirror: $($controls.backdropGroundMirror.checked) inputs agree with " +
+                    'the shipped Ghostty.Core.dll')
+    } else {
+        Write-Host ("    backdrop-ground mirror: NOT cross-checked ($($controls.backdropGroundMirror.error))") `
+                   -ForegroundColor Yellow
+    }
+
     $controlCase = New-Case 'control' 'wintty' 'solid' 'frosted' $spanTheme
     $control = $null
     try {
@@ -1143,12 +1395,17 @@ try {
             $m = $res.Measured
             $measuredByCase[$case.id] = $m
             $absByCase[$case.id] = $res.AbsRegions
+            $paletteByCase[$case.id] = $res.Palette
+            $caseById[$case.id] = $case
 
             $row = [ordered]@{
                 case = $case.id
                 config = $case
                 windowSize = $res.WindowSize
                 tabRows = $res.Surfaces.TabRowCount
+                # What the material layer estimates this case's translucent
+                # chrome from, recorded whether or not any comparison needed it.
+                palette = $(if ($null -ne $res.Palette) { Format-Rgb $res.Palette } else { $null })
                 regions = [ordered]@{}
             }
             foreach ($k in $m.Keys) {
@@ -1175,7 +1432,8 @@ try {
             }
 
             Write-Host ("    titleText=$($m['titleText'].Contrast):1 tabText=$($m['tabText'].Contrast):1 " +
-                        "titleBare=$(Format-Rgb $m['titleBare'].Mean) stripBare=$(Format-Rgb $m['stripBare'].Mean)")
+                        "titleBare=$(Format-Rgb $m['titleBare'].Mean) stripBare=$(Format-Rgb $m['stripBare'].Mean) " +
+                        "palette=$(if ($null -ne $res.Palette) { Format-Rgb $res.Palette } else { '<unread>' })")
             $rows.Add($row)
         }
         finally {
@@ -1226,40 +1484,111 @@ try {
         if ($highContrast -or $verdict -eq 'ok') { return }
 
         if ($MustDiffer) {
-            # A translucent frame is a function of the desktop behind it, so
-            # this comparison has one way to be wrong that is not the build's
-            # fault: a desktop sitting at the opaque frame's own shade makes
-            # solid and frosted measure alike on a build that is working
-            # perfectly. That is a run this harness cannot judge, not a defect,
-            # so it is read out rather than assumed away - every window is down
-            # by the time this runs, so the same rectangle of screen now holds
-            # what the frosted frame was sampling.
-            $ambiguous = $true
+            # A translucent frame does not paint a colour, it paints a
+            # COMPOSITE, and this comparison has one way to be wrong that is not
+            # the build's fault: a composite the product means to land on the
+            # shade the opaque frame already paints makes solid and frosted
+            # measure alike on a build that wired frame-style through perfectly.
+            # That is a run this harness cannot judge, not a defect.
+            #
+            # What decides it is the composite the product INTENDS, not the raw
+            # screen behind the window. The screen is only one of the acrylic's
+            # inputs; the tint pulls the surface towards the palette and the
+            # luminosity blend towards the system base for the active desktop
+            # polarity, and between them a dark palette on a dark desktop lands
+            # a few counts from the opaque shade while the raw screen sits well
+            # clear of it. Reading that raw screen as proof the desktop was not
+            # to blame is what filed this comparison as a defect on a working
+            # build.
+            #
+            # Estimated from the palette the window under test actually loaded,
+            # with BackdropGround.Estimate's own arithmetic - see
+            # Get-BackdropGround, and the control that holds the two together.
+            $palette = $paletteByCase[$B]
+            $ground = $null
+            $groundStyle = $null
+            if ($null -ne $palette -and $caseById.ContainsKey($B)) {
+                $groundStyle = Get-ChromeGroundStyle $caseById[$B]
+                $ground = Get-BackdropGround $palette ($polarity -eq 'dark') $groundStyle $DefaultTintOpacity
+            }
+
+            # The screen behind, read for the RECORD only. Every window is down
+            # by the time this runs, so the same rectangle now holds what the
+            # frosted frame was sampling, and having it in the artifact is worth
+            # the capture even though no verdict turns on it any more.
             $behind = [ordered]@{}
             foreach ($rgn in $deltas.Keys) {
                 $box = $absByCase[$A][$rgn]
-                if ($null -eq $box) { $ambiguous = $false; break }
+                if ($null -eq $box) { continue }
                 $desk = Get-ScreenMeanAt $box[0] $box[1] $box[2] $box[3]
-                if ($null -eq $desk) { $ambiguous = $false; break }
+                if ($null -eq $desk) { continue }
                 $behind[$rgn] = (Format-Rgb $desk.Mean)
-                if ((Get-MeanDelta $desk $measuredByCase[$A][$rgn]) -ge $ChannelDelta) { $ambiguous = $false }
             }
             $materials[$materials.Count - 1].desktopBehind = $behind
+
+            # Recorded whatever it decides, so the next comparison that comes
+            # out wrong is diagnosable from this file rather than by capturing
+            # the same two configs again by hand.
+            $estimate = [ordered]@{
+                palette = $(if ($null -ne $palette) { Format-Rgb $palette } else { $null })
+                paletteFrom = $B
+                osDark = ($polarity -eq 'dark')
+                systemBase = (Format-Rgb $(if ($polarity -eq 'dark') { $SystemBaseDark } else { $SystemBaseLight }))
+                groundStyle = $groundStyle
+                tintOpacity = $DefaultTintOpacity
+                ground = $(if ($null -ne $ground) { Format-Rgb $ground } else { $null })
+                opaqueFrom = $A
+                deltaToOpaque = [ordered]@{}
+            }
+            $ambiguous = $null -ne $ground
+            foreach ($rgn in $deltas.Keys) {
+                if ($null -eq $ground) { break }
+                $d = Get-ChannelDelta $ground $measuredByCase[$A][$rgn].Mean
+                $estimate.deltaToOpaque[$rgn] = $d
+                # One region the translucent frame was meant to move and did not
+                # is a defect, whatever the other regions were meant to do. Only
+                # a comparison where NOTHING was meant to move is unjudgeable.
+                if ($d -ge $ChannelDelta) { $ambiguous = $false }
+            }
+            $materials[$materials.Count - 1].estimatedGround = $estimate
+
+            if ($null -eq $ground) {
+                $materials[$materials.Count - 1].verdict = 'unjudgeable'
+                $caseErrors.Add(("material '$Rule' cannot be judged: '$A' and '$B' measure alike (max channel " +
+                                 "delta $maxDelta) and this run could not read the palette '$B' was painted " +
+                                 'from, so there is nothing to estimate what a translucent frame there would ' +
+                                 'composite to, and no way to tell a frame-style defect from a composite that ' +
+                                 "legitimately matches the opaque frame. The terminal body of '$B' did not come " +
+                                 'back a single flat colour: re-run with nothing writing to the terminal'))
+                return
+            }
             if ($ambiguous) {
                 $materials[$materials.Count - 1].verdict = 'indistinguishable'
-                $caseErrors.Add(("material '$Rule' cannot be judged on this desktop: '$A' and '$B' measure " +
-                                 "alike (max channel delta $maxDelta) and the screen behind the window sits " +
-                                 "within $ChannelDelta of the opaque frame's own shade (" +
-                                 (($behind.Keys | ForEach-Object { "$_=$($behind[$_])" }) -join ', ') +
-                                 "), so a translucent frame revealing it correctly is indistinguishable from " +
-                                 'one that never got the key. Move the window off that background and re-run'))
+                $other = if ($polarity -eq 'dark') { 'light' } else { 'dark' }
+                $caseErrors.Add(("material '$Rule' cannot be judged with this palette on a $polarity desktop: " +
+                                 "'$A' and '$B' measure alike (max channel delta $maxDelta), and a translucent " +
+                                 "frame here is meant to composite to $(Format-Rgb $ground) - the palette " +
+                                 "$(Format-Rgb $palette) tinted at $DefaultTintOpacity over the $polarity system " +
+                                 "base $($estimate.systemBase) - which is within $ChannelDelta of the shade the " +
+                                 'opaque frame paints (' +
+                                 (($estimate.deltaToOpaque.Keys | ForEach-Object { "$_=$($estimate.deltaToOpaque[$_])" }) -join ', ') +
+                                 '). A build that wired frame-style through is indistinguishable here from one ' +
+                                 'that never got the key. Re-run with a palette further from the system base, ' +
+                                 "or with the desktop in $other polarity, which moves the base out from under " +
+                                 'the palette. Moving the window will not help on its own: the tint and the ' +
+                                 'luminosity blend are what put the composite there. The screen behind read ' +
+                                 (($behind.Keys | ForEach-Object { "$_=$($behind[$_])" }) -join ', ')))
                 return
             }
             $findings.Add(("frame-style is not reaching the chrome: '$A' and '$B' differ only in " +
                            "frame-style and paint the same chrome (max channel delta $maxDelta, needs " +
                            "$ChannelDelta; " + (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') +
-                           "), and the screen behind the window is not what makes them alike (" +
-                           (($behind.Keys | ForEach-Object { "$_=$($behind[$_])" }) -join ', ') + ")"))
+                           "), and a translucent frame here was meant to composite to " +
+                           "$(Format-Rgb $ground) from palette $(Format-Rgb $palette), clear of the shade " +
+                           "'$A' paints (" +
+                           (($estimate.deltaToOpaque.Keys | ForEach-Object { "$_=$($estimate.deltaToOpaque[$_])" }) -join ', ') +
+                           "), so neither the palette nor the desktop is what makes them alike. The screen " +
+                           'behind read ' + (($behind.Keys | ForEach-Object { "$_=$($behind[$_])" }) -join ', ')))
         } else {
             $findings.Add(("$Rule does not hold: '$A' and '$B' should paint the same chrome and differ by " +
                            "$maxDelta (" + (($deltas.Keys | ForEach-Object { "$_=$($deltas[$_])" }) -join ', ') + ")"))
@@ -1328,6 +1657,18 @@ finally {
         spanningTheme = $spanTheme
         contrastFloor = $ContrastFloor
         channelDelta = $ChannelDelta
+        # The model the material layer judges a failed comparison by. Recorded
+        # in full because the estimate is the difference between a defect and a
+        # run nobody can judge, and a report that only carried the verdict left
+        # the last false positive here diagnosable by re-capturing the two
+        # configs by hand and nothing else.
+        backdropGround = [ordered]@{
+            source = 'mirrors Ghostty.Core.Shell.BackdropGround.Estimate'
+            systemBase = (Format-Rgb $(if ($polarity -eq 'dark') { $SystemBaseDark } else { $SystemBaseLight }))
+            opaqueChrome = (Format-Rgb $(if ($polarity -eq 'dark') { $OpaqueChromeDark } else { $OpaqueChromeLight }))
+            tintOpacity = $DefaultTintOpacity
+            paletteRead = 'the terminal body of each case, as launched'
+        }
         borderInset = [ordered]@{ x = $BorderInsetX; top = $BorderInsetTop; bottom = $BorderInsetBottom }
         settleMs = $SettleMs
         detectorProven = $detectorProven
