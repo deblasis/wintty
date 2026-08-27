@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Ghostty.Core.Accessibility;
 
 namespace Ghostty.Core.Config;
 
@@ -71,12 +72,24 @@ public interface IConfigService : IDisposable
     bool WindowsHighContrast { get; }
 
     /// <summary>
-    /// Set (or clear, with null) the High Contrast color override body to
-    /// layer on top of the user's config, then reload so it takes effect.
-    /// Called by the High Contrast monitor. A no-op when the body is
-    /// unchanged.
+    /// Set (or clear, with null) the High Contrast palette to layer on top
+    /// of the user's config, then reload so it takes effect. Called by the
+    /// High Contrast monitor. A no-op when the palette is unchanged.
     /// </summary>
-    void SetHighContrastOverride(string? body);
+    void SetHighContrastOverride(HighContrastColors? colors);
+
+    /// <summary>
+    /// The High Contrast background currently layered over the palette,
+    /// packed 0x00RRGGBB, or null when no override is active.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="BackgroundColor"/> is resolved from the user's config and
+    /// theme files, which the High Contrast override never touches: it is
+    /// layered into the native config only. Consumers that need the colour
+    /// the surface will actually settle on under High Contrast (the splash)
+    /// read this and fall back to <see cref="BackgroundColor"/>.
+    /// </remarks>
+    uint? HighContrastBackground { get; }
 
     /// <summary>
     /// Windows-only: backdrop material for the command palette.

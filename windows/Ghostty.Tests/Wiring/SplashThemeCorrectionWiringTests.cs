@@ -1,4 +1,6 @@
 using System.Linq;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
 
@@ -35,8 +37,19 @@ public class SplashThemeCorrectionWiringTests
         var launched = ShellSource.Load("App.xaml.cs").Method("OnLaunched");
         var adopt = launched.Call("Ghostty.Shell.SplashWindow.AdoptBackground");
 
-        // The terminal's colour, not the desktop's and not a constant.
-        Assert.Equal("_configService.BackgroundColor", adopt.Arg(0));
+        // The terminal's colour, not the desktop's and not a constant. Under
+        // HC that is the override's colour: BackgroundColor resolves from the
+        // config and theme files, which the High Contrast override is not
+        // layered into, so the theme colour here is exactly the mismatch the
+        // reveal used to uncover (#793). Pinned as a parsed coalesce rather
+        // than as text so the operands cannot trade places, which would put
+        // the theme colour back in charge under HC.
+        var colour = Assert.IsType<BinaryExpressionSyntax>(adopt.ArgExpression(0));
+        Assert.True(
+            colour.IsKind(SyntaxKind.CoalesceExpression),
+            "the splash's colour is not chosen between High Contrast and the theme");
+        Assert.Equal("_configService.HighContrastBackground", colour.Left.ToString());
+        Assert.Equal("_configService.BackgroundColor", colour.Right.ToString());
 
         // Statement order inside the method body, so the ordering is checked
         // rather than merely "somewhere in here".
@@ -65,6 +78,38 @@ public class SplashThemeCorrectionWiringTests
             handedOver < firstWindow,
             "the correction is published after the first window is built, which is too "
                 + "late for it to finish before a frame is revealed");
+    }
+
+    /// <summary>
+    /// What the window records for the next launch's splash must be the
+    /// colour that launch will settle on. Under High Contrast that is the
+    /// override's colour: BackgroundColor is resolved from the config and
+    /// theme files, which the override is not layered into, so recording it
+    /// under HC leaves the next HC launch starting one step from the right
+    /// colour and crossfading on every start (#793).
+    /// </summary>
+    [Fact]
+    public void TheRecordedBackground_PrefersTheHighContrastColour_WhenAnOverrideIsLayered()
+    {
+        var record = ShellSource.Load("MainWindow.xaml.cs").Method("RecordSplashBackground");
+
+        var background = record.Body!.Statements
+            .OfType<LocalDeclarationStatementSyntax>()
+            .Single(s => s.Declaration.Variables.Any(v => v.Identifier.ValueText == "background"));
+
+        // The mask survives from before; what it is applied to is the fix.
+        var mask = Assert.IsType<BinaryExpressionSyntax>(
+            background.Declaration.Variables.Single().Initializer!.Value);
+        Assert.True(mask.IsKind(SyntaxKind.BitwiseAndExpression));
+        Assert.Equal("0x00FFFFFFu", mask.Right.ToString());
+
+        var colour = Assert.IsType<BinaryExpressionSyntax>(
+            Assert.IsType<ParenthesizedExpressionSyntax>(mask.Left).Expression);
+        Assert.True(
+            colour.IsKind(SyntaxKind.CoalesceExpression),
+            "the recorded colour is not chosen between High Contrast and the theme");
+        Assert.Equal("_configService.HighContrastBackground", colour.Left.ToString());
+        Assert.Equal("_configService.BackgroundColor", colour.Right.ToString());
     }
 
     /// <summary>

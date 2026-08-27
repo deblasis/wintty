@@ -18,6 +18,15 @@ public static class HighContrastConfigWriter
     public const int DefaultMinimumContrast = 7;
 
     /// <summary>
+    /// Convert a Win32 COLORREF (0x00BBGGRR) to the 0x00RRGGBB packing the
+    /// C# colour caches use, so a value sampled beside <see cref="Render"/>
+    /// can be compared with <c>BackgroundColor</c> without a string round
+    /// trip through the config form.
+    /// </summary>
+    public static uint ColorRefToRgb(uint colorRef) =>
+        ((colorRef & 0xFFu) << 16) | (colorRef & 0xFF00u) | ((colorRef >> 16) & 0xFFu);
+
+    /// <summary>
     /// Convert a Win32 COLORREF (0x00BBGGRR) to Ghostty's lowercase
     /// zero-padded #rrggbb config form.
     /// </summary>

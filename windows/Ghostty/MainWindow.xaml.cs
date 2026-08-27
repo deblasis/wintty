@@ -2778,7 +2778,14 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private bool RecordSplashBackground()
     {
-        var background = _configService.BackgroundColor & 0x00FFFFFFu;
+        // The HC colour when the override is layered, not BackgroundColor:
+        // that one resolves from the config and theme files, which the
+        // override is not layered into, so persisting it under HC would
+        // start the next HC launch's splash on the theme colour -- one step
+        // further from the colour the terminal is about to settle on
+        // (issue #793).
+        var background = (_configService.HighContrastBackground
+            ?? _configService.BackgroundColor) & 0x00FFFFFFu;
 
         // Neither a configured background nor a configured theme means the
         // colour is the built-in theme's, which tracks the desktop and so is

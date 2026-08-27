@@ -63,7 +63,8 @@ public class SettingsConfigWriterLoggingTests
         public bool VerticalTabsHoverExpand => false;
         public bool CommandPaletteGroupCommands => false;
         public bool WindowsHighContrast => false;
-        public void SetHighContrastOverride(string? body) { }
+        public void SetHighContrastOverride(Ghostty.Core.Accessibility.HighContrastColors? colors) { }
+        public uint? HighContrastBackground => null;
         public string CommandPaletteBackground => "acrylic";
         public string NoColorOverride => "notify";
         public string LogLevel => "info";

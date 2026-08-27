@@ -23,6 +23,15 @@ public sealed class HighContrastConfigWriterTests
     }
 
     [Fact]
+    public void ColorRefToRgb_ByteSwapsIntoTheCachePacking()
+    {
+        // COLORREF is 0x00BBGGRR; the C# colour caches pack 0x00RRGGBB.
+        // 0x00123456 => B=0x12 G=0x34 R=0x56 => 0x00563412.
+        Assert.Equal(0x00563412u, HighContrastConfigWriter.ColorRefToRgb(0x00123456u));
+        Assert.Equal(0x00FFFFFFu, HighContrastConfigWriter.ColorRefToRgb(0x00FFFFFFu));
+    }
+
+    [Fact]
     public void Render_EmitsAllFiveLinesInOrder()
     {
         var colors = new HighContrastColors(

@@ -808,7 +808,14 @@ public partial class App : Application
         // does nothing at all when the colour it already painted turns out
         // to have been right, and the first window is still below, so there
         // is room to land before anything is revealed.
-        Ghostty.Shell.SplashWindow.AdoptBackground(_configService.BackgroundColor);
+        //
+        // The HC colour is asked for explicitly because BackgroundColor
+        // never sees the override: it resolves from the config and theme
+        // files, which the override is not layered into, and the splash
+        // would settle on the theme colour while the reveal uncovers
+        // COLOR_WINDOW (issue #793).
+        Ghostty.Shell.SplashWindow.AdoptBackground(
+            _configService.HighContrastBackground ?? _configService.BackgroundColor);
 
         // Session manager: owns restore decision + debounced persistence.
         // Constructed before window creation so we can decide whether to
