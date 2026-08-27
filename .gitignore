@@ -56,6 +56,7 @@ vgcore.*
 windows/scripts/fuzz-out/
 windows/scripts/search-fuzz/
 windows/scripts/shader-notice-fuzz/
+windows/scripts/frame-style-fuzz/
 windows/scripts/vtabs-layout-switch/
 windows/scripts/vtabs-morph/
 windows/scripts/vtabs-switcher/
