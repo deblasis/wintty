@@ -2263,15 +2263,24 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// The surface the bare-backdrop chrome sits on, packed 0x00RRGGBB.
-    /// Fed the resolved tint opacity rather than the default constant: the
-    /// user can set background-tint-opacity, and at 0.9 the palette all but
-    /// replaces the base.
+    /// Fed the resolver's tuning rather than the palette or the default
+    /// constants: the compositor blends the user's background-tint-color
+    /// at the user's background-tint-opacity, and scoring the ink against
+    /// any other pair means scoring it against a ground that is not on
+    /// screen.
     /// </summary>
-    private uint EstimatedBackdropGround => Core.Shell.BackdropGround.Estimate(
-        _configService.BackgroundColor,
-        Services.OsTheme.IsDark(),
-        _currentBackdropStyle,
-        ResolveAcrylicTuning().tintOpacity);
+    private uint EstimatedBackdropGround
+    {
+        get
+        {
+            var (tint, _, tintOpacity) = ResolveAcrylicTuning();
+            return Core.Shell.BackdropGround.Estimate(
+                ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
+                Services.OsTheme.IsDark(),
+                _currentBackdropStyle,
+                tintOpacity);
+        }
+    }
 
     /// <summary>
     /// Re-derive everything calibrated against the backdrop: the title row's
@@ -2716,10 +2725,6 @@ public sealed partial class MainWindow : Window
         ApplyPerTabChrome();
     }
 
-    /// <summary>
-    /// Pane borders follow the active tab's preset color when set; tab strip
-    /// backgrounds refresh in both orientations.
-    /// </summary>
     /// <summary>
     /// Pane borders follow the active tab's preset color when set; tab strip
     /// backgrounds refresh in both orientations.
