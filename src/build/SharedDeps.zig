@@ -12,6 +12,13 @@ const GhosttyFrameData = @import("GhosttyFrameData.zig");
 const DistResource = @import("GhosttyDist.zig").Resource;
 const gtk_helpers = @import("gtk.zig");
 
+// Mirrors pkg/sentry/build.zig's `Backend` enum. We can't `@import` that
+// file directly: it's the root of the "sentry" dependency module, and Zig
+// won't let the same file belong to two modules. Dependency options are
+// passed by tag name, not by nominal type identity, so a structurally
+// matching local enum works the same as importing the real one.
+const SentryBackend = enum { crashpad, breakpad, inproc, none };
+
 config: *const Config,
 
 options: *std.Build.Step.Options,
@@ -450,10 +457,21 @@ pub fn add(
 
     // Sentry
     if (self.config.sentry) {
+        // Windows has no vendored breakpad client layer (pkg/breakpad/build.zig
+        // has no Windows branch), so the in-process backend is the only one
+        // that links there. pkg/sentry's own Windows source set is complete:
+        // dbghelp unwinder, Windows symbolizer, Windows modulefinder.
+        //
+        // Typed rather than a bare enum literal: the backend depends on the
+        // target, which is runtime control flow here, and an untyped enum
+        // literal is comptime-only.
+        const sentry_windows = target.result.os.tag == .windows;
+        const sentry_backend: SentryBackend =
+            if (sentry_windows) .inproc else .breakpad;
         if (b.lazyDependency("sentry", .{
             .target = target,
             .optimize = optimize,
-            .backend = .breakpad,
+            .backend = sentry_backend,
         })) |sentry_dep| {
             step.root_module.addImport(
                 "sentry",
@@ -465,15 +483,18 @@ pub fn add(
                 sentry_dep.artifact("sentry").getEmittedBin(),
             );
 
-            // We also need to include breakpad in the static libs.
-            if (sentry_dep.builder.lazyDependency("breakpad", .{
-                .target = target,
-                .optimize = optimize,
-            })) |breakpad_dep| {
-                try static_libs.append(
-                    b.allocator,
-                    breakpad_dep.artifact("breakpad").getEmittedBin(),
-                );
+            // Breakpad is only linked for the breakpad backend. The inproc
+            // backend has no external dependency.
+            if (!sentry_windows) {
+                if (sentry_dep.builder.lazyDependency("breakpad", .{
+                    .target = target,
+                    .optimize = optimize,
+                })) |breakpad_dep| {
+                    try static_libs.append(
+                        b.allocator,
+                        breakpad_dep.artifact("breakpad").getEmittedBin(),
+                    );
+                }
             }
         }
     }

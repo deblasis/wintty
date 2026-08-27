@@ -10,7 +10,7 @@ namespace Ghostty.Tests.Wiring;
 /// <summary>
 /// The Win32 class brush is the fill that lands before XAML composes the
 /// first frame, so it is only ever seen at the moment where being wrong is
-/// most visible. Four things about it survive a unit test unharmed:
+/// most visible. Five things about it survive a unit test unharmed:
 ///
 /// GDI takes a COLORREF (0x00BBGGRR) where the resolver hands out ARGB
 /// (0xAARRGGBB). The constant this replaced was a neutral grey, so the
@@ -20,6 +20,12 @@ namespace Ghostty.Tests.Wiring;
 /// The memoisation key decides whether a reload reaches GDI at all, and a
 /// key that stops covering the colour swallows exactly the reloads the
 /// colour was made derivable for.
+///
+/// And the same is true one level up. ApplyBackdropStyle used to open
+/// with a skip guard, and any guard there -- however wide its key --
+/// swallows the colour-only reloads before the brush is even reached.
+/// The guard is gone: the SystemBackdrop swap gates on its own memo, and
+/// the brush's memo is what decides.
 ///
 /// SetClassLongPtr hands back the brush it displaced, and only the ones we
 /// allocated may be deleted. A cache that starts changing more often turns
@@ -124,6 +130,56 @@ public sealed class WindowClassBrushWiringTests
         Assert.NotEmpty(calls);
         foreach (var call in calls)
             Assert.Equal(resolved, call.Arg(1));
+    }
+
+    /// <summary>
+    /// ApplyBackdropStyle used to open with a skip guard, and a guard
+    /// there swallows the colour-only reloads this file exists for: with
+    /// background-style = solid the style never moves, so an OS dark/light
+    /// flip or a palette reload early-returned before the brush was
+    /// reached. Widening the guard's key cannot fix it -- the colour has to
+    /// be resolved before it can be tested, and any resolve-then-test
+    /// answers "unchanged" for exactly the reloads the colour moves on --
+    /// so the guard is gone entirely and the SystemBackdrop swap gates on
+    /// its own memo instead.
+    ///
+    /// The first half mirrors
+    /// <see cref="FrameStyleWiringTests.The_chrome_is_not_skipped_by_the_backdrops_own_memoisation"/>
+    /// so the two tripwires cannot drift apart. The second half pins where
+    /// the skipping actually lives now: the brush's own memo, which keys
+    /// on both the kind and the colour, so a colour-only change still
+    /// reaches GDI while an unchanged pair no-ops.
+    /// </summary>
+    [Fact]
+    public void The_brush_is_not_skipped_above_and_memoised_on_kind_and_colour_below()
+    {
+        var apply = MainWindow().Method("ApplyBackdropStyle");
+
+        // No early return anywhere in the method: one above the resolve or
+        // the brush calls is the old guard back, whatever its key tests.
+        Assert.Empty(apply.DescendantNodes().OfType<ReturnStatementSyntax>());
+
+        var brush = MainWindow().Method(ApplyBrush);
+        var kind = brush.ParameterList.Parameters[0].Identifier.ValueText;
+        var colour = ColourParameter(brush);
+
+        var memo = Assert.Single(
+            brush.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Statement is ReturnStatementSyntax);
+
+        var condition = Assert.IsType<BinaryExpressionSyntax>(memo.Condition);
+        Assert.True(
+            condition.IsKind(SyntaxKind.LogicalAndExpression),
+            $"the memoisation guard reads '{condition}', which cannot be testing both "
+                + "the kind and the colour. With no skip guard above, this memo is "
+                + "the only thing standing between a reload and GDI.");
+
+        var named = condition.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Select(i => i.Identifier.ValueText)
+            .Distinct()
+            .ToList();
+        Assert.Contains(kind, named);
+        Assert.Contains(colour, named);
     }
 
     [Fact]

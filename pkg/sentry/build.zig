@@ -28,6 +28,32 @@ pub fn build(b: *std.Build) !void {
 
     var flags: std.ArrayList([]const u8) = .empty;
     defer flags.deinit(b.allocator);
+    // The library is built with .linkage = .static, so sentry.h must not
+    // decorate its API with __declspec(dllimport); without this every
+    // sentry_* symbol comes out as an unresolved dllimport on Windows.
+    try flags.append(b.allocator, "-DSENTRY_BUILD_STATIC=1");
+    // Zig's ubsan runtime cannot be bundled on Windows (LNK4229), so every
+    // C object built with the default sanitizer settings leaves
+    // __ubsan_handle_* undefined. That is invisible while Zig links the
+    // artifact and fatal the moment an external linker consumes the archive,
+    // which on Windows is exactly what happens: ghostty-static.lib is linked
+    // into the NativeAOT image by MSVC link.exe. src/build/SharedDeps.zig
+    // already does this for ghostty's own C sources; sentry's were the set
+    // that did not go through it.
+    //
+    // Nothing in a `zig build` or a `dotnet build` catches this. Both link
+    // with Zig or run on CoreCLR; only `dotnet publish` reaches link.exe, so
+    // the whole four-tier gate stayed green while no release could link.
+    // Gated on the OS, not the ABI. src/build/SharedDeps.zig states the rule
+    // for this repo and says why: it affects both the MSVC and GNU ABIs.
+    // Gating on .msvc alone re-opens the same link failure for windows-gnu,
+    // which is the last thing to do in the commit that fixes it.
+    if (target.result.os.tag == .windows) {
+        try flags.appendSlice(b.allocator, &.{
+            "-fno-sanitize=undefined",
+            "-fno-sanitize-trap=undefined",
+        });
+    }
     if (target.result.os.tag == .windows) {
         try flags.appendSlice(b.allocator, &.{
             "-DSENTRY_WITH_UNWINDER_DBGHELP",
@@ -67,6 +93,19 @@ pub fn build(b: *std.Build) !void {
 
         // Symbolizer + Unwinder
         if (target.result.os.tag == .windows) {
+            // dbghelp:  symbolizer, dbghelp unwinder, modulefinder.
+            // version:  sentry_os.c version lookup.
+            // advapi32: sentry_os.c reads the OS build from the registry with
+            //           RegGetValueA. The app pulls advapi32 in by other
+            //           routes, so this only shows up as an undefined symbol
+            //           in targets that link sentry and little else, which is
+            //           what the test target is.
+            lib.root_module.linkSystemLibrary("dbghelp", .{});
+            lib.root_module.linkSystemLibrary("version", .{});
+            lib.root_module.linkSystemLibrary("advapi32", .{});
+            module.linkSystemLibrary("dbghelp", .{});
+            module.linkSystemLibrary("version", .{});
+            module.linkSystemLibrary("advapi32", .{});
             lib.root_module.addCSourceFiles(.{
                 .root = upstream.path(""),
                 .files = &.{
