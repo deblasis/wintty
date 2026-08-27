@@ -2595,6 +2595,13 @@ public sealed partial class MainWindow : Window
             ChromeSeparatorsWanted ? Core.Shell.ChromeSeparator.Resolve(ground) : null,
             ground,
             HighContrastChromeActive);
+
+        // The horizontal strip draws no lines -- its rows are side by side and
+        // the TabView already edges them -- but it sits on the same ground and
+        // scores its own titles against it. One read feeds both, so the two
+        // layouts cannot come out calibrated against different surfaces for
+        // one config, which only shows up mid-switch with both on screen.
+        _horizontalTabHost.SetChromeGround(ground);
     }
 
     /// <summary>
