@@ -275,4 +275,39 @@ internal static class SyntaxQueries
             $"'{call.Expression}' has {call.ArgumentList.Arguments.Count} arguments, wanted index {index}");
         return call.ArgumentList.Arguments[index].ToString();
     }
+
+    /// <summary>
+    /// One argument of a call as a node rather than as text.
+    ///
+    /// A substring assertion over an argument accepts its own negation:
+    /// `Assert.Contains("OsTheme.IsDark", arg)` is just as happy with
+    /// `!OsTheme.IsDark(...)`, which is the inverted polarity such an
+    /// assertion exists to catch. The node keeps the wrapper visible.
+    /// </summary>
+    public static ExpressionSyntax ArgExpression(this InvocationExpressionSyntax call, int index)
+    {
+        Assert.True(
+            call.ArgumentList.Arguments.Count > index,
+            $"'{call.Expression}' has {call.ArgumentList.Arguments.Count} arguments, wanted index {index}");
+        return call.ArgumentList.Arguments[index].Expression;
+    }
+
+    /// <summary>
+    /// Assert that <paramref name="expression"/> is a call to
+    /// <paramref name="callee"/> and nothing wrapped around one, then hand
+    /// the call back so the caller can go on to name its arguments.
+    ///
+    /// Matches the callee as written or as any namespace-qualified spelling
+    /// of it, because the same helper is called both ways in the shell.
+    /// </summary>
+    public static InvocationExpressionSyntax AssertCallTo(
+        this ExpressionSyntax expression, string callee)
+    {
+        var invocation = Assert.IsType<InvocationExpressionSyntax>(expression);
+        var actual = invocation.CalleeText();
+        Assert.True(
+            actual == callee || actual.EndsWith("." + callee, StringComparison.Ordinal),
+            $"expected a call to '{callee}', found '{actual}'");
+        return invocation;
+    }
 }
