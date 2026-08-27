@@ -349,6 +349,17 @@ public sealed class FrameStyleWiringTests
     /// Both strips take the same fill from the same expression. Two pushes
     /// resolved separately is how the horizontal strip ends up a different
     /// material from the vertical one for the same config.
+    ///
+    /// This is a guard on the push and nothing further. It watches one method
+    /// whose only branch is the High Contrast opt-out, which is why it stayed
+    /// green while the value it traces was being refused, half-applied and
+    /// then applied downstream: window-theme=system and window-theme=wintty
+    /// are indistinguishable from here, because the window does not branch on
+    /// them to decide the fill -- the receivers did. The last hop it can
+    /// honestly cover is that the strips are handed the title row's own read
+    /// rather than a second derivation of it, which is the tightening below.
+    /// Where the two paths actually diverged is
+    /// <see cref="The_lane_surfaces_are_written_only_from_the_pushed_fill"/>.
     /// </summary>
     [Fact]
     public void Both_strips_are_pushed_the_same_fill()
@@ -389,7 +400,165 @@ public sealed class FrameStyleWiringTests
             palette.IsKind(SyntaxKind.LogicalNotExpression),
             $"the window-theme half reads `{palette}`; unnegated it opts the palette out.");
         Assert.Equal("_shellTheme.IsEnabled", palette.Operand.ToString());
+
+        // And the value pushed is the title row's, masked -- not a second
+        // resolve with its own arguments. Asserted through the local, so a
+        // rewrite that keeps the shape and swaps the source is red: the
+        // transparency test, the null and the mask all have to be about the
+        // same value the row is painted from.
+        var fill = Property(Window(), "ChromeStripFill");
+        var source = Assert.Single(fill.DescendantNodes().OfType<VariableDeclaratorSyntax>());
+        Assert.Equal("ChromeFillArgb", source.Initializer?.Value.ToString());
+
+        var mask = Assert.Single(fill.DescendantNodes().OfType<ConditionalExpressionSyntax>());
+        var bare = Assert.IsType<BinaryExpressionSyntax>(mask.Condition);
+        Assert.True(
+            bare.IsKind(SyntaxKind.EqualsExpression),
+            $"the strips go bare on `{bare}`; a negated test leaves them bare on "
+                + "exactly the frames that asked to be painted.");
+        Assert.Equal(source.Identifier.ValueText, bare.Left.ToString());
+        Assert.Equal("RootBackgroundResolver.TransparentArgb", bare.Right.ToString());
+        Assert.True(
+            mask.WhenTrue.IsKind(SyntaxKind.NullLiteralExpression),
+            $"a bare strip is `null`, not `{mask.WhenTrue}`: the horizontal strip's "
+                + "surface is a theme resource, and putting it back is removing the "
+                + "entry rather than writing a colour with no alpha in it.");
+        var painted = Assert.IsType<BinaryExpressionSyntax>(mask.WhenFalse);
+        Assert.True(
+            painted.IsKind(SyntaxKind.BitwiseAndExpression),
+            $"the painted arm reads `{painted}`; the strips take packed RGB, so the "
+                + "row's alpha has to come off.");
+        Assert.Equal(source.Identifier.ValueText, painted.Left.ToString());
     }
+
+    /// <summary>
+    /// The two window-theme paths only ever diverged downstream of the push,
+    /// so this is the guard that can see them apart.
+    ///
+    /// The vertical lane is three rows of one Grid and the strip control is
+    /// only the middle one: the icon lane and the pane toggle above it and
+    /// the new-tab button below it are painted by the host's own two
+    /// surfaces. Those were written under `if (_shellThemeActive)`, so
+    /// window-theme=system left most of the lane on the backdrop whatever
+    /// frame-style said, while the title row an inch above it went opaque
+    /// from the same pushed value.
+    ///
+    /// Two rules, because either one alone leaves the drift available. The
+    /// surfaces have exactly one writer, which is the call the fill arrives
+    /// on -- a clear from ClearShellTheme or a theme change is a second
+    /// answer about the frame's material from code that does not know it. And
+    /// inside that call no write may sit under a window-theme test, which is
+    /// the gate that produced the split.
+    /// </summary>
+    [Fact]
+    public void The_lane_surfaces_are_written_only_from_the_pushed_fill()
+    {
+        // Named per file, because the surface is whatever that layout paints
+        // its lane with: two properties on the vertical host, one theme
+        // resource on the horizontal one.
+        var vertical = ShellSource.Load("Tabs.VerticalTabHost.xaml.cs");
+        AssertOneOwner(
+            "Tabs.VerticalTabHost.xaml.cs",
+            vertical.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Where(a => a.Left.ToString() is "Background" or "StripRoot.Background"));
+
+        // The horizontal strip's surface is a theme resource, so a write is an
+        // entry going into the dictionary or coming out of it. Both spellings
+        // are the same decision and both belong to the one owner.
+        var horizontal = ShellSource.Load("Tabs.TabHost.xaml.cs");
+        AssertOneOwner(
+            "Tabs.TabHost.xaml.cs",
+            horizontal.Root.DescendantNodes()
+                .Where(n => n is AssignmentExpressionSyntax { Left: ElementAccessExpressionSyntax }
+                    or InvocationExpressionSyntax)
+                .Where(n => NamesTheStripResource(n)));
+
+        // The strip control's own surface has two appliers rather than one:
+        // the default path rebuilds the whole pane chrome around the new fill,
+        // the palette path swaps the surface alone. Both read the pushed field
+        // and nothing else may paint it -- ApplyShellChrome taking it straight
+        // from the palette is what made window-theme=wintty opaque under every
+        // frame-style.
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+        var painters = strip.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "Background")
+            .Select(a => a.Ancestors().OfType<MethodDeclarationSyntax>()
+                .First().Identifier.ValueText)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+        Assert.Equal(
+            new[] { "ApplyDefaultPaneChrome", "ApplyShellPaneSurface" },
+            painters);
+
+        // ClearValue is the same write spelled as a call, and it is how the
+        // vertical lane's surface was being put back before. Nothing outside
+        // the owner may reach for it either, and the owner has no use for it:
+        // a cleared Background is not hit-testable, which takes the lane's
+        // context menu with it.
+        Assert.DoesNotContain(
+            vertical.Root.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText().EndsWith(".ClearValue", StringComparison.Ordinal)
+                && i.ArgumentList.Arguments.Any(
+                    a => a.ToString().Contains("BackgroundProperty", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// The key the strip's surface is filed under, as an argument or as an
+    /// indexer. Matched on the literal so a comment mentioning it is not a
+    /// write and a variable holding it is not missed for being one.
+    /// </summary>
+    private static bool NamesTheStripResource(SyntaxNode node) =>
+        node.DescendantNodes().OfType<LiteralExpressionSyntax>()
+            .Any(l => l.Token.ValueText == "TabViewBackground");
+
+    /// <summary>
+    /// Every write of a lane surface in <paramref name="file"/> lives in
+    /// SetChromeFill, and none of them is gated on which window-theme is on.
+    /// </summary>
+    private static void AssertOneOwner(string file, IEnumerable<SyntaxNode> found)
+    {
+        var writes = found.ToList();
+
+        // An empty sweep passes every rule below it. The surface is either
+        // painted somewhere in this file or the strip is not painted at all.
+        Assert.NotEmpty(writes);
+
+        foreach (var write in writes)
+        {
+            var owner = write.Ancestors().OfType<MethodDeclarationSyntax>().First();
+            Assert.True(
+                owner.Identifier.ValueText == "SetChromeFill",
+                $"{file} writes the lane surface in {owner.Identifier.ValueText}: "
+                    + "`" + write + "`. Only the call the frame's fill arrives on "
+                    + "may decide it.");
+
+            foreach (var gate in write.Ancestors().OfType<IfStatementSyntax>())
+            {
+                var names = gate.Condition.DescendantNodesAndSelf().OfType<SimpleNameSyntax>()
+                    .Select(n => n.Identifier.ValueText)
+                    .ToList();
+                Assert.False(
+                    names.Any(n => WindowThemeReads.Contains(n, StringComparer.Ordinal)),
+                    $"{file} writes the lane surface under `if ({gate.Condition})`. "
+                        + "The fill already answers for both window-themes; asking "
+                        + "again here is how the strip and the title row drift apart.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The names that mean "which window-theme is on". Any of them standing
+    /// between the pushed fill and the surface is the defect.
+    /// </summary>
+    private static readonly string[] WindowThemeReads = new[]
+    {
+        "_shellThemeActive",
+        "_shellTheme",
+        "_shellActiveTextBrush",
+        "_shellInactiveTextBrush",
+        "IsEnabled",
+    };
 
     /// <summary>
     /// And the strips have to accept it. Both used to refuse a fill while the

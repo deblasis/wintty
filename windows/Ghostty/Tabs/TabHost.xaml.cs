@@ -979,11 +979,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     internal void ClearShellTheme()
     {
-        // The cache has to describe what is installed, and this removes it.
-        // Left stale, the SetChromeFill that follows would decline to write a
-        // fill it thinks is already there.
+        // The cache has to describe what is installed, and the SetChromeFill
+        // that follows is about to replace it. Left stale, that call would
+        // decline to write a fill it thinks is already there.
+        //
+        // TabViewBackground itself is deliberately not removed here: it has
+        // one owner, and a clear from a second place is an answer about the
+        // frame's material given by code that does not know it.
         _chromeFillRgb = null;
-        TabViewControl.Resources.Remove("TabViewBackground");
         _shellActiveTextBrush = null;
         _shellInactiveTextBrush = null;
 
