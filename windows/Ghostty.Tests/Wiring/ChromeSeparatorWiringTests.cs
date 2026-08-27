@@ -30,6 +30,11 @@ public class ChromeSeparatorWiringTests
     /// where there is one edge. Both operands, and both negated: the gate is
     /// "neither is painting", so dropping either half or losing a `!` widens
     /// it to a path that does not want strokes.
+    ///
+    /// The window-theme half is the frame-aware answer, not the raw config
+    /// read. Asking window-theme alone was right only while it always
+    /// painted; a frosted frame sends its rows to the backdrop like any other
+    /// bare chrome, and the shade that was dividing them goes with it.
     /// </summary>
     [Fact]
     public void TheGate_IsExactlyNeitherPaintedPath()
@@ -51,8 +56,9 @@ public class ChromeSeparatorWiringTests
             "each operand must be negated: the gate is 'neither is painting'"));
 
         var negated = operands.Select(o => o!.Operand.ToString()).ToList();
-        Assert.Contains("_shellTheme.IsEnabled", negated);
+        Assert.Contains("ChromePaintedFromPalette", negated);
         Assert.Contains("HighContrastChromeActive", negated);
+        Assert.DoesNotContain("_shellTheme.IsEnabled", negated);
     }
 
     /// <summary>

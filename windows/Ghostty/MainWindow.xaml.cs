@@ -147,6 +147,12 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
+    // The chrome's own material, after the low-power override. Separate from
+    // the field above because background-style answers what the terminal is
+    // made of and frame-style what the window frame is made of; they are the
+    // same value only for as long as nobody sets the second key.
+    private string _currentFrameStyle = "";
+
     // Win32 class-brush kind currently applied via SetClassLongPtr.
     // Cached so repeated reloads on the same style don't re-invoke
     // the Win32 call (and, for the opaque case, don't leak a fresh
@@ -2151,12 +2157,20 @@ public sealed partial class MainWindow : Window
         // Caption buttons: transparent in horizontal mode, opaque in
         // vertical -- see ApplyCaptionButtonChrome().
 
-        VerticalTitleText.Foreground = new SolidColorBrush(
-            Microsoft.UI.ColorHelper.FromArgb(
-                _shellTheme.TitleBarForeground.A,
-                _shellTheme.TitleBarForeground.R,
-                _shellTheme.TitleBarForeground.G,
-                _shellTheme.TitleBarForeground.B));
+        // Only while the palette is actually painting the row. The colour was
+        // picked against the tab-bar shade, and a frosted frame does not put
+        // that shade behind it -- ApplyVerticalTitleBarChrome scores the ink
+        // against the backdrop for that case, the way it does for every other
+        // bare row.
+        if (ChromePaintedFromPalette)
+        {
+            VerticalTitleText.Foreground = new SolidColorBrush(
+                Microsoft.UI.ColorHelper.FromArgb(
+                    _shellTheme.TitleBarForeground.A,
+                    _shellTheme.TitleBarForeground.R,
+                    _shellTheme.TitleBarForeground.G,
+                    _shellTheme.TitleBarForeground.B));
+        }
 
         // Push theme to both tab hosts. RootGrid.Background is owned
         // by ApplyRootGridBackground and refreshed by the caller.
@@ -2279,9 +2293,99 @@ public sealed partial class MainWindow : Window
             var (tint, _, tintOpacity) = ResolveAcrylicTuning();
             return Core.Shell.BackdropGround.Estimate(
                 ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
-                Services.OsTheme.IsDark(),
-                _currentBackdropStyle,
+                // The window's own UISettings, the one the root grid is painted from.
+                // A freshly activated instance answers for whatever moment it was
+                // created in, so an OS flip could leave the row painted for one
+                // desktop and its ink scored against the other.
+                Services.OsTheme.IsDark(_systemUiSettings),
+                ChromeGroundStyle,
                 tintOpacity);
+        }
+    }
+
+    /// <summary>
+    /// The material actually behind the chrome.
+    ///
+    /// frame-style can cover the backdrop; it cannot replace it. A solid
+    /// frame is its own ground, and the other two leave whatever
+    /// background-style put there showing -- which is why frosted and crystal
+    /// are indistinguishable as frames: both mean "let the backdrop through",
+    /// and there is one backdrop per window.
+    /// </summary>
+    private string ChromeGroundStyle => _currentFrameStyle == BackdropStyles.Solid
+        ? BackdropStyles.Solid
+        : _currentBackdropStyle;
+
+    /// <summary>
+    /// The frame's material as the chrome actually gets it.
+    ///
+    /// High Contrast pins it solid. Translucency over a backdrop nobody
+    /// controls is the thing that mode exists to remove, so the key stops
+    /// being observable there.
+    ///
+    /// A solid background pins it solid too, and for the opposite reason:
+    /// there is nothing behind the frame to come through. Both pins sit in
+    /// this one expression rather than at each painter, because every
+    /// consumer of the frame's material wants the same answer and three of
+    /// them re-deriving it is three chances to disagree.
+    /// </summary>
+    private string EffectiveFrameStyle => HighContrastChromeActive
+        ? BackdropStyles.Solid
+        : BackdropStyles.FrameOver(_currentFrameStyle, _currentBackdropStyle);
+
+    /// <summary>
+    /// The fill the chrome takes, packed ARGB, where fully transparent means
+    /// "leave it to the backdrop".
+    ///
+    /// The two keys are orthogonal: window-theme picks the hue and
+    /// frame-style picks the material. So the palette is handed to the
+    /// resolver rather than pinned off -- it answers for a solid frame, and a
+    /// frosted or crystal one is transparent whichever hue it was going to
+    /// take. Pinning it off was what made frame-style unobservable under
+    /// window-theme=wintty, which is the combination the key exists to
+    /// create.
+    ///
+    /// Asked with the frame's effective material, so the transparent answer
+    /// is only ever given where something is behind the chrome to come
+    /// through.
+    /// </summary>
+    private uint ChromeFillArgb => RootBackgroundResolver.Resolve(
+        EffectiveFrameStyle,
+        _shellTheme.IsEnabled,
+        ShellThemeChromeArgb,
+        Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+
+    /// <summary>
+    /// True while the terminal palette is actually painting the chrome: the
+    /// window asked for palette-hued chrome and the frame is solid enough to
+    /// carry it.
+    ///
+    /// A frosted or crystal frame answers no. The row is the backdrop there
+    /// whatever hue it was going to take, so everything calibrated against a
+    /// painted row -- the title ink, the caption glyphs, the row separators
+    /// -- has to go back to the bare-chrome answer.
+    /// </summary>
+    private bool ChromePaintedFromPalette =>
+        _shellTheme.IsEnabled
+        && ChromeFillArgb != RootBackgroundResolver.TransparentArgb;
+
+    /// <summary>
+    /// The same fill for the tab strips, packed 0x00RRGGBB, or null when they
+    /// are left to the backdrop.
+    ///
+    /// Nullable rather than a transparent colour because for a strip "bare"
+    /// is the absence of an override rather than a colour with no alpha in
+    /// it: the horizontal strip's surface is a theme resource, and putting it
+    /// back means removing the entry, not writing #00000000 over it.
+    /// </summary>
+    private uint? ChromeStripFill
+    {
+        get
+        {
+            var argb = ChromeFillArgb;
+            return argb == RootBackgroundResolver.TransparentArgb
+                ? null
+                : argb & 0x00FFFFFFu;
         }
     }
 
@@ -2339,7 +2443,7 @@ public sealed partial class MainWindow : Window
 
         Windows.UI.Color dragBg;
         Windows.UI.Color stripMirrorBg;
-        if (_shellTheme.IsEnabled)
+        if (ChromePaintedFromPalette)
         {
             // One shade for the whole row, and it is the sidebar's. The
             // horizontal header paints TabBarBackground, so this row
@@ -2352,9 +2456,20 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            // High Contrast ignores frame-style: translucency over a backdrop
+            // nobody controls is what that mode exists to remove, so the row
+            // stays painted out of Windows' own colours whatever the key says.
+            // It only reaches here without the palette; with it the branch
+            // above already painted the row from the shade HC put in it.
+            //
+            // Otherwise the fill is the frame's material, and for frosted and
+            // crystal that is transparent as a colour rather than the absence
+            // of a brush: the drag region has to keep swallowing the clicks
+            // that would otherwise reach the strip behind it, and a null
+            // Background is not hit-testable.
             dragBg = HighContrastChromeActive
                 ? UnpackTerminalColor(_configService.BackgroundColor)
-                : unpainted;
+                : UnpackArgb(ChromeFillArgb);
             stripMirrorBg = dragBg;
         }
 
@@ -2368,7 +2483,13 @@ public sealed partial class MainWindow : Window
         // against the row rather than left on TextFillColorPrimaryBrush.
         // That resource follows the element theme alone, which is right
         // only while the element theme and the row agree.
-        if (!_shellTheme.IsEnabled)
+        //
+        // A bare frame under window-theme=wintty lands here too: the palette
+        // still names a title colour, but the row it was picked against is
+        // not being painted, so the ink is scored against the backdrop like
+        // any other bare chrome. ApplyShellTheme leaves it to this for the
+        // same reason.
+        if (!ChromePaintedFromPalette)
             VerticalTitleText.Foreground = TabColorBrush.FromPackedRgb(VerticalTitleInk);
 
         if (_lastVerticalTitleStripMirrorBg != stripMirrorBg)
@@ -2396,17 +2517,59 @@ public sealed partial class MainWindow : Window
                 : Visibility.Collapsed;
 
         ApplyChromeSeparators();
+        // After the separators, not before: that call is what tells the strips
+        // the live High Contrast flag and the ground they calibrate against,
+        // and a fill pushed ahead of it repaints them from the previous
+        // frame's answer to both.
+        ApplyStripChromeFill();
     }
 
     /// <summary>
-    /// True when the chrome is bare backdrop and therefore needs its
-    /// boundaries drawn. window-theme=wintty paints its surfaces from the
-    /// palette and High Contrast paints its own from Windows' colours; both
-    /// separate by shade already, and a stroke over either is a second
-    /// boundary where there is one edge.
+    /// Push the chrome's own fill to both tab strips.
+    ///
+    /// The strips are the same surface as the title row, so they take the
+    /// same answer: the palette's shade under a solid frame, the desktop's
+    /// under a solid frame with no palette, and nothing at all under a
+    /// frosted or crystal frame that has a backdrop to reveal. window-theme
+    /// is asked here now -- it names the hue, and refusing to pass it on is
+    /// what left the strips opaque on the one combination frame-style exists
+    /// to create.
+    ///
+    /// High Contrast without the palette is the one answer the window does
+    /// not have. That surface comes from an HC-overridable theme resource,
+    /// which is Windows' own colour rather than one derived from it, so the
+    /// strips are left to resolve it themselves.
+    ///
+    /// Both strips take the same value from the same read. Resolving them
+    /// separately is how the two layouts end up different materials for one
+    /// config, which only shows up mid-switch when they are both on screen.
+    /// </summary>
+    private void ApplyStripChromeFill()
+    {
+        var fill = HighContrastChromeActive && !_shellTheme.IsEnabled
+            ? null
+            : ChromeStripFill;
+        _verticalTabHost.SetChromeFill(fill);
+        _horizontalTabHost.SetChromeFill(fill);
+    }
+
+    /// <summary>
+    /// True when the chrome is one uniform surface and therefore needs its
+    /// boundaries drawn.
+    ///
+    /// Both painted paths separate the rows by shade already, and a stroke
+    /// over either is a second boundary where there is one edge: High
+    /// Contrast paints from Windows' colours, window-theme=wintty from the
+    /// terminal palette.
+    ///
+    /// But window-theme only paints while the frame is solid enough to carry
+    /// it. Ask it for a frosted frame over a translucent backdrop and the
+    /// rows go to the backdrop the way any other bare chrome does, and the
+    /// shade that was dividing them goes with it -- so that case wants the
+    /// stroke back rather than inheriting the palette path's exemption.
     /// </summary>
     private bool ChromeSeparatorsWanted =>
-        !_shellTheme.IsEnabled && !HighContrastChromeActive;
+        !ChromePaintedFromPalette && !HighContrastChromeActive;
 
     /// <summary>
     /// Draw the boundary the backdrop cannot.
@@ -2435,13 +2598,20 @@ public sealed partial class MainWindow : Window
             ChromeSeparatorsWanted ? Core.Shell.ChromeSeparator.Resolve(ground) : null,
             ground,
             HighContrastChromeActive);
+
+        // The horizontal strip draws no lines -- its rows are side by side and
+        // the TabView already edges them -- but it sits on the same ground and
+        // scores its own titles against it. One read feeds both, so the two
+        // layouts cannot come out calibrated against different surfaces for
+        // one config, which only shows up mid-switch with both on screen.
+        _horizontalTabHost.SetChromeGround(ground);
     }
 
     /// <summary>
     /// Caption min/max/close colors. Vertical mode matches whatever the
-    /// title row is: the tab-bar shade under window-theme=wintty, the bare
-    /// backdrop otherwise. Horizontal keeps transparent buttons over the
-    /// tab strip.
+    /// title row is: the tab-bar shade under a palette-painted row, the
+    /// frame's own material otherwise. Horizontal keeps transparent buttons
+    /// over the tab strip.
     /// </summary>
     private void ApplyCaptionButtonChrome()
     {
@@ -2455,7 +2625,7 @@ public sealed partial class MainWindow : Window
             Windows.UI.Color fg;
             Windows.UI.Color hoverBg;
             Windows.UI.Color pressedBg;
-            if (_shellTheme.IsEnabled)
+            if (ChromePaintedFromPalette)
             {
                 // Matches ApplyVerticalTitleBarChrome: the row is uniformly
                 // the tab-bar shade, so hover needs the OTHER theme color to
@@ -2467,12 +2637,13 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                // Transparent so the buttons sit on the same backdrop the
-                // rest of the row does, except under High Contrast, where
-                // the row is still painted from Windows' own colours.
+                // The same fill the rest of the row takes, so the caption lane
+                // cannot end up a different material from the row it is part
+                // of: bare under a frosted or crystal frame, painted under a
+                // solid one, and Windows' own colours under High Contrast.
                 titleBg = HighContrastChromeActive
                     ? UnpackTerminalColor(_configService.BackgroundColor)
-                    : Windows.UI.Color.FromArgb(0, 0, 0, 0);
+                    : UnpackArgb(ChromeFillArgb);
                 fg = UnpackTerminalColor(VerticalTitleInk);
                 var dark = fg.R > 0x7F;
                 hoverBg = dark
@@ -2517,6 +2688,17 @@ public sealed partial class MainWindow : Window
             (byte)(packed >> 16),
             (byte)(packed >> 8),
             (byte)packed);
+
+    /// <summary>
+    /// 0xAARRGGBB to a colour, alpha included -- what the resolvers hand out,
+    /// as opposed to the alpha-less terminal palette above.
+    /// </summary>
+    private static Windows.UI.Color UnpackArgb(uint argb)
+        => Windows.UI.Color.FromArgb(
+            (byte)(argb >> 24),
+            (byte)(argb >> 16),
+            (byte)(argb >> 8),
+            (byte)argb);
 
     /// <summary>
     /// Re-apply tab-host chrome after a horizontal/vertical layout switch.
@@ -2774,6 +2956,10 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Pane borders follow the active tab's preset color when set; tab strip
+    /// backgrounds refresh in both orientations.
+    /// </summary>
+    /// <summary>
     /// The accent the tab-and-pane shape is stroked in, held to a visible
     /// minimum against the terminal it is drawn on.
     ///
@@ -2860,6 +3046,11 @@ public sealed partial class MainWindow : Window
     /// Apply the window backdrop based on background-style and
     /// background-opacity config values. Dispatches to the correct
     /// SystemBackdrop implementation for each preset.
+    ///
+    /// Also resolves the chrome's own material from frame-style, which is a
+    /// different question with the same three answers: background-style says
+    /// what the terminal is made of, frame-style what the frame around it is.
+    /// Both live here so the low-power override lands on them from one place.
     /// </summary>
     private void ApplyBackdropStyle()
     {
@@ -2880,57 +3071,67 @@ public sealed partial class MainWindow : Window
                 ? BackdropStyles.Solid
                 : configStyle);
 
+        // Low power flattens the frame for the same reason it flattens the
+        // backdrop: the composition cost is in the translucency, not in which
+        // surface is carrying it. The opacity rule above is deliberately not
+        // repeated here -- background-opacity is the terminal's, and a frame
+        // has no cells to see through.
+        var frameStyle = lowPowerActive
+            ? BackdropStyles.Solid
+            : _configService.FrameStyle;
+
+        // Two decisions, not one. Swapping the SystemBackdrop is expensive and
+        // is worth skipping when the material has not moved; the colours below
+        // are palette-derived and move on a reload that leaves both styles
+        // alone. While one early return covered both, a reload that repainted
+        // the terminal without changing its style never reached the class
+        // brush, which kept the colour the window started with.
+        var backdropChanged = style != _currentBackdropStyle || SystemBackdrop is null;
+        _currentBackdropStyle = style;
+        _currentFrameStyle = frameStyle;
+
         // The class brush is the Win32 fill that lands before XAML composes,
         // so it has to be the colour RootGrid is about to settle on or the
         // frame flashes on the way there. Same resolver, same inputs, read
-        // from the effective style before the skip guard: the guard has to
-        // cover the colour too, and it cannot test a value it has not
-        // resolved yet.
+        // after _currentBackdropStyle is already the effective style. It
+        // follows the backdrop rather than the frame: RootGrid is what it has
+        // to agree with, and RootGrid is behind the terminal too.
         var classBrushArgb = RootBackgroundResolver.Resolve(
-            style,
+            _currentBackdropStyle,
             _shellTheme.IsEnabled,
             ShellThemeBackgroundArgb,
             Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
-
-        // Skip when the effective style and the class brush colour are both
-        // unchanged. A style-only guard swallows colour-only changes: with
-        // background-style = solid the style never moves, so an OS dark/light
-        // flip or a palette reload would early-return and leave GDI painting
-        // the old colour under the new RootGrid.
-        if (style == _currentBackdropStyle
-            && classBrushArgb == _lastClassBrushArgb
-            && SystemBackdrop is not null)
-            return;
-
-        _currentBackdropStyle = style;
-
-        var hwnd = WindowNative.GetWindowHandle(this);
-
-        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
 
         switch (style)
         {
             case BackdropStyles.Frosted:
                 if (DesktopAcrylicController.IsSupported())
-                    SystemBackdrop = new AcrylicBackdrop(
-                        tintColor, tintOpacity, luminosityOpacity,
-                        _newAcrylicLogger());
+                {
+                    if (backdropChanged)
+                    {
+                        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
+                        SystemBackdrop = new AcrylicBackdrop(
+                            tintColor, tintOpacity, luminosityOpacity,
+                            _newAcrylicLogger());
+                    }
+                }
                 else
+                {
                     goto case BackdropStyles.Solid;
+                }
                 ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Crystal:
-                SystemBackdrop = new CrystalBackdrop(hwnd);
+                if (backdropChanged)
+                    SystemBackdrop = new CrystalBackdrop(WindowNative.GetWindowHandle(this));
                 ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Solid:
             default:
-                if (MicaController.IsSupported())
-                    SystemBackdrop = new MicaBackdrop();
-                else
-                    SystemBackdrop = null;
+                if (backdropChanged)
+                    SystemBackdrop = MicaController.IsSupported() ? new MicaBackdrop() : null;
                 ApplyWindowClassBrush(ClassBrushKind.Opaque, classBrushArgb);
                 break;
         }
@@ -3250,17 +3451,23 @@ public sealed partial class MainWindow : Window
     /// resolver speaks. Both the Win32 class brush and RootGrid.Background
     /// feed it this; packing it twice is how the two start disagreeing.
     /// </summary>
-    private uint ShellThemeBackgroundArgb
-    {
-        get
-        {
-            var bg = _shellTheme.TitleBarBackground;
-            return ((uint)bg.A << 24) |
-                ((uint)bg.R << 16) |
-                ((uint)bg.G << 8) |
-                bg.B;
-        }
-    }
+    private uint ShellThemeBackgroundArgb => PackArgb(_shellTheme.TitleBarBackground);
+
+    /// <summary>
+    /// The shade the palette gives the chrome, packed ARGB.
+    ///
+    /// The tab bar's rather than the title bar's: the title row, the caption
+    /// lane and both strips are one surface, and the tab bar's shade is the
+    /// one they have always taken. RootGrid sits behind the terminal instead
+    /// of beside it and keeps the title bar's, above.
+    /// </summary>
+    private uint ShellThemeChromeArgb => PackArgb(_shellTheme.TabBarBackground);
+
+    private static uint PackArgb(Windows.UI.Color color) =>
+        ((uint)color.A << 24) |
+        ((uint)color.R << 16) |
+        ((uint)color.G << 8) |
+        color.B;
 
     /// <summary>
     /// Paint RootGrid.Background based on current backdrop style and
@@ -3277,11 +3484,7 @@ public sealed partial class MainWindow : Window
             ShellThemeBackgroundArgb,
             Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
-        var next = Windows.UI.Color.FromArgb(
-            (byte)(argb >> 24),
-            (byte)(argb >> 16),
-            (byte)(argb >> 8),
-            (byte)argb);
+        var next = UnpackArgb(argb);
 
         if (_lastRootBackground == next) return;
         _lastRootBackground = next;
