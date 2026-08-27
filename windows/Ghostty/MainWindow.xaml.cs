@@ -2379,6 +2379,47 @@ public sealed partial class MainWindow : Window
             VerticalTitleBar.Visibility == Visibility.Visible
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+
+        ApplyChromeSeparators();
+    }
+
+    /// <summary>
+    /// True when the chrome is bare backdrop and therefore needs its
+    /// boundaries drawn. window-theme=wintty paints its surfaces from the
+    /// palette and High Contrast paints its own from Windows' colours; both
+    /// separate by shade already, and a stroke over either is a second
+    /// boundary where there is one edge.
+    /// </summary>
+    private bool ChromeSeparatorsWanted =>
+        !_shellTheme.IsEnabled && !HighContrastChromeActive;
+
+    /// <summary>
+    /// Draw the boundary the backdrop cannot.
+    ///
+    /// With the chrome bare backdrop there is no change of shade between the
+    /// rows: they are two pieces of one surface, and two adjacent rows
+    /// measured 1.05:1. Nothing else is a candidate to divide them, so they
+    /// get a stroke unconditionally.
+    ///
+    /// The strip against the terminal is a different problem and is not
+    /// solved here. That boundary already has an owner: the tab content
+    /// frame is stretched around the whole terminal area in every layout and
+    /// touches the strip wherever the strip is. Making the line it already
+    /// draws legible beats drawing a second one beside it, which is a
+    /// doubled edge rather than a clearer one. See
+    /// <see cref="LegibleChromeAccent"/>.
+    ///
+    /// Idempotent and brush-cached, so every input that can move the ground
+    /// may call it.
+    /// </summary>
+    private void ApplyChromeSeparators()
+    {
+        var ground = EstimatedBackdropGround;
+
+        _verticalTabHost.SetRowSeparator(
+            ChromeSeparatorsWanted ? Core.Shell.ChromeSeparator.Resolve(ground) : null,
+            ground,
+            HighContrastChromeActive);
     }
 
     /// <summary>
@@ -2701,12 +2742,16 @@ public sealed partial class MainWindow : Window
         _horizontalTabHost.SetSelectedTabColors(bgColor, fgColor);
         _verticalTabHost.SetSelectedTabColors(bgColor, fgColor);
 
-        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
+        var cc = LegibleChromeAccent(
+            _configService.CursorColor ?? _configService.ForegroundColor);
         var wuiColor = Windows.UI.Color.FromArgb(0xFF,
             (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
         // Both hosts, from the one value that also draws the pane border
         // below: the selected tab is stroked in it on the three sides that
         // do not meet the pane, so tab and pane read as a single shape.
+        // Through the same legibility floor for the same reason -- the two
+        // halves of that shape disagreeing on colour is worse than either
+        // being wrong on its own.
         _horizontalTabHost.SetAccentColor(wuiColor);
         _verticalTabHost.SetAccentColor(wuiColor);
 
@@ -2714,14 +2759,37 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Pane borders follow the active tab's preset color when set; tab strip
-    /// backgrounds refresh in both orientations.
+    /// The accent the tab-and-pane shape is stroked in, held to a visible
+    /// minimum against the terminal it is drawn on.
+    ///
+    /// This is the strip/terminal boundary. The tab content frame is
+    /// stretched around the whole terminal area in every layout, so wherever
+    /// the strip is, that frame is the line between them; the selected tab's
+    /// folder shape closes onto the same line. When the accent it would be
+    /// drawn in cannot be seen against the terminal, the boundary is gone,
+    /// and the answer is to draw that line in something visible rather than
+    /// to add a second line beside an invisible one.
+    ///
+    /// The accent is <c>accent-color ?? cursor-color ?? foreground</c>, so a
+    /// theme that sets none of them lands on the foreground: white on a
+    /// light palette, which is where the boundary disappears.
+    ///
+    /// Applied to preset tab colours too. A preset that cannot be seen
+    /// against the terminal is not carrying the tab's identity either.
+    ///
+    /// The accent is moved in lightness rather than replaced, so a theme
+    /// whose accent is merely marginal against its own background comes back
+    /// as a lighter or darker version of itself instead of as a neutral.
+    /// Only a hue with no room left falls through to one.
     /// </summary>
+    private uint LegibleChromeAccent(uint desired)
+        => Core.Shell.ChromeSeparator.EnsureVisible(
+            _configService.BackgroundColor, desired);
+
     private void ApplyPerTabChrome()
     {
-        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
-        var defaultBorder = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(0xFF,
-            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc));
+        var defaultBorder = Tabs.TabColorBrush.FromPackedRgb(LegibleChromeAccent(
+            _configService.CursorColor ?? _configService.ForegroundColor));
 
         var active = _tabManager.ActiveTab;
         foreach (var tab in _tabManager.Tabs)
@@ -2730,8 +2798,8 @@ public sealed partial class MainWindow : Window
             if (ReferenceEquals(tab, active) && tab.Color != TabColor.None)
             {
                 var preset = TabColorPalette.Border(tab.Color);
-                borderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(
-                    0xFF, preset.R, preset.G, preset.B));
+                borderBrush = Tabs.TabColorBrush.FromPackedRgb(LegibleChromeAccent(
+                    (uint)((preset.R << 16) | (preset.G << 8) | preset.B)));
             }
             else
             {
@@ -2842,7 +2910,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateAcrylicTuning()
     {
-        if (_currentBackdropStyle != BackdropStyles.Frosted) return;
         if (SystemBackdrop is not AcrylicBackdrop current) return;
 
         var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();

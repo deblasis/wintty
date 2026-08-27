@@ -63,9 +63,17 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
         };
 
         // Keep the backdrop active even when the window loses focus.
+        //
+        // HighContrast is not decoration. The controller stands the material
+        // down and hands back the system's own surface colour when it is set,
+        // which is the whole contract High Contrast is asking for; leaving it
+        // unset kept a translucent acrylic under chrome that had already
+        // switched to opaque system colours, so the two disagreed in exactly
+        // the mode that exists to stop them disagreeing.
         _config = new SystemBackdropConfiguration
         {
             IsInputActive = true,
+            IsHighContrast = Ghostty.Accessibility.HighContrastDetector.IsActive(),
         };
 
         _controller.AddSystemBackdropTarget(target);
@@ -86,6 +94,27 @@ internal sealed partial class AcrylicBackdrop : SystemBackdrop
         _controller.TintColor = tintColor;
         _controller.TintOpacity = tintOpacity;
         _controller.LuminosityOpacity = luminosityOpacity;
+
+        // High Contrast can be switched on while the window is up, and it
+        // arrives as a config reload, which is what calls this. The backdrop
+        // is not recreated for it -- ApplyBackdropStyle early-returns when
+        // the style has not changed -- so without this the flag set at
+        // construction is the only one the controller ever sees.
+        //
+        // Gated on the flag actually changing, not on there being a tuning
+        // update. This method runs on every config reload and on every power
+        // saver transition, and most of those do not touch High Contrast;
+        // re-pushing the configuration each time hands the controller a
+        // whole new backdrop configuration for nothing, which is a
+        // composition change per keystroke on a background-tint-opacity
+        // edit. Reading the flag is a SystemParametersInfo call and is
+        // cheap; acting on it is not.
+        if (_config is null) return;
+        var highContrast = Ghostty.Accessibility.HighContrastDetector.IsActive();
+        if (highContrast == _config.IsHighContrast) return;
+
+        _config.IsHighContrast = highContrast;
+        _controller.SetSystemBackdropConfiguration(_config);
     }
 
     protected override void OnTargetDisconnected(
