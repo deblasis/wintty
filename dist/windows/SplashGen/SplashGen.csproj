@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Ghostty.SplashGen</RootNamespace>
+    <AssemblyName>Ghostty.SplashGen</AssemblyName>
+    <!-- This is a build tool that runs on Windows only; suppress the
+         System.Drawing.Common cross-platform warning. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ghostty.SplashGen.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The crop selector the splash actually uses, linked as source rather
+      than pulled in with a ProjectReference. The sheet has to survive the
+      narrowest window the selector can take, and the only honest way to
+      check that is to ask the selector itself: a copy of the 0.48 floor
+      living here would drift the first time someone moved the real one and
+      nothing would say so.
+
+      ThemeResolution comes along because LaunchTexture's colour helper
+      calls it. Nothing here draws in colour, but linking a file means
+      linking what it compiles against.
+
+      Same consequence IconGen documents: these public types now exist in
+      both this assembly and Ghostty.Core. Nothing references both. If
+      something ever needs to, the CS0433 ambiguity is this link, not a
+      stray package.
+    -->
+    <Compile Include="..\..\..\windows\Ghostty.Core\Shell\LaunchTexture.cs"
+             Link="Shared\LaunchTexture.cs" />
+    <Compile Include="..\..\..\windows\Ghostty.Core\Windows\ThemeResolution.cs"
+             Link="Shared\ThemeResolution.cs" />
+  </ItemGroup>
+</Project>
