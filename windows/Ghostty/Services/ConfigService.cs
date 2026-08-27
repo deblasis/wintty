@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using Ghostty.Core.Config;
 using Ghostty.Core.Env;
+using Ghostty.Core.Shell;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -80,7 +81,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     private static readonly string[] CommandPaletteBackgroundAllowed =
         { "acrylic", "mica", "opaque" };
 
-    public string BackgroundStyle { get; private set; } = "frosted";
+    public string BackgroundStyle { get; private set; } = BackdropStyles.Default;
     public Windows.UI.Color? BackgroundTintColor { get; private set; }
     public float? BackgroundTintOpacity { get; private set; }
     public float? BackgroundLuminosityOpacity { get; private set; }
@@ -917,7 +918,8 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         // background-style is a Windows-only key not in the Zig config
         // schema, so we read it directly from the config file.
-        BackgroundStyle = GetFileValue("background-style", "frosted");
+        BackgroundStyle = NormalizeStyle(
+            "background-style", GetFileValue("background-style", BackdropStyles.Default));
         BackgroundTintColor = ParseHexColor(GetFileValue("background-tint-color", ""));
         BackgroundTintOpacity = ParseFloat(GetFileValue("background-tint-opacity", ""));
         BackgroundLuminosityOpacity = ParseFloat(GetFileValue("background-luminosity-opacity", ""));
@@ -1349,6 +1351,22 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             : defaultValue;
 
     /// <summary>
+    /// Fold a raw style value, and say so when it was not one.
+    ///
+    /// The style comparisons downstream are ordinal, so a config saying
+    /// "Frosted" ran solid with nothing in the log. Reported from here
+    /// rather than from the fold itself because by the time the value
+    /// reaches the backdrop switch there is no key name left to put in
+    /// the message, and the reader needs the line of their config.
+    /// </summary>
+    private static string NormalizeStyle(string key, string raw)
+    {
+        if (BackdropStyles.TryNormalize(raw, out var style)) return style;
+        StaticLoggers.ConfigService.LogUnknownBackdropStyle(key, raw, style);
+        return style;
+    }
+
+    /// <summary>
     /// True iff the user's config file actually sets a value for this
     /// key. Distinguishes a user-authored override from an inherited
     /// theme/default value, which the typed accessors above conflate.
@@ -1677,6 +1695,17 @@ internal static partial class ConfigServiceLogExtensions
                    Message = "[ConfigService] Config applied natively but the C# snapshot failed to refresh")]
     internal static partial void LogSnapshotRefreshFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Warning, not Error: the window still comes up, the user just does
+    // not get the material they asked for. The key is in the message
+    // because more than one config key folds through the same parser, and
+    // an unattributed complaint sends the reader down the wrong line.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.UnknownBackdropStyle,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] {Key} = '{Value}' is not a known style; "
+                             + "using '{Fallback}'. Accepted: solid, frosted, crystal")]
+    internal static partial void LogUnknownBackdropStyle(
+        this ILogger<ConfigService> logger, string key, string value, string fallback);
 
     // Surfaces each warning string returned by
     // ConfigServiceProfileParser.ParseAll so admin-visible parse

@@ -6,6 +6,7 @@ using Ghostty.Controls.Settings;
 using Ghostty.Core.Settings;
 using Ghostty.Core.Config;
 using Ghostty.Core.DirectWrite;
+using Ghostty.Core.Shell;
 using Ghostty.Core.Settings;
 using Ghostty.Logging;
 using Ghostty.Services;
@@ -61,7 +62,7 @@ internal sealed partial class AppearancePage : Page
         // runtime type is different (e.g. in tests).
         if (configService is ConfigService cs)
         {
-            SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle);
+            SelectComboByTag(BackgroundStyleCombo, cs.BackgroundStyle, BackdropStyles.Default);
 
             // Seed power saver mode from config, defaulting to "auto".
             var powerMode = cs.GetRawFileValue("power-saver-mode");
@@ -93,7 +94,7 @@ internal sealed partial class AppearancePage : Page
         }
         else
         {
-            SelectComboByTag(BackgroundStyleCombo, "frosted");
+            SelectComboByTag(BackgroundStyleCombo, BackdropStyles.Default);
         }
 
         // Initialize gradient settings from current config.
@@ -189,7 +190,16 @@ internal sealed partial class AppearancePage : Page
         WindowThemeCombo.SelectedIndex = 0;
     }
 
-    private static void SelectComboByTag(ComboBox combo, string tag)
+    /// <summary>
+    /// Select the item carrying <paramref name="tag"/>, falling back to
+    /// <paramref name="fallbackTag"/> and only then to the first item.
+    ///
+    /// The first item is not a neutral landing place. On the backdrop
+    /// combo it is solid, so a value this page could not match -- a
+    /// misspelling, or a key the config knows and the combo does not --
+    /// showed the user a material the window was not drawing.
+    /// </summary>
+    private static void SelectComboByTag(ComboBox combo, string tag, string? fallbackTag = null)
     {
         foreach (ComboBoxItem item in combo.Items)
         {
@@ -199,6 +209,14 @@ internal sealed partial class AppearancePage : Page
                 return;
             }
         }
+
+        if (fallbackTag is not null
+            && !string.Equals(fallbackTag, tag, StringComparison.OrdinalIgnoreCase))
+        {
+            SelectComboByTag(combo, fallbackTag);
+            return;
+        }
+
         combo.SelectedIndex = 0;
     }
 
@@ -537,7 +555,7 @@ internal sealed partial class AppearancePage : Page
     private void BackgroundStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
-            OnValueChanged("background-style", item.Tag?.ToString() ?? "frosted");
+            OnValueChanged("background-style", item.Tag?.ToString() ?? BackdropStyles.Default);
     }
 
     private void NoColorOverride_SelectionChanged(object sender, SelectionChangedEventArgs e)

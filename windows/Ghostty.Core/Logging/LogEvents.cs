@@ -19,6 +19,7 @@ internal static class LogEvents
         public const int ThemeRefreshFailed    = 1005;
         public const int SnapshotRefreshFailed = 1006;
         public const int ChangedHandlerFailed  = 1007;
+        public const int UnknownBackdropStyle  = 1008;
     }
 
     // 1100-1199: Frecency / command history
