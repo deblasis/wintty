@@ -307,6 +307,36 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Keys are case-insensitive; each maps to the list of raw values in
     /// file order.
     /// </summary>
+    /// <summary>
+    /// Whether this launch asked for no configuration at all.
+    /// </summary>
+    /// <remarks>
+    /// libghostty honours <c>--no-config</c> by itself once the CLI args are
+    /// layered in, but that only covers the keys it parses. Wintty reads its
+    /// Windows-only keys straight off the config file, so without this the
+    /// flag would suppress <c>font-size</c> and leave <c>vertical-tabs</c>
+    /// standing, which is a worse answer than not having the flag.
+    ///
+    /// Read once from the process-wide reading rather than re-derived here,
+    /// so this service and libghostty cannot disagree about what was asked.
+    /// </remarks>
+    private readonly bool _noConfig;
+
+    /// <summary>
+    /// The config file to read as configuration, or null when this launch is
+    /// ignoring it.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="ConfigFilePath"/>, which stays populated
+    /// under <c>--no-config</c>: it is still where the file lives, and the
+    /// Settings UI, the raw editor, the "open config file" command and the
+    /// theme search path all need to know that whether or not it is in
+    /// force. Every read that puts the file's contents into effect goes
+    /// through this one instead, so suppressing the flag is one assignment
+    /// rather than a condition repeated at each read site.
+    /// </remarks>
+    private string? ConfigSourcePath => _noConfig ? null : ConfigFilePath;
+
     private Dictionary<string, List<string>>? _configFileCache;
 
     /// <summary>
@@ -363,10 +393,14 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 "libghostty export that touches global state.");
         }
 
+        _noConfig = Program.ConfigOverrides.NoConfig;
+
         var isOsDark = OsTheme.IsDark();
 
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
+        NativeMethods.ConfigLoadCliArgs(_config);
+        NativeMethods.ConfigLoadRecursiveFiles(_config);
         // Before finalize: that is where the theme is applied, and the
         // scheme decides which half of a light/dark pair (the user's, or
         // the built-in one) gets applied. Without it this handle resolves
@@ -438,6 +472,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         try
         {
+            // Nothing is being read from it, so nothing should be written to
+            // it either. Seeding under --no-config would have the flag create
+            // the very file it exists to ignore.
+            if (_noConfig) return;
             if (!File.Exists(ConfigFilePath)) return;
             if (new FileInfo(ConfigFilePath).Length != 0) return;
 
@@ -505,9 +543,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         {
             newConfig = NativeMethods.ConfigNew();
             NativeMethods.ConfigLoadDefaultFiles(newConfig);
+            NativeMethods.ConfigLoadCliArgs(newConfig);
+            NativeMethods.ConfigLoadRecursiveFiles(newConfig);
             // Layer the High Contrast override last so it wins over the
             // user's colors while HC is active. Skipped (body == null) when
             // HC is off or opted-out, restoring the user's config.
+            //
+            // Still last now that the CLI and its config-file includes load
+            // above it: High Contrast is an accessibility override and has to
+            // outrank anything the user asked for, a file named on the command
+            // line included.
             if (_highContrastOverrideBody is { } hcBody)
             {
                 var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
@@ -810,7 +855,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // that looks up Windows-only keys or theme colors goes through
         // these caches, so the whole reload is bounded by at most two
         // File.ReadLines calls regardless of how many keys we probe.
-        _configFileCache = LoadIniFile(ConfigFilePath);
+        _configFileCache = LoadIniFile(ConfigSourcePath);
         // No theme configured is not "no theme": libghostty applies its
         // built-in light/dark pair in that case, so the chrome has to
         // resolve against the same one or it frames a pane in colours the
@@ -867,6 +912,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // is still read from the file cache here, which only covers the
         // top-level config file: a value set in an included file or a
         // conditional block won't be seen.
+        //
+        // Reading it from that cache is also what settles the Settings UI
+        // under --no-config, and settles it the right way: the cache is
+        // empty, so the UI is off and the only remaining OpenConfig path
+        // hands the file to an external editor. A Settings window whose
+        // toggles wrote to a file this session is ignoring would be the
+        // confusing outcome, and this avoids it without a second rule.
         SettingsUiEnabled = string.Equals(
             GetFileValue("windows-settings-ui", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
@@ -1077,8 +1129,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // is small. Readers of the five profile-view properties see a
         // consistent snapshot via the single volatile _profileView
         // assignment below.
-        var rawConfigText = File.Exists(ConfigFilePath)
-            ? File.ReadAllText(ConfigFilePath)
+        // Reads the path rather than the cache, so it needs the same
+        // suppression: _configFileCache being empty under --no-config would
+        // not stop this one from putting the file's profiles back in force.
+        var rawConfigText = ConfigSourcePath is { } profileSource && File.Exists(profileSource)
+            ? File.ReadAllText(profileSource)
             : string.Empty;
         var view = Ghostty.Core.Config.ConfigServiceProfileParser.ParseAll(
             rawConfigText,
@@ -1615,6 +1670,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
     private void StartWatcher()
     {
+        // A reload re-applies --no-config, so a watched save could not
+        // actually take effect; arming it would just spend a reload per
+        // keystroke in the user's editor on rebuilding the same config.
+        if (_noConfig) return;
         if (_watcher != null) return;
         var dir = Path.GetDirectoryName(ConfigFilePath);
         var file = Path.GetFileName(ConfigFilePath);
