@@ -1,4 +1,5 @@
 using System;
+using Ghostty.Core.Config;
 
 namespace Ghostty.Services;
 
@@ -22,13 +23,7 @@ internal sealed class ShellThemeService
     public Windows.UI.Color ScrollbarTrack { get; private set; }
     public Windows.UI.Color ScrollbarThumb { get; private set; }
 
-    // "wintty" is the preferred spelling; "ghostty" is the deprecated alias
-    // libghostty still parses, and it comes back through the C API verbatim,
-    // so both have to enable palette-derived chrome or an unmigrated config
-    // would silently lose it.
-    public bool IsEnabled =>
-        string.Equals(_configService.WindowTheme, "wintty", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(_configService.WindowTheme, "ghostty", StringComparison.OrdinalIgnoreCase);
+    public bool IsEnabled => WindowThemeAlias.IsPaletteHued(_configService.WindowTheme);
 
     private bool _wasEnabled;
 
