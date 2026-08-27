@@ -14,16 +14,32 @@ public static class RootBackgroundResolver
     /// <summary>ARGB for "fully transparent, let the SystemBackdrop show through".</summary>
     public const uint TransparentArgb = 0x00000000u;
 
-    /// <summary>ARGB for the default opaque chrome color when no shell theme is active.</summary>
-    public const uint OpaqueChromeArgb = 0xFF0C0C0Cu;
+    /// <summary>
+    /// The colour opaque chrome takes when the terminal palette is not
+    /// driving it. Dark keeps the value the window has always used; light
+    /// exists because a light desktop with a solid backdrop used to come up
+    /// near-black around a near-white terminal.
+    /// </summary>
+    public static uint OpaqueChromeArgb(bool isDesktopDark) =>
+        isDesktopDark ? 0xFF0C0C0Cu : 0xFFF3F3F3u;
 
     /// <param name="backdropStyle">Current SystemBackdrop style (see <see cref="BackdropStyles"/>).</param>
-    /// <param name="shellThemeEnabled">True when window-theme=ghostty and chrome is driven by the terminal palette.</param>
+    /// <param name="shellThemeEnabled">True when window-theme=wintty and chrome is driven by the terminal palette.</param>
     /// <param name="shellThemeBgArgb">ARGB to use for the shell-theme-enabled case (typically the title bar background).</param>
-    public static uint Resolve(string backdropStyle, bool shellThemeEnabled, uint shellThemeBgArgb)
+    /// <param name="isDesktopDark">
+    /// The desktop's light/dark setting. Only consulted when nothing else
+    /// supplies a colour, but it has to be passed in every case: reading the
+    /// OS from here would make the resolver answer differently for two
+    /// callers on the same frame.
+    /// </param>
+    public static uint Resolve(
+        string backdropStyle,
+        bool shellThemeEnabled,
+        uint shellThemeBgArgb,
+        bool isDesktopDark)
     {
         if (backdropStyle is BackdropStyles.Frosted or BackdropStyles.Crystal)
             return TransparentArgb;
-        return shellThemeEnabled ? shellThemeBgArgb : OpaqueChromeArgb;
+        return shellThemeEnabled ? shellThemeBgArgb : OpaqueChromeArgb(isDesktopDark);
     }
 }
