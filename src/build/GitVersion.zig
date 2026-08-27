@@ -33,14 +33,7 @@ pub fn detect(b: *std.Build) !Version {
             else => return err,
         };
 
-        // Replace characters that are not valid in semantic version
-        // pre-release identifiers (which only allow [0-9A-Za-z-]).
-        // Slashes would also mess up dist tarball paths.
-        for (tmp) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '-') c.* = '-';
-        }
-
-        break :b tmp;
+        break :b sanitizeBranch(tmp);
     };
 
     const short_hash = short_hash: {
@@ -50,6 +43,11 @@ pub fn detect(b: *std.Build) !Version {
             .ignore,
         ) catch |err| switch (err) {
             error.FileNotFound => return error.GitNotFound,
+            // Same degradation as the branch lookup above: a git that runs but
+            // fails here means we cannot describe this checkout, which
+            // Config.init turns into a dev version. Without this prong the
+            // error escapes detect() bare and fails the configure phase.
+            error.ExitCodeFailure => return error.GitNotRepository,
             else => return err,
         };
 
@@ -104,6 +102,40 @@ pub fn detect(b: *std.Build) !Version {
         .short_hash = short_hash,
         .changes = changes,
         .tag = if (tag.len > 0) std.mem.trimEnd(u8, tag, "\r\n ") else null,
-        .branch = std.mem.trimEnd(u8, branch, "\r\n "),
+        .branch = branch,
     };
+}
+
+/// Git's raw `rev-parse --abbrev-ref HEAD` output, rewritten in place into a
+/// name usable as a semantic version pre-release identifier, which only allows
+/// [0-9A-Za-z-]. Slashes would also mess up dist tarball paths.
+///
+/// Trim before sanitizing, not after: git terminates the ref name with a
+/// newline, and the loop would rewrite that into a "-" that no later trim can
+/// tell apart from one the branch name really ends with.
+fn sanitizeBranch(raw: []u8) []u8 {
+    const trimmed = raw[0..std.mem.trimEnd(u8, raw, "\r\n ").len];
+    for (trimmed) |*c| {
+        if (!std.ascii.isAlphanumeric(c.*) and c.* != '-') c.* = '-';
+    }
+    return trimmed;
+}
+
+test "sanitizeBranch trims git's line ending before rewriting it" {
+    var raw = "fix/zero-config\n".*;
+    try std.testing.expectEqualStrings("fix-zero-config", sanitizeBranch(&raw));
+}
+
+test "sanitizeBranch keeps only what a pre-release identifier allows" {
+    // The rewrite is byte-wise, so the two bytes of the non-ASCII codepoint
+    // become two dashes rather than one.
+    var raw = "feature/caf\u{e8}_v1.2\r\n".*;
+    const name = sanitizeBranch(&raw);
+    try std.testing.expectEqualStrings("feature-caf---v1-2", name);
+    for (name) |c| try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '-');
+}
+
+test "sanitizeBranch keeps a dash the branch name really ends with" {
+    var raw = "wip-\n".*;
+    try std.testing.expectEqualStrings("wip-", sanitizeBranch(&raw));
 }
