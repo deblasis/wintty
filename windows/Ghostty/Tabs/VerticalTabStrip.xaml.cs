@@ -442,6 +442,20 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
+    /// The surface this control resolved for a bare lane under High
+    /// Contrast, or null on every other bare lane.
+    ///
+    /// High Contrast without the palette is the one bare lane that is a
+    /// colour at all: the window pushes no fill there precisely because the
+    /// surface is an HC-overridable theme resource it cannot name, and this
+    /// control resolves it. The host's own two rows read this rather than
+    /// resolving again, so all three lane rows come off the one resolution
+    /// -- two resolutions of the same resource can disagree about the
+    /// element theme they resolve against.
+    /// </summary>
+    internal Brush? HighContrastLaneSurface => _highContrast ? Background : null;
+
+    /// <summary>
     /// The lane's surface on the palette path.
     ///
     /// No High Contrast arm, unlike the default path: that mode pins the
