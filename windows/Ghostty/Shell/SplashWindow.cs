@@ -70,6 +70,14 @@ internal static unsafe partial class SplashWindow
     // this long whatever the ambient timer resolution turns out to be.
     private const int FadeDurationMs = 120;
 
+    // How long the splash takes to move to a corrected background. Off the
+    // clock for the same reason the fade is. Longer than the fade because
+    // this one is not covering anything the user is waiting for -- it runs
+    // while the app is still building, a second or so before the reveal --
+    // and a colour change that lands in two frames reads as a glitch rather
+    // than as the splash settling.
+    private const int RecolourDurationMs = 180;
+
     // How often to re-assert topmost while waiting. Frequent enough that a
     // main window appearing underneath is covered again within a frame or
     // two, rare enough not to load the window manager during startup.
@@ -135,6 +143,32 @@ internal static unsafe partial class SplashWindow
     private static int _surfaceHeight;
     private static uint _surfaceDpi;
 
+    // The DIB's own pixels. Kept because the recolour reads the composed
+    // frame back out and writes a blend of two of them in place, and there
+    // is no way to ask GDI for a bitmap's bits after the fact.
+    private static nint _surfaceBits;
+
+    // The background the composed bitmap was drawn for, so a colour change
+    // invalidates it the way a size or a scale change does.
+    private static uint _surfaceBackground;
+
+    // Bumped every time the bitmap is rebuilt. The recolour holds two
+    // snapshots of a particular composition, and anything that recomposes
+    // underneath it -- a resize, a scale change -- leaves them describing a
+    // bitmap that no longer exists.
+    private static int _surfaceGeneration;
+
+    // When the splash may next re-assert itself over the window coming up
+    // behind it. Shared by every loop that holds the thread, so a stretch
+    // spent in one of them cannot go unnudged for its whole length.
+    private static long _nextTopmostNudge;
+
+    // The resolved terminal background, published by the app thread and
+    // taken by the splash thread. Negative means nothing to take, which is
+    // a value no 24 bit colour can have, so a genuine black does not read
+    // as "nothing was published".
+    private static int _resolvedBackground = -1;
+
     /// <summary>
     /// Fixes which piece of the texture this splash shows. Drawn once when
     /// the splash starts, so that repainting for a resize or a DPI change
@@ -151,6 +185,28 @@ internal static unsafe partial class SplashWindow
     /// legitimate action away from the user to keep a decoration tidy.
     /// </summary>
     public static void Track(nint hwnd) => Volatile.Write(ref _trackedHwnd, hwnd);
+
+    /// <summary>
+    /// The terminal's real background colour, now that config has resolved
+    /// it. The splash moves to it, and does so without a cut when it had
+    /// painted something else.
+    /// </summary>
+    /// <remarks>
+    /// <para>Publishing an <see cref="int"/> is deliberately all this does.
+    /// The window, both device contexts and the composed bitmap belong to
+    /// the splash's own thread; a caller reaching across to repaint them
+    /// would be doing GDI on another thread's objects while that thread is
+    /// inside its own message pump. So the splash picks this up on its next
+    /// pass round the loop, which is exactly how it already learns which
+    /// window to follow.</para>
+    ///
+    /// <para>Safe before the splash starts, safe after it has gone, and safe
+    /// more than once: the last colour published before a pass is the one
+    /// that pass takes, and a pass that finds nothing published does
+    /// nothing.</para>
+    /// </remarks>
+    public static void AdoptBackground(uint backgroundRgb) =>
+        Interlocked.Exchange(ref _resolvedBackground, (int)(backgroundRgb & 0x00FFFFFFu));
 
     /// <summary>
     /// Put the splash on screen. Returns immediately; the window lives on
@@ -311,6 +367,13 @@ internal static unsafe partial class SplashWindow
             // assigned it to a monitor.
             AdoptDpi(GetDpiForWindow(_hwnd));
 
+            // A resolution that beat the first paint is not a correction,
+            // it is the answer: taking it here means coming up in the right
+            // colour rather than coming up wrong and dissolving out of it.
+            // The loop below is what serves the ordinary case, where the
+            // config is still being read at this point.
+            if (TakeResolvedBackground() is uint resolved) _background = resolved;
+
             if (!Paint(255))
             {
                 Diag("first paint failed; no splash this launch");
@@ -348,35 +411,10 @@ internal static unsafe partial class SplashWindow
     private static void PumpUntilDismissed()
     {
         var deadline = Environment.TickCount64 + WatchdogMs;
-        var nextTopmostNudge = 0L;
 
         while (!_dismissed.IsSet && Environment.TickCount64 < deadline)
         {
-            // Re-assert topmost. Creating the window with WS_EX_TOPMOST is
-            // not enough: when WinUI shows and activates the main window,
-            // the splash ends up behind it and the black gap it is meant
-            // to be covering shows through. SWP_NOACTIVATE so this never
-            // steals focus from the window coming up behind it.
-            //
-            // Throttled rather than done every pump tick. At tick rate this
-            // reorders the z-order sixty times a second while the main
-            // thread is still initializing, and the resulting window-manager
-            // and DWM work slows down the very startup we are waiting on.
-            //
-            // Skipped once the user has switched to another app. The splash
-            // has no taskbar button, no Alt-Tab entry and no close affordance,
-            // so re-asserting topmost over whatever they switched to would
-            // leave them looking at something they cannot dismiss.
-            var now = Environment.TickCount64;
-            if (now >= nextTopmostNudge)
-            {
-                if (CoversForegroundWindow())
-                {
-                    SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                }
-                nextTopmostNudge = now + TopmostNudgeIntervalMs;
-            }
+            NudgeTopmostIfDue();
 
             // Checked every time round, not throttled: this one tracks a
             // drag, so anything slower shows the splash lagging behind the
@@ -384,11 +422,51 @@ internal static unsafe partial class SplashWindow
             // change, a SetWindowPos.
             FollowTrackedWindow();
 
+            // After the follow, so a correction composes at the rect the
+            // splash has settled on rather than at one it is about to leave.
+            ApplyResolvedBackground();
+
             PumpMessages();
             // Waits on the dismiss signal rather than sleeping blindly, so
             // the fade starts the moment the window reports content.
             _dismissed.Wait(LoopParkMs);
         }
+    }
+
+    /// <summary>
+    /// Put the splash back on top, at most once per
+    /// <see cref="TopmostNudgeIntervalMs"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Creating the window with WS_EX_TOPMOST is not enough: when WinUI
+    /// shows and activates the main window, the splash ends up behind it and
+    /// the black gap it is meant to be covering shows through.
+    /// SWP_NOACTIVATE so this never steals focus from the window coming up
+    /// behind it.</para>
+    ///
+    /// <para>Throttled rather than done every pump tick. At tick rate this
+    /// reorders the z-order sixty times a second while the main thread is
+    /// still initializing, and the resulting window-manager and DWM work
+    /// slows down the very startup we are waiting on. The schedule is shared
+    /// rather than per-loop because the loops hand off to each other: a
+    /// recolour that ran on its own clock would either re-nudge the moment it
+    /// started or, worse, not nudge at all for as long as it lasted, which is
+    /// exactly the stretch in which the main window first appears.</para>
+    ///
+    /// <para>Skipped once the user has switched to another app. The splash
+    /// has no taskbar button, no Alt-Tab entry and no close affordance, so
+    /// re-asserting topmost over whatever they switched to would leave them
+    /// looking at something they cannot dismiss.</para>
+    /// </remarks>
+    private static void NudgeTopmostIfDue()
+    {
+        var now = Environment.TickCount64;
+        if (now < _nextTopmostNudge) return;
+        _nextTopmostNudge = now + TopmostNudgeIntervalMs;
+
+        if (!CoversForegroundWindow()) return;
+        SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     /// <summary>
@@ -454,6 +532,19 @@ internal static unsafe partial class SplashWindow
         _width = width;
         _height = height;
 
+        // Composed before the move rather than after it. A layered window
+        // keeps the surface it was last given across a resize, so from the
+        // moment the window grows until the next UpdateLayeredWindow the new
+        // area holds nothing and whatever is behind shows through -- which is
+        // the black window the splash exists to cover. Composing first makes
+        // the Paint below a blit rather than a full rebuild, and closes that
+        // to a frame.
+        //
+        // Measured on a first run, where the splash starts on the fallback
+        // rect and then adopts a maximized window: most of half a second of
+        // black with the old bitmap stranded in one corner.
+        if (resized) EnsureSurface();
+
         SetWindowPos(_hwnd, HWND_TOPMOST, r.left, r.top, width, height, SWP_NOACTIVATE);
 
         // Belt and braces. A move across a DPI boundary normally arrives as
@@ -485,6 +576,169 @@ internal static unsafe partial class SplashWindow
         if (dpi == _dpi) return false;
         _dpi = dpi;
         return true;
+    }
+
+    /// <summary>
+    /// Take whatever colour the app thread has published, or null when it
+    /// has published nothing since the last call.
+    /// </summary>
+    private static uint? TakeResolvedBackground()
+    {
+        var taken = Interlocked.Exchange(ref _resolvedBackground, -1);
+        return taken < 0 ? null : (uint)taken;
+    }
+
+    /// <summary>
+    /// Correct the painted background when the resolved one turns out to be
+    /// something else.
+    /// </summary>
+    /// <remarks>
+    /// The equality check is what makes this cheap on the launch that
+    /// matters. The first paint's colour is the one the terminal actually
+    /// resolved to last session, so it is already right unless the config or
+    /// the desktop moved in between -- and a dissolve from a colour to
+    /// itself is a stutter with nothing to show for it, spent on the one
+    /// path whose whole job is to be quick.
+    /// </remarks>
+    private static void ApplyResolvedBackground()
+    {
+        if (TakeResolvedBackground() is not uint resolved) return;
+        if (resolved == _background) return;
+        Recolour(resolved);
+    }
+
+    /// <summary>
+    /// Move the splash from the colour it guessed to the one config
+    /// resolved, over <see cref="RecolourDurationMs"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>A cross-dissolve of two composed frames rather than a walk of
+    /// the background colour itself. Recomposing costs a full-window fill, a
+    /// GDI+ session and a decode of a 2048 square sheet, which is not a
+    /// per-frame price this path can pay; blending the two finished frames
+    /// costs one pass over the pixels. It is also the same picture: both
+    /// frames are the identical drawing over two colours, so the blend moves
+    /// the background and the ink together and leaves the icon -- opaque and
+    /// byte-identical in both -- exactly alone.</para>
+    ///
+    /// <para>Every early exit leaves the target colour on screen rather than
+    /// the guess, because the app frame about to be revealed is that colour.
+    /// The one exception is <see cref="HideNow"/>, where the process is
+    /// ending and there is no frame to match.</para>
+    /// </remarks>
+    private static void Recolour(uint target)
+    {
+        // Read the current frame before anything can overwrite it: the
+        // rebuild below composes straight over these very bits.
+        var from = SnapshotSurface();
+
+        _background = target;
+
+        // Nothing to dissolve from means the corrected colour goes up in one
+        // step, which is still the right colour a frame late rather than the
+        // wrong one for the rest of the splash.
+        if (from is null)
+        {
+            Paint(_alpha);
+            return;
+        }
+
+        if (!EnsureSurface()) return;
+
+        var generation = _surfaceGeneration;
+        var to = SnapshotSurface();
+        if (to is null || to.Length != from.Length)
+        {
+            Paint(_alpha);
+            return;
+        }
+
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            // The process is going away and the caller is on the join. Leave
+            // the half-blended frame: HideNow's whole point is that nothing
+            // is worth holding an exit for, and the window is a statement
+            // away from being destroyed.
+            if (Volatile.Read(ref _skipFade)) return;
+
+            // The window has content, so the fade is next and it must fade
+            // out the colour the window is actually painted in. Break rather
+            // than return, to land on the target below.
+            if (_dismissed.IsSet) break;
+
+            // Something recomposed underneath -- a resize, a scale change.
+            // It composed at the target colour, since that is what
+            // _background now holds, so the correction is already done and
+            // writing these stale bits over it would undo it.
+            if (_surfaceGeneration != generation) return;
+
+            var elapsed = clock.ElapsedMilliseconds;
+            if (elapsed >= RecolourDurationMs) break;
+
+            Blend(from, to, (int)(255 * elapsed / RecolourDurationMs));
+            if (!Paint(_alpha)) return;
+
+            // Kept nudging, pumping and following for the same reasons the
+            // loop this was called from does. The nudge is the one that had
+            // to be here rather than left to the caller: the main window is
+            // shown and activated somewhere around now, and a transition that
+            // held the thread without re-asserting spent its whole length
+            // behind the black window it was correcting the colour of.
+            NudgeTopmostIfDue();
+            FollowTrackedWindow();
+            PumpMessages();
+            Thread.Sleep(LoopParkMs);
+        }
+
+        if (_surfaceGeneration != generation) return;
+        Blend(from, to, 255);
+        Paint(_alpha);
+    }
+
+    /// <summary>
+    /// A copy of the composed bitmap's pixels, or null when there is no
+    /// bitmap to copy.
+    /// </summary>
+    private static uint[]? SnapshotSurface()
+    {
+        var count = (long)_surfaceWidth * _surfaceHeight;
+        if (_surfaceBits == 0 || count <= 0 || count > int.MaxValue) return null;
+
+        var copy = new uint[count];
+        new ReadOnlySpan<uint>((void*)_surfaceBits, (int)count).CopyTo(copy);
+        return copy;
+    }
+
+    /// <summary>
+    /// Write the blend of two composed frames into the live bitmap,
+    /// <paramref name="t"/> of the way from the first to the second out of
+    /// 255.
+    /// </summary>
+    private static void Blend(uint[] from, uint[] to, int t)
+    {
+        var bits = (uint*)_surfaceBits;
+        if (bits == null) return;
+
+        for (var i = 0; i < from.Length; i++)
+        {
+            var a = from[i];
+            var b = to[i];
+            // Alpha is forced opaque rather than blended. The layered window
+            // is updated with a constant-alpha blend over an opaque source,
+            // so a pixel that came out of here with anything but 0xFF would
+            // be a hole in the splash.
+            bits[i] = 0xFF000000u
+                | (Mix(a >> 16, b >> 16) << 16)
+                | (Mix(a >> 8, b >> 8) << 8)
+                | Mix(a, b);
+        }
+
+        uint Mix(uint x, uint y)
+        {
+            var start = (int)(x & 0xFF);
+            return (uint)(start + ((((int)(y & 0xFF)) - start) * t / 255));
+        }
     }
 
     /// <summary>
@@ -574,18 +828,22 @@ internal static unsafe partial class SplashWindow
         var height = _height;
         if (width <= 0 || height <= 0) return false;
 
+        var background = _background;
+
         // The DPI is part of the key, not just the size: the icon is sized
         // from it, so a same-size move onto a monitor at a different scale
-        // leaves a bitmap that is the right shape and the wrong drawing.
+        // leaves a bitmap that is the right shape and the wrong drawing. The
+        // background is part of it for the same reason and one more: the
+        // texture is tinted from it, so a recolour changes every pixel of
+        // this bitmap and not only the flat fill behind them.
         if (_surfaceDib != 0 && _surfaceWidth == width && _surfaceHeight == height
-            && _surfaceDpi == _dpi)
+            && _surfaceDpi == _dpi && _surfaceBackground == background)
         {
             return true;
         }
 
         ReleaseSurface();
 
-        var background = _background;
         var dpi = _dpi;
         var scale = dpi / 96.0;
         var iconPx = (int)Math.Round(
@@ -637,9 +895,12 @@ internal static unsafe partial class SplashWindow
         _surfaceMemDc = memDc;
         _surfaceDib = dib;
         _surfaceOldBitmap = oldBitmap;
+        _surfaceBits = bits;
         _surfaceWidth = width;
         _surfaceHeight = height;
         _surfaceDpi = dpi;
+        _surfaceBackground = background;
+        _surfaceGeneration++;
 
         FillOpaque(bits, width, height, background);
         DrawContent(memDc, width, height, iconPx, background);
@@ -664,9 +925,14 @@ internal static unsafe partial class SplashWindow
         _surfaceMemDc = 0;
         _surfaceDib = 0;
         _surfaceOldBitmap = 0;
+        // Not optional the way the sizes below are. The DIB is gone, and the
+        // recolour reads and writes through this pointer directly, so a stale
+        // one is a write into freed memory rather than a wrong picture.
+        _surfaceBits = 0;
         _surfaceWidth = 0;
         _surfaceHeight = 0;
         _surfaceDpi = 0;
+        _surfaceBackground = 0;
     }
 
     /// <summary>
