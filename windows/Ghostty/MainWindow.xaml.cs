@@ -154,6 +154,12 @@ public sealed partial class MainWindow : Window
     private enum ClassBrushKind { Transparent, Opaque }
     private ClassBrushKind? _lastClassBrushKind;
 
+    // Colour half of the class-brush cache key. The opaque fill is derived
+    // from the palette and the desktop polarity, so a reload can change it
+    // while the kind stays put, and keying on the kind alone meant GDI kept
+    // the colour the window started with.
+    private uint _lastClassBrushArgb;
+
     // True when the HBRUSH currently installed as GCLP_HBRBACKGROUND
     // was allocated by CreateSolidBrush (and therefore must be
     // DeleteObject'd when replaced). False when it is a stock object
@@ -393,6 +399,16 @@ public sealed partial class MainWindow : Window
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
         _configService = configService;
+
+        // Position is load-bearing, so this does not belong down with the
+        // other service construction. ApplyBackdropStyle resolves the Win32
+        // class brush colour from the shell theme further down this
+        // constructor, and this field is what it reads. Built here it is a
+        // pure derivation of the config that has just been assigned: no
+        // XAML, no HWND, no dispatcher, nothing that InitializeComponent or
+        // the tab hosts have to have run first.
+        _shellTheme = new ShellThemeService(configService);
+
         _configEditor = App.ConfigFileEditor
             ?? throw new InvalidOperationException(
                 "MainWindow: App.ConfigFileEditor is null. " +
@@ -515,7 +531,6 @@ public sealed partial class MainWindow : Window
         ApplyTheme();
         _themeManager.ThemeChanged += OnWindowThemeChanged;
 
-        _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
 
         // The +list-themes pipe server is process-wide, not per window: its
@@ -2865,8 +2880,26 @@ public sealed partial class MainWindow : Window
                 ? BackdropStyles.Solid
                 : configStyle);
 
-        // Skip if the effective style hasn't changed.
-        if (style == _currentBackdropStyle && SystemBackdrop is not null)
+        // The class brush is the Win32 fill that lands before XAML composes,
+        // so it has to be the colour RootGrid is about to settle on or the
+        // frame flashes on the way there. Same resolver, same inputs, read
+        // from the effective style before the skip guard: the guard has to
+        // cover the colour too, and it cannot test a value it has not
+        // resolved yet.
+        var classBrushArgb = RootBackgroundResolver.Resolve(
+            style,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+
+        // Skip when the effective style and the class brush colour are both
+        // unchanged. A style-only guard swallows colour-only changes: with
+        // background-style = solid the style never moves, so an OS dark/light
+        // flip or a palette reload would early-return and leave GDI painting
+        // the old colour under the new RootGrid.
+        if (style == _currentBackdropStyle
+            && classBrushArgb == _lastClassBrushArgb
+            && SystemBackdrop is not null)
             return;
 
         _currentBackdropStyle = style;
@@ -2884,12 +2917,12 @@ public sealed partial class MainWindow : Window
                         _newAcrylicLogger());
                 else
                     goto case BackdropStyles.Solid;
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Crystal:
                 SystemBackdrop = new CrystalBackdrop(hwnd);
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Solid:
@@ -2898,7 +2931,7 @@ public sealed partial class MainWindow : Window
                     SystemBackdrop = new MicaBackdrop();
                 else
                     SystemBackdrop = null;
-                ApplyWindowClassBrush(ClassBrushKind.Opaque);
+                ApplyWindowClassBrush(ClassBrushKind.Opaque, classBrushArgb);
                 break;
         }
     }
@@ -3069,10 +3102,18 @@ public sealed partial class MainWindow : Window
     /// must not. <see cref="_classBrushOwned"/> tracks that
     /// distinction.
     /// </summary>
-    private void ApplyWindowClassBrush(ClassBrushKind kind)
+    /// <param name="kind">Whether the frame is filled or left to the backdrop.</param>
+    /// <param name="argb">
+    /// The fill colour, packed the way the resolver hands it out. Ignored
+    /// for the transparent kind, but still part of the memoisation key: the
+    /// colour is derived from the palette now, so keying on the kind alone
+    /// swallowed a reload that repainted the same solid frame a new colour.
+    /// </param>
+    private void ApplyWindowClassBrush(ClassBrushKind kind, uint argb)
     {
-        if (_lastClassBrushKind == kind) return;
+        if (_lastClassBrushKind == kind && _lastClassBrushArgb == argb) return;
         _lastClassBrushKind = kind;
+        _lastClassBrushArgb = argb;
 
         var hwnd = WindowNative.GetWindowHandle(this);
         var (brush, owned) = kind switch
@@ -3080,7 +3121,7 @@ public sealed partial class MainWindow : Window
             ClassBrushKind.Transparent =>
                 (Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH), false),
             ClassBrushKind.Opaque =>
-                (CreateSolidBrush(0x000C0C0Cu), true),
+                (CreateSolidBrush(Core.Shell.ColorRef.ToColorRef(argb)), true),
             _ => throw new System.Diagnostics.UnreachableException(
                 $"Unknown ClassBrushKind: {kind}"),
         };
@@ -3205,6 +3246,23 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The shell theme's title bar color packed as ARGB, which is what the
+    /// resolver speaks. Both the Win32 class brush and RootGrid.Background
+    /// feed it this; packing it twice is how the two start disagreeing.
+    /// </summary>
+    private uint ShellThemeBackgroundArgb
+    {
+        get
+        {
+            var bg = _shellTheme.TitleBarBackground;
+            return ((uint)bg.A << 24) |
+                ((uint)bg.R << 16) |
+                ((uint)bg.G << 8) |
+                bg.B;
+        }
+    }
+
+    /// <summary>
     /// Paint RootGrid.Background based on current backdrop style and
     /// shell-theme state. Single source of truth so
     /// ApplyBackdropStyle and ApplyShellTheme never write this
@@ -3213,15 +3271,11 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyRootGridBackground()
     {
-        var bg = _shellTheme.TitleBarBackground;
-        uint shellBgArgb =
-            ((uint)bg.A << 24) |
-            ((uint)bg.R << 16) |
-            ((uint)bg.G << 8) |
-            bg.B;
-
         var argb = RootBackgroundResolver.Resolve(
-            _currentBackdropStyle, _shellTheme.IsEnabled, shellBgArgb);
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
         var next = Windows.UI.Color.FromArgb(
             (byte)(argb >> 24),
