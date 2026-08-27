@@ -79,6 +79,8 @@ internal sealed partial class HighContrastMonitor : IDisposable
             SelectionBackground: GetSysColor(COLOR_HIGHLIGHT),
             SelectionForeground: GetSysColor(COLOR_HIGHLIGHTTEXT));
 
-        _configService.SetHighContrastOverride(HighContrastConfigWriter.Render(colors));
+        // The palette, not the rendered body: ConfigService owns the layering
+        // and needs the colours beside it to answer HighContrastBackground.
+        _configService.SetHighContrastOverride(colors);
     }
 }

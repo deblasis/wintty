@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
 using Ghostty.Core.Env;
 using Ghostty.Core.Shell;
@@ -70,11 +71,12 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
 
-    // The High Contrast override config body to layer on top of the user's
-    // config, or null when HC is inactive/opted-out. Set by
-    // HighContrastMonitor; consumed in Reload. Only touched on the UI thread
-    // (the monitor marshals its events, and Reload runs on the UI thread).
-    private string? _highContrastOverrideBody;
+    // The High Contrast palette to layer on top of the user's config, or
+    // null when HC is inactive/opted-out. Set by HighContrastMonitor;
+    // consumed in Reload and by HighContrastBackground. Only touched on the
+    // UI thread (the monitor marshals its events, and Reload runs on the UI
+    // thread).
+    private HighContrastColors? _highContrastOverrideColors;
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
 
@@ -546,15 +548,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             NativeMethods.ConfigLoadCliArgs(newConfig);
             NativeMethods.ConfigLoadRecursiveFiles(newConfig);
             // Layer the High Contrast override last so it wins over the
-            // user's colors while HC is active. Skipped (body == null) when
-            // HC is off or opted-out, restoring the user's config.
+            // user's colors while HC is active. Skipped when HC is off or
+            // opted-out, restoring the user's config.
             //
             // Still last now that the CLI and its config-file includes load
             // above it: High Contrast is an accessibility override and has to
             // outrank anything the user asked for, a file named on the command
             // line included.
-            if (_highContrastOverrideBody is { } hcBody)
+            if (_highContrastOverrideColors is { } hcColors)
             {
+                var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
                 var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
                 if (hcPath is not null)
                     NativeMethods.ConfigLoadFile(newConfig, hcPath);
@@ -768,19 +771,36 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void SuppressWatcher(bool suppress) => _suppressWatcher = suppress;
 
     /// <summary>
-    /// Set (or clear, with null) the High Contrast override config body and
+    /// Set (or clear, with null) the High Contrast override palette and
     /// reload so the layered colors take effect. Called by
     /// <c>HighContrastMonitor</c> on the UI thread. Skips the reload when the
-    /// body is unchanged, so spurious palette-change events don't churn the
+    /// palette is unchanged, so spurious palette-change events don't churn the
     /// config.
     /// </summary>
-    public void SetHighContrastOverride(string? body)
+    public void SetHighContrastOverride(HighContrastColors? colors)
     {
-        if (string.Equals(_highContrastOverrideBody, body, StringComparison.Ordinal))
-            return;
-        _highContrastOverrideBody = body;
+        if (_highContrastOverrideColors == colors) return;
+        _highContrastOverrideColors = colors;
         Reload();
     }
+
+    /// <summary>
+    /// The High Contrast background the override layers over the palette,
+    /// packed 0x00RRGGBB, or null when HC is off or opted out.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="BackgroundColor"/> keeps resolving from the config and
+    /// theme files: the override is layered into the native config only, and
+    /// making the C# cache HC-aware would move every chrome consumer that
+    /// reads it under HC (VerticalTitleInk, the drag region, the title bar)
+    /// onto colours #790 verified as they are. This is the one place the
+    /// colour the terminal will actually settle on is answerable, which is
+    /// what the splash needs.
+    /// </remarks>
+    public uint? HighContrastBackground =>
+        _highContrastOverrideColors is { } hc
+            ? Ghostty.Core.Accessibility.HighContrastConfigWriter.ColorRefToRgb(hc.Background)
+            : null;
 
     private void CacheDiagnostics()
     {
