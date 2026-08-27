@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Frozen;
+using System.Collections.Generic;
 using System.Text;
 
 namespace Ghostty.Core.Cli;
@@ -79,6 +80,216 @@ internal static class CliAliases
     /// argument and corrupt argv[0].
     /// </summary>
     private static bool IsSeparator(char c) => c is ' ' or '\t';
+
+    /// <summary>
+    /// Advance past argv[0], leaving <paramref name="index"/> on the first
+    /// code unit after the separator that ended it. Returns false when the
+    /// command line carries no arguments at all.
+    /// </summary>
+    /// <remarks>
+    /// argv[0] plays by its own rules: quotes toggle and are dropped,
+    /// backslash escaping does not apply, and there is no leading separator
+    /// skip. A command line starting with a separator therefore has an empty
+    /// argv[0] and the exe path becomes the first argument, which is what
+    /// both zig and the .NET host do.
+    /// </remarks>
+    private static bool TrySkipProgram(string commandLine, out int index)
+    {
+        index = 0;
+
+        // An empty command line, or one starting with NUL, yields zero
+        // arguments: the iterator completes before argv[0].
+        if (string.IsNullOrEmpty(commandLine) || commandLine[0] == '\0') return false;
+
+        var insideQuotes = false;
+        while (index < commandLine.Length)
+        {
+            var c = commandLine[index];
+            if (c == '\0') return false;
+            index++;
+            if (c == '"') insideQuotes = !insideQuotes;
+            else if (IsSeparator(c) && !insideQuotes) break;
+        }
+
+        // Ran to the end of the string without an unquoted separator, or the
+        // separator was the last character: no arguments follow.
+        return index < commandLine.Length;
+    }
+
+    /// <summary>
+    /// Advance <paramref name="index"/> to the next argument after argv[0]
+    /// and report the span it occupies. Returns false at the end of the
+    /// arguments.
+    /// </summary>
+    /// <remarks>
+    /// Reproduces the argument boundaries of
+    /// <c>std.process.Args.Iterator.Windows</c> (zig 0.16.0,
+    /// <c>lib/std/process/Args.zig</c>), quote toggling and backslash
+    /// escaping included, because that is the tokenizer libghostty runs on
+    /// the string handed to <c>ghostty_init_wide</c>. A boundary this gets
+    /// wrong is an edit landing in the middle of what the real parser reads
+    /// as a single argument.
+    ///
+    /// Boundaries only, not decoding: the span is raw text, and raw and
+    /// decoded differ wherever a quote or a backslash appears. A caller
+    /// comparing the span against a literal has to decline any span carrying
+    /// either character.
+    ///
+    /// Index-based over <c>char</c> for the same reason
+    /// <see cref="TryRewrite"/> is: the command line is WTF-16 and may hold
+    /// unpaired surrogates, which <c>Rune.DecodeFromUtf16</c> rejects. Every
+    /// character switched on here is ASCII, so no surrogate half can be
+    /// mistaken for one.
+    /// </remarks>
+    private static bool TryNextArg(
+        string commandLine, ref int index, out int start, out int length)
+    {
+        start = 0;
+        length = 0;
+
+        while (index < commandLine.Length && IsSeparator(commandLine[index])) index++;
+        if (index >= commandLine.Length || commandLine[index] == '\0') return false;
+
+        start = index;
+        var backslashes = 0;
+        var insideQuotes = false;
+        while (index < commandLine.Length)
+        {
+            var c = commandLine[index];
+            if (c == '\0') break;
+
+            if (IsSeparator(c))
+            {
+                backslashes = 0;
+                if (!insideQuotes) break;
+            }
+            else if (c == '"')
+            {
+                // 2n backslashes leave the quote acting as a quote;
+                // 2n + 1 escape it into a literal one.
+                var escaped = backslashes % 2 != 0;
+                backslashes = 0;
+                if (!escaped)
+                {
+                    // A doubled quote inside quotes is one literal quote and
+                    // does not toggle. Consuming the second one here is what
+                    // keeps the toggle state right for everything after it.
+                    if (insideQuotes &&
+                        index + 1 < commandLine.Length &&
+                        commandLine[index + 1] == '"')
+                    {
+                        index++;
+                    }
+                    else
+                    {
+                        insideQuotes = !insideQuotes;
+                    }
+                }
+            }
+            else if (c == '\\')
+            {
+                backslashes++;
+            }
+            else
+            {
+                backslashes = 0;
+            }
+
+            index++;
+        }
+
+        length = index - start;
+        return true;
+    }
+
+    /// <summary>
+    /// Wintty's spelling of the flag that discards the default config
+    /// files, and the libghostty key it is spliced into.
+    /// </summary>
+    /// <remarks>
+    /// Rewritten rather than acted on here because the discard is not a
+    /// thing the shell can do correctly. libghostty resets
+    /// <c>config-default-files</c> at the top of <c>loadCliArgs</c>,
+    /// records a replay marker, and rebuilds the config from that marker
+    /// when the flag turns up - so the discard drops precisely what the
+    /// default files contributed and nothing else. A shell-side
+    /// reimplementation would have to reproduce that, and would still
+    /// leave `no-config` on the command line for libghostty to report as
+    /// an unknown key.
+    /// </remarks>
+    private const string NoConfigFlag = "--no-config";
+
+    private const string NoConfigKey = "--config-default-files=false";
+
+    /// <summary>
+    /// <c>--config-file</c>, in the <c>--key=value</c> form libghostty
+    /// documents, and bare for the case where the value is a separate
+    /// argument.
+    /// </summary>
+    private const string ConfigFileFlag = "--config-file";
+
+    /// <summary>
+    /// Translate the Wintty config flags on <paramref name="commandLine"/>
+    /// into what libghostty parses, and report what was asked for.
+    /// </summary>
+    /// <remarks>
+    /// Matching is done on the raw span, so a flag written with quotes or
+    /// backslashes inside the flag name itself is not recognised. That form
+    /// degrades to a libghostty unknown-key diagnostic rather than to
+    /// silence, and no realistic invocation writes it - a path argument
+    /// carrying backslashes sits after the <c>=</c>, past the part compared
+    /// here.
+    /// </remarks>
+    public static ConfigOverrides RewriteConfigFlags(string commandLine)
+    {
+        if (!TrySkipProgram(commandLine, out var i))
+            return new ConfigOverrides(commandLine, false, false);
+
+        var noConfig = false;
+        var configFile = false;
+        List<(int Start, int Length)>? splices = null;
+
+        while (TryNextArg(commandLine, ref i, out var start, out var length))
+        {
+            var span = commandLine.AsSpan(start, length);
+
+            // -e hands the rest of the line to the child command, so a flag
+            // after it is the child's. Same rule IsHelpRequest applies, and
+            // for the same reason: `wintty -e mytool --no-config` configures
+            // mytool, not Wintty.
+            if (span.SequenceEqual("-e")) break;
+
+            if (span.SequenceEqual(NoConfigFlag))
+            {
+                noConfig = true;
+                (splices ??= new List<(int, int)>()).Add((start, length));
+                continue;
+            }
+
+            // Bare and `=`-joined both count. Only the flag name is compared,
+            // so a value carrying backslashes or quotes still matches.
+            if (span.StartsWith(ConfigFileFlag) &&
+                (span.Length == ConfigFileFlag.Length || span[ConfigFileFlag.Length] == '='))
+            {
+                configFile = true;
+            }
+        }
+
+        if (splices is null)
+            return new ConfigOverrides(commandLine, noConfig, configFile);
+
+        var sb = new StringBuilder(commandLine.Length + splices.Count * NoConfigKey.Length);
+        var copied = 0;
+        foreach (var (start, length) in splices)
+        {
+            sb.Append(commandLine, copied, start - copied);
+            sb.Append(NoConfigKey);
+            copied = start + length;
+        }
+        sb.Append(commandLine, copied, commandLine.Length - copied);
+
+        return new ConfigOverrides(sb.ToString(), noConfig, configFile);
+    }
 
     /// <summary>
     /// Rewrite <paramref name="commandLine"/> so libghostty sees a bare
@@ -230,6 +441,23 @@ internal static class CliAliases
             "or `--font-family=\"Fira Code\"`.\n\n");
         sb.Append($"`{programName} -e <command>` runs a command inside the terminal, for\n");
         sb.Append($"example `{programName} -e pwsh`.\n\n");
+
+        sb.Append("Configuration options:\n\n");
+        sb.Append(
+            "  --config-file=<path>  Also load <path>, after the config file that\n" +
+            "                        would be loaded anyway. Repeatable.\n" +
+            "  --no-config           Ignore the config file entirely and run on\n" +
+            "                        built-in defaults.\n\n");
+        sb.Append(
+            "The two are not mirror images. `--no-config` suppresses every source,\n" +
+            $"including the {AppIdentity.ProductName}-only keys read outside the shared\n" +
+            "config parser. `--config-file` supplies only the keys that parser\n" +
+            $"handles, so {AppIdentity.ProductName}-only keys such as `vertical-tabs`\n" +
+            "still come from the usual config file.\n\n");
+        sb.Append(
+            "Either option starts a separate instance, because a config cannot be\n" +
+            "handed to a window that is already open.\n\n");
+
         sb.Append("Commands:\n\n");
 
         foreach (var name in Sorted)

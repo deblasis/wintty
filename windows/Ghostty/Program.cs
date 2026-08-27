@@ -526,6 +526,30 @@ public static partial class Program
             Environment.Exit(Cli.CliActions.PrintVersion());
         }
 
+        // +crash <kind> is the probe behind the crash coverage matrix
+        // in docs/2026-08-25-crash-reporting-and-diagnostics-design.md.
+        // Intercepted here for the same reason +version is: it must run
+        // before the libghostty CLI dispatcher. Deliberately not a
+        // CliAliases entry, because that set is parity-tested against the
+        // Action enum in src/cli/ghostty.zig.
+        // A bare `+crash` is handled too: without it the argument falls
+        // through to the libghostty dispatcher, which reports an unknown
+        // action rather than the list of kinds the caller was reaching for.
+        if (args.Length > 0 && args[0] == "+crash")
+        {
+            // Arm crash reporting first. This interception happens before
+            // InitGhostty, and ghostty_init is what brings sentry up, so a
+            // trigger fired here would otherwise crash a process with no
+            // reporter attached and every envelope row would read as absent
+            // for a reason that has nothing to do with the backend.
+            if (args.Length > 1)
+            {
+                Cli.CrashTrigger.ArmCrashReporting(TimeSpan.FromSeconds(10));
+            }
+
+            Environment.Exit(Cli.CrashTrigger.Run(args.Length > 1 ? args[1] : ""));
+        }
+
         // Does the command line lead with a bare Windows subcommand, e.g.
         // `wintty list-themes`? This is the same call InitWideFromProcess
         // makes to perform the rewrite, over the same input, so the gate
@@ -701,6 +725,23 @@ public static partial class Program
     /// </summary>
     internal static bool IsGhosttyInitialized => _ghosttyInitialized;
 
+    private static Ghostty.Core.Cli.ConfigOverrides _configOverrides;
+
+    /// <summary>
+    /// What this process's command line asked of the configuration, settled
+    /// once by <see cref="InitGhostty"/>.
+    /// </summary>
+    /// <remarks>
+    /// One reading for the whole process, for the same reason the
+    /// single-instance election is held once: libghostty reads the command
+    /// line from its own global state, so a second, independently derived
+    /// answer here could disagree with the config libghostty is actually
+    /// holding. Valid only once <see cref="IsGhosttyInitialized"/> is true;
+    /// every consumer runs after that, and ConfigService's constructor
+    /// refuses to exist before it.
+    /// </remarks>
+    internal static Ghostty.Core.Cli.ConfigOverrides ConfigOverrides => _configOverrides;
+
     /// <summary>
     /// Initialize libghostty from this process's command line, exiting the
     /// process if it fails. A second call is a no-op.
@@ -733,7 +774,7 @@ public static partial class Program
         // argv. ghostty_init's char** cannot represent WTF-16, so it would
         // ignore what we passed and use the process command line anyway,
         // and reassembling argv would lose unpaired surrogates in paths.
-        var result = NativeMethods.InitWideFromProcess();
+        var result = NativeMethods.InitWideFromProcess(out _configOverrides);
         if (result != 0)
         {
             // ghostty_init failed (e.g. invalid action). There is no degraded
@@ -968,6 +1009,24 @@ public static partial class Program
                 ReadSingleInstanceSetting(),
                 Environment.ProcessPath ?? string.Empty);
 
+            // A secondary serializes its argv to the primary and the primary
+            // opens a window from it, but only the jump-list and toast markers
+            // survive that trip -- config flags are dropped on the floor. Nor
+            // could the primary honour them if they arrived: one config handle
+            // backs every surface it owns, so applying them would restyle
+            // windows nobody asked to change. A new process is the only place
+            // a different config can exist.
+            if (ConfigOverrides.Any && _singleInstance.Role != SingleInstanceRole.Disabled)
+            {
+                _singleInstance.Dispose();
+                _singleInstance = SingleInstanceElection.Run(
+                    enabled: false,
+                    Environment.ProcessPath ?? string.Empty);
+                WriteStartupDiagnostic(
+                    "config flags on the command line cannot be handed to a " +
+                    "running instance; starting a separate one");
+            }
+
             // Put the launch splash up before WinUI starts. Everything
             // below this line -- Application.Start, App's ctor, config
             // load, libghostty init, the first XAML frame -- is seconds of
@@ -1052,7 +1111,11 @@ public static partial class Program
                 : string.Empty;
             var path = rawPath.Length == 0 ? null : Path.GetFullPath(rawPath);
 
-            var configFile = ConfigIniFile.Load(path);
+            // The same suppression ConfigService applies, at the one read
+            // that happens too early to go through it. Left in, --no-config
+            // would route the launch into a primary holding the config it
+            // was told to ignore.
+            var configFile = ConfigIniFile.Load(ConfigOverrides.NoConfig ? null : path);
             return WindowsOnlyKeyParsers.ParseBool(
                 ConfigIniFile.First(configFile, "windows-single-instance"),
                 defaultValue: false);

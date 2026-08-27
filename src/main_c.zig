@@ -16,7 +16,26 @@ const main = @import("main_ghostty.zig");
 const global = @import("global.zig");
 const apprt = @import("apprt.zig");
 const internal_os = @import("os/main.zig");
+const crash = @import("crash/main.zig");
 const windows = @import("os/windows.zig");
+
+/// Panic handler for the library.
+///
+/// A Zig panic on Windows raises no exception the in-process crash backend can
+/// observe: `std.debug.defaultPanic` ends in `std.process.abort`, which on
+/// Windows is `ntdll.RtlExitUserProcess`, a clean exit. sentry hooks
+/// `SetUnhandledExceptionFilter`, which a clean exit never invokes, so a panic
+/// would otherwise leave no exception, no WER record and no crash report.
+/// Report it explicitly, then panic exactly as the default handler would.
+///
+/// `capturePanic` is a no-op off Windows, where the backend's SIGABRT handler
+/// already sees the panic and reporting again would duplicate it.
+pub const panic = std.debug.FullPanic(panicImpl);
+
+fn panicImpl(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    crash.sentry.capturePanic(msg);
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
 
 // Some comptime assertions that our C API depends on.
 comptime {
@@ -319,16 +338,67 @@ pub const DllMain = if (builtin.os.tag == .windows) struct {
     const __acrt_initialize = @extern(*const fn () callconv(.c) c_int, .{ .name = "__acrt_initialize" });
     const __acrt_uninitialize = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "__acrt_uninitialize" });
 
+    // `__acrt_initialize` runs only the `__acrt_initializers` table: heap,
+    // locks, ptd, lowio, command line. It does NOT run the `.CRT$XI` C
+    // initializer table, and `__acrt_initialize_stdio` lives there. Skipping
+    // it leaves `__piob` NULL and every `_iob[i]._lock` critical section
+    // zeroed, so the first C stdio call anywhere in this DLL access violates
+    // inside ntdll on a NULL `DebugInfo`. Zig's std never touches `FILE*`, so
+    // nothing noticed until sentry's logger called vfprintf(stderr, ...).
+    //
+    // A real MSVC DllMain runs these through
+    // `__scrt_dllmain_after_initialize_c`. `.CRT$XI` also carries fmode,
+    // timeset, fma3 and multibyte init, so this is not sentry-specific.
+    const PIFV = *const fn () callconv(.c) c_int;
+    const PVFV = *const fn () callconv(.c) void;
+    const _initterm_e = @extern(*const fn ([*]?PIFV, [*]?PIFV) callconv(.c) c_int, .{ .name = "_initterm_e" });
+    const _initterm = @extern(*const fn ([*]?PVFV, [*]?PVFV) callconv(.c) void, .{ .name = "_initterm" });
+    const __xi_a = @extern([*]?PIFV, .{ .name = "__xi_a" });
+    const __xi_z = @extern([*]?PIFV, .{ .name = "__xi_z" });
+    const __xc_a = @extern([*]?PVFV, .{ .name = "__xc_a" });
+    const __xc_z = @extern([*]?PVFV, .{ .name = "__xc_z" });
+    const __xp_a = @extern([*]?PVFV, .{ .name = "__xp_a" });
+    const __xp_z = @extern([*]?PVFV, .{ .name = "__xp_z" });
+    const __xt_a = @extern([*]?PVFV, .{ .name = "__xt_a" });
+    const __xt_z = @extern([*]?PVFV, .{ .name = "__xt_z" });
+
+    /// Whether attach brought the CRT all the way up.
+    ///
+    /// Windows calls DllMain(DLL_PROCESS_DETACH) after an attach that
+    /// returned FALSE, so without this a partial init is torn down as though
+    /// it were a complete one: uninitializers run against a CRT that was
+    /// never finished, and the `.CRT$XP`/`.CRT$XT` tables are walked when no
+    /// constructor ever ran. Real MSVC guards the same window with
+    /// `__scrt_current_native_startup_state` in `dll_dllmain.cpp`.
+    var crt_up: bool = false;
+
     pub fn handler(_: HINSTANCE, fdwReason: DWORD, _: LPVOID) callconv(.winapi) BOOL {
         // Only MSVC needs to bootstrap the CRT; MinGW handles it via dllcrt2.obj.
         if (builtin.abi != .msvc) return TRUE;
         switch (fdwReason) {
             DLL_PROCESS_ATTACH => {
-                if (__vcrt_initialize() < 0) return FALSE;
-                if (__acrt_initialize() < 0) return FALSE;
+                // Both return 1 on success and 0 on failure, never a
+                // negative value, so a `< 0` test let a failed CRT init
+                // through silently.
+                if (__vcrt_initialize() == 0) return FALSE;
+                if (__acrt_initialize() == 0) {
+                    _ = __vcrt_uninitialize(1);
+                    return FALSE;
+                }
+                if (_initterm_e(__xi_a, __xi_z) != 0) {
+                    _ = __acrt_uninitialize(1);
+                    _ = __vcrt_uninitialize(1);
+                    return FALSE;
+                }
+                _initterm(__xc_a, __xc_z);
+                crt_up = true;
                 return TRUE;
             },
             DLL_PROCESS_DETACH => {
+                if (!crt_up) return TRUE;
+                crt_up = false;
+                _initterm(__xp_a, __xp_z);
+                _initterm(__xt_a, __xt_z);
                 _ = __acrt_uninitialize(1);
                 _ = __vcrt_uninitialize(1);
                 return TRUE;
