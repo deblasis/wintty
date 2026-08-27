@@ -2887,8 +2887,26 @@ public sealed partial class MainWindow : Window
                 ? BackdropStyles.Solid
                 : configStyle);
 
-        // Skip if the effective style hasn't changed.
-        if (style == _currentBackdropStyle && SystemBackdrop is not null)
+        // The class brush is the Win32 fill that lands before XAML composes,
+        // so it has to be the colour RootGrid is about to settle on or the
+        // frame flashes on the way there. Same resolver, same inputs, read
+        // from the effective style before the skip guard: the guard has to
+        // cover the colour too, and it cannot test a value it has not
+        // resolved yet.
+        var classBrushArgb = RootBackgroundResolver.Resolve(
+            style,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+
+        // Skip when the effective style and the class brush colour are both
+        // unchanged. A style-only guard swallows colour-only changes: with
+        // background-style = solid the style never moves, so an OS dark/light
+        // flip or a palette reload would early-return and leave GDI painting
+        // the old colour under the new RootGrid.
+        if (style == _currentBackdropStyle
+            && classBrushArgb == _lastClassBrushArgb
+            && SystemBackdrop is not null)
             return;
 
         _currentBackdropStyle = style;
@@ -2896,16 +2914,6 @@ public sealed partial class MainWindow : Window
         var hwnd = WindowNative.GetWindowHandle(this);
 
         var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
-
-        // The class brush is the Win32 fill that lands before XAML composes,
-        // so it has to be the colour RootGrid is about to settle on or the
-        // frame flashes on the way there. Same resolver, same inputs, read
-        // after _currentBackdropStyle is already the effective style.
-        var classBrushArgb = RootBackgroundResolver.Resolve(
-            _currentBackdropStyle,
-            _shellTheme.IsEnabled,
-            ShellThemeBackgroundArgb,
-            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
         switch (style)
         {

@@ -10,7 +10,7 @@ namespace Ghostty.Tests.Wiring;
 /// <summary>
 /// The Win32 class brush is the fill that lands before XAML composes the
 /// first frame, so it is only ever seen at the moment where being wrong is
-/// most visible. Four things about it survive a unit test unharmed:
+/// most visible. Five things about it survive a unit test unharmed:
 ///
 /// GDI takes a COLORREF (0x00BBGGRR) where the resolver hands out ARGB
 /// (0xAARRGGBB). The constant this replaced was a neutral grey, so the
@@ -19,7 +19,10 @@ namespace Ghostty.Tests.Wiring;
 ///
 /// The memoisation key decides whether a reload reaches GDI at all, and a
 /// key that stops covering the colour swallows exactly the reloads the
-/// colour was made derivable for.
+/// colour was made derivable for. The same is true one level up: the skip
+/// guard in ApplyBackdropStyle decides whether ApplyWindowClassBrush runs
+/// at all, and a guard that tests only the style swallows the colour-only
+/// reloads before the brush is even reached.
 ///
 /// SetClassLongPtr hands back the brush it displaced, and only the ones we
 /// allocated may be deleted. A cache that starts changing more often turns
@@ -113,7 +116,9 @@ public sealed class WindowClassBrushWiringTests
         var apply = MainWindow().Method("ApplyBackdropStyle");
         var resolve = apply.Call("RootBackgroundResolver.Resolve");
 
-        Assert.Equal("_currentBackdropStyle", resolve.Arg(0));
+        // "style" is the effective style: the local the flattening ternary
+        // above produces, not the raw config value.
+        Assert.Equal("style", resolve.Arg(0));
         var polarity = resolve.ArgExpression(3).AssertCallTo("OsTheme.IsDark");
         Assert.Equal("_systemUiSettings", polarity.Arg(0));
 
@@ -124,6 +129,34 @@ public sealed class WindowClassBrushWiringTests
         Assert.NotEmpty(calls);
         foreach (var call in calls)
             Assert.Equal(resolved, call.Arg(1));
+    }
+
+    [Fact]
+    public void The_skip_guard_tests_the_brush_colour_and_not_just_the_style()
+    {
+        var apply = MainWindow().Method("ApplyBackdropStyle");
+        var resolve = apply.Call("RootBackgroundResolver.Resolve");
+        var resolved = Assert.Single(
+            resolve.Ancestors().OfType<VariableDeclaratorSyntax>()).Identifier.ValueText;
+
+        var guard = Assert.Single(
+            apply.DescendantNodes().OfType<IfStatementSyntax>(),
+            i => i.Statement is ReturnStatementSyntax);
+
+        // The colour has to be resolved above the guard, or there is no
+        // colour in hand for the guard to test.
+        Assert.True(
+            resolve.SpanStart < guard.SpanStart,
+            "the class brush colour is resolved below the skip guard, so the guard "
+                + "cannot see it and colour-only changes (an OS dark/light flip, a "
+                + "palette reload) early-return before reaching the brush.");
+
+        var named = guard.Condition.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Select(i => i.Identifier.ValueText)
+            .Distinct()
+            .ToList();
+        Assert.Contains("_currentBackdropStyle", named);
+        Assert.Contains(resolved, named);
     }
 
     [Fact]
