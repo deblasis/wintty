@@ -295,26 +295,26 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     /// while the title row an inch above it went opaque. window-theme names
     /// the shade and frame-style decides whether it is painted; neither of
     /// those questions is asked again here.
+    ///
+    /// The one bare lane that is a colour at all is High Contrast without
+    /// the palette: the window cannot name that surface, so the strip
+    /// resolves it for the middle row and the host's two rows paint from
+    /// the same resolved brush. The strip goes first, because its answer is
+    /// what the bare arm reads.
     /// </summary>
     internal void SetChromeFill(uint? fillRgb)
     {
-        if (fillRgb is { } rgb)
-        {
-            var brush = TabColorBrush.FromPackedRgb(rgb);
-            Background = brush;
-            StripRoot.Background = brush;
-        }
-        else
-        {
-            // Transparent rather than cleared: StripRoot carries the lane's
-            // ContextRequested handler, and a null Background is not
-            // hit-testable, so clearing it takes the strip's context menu
-            // with it everywhere the rows do not reach.
-            Background = TransparentBrush;
-            StripRoot.Background = TransparentBrush;
-        }
-
         _strip.SetChromeFill(fillRgb);
+
+        // Transparent rather than cleared when there is no surface: StripRoot
+        // carries the lane's ContextRequested handler, and a null Background
+        // is not hit-testable, so clearing it takes the strip's context menu
+        // with it everywhere the rows do not reach.
+        var brush = fillRgb is { } rgb
+            ? TabColorBrush.FromPackedRgb(rgb)
+            : _strip.HighContrastLaneSurface ?? TransparentBrush;
+        Background = brush;
+        StripRoot.Background = brush;
     }
 
     private static readonly SolidColorBrush TransparentBrush =
