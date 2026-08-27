@@ -796,6 +796,20 @@ public partial class App : Application
         _highContrastMonitor = new Ghostty.Accessibility.HighContrastMonitor(
             _configService, DispatcherQueue.GetForCurrentThread());
 
+        // The splash painted itself before this process had a config, from
+        // the colour the terminal came up as last session. This is the first
+        // moment the real one is final: the ConfigService constructor
+        // resolves the theme, and the monitor just above is the write that
+        // can still change the answer -- under High Contrast its constructor
+        // layers COLOR_WINDOW over the theme and reloads, and publishing
+        // before that hands the splash the pre-HC colour so the reveal
+        // uncovers a window it does not match. Nothing waits on the
+        // correction: the splash takes it on its own thread's next pass,
+        // does nothing at all when the colour it already painted turns out
+        // to have been right, and the first window is still below, so there
+        // is room to land before anything is revealed.
+        Ghostty.Shell.SplashWindow.AdoptBackground(_configService.BackgroundColor);
+
         // Session manager: owns restore decision + debounced persistence.
         // Constructed before window creation so we can decide whether to
         // rebuild a saved session or open a single default window.
