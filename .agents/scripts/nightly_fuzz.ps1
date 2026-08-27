@@ -122,6 +122,24 @@ function Write-Status([string]$phase) {
     } catch {}
 }
 
+# The fuzz suite's exit codes carry the suite's whole point (the table in
+# windows/scripts/README.md, decided in fuzz-suite.ps1's Get-Verdict): 2 is a
+# product finding, 1 is a harness that never exercised the product. Reading
+# them the wrong way round files a product bug against a broken harness and
+# buries a real finding under an infra title, and the inverted switch that did
+# it here read plausibly for months. Kept as a function so the self-test can
+# assert against THIS mapping rather than a copy of the rules, which is what
+# lets a self-test pass while the shipped roll-up is inverted.
+function Get-FuzzOutcome {
+    param($Code)
+    switch ([int]$Code) {
+        0       { 'clean' }
+        2       { 'findings' }
+        1       { 'harness' }
+        default { 'unknown' }
+    }
+}
+
 if ($SelfTest) {
     $failed = $false
     $idle = [NightlyIdleProbe]::MinutesIdle()
@@ -134,6 +152,27 @@ if ($SelfTest) {
     if ($cfg.hibernateAfter) { Write-Host 'SELF-TEST FAILED: config roundtrip'; $failed = $true }
     if (-not (Wait-ForIdle -IdleMinutes 0 -TimeoutMinutes 0)) { Write-Host 'SELF-TEST FAILED: zero-threshold idle wait'; $failed = $true }
     if (Wait-ForIdle -IdleMinutes 99999 -TimeoutMinutes 0) { Write-Host 'SELF-TEST FAILED: timeout path returned true'; $failed = $true }
+    # The fuzz exit-code mapping, asserted one code at a time rather than as a
+    # table lookup that would restate Get-FuzzOutcome's switch and agree with
+    # it however it is written. This shipped inverted - 1 filed as a product
+    # finding, 2 falling through to "harness failure" - and no self-test
+    # noticed, because nothing here read the mapping at all.
+    foreach ($c in @(
+        @{ code = 0; want = 'clean';    why = '0 is a clean run' }
+        @{ code = 1; want = 'harness';  why = '1 means the harness could not run, so no product bug is filed' }
+        @{ code = 2; want = 'findings'; why = '2 means real product findings' }
+        @{ code = 7; want = 'unknown';  why = 'a code outside the contract is not silently a pass' }
+    )) {
+        $got = Get-FuzzOutcome $c.code
+        if ($got -ne $c.want) {
+            Write-Host "SELF-TEST FAILED: fuzz exit $($c.code) mapped to '$got', expected '$($c.want)' ($($c.why))"
+            $failed = $true
+        }
+    }
+    # An unset exit code is 'nothing was measured', never a finding: the run
+    # site defaults it with `?? 1`, and this pins the value that default feeds.
+    if ((Get-FuzzOutcome ($null ?? 1)) -ne 'harness') { Write-Host 'SELF-TEST FAILED: missing exit code must degrade to a harness failure, not a product finding'; $failed = $true }
+
     # The self-test dir must be disjoint from the real logs, or a run of the
     # self-test would wipe the user's saved options.
     if ($logDir -eq (Join-Path $repoRoot '.agents\nightly-logs')) { Write-Host 'SELF-TEST FAILED: not sandboxed'; $failed = $true }
@@ -291,13 +330,17 @@ if ($NoFuzz -or (-not $config.runFuzz)) {
     Write-Status 'fuzz'
     $global:LASTEXITCODE = $null
     just --justfile (Join-Path $wt 'justfile') --working-directory $wt fuzz
-    $fuzzRc = $LASTEXITCODE ?? 2
+    # `?? 1`, matching every recipe in the justfile: a `just` that never ran
+    # leaves $LASTEXITCODE unset, and nothing was measured. Defaulting that to
+    # 2 would invent a product finding out of a recipe that never started.
+    $fuzzRc = $LASTEXITCODE ?? 1
     $script:status.results['fuzz'] = $fuzzRc
     Write-Host "nightly: fuzz rc=$fuzzRc"
-    switch ($fuzzRc) {
-        0 { Get-Date -Format 'yyyy-MM-dd' | Set-Content $fuzzStateFile }
-        1 { File-Issue '[nightly] fuzz suite found product failures' "``just fuzz`` exited 1 (product findings)." }
-        default { File-Issue '[nightly] fuzz suite could not run' "``just fuzz`` exited $fuzzRc (harness failure, coverage is not running)." }
+    switch (Get-FuzzOutcome $fuzzRc) {
+        'clean'    { Get-Date -Format 'yyyy-MM-dd' | Set-Content $fuzzStateFile }
+        'findings' { File-Issue '[nightly] fuzz suite found product failures' "``just fuzz`` exited 2 (product findings)." }
+        'harness'  { File-Issue '[nightly] fuzz suite could not run' "``just fuzz`` exited 1 (harness failure, coverage is not running)." }
+        'unknown'  { File-Issue '[nightly] fuzz suite could not run' "``just fuzz`` exited $fuzzRc, outside the suite's 0/1/2 contract, so the product was never judged." }
     }
 }
 
