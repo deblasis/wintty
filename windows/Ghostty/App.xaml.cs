@@ -474,6 +474,16 @@ public partial class App : Application
         _configService = new ConfigService(DispatcherQueue.GetForCurrentThread());
         ConfigService = _configService;
 
+        // The splash painted itself before this process had a config, from
+        // the colour the terminal came up as last session. This is the first
+        // moment the real one is known -- the constructor above resolves the
+        // theme and the palette, it is not lazy -- and the app frame is still
+        // roughly a second away, so a correction has room to finish before
+        // anything is revealed. Nothing waits on it: the splash takes this on
+        // its own thread's next pass, and does nothing at all when the colour
+        // it already painted turns out to have been right.
+        Ghostty.Shell.SplashWindow.AdoptBackground(_configService.BackgroundColor);
+
         // build the factory from Ghostty config before any other service constructs an
         // ILogger<T>. Log directory under the same %LOCALAPPDATA%\Wintty root that
         // App.LogUnhandled already uses for crash.log, so a user reporting a bug only has
