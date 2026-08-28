@@ -1,49 +1,44 @@
 <!-- LOGO -->
-<h1>
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/eed9e6f8-dfc5-4e29-b3bb-53ca39cf6aeb" alt="Logo" width="128" />
-  <br><a href="https://wintty.io?utm_source=gh_readme">Wintty</a>
-</p>
+<h1 align="center">
+  <img src="https://github.com/user-attachments/assets/eed9e6f8-dfc5-4e29-b3bb-53ca39cf6aeb" alt="Wintty logo" width="128" />
+  <br>Wintty
 </h1>
 <p align="center">
-  Ghostty's speed and features, native on Windows.
+  A native Windows terminal emulator on the Ghostty core.
   <br />
-  A DX12 renderer and a WinUI 3 shell on <code>libghostty</code>, the Zig core
-  proven by <a href="https://ghostty.org">Ghostty</a>.
+  A DirectX 12 (GPU) renderer and a WinUI 3 shell on <code>libghostty</code>,
+  the Zig emulation core proven by <a href="https://ghostty.org">Ghostty</a>.
   <br />
-  <a href="https://wintty.io/download?utm_source=gh_readme">Download</a>
+  <a href="https://wintty.io/download?utm_source=gh_readme&utm_content=nav">Download</a>
   ·
-  <a href="https://wintty.io/docs?utm_source=gh_readme">Documentation</a>
+  <a href="https://wintty.io/docs?utm_source=gh_readme&utm_content=nav">Documentation</a>
   ·
   <a href="#build-from-source">Build from source</a>
   ·
   <a href="CONTRIBUTING.md">Contributing</a>
+  ·
+  <a href="HACKING.md">Developing</a>
 </p>
-
-> [!IMPORTANT]
-> ## Wintty (Ghostty R&D Soft Fork)
->
-> <p align="center">🍬🍴</p>
->
-> This is a soft fork focused on bringing Ghostty to Windows.
-> The `windows` branch is the default and contains all Windows-specific work
-> rebased on top of upstream `main`, which is synced daily.
->
-> 17 PRs of this fork's build and CI work were merged upstream before the
-> project continued here; upstream doesn't have capacity for Windows right
-> now, so this is where Windows lives. It started as a public build-in-public
-> effort (the old progress meters live in the git history) and it is a daily
-> driver today.
 
 ## Get Wintty
 
-**Sponsored build (recommended).** [Sponsor any amount](https://github.com/sponsors/deblasis),
-then [sign in with GitHub](https://wintty.io/download) and download the signed
-installer. You get automatic in-app updates, both `stable` and `tip` channels,
-and the sponsors-only Discord channel. Pro adds more; see the
-[tiers page](https://wintty.io/docs/install/tiers).
+**Sponsored build (recommended).** [Sponsor any amount](https://github.com/sponsors/deblasis)
+to unlock the signed, auto-updating build, then
+[sign in with GitHub](https://wintty.io/download?utm_source=gh_readme&utm_content=get-wintty)
+and download it. Any sponsorship gets you the installer, automatic in-app
+updates, both `stable` and `tip` channels, and the sponsors-only Discord
+channel. **Pro is $9.99 a year** and adds more; the full breakdown is on the
+[tiers page](https://wintty.io/docs/install/tiers?utm_source=gh_readme).
 
-**Build from source (free, always).** Clone, `just`, done:
+Requires Windows 10 (1809+) or Windows 11, x64, and a DirectX 12
+feature-level-12.0 GPU. There is no software-renderer fallback, so VMs without
+GPU passthrough and Remote Desktop sessions will not start it. The installer
+is signed; SmartScreen may still show "Windows protected your PC" on first
+run of a newly published build (choose More info, then Run anyway).
+
+### Build from source (free and open source, always; MIT)
+
+Clone, `just`, done:
 
 ```bash
 git clone https://github.com/deblasis/wintty && cd wintty
@@ -51,40 +46,60 @@ just              # tests + build the DLL
 just build-win    # the app
 ```
 
-You need [Zig](https://ziglang.org/) (version pinned in `build.zig.zon`) and
-[Just](https://github.com/casey/just) (why Just, and how CI works:
-[windows/docs/tooling.md](windows/docs/tooling.md)). Full instructions:
-[Build from Source](https://wintty.io/docs/install/build).
+Prerequisites, Windows 10 (1809+) x64: [Zig](https://ziglang.org/) 0.16 or
+newer (floor set by `minimum_zig_version` in `build.zig.zon`),
+[Just](https://github.com/casey/just), [PowerShell 7](https://aka.ms/powershell),
+and the [.NET 10 SDK](https://dotnet.microsoft.com/) (version pinned in
+`global.json`). `just build-win` is a Windows-only recipe. Why Just, and how
+merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 
 > [!WARNING]
-> Development goes very fast. Depending on when you build, you might hit
-> stability issues: CI runs in batches a few times a day, so a bad commit can
-> fall through the cracks and you might just be unlucky. Point at a tag for a
-> calmer ride.
+> Development moves fast, and there is no always-on hosted CI on this branch:
+> merges are gated on a green local `just signoff` run against the exact
+> commit, so the occasional bad commit can land between batches. For a
+> calmer ride, build a tagged source snapshot instead of the branch tip
+> (browse tags on the releases page).
+
+> [!IMPORTANT]
+> ### An independent soft fork of Ghostty
+>
+> <p align="center">🍬🍴</p>
+>
+> Wintty is an independent project, not affiliated with or endorsed by the
+> Ghostty project or Mitchell Hashimoto. It is a soft fork focused on
+> bringing Ghostty to Windows: the `windows` branch is the default and is
+> rebased on upstream `main` daily. 21 of this fork's build and CI PRs were
+> merged upstream before the project continued here; upstream is not
+> planning Windows for now, so this is where Windows lives. It started as a
+> public build-in-public effort and it is a daily driver today.
 
 ## What you get
 
-- Real terminal emulation on the Zig core Ghostty ships (Kitty graphics
-  protocol included), rendered through DirectX 12 with DXGI and DirectComposition
-- A native WinUI 3 shell: vertical tabs, splits, quick terminal, command palette,
-  full settings UI, profiles with shell auto-discovery, session restore
+- Real terminal emulation on the Zig core Ghostty ships, Kitty graphics
+  protocol included (the Windows transport for it is fork work), rendered
+  through DirectX 12 with DXGI and DirectComposition (fork work)
+- A native WinUI 3 shell: vertical tabs, splits, quick terminal, command
+  palette, full settings UI, profiles with shell auto-discovery, session
+  restore
 - Windows integration: Mica / Acrylic / Crystal backdrops, toast notifications,
   jump lists, taskbar progress, High Contrast support, single instance
 - Shell support out of the box: pwsh, cmd, WSL distros, MSYS2
-- A thin C# layer over `libghostty.dll` via P/Invoke, same architecture as
-  macOS where Swift wraps the same core
+- A thin C# layer over `ghostty.dll` via P/Invoke, same architecture as macOS
+  where Swift wraps the same core
 
-The full feature matrix with per-tier availability:
-[tiers page](https://wintty.io/docs/install/tiers).
+The full per-tier feature matrix:
+[Wintty tiers and features](https://wintty.io/docs/install/tiers?utm_source=gh_readme).
 
 ## Architecture in one paragraph
 
 `libghostty` keeps all terminal emulation in Zig. The Windows app wraps it in
 C# (WinUI 3) for windowing, input, and platform integration. The DX12 renderer
 supports three surface modes at the library level, HWND, SwapChainPanel
-(composition), and shared texture, so embedders pick whichever fits their host.
-No compile-time flags; the device picks the path from what the caller provides.
-.NET examples live in [libghostty-dotnet](https://github.com/deblasis/libghostty-dotnet).
+(composition), and shared texture, so embedders pick whichever fits their
+host. No compile-time flags; the device picks the path from what the caller
+provides. Note that upstream's libghostty C API is still young and unversioned,
+so embedders should expect some churn. .NET examples live in
+[libghostty-dotnet](https://github.com/deblasis/libghostty-dotnet).
 
 ## Roadmap
 
@@ -104,9 +119,14 @@ or [reach out](https://x.com/polyMatto).
 ## Crash reports
 
 Wintty captures crashes locally and never sends anything anywhere on its own.
-If you hit a crash and want it fixed, open an issue; a support dump you can
-review before sending is available on request. Details in the
-[privacy notice](https://wintty.io/privacy).
+If you hit a crash and want it fixed, open an issue; the app can also produce
+a support dump that you can review in full before choosing to send it.
+Details in the [privacy notice](https://wintty.io/privacy).
+
+## License
+
+MIT, inherited from Ghostty. See [LICENSE](LICENSE). The sponsored binaries
+are a convenience, not a license change: the source builds the same thing.
 
 ## Upstream
 
