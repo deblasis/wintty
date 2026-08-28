@@ -437,6 +437,20 @@ internal sealed partial class VerticalTabStrip : UserControl
     private readonly Dictionary<TabModel, VerticalTabPinnedRow> _pinnedRows = new();
     private readonly Dictionary<TabModel, TabHooks> _pinnedHooks = new();
 
+    // The drop preview: an icon-only ghost slot promising where a body row
+    // dragged over the shelf would land. It exists only while that promise
+    // is deliverable -- unpinned row, pointer over the shelf -- and it is
+    // strictly visual: it never touches manager state, and the drop that
+    // honours it still commits through the zone grammar (Classify /
+    // SetPinned / read-back), never through the ghost.
+    private VerticalTabPinnedRow? _pinPreview;
+
+    // The tab whose row held focus when a churn removed it, so the rebuilt
+    // row can take the focus with it (AddItem). Focus is unique, so at
+    // most one removal in a churn can set this; a candidate left over by a
+    // tab that never comes back is inert -- the restore is by reference.
+    private TabModel? _refocusTab;
+
     /// <summary>
     /// Paint the strip lane, or leave it to the window backdrop.
     ///
@@ -1328,6 +1342,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_items.ContainsKey(tab) || _pinnedRows.ContainsKey(tab)) return;
         if (tab.IsPinned) AddPinnedRow(tab);
         else AddBodyRow(tab);
+
+        // A churn rebuild (Move's Remove+Add, a pin relocation, a
+        // RebuildAllItems) removed the element that held focus and
+        // inserted a fresh one. Without this hand-off a keyboard unpin of
+        // the focused row drops focus out of the strip entirely -- the
+        // panel is not a control, nothing re-takes it, and the arrows go
+        // dead until a click. The candidate is only set by RemoveItem
+        // when the removed element actually held focus, so a plain
+        // rebuild that churns an unfocused row restores nothing.
+        if (!ReferenceEquals(_refocusTab, tab)) return;
+        _refocusTab = null;
+        RowElementOf(tab)?.Focus(FocusState.Programmatic);
     }
 
     private void AddBodyRow(TabModel tab)
@@ -1377,6 +1403,10 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         _items[tab] = item;
         _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
+
+        // One seam into the shelf: Up from the first body row walks into
+        // it. Every other arrow reaches MUXC's own traversal untouched.
+        item.KeyDown += OnBodyRowKeyDown;
 
         // Fenced because an Insert before the current selection shifts what
         // MUXC considers selected and raises SelectionChanged for a tab the
@@ -1429,6 +1459,16 @@ internal sealed partial class VerticalTabStrip : UserControl
         _pinnedRows[tab] = row;
         _pinnedHooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
         _pinnedPanel.Children.Add(row);
+
+        // Outside MUXC, the row owns its own keyboard story: Enter/Space
+        // activate through the same fenced path a shelf click uses, and
+        // Up/Down walk within the shelf and across the boundary. The focus
+        // indicator is the pane's hover-fill resource -- pinned rows paint
+        // no hover state today, so the fill is focus's alone -- because
+        // the row has no focus rect of its own to lean on.
+        row.KeyDown += OnPinnedRowKeyDown;
+        row.GotFocus += OnPinnedRowFocusVisual;
+        row.LostFocus += OnPinnedRowFocusVisual;
     }
 
     /// <summary>
@@ -1465,6 +1505,10 @@ internal sealed partial class VerticalTabStrip : UserControl
         // no fence -- only MenuItems removals can move MUXC's selection.)
         if (_pinnedRows.Remove(tab, out var pinned))
         {
+            // Remember whether the row held focus before it goes: its
+            // replacement (same tab, rebuilt in the other container on a
+            // zone crossing) should take the focus with it (AddItem).
+            if (pinned.FocusState != FocusState.Unfocused) _refocusTab = tab;
             _pinnedPanel.Children.Remove(pinned);
             if (_pinnedHooks.Remove(tab, out var pinnedHooks))
                 pinnedHooks.Dispose();
@@ -1472,6 +1516,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
 
         if (!_items.TryGetValue(tab, out var item)) return;
+        if (item.FocusState != FocusState.Unfocused) _refocusTab = tab;
 
         // Fenced for the same reason as the insert in AddBodyRow: removing
         // the selected row moves MUXC's selection to a neighbour and
@@ -1584,6 +1629,97 @@ internal sealed partial class VerticalTabStrip : UserControl
         ApplyAllItemTabColors();
         RecolorNavItems();
         RefreshSelectionChrome();
+    }
+
+    /// <summary>
+    /// The activation a shelf row gets, from a click (the drag machine's
+    /// sub-threshold release) or from Enter/Space. The pinned panel is
+    /// outside MUXC selection, so no SelectionChanged will ever carry
+    /// either gesture to the manager: this is the same fenced activation
+    /// the selection handler runs, spoken for the rows it cannot hear.
+    /// </summary>
+    private void ActivateFromShelf(TabModel tab)
+    {
+        if (ReferenceEquals(tab, _manager.ActiveTab)) return;
+
+        _syncing = true;
+        try { _manager.Activate(tab); }
+        finally { _syncing = false; }
+
+        ApplyAllItemTabColors();
+        RecolorNavItems();
+        RefreshSelectionChrome();
+    }
+
+    private void OnPinnedRowKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        // A drag owns the keyboard (Escape cancels it) and a drag never
+        // activates, so shelf keys stand down while one is live.
+        if (_drag is not null) return;
+        if (sender is not VerticalTabPinnedRow { Tag: TabModel tab }) return;
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space:
+                e.Handled = true;
+                ActivateFromShelf(tab);
+                break;
+            case Windows.System.VirtualKey.Down or Windows.System.VirtualKey.Up:
+                e.Handled = FocusShelfNeighbour(
+                    tab, e.Key == Windows.System.VirtualKey.Down ? 1 : -1);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Walk the shelf, and cross the boundary at its edges. Panel order IS
+    /// projection order (ReconcileRowOrder keeps them equal), so indexes
+    /// here are the row's real neighbours. Down past the last pinned row
+    /// lands on the first body row, where MUXC's own arrow traversal takes
+    /// over; Up past the first stops -- the pane toggle above is MUXC's.
+    /// </summary>
+    private bool FocusShelfNeighbour(TabModel tab, int delta)
+    {
+        if (RowElementOf(tab) is not { } row) return false;
+        var i = _pinnedPanel.Children.IndexOf(row) + delta;
+        if (i >= 0 && i < _pinnedPanel.Children.Count)
+            return _pinnedPanel.Children[i].Focus(FocusState.Programmatic);
+
+        if (delta > 0
+            && NavView.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()
+            is { } firstBody)
+            return firstBody.Focus(FocusState.Programmatic);
+
+        return false;
+    }
+
+    private void OnBodyRowKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        // A drag owns the keyboard (Escape cancels it), here too.
+        if (_drag is not null) return;
+        // The one seam into the shelf from the body: Up from the FIRST
+        // body row, only while the shelf exists. Everything else -- every
+        // other key, every other row, no pins at all -- is MUXC's arrow
+        // traversal, which must stay exactly as it was.
+        if (e.Key != Windows.System.VirtualKey.Up) return;
+        if (_manager.PinCount == 0) return;
+        if (sender is not NavigationViewItem) return;
+        if (NavView.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()
+            is not { } first || !ReferenceEquals(first, sender)) return;
+        if (_pinnedPanel.Children.Count == 0) return;
+        if (!_pinnedPanel.Children[^1].Focus(FocusState.Programmatic)) return;
+        e.Handled = true;
+    }
+
+    private void OnPinnedRowFocusVisual(object sender, RoutedEventArgs e)
+    {
+        if (sender is not VerticalTabPinnedRow row) return;
+        // The pane's hover-fill resource, reused as the focus indicator:
+        // pinned rows paint no hover state today, so this fill is focus's
+        // alone, and the row's FocusState is what picks it over the
+        // transparent rest state.
+        row.Background = row.FocusState == FocusState.Unfocused
+            ? TransparentBrush
+            : ResolveThemeBrush("SubtleFillColorSecondaryBrush");
     }
 
     /// <summary>The row rendering <paramref name="tab"/>, if built.</summary>
@@ -1778,21 +1914,37 @@ internal sealed partial class VerticalTabStrip : UserControl
             // touching anything, so activation proceeds exactly as it would
             // have. For a shelf row, "as it would have" is HERE: the pinned
             // panel is outside MUXC selection, so no SelectionChanged will
-            // ever carry the click to the manager. The same fenced
-            // activation the selection handler runs, for the rows it cannot
-            // hear; body clicks keep flowing through MUXC untouched.
+            // ever carry the click to the manager -- ActivateFromShelf is
+            // the fenced activation the selection handler runs, for the
+            // rows it cannot hear. Body clicks keep flowing through MUXC.
             _drag = null;
-            if (drag.PressRow is VerticalTabPinnedRow
-                && !ReferenceEquals(drag.Tab, _manager.ActiveTab))
+            if (drag.PressRow is VerticalTabPinnedRow)
+                ActivateFromShelf(drag.Tab);
+            return;
+        }
+        // Drop inside the pinned zone pins (5.5). The preview is the
+        // promise -- it shows only while the row is still unpinned and its
+        // center is over the shelf -- so honouring it at release is the
+        // same zone-grammar commit the tick loop runs: Classify names the
+        // op, SetPinned relocates to the prefix's last slot (exactly where
+        // the ghost sat), and the read-back traces what landed. The churn
+        // has replaced the dragged row's element, so there is no live
+        // visual to settle: the row lands as a cut, in the ghost's slot.
+        if (_pinPreview is not null)
+        {
+            var zone = TabPinBoundary.Classify(
+                drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count,
+                _manager.PinCount - 1);
+            if (zone.Op == TabPinZoneOp.Pin)
             {
-                _syncing = true;
-                try { _manager.Activate(drag.Tab); }
-                finally { _syncing = false; }
-
-                ApplyAllItemTabColors();
-                RecolorNavItems();
-                RefreshSelectionChrome();
+                _commitChurn = true;
+                try { _manager.SetPinned(drag.Tab, true); }
+                finally { _commitChurn = false; }
+                DragTrace(
+                    $"DRAG pin drop landed={_manager.IndexOf(drag.Tab)} " +
+                    $"to={zone.To}");
             }
+            EndDrag(drag, settle: false, velocity: 0);
             return;
         }
         // Capture is not released here: a synchronous PointerCaptureLost
@@ -2229,7 +2381,15 @@ internal sealed partial class VerticalTabStrip : UserControl
         drag.Machine.UpdateIndex(_manager.IndexOf(drag.Tab));
         RemeasureCenters(drag);
         double arranged = RowCenterY(drag.Tab);
-        if (double.IsNaN(arranged)) return;
+        if (double.IsNaN(arranged))
+        {
+            // The dragged row has no arranged truth this tick, so the
+            // preview's gate cannot be evaluated: an unreadable
+            // measurement is no promise, and a ghost left standing on a
+            // stale one outlives its premise.
+            HidePinPreview();
+            return;
+        }
         var draggedCenter = arranged + (drag.LastPointerY - drag.AnchorY);
 
         // Pre-commit arranged centers, one measurement per row: the gap
@@ -2314,6 +2474,118 @@ internal sealed partial class VerticalTabStrip : UserControl
                 if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
             }
         }
+
+        UpdatePinPreview(drag, draggedCenter);
+    }
+
+    // -----------------------------------------------------------------
+    // The pin drop preview (5.5): while a body row is dragged over the
+    // shelf and has not yet committed its crossing, an icon-only ghost
+    // slot sits in the shelf at the position the drop would land. The
+    // state machine is show/move/hide: shown and re-positioned from the
+    // coalesced drag tick, hidden by EndDrag -- the shared tail of the
+    // drop and every cancel -- and it never touches manager state. Once
+    // the crossing DOES commit, the real icon-only row is in the shelf
+    // following the pointer, and the ghost would promise a slot the real
+    // row already holds; the gate below hides it on that tick.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Re-derive the ghost from this tick's truth. The promise is only
+    /// alive while the dragged row is still unpinned, pins exist, and the
+    /// row's center is over the shelf; any other state hides it. An
+    /// unreadable measurement also hides it -- a ghost at a stale position
+    /// is a wrong promise, and no ghost is the honest one.
+    /// </summary>
+    private void UpdatePinPreview(DragSession drag, double draggedCenter)
+    {
+        var shelfBottom = ShelfBottomY();
+        if (drag.Tab.IsPinned || _manager.PinCount == 0
+            || double.IsNaN(shelfBottom) || draggedCenter >= shelfBottom)
+        {
+            HidePinPreview();
+            return;
+        }
+
+        var pins = TabStripProjection.Rows(_manager)
+            .Take(_manager.PinCount).ToList();
+        if (pins.Count == 0) { HidePinPreview(); return; }
+        if (RowElementOf(pins[^1]) is not { } last) { HidePinPreview(); return; }
+        var lastCenter = RowCenterY(pins[^1]);
+        if (double.IsNaN(lastCenter) || last.ActualWidth <= 0)
+        {
+            HidePinPreview();
+            return;
+        }
+
+        // The slot after the last pinned row: one row pitch down from its
+        // center (40px row + 2+2 margins), at the rows' own inset. Both
+        // vertical insets: the ghost zeroes its own margin, and the real
+        // row's 2px top margin is half of where its center actually
+        // lands -- shorting one leaves the ghost 2px proud of the slot
+        // and flashes at the handoff.
+        ShowPinPreview(drag,
+            top: lastCenter + VerticalTabPinnedRow.RowHeight / 2 + 2 * RowInsetVertical,
+            left: RowInsetLeft,
+            width: last.ActualWidth);
+    }
+
+    private double ShelfBottomY()
+    {
+        try
+        {
+            return _pinnedShelf.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, _pinnedShelf.ActualHeight)).Y;
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return double.NaN;
+        }
+    }
+
+    /// <summary>
+    /// Build the ghost fresh for this promise: a real pinned row shape
+    /// (the destination state, icon-only) at half strength, untouchable --
+    /// no hit testing, no tab stop, and out of the raw accessibility view
+    /// so a client never hears a tab that does not exist yet.
+    /// </summary>
+    private void ShowPinPreview(DragSession drag, double top, double left, double width)
+    {
+        if (_pinPreview is null)
+        {
+            var ghost = new VerticalTabPinnedRow(drag.Tab, AccentBrush)
+            {
+                IsHitTestVisible = false,
+                IsTabStop = false,
+                Opacity = 0.5,
+                Margin = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            AutomationProperties.SetAccessibilityView(
+                ghost, AccessibilityView.Raw);
+            _pinPreview = ghost;
+            PreviewHost.Children.Add(ghost);
+            PreviewHost.Visibility = Visibility.Visible;
+        }
+
+        _pinPreview.SetIcon(TabIconElementFactory.Create(drag.Tab.TabIcon));
+        _pinPreview.Width = width;
+        Canvas.SetLeft(_pinPreview, left);
+        Canvas.SetTop(_pinPreview, top);
+    }
+
+    /// <summary>
+    /// Take the promise back. EndDrag is the one place: drop and every
+    /// cancel family (escape, capture loss, row close, layout switch,
+    /// teardown) tear the gesture down here, so the ghost cannot outlive
+    /// the drag that promised it.
+    /// </summary>
+    private void HidePinPreview()
+    {
+        if (_pinPreview is null) return;
+        PreviewHost.Children.Remove(_pinPreview);
+        _pinPreview = null;
+        PreviewHost.Visibility = Visibility.Collapsed;
     }
 
     private (double Center, double[] Centers) MeasureRows(TabModel dragged)
@@ -2366,6 +2638,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         _drag = null;
         StopAutoscroll(drag);
         DetachGapMotion();
+        HidePinPreview();
         var settled = false;
         try
         {
