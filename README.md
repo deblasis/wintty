@@ -5,21 +5,19 @@
   <br><a href="https://wintty.io?utm_source=gh_readme">Wintty</a>
 </p>
 </h1>
-  <p align="center">
-    Fast, native, feature-rich terminal emulator pushing modern features.
-    <br />
-    A native GUI or embeddable library via <code>libghostty</code>.
-    <br />
-    <a href="#about">About</a>
-    ·
-    <a href="https://ghostty.org/download">Download</a>
-    ·
-    <a href="https://ghostty.org/docs">Documentation</a>
-    ·
-    <a href="CONTRIBUTING.md">Contributing</a>
-    ·
-    <a href="HACKING.md">Developing</a>
-  </p>
+<p align="center">
+  Ghostty's speed and features, native on Windows.
+  <br />
+  A DX12 renderer and a WinUI 3 shell on <code>libghostty</code>, the Zig core
+  proven by <a href="https://ghostty.org">Ghostty</a>.
+  <br />
+  <a href="https://wintty.io/download?utm_source=gh_readme">Download</a>
+  ·
+  <a href="https://wintty.io/docs?utm_source=gh_readme">Documentation</a>
+  ·
+  <a href="#build-from-source">Build from source</a>
+  ·
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 > [!IMPORTANT]
@@ -31,354 +29,89 @@
 > The `windows` branch is the default and contains all Windows-specific work
 > rebased on top of upstream `main`, which is synced daily.
 >
-> **Status:** DX12 renderer + WinUI 3 shell shipping tabs, splits, quick terminal, command palette, settings UI, notifications, jump lists, taskbar progress, Mica/Acrylic/Crystal backdrops, and a UIA accessibility provider. Usable daily-driver; polishing renderer throughput and finishing the remaining native-integration surface below.
->
-> **MVWT** Minimum Viewable Windows Terminal
-> `[████████████████████] ~100%`
->
-> **MVT** Moonshot Viable Terminal ([#26](https://github.com/deblasis/wintty/issues/26))
-> `[██████████████░░░░░░] ~70%`
->
-> The Windows app is a native C# GUI wrapping `libghostty.dll`, same architecture
-> as macOS where Swift wraps `libghostty`. All terminal emulation stays in Zig.
-> The C# layer handles windowing, input, and platform integration via P/Invoke.
-> The renderer uses DirectX 12 with DXGI swap chains and DirectComposition.
->
-> ### Building
->
-> Prerequisites: [Zig](https://ziglang.org/) (version in `build.zig.zon`), [Just](https://github.com/casey/just)
->
-> ```bash
-> just              # Run tests + build DLL
-> just test         # Run all Zig tests
-> just test-lib-vt  # Fast: test libghostty-vt only
-> just build-dll    # Build libghostty.dll
-> just sync         # Rebase on latest upstream
-> ```
->
-> See [docs/windows/tooling.md](docs/windows/tooling.md) for why Just and how CI (I should call it DisContinous Integration) works.
->
-> ### Branching Model
->
-> - `main` - mirror of upstream `ghostty-org/ghostty`, synced daily, if it's a good day
-> - `windows` (default) - all Windows work rebased on upstream
-> - Feature branches - branch off `windows`, PR back into `windows`
->
-> ### What is done
->
-> **Build infrastructure** (17 PRs merged upstream)
->
-> - [x] `zig build test` passing on Windows (2604 tests, 53 skipped)
-> - [x] All shared dependencies building (FreeType, HarfBuzz, zlib, oniguruma, zioshade, etc.)
-> - [x] `zig build test-lib-vt` passing on all platforms
-> - [x] Windows CI running without `continue-on-error`
-> - [x] Backslash path handling in config parsing
-> - [x] CRLF line ending fix for comptime parsing + `.gitattributes` normalization
-> - [x] `ghostty.dll` building on Windows (CRT init fix for MSVC DLL mode)
-> - [x] DLL init regression test and build instructions
-> - [x] Full Windows CI test suite
->
-> **DX12 renderer** (in fork)
->
-> - [x] DXGI bindings (adapters, factories, swap chains -- carried from DX11)
-> - [x] DirectComposition bindings (DWM composition -- carried from DX11)
-> - [x] COM helpers and test infrastructure (carried from DX11)
-> - [x] HLSL shaders (5 pipelines, SM 6.0 via dxc.exe)
-> - [x] D3D12 COM interface bindings
-> - [x] DX12 device lifecycle (command queue, fence, descriptor heaps)
-> - [x] DX12 render pipeline (PSOs, root signatures, command lists)
-> - [x] DX12 GPU primitives (upload heap buffers, textures, samplers)
-> - [x] Backend enum with `directx12` variant
-> - [x] Three surface modes: HWND, SwapChainPanel (composition), shared texture
->
-> **SwapChainPanel spike** (in fork, [demo video](https://www.youtube.com/watch?v=-Cn9mlxX_GA))
->
-> - [x] DX11 swap chain created from Zig, bound to WinUI 3 SwapChainPanel
-> - [x] Instanced cell grid rendering, bitmap font, animated demo scenes, resize, DPI
->
-> **App shell** (`windows/Ghostty/` + `windows/Ghostty.Core/`)
->
-> - [x] C# WinUI 3 project scaffold + P/Invoke bindings for libghostty C API
-> - [x] `--version` flag working from command line
-> - [x] Interop test suite against the real DLL
-> - [x] ConPTY shell spawning (pwsh, cmd, WSL distros, MSYS2/fish) with UTF-8 codepage handling
-> - [x] Tabs (vertical tab strip, tab overview, snap zones, color palettes, per-tab icons, rename)
-> - [x] Splits (split tree, pane context menus, directional navigation)
-> - [x] Quick Terminal (quake/dropdown): position, size, screen, animation, autohide, global hotkey
-> - [x] Command palette (frecency autocomplete, built-in/config/jump/profile/demo command sources)
-> - [x] Native settings UI (Appearance, Keybindings, General, Profiles, Terminal, Colors, Raw editor, Advanced, cheat-sheet)
-> - [x] Profiles with auto-discovery of installed shells (pwsh, cmd, WSL, MSYS2) + icon resolution (Win32, SVG)
-> - [x] Session save/restore (window/tab/split state)
-> - [x] Scrollback search, resize overlay, inspector, bell, single-instance
-> - [x] Clipboard with paste confirmation (MIME + format marshalling)
->
-> **Native Windows integration**
->
-> - [x] Mica / Acrylic / **Crystal** backdrops with tint resolver
-> - [x] Toast notifications (bell, long-running command completion) with rate-limiting
-> - [x] Jump lists (recent directories, pinned profiles via `ICustomDestinationList`)
-> - [x] Taskbar progress + attention overlay (OSC 9;4, `ITaskbarList3`)
-> - [x] Dark/Light theme sync + **High-Contrast** support for the terminal surface
-> - [x] Power / energy awareness (power-saver mode, adaptive behavior)
-> - [x] Branded app icon + icon picker
-> - [x] Kitty image protocol transport (ConPTY bypass) with DX12 atlas upload
->
-> ### Architecture: Surface Modes
->
-> The DX12 renderer supports three surface modes at the library level so that
-> libghostty consumers can pick whichever model fits their host:
-> - **HWND** -- `CreateSwapChainForHwnd` via DXGI, for standalone windows, test harnesses, and third-party embedders
-> - **SwapChainPanel** (composition) -- `CreateSwapChainForComposition` via DXGI, for WinUI 3 / XAML hosts
-> - **Shared texture** -- renders to a standalone `ID3D12Resource` (texture) with a DXGI shared handle, for game engines, custom renderers, and offscreen scenarios
->
-> The device picks the path based on what the caller provides. No compile-time flags.
->
-> ### What is next
->
-> **Renderer throughput** ([#93](https://github.com/deblasis/wintty/issues/93), [#94](https://github.com/deblasis/wintty/issues/94))
->
-> - [ ] Scroll optimization -- row versioning / GPU buffer rotation so a viewport scroll only re-uploads the newly exposed rows
-> - [ ] Adaptive presentation -- waitable swap chain, `ALLOW_TEARING` / VRR, skip-present when idle
-> - [ ] Glyph Protocol upload parity (DX12 + DirectWrite atlas) ([#551](https://github.com/deblasis/wintty/issues/551))
->
-> **Native integration gaps** ([#81](https://github.com/deblasis/wintty/issues/81))
->
-> - [ ] System tray / background mode (minimize-to-tray + always-show icon)
-> - [ ] "Open Terminal Here" Explorer context menu (classic registry + Win11 `IExplorerCommand`)
-> - [ ] Default terminal handoff (`ITerminalHandoff`) -- register as a Windows 11 default terminal
-> - [ ] First-class automation surface (control CLI / COM server) to match macOS AppleScript + Shortcuts
-> - [ ] Multi-window
->
-> **Config surface & packaging** ([#214](https://github.com/deblasis/wintty/issues/214))
->
-> - [ ] `windows-*` config keys mirroring the `macos-*` surface (titlebar style, backdrop, window buttons, icon theming, etc.)
-> - [ ] Installer packages (MSI, MSIX, winget); auto-update ships via the sponsor tier (Velopack)
-> - [ ] VT-compliance CI (esctest) once Actions billing is restored ([#508](https://github.com/deblasis/wintty/issues/508))
->
-> ### .NET Examples
->
-> .NET-specific examples live in [deblasis/libghostty-dotnet](https://github.com/deblasis/libghostty-dotnet),
-> separate from the `example/` directory in this repo which is for C and Zig.
-> These examples help surface friction points, bugs, and integration gaps
-> from the perspective of a .NET consumer of libghostty.
->
-> ### History
->
-> This fork started as an upstream contribution effort. 17 PRs were merged
-> into ghostty-org/ghostty covering build fixes, CI, and DLL infrastructure.
-> The project continues as a soft fork - upstream doesn't have capacity to
-> maintain Windows-specific changes right now, so here we are.
-> GitHub Actions are disabled for this fork because we are poor and just.
-> I mean, we use `just` for insanity checks.
->
-> [!NOTE]
-> **To everyone who has kindly sponsored this OSS work -- THANK YOU! 🙏**
->
-> In the next few days I'll start offering sponsor perks like **auto-updates**
-> and **signed binaries**. Keep an eye on these pages, or
-> [reach out / sponsor](https://github.com/sponsors/deblasis) so I can keep
-> you posted. Stay tuned.
+> 17 PRs of this fork's build and CI work were merged upstream before the
+> project continued here; upstream doesn't have capacity for Windows right
+> now, so this is where Windows lives. It started as a public build-in-public
+> effort (the old progress meters live in the git history) and it is a daily
+> driver today.
 
-## About
+## Get Wintty
 
-Ghostty is a terminal emulator that differentiates itself by being
-fast, feature-rich, and native. While there are many excellent terminal
-emulators available, they all force you to choose between speed,
-features, or native UIs. Ghostty provides all three.
+**Sponsored build (recommended).** [Sponsor any amount](https://github.com/sponsors/deblasis),
+then [sign in with GitHub](https://wintty.io/download) and download the signed
+installer. You get automatic in-app updates, both `stable` and `tip` channels,
+and the sponsors-only Discord channel. Pro adds more; see the
+[tiers page](https://wintty.io/docs/install/tiers).
 
-**`libghostty`** is a cross-platform, zero-dependency C and Zig library
-for building terminal emulators or utilizing terminal functionality
-(such as style parsing). Anyone can use `libghostty` to build a terminal
-emulator or embed a terminal into their own applications. See
-[Ghostling](https://github.com/ghostty-org/ghostling) for a minimal complete project
-example or the [`examples` directory](https://github.com/ghostty-org/ghostty/tree/main/example)
-for smaller examples of using `libghostty` in C and Zig.
+**Build from source (free, always).** Clone, `just`, done:
 
-For more details, see [About Ghostty](https://ghostty.org/docs/about).
-
-## Download
-
-See the [download page](https://ghostty.org/download) on the Ghostty website.
-
-## Documentation
-
-See the [documentation](https://ghostty.org/docs) on the Ghostty website.
-
-## Contributing and Developing
-
-If you have any ideas, issues, etc. regarding Ghostty, or would like to
-contribute to Ghostty through pull requests, please check out our
-["Contributing to Ghostty"](CONTRIBUTING.md) document. Those who would like
-to get involved with Ghostty's development as well should also read the
-["Developing Ghostty"](HACKING.md) document for more technical details.
-
-## Roadmap and Status
-
-Ghostty is stable and in use by millions of people and machines daily.
-
-The high-level ambitious plan for the project, in order:
-
-|  #  | Step                                                    | Status |
-| :-: | ------------------------------------------------------- | :----: |
-|  1  | Standards-compliant terminal emulation                  |   ✅   |
-|  2  | Competitive performance                                 |   ✅   |
-|  3  | Rich windowing features -- multi-window, tabbing, panes |   ✅   |
-|  4  | Native Platform Experiences                             |   ✅   |
-|  5  | Cross-platform `libghostty` for Embeddable Terminals    |   ✅   |
-|  6  | Ghostty-only Terminal Control Sequences                 |   ❌   |
-
-Additional details for each step in the big roadmap below:
-
-#### Standards-Compliant Terminal Emulation
-
-Ghostty implements all of the regularly used control sequences and
-can run every mainstream terminal program without issue. For legacy sequences,
-we've done a [comprehensive xterm audit](https://github.com/ghostty-org/ghostty/issues/632)
-comparing Ghostty's behavior to xterm and building a set of conformance
-test cases.
-
-In addition to legacy sequences (what you'd call real "terminal" emulation),
-Ghostty also supports more modern sequences than almost any other terminal
-emulator. These features include things like the Kitty graphics protocol,
-Kitty image protocol, clipboard sequences, synchronized rendering,
-light/dark mode notifications, and many, many more.
-
-We believe Ghostty is one of the most compliant and feature-rich terminal
-emulators available.
-
-Terminal behavior is partially a de jure standard
-(i.e. [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/))
-but mostly a de facto standard as defined by popular terminal emulators
-worldwide. Ghostty takes the approach that our behavior is defined by
-(1) standards, if available, (2) xterm, if the feature exists, (3)
-other popular terminals, in that order. This defines what the Ghostty project
-views as a "standard."
-
-#### Competitive Performance
-
-Ghostty is generally in the same performance category as the other highest
-performing terminal emulators.
-
-"The same performance category" means that Ghostty is much faster than
-traditional or "slow" terminals and is within an unnoticeable margin of the
-well-known "fast" terminals. For example, Ghostty and Alacritty are usually within
-a few percentage points of each other on various benchmarks, but are both
-something like 100x faster than Terminal.app and iTerm. However, Ghostty
-is much more feature rich than Alacritty and has a much more native app
-experience.
-
-This performance is achieved through high-level architectural decisions and
-low-level optimizations. At a high-level, Ghostty has a multi-threaded
-architecture with a dedicated read thread, write thread, and render thread
-per terminal. Our renderer uses OpenGL on Linux and Metal on macOS.
-Our read thread has a heavily optimized terminal parser that leverages
-CPU-specific SIMD instructions. Etc.
-
-#### Rich Windowing Features
-
-The Mac and Linux (build with GTK) apps support multi-window, tabbing, and
-splits with additional features such as tab renaming, coloring, etc. These
-features allow for a higher degree of organization and customization than
-single-window terminals.
-
-#### Native Platform Experiences
-
-Ghostty is a cross-platform terminal emulator but we don't aim for a
-least-common-denominator experience. There is a large, shared core written
-in Zig but we do a lot of platform-native things:
-
-- The macOS app is a true SwiftUI-based application with all the things you
-  would expect such as real windowing, menu bars, a settings GUI, etc.
-- macOS uses a true Metal renderer with CoreText for font discovery.
-- macOS supports AppleScript, Apple Shortcuts (AppIntents), etc.
-- The Linux app is built with GTK.
-- The Linux app integrates deeply with systemd if available for things
-  like always-on, new windows in a single instance, cgroup isolation, etc.
-
-Our goal with Ghostty is for users of whatever platform they run Ghostty
-on to think that Ghostty was built for their platform first and maybe even
-exclusively. We want Ghostty to feel like a native app on every platform,
-for the best definition of "native" on each platform.
-
-#### Cross-platform `libghostty` for Embeddable Terminals
-
-In addition to being a standalone terminal emulator, Ghostty is a
-C-compatible library for embedding a fast, feature-rich terminal emulator
-in any 3rd party project. This library is called `libghostty`.
-
-Due to the scope of this project, we're breaking libghostty down into
-separate libraries, starting with `libghostty-vt`. The goal of
-this project is to focus on parsing terminal sequences and maintaining
-terminal state. This is covered in more detail in this
-[blog post](https://mitchellh.com/writing/libghostty-is-coming).
-
-`libghostty-vt` is already available and usable today for Zig and C and
-is compatible for macOS, Linux, Windows, and WebAssembly. The functionality
-is extremely stable (since its been proven in Ghostty GUI for a long time),
-but the API signatures are still in flux.
-
-`libghostty` is already heavily in use. See [`examples`](https://github.com/ghostty-org/ghostty/tree/main/example)
-for small examples of using `libghostty` in C and Zig or the
-[Ghostling](https://github.com/ghostty-org/ghostling) project for a
-complete example. See [awesome-libghostty](https://github.com/Uzaaft/awesome-libghostty)
-for a list of projects and resources related to `libghostty`.
-
-We haven't tagged libghostty with a version yet and we're still working
-on a better docs experience, but our [Doxygen website](https://libghostty.tip.ghostty.org/)
-is a good resource for the C API.
-
-#### Ghostty-only Terminal Control Sequences
-
-We want and believe that terminal applications can and should be able
-to do so much more. We've worked hard to support a wide variety of modern
-sequences created by other terminal emulators towards this end, but we also
-want to fill the gaps by creating our own sequences.
-
-We've been hesitant to do this up until now because we don't want to create
-more fragmentation in the terminal ecosystem by creating sequences that only
-work in Ghostty. But, we do want to balance that with the desire to push the
-terminal forward with stagnant standards and the slow pace of change in the
-terminal ecosystem.
-
-We haven't done any of this yet.
-
-## Crash Reports
-
-Ghostty has a built-in crash reporter that will generate and save crash
-reports to disk. The crash reports are saved to the `$XDG_STATE_HOME/ghostty/crash`
-directory. If `$XDG_STATE_HOME` is not set, the default is `~/.local/state`.
-**Crash reports are _not_ automatically sent anywhere off your machine.**
-
-Crash reports are only generated the next time Ghostty is started after a
-crash. If Ghostty crashes and you want to generate a crash report, you must
-restart Ghostty at least once. You should see a message in the log that a
-crash report was generated.
-
-> [!NOTE]
->
-> Use the `ghostty +crash-report` CLI command to get a list of available crash
-> reports. A future version of Ghostty will make the contents of the crash
-> reports more easily viewable through the CLI and GUI.
-
-Crash reports end in the `.winttycrash` extension. The crash reports are in
-[Sentry envelope format](https://develop.sentry.dev/sdk/envelopes/). You can
-upload these to your own Sentry account to view their contents, but the format
-is also publicly documented so any other available tools can also be used.
-The `ghostty +crash-report` CLI command can be used to list any crash reports.
-A future version of Ghostty will show you the contents of the crash report
-directly in the terminal.
-
-To send the crash report to the Ghostty project, you can use the following
-CLI command using the [Sentry CLI](https://docs.sentry.io/cli/installation/):
-
-```shell-session
-SENTRY_DSN=https://e914ee84fd895c4fe324afa3e53dac76@o4507352570920960.ingest.us.sentry.io/4507850923638784 sentry-cli send-envelope --raw <path to ghostty crash>
+```bash
+git clone https://github.com/deblasis/wintty && cd wintty
+just              # tests + build the DLL
+just build-win    # the app
 ```
 
+You need [Zig](https://ziglang.org/) (version pinned in `build.zig.zon`) and
+[Just](https://github.com/casey/just) (why Just, and how CI works:
+[windows/docs/tooling.md](windows/docs/tooling.md)). Full instructions:
+[Build from Source](https://wintty.io/docs/install/build).
+
 > [!WARNING]
->
-> The crash report can contain sensitive information. The report doesn't
-> purposely contain sensitive information, but it does contain the full
-> stack memory of each thread at the time of the crash. This information
-> is used to rebuild the stack trace but can also contain sensitive data
-> depending on when the crash occurred.
+> Development goes very fast. Depending on when you build, you might hit
+> stability issues: CI runs in batches a few times a day, so a bad commit can
+> fall through the cracks and you might just be unlucky. Point at a tag for a
+> calmer ride.
+
+## What you get
+
+- Real terminal emulation on the Zig core Ghostty ships (Kitty graphics
+  protocol included), rendered through DirectX 12 with DXGI and DirectComposition
+- A native WinUI 3 shell: vertical tabs, splits, quick terminal, command palette,
+  full settings UI, profiles with shell auto-discovery, session restore
+- Windows integration: Mica / Acrylic / Crystal backdrops, toast notifications,
+  jump lists, taskbar progress, High Contrast support, single instance
+- Shell support out of the box: pwsh, cmd, WSL distros, MSYS2
+- A thin C# layer over `libghostty.dll` via P/Invoke, same architecture as
+  macOS where Swift wraps the same core
+
+The full feature matrix with per-tier availability:
+[tiers page](https://wintty.io/docs/install/tiers).
+
+## Architecture in one paragraph
+
+`libghostty` keeps all terminal emulation in Zig. The Windows app wraps it in
+C# (WinUI 3) for windowing, input, and platform integration. The DX12 renderer
+supports three surface modes at the library level, HWND, SwapChainPanel
+(composition), and shared texture, so embedders pick whichever fits their host.
+No compile-time flags; the device picks the path from what the caller provides.
+.NET examples live in [libghostty-dotnet](https://github.com/deblasis/libghostty-dotnet).
+
+## Roadmap
+
+Renderer throughput next: scroll optimization, adaptive presentation, waitable
+swap chains ([#93](https://github.com/deblasis/wintty/issues/93), [#94](https://github.com/deblasis/wintty/issues/94)).
+Then the native-integration gaps: system tray, "Open Terminal Here", default
+terminal handoff, multi-window ([#81](https://github.com/deblasis/wintty/issues/81)).
+The full issue tracker is the real roadmap.
+
+## Sponsors
+
+**To everyone who has kindly sponsored this work: THANK YOU. 🙏** You are why
+this ships. Perks are live: signed binaries, automatic updates, the Discord
+channel, and the Pro tier. [Join them](https://github.com/sponsors/deblasis)
+or [reach out](https://x.com/polyMatto).
+
+## Crash reports
+
+Wintty captures crashes locally and never sends anything anywhere on its own.
+If you hit a crash and want it fixed, open an issue; a support dump you can
+review before sending is available on request. Details in the
+[privacy notice](https://wintty.io/privacy).
+
+## Upstream
+
+Wintty is built on [Ghostty](https://ghostty.org) by
+[Mitchell Hashimoto](https://github.com/mitchellh) and contributors. All
+credit for the terminal emulation core, and much of the speed, is theirs.
+Anything not Windows-specific (macOS, Linux/GTK, the full libghostty story)
+lives upstream: [ghostty.org/docs](https://ghostty.org/docs).
