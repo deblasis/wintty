@@ -3,15 +3,19 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
+using System.Numerics;
 using System.Threading.Tasks;
 using Ghostty.Core;
 using Ghostty.Core.Tabs;
 using Ghostty.Core.Windows;
 using Ghostty.Services;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.UI;
@@ -133,6 +137,9 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         _manager.Tabs.CollectionChanged += OnTabsCollectionChanged;
         _manager.ActiveTabChanged += (_, _) => SyncSelectionFromManager();
+
+        HookDragInput();
+        Unloaded += (_, _) => CancelDrag("teardown");
     }
 
     internal SolidColorBrush AccentBrush =>
@@ -388,6 +395,13 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     internal void SetSelectionRowSuppressed(bool suppressed)
     {
+        // Suppression arriving over a live drag is the layout switch
+        // staging: the morph hides this row before anything moves. A drag
+        // refuses to start under an existing suppression, so this
+        // transition can only be a switch beginning, and the reorder
+        // grammar folds first -- the manager reconcile repairs the order,
+        // the pane moves second (edge case 9).
+        if (suppressed && _drag is not null) CancelDrag("switch");
         if (_selectionRowSuppressed == suppressed) return;
         _selectionRowSuppressed = suppressed;
         UpdateSelectionRow();
@@ -594,13 +608,20 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void UpdateSelectionRow()
     {
-        if (_selectionRowSuppressed)
+        if (_selectionRowSuppressed || (_drag is { HidesSelectionRow: true }))
         {
             SelectionRow.Visibility = Visibility.Collapsed;
             UpdateRowSeparators(selectionRowVisible: false);
             SelectionRowChanged?.Invoke();
             return;
         }
+
+        // Mid-drag the rows' arranged slots run ahead of their visuals
+        // (glides ride the compositor), so re-placing the overlay here
+        // would paint the accent fill a slot away from the row it marks.
+        // The last placement keeps matching what is on screen; the one
+        // refresh at the drag's end catches up.
+        if (_drag is not null) return;
 
         if (_manager.ActiveTab is null
             || !_items.TryGetValue(_manager.ActiveTab, out var item)
@@ -968,6 +989,10 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void EnsureActiveItemVisible()
     {
+        // A drag owns the scroller: a bring-into-view fired by a mid-drag
+        // commit would scroll the strip under a still pointer and drag
+        // the row off the finger. The next post-drag refresh catches up.
+        if (_drag is not null) return;
         if (_manager.ActiveTab is null) return;
         if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
 
@@ -1218,6 +1243,13 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void RemoveItem(TabModel tab)
     {
+        // A removal of the dragged row is either a commit's move phase --
+        // the manager re-inserts it right after, which _commitChurn marks --
+        // or the row was really closed mid-drag (Ctrl+W). The latter ends
+        // the gesture before the container it is following leaves the tree.
+        if (_drag is { } drag && ReferenceEquals(tab, drag.Tab) && !_commitChurn)
+            CancelDrag("closed");
+
         if (!_items.TryGetValue(tab, out var item)) return;
 
         // Fenced for the same reason as the insert in AddItem: removing the
@@ -1236,6 +1268,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_syncing) return;
         if (args.SelectedItem is not NavigationViewItem { Tag: TabModel tab }) return;
+
+        // A drag never activates (MRU and the active tab are drag-untouched
+        // by invariant). MUXC can surface a selection change out of the very
+        // press the gesture grew from -- its container lost the pointer to
+        // our capture mid-flight -- so a live drag pushes selection back to
+        // the manager's active row and leaves activation alone.
+        if (_drag is { Machine.Phase: TabDragPhase.Dragging })
+        {
+            SyncSelectionFromManager();
+            return;
+        }
 
         _syncing = true;
         try { _manager.Activate(tab); }
@@ -1256,4 +1299,829 @@ internal sealed partial class VerticalTabStrip : UserControl
         var item = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
         return item?.Tag as TabModel;
     }
+
+    // -----------------------------------------------------------------
+    // Drag to reorder (spec 5.2). The strip captures the pointer once a
+    // press grows past the start threshold, the row follows through a
+    // composition expression, crossings commit through TabManager.Move so
+    // the manager is the truth mid-drag, and neighbours glide on
+    // composition Translation animations. Rows move INSIDE the strip; the
+    // lane itself is never animated (the PR 643 constraint), and a drag
+    // never activates a tab or touches MRU.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Oracle for the drag harness, the same shape as
+    /// LayoutCoordinator's morph trace: the env var is the per-run log
+    /// path, so concurrent instances never interleave one file, and the
+    /// trace is inert (a null check) when it is unset. Lines pair
+    /// DRAG begin/end, one per commit, and the ghosts counts report
+    /// composition the strip still believes it is driving -- the oracle
+    /// reads any N above zero as a leak, and a `drop` line without a
+    /// later `DRAG settle` as a settle that never completed.
+    /// </summary>
+    private static readonly string? DragTracePath =
+        Environment.GetEnvironmentVariable("WINTTY_TABDRAG_TRACE");
+
+    private static void DragTrace(string message)
+    {
+        if (DragTracePath is null) return;
+        try
+        {
+            System.IO.File.AppendAllText(DragTracePath, message + Environment.NewLine);
+        }
+        catch
+        {
+            // A locked or unwritable log must never take the drag down.
+        }
+    }
+
+    private DragSession? _drag;
+    private bool _evalPending;
+    // True while a commit's manager mutation is churning the dragged
+    // row's own container through RemoveItem/AddItem; distinguishes that
+    // churn from a real mid-drag close of the row.
+    private bool _commitChurn;
+
+    /// <summary>Everything one drag holds in the air, released by EndDrag.</summary>
+    private sealed class DragSession
+    {
+        public required TabModel Tab;
+        public required TabDragReorder Machine;
+        public required IReadOnlyList<TabModel> PreDragOrder;
+        public required uint PointerId;
+        public double PressY;
+        public double PressBaseCenter;
+        // The arranged center the anchor currently assumes; the tick's
+        // measurement is only believed when it moves off this.
+        public double AssumedCenter;
+        public double LastPointerY;
+        public double AnchorY;
+        public double LastScrollOffset;
+        public double LastAutoscrollSpeed;
+        public double LastAutoscrollMs;
+        public bool MotionOn;
+        public bool HidesSelectionRow;
+        public FrameworkElement Item = null!;
+        public ScrollViewer? Scroller;
+        public Visual? Visual;
+        public CompositionPropertySet? Properties;
+        public ExpressionAnimation? Follow;
+        // The eased 250ms glide every gap animation rides; created once
+        // per drag from the dragged row's compositor.
+        public Vector3KeyFrameAnimation? Glide;
+        public DispatcherQueueTimer? Autoscroll;
+        public TypedEventHandler<DispatcherQueueTimer, object>? AutoscrollTick;
+        public EventHandler<ScrollViewerViewChangedEventArgs>? ViewChanged;
+    }
+
+    private void HookDragInput()
+    {
+        // handledEventsToo: MUXC's containers mark their presses handled
+        // for selection, and the drag must see those same presses to arm
+        // on them. Nothing here sets Handled on a press or a move, so
+        // hover and clicks behave exactly as before a drag existed. The
+        // handlers wrap in explicit delegates because AddHandler's
+        // parameter is object and a bare method group warns CS8974.
+        AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler(OnDragPointerPressed), true);
+        AddHandler(UIElement.PointerMovedEvent,
+            new PointerEventHandler(OnDragPointerMoved), true);
+        AddHandler(UIElement.PointerReleasedEvent,
+            new PointerEventHandler(OnDragPointerReleased), true);
+        AddHandler(UIElement.PointerCanceledEvent,
+            new PointerEventHandler(OnDragPointerCanceled), true);
+        AddHandler(UIElement.PointerCaptureLostEvent,
+            new PointerEventHandler(OnDragPointerCaptureLost), true);
+        AddHandler(UIElement.KeyDownEvent,
+            new KeyEventHandler(OnDragKeyDown), true);
+    }
+
+    private void OnDragPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not null) return;
+        // A layout switch stages through SetSelectionRowSuppressed; a
+        // drag never starts under one.
+        if (_selectionRowSuppressed) return;
+
+        var source = e.OriginalSource as DependencyObject;
+        var item = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
+        if (item is null || item.Tag is not TabModel tab) return;
+        // The close button owns its own presses; no drag grows out of one.
+        if (VisualTreeHelperEx.FindAncestor<Button>(source) is not null) return;
+        if (!_items.TryGetValue(tab, out var owned) || !ReferenceEquals(owned, item)) return;
+        if (_manager.Tabs.Count < 2) return;
+
+        var point = e.GetCurrentPoint(this);
+        var machine = new TabDragReorder(_manager.Tabs.Count, _manager.IndexOf(tab));
+        machine.Press(point.Position.Y);
+        // Each begin..settle pair owns its census: a teardown failure in
+        // one drag must not inflate the ghost count of the next.
+        _teardownFailures = 0;
+        _drag = new DragSession
+        {
+            Tab = tab,
+            Machine = machine,
+            PreDragOrder = TabStripProjection.Rows(_manager),
+            PointerId = e.Pointer.PointerId,
+            LastPointerY = point.Position.Y,
+            PressY = point.Position.Y,
+        };
+    }
+
+    private void OnDragPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        var y = e.GetCurrentPoint(this).Position.Y;
+
+        if (drag.Machine.Phase == TabDragPhase.Pressed)
+        {
+            if (!drag.Machine.Begin(y)) return;
+            StartDragVisual(drag, e);
+            if (_drag is null) return; // start refused; the click falls through
+        }
+
+        drag.LastPointerY = y;
+        drag.Machine.SampleVelocity(y, Environment.TickCount64);
+        drag.Properties?.InsertVector3("pointer", new Vector3(0, (float)y, 0));
+        ScheduleDragEvaluate();
+    }
+
+    private void OnDragPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        // Velocity first, and signed: Drop clears the sample window, and
+        // the remaining travel is slot minus release (AnchorY is the slot
+        // the anchor holds), positive = down -- the same axis
+        // SampleVelocity feeds. A magnitude here would trip the
+        // away-guard and kill every upward settle.
+        var velocity = drag.Machine.ReleaseVelocity(drag.AnchorY - drag.LastPointerY);
+        var index = drag.Machine.Drop();
+        if (index < 0)
+        {
+            // Never lifted past the threshold: a click. Stand down
+            // without touching anything, so activation proceeds exactly
+            // as it would have.
+            _drag = null;
+            return;
+        }
+        // Capture is not released here: a synchronous PointerCaptureLost
+        // off our own release would re-enter as a cancel and roll the
+        // drop back. The platform releases capture on lift anyway, and
+        // by then the session is gone.
+        DragTrace($"DRAG drop index={index} velocity={velocity:0}");
+        EndDrag(drag, settle: drag.MotionOn, velocity: velocity);
+    }
+
+    private void OnDragPointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        CancelDrag("canceled");
+    }
+
+    private void OnDragPointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        CancelDrag("capture");
+    }
+
+    private void OnDragKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (_drag is not { Machine.Phase: TabDragPhase.Dragging }) return;
+        if (e.Key != Windows.System.VirtualKey.Escape) return;
+        e.Handled = true;
+        CancelDrag("escape");
+    }
+
+    private void StartDragVisual(DragSession drag, PointerRoutedEventArgs e)
+    {
+        if (!_items.TryGetValue(drag.Tab, out var item)) { CancelDrag("closed"); return; }
+        if (!CapturePointer(e.Pointer)) { CancelDrag("capture"); return; }
+
+        drag.Item = item;
+        drag.MotionOn = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
+        drag.HidesSelectionRow = ReferenceEquals(drag.Tab, _manager.ActiveTab);
+        drag.Machine.UpdateIndex(_manager.IndexOf(drag.Tab));
+        try
+        {
+            var (center, centers) = MeasureRows(drag.Tab);
+            drag.PressBaseCenter = center;
+            drag.AssumedCenter = center;
+            drag.Machine.UpdateCenters(centers);
+        }
+        catch (InvalidOperationException)
+        {
+            // A row the projection holds is not realized; crossings
+            // cannot be judged yet, so refuse the lift. The gesture
+            // degrades to the click it started as.
+            CancelDrag("layout");
+            return;
+        }
+
+        try
+        {
+            AttachFollow(drag);
+            if (drag.MotionOn)
+            {
+                AttachLift(drag);
+                var glide = drag.Visual!.Compositor.CreateVector3KeyFrameAnimation();
+                glide.Duration = TimeSpan.FromMilliseconds(TabStripMotion.GapGlideMs);
+                // No key frame at progress 0: the animation starts from
+                // whatever the row's Translation holds when it starts,
+                // which is the slot delta GlideRow just pinned.
+                glide.InsertKeyFrame(1f, Vector3.Zero,
+                    drag.Visual.Compositor.CreateCubicBezierEasingFunction(
+                        new Vector2(0.55f, 0.55f), new Vector2(0f, 1f)));
+                drag.Glide = glide;
+            }
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // Composition refused: drop the gesture rather than run one
+            // that only pretends to follow the pointer.
+            CancelDrag("composition");
+            return;
+        }
+
+        if (drag.HidesSelectionRow) UpdateSelectionRow();
+        StartAutoscroll(drag);
+        DragTrace($"DRAG begin index={drag.Machine.Index} " +
+            $"rows={_manager.Tabs.Count} motion={(drag.MotionOn ? "on" : "off")}");
+    }
+
+    /// <summary>
+    /// The follow: the row's composition Translation rides an expression
+    /// over a property set the pointer feeds, so the arithmetic runs on
+    /// the compositor and a stalled UI thread (the terminal re-rendering
+    /// mid-drag) cannot stutter the row. Translation, not Offset: layout
+    /// owns Offset, and a commit re-arranges the row mid-drag.
+    /// </summary>
+    private void AttachFollow(DragSession drag)
+    {
+        ElementCompositionPreview.SetIsTranslationEnabled(drag.Item, true);
+        var visual = ElementCompositionPreview.GetElementVisual(drag.Item);
+        var properties = visual.Compositor.CreatePropertySet();
+        properties.InsertVector3("pointer", new Vector3(0, (float)drag.LastPointerY, 0));
+        ApplyAnchor(drag, properties);
+        var follow = visual.Compositor.CreateExpressionAnimation(
+            "Vector3(0, P.pointer.y - P.anchor.y, 0)");
+        follow.SetReferenceParameter("P", properties);
+        visual.StartAnimation("Translation", follow);
+        drag.Visual = visual;
+        drag.Properties = properties;
+        drag.Follow = follow;
+    }
+
+    /// <summary>
+    /// A commit churns the dragged row's own container (Move surfaces as
+    /// Remove+Add and the item is rebuilt), so the follow re-arms on the
+    /// fresh visual. The anchor is re-derived from the row's post-commit
+    /// slot, so the rebuilt row appears exactly where the pointer had it;
+    /// the next tick's measurement confirms.
+    /// </summary>
+    private void RebindFollow(DragSession drag, double assumedCenter)
+    {
+        if (!_items.TryGetValue(drag.Tab, out var item)) return;
+        drag.Item = item;
+        if (!double.IsNaN(assumedCenter)) drag.AssumedCenter = assumedCenter;
+        ElementCompositionPreview.SetIsTranslationEnabled(item, true);
+        var visual = ElementCompositionPreview.GetElementVisual(item);
+        drag.Visual = visual;
+        // The churned container scales from its own middle, the same
+        // center AttachLift set on the original, or the lift pivots from
+        // the corner after the first mid-drag commit.
+        visual.CenterPoint = new Vector3(
+            (float)item.ActualWidth / 2f, (float)item.ActualHeight / 2f, 0f);
+        if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
+        // Rebuilt at the lift height: re-running the lift spring per
+        // crossing would re-bounce the row all the way down the strip.
+        if (drag.MotionOn)
+            visual.Scale = new Vector3(TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
+        if (drag.Follow is not null)
+            visual.StartAnimation("Translation", drag.Follow);
+    }
+
+    /// <summary>
+    /// Re-feed the machine's slot centers from layout, keeping any slot
+    /// the strip cannot measure right now at its previous value. Centers
+    /// are read in the strip's current frame, so scrolling between here
+    /// and the drag's start cannot skew a crossing threshold.
+    /// </summary>
+    private void RemeasureCenters(DragSession drag)
+    {
+        var rows = TabStripProjection.Rows(_manager);
+        var centers = new double[rows.Count];
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var measured = RowCenterY(rows[i]);
+            // CenterOf throws for a slot the machine has not grown into
+            // yet -- a row added mid-drag, measured before its first
+            // arrange, on the very tick this feed expands it. There is
+            // no previous belief to keep, so the unresolved measurement
+            // stands for this tick; Evaluate treats it as "no crossing"
+            // and the next tick re-feeds it.
+            centers[i] = !double.IsNaN(measured) || i >= drag.Machine.RowCount
+                ? measured
+                : drag.Machine.CenterOf(i);
+        }
+        drag.Machine.UpdateCenters(centers);
+    }
+
+    /// <summary>
+    /// anchor = pressY - pressBaseCenter + assumedCenter. Translation is
+    /// pointer - anchor, which keeps the row's visual position glued to
+    /// the pointer through arranged-slot changes (a commit, a scroll):
+    /// those shift the assumed center, the anchor shifts with it, and
+    /// the visual stays put.
+    /// </summary>
+    private void ApplyAnchor(DragSession drag, CompositionPropertySet properties)
+    {
+        drag.AnchorY = drag.PressY - drag.PressBaseCenter + drag.AssumedCenter;
+        properties.InsertVector3("anchor", new Vector3(0, (float)drag.AnchorY, 0));
+    }
+
+    private void AttachLift(DragSession drag)
+    {
+        var visual = drag.Visual!;
+        visual.CenterPoint = new Vector3(
+            (float)drag.Item.ActualWidth / 2f, (float)drag.Item.ActualHeight / 2f, 0f);
+        var lift = visual.Compositor.CreateSpringVector3Animation();
+        lift.DampingRatio = TabStripMotion.LiftDampingRatio;
+        lift.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
+        lift.FinalValue = new Vector3(TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
+        visual.StartAnimation("Scale", lift);
+    }
+    // Neighbours currently riding a gap glide, by tab. Doubles as the
+    // leak census: anything still in here after the drag's teardown is a
+    // ghost the trace reports.
+    private readonly Dictionary<TabModel, (NavigationViewItem Item, CompositionScopedBatch Batch)>
+        _gapMotion = new();
+    private int _teardownFailures;
+
+    /// <summary>
+    /// Neighbours glide to their new slots. WinUI 3 has no implicit
+    /// animations to hang this on, so each commit drives the rows'
+    /// composition Translation directly: a row that just changed slots is
+    /// offset back by the slot delta and eased home to zero. Attached per
+    /// commit and torn down after the drag -- outside a drag the offsets
+    /// change only when the strip itself changes, and that must stay
+    /// exactly as it was.
+    ///
+    /// The delta is measured between the pre-commit arranged centers of
+    /// the two slots involved, so scroll motion cancels out of it.
+    /// </summary>
+    private void StartGapGlides(IReadOnlyList<TabModel> beforeRows,
+        IReadOnlyList<double> beforeCenters, TabModel dragged)
+    {
+        if (_drag is not { } drag || !drag.MotionOn) return;
+        if (drag.Glide is null || drag.Visual is null) return;
+
+        var afterRows = TabStripProjection.Rows(_manager);
+        CompositionScopedBatch? batch = null;
+        for (int i = 0; i < afterRows.Count; i++)
+        {
+            var tab = afterRows[i];
+            if (ReferenceEquals(tab, dragged)) continue;
+            int old = -1;
+            for (int j = 0; j < beforeRows.Count; j++)
+                if (ReferenceEquals(beforeRows[j], tab)) { old = j; break; }
+            if (old < 0 || old == i) continue;
+            if (old >= beforeCenters.Count || i >= beforeCenters.Count) continue;
+            double delta = beforeCenters[i] - beforeCenters[old];
+            if (double.IsNaN(delta) || Math.Abs(delta) < 0.5) continue;
+
+            batch ??= drag.Visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+            GlideRow(tab, delta, batch);
+        }
+        // Completed lands after the glide's 250ms; only rows still riding
+        // THIS batch are handed back, so a re-glide inside the window is
+        // not killed by the batch it superseded.
+        if (batch is not null)
+        {
+            var settled = batch;
+            settled.Completed += (_, _) =>
+            {
+                foreach (var entry in _gapMotion.Where(g => ReferenceEquals(g.Value.Batch, settled))
+                             .ToList())
+                    HandBackRow(entry.Key);
+                DragTrace($"DRAG glide ghosts={CountLeakedMotion()}");
+            };
+            settled.End();
+        }
+    }
+
+    /// <summary>
+    /// One row's glide: pin it visually where its old slot was (Translation
+    /// carries the negative delta against the new arrange), then ease to
+    /// zero. A row already gliding is stopped first, so it snaps to its
+    /// current slot before taking the fresh delta -- chained flicks land
+    /// slot-true rather than composing two half-finished glides.
+    /// </summary>
+    private void GlideRow(TabModel tab, double delta, CompositionScopedBatch batch)
+    {
+        if (_drag is not { } drag) return;
+        if (!_items.TryGetValue(tab, out var item)) return;
+        try
+        {
+            var visual = ElementCompositionPreview.GetElementVisual(item);
+            visual.StopAnimation("Translation");
+            ElementCompositionPreview.SetIsTranslationEnabled(item, true);
+            visual.Properties.InsertVector3("Translation", new Vector3(0, (float)-delta, 0));
+            if (drag.Glide is not null)
+                visual.StartAnimation("Translation", drag.Glide);
+            _gapMotion[tab] = (item, batch);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // Composition refused: this row lands as a cut, like the
+            // motion-off path. State never depends on the glide.
+        }
+    }
+
+    private void HandBackRow(TabModel tab)
+    {
+        if (!_gapMotion.Remove(tab, out var entry)) return;
+        try
+        {
+            var visual = ElementCompositionPreview.GetElementVisual(entry.Item);
+            visual.StopAnimation("Translation");
+            visual.Properties.InsertVector3("Translation", Vector3.Zero);
+            ElementCompositionPreview.SetIsTranslationEnabled(entry.Item, false);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            _teardownFailures++;
+        }
+    }
+
+    private void DetachGapMotion()
+    {
+        foreach (var tab in _gapMotion.Keys.ToList())
+            HandBackRow(tab);
+        _gapMotion.Clear();
+    }
+
+    private void StartAutoscroll(DragSession drag)
+    {
+        // The scroller field only fills when the expanded pane has been
+        // opened through SelectionViewport; a first drag on a fresh pane
+        // must find it here or autoscroll silently never runs.
+        _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
+        var scroller = _menuItemsScroller as ScrollViewer;
+        if (scroller is not null)
+        {
+            drag.Scroller = scroller;
+            drag.LastScrollOffset = scroller.VerticalOffset;
+            EventHandler<ScrollViewerViewChangedEventArgs> viewChanged =
+                (_, _) => OnDragScroll(drag, scroller.VerticalOffset);
+            scroller.ViewChanged += viewChanged;
+            drag.ViewChanged = viewChanged;
+        }
+
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(16);
+        timer.IsRepeating = true;
+        TypedEventHandler<DispatcherQueueTimer, object> tick = (_, _) => OnAutoscrollTick(drag);
+        timer.Tick += tick;
+        drag.AutoscrollTick = tick;
+        drag.Autoscroll = timer;
+        drag.LastAutoscrollMs = Environment.TickCount64;
+        timer.Start();
+    }
+
+    private void StopAutoscroll(DragSession drag)
+    {
+        if (drag.Autoscroll is { } timer)
+        {
+            timer.Stop();
+            if (drag.AutoscrollTick is not null) timer.Tick -= drag.AutoscrollTick;
+        }
+        drag.Autoscroll = null;
+        if (drag.Scroller is not null && drag.ViewChanged is not null)
+            drag.Scroller.ViewChanged -= drag.ViewChanged;
+        drag.Scroller = null;
+    }
+
+    /// <summary>
+    /// Scrolling moves the content under a still pointer: the arranged
+    /// slot shifts by the scroll delta, so the assumed center shifts with
+    /// it and the row rides the content instead of being dragged off it.
+    /// </summary>
+    private void OnDragScroll(DragSession drag, double offset)
+    {
+        var ds = offset - drag.LastScrollOffset;
+        drag.LastScrollOffset = offset;
+        if (Math.Abs(ds) < 0.01) return;
+        drag.AssumedCenter -= ds;
+        if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
+        RemeasureCenters(drag);
+        ScheduleDragEvaluate();
+    }
+
+    private void OnAutoscrollTick(DragSession drag)
+    {
+        var scroller = drag.Scroller;
+        if (scroller is null) return;
+        try
+        {
+            var top = scroller.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            var speed = drag.Machine.AutoscrollSpeed(
+                drag.LastPointerY, top, top + scroller.ActualHeight);
+            if (Math.Abs(speed - drag.LastAutoscrollSpeed) > 0.5)
+            {
+                drag.LastAutoscrollSpeed = speed;
+                DragTrace($"DRAG autoscroll speed={Math.Abs(speed):0}");
+            }
+            // The 16ms timer interval is a lower bound, not a contract:
+            // measure the real delta between ticks so the 360->840 ramp
+            // holds its px/s when ticks run late. Clamped so one stalled
+            // tick cannot fling the strip.
+            var now = Environment.TickCount64;
+            var dt = Math.Clamp((now - drag.LastAutoscrollMs) / 1000.0, 0, 0.25);
+            drag.LastAutoscrollMs = now;
+            if (speed != 0)
+                scroller.ChangeView(null, scroller.VerticalOffset + speed * dt, null,
+                    disableAnimation: true);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex)) { }
+    }
+
+    /// <summary>
+    /// Crossings are evaluated on a coalesced dispatcher tick, never per
+    /// pointer event: the pointer feeds the property set directly and the
+    /// order decisions wait for Normal priority (the drag frame budget).
+    /// </summary>
+    private void ScheduleDragEvaluate()
+    {
+        if (_evalPending) return;
+        _evalPending = true;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
+        {
+            _evalPending = false;
+            EvaluateDrag();
+        });
+    }
+
+    private void EvaluateDrag()
+    {
+        if (_drag is not { } drag) return;
+        if (!_manager.Tabs.Contains(drag.Tab) || !_items.ContainsKey(drag.Tab))
+        {
+            CancelDrag("closed");
+            return;
+        }
+
+        drag.Machine.UpdateIndex(_manager.IndexOf(drag.Tab));
+        RemeasureCenters(drag);
+        double arranged = RowCenterY(drag.Tab);
+        if (double.IsNaN(arranged)) return;
+        var draggedCenter = arranged + (drag.LastPointerY - drag.AnchorY);
+
+        // Pre-commit arranged centers, one measurement per row: the gap
+        // glides read their slot deltas out of this frame, so every delta
+        // is scroll-consistent and layout-race-free (arrange cannot run
+        // mid-tick).
+        var beforeRows = TabStripProjection.Rows(_manager);
+        var beforeCenters = new double[beforeRows.Count];
+        for (int i = 0; i < beforeRows.Count; i++)
+            beforeCenters[i] = RowCenterY(beforeRows[i]);
+
+        var committed = false;
+        while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
+        {
+            var from = _manager.IndexOf(drag.Tab);
+            _commitChurn = true;
+            try { _manager.Move(from, crossing.To); }
+            finally { _commitChurn = false; }
+            if (!_items.ContainsKey(drag.Tab)) { CancelDrag("closed"); return; }
+
+            // Move clamps at the pin boundary and no-ops on collapse, so
+            // read the truth back: a crossing that did not land must not
+            // re-anchor the row to a slot it never reached -- the next
+            // tick would re-cross it for the rest of the gesture. Tell
+            // the machine where the row actually is, skip the rebind,
+            // and break: re-evaluating now would re-fire the identical
+            // refused crossing. Pin-aware ordering itself is PR 4.
+            var actual = _manager.IndexOf(drag.Tab);
+            if (actual != crossing.To)
+            {
+                drag.Machine.UpdateIndex(actual);
+                DragTrace($"DRAG refused {crossing.From}->{crossing.To}");
+                break;
+            }
+            RebindFollow(drag, beforeCenters[crossing.To]);
+            committed = true;
+            DragTrace($"DRAG commit {crossing.From}->{crossing.To}");
+        }
+
+        StartGapGlides(beforeRows, beforeCenters, drag.Tab);
+
+        // On a tick with no commit, a measurement that has drifted off the
+        // anchor's assumption is layout truth catching up (a row height
+        // change, a pane resize) and is adopted. After a commit the stale
+        // pre-arrange measurement is exactly what the anchor already
+        // modeled, and believing it would throw the row back a slot.
+        if (!committed)
+        {
+            double measured = RowCenterY(drag.Tab);
+            if (!double.IsNaN(measured) && Math.Abs(measured - drag.AssumedCenter) > 0.5)
+            {
+                drag.AssumedCenter = measured;
+                if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
+            }
+        }
+    }
+
+    private (double Center, double[] Centers) MeasureRows(TabModel dragged)
+    {
+        var rows = TabStripProjection.Rows(_manager);
+        var centers = new double[rows.Count];
+        int draggedIndex = -1;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            centers[i] = RowCenterY(rows[i]);
+            if (ReferenceEquals(rows[i], dragged)) draggedIndex = i;
+        }
+        if (draggedIndex < 0 || double.IsNaN(centers[draggedIndex]))
+            throw new InvalidOperationException(
+                "drag row is not realized; crossings cannot be judged");
+        return (centers[draggedIndex], centers);
+    }
+
+    /// <summary>
+    /// Arranged center of a row in this control's coordinates, or NaN
+    /// while the row has no layout to read (the same failure family the
+    /// separator and selection-row reads guard).
+    /// </summary>
+    private double RowCenterY(TabModel tab)
+    {
+        if (!_items.TryGetValue(tab, out var item) || item.ActualHeight <= 0)
+            return double.NaN;
+        try
+        {
+            return item.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y + item.ActualHeight / 2;
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return double.NaN;
+        }
+    }
+
+    /// <summary>
+    /// Drop: the manager already holds the final order (crossings
+    /// committed mid-drag), so this is visual teardown only. The settle
+    /// spring is the interaction's only inertia, carries the measured
+    /// release velocity, and only runs under the motion gate; otherwise
+    /// the row lands as a cut. The spring starts from the follow
+    /// expression's last value, which is recomputed here -- stopping an
+    /// animation reverts the property to its set value, and none was set.
+    /// </summary>
+    private void EndDrag(DragSession drag, bool settle, double velocity)
+    {
+        _drag = null;
+        StopAutoscroll(drag);
+        DetachGapMotion();
+        var settled = false;
+        try
+        {
+            var visual = drag.Visual;
+            if (visual is not null)
+            {
+                visual.StopAnimation("Translation");
+                visual.StopAnimation("Scale");
+                visual.Scale = new Vector3(1, 1, 1);
+                if (settle && drag.Properties is not null)
+                {
+                    // The spring needs a real start: the follow was an
+                    // expression, so its value is recomputed and set.
+                    visual.Properties.InsertVector3("Translation",
+                        new Vector3(0, (float)(drag.LastPointerY - drag.AnchorY), 0));
+                    var spring = visual.Compositor.CreateSpringVector3Animation();
+                    spring.DampingRatio = TabStripMotion.SettleDampingRatio;
+                    spring.Period = TimeSpan.FromMilliseconds(TabStripMotion.SettlePeriodMs);
+                    spring.InitialVelocity = new Vector3(0, (float)velocity, 0);
+                    spring.FinalValue = new Vector3(0, 0, 0);
+                    var batch = visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+                    // Subscribe before End (the gap-glide batches do the
+                    // same), and guard by identity: the batch fires long
+                    // after release, and a quick re-press on the same row
+                    // has already armed a fresh follow on this item --
+                    // a stale settle must not tear it down.
+                    batch.Completed += (_, _) =>
+                    {
+                        if (_drag is { } live && ReferenceEquals(live.Item, drag.Item))
+                        {
+                            DragTrace("DRAG settle superseded");
+                            return;
+                        }
+                        ResetDragVisual(drag);
+                        DragTrace($"DRAG settle ghosts={CountLeakedMotion()}");
+                    };
+                    visual.StartAnimation("Translation", spring);
+                    batch.End();
+                    settled = true;
+                }
+            }
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // The row's tree went away mid-teardown; nothing left to
+            // hand back, and the reconcile owns the order regardless.
+        }
+        DragTrace($"DRAG end ghosts={CountLeakedMotion()}");
+        if (!settled) ResetDragVisual(drag);
+    }
+
+    /// <summary>
+    /// Hand the row's visual back: translation off lands it on its
+    /// arranged slot as a cut, and the parked selection overlay catches
+    /// up in the same pass.
+    /// </summary>
+    private void ResetDragVisual(DragSession drag)
+    {
+        try
+        {
+            if (drag.Visual is not null)
+            {
+                drag.Visual.StopAnimation("Translation");
+                drag.Visual.StopAnimation("Scale");
+                drag.Visual.Properties.InsertVector3("Translation", Vector3.Zero);
+                drag.Visual.Scale = new Vector3(1, 1, 1);
+            }
+            if (drag.Item is not null)
+                ElementCompositionPreview.SetIsTranslationEnabled(drag.Item, false);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex)) { }
+        UpdateSelectionRow();
+    }
+
+    /// <summary>
+    /// End the gesture restoring the pre-drag order. Committed crossings
+    /// are already manager truth, so the rollback replays the projection
+    /// diff through Move and PR 2's reconcile semantics do the repair.
+    /// The visual goes home as a cut: the rollback churns the dragged
+    /// row's container, so there is no visual left to spring, and state
+    /// must not wait on motion anyway.
+    /// </summary>
+    private void CancelDrag(string reason)
+    {
+        if (_drag is not { } drag) return;
+        if (drag.Machine.Phase != TabDragPhase.Dragging)
+        {
+            // The gesture never lifted: a press that stayed a click has
+            // no trace pair and no visuals to tear down.
+            _drag = null;
+            return;
+        }
+        drag.Machine.Cancel();
+        DragTrace($"DRAG cancel reason={reason}");
+        EndDrag(drag, settle: false, velocity: 0);
+        try
+        {
+            foreach (var op in TabStripProjection.Diff(
+                drag.PreDragOrder, TabStripProjection.Rows(_manager)))
+            {
+                var from = _manager.IndexOf(op.Tab);
+                if (from < 0 || from == op.To) continue;
+                _commitChurn = true;
+                try { _manager.Move(from, op.To); }
+                finally { _commitChurn = false; }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Tabs opened or closed mid-drag changed membership; the
+            // pre-drag order is no longer expressible, so the committed
+            // order stands rather than guess.
+        }
+    }
+
+    /// <summary>
+    /// Rows the strip still believes carry drag composition: gap glides
+    /// not yet handed back, plus any teardown step that had to be
+    /// abandoned. The oracle reads anything above zero as a leak.
+    /// </summary>
+    private int CountLeakedMotion() => _gapMotion.Count + _teardownFailures;
+
+    /// <summary>
+    /// Windows' animation-effects setting. Constructing UISettings can
+    /// throw in packaged/sandboxed contexts (App.xaml.cs notes the same);
+    /// unreadable is not "off", so the gate fails open and High Contrast
+    /// still collapses the motion through its own pushed flag.
+    /// </summary>
+    private static bool SystemAnimationsEnabled()
+    {
+        try { return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled; }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return true;
+        }
+    }
+
+    private static bool IsLayoutReadFailure(Exception ex)
+        => ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException;
 }
