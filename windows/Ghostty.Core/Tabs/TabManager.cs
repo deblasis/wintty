@@ -37,6 +37,10 @@ internal sealed class TabManager
     private readonly ObservableCollection<TabModel> _tabs = new();
     private readonly MruList<TabModel> _mru = new();
     private readonly List<TabGroup> _groups = new();
+    // The wrapper is created once and handed out on every read of Groups:
+    // free per read, and a caller that casts it back to IList throws
+    // instead of mutating the registry behind Normalize's back.
+    private readonly ReadOnlyCollection<TabGroup> _groupsView;
     private TabModel _activeTab = null!;
 
     // Exposed as the concrete ObservableCollection so WinUI can bind
@@ -57,7 +61,7 @@ internal sealed class TabManager
     /// <see cref="Normalize"/> dissolves emptied groups, so there is no
     /// empty-group state to render.
     /// </summary>
-    public IReadOnlyList<TabGroup> Groups => _groups;
+    public IReadOnlyList<TabGroup> Groups => _groupsView;
 
     /// <summary>
     /// Size of the pinned prefix of <see cref="Tabs"/>. Derived on every
@@ -133,6 +137,7 @@ internal sealed class TabManager
     {
         _paneHostFactory = paneHostFactory;
         _closedTabs = closedTabs;
+        _groupsView = new(_groups);
         if (seed is null)
         {
             var first = CreateTab(initialSnapshot);
@@ -384,6 +389,7 @@ internal sealed class TabManager
     /// </summary>
     public void MoveGroup(TabGroup group, int targetIndex)
     {
+        ArgumentNullException.ThrowIfNull(group);
         var run = MembersOf(group);
         if (run.Count == 0) return;
         int start = _tabs.IndexOf(run[0]);
@@ -413,6 +419,7 @@ internal sealed class TabManager
     /// </summary>
     public IReadOnlyList<TabModel> RunOf(TabModel tab)
     {
+        ArgumentNullException.ThrowIfNull(tab);
         if (tab.Group is null)
             return new List<TabModel> { tab };
         return MembersOf(tab.Group);
@@ -462,6 +469,7 @@ internal sealed class TabManager
     /// </summary>
     public void CollapseGroup(TabGroup group, bool collapsed)
     {
+        ArgumentNullException.ThrowIfNull(group);
         group.IsCollapsed = collapsed;
     }
 
@@ -472,6 +480,10 @@ internal sealed class TabManager
     /// </summary>
     public void SortPinned()
     {
+        // The one mutator that skips Normalize: only the prefix is
+        // reordered, and a pinned tab can never be grouped (pinning a
+        // grouped tab ungroups it; groups cannot be pinned), so a sort
+        // cannot leave anything for Normalize to repair.
         int count = PinCount;
         if (count <= 1) return;
         var sorted = new List<TabModel>(count);

@@ -490,17 +490,41 @@ public class TabManagerPinGroupTests
         Assert.Equal(0, changes);
     }
 
+    [Fact]
+    public void AdoptTab_folds_a_pinned_adoptee_into_the_prefix()
+    {
+        var src = NewManager(1); // [s0, s1]
+        var dest = NewManager(2); // [a, b, c]
+        dest.SetPinned(dest.Tabs[1], true); // [b*, a, c]
+        src.SetPinned(src.Tabs[1], true); // [s1*, s0]
+
+        // A detached tab keeps its pin; the adopter honors it instead of
+        // letting the tab sink into the unpinned zone.
+        var adoptee = src.DetachTab(src.Tabs[0]);
+
+        dest.AdoptTab(adoptee);
+
+        Assert.Equal(2, dest.PinCount);
+        // Adoption appends, so Normalize lifts the adoptee to the END of
+        // the existing prefix rather than the front of it.
+        Assert.Same(adoptee, dest.Tabs[1]);
+        Assert.True(adoptee.IsPinned);
+        Assert.Null(adoptee.Group);
+        Assert.False(dest.Tabs[2].IsPinned);
+    }
+
     // --- The invariants hold across arbitrary op sequences ---
 
     [Fact]
     public void Random_op_sequences_keep_the_invariants()
     {
         var mgr = NewManager(2);
+        var orphans = new List<TabModel>();
         var random = new Random(20260828);
 
         for (int step = 0; step < 300; step++)
         {
-            switch (random.Next(8))
+            switch (random.Next(11))
             {
                 case 0:
                     mgr.SetPinned(mgr.Tabs[random.Next(mgr.Tabs.Count)], random.Next(2) == 0);
@@ -531,6 +555,23 @@ public class TabManagerPinGroupTests
                     break;
                 case 7:
                     mgr.MoveRun(random.Next(mgr.Tabs.Count), random.Next(mgr.Tabs.Count + 1));
+                    break;
+                case 8:
+                    mgr.SortPinned();
+                    break;
+                case 9:
+                    // The tab leaves this window and may come back later.
+                    if (mgr.Tabs.Count > 1)
+                        orphans.Add(mgr.DetachTab(mgr.Tabs[random.Next(mgr.Tabs.Count)]));
+                    break;
+                case 10:
+                    if (orphans.Count > 0)
+                    {
+                        int pick = random.Next(orphans.Count);
+                        var adoptee = orphans[pick];
+                        orphans.RemoveAt(pick);
+                        mgr.AdoptTab(adoptee);
+                    }
                     break;
             }
 
