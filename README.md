@@ -30,10 +30,12 @@ sponsors-only Discord channel; Pro adds more
 ([tiers](https://wintty.io/docs/install/tiers?utm_source=gh_readme)).
 
 Requires Windows 10 (1809+) or Windows 11, x64, and a DirectX 12
-feature-level-12.0 GPU. There is no software-renderer fallback, so VMs without
-GPU passthrough and Remote Desktop sessions will not start it. SmartScreen may
-show "Windows protected your PC" on first run of a newly published build
-(choose More info, then Run anyway).
+feature-level-12.0 GPU. These builds have no software fallback, so VMs without
+GPU passthrough and Remote Desktop sessions will not start them; the Pro
+Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
+whose WARP software rasterizer engages automatically on no-GPU systems and in
+remote sessions. SmartScreen may show "Windows protected your PC" on first run
+of a newly published build (choose More info, then Run anyway).
 
 ### Build from source (free, always)
 
