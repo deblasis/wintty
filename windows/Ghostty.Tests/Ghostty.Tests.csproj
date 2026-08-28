@@ -167,6 +167,15 @@
     <EmbeddedResource Include="..\Ghostty\Tabs\TabColorPalettePicker.xaml"
                       Link="Tabs\TabColorPalettePicker.xaml"
                       LogicalName="Ghostty.Tests.Tabs.TabColorPalettePicker.xaml" />
+    <!--
+      TabHost.xaml, for the drop-outside census in TabStripSyncWiringTests:
+      detach-by-drag stays unwired, and a XAML event attribute is invisible
+      to the .cs source sweep. A dotted LogicalName, so the test's suffix
+      match does not depend on the host's directory separator.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Tabs\TabHost.xaml"
+                      Link="Tabs\TabHost.xaml"
+                      LogicalName="Ghostty.Tests.Tabs.TabHost.xaml" />
     <EmbeddedResource Include="..\Ghostty\Tabs\VerticalTabStrip.xaml"
                       Link="Tabs\VerticalTabStrip.xaml"
                       LogicalName="Ghostty.Tests.Tabs.VerticalTabStrip.xaml" />

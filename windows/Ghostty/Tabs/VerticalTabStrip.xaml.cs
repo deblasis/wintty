@@ -1078,7 +1078,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         // otherwise stay in MenuItems with their subscriptions live.
         foreach (var tab in _hooks.Keys.ToArray())
             RemoveItem(tab);
-        foreach (var tab in _manager.Tabs)
+        // Row order comes from the projector, the same source the
+        // horizontal strip reconciles against, so the two strips cannot
+        // disagree by construction. Identical to Tabs while headers are
+        // off, which is what makes the swap behavior-neutral; the
+        // Add/Remove branches above stay index-honoring because with no
+        // headers the collection's indices ARE the projection's.
+        foreach (var tab in TabStripProjection.Rows(_manager))
             AddItem(tab);
     }
 
