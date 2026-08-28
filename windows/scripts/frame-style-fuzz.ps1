@@ -1924,11 +1924,6 @@ finally {
     else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force -LiteralPath $stage -ErrorAction SilentlyContinue
 
-    # System state, after the staging sweep so its removal cannot order this
-    # out. Throws on a read-back that does not match the snapshot, which is
-    # the point: a restore that returns silently has only a hope.
-    Restore-EnvSnapshot
-
     $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)
     if ($crashGrew) { $findings.Add('crash.log grew during the run') }
 
@@ -1978,6 +1973,12 @@ finally {
         caseErrors = $caseErrors
     } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'result.json')
     Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
+
+    # System state, LAST, after the report the promise two comments up makes.
+    # Restore-EnvSnapshot throws on a read-back that does not match the
+    # snapshot, which is the point - a restore that returns silently has only
+    # a hope - but that throw must not eat the report on its way out.
+    Restore-EnvSnapshot
 }
 
 if ($findings.Count -gt 0) {

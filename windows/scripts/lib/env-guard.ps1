@@ -116,10 +116,17 @@ $script:DesktopKey  = 'HKCU:\Control Panel\Desktop'
 
 # ---- small helpers ----------------------------------------------------------
 
+# '(default)' is the registry provider's alias for the nameless default
+# value, and only the provider honors it: raw .NET wants the empty string
+# there, and GetValueKind('(default)') throws even on a key that has a default
+# value. Translate once so the kind read below cannot fail on a value the
+# provider just handed us, and keep it inside its own guard: a value whose
+# kind cannot be read is an error, not a slot to silently skip.
 function Get-RegValueOrNull([string]$Key, [string]$Name) {
+    $valueName = if ($Name -eq '(default)') { '' } else { $Name }
     $v = try { Get-ItemPropertyValue -LiteralPath $Key -Name $Name -ErrorAction Stop } catch { $null }
     if ($null -eq $v) { return $null }
-    $kind = (Get-Item -LiteralPath $Key).GetValueKind($Name)
+    $kind = try { (Get-Item -LiteralPath $Key).GetValueKind($valueName) } catch { throw "ENV_GUARD: GetValueKind failed for $Key :: $valueName : $_" }
     return [ordered]@{ kind = "$kind"; value = $v }
 }
 
@@ -196,15 +203,12 @@ function Send-SettingChange([string]$Section) {
 
 # ---- snapshot ---------------------------------------------------------------
 
-function Save-EnvSnapshot {
-    param(
-        # Default overwrites: the point is a well-known place `just env-restore`
-        # can find after a harness crashed, not an archive of every run.
-        [string]$Path = $script:EnvGuardSnapshotPath
-    )
-
-    $snap = [ordered]@{
-        takenUtc  = (Get-Date).ToUniversalTime().ToString('o')
+# Read the machine back into the shape a snapshot stores. Save-EnvSnapshot and
+# the post-restore comparison both call this, so what goes into the file and
+# what the read-back judges are by construction the same readers, not a cached
+# copy of what one of them wrote.
+function Read-EnvCurrent {
+    return [ordered]@{
         highContrast = [ordered]@{ flags = Get-HighContrastFlags }
         tracking  = [ordered]@{
             enabled = Get-SpiUint $script:SPI_GETACTIVEWINDOWTRACKING
@@ -231,40 +235,19 @@ function Save-EnvSnapshot {
             systemUsesLightTheme = Get-RegValueOrNull $script:PersonalizeKey 'SystemUsesLightTheme'
         }
     }
-
-    $snap | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
-    return $Path
 }
 
-# Read the machine back into the same shape a snapshot stores, for the
-# read-back comparison. Separate from Save-EnvSnapshot so the comparison
-# exercises the readers, not a cached copy of what we just wrote.
-function Read-EnvCurrent {
-    return [ordered]@{
-        highContrast = [ordered]@{ flags = Get-HighContrastFlags }
-        tracking  = [ordered]@{
-            enabled = Get-SpiUint $script:SPI_GETACTIVEWINDOWTRACKING
-            zOrder  = Get-SpiUint $script:SPI_GETACTIVEWNDTRKZORDER
-            timeout = Get-SpiUint $script:SPI_GETACTIVEWNDTRKTIMEOUT
-        }
-        themes    = [ordered]@{
-            currentTheme = Get-RegValueOrNull $script:ThemesKey 'CurrentTheme'
-            preHighContrastScheme = Get-RegValueOrNull (Join-Path $script:ThemesKey 'HighContrast') 'Pre-High Contrast Scheme'
-            preload = if (Test-Path (Join-Path $script:ThemesKey 'Preload')) {
-                Get-RegValueOrNull (Join-Path $script:ThemesKey 'Preload') '(default)'
-            } else { $null }
-        }
-        desktop   = [ordered]@{
-            background     = Get-RegValueOrNull $script:ColorsKey 'Background'
-            wallpaper      = Get-RegValueOrNull $script:DesktopKey 'WallPaper'
-            tileWallpaper  = Get-RegValueOrNull $script:DesktopKey 'TileWallpaper'
-            wallpaperStyle = Get-RegValueOrNull $script:DesktopKey 'WallpaperStyle'
-        }
-        personalize = [ordered]@{
-            appsUseLightTheme   = Get-RegValueOrNull $script:PersonalizeKey 'AppsUseLightTheme'
-            systemUsesLightTheme = Get-RegValueOrNull $script:PersonalizeKey 'SystemUsesLightTheme'
-        }
-    }
+function Save-EnvSnapshot {
+    param(
+        # Default overwrites: the point is a well-known place `just env-restore`
+        # can find after a harness crashed, not an archive of every run.
+        [string]$Path = $script:EnvGuardSnapshotPath
+    )
+
+    $snap = Read-EnvCurrent
+    $snap['takenUtc'] = (Get-Date).ToUniversalTime().ToString('o')
+    $snap | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
+    return $Path
 }
 
 # ---- restore ----------------------------------------------------------------
@@ -288,7 +271,24 @@ function Restore-EnvSnapshot {
         @{ key = Join-Path $script:ThemesKey 'Preload';          name = '(default)';                  slot = $snap['themes']['preload'] }
     )) {
         if ($null -ne $entry.slot) {
-            Set-ItemProperty -LiteralPath $entry.key -Name $entry.name -Value $entry.slot['value'] -Type $entry.slot['kind']
+            if ($entry.name -eq '(default)') {
+                # Same alias trap as the reader, plus one more: the provider
+                # hands Get-Item back a READ-ONLY key, so the write goes
+                # through an explicitly writable OpenSubKey with the empty
+                # name, or it fails (Set-ItemProperty would instead create a
+                # value literally named "(default)").
+                $subKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                    ($entry.key -replace '^HKCU:\\', ''), $true)
+                if ($null -eq $subKey) { throw "ENV_GUARD: cannot open $($entry.key) for write" }
+                try {
+                    $subKey.SetValue('', $entry.slot['value'],
+                        [Microsoft.Win32.RegistryValueKind]$entry.slot['kind'])
+                }
+                finally { $subKey.Close() }
+            }
+            else {
+                Set-ItemProperty -LiteralPath $entry.key -Name $entry.name -Value $entry.slot['value'] -Type $entry.slot['kind']
+            }
         }
     }
 
