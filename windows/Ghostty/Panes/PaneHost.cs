@@ -97,6 +97,31 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private readonly Dictionary<LeafPane, Rectangle> _dimRects = new();
     private FrameworkElement _treeRoot = null!; // assigned in ctor before use
 
+    // Startup-glow appearance/enablement, pushed from MainWindow
+    // (PaneHost has no config access of its own; this mirrors
+    // SetActiveBorderBrush). Read when a leaf's surface spawns.
+    private bool _startupGlowEnabled;
+    private Windows.UI.Color _startupGlowTrail = Microsoft.UI.Colors.DodgerBlue;
+    private Windows.UI.Color _startupGlowLead = Microsoft.UI.Colors.White;
+
+    // One startup-glow lifecycle per leaf's TerminalControl, alive only from
+    // surface spawn until the glow fades (or the pane closes). Three
+    // dictionaries keyed by the same control, added and removed in lockstep
+    // by TeardownGlow: the state machine (lifecycle), the composition
+    // renderer (drawing), and the mount Canvas that hosts the renderer's
+    // child visual in _highlightOverlay.
+    private readonly Dictionary<TerminalControl, Core.Panes.PaneStartupGlowState> _glowStates = new();
+    private readonly Dictionary<TerminalControl, PaneStartupGlow> _glows = new();
+    private readonly Dictionary<TerminalControl, Canvas> _glowMounts = new();
+
+    // Panes smaller than this in either dimension (DIPs) skip the glow.
+    private const double MinGlowDimension = 80.0;
+    // Fallback for surfaces that never reach first_render (a command that
+    // produces no output still renders, so hitting this means something is
+    // genuinely stuck, and a glow that never leaves is worse than none).
+    private static readonly TimeSpan GlowCapDuration = TimeSpan.FromMilliseconds(10000);
+    private static readonly TimeSpan GlowFadeDuration = TimeSpan.FromMilliseconds(250);
+
     // Top-right "restore" affordance shown only while a pane is zoomed,
     // styled like the quake pin button. Clicking it unzooms. The resting
     // glyph is a plain magnifier (status: this pane is magnified); on
@@ -275,6 +300,17 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var resolved = brush ?? DefaultActiveBorderBrush;
         _activeBorderFrame.BorderBrush = resolved;
         _tabContentBorderFrame.BorderBrush = resolved;
+    }
+
+    /// <summary>Push startup-glow enablement and colors from MainWindow.
+    /// Mirrors <see cref="SetActiveBorderBrush"/>: PaneHost holds no config,
+    /// so the window hands down what a spawn needs. Affects future spawns
+    /// only; a glow already running keeps its colors.</summary>
+    public void SetStartupGlowConfig(bool enabled, Windows.UI.Color trail, Windows.UI.Color lead)
+    {
+        _startupGlowEnabled = enabled;
+        _startupGlowTrail = trail;
+        _startupGlowLead = lead;
     }
 
     /// <summary>
@@ -476,6 +512,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // Force the overlay above any sibling in the host Grid so
         // the chrome never gets composited under the terminal.
         Canvas.SetZIndex(_highlightOverlay, 999);
+        // Inside the overlay, the active border sits above the startup-glow
+        // mounts (998, set in OnLeafSurfaceSpawned) so a freshly spawned
+        // pane glows just under its own focus stroke rather than over it.
+        // Children with no explicit ZIndex (the dim rects) stay at 0, below
+        // both, which is the order they already drew in.
+        Canvas.SetZIndex(_activeBorderFrame, 999);
 
         // The tab's own frame, around the whole terminal area rather than
         // around a leaf. The selected tab is drawn as a folder joined to
@@ -728,6 +770,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     /// </summary>
     public void DisposeAllLeaves()
     {
+        // Tear down any in-flight startup glows first so their timers stop
+        // and their composition visuals are released promptly. Glows are
+        // keyed by TerminalControl independent of tree state, so this runs
+        // regardless of the _allLeavesClosed gate below. Snapshot the keys
+        // first: TeardownGlow mutates the dictionaries it is iterating.
+        foreach (var terminal in _glowStates.Keys.ToList())
+            TeardownGlow(terminal);
+
         // Tree walk is gated on _allLeavesClosed: every leaf was
         // already disposed one-by-one as the tree collapsed; _root
         // still references the last-closed leaf but walking it here
@@ -900,7 +950,136 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested -= OnTerminalCloseRequested;
         t.ContextMenuRequested -= OnTerminalContextMenuRequested;
         t.PwdChanged -= OnTerminalPwdChanged;
+        // Tear down the per-surface startup glow so its controller, renderer
+        // and mount do not outlive the disposed terminal. Runs before
+        // DisposeSurface so a glow timer that fires mid-teardown finds its
+        // dictionaries already empty instead of driving a visual whose mount
+        // is coming off the tree.
+        TeardownGlow(t);
         t.DisposeSurface();
+    }
+
+    // Startup glow -------------------------------------------------------
+
+    private void OnLeafSurfaceSpawned(object? sender, EventArgs e)
+    {
+        if (sender is not TerminalControl terminal) return;
+        if (!_startupGlowEnabled) return;
+        // One glow per control. SurfaceSpawned fires once per control, so
+        // this is only a guard against a future second raise landing here.
+        if (_glowStates.ContainsKey(terminal)) return;
+
+        var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), terminal));
+        if (leaf is null) return;
+
+        // Bounds may not be settled at spawn time (SurfaceSpawned fires from
+        // OnLoaded, before first layout). Create the mount and renderer at
+        // zero size now and let PositionGlowMount size them; the layout
+        // handler keeps them tracked until the glow ends.
+        var mount = new Canvas { IsHitTestVisible = false, Width = 0, Height = 0 };
+        // Just under the active border (999, set in BuildChrome).
+        Canvas.SetZIndex(mount, 998);
+        _highlightOverlay.Children.Add(mount);
+        _glowMounts[terminal] = mount;
+
+        var glow = new PaneStartupGlow(mount, new Vector2(0f, 0f),
+            _startupGlowTrail, _startupGlowLead);
+        _glows[terminal] = glow;
+
+        var state = new Core.Panes.PaneStartupGlowState(
+            new Ghostty.Core.Config.SystemSchedulerTimer(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                    Ghostty.Core.Config.SystemSchedulerTimer>.Instance),
+            cap: GlowCapDuration,
+            fade: GlowFadeDuration);
+        // The timer callback runs on a threadpool thread; the visual tree
+        // only moves on the dispatcher thread.
+        state.StateChanged += phase => DispatcherQueue.TryEnqueue(() => OnGlowPhase(terminal, phase));
+        _glowStates[terminal] = state;
+
+        state.Start();
+        glow.StartGlow();
+
+        // Size now if layout is already available (splitting an
+        // already-laid-out window); otherwise the layout handler catches it.
+        PositionGlowMount(terminal, mount);
+    }
+
+    private void OnLeafFirstRender(object? sender, EventArgs e)
+    {
+        if (sender is not TerminalControl terminal) return;
+        // The pane produced renderable content for the first time: end this
+        // leaf's glow now rather than waiting out the cap. NotifyReady is a
+        // no-op if the glow already faded or never started, so a late or
+        // duplicate signal is harmless. FirstRender is raised on the UI
+        // thread, and the state machine is thread-safe regardless.
+        if (_glowStates.TryGetValue(terminal, out var state))
+            state.NotifyReady();
+    }
+
+    private void OnGlowPhase(TerminalControl terminal, Core.Panes.PaneStartupGlowState.Phase phase)
+    {
+        if (!_glows.TryGetValue(terminal, out var glow)) return;
+        switch (phase)
+        {
+            case Core.Panes.PaneStartupGlowState.Phase.FadingOut:
+                glow.BeginFadeOut(GlowFadeDuration);
+                break;
+            case Core.Panes.PaneStartupGlowState.Phase.Idle:
+                TeardownGlow(terminal);
+                break;
+        }
+    }
+
+    private void TeardownGlow(TerminalControl terminal)
+    {
+        if (_glowStates.Remove(terminal, out var state)) state.Dispose();
+        if (_glows.Remove(terminal, out var glow)) glow.Dispose();
+        if (_glowMounts.Remove(terminal, out var mount)) _highlightOverlay.Children.Remove(mount);
+    }
+
+    // Position+size one glow mount over its leaf, enforcing the minimum-size
+    // degradation. Called per-spawn and from the layout handler. When the leaf
+    // is too small or not yet laid out, the mount is collapsed to zero size so
+    // the glow is simply invisible (and reappears if the pane later grows).
+    private void PositionGlowMount(TerminalControl terminal, Canvas mount)
+    {
+        var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), terminal));
+        if (leaf is null) return;
+
+        var ctl = leaf.Terminal();
+        // Same "not laid out yet" guard the other overlay layers use.
+        if (ctl.ActualWidth <= 0 || ctl.ActualHeight <= 0)
+        {
+            CollapseGlowMount(terminal, mount);
+            return;
+        }
+
+        // LeafLayoutBounds walks layout slots rather than transforms: at cold
+        // start the render-thread transform is not committed by the idle
+        // compositor for ~750ms, so a TransformToVisual-based mount would
+        // strand at zero size until then (see LeafLayoutBounds).
+        var bounds = LeafLayoutBounds(ctl);
+        if (bounds.Width < MinGlowDimension || bounds.Height < MinGlowDimension)
+        {
+            CollapseGlowMount(terminal, mount);
+            return;
+        }
+
+        Canvas.SetLeft(mount, bounds.X);
+        Canvas.SetTop(mount, bounds.Y);
+        mount.Width = bounds.Width;
+        mount.Height = bounds.Height;
+        if (_glows.TryGetValue(terminal, out var glow))
+            glow.UpdateSize(new Vector2((float)bounds.Width, (float)bounds.Height));
+    }
+
+    private void CollapseGlowMount(TerminalControl terminal, Canvas mount)
+    {
+        mount.Width = 0;
+        mount.Height = 0;
+        if (_glows.TryGetValue(terminal, out var glow))
+            glow.UpdateSize(new Vector2(0f, 0f));
     }
 
     /// <summary>
@@ -1328,6 +1507,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
         t.PwdChanged += OnTerminalPwdChanged;
+        // Startup glow: begin the orbit when this leaf's surface spawns; end
+        // it on the FIRST of first_render (the pane produced renderable
+        // content, shell-agnostic) or the cap timer as the fallback. We use
+        // first_render rather than OSC 133 prompt-ready: prompt-ready depends
+        // on shell integration loading and varies per shell
+        // (cmd/pwsh/wsl/...), whereas first_render is universal.
+        t.SurfaceSpawned += OnLeafSurfaceSpawned;
+        t.FirstRender += OnLeafFirstRender;
         return t;
     }
 
@@ -1413,6 +1600,12 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
             PositionOverlayOverLeaf(dim, leaf, insetForStroke: false);
         }
+
+        // Keep each live startup-glow mount tracked over its leaf while the
+        // glow lasts. Cheap when the dictionary is empty (the common case
+        // once every pane has rendered).
+        foreach (var (terminal, mount) in _glowMounts)
+            PositionGlowMount(terminal, mount);
     }
 
     private void PositionActiveBorderOverLeaf(LeafPane leaf)

@@ -3043,6 +3043,13 @@ public sealed partial class MainWindow : Window
         var defaultBorder = Tabs.TabColorBrush.FromPackedRgb(LegibleChromeAccent(
             _configService.CursorColor ?? _configService.ForegroundColor));
 
+        // Startup glow: the lead is the theme foreground, the trail is
+        // whichever brush this tab's border ends up with below, so the sweep
+        // hands over to the same colour the pane settles into.
+        var glowFg = _configService.ForegroundColor;
+        var glowLead = Windows.UI.Color.FromArgb(
+            0xFF, (byte)(glowFg >> 16), (byte)(glowFg >> 8), (byte)glowFg);
+
         var active = _tabManager.ActiveTab;
         foreach (var tab in _tabManager.Tabs)
         {
@@ -3058,7 +3065,13 @@ public sealed partial class MainWindow : Window
                 borderBrush = defaultBorder;
             }
 
-            ((PaneHost)tab.PaneHost).SetActiveBorderBrush(borderBrush);
+            var paneHost = (PaneHost)tab.PaneHost;
+            paneHost.SetActiveBorderBrush(borderBrush);
+            // Has to land before a newly created PaneHost's first leaf raises
+            // its deferred Loaded/SurfaceSpawned, or the glow is configured
+            // too late to run: WinUI fires Loaded on a later dispatcher turn,
+            // after this method has returned.
+            paneHost.SetStartupGlowConfig(_configService.PaneStartupGlow, borderBrush.Color, glowLead);
         }
 
         _horizontalTabHost.RefreshTabColors();
