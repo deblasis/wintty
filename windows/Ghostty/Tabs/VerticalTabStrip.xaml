@@ -23,6 +23,15 @@
                     CornerRadius="0"/>
         </Canvas>
 
+        <!-- Over NavView: the pin preview is a promise about a slot in the
+             pane, and a host behind the pane would vanish under every
+             painted fill. Hit-test invisible so the pane's own hover,
+             press, and scroll behavior under it never notices. -->
+        <Canvas x:Name="PreviewHost"
+                Canvas.ZIndex="2"
+                IsHitTestVisible="False"
+                Visibility="Collapsed"/>
+
         <controls:NavigationView x:Name="NavView"
                                  IsBackButtonVisible="Collapsed"
                                  IsSettingsVisible="False"
