@@ -205,6 +205,7 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
                 requestDetachToNewWindow: t => TabWindowActions.DetachToNewWindow(XamlRoot, t),
                 _dialogs,
                 toggleTabLayout: () => _router.RequestToggleTabLayout(),
+                requestPin: _router.RequestPin,
                 isVertical: true,
                 getSnapSource: () => TabWindowActions.GetSnapSource(XamlRoot),
                 detachWithZone: (t, z) => TabWindowActions.DetachWithZone(XamlRoot, t, z));

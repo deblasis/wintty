@@ -35,7 +35,8 @@ internal static class TabAccessibleText
             : effectiveTitle;
 
     /// <summary>Transient state for <paramref name="tab"/>.</summary>
-    internal static string Status(TabModel tab) => Status(tab.BellRinging);
+    internal static string Status(TabModel tab)
+        => Status(tab.IsPinned, tab.BellRinging);
 
     /// <summary>
     /// Transient state for the tab, for AutomationProperties.ItemStatus.
@@ -49,9 +50,27 @@ internal static class TabAccessibleText
     /// the state. ItemStatus is the property UIA defines for exactly this
     /// -- state that rides along with an item and changes under it -- and
     /// it leaves the name alone.
+    ///
+    /// "Pinned" is the same kind of state: the row still has its title,
+    /// and what changed is where the strip keeps it. A pin that renamed
+    /// the tab would hide the one string every other surface (overview,
+    /// switcher, pane title) still agrees on.
     /// </summary>
-    internal static string Status(bool bellRinging)
-        => bellRinging ? "Bell" : string.Empty;
+    internal static string Status(bool isPinned, bool bellRinging)
+    {
+        if (!isPinned) return bellRinging ? "Bell" : string.Empty;
+        return bellRinging ? "Pinned, Bell" : "Pinned";
+    }
+
+    /// <summary>
+    /// Spoken when a keyboard or menu pin/unpin lands. The reorder a pin
+    /// performs is visible, but the zone change behind it is not: the row
+    /// keeps its title, and without an announcement the listener hears an
+    /// unexplained jump. Pointer drags announce nothing -- the user is
+    /// watching it happen (5.6).
+    /// </summary>
+    internal static string PinAnnouncement(TabModel tab, bool pinned)
+        => pinned ? $"Tab pinned, {Name(tab)}" : $"Tab unpinned, {Name(tab)}";
 
     /// <summary>
     /// Spoken when a tab starts ringing. ItemStatus is the correct

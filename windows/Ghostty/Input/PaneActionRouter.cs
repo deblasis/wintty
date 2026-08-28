@@ -166,6 +166,18 @@ internal sealed class PaneActionRouter
     /// </summary>
     public event EventHandler? ShowTabOverviewRequested;
 
+    /// <summary>
+    /// Raised after a commanded pin/unpin has landed on the manager --
+    /// palette entry, chord, or the per-tab context menu, all of which
+    /// dispatch through <see cref="RequestPin"/>. The bool is the state
+    /// the tab was left in. MainWindow listens to raise the UIA
+    /// announcement from a window-owned element: pointer drags cross the
+    /// same boundary through <see cref="TabManager.SetPinned"/> and raise
+    /// nothing, so the source has to be the dispatch path, not the state
+    /// change.
+    /// </summary>
+    public event EventHandler<(TabModel Tab, bool Pinned)>? TabPinChangedFromCommand;
+
     public void Invoke(PaneAction action)
     {
         // Event-only actions that don't need pane/tab state — handle
@@ -315,6 +327,14 @@ internal sealed class PaneActionRouter
                 if (i > 0) _tabs.Move(i, i - 1);
                 break;
             }
+            case PaneAction.PinTab:
+            case PaneAction.UnpinTab:
+            {
+                var tab = _tabs.ActiveTab;
+                if (tab is not null)
+                    RequestPin(tab, action == PaneAction.PinTab);
+                break;
+            }
             default:
                 throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }
@@ -327,6 +347,25 @@ internal sealed class PaneActionRouter
     /// </summary>
     public void RequestToggleTabLayout()
         => ToggleTabLayoutRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
+    /// One pin, one implementation: the manager op plus the event that
+    /// tells the window to announce it. Invoke's PinTab/UnpinTab land
+    /// here, and so does the per-tab context menu, whose pin targets the
+    /// right-clicked tab rather than the active one. Pointer drags cross
+    /// the same boundary through <see cref="TabManager.SetPinned"/>
+    /// directly and announce nothing (5.6), so the source is the dispatch
+    /// path, not the state change.
+    /// </summary>
+    public void RequestPin(TabModel tab, bool pin)
+    {
+        if (_tabs.IndexOf(tab) < 0) return;
+        // A command naming the state the tab already has did nothing;
+        // announcing it would narrate a change that never happened.
+        if (tab.IsPinned == pin) return;
+        _tabs.SetPinned(tab, pin);
+        TabPinChangedFromCommand?.Invoke(this, (tab, pin));
+    }
 
     /// <summary>
     /// Public dispatch entry for the sidebar collapse toggle. Reuses

@@ -845,6 +845,17 @@ public sealed partial class MainWindow : Window
             _tabManager,
             (tab, text) => UiaAnnouncer.Announce(BellAnnouncementSource(tab), text, "tab-bell"));
 
+        // Commanded pins (palette, chord, context menu) announce; pointer
+        // drags do not. The router is what makes a pin commanded, so the
+        // announcement hangs off the router event rather than off the
+        // manager state -- SetPinned fires for every source and cannot
+        // tell them apart.
+        _router.TabPinChangedFromCommand += (_, e) =>
+            UiaAnnouncer.Announce(
+                BellAnnouncementSource(e.Tab),
+                TabAccessibleText.PinAnnouncement(e.Tab, e.Pinned),
+                "tab-pin");
+
         AppWindow.Changed += (_, args) =>
         {
             // Cheap insurance rather than a known crash: no case has been

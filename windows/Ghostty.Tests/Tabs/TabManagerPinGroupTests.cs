@@ -165,6 +165,90 @@ public class TabManagerPinGroupTests
         Assert.Equal(1, mgr.PinCount);
     }
 
+    // --- The drag layer's zone-crossing commit: SetPinned + Move, one call site ---
+    //
+    // A drag that carries a row across the pin boundary cannot commit with
+    // Move alone (the clamps above are exactly why), so the caller pairs
+    // SetPinned with Move. These pin the pairing's observable contract:
+    // the drop lands at the crossing's slot, never at the zone boundary
+    // SetPinned relocates to.
+
+    [Fact]
+    public void Crossing_up_pins_and_lands_at_the_crossing_slot()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        NameTabs(mgr);
+        mgr.SetPinned(mgr.Tabs[0], true);
+        mgr.SetPinned(mgr.Tabs[1], true); // prefix = A, B
+        var c = mgr.Tabs[2];
+
+        // C dragged up to slot 1: pin first (relocates to the prefix end,
+        // slot 2), then move into the slot the crossing asked for.
+        mgr.SetPinned(c, true);
+        mgr.Move(mgr.IndexOf(c), 1);
+
+        Assert.True(c.IsPinned);
+        Assert.Equal(3, mgr.PinCount);
+        Assert.Equal(new[] { "A", "C", "B", "D" }, Titles(mgr));
+    }
+
+    [Fact]
+    public void Crossing_down_unpins_and_lands_at_the_crossing_slot()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        NameTabs(mgr);
+        mgr.SetPinned(mgr.Tabs[0], true); // prefix = A
+        var a = mgr.Tabs[0];
+
+        // A dragged down to slot 2: unpin first (relocates to the first
+        // unpinned slot, which is slot 1 here), then move to the slot.
+        mgr.SetPinned(a, false);
+        mgr.Move(mgr.IndexOf(a), 2);
+
+        Assert.False(a.IsPinned);
+        Assert.Equal(0, mgr.PinCount);
+        Assert.Equal(new[] { "B", "C", "A" }, Titles(mgr));
+    }
+
+    [Fact]
+    public void Unpinning_to_the_boundary_crossing_relocates_then_lands()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        NameTabs(mgr);
+        mgr.SetPinned(mgr.Tabs[0], true);
+        mgr.SetPinned(mgr.Tabs[1], true); // prefix = A, B
+        var a = mgr.Tabs[0];
+        int moved = 0;
+        mgr.TabMoved += (_, _) => moved++;
+
+        // Crossing slot == PinCount is the first unpinned slot in the
+        // pre-commit frame. The unpin relocates A to the boundary (slot 1
+        // in the new frame), and the paired Move carries it the rest of
+        // the way to the crossing's slot.
+        mgr.SetPinned(a, false);
+        mgr.Move(mgr.IndexOf(a), 2);
+
+        Assert.False(a.IsPinned);
+        Assert.Equal(1, mgr.PinCount);
+        Assert.Equal(new[] { "B", "C", "A", "D" }, Titles(mgr));
+        Assert.Equal(2, moved); // the relocation, then the placement
+    }
+
+    private static void NameTabs(TabManager mgr)
+    {
+        string[] names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        for (int i = 0; i < mgr.Tabs.Count && i < names.Length; i++)
+            Title(mgr.Tabs[i], names[i]);
+    }
+
+    private static string[] Titles(TabManager mgr)
+    {
+        var titles = new string[mgr.Tabs.Count];
+        for (int i = 0; i < mgr.Tabs.Count; i++)
+            titles[i] = mgr.Tabs[i].EffectiveTitle;
+        return titles;
+    }
+
     // --- Group contiguity ---
 
     [Fact]

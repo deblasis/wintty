@@ -32,6 +32,7 @@ internal static class TabContextMenuBuilder
         Action<TabModel> requestDetachToNewWindow,
         DialogTracker dialogs,
         Action toggleTabLayout,
+        Action<TabModel, bool> requestPin,
         bool isVertical = false,
         Func<SnapZoneSource>? getSnapSource = null,
         Action<TabModel, SnapZone>? detachWithZone = null)
@@ -71,6 +72,19 @@ internal static class TabContextMenuBuilder
             }
         };
         flyout.Items.Add(rename);
+
+        // One implementation for both hosts: the label is the only thing
+        // that flips here. The pin itself routes through the caller's hook
+        // (the router's RequestPin) so a menu pin announces exactly like a
+        // palette one; the relocation it triggers is still the manager's
+        // (SetPinned moves the tab to the zone boundary), so the strips
+        // pick it up through their normal sync paths.
+        var pin = new MenuFlyoutItem
+        {
+            Text = tab.IsPinned ? "Unpin Tab" : "Pin Tab",
+        };
+        pin.Click += (_, _) => requestPin(tab, !tab.IsPinned);
+        flyout.Items.Add(pin);
 
         var dup = new MenuFlyoutItem { Text = "Duplicate Tab" };
         dup.Click += (_, _) => manager.NewTab();
@@ -120,11 +134,15 @@ internal static class TabContextMenuBuilder
         // Re-evaluate IsEnabled on each open so tabs closed after
         // the flyout was built (but before the user right-clicked)
         // are reflected in the grey state. Matches Windows Terminal.
+        // The pin item's LABEL rides the same pass: a flyout can be
+        // built while the tab is unpinned and opened after a drag
+        // pinned it, and a stale "Pin Tab" that unpins would lie.
         flyout.Opening += (_, _) =>
         {
             detach.IsEnabled = manager.Tabs.Count > 1;
             if (moveToZone is not null)
                 moveToZone.IsEnabled = manager.Tabs.Count > 1;
+            pin.Text = tab.IsPinned ? "Unpin Tab" : "Pin Tab";
         };
 
         flyout.Items.Add(new MenuFlyoutSeparator());
