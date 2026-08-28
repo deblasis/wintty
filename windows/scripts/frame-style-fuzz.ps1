@@ -122,6 +122,7 @@ param(
     [int]$Random = 0
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/env-guard.ps1')
 $ErrorActionPreference = 'Stop'
 
 # Same convention as the other harnesses here: a PRODUCT_FAIL throw is a defect
@@ -1391,6 +1392,14 @@ function Test-BackdropGroundMirror([string]$Exe) {
 }
 
 # ---- run ------------------------------------------------------------------
+# This harness reads High Contrast and the desktop polarity and sets neither,
+# but it does not run alone: verification legs around it have left system
+# state behind after crashing (High Contrast, desktop colour, app theme), and
+# once crashed there was no snapshot to restore from. This is that snapshot.
+# If nothing moves the state while the run is up, the restore in the finally
+# is a no-op that its read-back proves was a no-op.
+[void](Save-EnvSnapshot)
+
 try {
     # ---- controls, before anything is judged ------------------------------
     #
@@ -1964,6 +1973,12 @@ finally {
         caseErrors = $caseErrors
     } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $OutDir 'result.json')
     Write-Host (Get-Content (Join-Path $OutDir 'result.json') -Raw)
+
+    # System state, LAST, after the report the promise two comments up makes.
+    # Restore-EnvSnapshot throws on a read-back that does not match the
+    # snapshot, which is the point - a restore that returns silently has only
+    # a hope - but that throw must not eat the report on its way out.
+    Restore-EnvSnapshot
 }
 
 if ($findings.Count -gt 0) {

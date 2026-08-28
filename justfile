@@ -372,6 +372,13 @@ fuzz-list:
 fuzz-selftest:
     pwsh -NoProfile -File windows/scripts/fuzz-suite.ps1 -SelfTest; exit ($LASTEXITCODE ?? 1)
 
+# Manual recovery after a harness crashed with system state (High Contrast,
+# desktop colour, app theme) left behind: restores from the snapshot the
+# env-guard library takes, and throws if the read-back does not match it.
+[windows]
+env-restore:
+    pwsh -NoProfile -File windows/scripts/lib/env-guard.ps1 -Restore; exit ($LASTEXITCODE ?? 1)
+
 # === Upstream Sync ===
 
 # Pinned to bash via shebang so the POSIX `[` branch test below works
