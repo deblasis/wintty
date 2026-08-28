@@ -180,6 +180,25 @@ public partial class App : Application
     // every rule in ThemePreviewOwnershipWiringTests still green.
     internal static Action<string>? ApplyThemePreview { get; private set; }
 
+    /// <summary>
+    /// What the palette was before a theme browse previewed over it, and
+    /// therefore what an abandoned browse puts back. One for the process,
+    /// shared by the inline picker and by the pipe protocol.
+    /// </summary>
+    // Owned here for the same reason the preview service above it is: what a
+    // preview overwrites is not the picker's own drawing but the one palette
+    // ConfigService fans out to every window. Two browses can be live at once
+    // -- a theme request goes to the last window the user activated and the
+    // pipe is free again the moment it is read -- so a snapshot per window
+    // snapshotted the other window's preview, and its cancel then restored a
+    // theme nobody chose over one somebody had just accepted.
+    //
+    // A field rather than something OnLaunched builds and the shutdown
+    // clears, like ClosedTabs above: it holds no resource, so there is
+    // nothing to dispose and no window in which a browse would find it null
+    // and silently stop being revertible.
+    internal static readonly Ghostty.Core.Themes.InlineThemePreviewSession ThemePreviewSession = new();
+
     internal static ConfigService? ConfigService { get; private set; }
     internal static Ghostty.Core.Profiles.IProfileRegistry? ProfileRegistry { get; private set; }
     internal static Ghostty.Session.SessionManager? SessionManager { get; private set; }
@@ -779,9 +798,15 @@ public partial class App : Application
         // Built here but not started here: NoteRegularWindowRegistered opens
         // the pipe, because the pipe is what the CLI reads as "a window is
         // ready to show you a picker".
+        //
+        // Handed the process's one preview session rather than keeping saved
+        // colours of its own. The pipe protocol and the inline picker drive
+        // the same palette, so two snapshots meant a TUI accept and a picker
+        // cancel could each undo the other.
         _themePreview = new Ghostty.Services.ThemePreviewService(
             _configService,
             DispatcherQueue.GetForCurrentThread(),
+            ThemePreviewSession,
             factory.CreateLogger<Ghostty.Services.ThemePreviewService>());
         _themePreview.ListThemesRequested += OnAppListThemesRequested;
         ApplyThemePreview = _themePreview.ApplyThemePreview;
