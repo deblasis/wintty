@@ -13,6 +13,7 @@ using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
@@ -109,6 +110,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         InitializeComponent();
         _manager = manager;
 
+        BuildPinnedShelf();
         RebuildAllItems();
         SyncSelectionFromManager();
 
@@ -424,6 +426,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     private SolidColorBrush? _rowSeparatorBrush;
     private readonly List<Border> _rowSeparators = new();
 
+    // The pinned shelf: header, fixed row panel, and the zone's boundary
+    // stroke, hosted as NavView.PaneCustomContent. Pinned rows are NOT
+    // MenuItems -- they must not scroll and must not take part in MUXC
+    // selection -- so they get their own container and their own registry.
+    private readonly StackPanel _pinnedShelf = new();
+    private readonly TextBlock _pinnedHeader = new();
+    private readonly StackPanel _pinnedPanel = new();
+    private readonly Border _boundaryStroke = new();
+    private readonly Dictionary<TabModel, VerticalTabPinnedRow> _pinnedRows = new();
+    private readonly Dictionary<TabModel, TabHooks> _pinnedHooks = new();
+
     /// <summary>
     /// Paint the strip lane, or leave it to the window backdrop.
     ///
@@ -531,16 +544,16 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// One line in each gap between rows, skipping both gaps that touch the
-    /// selected row: those two edges are already drawn, in the accent, by the
-    /// selected row's own top and bottom stroke. Drawing them again puts two
-    /// lines a pixel apart.
+    /// One line in each gap between the scrolling list's rows, skipping both
+    /// gaps that touch the selected row: those two edges are already drawn,
+    /// in the accent, by the selected row's own top and bottom stroke.
+    /// Drawing them again puts two lines a pixel apart.
     ///
-    /// The gap after the last pinned row never skips and never takes the
-    /// row-separator brush: it is the pin zone's edge, drawn in the accent
-    /// at double height, and it is the only boundary the strip shows for
-    /// the zone (spec 5.1's section header and fixed panel are not built
-    /// here). It exists only while both zones do.
+    /// Only the list's gaps. The pinned rows live in the fixed panel above
+    /// the scroller, so the pin zone's edge is not a gap in this pool any
+    /// more: it is the boundary stroke along the shelf's bottom edge
+    /// (UpdatePinnedShelfChrome), which starts where the panel ends and the
+    /// list begins.
     ///
     /// Rebuilt rather than kept in sync per item, because the thing being
     /// mirrored is MUXC's arranged layout, and the only honest read of that
@@ -548,6 +561,12 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private void UpdateRowSeparators(bool selectionRowVisible)
     {
+        // The shelf rides this refresh on purpose: it is the pass every
+        // selection-placement and drag entry/exit path already calls, so
+        // the boundary stroke's brighten/dim never needs a caller of its
+        // own and cannot be forgotten on an exit path.
+        UpdatePinnedShelfChrome();
+
         // Pooled by index rather than rebuilt. This runs from the same
         // refresh the selection row rides, which the constructor keeps off
         // LayoutUpdated specifically so it does not allocate on every layout
@@ -561,26 +580,16 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
-        // The boundary lives in the gap after the last pinned row, which
-        // is only a real gap while an unpinned tab exists below it.
-        var boundaryIndex = _manager.PinCount - 1;
-        var hasBoundary = boundaryIndex >= 0 && boundaryIndex + 1 < _manager.Tabs.Count;
-
         var tabs = _manager.Tabs;
-        for (var i = 0; i + 1 < tabs.Count; i++)
+        // The pinned prefix renders in the shelf, not in the list, so its
+        // slots have no gaps here to draw.
+        for (var i = _manager.PinCount; i + 1 < tabs.Count; i++)
         {
-            var boundary = hasBoundary && i == boundaryIndex;
-            if (boundary)
-            {
-                // The boundary marks the zone, not the row under it: it
-                // never skips, so the edge stays visible when the active
-                // row sits on it.
-            }
             // Only skip the gaps the selected row is actually covering. The
             // row is collapsed during a layout morph and on MUXC's first
             // frame, and skipping on those passes left two gaps with nothing
             // drawing them and nothing hiding them either.
-            else if (selectionRowVisible)
+            if (selectionRowVisible)
             {
                 if (ReferenceEquals(tabs[i], _manager.ActiveTab)) continue;
                 if (ReferenceEquals(tabs[i + 1], _manager.ActiveTab)) continue;
@@ -603,10 +612,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
 
             // A null row-separator brush means this theme separates by
-            // shade and wants no lines; the boundary still draws, because
-            // it is the zone's edge and drag-to-pin needs it visible.
-            Brush? fill = boundary ? BoundaryStrokeBrush() : _rowSeparatorBrush;
-            if (fill is null) continue;
+            // shade and wants no lines at all between rows.
+            if (_rowSeparatorBrush is null) continue;
 
             Border line;
             if (used < _rowSeparators.Count)
@@ -623,11 +630,11 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
 
             line.Width = Math.Max(0, ActualWidth - RowInsetLeft);
-            line.Height = boundary ? BoundaryStrokeHeight : 1;
-            line.Background = fill;
+            line.Height = 1;
+            line.Background = _rowSeparatorBrush;
             line.Visibility = Visibility.Visible;
             Canvas.SetLeft(line, RowInsetLeft);
-            Canvas.SetTop(line, bottom - RowInsetVertical - (boundary ? 1 : 0));
+            Canvas.SetTop(line, bottom - RowInsetVertical);
             used++;
         }
 
@@ -672,7 +679,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_drag is not null) return;
 
         if (_manager.ActiveTab is null
-            || !_items.TryGetValue(_manager.ActiveTab, out var item)
+            || RowElementOf(_manager.ActiveTab) is not { } item
             || item.ActualWidth <= 0
             || item.ActualHeight <= 0
             || ActualWidth <= 0)
@@ -867,6 +874,21 @@ internal sealed partial class VerticalTabStrip : UserControl
 
             ApplyItemTabColor(item, model);
         }
+
+        // Pinned rows carry the same ink rules with no MUXC resources to
+        // write: the icon draws in the row's foreground (full strength when
+        // the selection overlay sits behind it, muted otherwise), and the
+        // bell stays accent, exactly as on a body row.
+        foreach (var (model, row) in _pinnedRows)
+        {
+            var active = ReferenceEquals(model, _manager.ActiveTab);
+            row.ApplyInk(model.Color != TabColor.None
+                ? TabColorBrush.FromPackedRgb(TabColorPalette.ForegroundRgb(
+                    model.Color, active, _stripBackdropPacked))
+                : active
+                    ? ActiveRowChrome(model).Foreground
+                    : ResolveInactiveTextBrush());
+        }
     }
 
     private static void ApplyItemForeground(NavigationViewItem item, Brush? fg, bool active)
@@ -927,7 +949,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             // the strip host becomes Visible (horizontal→vertical switch).
             if (!retryIfZeroBounds
                 || _manager.ActiveTab is null
-                || !_items.TryGetValue(_manager.ActiveTab, out var item)
+                || RowElementOf(_manager.ActiveTab) is not { } item
                 || (item.ActualWidth > 0 && item.ActualHeight > 0)
                 || ActualWidth <= 0)
             {
@@ -976,10 +998,20 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
 
         if (_manager.ActiveTab is null) return;
-        if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
 
         _syncing = true;
-        try { NavView.SelectedItem = item; }
+        try
+        {
+            // While the active tab is pinned it has no MenuItems entry at
+            // all, and MUXC has nothing that can be selected. Leaving the
+            // previous selection standing would keep a body row painted as
+            // selected while the strip's active chrome sits on a pinned
+            // row, so park the selection at null: the selection overlay is
+            // the active chrome for a pinned row and does not consult MUXC.
+            NavView.SelectedItem = _items.TryGetValue(_manager.ActiveTab, out var item)
+                ? item
+                : null;
+        }
         finally { _syncing = false; }
 
         ApplyAllItemTabColors();
@@ -993,22 +1025,34 @@ internal sealed partial class VerticalTabStrip : UserControl
     private FrameworkElement? _menuItemsScroller;
 
     /// <summary>
-    /// Vertical bounds of the scrolling row list, in RootGrid-relative
-    /// coordinates via <paramref name="reference"/>, or null while the
-    /// template has not been applied.
+    /// Vertical bounds of the container the active row lives in -- the
+    /// scrolling list for a body row, the pinned shelf for a pinned one --
+    /// in RootGrid-relative coordinates via <paramref name="reference"/>,
+    /// or null while the template has not been applied.
     /// </summary>
     /// <remarks>
-    /// Deliberately the scroller and not this control: with more tabs than
-    /// fit, the selected row scrolls out of the list while its layout offset
-    /// still reports where it would have been. A caller clipping to the
-    /// control instead clips to something that always contains the row, so
-    /// the clamp does nothing and a cover gets drawn across the pane at a
-    /// height with no tab beside it.
+    /// Deliberately the scroller and not this control for body rows: with
+    /// more tabs than fit, the selected row scrolls out of the list while
+    /// its layout offset still reports where it would have been. A caller
+    /// clipping to the control instead clips to something that always
+    /// contains the row, so the clamp does nothing and a cover gets drawn
+    /// across the pane at a height with no tab beside it.
     /// </remarks>
     internal (double Top, double Bottom)? SelectionViewport(UIElement reference)
     {
         _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
-        if (_menuItemsScroller is not { ActualHeight: > 0 } scroller) return null;
+
+        // Clip to the container the active row actually lives in. A pinned
+        // active row sits ABOVE the scroller, so clamping it to the
+        // scrolling viewport produces an empty span and the seam cover
+        // collapses -- the pane-border join silently disappears for exactly
+        // the tabs the panel exists to hold. The shelf is fixed and fully
+        // visible, so its bounds are the right clip for its rows.
+        var container = _manager.ActiveTab is { } active
+                        && RowElementOf(active) is VerticalTabPinnedRow
+            ? (FrameworkElement?)_pinnedShelf
+            : _menuItemsScroller;
+        if (container is not { ActualHeight: > 0 } scroller) return null;
 
         try
         {
@@ -1042,7 +1086,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         // the row off the finger. The next post-drag refresh catches up.
         if (_drag is not null) return;
         if (_manager.ActiveTab is null) return;
-        if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
+        if (!_items.TryGetValue(_manager.ActiveTab, out var item))
+        {
+            // The active row is in the fixed pinned panel above the
+            // scroller: it is always on screen and there is no scroll
+            // position to reach it with.
+            return;
+        }
 
         item.StartBringIntoView(new BringIntoViewOptions
         {
@@ -1144,21 +1194,87 @@ internal sealed partial class VerticalTabStrip : UserControl
     private static uint PackColor(Color c)
         => ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
+    /// <summary>
+    /// The pinned section: a small-caps header, the fixed row panel, and
+    /// the zone boundary's stroke along the panel's bottom edge.
+    /// </summary>
+    /// <remarks>
+    /// The shelf rides <see cref="NavigationView.PaneCustomContent"/>
+    /// rather than a row of this control's root grid or a MenuItems entry,
+    /// and that placement is load-bearing. A root-grid row would sit
+    /// OUTSIDE the pane, so it would not collapse with it and would fight
+    /// MUXC's own pane/compact layout when the sidebar toggles. A
+    /// MenuItems entry scrolls with the list and joins MUXC selection,
+    /// which is exactly what a pinned section must not do. PaneCustomContent
+    /// is the slot MUXC already reserves inside the pane between the pane
+    /// toggle and the scrolling list: it never scrolls, it never selects,
+    /// it owns no part of the item template, and it tracks the pane width,
+    /// so the 40px icon rows fit both the expanded pane and the 48px
+    /// compact one.
+    /// </remarks>
+    private void BuildPinnedShelf()
+    {
+        // "Pinned" reads as a section title, not a row: small caps, fixed
+        // 24px band, offered only while pins exist (UpdatePinnedShelfChrome),
+        // and carrying heading semantics so an assistive client can jump to
+        // the section instead of walking into it.
+        _pinnedHeader.Text = "Pinned";
+        _pinnedHeader.Height = PinnedHeaderHeight;
+        _pinnedHeader.FontSize = 12;
+        _pinnedHeader.CharacterSpacing = 60;
+        _pinnedHeader.Margin = new Thickness(RowInsetLeft + 4, 0, 0, 0);
+        _pinnedHeader.VerticalAlignment = VerticalAlignment.Center;
+        _pinnedHeader.Visibility = Visibility.Collapsed;
+        Microsoft.UI.Xaml.Documents.Typography.SetCapitals(
+            _pinnedHeader, Microsoft.UI.Xaml.FontCapitals.SmallCaps);
+        AutomationProperties.SetName(_pinnedHeader, "Pinned");
+        AutomationProperties.SetHeadingLevel(
+            _pinnedHeader, AutomationHeadingLevel.Level2);
+
+        _boundaryStroke.Height = BoundaryStrokeHeight;
+        _boundaryStroke.IsHitTestVisible = false;
+        _boundaryStroke.Margin = new Thickness(RowInsetLeft, 0, 0, 0);
+        _boundaryStroke.Visibility = Visibility.Collapsed;
+
+        _pinnedShelf.Children.Add(_pinnedHeader);
+        _pinnedShelf.Children.Add(_pinnedPanel);
+        _pinnedShelf.Children.Add(_boundaryStroke);
+        _pinnedShelf.Visibility = Visibility.Collapsed;
+
+        NavView.PaneCustomContent = _pinnedShelf;
+    }
+
+    /// <summary>Height of the pinned section's header band.</summary>
+    private const double PinnedHeaderHeight = 24;
+
+    /// <summary>
+    /// The element rendering <paramref name="tab"/>, from whichever
+    /// container holds it. Every measurement (row centers, the selection
+    /// overlay, the separators) and every drag read resolves rows through
+    /// here, so a row's two possible homes differ in membership only: one
+    /// coordinate space -- this control's -- serves both, which is what
+    /// lets the untouched drag machine keep judging crossings across a
+    /// zone change.
+    /// </summary>
+    private FrameworkElement? RowElementOf(TabModel tab)
+        => _pinnedRows.TryGetValue(tab, out var pinned) ? pinned
+        : _items.TryGetValue(tab, out var item) ? item
+        : null;
+
     private void RebuildAllItems()
     {
         // Remove by what we hold, not by what the manager still has:
         // on a Reset the manager is already empty and rows we own would
-        // otherwise stay in MenuItems with their subscriptions live.
-        foreach (var tab in _hooks.Keys.ToArray())
+        // otherwise stay in their container with their subscriptions live.
+        foreach (var tab in _hooks.Keys.Concat(_pinnedHooks.Keys).ToArray())
             RemoveItem(tab);
         // Row order comes from the projector, the same source the
         // horizontal strip reconciles against, so the two strips cannot
-        // disagree by construction. Identical to Tabs while headers are
-        // off (which makes the swap behavior-neutral); the Add/Remove
-        // branches above stay index-honoring because with no headers the
-        // collection's indices ARE the projection's.
+        // disagree by construction. AddItem is membership-only, so adding
+        // in projection order lands every row in its container at its slot.
         foreach (var tab in TabStripProjection.Rows(_manager))
             AddItem(tab);
+        UpdatePinnedShelfChrome();
     }
 
     private void OnTabsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -1166,19 +1282,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         switch (e.Action)
         {
             case NotifyCollectionChangedAction.Add:
-                // NewStartingIndex matters: TabManager.Move is RemoveAt +
-                // Insert, which ObservableCollection reports as Remove then
-                // Add, not Move. Appending here would drift the strip order
-                // away from the manager on every "Move Tab Left/Right".
                 if (e.NewItems is not null)
-                {
-                    var addIndex = e.NewStartingIndex;
                     foreach (TabModel tab in e.NewItems)
-                    {
-                        AddItem(tab, addIndex);
-                        if (addIndex >= 0) addIndex++;
-                    }
-                }
+                        AddItem(tab);
                 break;
             case NotifyCollectionChangedAction.Remove:
                 if (e.OldItems is not null)
@@ -1198,13 +1304,34 @@ internal sealed partial class VerticalTabStrip : UserControl
                         AddItem(tab);
                 break;
         }
+        // Membership above, order here. The event index was the order
+        // authority while every row was a MenuItems entry (the collection's
+        // indices were the projection's), but pinned rows live outside
+        // MenuItems, so a manager index counts slots the list does not
+        // hold. The projection is the one authority that still speaks for
+        // both containers, and ReconcileRowOrder is the pass that applies
+        // it -- after the churn of any Move (reported as Remove then Add)
+        // and after every other mutation above.
+        ReconcileRowOrder();
         SyncSelectionFromManager();
     }
 
-    private void AddItem(TabModel tab, int index = -1)
+    /// <summary>
+    /// Build the row <paramref name="tab"/> renders as, in the container
+    /// its pin flag names: the fixed panel for the pinned prefix, the
+    /// scrolling list for everything else. Membership only -- where the
+    /// row sits among its neighbours is ReconcileRowOrder's answer, taken
+    /// from the projection.
+    /// </summary>
+    private void AddItem(TabModel tab)
     {
-        if (_items.ContainsKey(tab)) return;
+        if (_items.ContainsKey(tab) || _pinnedRows.ContainsKey(tab)) return;
+        if (tab.IsPinned) AddPinnedRow(tab);
+        else AddBodyRow(tab);
+    }
 
+    private void AddBodyRow(TabModel tab)
+    {
         var row = new VerticalTabNavRow(tab, AccentBrush, OnRowCloseClick);
         var item = new NavigationViewItem
         {
@@ -1257,16 +1384,51 @@ internal sealed partial class VerticalTabStrip : UserControl
         // activates the wrong tab, and comes back around to assign
         // SelectedItem while MUXC is still inside its own notification.
         _syncing = true;
-        try
-        {
-            if (index >= 0 && index <= NavView.MenuItems.Count)
-                NavView.MenuItems.Insert(index, item);
-            else
-                NavView.MenuItems.Add(item);
-        }
+        try { NavView.MenuItems.Add(item); }
         finally { _syncing = false; }
 
         ApplyItemTabColor(item, tab);
+    }
+
+    private void AddPinnedRow(TabModel tab)
+    {
+        var row = new VerticalTabPinnedRow(tab, AccentBrush);
+        row.SetIcon(TabIconElementFactory.Create(tab.TabIcon));
+
+        // The same three subscriptions a body row takes, pointed at the
+        // pinned row instead: title and bell feed the tooltip and the a11y
+        // chrome, color re-inks the whole strip, and the icon rebuilds when
+        // the foreground process changes. (AddBodyRow carries the long
+        // version of the split rationale.)
+        var textBinding = AotBinding.Create(tab, _ =>
+        {
+            if (_pinnedRows.TryGetValue(tab, out var pinnedRow))
+                pinnedRow.Refresh(tab);
+        },
+        nameof(TabModel.EffectiveTitle),
+        nameof(TabModel.ShellReportedTitle),
+        nameof(TabModel.UserOverrideTitle),
+        nameof(TabModel.BellRinging));
+
+        var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
+            nameof(TabModel.Color));
+
+        var vm = tab.TabIcon;
+        PropertyChangedEventHandler iconHandler = (_, e) =>
+        {
+            if (e.PropertyName is not null
+                && e.PropertyName != nameof(TabIconViewModel.Icon)
+                && e.PropertyName != nameof(TabIconViewModel.IsMdl2Glyph)
+                && e.PropertyName != nameof(TabIconViewModel.Mdl2CodePoint))
+                return;
+            if (_pinnedRows.TryGetValue(tab, out var pinnedRow))
+                pinnedRow.SetIcon(TabIconElementFactory.Create(tab.TabIcon));
+        };
+        vm.PropertyChanged += iconHandler;
+
+        _pinnedRows[tab] = row;
+        _pinnedHooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
+        _pinnedPanel.Children.Add(row);
     }
 
     /// <summary>
@@ -1298,11 +1460,22 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_drag is { } drag && ReferenceEquals(tab, drag.Tab) && !_commitChurn)
             CancelDrag("closed");
 
+        // The row lives in exactly one container; take it out of that one.
+        // (The panel is not a MUXC selection surface, so its removal needs
+        // no fence -- only MenuItems removals can move MUXC's selection.)
+        if (_pinnedRows.Remove(tab, out var pinned))
+        {
+            _pinnedPanel.Children.Remove(pinned);
+            if (_pinnedHooks.Remove(tab, out var pinnedHooks))
+                pinnedHooks.Dispose();
+            return;
+        }
+
         if (!_items.TryGetValue(tab, out var item)) return;
 
-        // Fenced for the same reason as the insert in AddItem: removing the
-        // selected row moves MUXC's selection to a neighbour and reports it
-        // as the user's choice.
+        // Fenced for the same reason as the insert in AddBodyRow: removing
+        // the selected row moves MUXC's selection to a neighbour and
+        // reports it as the user's choice.
         _syncing = true;
         try { NavView.MenuItems.Remove(item); }
         finally { _syncing = false; }
@@ -1310,6 +1483,82 @@ internal sealed partial class VerticalTabStrip : UserControl
         _items.Remove(tab);
         if (_hooks.Remove(tab, out var hooks))
             hooks.Dispose();
+    }
+
+    /// <summary>
+    /// Bring both containers' row order back to the projection's. Rows are
+    /// reordered in place -- the element instance each dict holds is moved,
+    /// never rebuilt -- so a plain move churns nothing a drag is still
+    /// following that the Remove+Add pair did not churn already. A
+    /// membership skew (a dict holding a tab its container's projection no
+    /// longer names, or counts gone apart) is not something an order pass
+    /// can repair; that is what the rebuild is for.
+    /// </summary>
+    private void ReconcileRowOrder()
+    {
+        var rows = TabStripProjection.Rows(_manager);
+        var pinCount = _manager.PinCount;
+        var pinned = rows.Take(pinCount).ToList();
+        var body = rows.Skip(pinCount).ToList();
+
+        if (_pinnedRows.Count != pinned.Count || _items.Count != body.Count
+            || _pinnedPanel.Children.Count != pinned.Count
+            || NavView.MenuItems.Count != body.Count
+            || pinned.Any(t => !_pinnedRows.ContainsKey(t))
+            || body.Any(t => !_items.ContainsKey(t)))
+        {
+            RebuildAllItems();
+            return;
+        }
+
+        for (var i = 0; i < pinned.Count; i++)
+        {
+            var row = _pinnedRows[pinned[i]];
+            if (ReferenceEquals(_pinnedPanel.Children[i], row)) continue;
+            var idx = _pinnedPanel.Children.IndexOf(row);
+            if (idx >= 0) _pinnedPanel.Children.RemoveAt(idx);
+            _pinnedPanel.Children.Insert(i, row);
+        }
+
+        var items = NavView.MenuItems;
+        _syncing = true;
+        try
+        {
+            for (var i = 0; i < body.Count; i++)
+            {
+                var row = _items[body[i]];
+                if (ReferenceEquals(items[i], row)) continue;
+                var idx = items.IndexOf(row);
+                if (idx >= 0) items.RemoveAt(idx);
+                items.Insert(i, row);
+            }
+        }
+        finally { _syncing = false; }
+
+        UpdatePinnedShelfChrome();
+    }
+
+    /// <summary>
+    /// The shelf's two state-dependent bits: the header exists only while
+    /// pins do, and the boundary stroke marks the edge between the zones,
+    /// so it exists only while both do -- the same "both zones exist" gate
+    /// the in-list boundary stroke always had.
+    /// </summary>
+    private void UpdatePinnedShelfChrome()
+    {
+        var anyPins = _manager.PinCount > 0;
+        _pinnedShelf.Visibility = anyPins ? Visibility.Visible : Visibility.Collapsed;
+        // The header follows the shelf's gate: BuildPinnedShelf only parks
+        // it collapsed as the initial state, so this flip is the one thing
+        // that ever makes the 24px headline -- and its heading semantics --
+        // render.
+        _pinnedHeader.Visibility = anyPins ? Visibility.Visible : Visibility.Collapsed;
+
+        var bothZones = anyPins && _manager.PinCount < _manager.Tabs.Count;
+        _boundaryStroke.Visibility = bothZones ? Visibility.Visible : Visibility.Collapsed;
+        // Brightens while a drag is live, via BoundaryStrokeBrush's drag
+        // gate -- the aiming feedback the drag-to-pin gesture reads.
+        if (bothZones) _boundaryStroke.Background = BoundaryStrokeBrush();
     }
 
     private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -1338,14 +1587,16 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>The row rendering <paramref name="tab"/>, if built.</summary>
-    internal FrameworkElement? TabElement(TabModel tab)
-        => _items.TryGetValue(tab, out var item) ? item : null;
+    internal FrameworkElement? TabElement(TabModel tab) => RowElementOf(tab);
 
     /// <summary>Resolve TabModel for a nav item hit-test target.</summary>
     internal TabModel? TabFromElement(DependencyObject? source)
     {
-        var item = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
-        return item?.Tag as TabModel;
+        // A row is either a NavigationViewItem in the scrolling list or a
+        // VerticalTabPinnedRow in the fixed panel; both carry the tab on Tag.
+        if (VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source) is { } item)
+            return item.Tag as TabModel;
+        return VisualTreeHelperEx.FindAncestor<VerticalTabPinnedRow>(source)?.Tag as TabModel;
     }
 
     // -----------------------------------------------------------------
@@ -1403,6 +1654,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         // the flags define.
         public required IReadOnlySet<TabModel> PreDragPinned;
         public required uint PointerId;
+        // The element the press resolved ownership through. The release's
+        // click path needs to know which CONTAINER the press landed in, and
+        // by release time a zone churn may already have moved the row: the
+        // press-time answer is the one that describes where the user aimed.
+        public FrameworkElement? PressRow;
         public double PressY;
         public double PressBaseCenter;
         // The arranged center the anchor currently assumes; the tick's
@@ -1458,11 +1714,14 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_selectionRowSuppressed) return;
 
         var source = e.OriginalSource as DependencyObject;
-        var item = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
+        // A row is either a NavigationViewItem in the list or a pinned row
+        // in the shelf; both carry the tab on Tag.
+        var item = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source)
+                ?? (FrameworkElement?)VisualTreeHelperEx.FindAncestor<VerticalTabPinnedRow>(source);
         if (item is null || item.Tag is not TabModel tab) return;
         // The close button owns its own presses; no drag grows out of one.
         if (VisualTreeHelperEx.FindAncestor<Button>(source) is not null) return;
-        if (!_items.TryGetValue(tab, out var owned) || !ReferenceEquals(owned, item)) return;
+        if (RowElementOf(tab) is not { } owned || !ReferenceEquals(owned, item)) return;
         if (_manager.Tabs.Count < 2) return;
 
         var point = e.GetCurrentPoint(this);
@@ -1479,6 +1738,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             PreDragPinned = new HashSet<TabModel>(
                 _manager.Tabs.Where(t => t.IsPinned)),
             PointerId = e.Pointer.PointerId,
+            PressRow = owned,
             LastPointerY = point.Position.Y,
             PressY = point.Position.Y,
         };
@@ -1514,10 +1774,25 @@ internal sealed partial class VerticalTabStrip : UserControl
         var index = drag.Machine.Drop();
         if (index < 0)
         {
-            // Never lifted past the threshold: a click. Stand down
-            // without touching anything, so activation proceeds exactly
-            // as it would have.
+            // Never lifted past the threshold: a click. Stand down without
+            // touching anything, so activation proceeds exactly as it would
+            // have. For a shelf row, "as it would have" is HERE: the pinned
+            // panel is outside MUXC selection, so no SelectionChanged will
+            // ever carry the click to the manager. The same fenced
+            // activation the selection handler runs, for the rows it cannot
+            // hear; body clicks keep flowing through MUXC untouched.
             _drag = null;
+            if (drag.PressRow is VerticalTabPinnedRow
+                && !ReferenceEquals(drag.Tab, _manager.ActiveTab))
+            {
+                _syncing = true;
+                try { _manager.Activate(drag.Tab); }
+                finally { _syncing = false; }
+
+                ApplyAllItemTabColors();
+                RecolorNavItems();
+                RefreshSelectionChrome();
+            }
             return;
         }
         // Capture is not released here: a synchronous PointerCaptureLost
@@ -1550,7 +1825,7 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void StartDragVisual(DragSession drag, PointerRoutedEventArgs e)
     {
-        if (!_items.TryGetValue(drag.Tab, out var item)) { CancelDrag("closed"); return; }
+        if (RowElementOf(drag.Tab) is not { } item) { CancelDrag("closed"); return; }
         if (!CapturePointer(e.Pointer)) { CancelDrag("capture"); return; }
 
         drag.Item = item;
@@ -1643,7 +1918,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private void RebindFollow(DragSession drag, double assumedCenter)
     {
-        if (!_items.TryGetValue(drag.Tab, out var item)) return;
+        if (RowElementOf(drag.Tab) is not { } item) return;
         drag.Item = item;
         if (!double.IsNaN(assumedCenter)) drag.AssumedCenter = assumedCenter;
         ElementCompositionPreview.SetIsTranslationEnabled(item, true);
@@ -1716,7 +1991,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     // Neighbours currently riding a gap glide, by tab. Doubles as the
     // leak census: anything still in here after the drag's teardown is a
     // ghost the trace reports.
-    private readonly Dictionary<TabModel, (NavigationViewItem Item, CompositionScopedBatch Batch)>
+    private readonly Dictionary<TabModel, (FrameworkElement Item, CompositionScopedBatch Batch)>
         _gapMotion = new();
     private int _teardownFailures;
 
@@ -1782,7 +2057,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void GlideRow(TabModel tab, double delta, CompositionScopedBatch batch)
     {
         if (_drag is not { } drag) return;
-        if (!_items.TryGetValue(tab, out var item)) return;
+        if (RowElementOf(tab) is not { } item) return;
         try
         {
             var visual = ElementCompositionPreview.GetElementVisual(item);
@@ -1888,6 +2163,23 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             var top = scroller.TransformToVisual(this)
                 .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            // The pinned shelf sits above the scroller, so a pointer over it
+            // reads as ABOVE the viewport: to the machine that is fromTop
+            // negative, the deepest point of the scroll-up band, and the
+            // strip would phantom-scroll up at full speed under a stationary
+            // finger resting on the panel. Nothing under the pointer there
+            // can reflow -- the shelf is fixed and outside the scroll
+            // content -- so the band is defined to start at the scroller's
+            // top edge and never above it.
+            if (drag.LastPointerY < top)
+            {
+                if (drag.LastAutoscrollSpeed != 0)
+                {
+                    drag.LastAutoscrollSpeed = 0;
+                    DragTrace("DRAG autoscroll speed=0");
+                }
+                return;
+            }
             var speed = drag.Machine.AutoscrollSpeed(
                 drag.LastPointerY, top, top + scroller.ActualHeight);
             if (Math.Abs(speed - drag.LastAutoscrollSpeed) > 0.5)
@@ -1928,7 +2220,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void EvaluateDrag()
     {
         if (_drag is not { } drag) return;
-        if (!_manager.Tabs.Contains(drag.Tab) || !_items.ContainsKey(drag.Tab))
+        if (!_manager.Tabs.Contains(drag.Tab) || RowElementOf(drag.Tab) is null)
         {
             CancelDrag("closed");
             return;
@@ -1985,7 +2277,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 if (drag.HidesSelectionRow) UpdateSelectionRow();
                 else UpdateRowSeparators(selectionRowVisible: true);
             }
-            if (!_items.ContainsKey(drag.Tab)) { CancelDrag("closed"); return; }
+            if (RowElementOf(drag.Tab) is null) { CancelDrag("closed"); return; }
 
             // Move clamps at the pin boundary and no-ops on collapse, so
             // read the truth back: a crossing that did not land must not
@@ -2047,7 +2339,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private double RowCenterY(TabModel tab)
     {
-        if (!_items.TryGetValue(tab, out var item) || item.ActualHeight <= 0)
+        if (RowElementOf(tab) is not { } item || item.ActualHeight <= 0)
             return double.NaN;
         try
         {

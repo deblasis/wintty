@@ -211,7 +211,8 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
                 getSnapSource: () => TabWindowActions.GetSnapSource(XamlRoot),
                 detachWithZone: (t, z) => TabWindowActions.DetachWithZone(XamlRoot, t, z));
 
-            var row = VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
+            var row = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source)
+                ?? (FrameworkElement?)VisualTreeHelperEx.FindAncestor<VerticalTabPinnedRow>(source);
             if (row is not null)
             {
                 if (e.TryGetPosition(row, out Point tabPos))
