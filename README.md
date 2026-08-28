@@ -29,13 +29,17 @@ and download it. You get both `stable` and `tip` channels and the
 sponsors-only Discord channel; Pro adds more
 ([tiers](https://wintty.io/docs/install/tiers?utm_source=gh_readme)).
 
-Requires Windows 10 (1809+) or Windows 11, x64, and a DirectX 12
+The OSS and the Sponsor versions require Windows 11, x64, and a DirectX 12
 feature-level-12.0 GPU. These builds have no software fallback, so VMs without
-GPU passthrough and Remote Desktop sessions will not start them; the Pro
-Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
+GPU passthrough and Remote Desktop sessions will not start them.
+
+The Pro Legacy tier exists for exactly those boxes, shipping a DirectX 11 renderer
 whose WARP software rasterizer engages automatically on no-GPU systems and in
 remote sessions. SmartScreen may show "Windows protected your PC" on first run
 of a newly published build (choose More info, then Run anyway).
+
+**IMPORTANT:** Do NOT trust installers and/or binaries that are not sourced from https://wintty.io/download and are not digitally signed.
+
 
 ### Build from source (free, always)
 
@@ -66,18 +70,18 @@ merges are gated: [windows/docs/tooling.md](windows/docs/tooling.md).
 >
 > <p align="center">🍬🍴</p>
 >
-> Wintty is an independent project, not affiliated with or endorsed by the
+> Wintty is an independent project, not affiliated with the
 > Ghostty project or Mitchell Hashimoto. It is a soft fork focused on
-> bringing Ghostty to Windows: the `windows` branch is the default and is
-> rebased on upstream `main` daily. 21 of this fork's build and CI PRs were
+> bringing Ghostty to Windows built with passion by a long time Windows user (3.11): the `windows` branch is the default and is
+> rebased on upstream `main` as often as possible. About 20 of this fork's build and CI PRs were
 > merged upstream before the project continued here, and since upstream is
-> not planning Windows, this is where Windows lives.
+> not planning Windows at the time of writing, this is where Windows lives I guess.
+
 
 ## What you get
 
 - Real terminal emulation on the Zig core Ghostty ships, Kitty graphics
-  protocol included (the Windows transport for it is fork work), rendered
-  through DirectX 12 with DXGI and DirectComposition (fork work)
+  protocol included 
 - A native WinUI 3 shell: vertical tabs, splits, quick terminal, command
   palette, full settings UI, profiles with shell auto-discovery, session
   restore
@@ -103,10 +107,6 @@ so embedders should expect some churn. .NET examples live in
 
 ## Roadmap
 
-Renderer throughput next: scroll optimization, adaptive presentation, waitable
-swap chains ([#93](https://github.com/deblasis/wintty/issues/93), [#94](https://github.com/deblasis/wintty/issues/94)).
-Then the native-integration gaps: system tray, "Open Terminal Here", default
-terminal handoff, multi-window ([#81](https://github.com/deblasis/wintty/issues/81)).
 The full issue tracker is the real roadmap.
 
 ## Sponsors
