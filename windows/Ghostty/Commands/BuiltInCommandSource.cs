@@ -65,6 +65,8 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.ResizeSplitRight, "Resize Split Right", "Move the nearest vertical split divider right", CommandCategory.Pane);
         AddPaneCommand(commands, PaneAction.MoveTabRight, "Move Tab Right", "Move the active tab one position right", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.MoveTabLeft, "Move Tab Left", "Move the active tab one position left", CommandCategory.Tab);
+        AddPaneCommand(commands, PaneAction.PinTab, "Pin Tab", "Pin the active tab into the pinned zone", CommandCategory.Tab, "\uE718");
+        AddPaneCommand(commands, PaneAction.UnpinTab, "Unpin Tab", "Unpin the active tab from the pinned zone", CommandCategory.Tab, "\uE77A");
         AddPaneCommand(commands, PaneAction.ToggleVerticalTabsPinned, "Toggle Vertical Tabs Pinned", "Pin or unpin the vertical tab sidebar", CommandCategory.Tab);
         AddTabLayoutSwitchCommand(commands);
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal, icon: null, pathKey: "quake");
