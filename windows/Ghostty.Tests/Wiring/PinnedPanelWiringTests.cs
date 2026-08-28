@@ -179,8 +179,7 @@ public class PinnedPanelWiringTests
     /// panel is outside selection -- so the drag machine's sub-threshold
     /// release is the only thing that can carry the activation. The
     /// press-time row decides which container the click landed in (by
-    /// release time a zone churn may have moved it), the activation is the
-    /// same fenced one the selection handler runs, and body clicks keep
+    /// release time a zone churn may have moved it), and body clicks keep
     /// flowing through MUXC untouched.
     /// </summary>
     [Fact]
@@ -196,18 +195,11 @@ public class PinnedPanelWiringTests
             .Single(i => i.Condition.ToString()
                 .Contains("drag.PressRow is VerticalTabPinnedRow"));
 
-        var activate = click.Calls("_manager.Activate").Single();
+        // The activation rides the one shared shelf seam -- Enter/Space
+        // takes the same path -- so both gestures are guaranteed the same
+        // fence. The seam's own polarity is pinned with the focus facts.
+        var activate = click.Calls("ActivateFromShelf").Single();
         Assert.Equal("drag.Tab", activate.Arg(0));
-
-        // Fenced like the selection handler's activation: Activate can
-        // surface a selection change synchronously, and an unfenced one
-        // re-enters as a choice the user did not make.
-        var fence = click.AssignsTo("_syncing")
-            .Where(a => a.Right.ToString() == "true")
-            .ToList();
-        Assert.Single(fence);
-        Assert.True(fence[0].Span.Start < activate.Span.Start,
-            "the activation must be fenced, not just performed");
     }
 
     /// <summary>

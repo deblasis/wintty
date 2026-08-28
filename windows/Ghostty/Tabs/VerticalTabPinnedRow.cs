@@ -1,3 +1,4 @@
+using Ghostty.Accessibility;
 using Ghostty.Core.Tabs;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -40,6 +41,12 @@ internal sealed partial class VerticalTabPinnedRow : Grid
         Height = RowHeight;
         // Same inset the body rows get through NavigationViewItemContentMargin.
         Margin = new Thickness(4, 2, 0, 2);
+        // Keyboard parity with the body rows: MUXC's containers are tab
+        // stops with their own arrow traversal, and this row is outside
+        // MUXC, so it carries the tab stop itself and the strip's key
+        // handler moves focus across the boundary. The drop-preview ghost
+        // is built from this same class and turns the flag back off.
+        IsTabStop = true;
         // Body rows are ListItems because MUXC says so; say it here too, so
         // a client hears one kind of thing on both sides of the boundary.
         AutomationProperties.SetAutomationControlType(
@@ -111,6 +118,15 @@ internal sealed partial class VerticalTabPinnedRow : Grid
             ? name[..2]
             : name[..1];
     }
+
+    /// <summary>
+    /// The row has to be its own peer for focus to be visible to a client
+    /// at all: a plain Grid gets no peer, and without one the keyboard
+    /// focus this row takes raises no automation focus event, so a screen
+    /// reader never knows the shelf is where focus went.
+    /// </summary>
+    protected override AutomationPeer OnCreateAutomationPeer()
+        => new VerticalTabPinnedRowAutomationPeer(this);
 
     /// <summary>Apply the ink the icon draws with. The bell stays accent.</summary>
     public void ApplyInk(Brush? foreground)
