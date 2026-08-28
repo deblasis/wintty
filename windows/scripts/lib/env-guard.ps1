@@ -2,7 +2,7 @@
 <#
     Snapshot, restore, and verify the machine state the GUI harnesses touch.
 
-    Why this exists, from two real incidents (2026-08-28):
+    Why this exists, from three real incidents (2026-08-28):
 
       A verification leg that toggles High Contrast through
       SPI_SETHIGHCONTRAST crashed mid-run and left the machine in High
@@ -15,6 +15,13 @@
       the pointer's own bits as the value, and any heap address is nonzero,
       which is TRUE. The GETs are the opposite: they write through pvParam,
       so they need a real pointer.
+
+      A crashed harness left accent-on-titles (ColorPrevalence) on with a
+      green accent, and every window on the machine drew a green border.
+      Writing the personalization values back and broadcasting provably does
+      not repaint frames that are already up; the only thing that did was
+      toggling EnableTransparency off and back on, so the restore does that
+      kick itself whenever a frame colour moved.
 
     So every SET here goes through one guarded path, and every restore is
     followed by a read-back that must equal the snapshot or the restore
@@ -34,14 +41,24 @@
                          WallpaperStyle
       app/system theme   Personalize -> AppsUseLightTheme,
                          SystemUsesLightTheme
+      frame colour       DWM personalization: Personalize -> ColorPrevalence,
+                         EnableTransparency; the DWM key's colour values
+                         (AccentColor, ColorPrevalence,
+                         EnableWindowColorization, ColorizationColor,
+                         ColorizationAfterglow); Explorer\Accent ->
+                         StartColorMenu, AccentColorMenu
 
     Dot-source it:
 
         . (Join-Path $PSScriptRoot 'lib/env-guard.ps1')
 
-    As a script it runs -SelfTest (SPI-backed round-trip on hover time, which
-    is user-invisible) or -Restore (the default snapshot path; this is what
-    `just env-restore` calls after a crashed harness).
+    As a script it runs -SelfTest (a hover-time SPI round-trip, which is
+    user-invisible, plus a ColorPrevalence flip whose restore kicks DWM and
+    flashes accent borders for under a second; the flip leg, and with it the
+    kick, is skipped where Personalize\ColorPrevalence is absent or not 0/1,
+    so a machine without it never exercises the kick path) or -Restore (the
+    default snapshot path; this is what `just env-restore` calls after a
+    crashed harness).
 #>
 param(
     [switch]$SelfTest,
@@ -113,6 +130,8 @@ $script:ThemesKey   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes'
 $script:PersonalizeKey = Join-Path $script:ThemesKey 'Personalize'
 $script:ColorsKey   = 'HKCU:\Control Panel\Colors'
 $script:DesktopKey  = 'HKCU:\Control Panel\Desktop'
+$script:AccentKey   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent'
+$script:DwmKey      = 'HKCU:\Software\Microsoft\Windows\DWM'
 
 # ---- small helpers ----------------------------------------------------------
 
@@ -230,9 +249,35 @@ function Read-EnvCurrent {
             tileWallpaper  = Get-RegValueOrNull $script:DesktopKey 'TileWallpaper'
             wallpaperStyle = Get-RegValueOrNull $script:DesktopKey 'WallpaperStyle'
         }
+        # The frame-colour half of accent personalization. AccentPalette is
+        # deliberately not captured: it is REG_BINARY, which the JSON
+        # round-trip has no plumbing for, and it feeds menus and tiles rather
+        # than the frame colour.
+        accent = [ordered]@{
+            startColorMenu  = Get-RegValueOrNull $script:AccentKey 'StartColorMenu'
+            accentColorMenu = Get-RegValueOrNull $script:AccentKey 'AccentColorMenu'
+        }
+        # What DWM itself reads when it decides whether a frame carries the
+        # accent. There are TWO ColorPrevalence values on a machine - this
+        # one and the Personalize one the Settings UI writes - and both have
+        # to come back or the restore has only half the story.
+        dwm = [ordered]@{
+            # The list is fixed rather than probed per layout: an absent
+            # value captures as null, and both the restore (null slots skip)
+            # and the read-back (null compares as empty) handle that, so a
+            # build lacking one of these is still judged, not silently
+            # narrowed.
+            accentColor              = Get-RegValueOrNull $script:DwmKey 'AccentColor'
+            colorPrevalence          = Get-RegValueOrNull $script:DwmKey 'ColorPrevalence'
+            enableWindowColorization = Get-RegValueOrNull $script:DwmKey 'EnableWindowColorization'
+            colorizationColor        = Get-RegValueOrNull $script:DwmKey 'ColorizationColor'
+            colorizationAfterglow    = Get-RegValueOrNull $script:DwmKey 'ColorizationAfterglow'
+        }
         personalize = [ordered]@{
             appsUseLightTheme   = Get-RegValueOrNull $script:PersonalizeKey 'AppsUseLightTheme'
             systemUsesLightTheme = Get-RegValueOrNull $script:PersonalizeKey 'SystemUsesLightTheme'
+            colorPrevalence    = Get-RegValueOrNull $script:PersonalizeKey 'ColorPrevalence'
+            enableTransparency = Get-RegValueOrNull $script:PersonalizeKey 'EnableTransparency'
         }
     }
 }
@@ -261,6 +306,38 @@ function Restore-EnvSnapshot {
         throw "ENV_GUARD: no snapshot at $Path; run a harness that takes one, or Save-EnvSnapshot first"
     }
     $snap = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+
+    # A snapshot that predates a group has to reach the read-back rather than
+    # die in the entry table below: indexing into a group that is not there
+    # throws, so every group read goes through a table that is empty when the
+    # snapshot lacks it. $snap itself stays untouched, because Compare is
+    # what refuses to call that restore clean.
+    $dwmSlots = if ($null -ne $snap['dwm']) { $snap['dwm'] } else { @{} }
+    $accentSlots = if ($null -ne $snap['accent']) { $snap['accent'] } else { @{} }
+    $personalizeSlots = if ($null -ne $snap['personalize']) { $snap['personalize'] } else { @{} }
+
+    # Before anything is written, ask whether a frame colour actually moved.
+    # If it did, the writes and broadcasts below put the VALUES back but
+    # provably do not repaint frames that are already on screen: in the
+    # 2026-08-28 green-border incident the registry came back exactly right
+    # and every open window kept drawing its green accent border anyway.
+    $live = Read-EnvCurrent
+    $frameColourMoved = $false
+    foreach ($name in $dwmSlots.Keys) {
+        # Absent captures as null on BOTH sides, and indexing into null
+        # throws; a machine missing one of these values is exactly when a
+        # restore gets asked for, so coerce each side through the same
+        # double-quoted comparison the read-back applies instead of crashing
+        # before any write happens.
+        $snapValue = if ($null -ne $dwmSlots[$name]) { $dwmSlots[$name]['value'] } else { $null }
+        $liveValue = if ($null -ne $live['dwm'][$name]) { $live['dwm'][$name]['value'] } else { $null }
+        if ("$snapValue" -ne "$liveValue") { $frameColourMoved = $true }
+    }
+    foreach ($name in 'colorPrevalence', 'enableTransparency') {
+        $snapValue = if ($null -ne $personalizeSlots[$name]) { $personalizeSlots[$name]['value'] } else { $null }
+        $liveValue = if ($null -ne $live['personalize'][$name]) { $live['personalize'][$name]['value'] } else { $null }
+        if ("$snapValue" -ne "$liveValue") { $frameColourMoved = $true }
+    }
 
     # --- High Contrast: write the themes state back first, then the SPI with
     # the original flags. That ordering is what the themes system itself does,
@@ -301,15 +378,27 @@ function Restore-EnvSnapshot {
     Set-SpiUint $script:SPI_SETACTIVEWNDTRKZORDER   ([uint32]($snap['tracking']['zOrder']))
     Set-SpiUint $script:SPI_SETACTIVEWNDTRKTIMEOUT  ([uint32]($snap['tracking']['timeout']))
 
-    # --- desktop and personalization, registry-backed: write, then one
-    # broadcast per section the listeners match on.
+    # --- desktop, personalization, and the frame colours, registry-backed:
+    # write, then one broadcast per section the listeners match on. The DWM
+    # and Accent values ride the Personalize section because that is the
+    # section those listeners watch; the broadcast alone does not make DWM
+    # repaint, which is what the kick below is for.
     foreach ($entry in @(
         @{ key = $script:ColorsKey;     name = 'Background';     slot = $snap['desktop']['background'];     section = 'Control Panel\Colors' },
         @{ key = $script:DesktopKey;    name = 'WallPaper';      slot = $snap['desktop']['wallpaper'];      section = 'Control Panel\Desktop' },
         @{ key = $script:DesktopKey;    name = 'TileWallpaper';  slot = $snap['desktop']['tileWallpaper'];  section = 'Control Panel\Desktop' },
         @{ key = $script:DesktopKey;    name = 'WallpaperStyle'; slot = $snap['desktop']['wallpaperStyle']; section = 'Control Panel\Desktop' },
-        @{ key = $script:PersonalizeKey; name = 'AppsUseLightTheme';    slot = $snap['personalize']['appsUseLightTheme'];    section = 'Personalize' },
-        @{ key = $script:PersonalizeKey; name = 'SystemUsesLightTheme'; slot = $snap['personalize']['systemUsesLightTheme']; section = 'Personalize' }
+        @{ key = $script:PersonalizeKey; name = 'AppsUseLightTheme';    slot = $personalizeSlots['appsUseLightTheme'];    section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'SystemUsesLightTheme'; slot = $personalizeSlots['systemUsesLightTheme']; section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'ColorPrevalence';      slot = $personalizeSlots['colorPrevalence'];      section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'EnableTransparency';   slot = $personalizeSlots['enableTransparency'];   section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'AccentColor';              slot = $dwmSlots['accentColor'];              section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorPrevalence';          slot = $dwmSlots['colorPrevalence'];          section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'EnableWindowColorization'; slot = $dwmSlots['enableWindowColorization']; section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorizationColor';        slot = $dwmSlots['colorizationColor'];        section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorizationAfterglow';    slot = $dwmSlots['colorizationAfterglow'];    section = 'Personalize' },
+        @{ key = $script:AccentKey; name = 'StartColorMenu';           slot = $accentSlots['startColorMenu'];        section = 'Personalize' },
+        @{ key = $script:AccentKey; name = 'AccentColorMenu';          slot = $accentSlots['accentColorMenu'];       section = 'Personalize' }
     )) {
         if ($null -ne $entry.slot) {
             Set-ItemProperty -LiteralPath $entry.key -Name $entry.name -Value $entry.slot['value'] -Type $entry.slot['kind']
@@ -318,6 +407,37 @@ function Restore-EnvSnapshot {
     Send-SettingChange 'Control Panel\Colors'
     Send-SettingChange 'Control Panel\Desktop'
     Send-SettingChange 'Personalize'
+
+    # The composition kick, and the only reason a restore can be seen moving:
+    # registry plus broadcast provably does not repaint existing frames (the
+    # green-border incident above), and toggling EnableTransparency off then
+    # back on is the remedy that was verified by hand, because it makes DWM
+    # re-resolve the accent and repaint every frame. It is worth its flash
+    # only when a frame colour actually moved, and it ends on the snapshot
+    # value so the read-back below still judges the restore unchanged; a
+    # restore that moved no frame colour never touches the user's
+    # transparency.
+    if ($frameColourMoved -and $null -ne $personalizeSlots['enableTransparency']) {
+        $transparency = $personalizeSlots['enableTransparency']
+        try {
+            Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value (1 - [int]$transparency['value']) -Type $transparency['kind']
+            Send-SettingChange 'Personalize'
+            Start-Sleep -Milliseconds 250
+        }
+        finally {
+            # The off half throwing must not leave the machine transparent:
+            # the write-back to the snapshot value runs no matter how the
+            # first half went, which is the same last-ditch shape the
+            # self-test's finally has.
+            Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value ([int]$transparency['value']) -Type $transparency['kind']
+            Send-SettingChange 'Personalize'
+        }
+        # Give DWM a beat on the restored value before the read-back judges.
+        # The sleep sits outside the finally because a kick failure propagates
+        # to the read-back's own throw; every path that reaches a read-back
+        # settles for this long first.
+        Start-Sleep -Milliseconds 250
+    }
 
     # --- the read-back. This is the guarantee the whole file is here for:
     # a restore that returns without this comparison passing has left the
@@ -334,7 +454,15 @@ function Compare-EnvToSnapshot {
     $current = Read-EnvCurrent
     $failures = @()
 
-    foreach ($group in 'highContrast', 'tracking', 'themes', 'desktop', 'personalize') {
+    foreach ($group in 'highContrast', 'tracking', 'themes', 'desktop', 'personalize', 'accent', 'dwm') {
+        # A group the snapshot does not have (a pre-frame-colour snapshot
+        # found by `just env-restore` after a later crash) must not read as a
+        # clean restore: an old snapshot silently skips what it never
+        # captured, which is a "probably worked" wearing a SUCCESS label.
+        if ($null -eq $Snapshot[$group]) {
+            $failures += ('{0}: missing from the snapshot; it predates this group - take a fresh snapshot' -f $group)
+            continue
+        }
         foreach ($name in $Snapshot[$group].Keys) {
             $expected = $Snapshot[$group][$name]
             $actual = $current[$group][$name]
@@ -342,8 +470,9 @@ function Compare-EnvToSnapshot {
             # SPI number; compare the value either way.
             $expectedV = if ($expected -is [hashtable] -or $expected -is [System.Collections.Specialized.OrderedDictionary]) { $expected['value'] } else { $expected }
             $actualV   = if ($actual   -is [hashtable] -or $actual   -is [System.Collections.Specialized.OrderedDictionary]) { $actual['value'] }   else { $actual }
-            # "$expected" so a DWord read back as [int] and stored as [long]
-            # by the JSON round-trip compares by value, not by type.
+            # "$expected" so a DWord the provider hands back as [uint32] and
+            # the JSON round-trip stores as [long] compares by value, not by
+            # type.
             if ("$expectedV" -ne "$actualV") {
                 $failures += ('{0}.{1}: expected [{2}], actual [{3}]' -f $group, $name, $expectedV, $actualV)
             }
@@ -385,12 +514,34 @@ if ($MyInvocation.InvocationName -ne '.') {
             # the top: state this self-test never touched has to round-trip
             # exactly or the restore's own guarantee is not real.
             Restore-EnvSnapshot -Path $scratch
+
+            # Now the changed-state path, kick included, because a kick that
+            # has never fired is exactly the "restore that probably worked"
+            # this file exists to prevent. This leg is honest about its cost:
+            # it flashes accent borders and transparency for under a second.
+            # Flip ColorPrevalence and deliberately do NOT put it back - the
+            # restore has to, and its read-back throw is the assertion.
+            $originalPrevalence = try {
+                Get-ItemPropertyValue -LiteralPath $script:PersonalizeKey -Name 'ColorPrevalence' -ErrorAction Stop
+            } catch { $null }
+            if ($originalPrevalence -eq 0 -or $originalPrevalence -eq 1) {
+                Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'ColorPrevalence' -Value (1 - $originalPrevalence) -Type DWord
+                Restore-EnvSnapshot -Path $scratch
+            }
+
             Write-Host 'SELFTEST OK'
         }
         finally {
-            # Put the knob back no matter which way the assertions above
-            # went, then drop the scratch snapshot.
+            # Put the knobs back no matter which way the assertions above
+            # went, then drop the scratch snapshot. The prevalence write is
+            # last-ditch: the restore above should already have put it back,
+            # and if it threw, the operator's machine does not keep the
+            # self-test's flip.
             Set-SpiHoverTime $original
+            if ($originalPrevalence -eq 0 -or $originalPrevalence -eq 1) {
+                Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'ColorPrevalence' -Value $originalPrevalence -Type DWord
+                Send-SettingChange 'Personalize'
+            }
             Remove-Item -LiteralPath $scratch -Force -ErrorAction SilentlyContinue
         }
         exit 0
