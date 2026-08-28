@@ -5,6 +5,8 @@ using Ghostty.Dialogs;
 using Ghostty.Input;
 using Ghostty.Panes;
 using Ghostty.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -38,6 +40,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // (which would drop the 2px progress bar and the tab-color tint).
     private readonly Dictionary<TabModel, TextBlock> _headerTextByModel = new();
     private bool _suppressSelectionEvent;
+    // From the process-wide factory rather than injected: this control is
+    // built before DI contexts exist and logs one terminal condition only.
+    private readonly ILogger _log =
+        (ILogger?)App.LoggerFactory?.CreateLogger<TabHost>() ?? NullLogger.Instance;
 
     public FrameworkElement HostElement => this;
 
@@ -79,6 +85,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // under Equal sizing, so the strip resizing moves it too.
         Loaded += (_, _) => QueueBridgeUpdate();
         TabViewControl.SizeChanged += (_, _) => UpdateSelectedTabBridge();
+
+        // The drag lifecycle gates the seam cover below: mid-drag the
+        // strip's slots are TabView's reorder preview, not the manager's
+        // order, so the cover (placed from the active item's slot) is
+        // suppressed for the drag and re-placed at the drop.
+        TabViewControl.TabDragStarting += OnTabDragStarting;
+
+        // TabView.TabItemsChanged stays unwired on purpose. It fires for
+        // this control's own writes as much as for TabView's, so a
+        // validation handler on it would re-enter the reconcile that
+        // mutates TabItems. The validation points are the reconciles in
+        // MoveItem and OnTabDragCompleted; both read the manager.
     }
 
     private void AddItem(TabModel tab)
@@ -235,10 +253,98 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void MoveItem(TabModel tab, int to)
     {
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
+        var current = TabViewControl.TabItems.IndexOf(item);
+        // A drag drop raises this event after TabView has applied the
+        // move itself, so the common case is in-place, and re-inserting
+        // at the index the item already occupies churns the strip for
+        // nothing. But "in-place" is measured against the moved item only
+        // -- Normalize can have repaired the rest of the strip around it
+        // (group re-gather), so the early return still runs the reconcile.
+        if (current == to)
+        {
+            ReconcileStripOrder();
+            return;
+        }
         TabViewControl.TabItems.Remove(item);
         TabViewControl.TabItems.Insert(to, item);
         // _paneHostContainer order does not matter — Visibility picks
         // the active one. No reorder needed there.
+
+        // The event's indices are the raw op's, and Normalize may have
+        // repaired further than the op asked; the reconcile re-derives
+        // the strip from the manager's state and owns the last word.
+        ReconcileStripOrder();
+    }
+
+    /// <summary>
+    /// Bring TabItems back into the order the manager holds, via
+    /// <see cref="TabStripProjection"/>. The repair for every seam where
+    /// the two can disagree: Normalize's silent relocations after a raw
+    /// move, and TabView's own reorder that the manager refused or
+    /// clamped. Zero ops when they already agree, so the calls on the
+    /// happy paths cost one comparison per tab.
+    /// </summary>
+    private void ReconcileStripOrder()
+    {
+        var repaired = false;
+        // ListView drops its selection when the selected item is removed
+        // and does not restore it on re-insert; live, that drop surfaces
+        // as an activation of whatever TabView picked instead. A repair
+        // must never read as a tab switch.
+        _suppressSelectionEvent = true;
+        try
+        {
+            foreach (var op in TabStripProjection.Diff(
+                TabStripProjection.Rows(_manager), StripOrder()))
+            {
+                var item = _itemByModel[op.Tab];
+                TabViewControl.TabItems.Remove(item);
+                TabViewControl.TabItems.Insert(op.To, item);
+                repaired = true;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
+        {
+            // Diff throws on membership skew, the lookup on a model
+            // without an item; neither is producible today. The pure
+            // layer keeps its throws as the oracle; here a terminal's
+            // strip must not die, so rebuild from the manager.
+            _log.LogReconcileFailed(ex);
+            RebuildStripFromManager();
+            repaired = true;
+        }
+        finally
+        {
+            _suppressSelectionEvent = false;
+        }
+        if (repaired) SelectActive();
+    }
+
+    /// <summary>
+    /// The reconcile's last resort: rebuild TabItems in manager order
+    /// from the items this host owns, repairing skew in both directions
+    /// (a tab the strip lost, an item the manager does not hold).
+    /// </summary>
+    private void RebuildStripFromManager()
+    {
+        TabViewControl.TabItems.Clear();
+        foreach (var tab in TabStripProjection.Rows(_manager))
+            if (_itemByModel.TryGetValue(tab, out var item))
+                TabViewControl.TabItems.Add(item);
+    }
+
+    /// <summary>
+    /// The strip's current order, as models. AddItem put the TabModel in
+    /// each item's DataContext, so the order reads back without a second
+    /// map to keep in step.
+    /// </summary>
+    private List<TabModel> StripOrder()
+    {
+        var order = new List<TabModel>(TabViewControl.TabItems.Count);
+        foreach (var item in TabViewControl.TabItems)
+            if (item is TabViewItem { DataContext: TabModel tab })
+                order.Add(tab);
+        return order;
     }
 
     private void SelectActive()
@@ -331,6 +437,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private void UpdateSelectedTabBridge()
     {
+        if (_stripDragActive)
+        {
+            // Mid-drag the strip's slots are TabView's reorder preview,
+            // not the manager's order; placing from them paints the cover
+            // onto a stale slot for the length of the drag. The drop
+            // re-places it.
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
+            return;
+        }
+
         var active = _manager.ActiveTab;
         if (active is null
             || !_itemByModel.TryGetValue(active, out var item)
@@ -786,8 +902,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
         e.Handled = true;
     }
 
+    /// <summary>
+    /// True while a TabView drag has the strip. The seam cover derives
+    /// from the active item's arranged slot, and during a drag that slot
+    /// is TabView's reorder preview rather than the manager's order.
+    /// </summary>
+    private bool _stripDragActive;
+
+    private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
+    {
+        _stripDragActive = true;
+        // Hidden synchronously: the drag is live from this call onward,
+        // and anything the strip does from here moves slots the manager
+        // has not agreed to yet.
+        SelectedTabSeamChanged?.Invoke(0, 0, null);
+    }
+
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
     {
+        _stripDragActive = false;
         if (args.Item is TabViewItem item)
         {
             var newIndex = TabViewControl.TabItems.IndexOf(item);
@@ -798,10 +931,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     var oldIndex = _manager.IndexOf(model);
                     if (oldIndex != newIndex && oldIndex >= 0)
                         _manager.Move(oldIndex, newIndex);
-                    return;
+                    break;
                 }
             }
         }
+        // The drop is where the two orders can end up disagreeing with
+        // nobody left to fix it: TabView has already applied whatever
+        // reorder it wanted, and the manager may have refused the move
+        // outright (an invariant clamp mutates nothing and raises
+        // nothing) or repaired further than the op asked. The strip
+        // yields to the manager; on an accepted drag this is a no-op
+        // scan.
+        ReconcileStripOrder();
+        QueueBridgeUpdate();
     }
 
     /// <summary>
@@ -1112,4 +1254,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
     }
 
+}
+
+internal static partial class TabHostLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.TabStrip.ReconcileFailed,
+                   Level = LogLevel.Error,
+                   Message = "[tabs] strip order reconcile failed; rebuilt the strip from the tab manager")]
+    internal static partial void LogReconcileFailed(
+        this ILogger logger, System.Exception ex);
 }

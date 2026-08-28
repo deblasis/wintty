@@ -267,6 +267,17 @@ internal static class SyntaxQueries
         return found[0];
     }
 
+    /// <summary>
+    /// Every assignment to a bare field name, wherever it sits. A
+    /// suppression flag is as much about position as about existing, so
+    /// callers filter on span rather than this collapsing to a bool.
+    /// </summary>
+    public static IEnumerable<AssignmentExpressionSyntax> AssignsTo(
+        this SyntaxNode node, string field)
+        => node.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is IdentifierNameSyntax id
+                        && id.Identifier.ValueText == field);
+
     /// <summary>The literal source of one argument of a call.</summary>
     public static string Arg(this InvocationExpressionSyntax call, int index)
     {
