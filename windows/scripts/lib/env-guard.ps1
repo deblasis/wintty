@@ -432,9 +432,10 @@ function Restore-EnvSnapshot {
             Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value ([int]$transparency['value']) -Type $transparency['kind']
             Send-SettingChange 'Personalize'
         }
-        # Give DWM a beat on the restored value before the read-back judges -
-        # on the failure path too, which is why the sleep sits outside the
-        # finally.
+        # Give DWM a beat on the restored value before the read-back judges.
+        # The sleep sits outside the finally because a kick failure propagates
+        # to the read-back's own throw; every path that reaches a read-back
+        # settles for this long first.
         Start-Sleep -Milliseconds 250
     }
 
