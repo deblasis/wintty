@@ -5,6 +5,8 @@ using Ghostty.Dialogs;
 using Ghostty.Input;
 using Ghostty.Panes;
 using Ghostty.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -38,6 +40,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // (which would drop the 2px progress bar and the tab-color tint).
     private readonly Dictionary<TabModel, TextBlock> _headerTextByModel = new();
     private bool _suppressSelectionEvent;
+    // From the process-wide factory rather than injected: this control is
+    // built before DI contexts exist and logs one terminal condition only.
+    private readonly ILogger _log =
+        (ILogger?)App.LoggerFactory?.CreateLogger<TabHost>() ?? NullLogger.Instance;
 
     public FrameworkElement HostElement => this;
 
@@ -80,20 +86,17 @@ internal sealed partial class TabHost : UserControl, ITabHost
         Loaded += (_, _) => QueueBridgeUpdate();
         TabViewControl.SizeChanged += (_, _) => UpdateSelectedTabBridge();
 
-        // The drag lifecycle gates the seam cover (OnTabDragStarting /
-        // OnTabDragCompleted). Mid-drag the strip's slots are TabView's
-        // reorder preview rather than the manager's order, and the cover
-        // is placed from the active item's slot, so it is suppressed for
-        // the length of the drag and re-placed at the drop.
+        // The drag lifecycle gates the seam cover below: mid-drag the
+        // strip's slots are TabView's reorder preview, not the manager's
+        // order, so the cover (placed from the active item's slot) is
+        // suppressed for the drag and re-placed at the drop.
         TabViewControl.TabDragStarting += OnTabDragStarting;
 
         // TabView.TabItemsChanged stays unwired on purpose. It fires for
-        // this control's own writes (AddItem, MoveItem, the reconcile) as
-        // much as for TabView's, so a validation handler on it would
-        // re-enter the reconcile that mutates TabItems. The validation
-        // points are the reconcile in MoveItem and the one in
-        // OnTabDragCompleted; both read the manager rather than the
-        // control.
+        // this control's own writes as much as for TabView's, so a
+        // validation handler on it would re-enter the reconcile that
+        // mutates TabItems. The validation points are the reconciles in
+        // MoveItem and OnTabDragCompleted; both read the manager.
     }
 
     private void AddItem(TabModel tab)
@@ -251,22 +254,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
         var current = TabViewControl.TabItems.IndexOf(item);
-        // A TabView drag drop raises this event after the control has
-        // already applied the move itself, so the common case is
-        // in-place. Re-inserting an item at the index it already
-        // occupies churns the strip (container regeneration) for no
-        // effect.
-        if (current == to) return;
+        // A drag drop raises this event after TabView has applied the
+        // move itself, so the common case is in-place, and re-inserting
+        // at the index the item already occupies churns the strip for
+        // nothing. But "in-place" is measured against the moved item only
+        // -- Normalize can have repaired the rest of the strip around it
+        // (group re-gather), so the early return still runs the reconcile.
+        if (current == to)
+        {
+            ReconcileStripOrder();
+            return;
+        }
         TabViewControl.TabItems.Remove(item);
         TabViewControl.TabItems.Insert(to, item);
         // _paneHostContainer order does not matter — Visibility picks
         // the active one. No reorder needed there.
 
         // The event's indices are the raw op's, and Normalize may have
-        // repaired further than the op asked (a move that breaks group
-        // contiguity re-gathers the run). The reconcile re-derives the
-        // strip from the manager's final state and owns the last word;
-        // the fast path above just settles the ordinary case in one op.
+        // repaired further than the op asked; the reconcile re-derives
+        // the strip from the manager's state and owns the last word.
         ReconcileStripOrder();
     }
 
@@ -280,13 +286,51 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     private void ReconcileStripOrder()
     {
-        foreach (var op in TabStripProjection.Diff(
-            TabStripProjection.Rows(_manager), StripOrder()))
+        var repaired = false;
+        // ListView drops its selection when the selected item is removed
+        // and does not restore it on re-insert; live, that drop surfaces
+        // as an activation of whatever TabView picked instead. A repair
+        // must never read as a tab switch.
+        _suppressSelectionEvent = true;
+        try
         {
-            var item = _itemByModel[op.Tab];
-            TabViewControl.TabItems.Remove(item);
-            TabViewControl.TabItems.Insert(op.To, item);
+            foreach (var op in TabStripProjection.Diff(
+                TabStripProjection.Rows(_manager), StripOrder()))
+            {
+                var item = _itemByModel[op.Tab];
+                TabViewControl.TabItems.Remove(item);
+                TabViewControl.TabItems.Insert(op.To, item);
+                repaired = true;
+            }
         }
+        catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
+        {
+            // Diff throws on membership skew, the lookup on a model
+            // without an item; neither is producible today. The pure
+            // layer keeps its throws as the oracle; here a terminal's
+            // strip must not die, so rebuild from the manager.
+            _log.LogReconcileFailed(ex);
+            RebuildStripFromManager();
+            repaired = true;
+        }
+        finally
+        {
+            _suppressSelectionEvent = false;
+        }
+        if (repaired) SelectActive();
+    }
+
+    /// <summary>
+    /// The reconcile's last resort: rebuild TabItems in manager order
+    /// from the items this host owns, repairing skew in both directions
+    /// (a tab the strip lost, an item the manager does not hold).
+    /// </summary>
+    private void RebuildStripFromManager()
+    {
+        TabViewControl.TabItems.Clear();
+        foreach (var tab in TabStripProjection.Rows(_manager))
+            if (_itemByModel.TryGetValue(tab, out var item))
+                TabViewControl.TabItems.Add(item);
     }
 
     /// <summary>
@@ -1210,4 +1254,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
     }
 
+}
+
+internal static partial class TabHostLogExtensions
+{
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.TabStrip.ReconcileFailed,
+                   Level = LogLevel.Error,
+                   Message = "[tabs] strip order reconcile failed; rebuilt the strip from the tab manager")]
+    internal static partial void LogReconcileFailed(
+        this ILogger logger, System.Exception ex);
 }

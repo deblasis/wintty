@@ -13,13 +13,11 @@ namespace Ghostty.Core.Tabs;
 /// <see cref="TabManager.TabMoved"/> carries the raw operation's indices,
 /// and <c>Normalize</c> may relocate tabs afterwards (a move that pulls a
 /// member out mid-run re-gathers its group). A listener replaying event
-/// indices against a live collection strands desynced; the projector
-/// reads the manager's FINAL state and describes what brings any strip
-/// back to it.
-///
-/// Group headers and collapsed chips arrive with the groups slice; until
-/// then the projection is the flat list both strips already rendered,
-/// which is what makes this seam behavior-neutral.
+/// indices strands desynced; the projector reads the manager's FINAL
+/// state and describes what brings any strip back to it. Until the
+/// groups slice lands (headers, collapsed chips) the projection is the
+/// flat list both strips already rendered, which is what makes this
+/// seam behavior-neutral.
 /// </summary>
 internal static class TabStripProjection
 {

@@ -10,14 +10,13 @@ namespace Ghostty.Tests.Tabs;
 /// The projector is the single translation point between the manager's
 /// order and what a strip renders, so these tests drive it the way the
 /// hosts do: manager mutations on one side, a live collection replaying
-/// the shell's Remove-then-Insert discipline on the other.
+/// the shell's remove-then-insert discipline on the other.
 ///
-/// The three seams here are the ones PR 2 owns (spec 10, PR 2 row):
-/// raw TabMoved indices that Normalize has since repaired, a Move the
-/// invariants clamp down to a silent no-op, and the batched TabMoved
-/// pairs of a run move. The shell cannot load into this host, so the
-/// mirror stands in for TabItems; TabStripSyncWiringTests pins the real
-/// handlers to the same replay-then-reconcile shape.
+/// The seams here are the ones PR 2 owns (spec 10): raw TabMoved
+/// indices that Normalize has since repaired, a Move the invariants
+/// clamp to a silent no-op, and the batched TabMoved pairs of a run
+/// move. The shell cannot load into this host, so the mirror stands in
+/// for TabItems; TabStripSyncWiringTests pins the real handlers.
 /// </summary>
 public class TabStripProjectionTests
 {
@@ -28,11 +27,7 @@ public class TabStripProjectionTests
         return mgr;
     }
 
-    /// <summary>
-    /// A live strip: the manager's tabs in some order, mutated only by
-    /// the shell's remove-then-insert discipline. Stands in for TabItems
-    /// / MenuItems, which this test host cannot construct.
-    /// </summary>
+    /// <summary>A live strip, mutated only by the hosts' discipline.</summary>
     private sealed class Strip
     {
         public readonly List<TabModel> Items = new();
@@ -59,10 +54,8 @@ public class TabStripProjectionTests
     }
 
     /// <summary>
-    /// OnTabDragCompleted's shape, driven against a live mirror. The
-    /// wiring test pins the real handler to the same three steps: read
-    /// the strip index, Move in manager space, reconcile the strip to
-    /// the manager's final order.
+    /// OnTabDragCompleted's shape, driven against a live mirror: read the
+    /// strip index, Move in manager space, reconcile via the projector.
     /// </summary>
     private static void CompleteDrag(TabManager mgr, Strip strip, TabModel dragged)
     {
@@ -70,9 +63,12 @@ public class TabStripProjectionTests
         int oldIndex = mgr.IndexOf(dragged);
         if (oldIndex != newIndex && oldIndex >= 0)
             mgr.Move(oldIndex, newIndex);
-        strip.Apply(TabStripProjection.Diff(
-            TabStripProjection.Rows(mgr), strip.Items));
+        Reconcile(mgr, strip);
     }
+
+    // The repair step both hosts run after any strip-side change.
+    private static void Reconcile(TabManager mgr, Strip strip)
+        => strip.Apply(TabStripProjection.Diff(TabStripProjection.Rows(mgr), strip.Items));
 
     private static int ManagerMutations(TabManager mgr, Action action)
     {
@@ -169,17 +165,15 @@ public class TabStripProjectionTests
 
         mgr.Move(1, 3); // pull B out past the run end
 
-        // The manager re-gathered the run; the event reported only the raw op.
+        // The manager re-gathered the run; the event reported only the op.
         Assert.Equal(new[] { a, c, b, x }, mgr.Tabs.ToArray());
         var move = Assert.Single(moves);
         Assert.Equal((b, 1, 3), move);
 
-        // The replay followed the event's indices and stranded desynced --
-        // the seam, observed before the repair.
+        // The replay followed the event's raw indices and stranded -- the seam.
         Assert.Equal(new[] { a, c, x, b }, strip.Items);
 
-        strip.Apply(TabStripProjection.Diff(
-            TabStripProjection.Rows(mgr), strip.Items));
+        Reconcile(mgr, strip);
 
         Assert.Equal(mgr.Tabs.ToArray(), strip.Items.ToArray());
     }
@@ -198,19 +192,18 @@ public class TabStripProjectionTests
         int moved = 0;
         mgr.TabMoved += (_, _) => moved++;
 
-        // TabView's own reorder has already put B in front of the pin; the
-        // manager is asked to ratify a move into the pinned prefix.
+        // TabView's reorder already put B in front of the pin; the manager
+        // is asked to ratify a move into the pinned prefix.
         strip.Items.Remove(b);
         strip.Items.Insert(0, b);
 
         int mutations = ManagerMutations(mgr, () => CompleteDrag(mgr, strip, b));
 
-        // The clamp reduced the move to a no-op: no list change, no event.
+        // The clamp reduced the move to a no-op: no list change, no event,
+        // and the drop's reconcile pulled the strip back to the manager.
         Assert.Equal(0, mutations);
         Assert.Equal(0, moved);
         Assert.Equal(new[] { a, b, c }, mgr.Tabs.ToArray());
-
-        // The drop's reconcile pulled the strip back to the manager's order.
         Assert.Equal(mgr.Tabs.ToArray(), strip.Items.ToArray());
     }
 
@@ -261,10 +254,8 @@ public class TabStripProjectionTests
 
                 AssertRunContiguous(mgr, group);
                 // The rotation's paired events, replayed one by one, land
-                // wherever they land; the reconcile is what guarantees the
-                // strip ends on the manager's order.
-                strip.Apply(TabStripProjection.Diff(
-                    TabStripProjection.Rows(mgr), strip.Items));
+                // wherever they land; the reconcile guarantees the ending.
+                Reconcile(mgr, strip);
                 Assert.Equal(mgr.Tabs.ToArray(), strip.Items.ToArray());
             }
         }
@@ -288,12 +279,10 @@ public class TabStripProjectionTests
 
         Assert.Equal(new[] { p, q, a, b, c }, mgr.Tabs.ToArray());
 
-        // The per-member pairs replayed one by one cannot express the
-        // block move -- the seam, observed before the repair.
+        // Per-member pairs replayed one by one cannot express the block move.
         Assert.NotEqual(mgr.Tabs.ToArray(), strip.Items.ToArray());
 
-        strip.Apply(TabStripProjection.Diff(
-            TabStripProjection.Rows(mgr), strip.Items));
+        Reconcile(mgr, strip);
 
         Assert.Equal(mgr.Tabs.ToArray(), strip.Items.ToArray());
     }
