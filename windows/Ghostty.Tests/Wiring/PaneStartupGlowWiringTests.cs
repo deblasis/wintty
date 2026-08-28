@@ -98,8 +98,8 @@ public class PaneStartupGlowWiringTests
     {
         Assert.Single(Host().Method("TeardownLeaf").Body!.Statements
             .SelectMany(s => s.DescendantNodesAndSelf())
-            .OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText() == "TeardownGlow"));
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "TeardownGlow");
     }
 
     /// <summary>
@@ -155,10 +155,10 @@ public class PaneStartupGlowWiringTests
         var host = Host();
 
         var position = host.Method("PositionGlowMount");
-        Assert.Single(position.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText() == "LeafLayoutBounds"));
-        Assert.Empty(position.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText().EndsWith("TransformToVisual", System.StringComparison.Ordinal)));
+        var calls = position.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>();
+        Assert.Single(calls, i => i.CalleeText() == "LeafLayoutBounds");
+        Assert.DoesNotContain(calls,
+            i => i.CalleeText().EndsWith("TransformToVisual", System.StringComparison.Ordinal));
 
         var leafBounds = host.Method("LeafLayoutBounds");
         Assert.Contains(leafBounds.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
