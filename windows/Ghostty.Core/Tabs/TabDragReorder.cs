@@ -37,10 +37,14 @@ public sealed class TabDragReorder
 {
     private readonly double _startThresholdPx;
     private readonly double _hysteresisPx;
-    // Arranged row centers by manager index. The strip re-feeds these
-    // from layout; between a commit and the next measurement this class
-    // keeps them true by swapping the two rows it just reordered, so a
-    // fast flick can chain crossings on stale layout.
+    // Arranged row centers as a function of slot: entry i is slot i's
+    // center for whichever row sits at manager index i. Commits leave
+    // them untouched -- rows occupy slots in manager order, so a reorder
+    // needs no surgery here -- and the only reason to re-feed is a change
+    // in row metrics: scroll, resize, membership. A re-feed must carry
+    // FINAL arranged positions, never in-flight glide positions; a
+    // center read off a row still gliding poisons the crossing
+    // thresholds and the anchor alike.
     private double[] _centers;
     private int _index;
     private TabDragPhase _phase;
@@ -92,8 +96,13 @@ public sealed class TabDragReorder
     }
 
     /// <summary>
-    /// Re-feed arranged row centers after layout or scroll. Centers the
-    /// strip has not measured yet stay as the swaps left them.
+    /// Re-feed arranged row centers. Centers are a function of slot and
+    /// survive commits untouched, so this is only needed when row metrics
+    /// change -- scroll, resize, membership -- and it must carry FINAL
+    /// arranged positions: a center read off a row still mid-glide
+    /// poisons both the crossing thresholds and the anchor. Slots the
+    /// strip cannot measure yet keep their previous value; a shrunken
+    /// strip clamps the dragged index.
     /// </summary>
     public void UpdateCenters(IReadOnlyList<double> centers)
     {
@@ -104,8 +113,13 @@ public sealed class TabDragReorder
     }
 
     /// <summary>
-    /// Re-derive the dragged row's index after a membership change mid-drag
-    /// (a tab opened or closed elsewhere): the index is manager truth.
+    /// Re-derive the dragged row's index after a membership change
+    /// elsewhere (a tab opened or closed): the index is manager truth.
+    /// Asymmetric with <see cref="UpdateCenters"/> by design: an
+    /// out-of-range index is dropped rather than clamped, because the
+    /// only way the dragged row's own index can leave range is the row
+    /// closing -- and a mid-drag close is the STRIP's job to answer with
+    /// Cancel, not an index update the machine is expected to absorb.
     /// </summary>
     public void UpdateIndex(int index)
     {
@@ -113,9 +127,22 @@ public sealed class TabDragReorder
         _index = index;
     }
 
-    /// <summary>Arranged center the machine currently believes row <c>index</c> has.</summary>
+    /// <summary>
+    /// Arranged center the machine currently believes the row at
+    /// <c>index</c> has. Throws for any index outside the strip: asking
+    /// about a row the machine does not know is a strip bug, and
+    /// laundering it as 0 would bend a crossing past the first slot.
+    /// Bounds come from <see cref="RowCount"/>.
+    /// </summary>
     public double CenterOf(int index)
-        => index >= 0 && index < _centers.Length ? _centers[index] : 0;
+    {
+        if (index < 0 || index >= _centers.Length)
+            throw new ArgumentOutOfRangeException(nameof(index));
+        return _centers[index];
+    }
+
+    /// <summary>How many rows the machine currently holds centers for.</summary>
+    public int RowCount => _centers.Length;
 
     /// <summary>
     /// Commit-on-center-crossing: the dragged row's center against its
@@ -179,7 +206,12 @@ public sealed class TabDragReorder
     /// <summary>Feed the velocity window. <paramref name="ms"/> is monotonic.</summary>
     public void SampleVelocity(double y, double ms)
     {
-        _samples.RemoveAll(s => s.Ms < ms - TabStripMotion.VelocityWindowMs);
+        // Front-prune rather than RemoveAll: this runs per pointer move,
+        // and a lambda there allocates a closure on every call.
+        double cutoff = ms - TabStripMotion.VelocityWindowMs;
+        int stale = 0;
+        while (stale < _samples.Count && _samples[stale].Ms < cutoff) stale++;
+        if (stale > 0) _samples.RemoveRange(0, stale);
         _samples.Add((ms, y));
     }
 
@@ -190,6 +222,15 @@ public sealed class TabDragReorder
     /// AWAY from the slot carries no settle velocity at all -- the
     /// spring owns the direction, and handing it a fling against the
     /// travel would throw the row the wrong way before reeling it back.
+    ///
+    /// <paramref name="remainingDistancePx"/> is signed on the same axis
+    /// as <see cref="SampleVelocity"/>, positive = down; passing a bare
+    /// magnitude makes every velocity read as running away from the slot
+    /// and this guard kills legitimate upward settles.
+    ///
+    /// Read BEFORE <see cref="Drop"/> or <see cref="Cancel"/>: both clear
+    /// the sample window, so the natural call order reports 0 forever
+    /// with every test still green.
     /// </summary>
     public double ReleaseVelocity(double remainingDistancePx)
     {
@@ -208,7 +249,8 @@ public sealed class TabDragReorder
     /// Terminal: pointer released over a live drag. Returns the dragged
     /// row's committed index; the manager already holds it. A release
     /// that never lifted past the start threshold was a click, not a
-    /// drag, and reports -1.
+    /// drag, and reports -1. Clears the velocity window, so read
+    /// <see cref="ReleaseVelocity"/> first.
     /// </summary>
     public int Drop()
     {

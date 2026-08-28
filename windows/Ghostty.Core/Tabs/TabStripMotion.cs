@@ -59,6 +59,15 @@ internal static class TabStripMotion
     /// animation effects are on and High Contrast is not. Disabled means
     /// every spring collapses to a cut; state correctness never waits on
     /// an animation completing.
+    ///
+    /// The strip's sources for the two flags: animationsEnabled is
+    /// UISettings.AnimationsEnabled (UISettings is thread-affine -- read
+    /// it on the dispatcher); highContrast is
+    /// HighContrastDetector.IsActive() COMPOSED through
+    /// HighContrastState.ShouldApply, because raw IsActive diverges from
+    /// the chrome whenever the user has opted out of High Contrast
+    /// themes. There is no existing animation-preference read anywhere
+    /// else in the repo to reuse.
     /// </summary>
     public static bool Enabled(bool animationsEnabled, bool highContrast)
         => animationsEnabled && !highContrast;

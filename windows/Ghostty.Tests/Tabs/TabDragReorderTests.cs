@@ -34,6 +34,17 @@ public class TabDragReorderTests
     }
 
     [Fact]
+    public void Begin_exactly_at_the_threshold_lifts()
+    {
+        var machine = NewMachine();
+        machine.Press(20);
+
+        // |24 - 20| == GrabStartThresholdPx: the threshold is inclusive.
+        Assert.True(machine.Begin(24));
+        Assert.Equal(TabDragPhase.Dragging, machine.Phase);
+    }
+
+    [Fact]
     public void Threshold_travel_lifts_to_dragging()
     {
         var machine = NewMachine();
@@ -156,14 +167,42 @@ public class TabDragReorderTests
     }
 
     [Fact]
+    public void An_out_of_range_index_update_is_dropped_not_clamped()
+    {
+        // The asymmetry with UpdateCenters is deliberate: the dragged
+        // row's index only leaves range when the row itself closed, and
+        // answering that is the strip's Cancel job, not an absorb-here.
+        var machine = NewMachine(grabIndex: 2);
+        machine.Press(100);
+        machine.Begin(110);
+        machine.UpdateIndex(9);
+
+        Assert.Equal(2, machine.Index);
+    }
+
+    [Fact]
+    public void Center_of_a_row_the_machine_does_not_know_throws()
+    {
+        var machine = NewMachine();
+        Assert.Equal(4, machine.RowCount);
+
+        // A zero for an unknown row would launder a strip bug into a
+        // crossing bent past the first slot.
+        Assert.Throws<ArgumentOutOfRangeException>(() => machine.CenterOf(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => machine.CenterOf(4));
+    }
+
+    [Fact]
     public void Autoscroll_ramps_with_edge_distance_and_signs_by_edge()
     {
         var machine = NewMachine();
         const double top = 100, bottom = 500;
 
         Assert.Equal(0, machine.AutoscrollSpeed(300, top, bottom));
+        // Exactly AutoscrollBandPx from the edge is still in the band and
+        // pays the base speed; the guard is strictly greater-than.
         Assert.Equal(-TabStripMotion.AutoscrollBasePxPerSecond,
-            machine.AutoscrollSpeed(124, top, bottom));
+            machine.AutoscrollSpeed(top + TabStripMotion.AutoscrollBandPx, top, bottom));
         Assert.Equal(-TabStripMotion.AutoscrollMaxPxPerSecond,
             machine.AutoscrollSpeed(95, top, bottom));
         Assert.Equal(TabStripMotion.AutoscrollMaxPxPerSecond,
@@ -190,7 +229,24 @@ public class TabDragReorderTests
 
         // Only the trailing pair survives the window: 50 -> 55 over 50ms
         // is 100 px/s downward, not the 20,000 px/s the expired pair saw.
-        Assert.InRange(machine.ReleaseVelocity(1000), 80, 120);
+        Assert.Equal(100, machine.ReleaseVelocity(1000), 1);
+    }
+
+    [Fact]
+    public void Release_velocity_after_drop_is_zero_the_window_is_cleared()
+    {
+        var machine = NewMachine();
+        machine.Press(0);
+        machine.Begin(10);
+        machine.SampleVelocity(0, 0);
+        machine.SampleVelocity(500, 10);
+        machine.Drop();
+
+        // Drop retires the gesture and clears the sample window with it:
+        // the release velocity must be read BEFORE Drop. Pinned as
+        // documented behavior, because the natural call order reports 0
+        // with every other test still green.
+        Assert.Equal(0, machine.ReleaseVelocity(60));
     }
 
     [Fact]
