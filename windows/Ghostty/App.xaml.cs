@@ -392,6 +392,14 @@ public partial class App : Application
         {
             LogUnhandled("UNOBSERVED TASK", e.Exception.ToString());
         };
+
+        // Program registers its own AppDomain handler at the top of Main so
+        // the CLI, which never builds an App, still reports an unhandled
+        // exception off the main thread (#442). From here on this process is
+        // the GUI and the handlers above own that class, so Program's stands
+        // down. Last, deliberately: until this line both are registered, and
+        // an overlap costs a duplicate log while a gap costs the report.
+        Program.HandOffUnhandledReporting();
     }
 
     private static void LogUnhandled(string tag, string detail)

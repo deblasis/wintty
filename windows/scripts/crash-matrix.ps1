@@ -95,18 +95,23 @@ $matrix = @(
     # so SetUnhandledExceptionFilter never runs and nothing is captured. Same
     # result as env-failfast, by the same mechanism.
     #
-    # No crash log either, and that is the CLI telling the truth rather than a
-    # gap: the handler that writes one is registered in App.xaml.cs, which is
-    # the GUI, and the CLI path runs in Program.MainImpl before any App
-    # exists. That handler is what covers this class in the shipped app, with
-    # a managed stack trace, and it is measured through the palette the way
-    # the libghostty rows are.
+    # A crash log, though, and the exit code is what says the fix is real
+    # rather than a regression: the process still dies at 0xC0000409 and
+    # still produces no envelope, and it now leaves the artifact the
+    # ownership rule assigns to a managed exception.
     #
-    # This row used to expect a log, and got one, because the throw was caught
-    # by Main's catch-all and turned into ReportFatal: the process never
-    # crashed and the row passed for the wrong reason. The trigger now throws
-    # from its own thread.
-    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $false; ExitCode = -1073740791 }
+    # This row expected NO log until Program.Main started registering an
+    # AppDomain.CurrentDomain.UnhandledException handler of its own. Before
+    # that, the only such handler lived in App.xaml.cs, so the CLI - which
+    # builds no App - reported this class nowhere at all. That was the gap,
+    # not the truth, and it was the whole of issue #442.
+    #
+    # Read the pair, not the row: a log WITHOUT 0xC0000409 would mean the
+    # throw was caught somewhere and the process never crashed, which is how
+    # this row passed for the wrong reason once before, back when the trigger
+    # threw inline and Main's catch-all turned it into a clean ReportFatal.
+    # The trigger throws from its own thread precisely so that cannot recur.
+    @{ Kind = 'managed-unhandled'; Envelope = $false; CrashLog = $true;  ExitCode = -1073740791 }
     @{ Kind = 'env-failfast';      Envelope = $false; CrashLog = $false; ExitCode = -1073740791 }
     @{ Kind = 'stack-overflow';    Envelope = $false; CrashLog = $false; ExitCode = -1073741571 }
     # Zero, and it is load-bearing: this row exists to prove a thousand
@@ -219,10 +224,18 @@ function Get-EnvelopeSet {
         Select-Object -ExpandProperty Name)
 }
 
-# The managed handler uses File.WriteAllText, which OVERWRITES. Detecting a
-# crash log by growth therefore misses every row after the first: a shorter
-# exception replaces a longer one and the length goes down. Identify the file
-# by its contents instead, so "was it rewritten" is what gets measured.
+# Identify the crash log by its CONTENTS, not by its size.
+#
+# The reason has changed once already and the stamp survived both, which is
+# why it is worth writing down. The managed handler used to call
+# File.WriteAllText, which overwrites: detecting a log by growth missed every
+# row after the first, because a shorter exception replaced a longer one and
+# the length went DOWN. It now appends (each entry delimited and timestamped),
+# so growth would work again - but a hash still measures the right thing and a
+# length no longer distinguishes two crashes that happen to write the same
+# number of bytes. Appending also makes the hash strictly better than it was:
+# two identical exceptions in a row used to produce byte-identical files and
+# now cannot.
 function Get-CrashLogStamp {
     if (-not (Test-Path $CrashLog)) { return '<absent>' }
     $item = Get-Item $CrashLog
