@@ -167,6 +167,14 @@
     <EmbeddedResource Include="..\Ghostty\Tabs\TabColorPalettePicker.xaml"
                       Link="Tabs\TabColorPalettePicker.xaml"
                       LogicalName="Ghostty.Tests.Tabs.TabColorPalettePicker.xaml" />
+    <!--
+      TabHost.xaml, for the unwired-event censuses in TabStripSyncWiringTests:
+      a XAML event attribute is invisible to the .cs source sweep. Dotted
+      LogicalName, so suffix matching does not depend on the path separator.
+    -->
+    <EmbeddedResource Include="..\Ghostty\Tabs\TabHost.xaml"
+                      Link="Tabs\TabHost.xaml"
+                      LogicalName="Ghostty.Tests.Tabs.TabHost.xaml" />
     <EmbeddedResource Include="..\Ghostty\Tabs\VerticalTabStrip.xaml"
                       Link="Tabs\VerticalTabStrip.xaml"
                       LogicalName="Ghostty.Tests.Tabs.VerticalTabStrip.xaml" />

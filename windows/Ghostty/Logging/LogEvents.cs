@@ -113,4 +113,10 @@ internal static class LogEvents
     {
         public const int SwapChainInitFailed = 3000;
     }
+
+    // 3100-3199: Tab strip
+    internal static class TabStrip
+    {
+        public const int ReconcileFailed = 3100; // TabHost
+    }
 }
