@@ -899,6 +899,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         t.GotFocus -= OnTerminalGotFocus;
         t.CloseRequested -= OnTerminalCloseRequested;
         t.ContextMenuRequested -= OnTerminalContextMenuRequested;
+        t.PwdChanged -= OnTerminalPwdChanged;
         t.DisposeSurface();
     }
 
@@ -1326,7 +1327,16 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // multi-pane closing collapses correctly.
         t.CloseRequested += OnTerminalCloseRequested;
         t.ContextMenuRequested += OnTerminalContextMenuRequested;
+        t.PwdChanged += OnTerminalPwdChanged;
         return t;
+    }
+
+    private void OnTerminalPwdChanged(object? sender, string? pwd)
+    {
+        if (sender is not TerminalControl tc) return;
+        var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), tc));
+        if (leaf is null) return;
+        leaf.LastCwd = pwd;
     }
 
     private void OnTerminalContextMenuRequested(object? sender, Windows.Foundation.Point? position)

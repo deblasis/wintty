@@ -96,6 +96,13 @@ internal sealed class LeafDto : PaneNodeDto
 
     /// <summary>Replayed verbatim if <see cref="ProfileId"/> no longer resolves.</summary>
     public LeafCommand? Fallback { get; set; }
+
+    /// <summary>
+    /// The pane's last-reported directory (OSC 7), or null when the shell
+    /// never reported one. The resolver spawns the rebuilt pane here in
+    /// preference to the profile's static working-directory.
+    /// </summary>
+    public string? Cwd { get; set; }
 }
 
 internal sealed class SplitDto : PaneNodeDto
