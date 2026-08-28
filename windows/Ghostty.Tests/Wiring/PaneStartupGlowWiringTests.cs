@@ -26,6 +26,11 @@ public class PaneStartupGlowWiringTests
 
     private static ShellSource ConfigService() => ShellSource.Load("Services.ConfigService.cs");
 
+    private static string ZIndex(ShellSource source, string element) =>
+        source.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => i.CalleeText() == "Canvas.SetZIndex" && i.Arg(0) == element)
+            .Arg(1);
+
     /// <summary>
     /// SurfaceSpawned is the glow's start gun, and it is only correct at the
     /// tail of OnLoaded: before that statement the surface either does not
@@ -127,12 +132,8 @@ public class PaneStartupGlowWiringTests
     {
         var host = Host();
 
-        var zindex = host.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText() == "Canvas.SetZIndex")
-            .ToDictionary(i => i.Arg(0), i => i.Arg(1));
-
-        Assert.Equal("998", zindex["mount"]);
-        Assert.Equal("999", zindex["_activeBorderFrame"]);
+        Assert.Equal("998", ZIndex(host, "mount"));
+        Assert.Equal("999", ZIndex(host, "_activeBorderFrame"));
 
         // The mount is a child of the overlay, the same surface the active
         // border draws on, so the two z-values are the whole ordering.
@@ -177,9 +178,9 @@ public class PaneStartupGlowWiringTests
             .Select(i => i.Condition.ToString())
             .ToList();
 
-        Assert.Contains("_startupGlowEnabled", guards);
+        Assert.Contains("!_startupGlowEnabled", guards);
         Assert.True(
-            guards.IndexOf("_startupGlowEnabled") < guards.IndexOf("_glowStates.ContainsKey(terminal)"),
+            guards.IndexOf("!_startupGlowEnabled") < guards.IndexOf("_glowStates.ContainsKey(terminal)"),
             "the enablement guard must come before the already-glowing guard");
     }
 
