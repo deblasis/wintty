@@ -1,0 +1,141 @@
+using Ghostty.Core.Tabs;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+
+namespace Ghostty.Tabs;
+
+/// <summary>
+/// Icon-only row for a pinned tab in the fixed panel above the scrolling
+/// list. Deliberately not a <see cref="NavigationViewItem"/>: the panel
+/// must neither scroll nor take part in MUXC selection, so the row is a
+/// plain element the strip hosts in its PaneCustomContent. There is no
+/// room for a title, so it rides the tooltip, and the accessible name and
+/// the "Pinned" status sit on the row itself, which is the leaf the
+/// automation tree sees here.
+/// </summary>
+internal sealed partial class VerticalTabPinnedRow : Grid
+{
+    /// <summary>Row height. Fits the 48px compact pane with its inset.</summary>
+    internal const double RowHeight = 40;
+
+    /// <summary>The icon slot is a square, the one shape both pane widths agree on.</summary>
+    private const double IconSlotSize = 40;
+
+    private readonly Grid _iconSlot;
+    private readonly FontIcon _bell;
+    private IconElement? _icon;
+    private TextBlock? _iconFallback;
+
+    public VerticalTabPinnedRow(TabModel tab, SolidColorBrush accentBrush)
+    {
+        Tag = tab;
+        // Transparent, not null: a null background leaves the row's empty
+        // span to hit-test through to the pane, so clicks and presses off
+        // the icon would fall through entirely. Body rows hit-test
+        // full-bleed through their template; this is that parity.
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Height = RowHeight;
+        // Same inset the body rows get through NavigationViewItemContentMargin.
+        Margin = new Thickness(4, 2, 0, 2);
+        // Body rows are ListItems because MUXC says so; say it here too, so
+        // a client hears one kind of thing on both sides of the boundary.
+        AutomationProperties.SetAutomationControlType(
+            this, AutomationControlType.ListItem);
+
+        _iconSlot = new Grid
+        {
+            Width = IconSlotSize,
+            Height = IconSlotSize,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Children.Add(_iconSlot);
+
+        // Over the icon's corner, so the row reads as "this icon is ringing"
+        // whether the pane is 48px or 220px wide.
+        _bell = new FontIcon
+        {
+            Glyph = "\uEA8F",
+            FontSize = 9,
+            Foreground = accentBrush,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed,
+        };
+        _iconSlot.Children.Add(_bell);
+
+        Refresh(tab);
+    }
+
+    /// <summary>Swap the row's icon for a freshly built one.</summary>
+    public void SetIcon(IconElement? icon)
+    {
+        if (_icon is not null) _iconSlot.Children.Remove(_icon);
+        if (_iconFallback is not null) _iconSlot.Children.Remove(_iconFallback);
+        _icon = icon;
+        _iconFallback = null;
+
+        if (icon is not null)
+        {
+            // Below the bell (slot 0): the bell badge paints over the icon's
+            // corner, and a later child renders on top of an earlier one.
+            _iconSlot.Children.Insert(0, icon);
+        }
+        else
+        {
+            // An icon-only row with nothing in it is a blank slot: fall back
+            // to the title's initial, the same stand-in a collapsed body row
+            // reads as when the foreground process has no icon.
+            if (Tag is not TabModel tab) return;
+            _iconFallback = new TextBlock
+            {
+                Text = InitialOf(TabAccessibleText.Name(tab)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            _iconSlot.Children.Insert(0, _iconFallback);
+        }
+    }
+
+    /// <summary>
+    /// The title's first character, as a whole character: a title opening
+    /// with an astral character is a surrogate pair, and halving one draws
+    /// U+FFFD where the initial should be.
+    /// </summary>
+    private static string InitialOf(string name)
+    {
+        if (name.Length == 0) return "?";
+        return char.IsHighSurrogate(name[0]) && name.Length > 1 && char.IsLowSurrogate(name[1])
+            ? name[..2]
+            : name[..1];
+    }
+
+    /// <summary>Apply the ink the icon draws with. The bell stays accent.</summary>
+    public void ApplyInk(Brush? foreground)
+    {
+        if (_icon is not null)
+        {
+            if (foreground is not null) _icon.Foreground = foreground;
+            else _icon.ClearValue(IconElement.ForegroundProperty);
+        }
+        if (_iconFallback is not null)
+        {
+            if (foreground is not null) _iconFallback.Foreground = foreground;
+            else _iconFallback.ClearValue(TextBlock.ForegroundProperty);
+        }
+    }
+
+    /// <summary>
+    /// Everything that follows the tab's title or transient state: the
+    /// tooltip, the bell, and the text an assistive client reads.
+    /// </summary>
+    public void Refresh(TabModel tab)
+    {
+        ToolTipService.SetToolTip(this, tab.EffectiveTitle);
+        AutomationProperties.SetName(this, TabAccessibleText.Name(tab));
+        AutomationProperties.SetItemStatus(this, TabAccessibleText.Status(tab));
+        _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
+    }
+}
