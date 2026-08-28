@@ -54,9 +54,11 @@
 
     As a script it runs -SelfTest (a hover-time SPI round-trip, which is
     user-invisible, plus a ColorPrevalence flip whose restore kicks DWM and
-    flashes accent borders for under a second) or -Restore (the default
-    snapshot path; this is what `just env-restore` calls after a crashed
-    harness).
+    flashes accent borders for under a second; the flip leg, and with it the
+    kick, is skipped where Personalize\ColorPrevalence is absent or not 0/1,
+    so a machine without it never exercises the kick path) or -Restore (the
+    default snapshot path; this is what `just env-restore` calls after a
+    crashed harness).
 #>
 param(
     [switch]$SelfTest,
@@ -260,9 +262,11 @@ function Read-EnvCurrent {
         # one and the Personalize one the Settings UI writes - and both have
         # to come back or the restore has only half the story.
         dwm = [ordered]@{
-            # accentColorInactive is absent on this build; Get-RegValueOrNull
-            # captures an absent value as null, which restores as a skip, so
-            # the capture list is the same on every layout.
+            # The list is fixed rather than probed per layout: an absent
+            # value captures as null, and both the restore (null slots skip)
+            # and the read-back (null compares as empty) handle that, so a
+            # build lacking one of these is still judged, not silently
+            # narrowed.
             accentColor              = Get-RegValueOrNull $script:DwmKey 'AccentColor'
             colorPrevalence          = Get-RegValueOrNull $script:DwmKey 'ColorPrevalence'
             enableWindowColorization = Get-RegValueOrNull $script:DwmKey 'EnableWindowColorization'
@@ -303,6 +307,15 @@ function Restore-EnvSnapshot {
     }
     $snap = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
 
+    # A snapshot that predates a group has to reach the read-back rather than
+    # die in the entry table below: indexing into a group that is not there
+    # throws, so every group read goes through a table that is empty when the
+    # snapshot lacks it. $snap itself stays untouched, because Compare is
+    # what refuses to call that restore clean.
+    $dwmSlots = if ($null -ne $snap['dwm']) { $snap['dwm'] } else { @{} }
+    $accentSlots = if ($null -ne $snap['accent']) { $snap['accent'] } else { @{} }
+    $personalizeSlots = if ($null -ne $snap['personalize']) { $snap['personalize'] } else { @{} }
+
     # Before anything is written, ask whether a frame colour actually moved.
     # If it did, the writes and broadcasts below put the VALUES back but
     # provably do not repaint frames that are already on screen: in the
@@ -310,17 +323,20 @@ function Restore-EnvSnapshot {
     # and every open window kept drawing its green accent border anyway.
     $live = Read-EnvCurrent
     $frameColourMoved = $false
-    foreach ($name in $snap['dwm'].Keys) {
-        # A null slot is a value the snapshotted machine did not have, and
-        # indexing into null throws; go through the same double-quoted
-        # coercion the read-back applies, so absent compares as empty rather
-        # than crashing the restore.
-        $snapValue = if ($null -ne $snap['dwm'][$name]) { $snap['dwm'][$name]['value'] } else { $null }
-        if ("$snapValue" -ne "$($live['dwm'][$name]['value'])") { $frameColourMoved = $true }
+    foreach ($name in $dwmSlots.Keys) {
+        # Absent captures as null on BOTH sides, and indexing into null
+        # throws; a machine missing one of these values is exactly when a
+        # restore gets asked for, so coerce each side through the same
+        # double-quoted comparison the read-back applies instead of crashing
+        # before any write happens.
+        $snapValue = if ($null -ne $dwmSlots[$name]) { $dwmSlots[$name]['value'] } else { $null }
+        $liveValue = if ($null -ne $live['dwm'][$name]) { $live['dwm'][$name]['value'] } else { $null }
+        if ("$snapValue" -ne "$liveValue") { $frameColourMoved = $true }
     }
     foreach ($name in 'colorPrevalence', 'enableTransparency') {
-        $snapValue = if ($null -ne $snap['personalize'][$name]) { $snap['personalize'][$name]['value'] } else { $null }
-        if ("$snapValue" -ne "$($live['personalize'][$name]['value'])") { $frameColourMoved = $true }
+        $snapValue = if ($null -ne $personalizeSlots[$name]) { $personalizeSlots[$name]['value'] } else { $null }
+        $liveValue = if ($null -ne $live['personalize'][$name]) { $live['personalize'][$name]['value'] } else { $null }
+        if ("$snapValue" -ne "$liveValue") { $frameColourMoved = $true }
     }
 
     # --- High Contrast: write the themes state back first, then the SPI with
@@ -372,17 +388,17 @@ function Restore-EnvSnapshot {
         @{ key = $script:DesktopKey;    name = 'WallPaper';      slot = $snap['desktop']['wallpaper'];      section = 'Control Panel\Desktop' },
         @{ key = $script:DesktopKey;    name = 'TileWallpaper';  slot = $snap['desktop']['tileWallpaper'];  section = 'Control Panel\Desktop' },
         @{ key = $script:DesktopKey;    name = 'WallpaperStyle'; slot = $snap['desktop']['wallpaperStyle']; section = 'Control Panel\Desktop' },
-        @{ key = $script:PersonalizeKey; name = 'AppsUseLightTheme';    slot = $snap['personalize']['appsUseLightTheme'];    section = 'Personalize' },
-        @{ key = $script:PersonalizeKey; name = 'SystemUsesLightTheme'; slot = $snap['personalize']['systemUsesLightTheme']; section = 'Personalize' },
-        @{ key = $script:PersonalizeKey; name = 'ColorPrevalence';      slot = $snap['personalize']['colorPrevalence'];      section = 'Personalize' },
-        @{ key = $script:PersonalizeKey; name = 'EnableTransparency';   slot = $snap['personalize']['enableTransparency'];   section = 'Personalize' },
-        @{ key = $script:DwmKey;    name = 'AccentColor';              slot = $snap['dwm']['accentColor'];              section = 'Personalize' },
-        @{ key = $script:DwmKey;    name = 'ColorPrevalence';          slot = $snap['dwm']['colorPrevalence'];          section = 'Personalize' },
-        @{ key = $script:DwmKey;    name = 'EnableWindowColorization'; slot = $snap['dwm']['enableWindowColorization']; section = 'Personalize' },
-        @{ key = $script:DwmKey;    name = 'ColorizationColor';        slot = $snap['dwm']['colorizationColor'];        section = 'Personalize' },
-        @{ key = $script:DwmKey;    name = 'ColorizationAfterglow';    slot = $snap['dwm']['colorizationAfterglow'];    section = 'Personalize' },
-        @{ key = $script:AccentKey; name = 'StartColorMenu';           slot = $snap['accent']['startColorMenu'];        section = 'Personalize' },
-        @{ key = $script:AccentKey; name = 'AccentColorMenu';          slot = $snap['accent']['accentColorMenu'];       section = 'Personalize' }
+        @{ key = $script:PersonalizeKey; name = 'AppsUseLightTheme';    slot = $personalizeSlots['appsUseLightTheme'];    section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'SystemUsesLightTheme'; slot = $personalizeSlots['systemUsesLightTheme']; section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'ColorPrevalence';      slot = $personalizeSlots['colorPrevalence'];      section = 'Personalize' },
+        @{ key = $script:PersonalizeKey; name = 'EnableTransparency';   slot = $personalizeSlots['enableTransparency'];   section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'AccentColor';              slot = $dwmSlots['accentColor'];              section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorPrevalence';          slot = $dwmSlots['colorPrevalence'];          section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'EnableWindowColorization'; slot = $dwmSlots['enableWindowColorization']; section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorizationColor';        slot = $dwmSlots['colorizationColor'];        section = 'Personalize' },
+        @{ key = $script:DwmKey;    name = 'ColorizationAfterglow';    slot = $dwmSlots['colorizationAfterglow'];    section = 'Personalize' },
+        @{ key = $script:AccentKey; name = 'StartColorMenu';           slot = $accentSlots['startColorMenu'];        section = 'Personalize' },
+        @{ key = $script:AccentKey; name = 'AccentColorMenu';          slot = $accentSlots['accentColorMenu'];       section = 'Personalize' }
     )) {
         if ($null -ne $entry.slot) {
             Set-ItemProperty -LiteralPath $entry.key -Name $entry.name -Value $entry.slot['value'] -Type $entry.slot['kind']
@@ -401,13 +417,24 @@ function Restore-EnvSnapshot {
     # value so the read-back below still judges the restore unchanged; a
     # restore that moved no frame colour never touches the user's
     # transparency.
-    if ($frameColourMoved -and $null -ne $snap['personalize']['enableTransparency']) {
-        $transparency = $snap['personalize']['enableTransparency']
-        Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value (1 - [int]$transparency['value']) -Type $transparency['kind']
-        Send-SettingChange 'Personalize'
-        Start-Sleep -Milliseconds 250
-        Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value ([int]$transparency['value']) -Type $transparency['kind']
-        Send-SettingChange 'Personalize'
+    if ($frameColourMoved -and $null -ne $personalizeSlots['enableTransparency']) {
+        $transparency = $personalizeSlots['enableTransparency']
+        try {
+            Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value (1 - [int]$transparency['value']) -Type $transparency['kind']
+            Send-SettingChange 'Personalize'
+            Start-Sleep -Milliseconds 250
+        }
+        finally {
+            # The off half throwing must not leave the machine transparent:
+            # the write-back to the snapshot value runs no matter how the
+            # first half went, which is the same last-ditch shape the
+            # self-test's finally has.
+            Set-ItemProperty -LiteralPath $script:PersonalizeKey -Name 'EnableTransparency' -Value ([int]$transparency['value']) -Type $transparency['kind']
+            Send-SettingChange 'Personalize'
+        }
+        # Give DWM a beat on the restored value before the read-back judges -
+        # on the failure path too, which is why the sleep sits outside the
+        # finally.
         Start-Sleep -Milliseconds 250
     }
 
@@ -427,6 +454,14 @@ function Compare-EnvToSnapshot {
     $failures = @()
 
     foreach ($group in 'highContrast', 'tracking', 'themes', 'desktop', 'personalize', 'accent', 'dwm') {
+        # A group the snapshot does not have (a pre-frame-colour snapshot
+        # found by `just env-restore` after a later crash) must not read as a
+        # clean restore: an old snapshot silently skips what it never
+        # captured, which is a "probably worked" wearing a SUCCESS label.
+        if ($null -eq $Snapshot[$group]) {
+            $failures += ('{0}: missing from the snapshot; it predates this group - take a fresh snapshot' -f $group)
+            continue
+        }
         foreach ($name in $Snapshot[$group].Keys) {
             $expected = $Snapshot[$group][$name]
             $actual = $current[$group][$name]
@@ -434,8 +469,9 @@ function Compare-EnvToSnapshot {
             # SPI number; compare the value either way.
             $expectedV = if ($expected -is [hashtable] -or $expected -is [System.Collections.Specialized.OrderedDictionary]) { $expected['value'] } else { $expected }
             $actualV   = if ($actual   -is [hashtable] -or $actual   -is [System.Collections.Specialized.OrderedDictionary]) { $actual['value'] }   else { $actual }
-            # "$expected" so a DWord read back as [int] and stored as [long]
-            # by the JSON round-trip compares by value, not by type.
+            # "$expected" so a DWord the provider hands back as [uint32] and
+            # the JSON round-trip stores as [long] compares by value, not by
+            # type.
             if ("$expectedV" -ne "$actualV") {
                 $failures += ('{0}.{1}: expected [{2}], actual [{3}]' -f $group, $name, $expectedV, $actualV)
             }
