@@ -409,6 +409,22 @@ public static partial class Program
         // native/ghostty.dll would otherwise unwind this delegate unhandled
         // and abort with an exit code that is none of the ExitCode values
         // callers are told to discriminate on.
+        // The catch below only sees exceptions that unwind out of MainImpl on
+        // THIS thread. An unhandled exception on any other thread does not
+        // unwind anywhere: it goes straight to RaiseFailFastException, which
+        // under NativeAOT bypasses SetUnhandledExceptionFilter too, so sentry
+        // never sees it either. Measured on a published build, that left
+        // `wintty +crash managed-unhandled` exiting 0xC0000409 with no crash
+        // log and no envelope: nothing anywhere recorded it (#442).
+        //
+        // The GUI has never had this hole, because App's constructor installs
+        // the same handler. This is the CLI, which builds no App at all, plus
+        // the stretch of MainImpl that runs before one exists on either path.
+        // Handed off to App rather than left registered alongside it, so the
+        // GUI keeps producing exactly one artifact; see
+        // HandOffUnhandledReporting.
+        AppDomain.CurrentDomain.UnhandledException += FatalHandler;
+
         var exitCode = 0;
         var main = new Thread(
             () =>
@@ -428,6 +444,48 @@ public static partial class Program
         main.Join();
         return exitCode;
     }
+
+    /// <summary>
+    /// Reports an unhandled exception from any thread, then lets the runtime
+    /// tear the process down as it was going to.
+    ///
+    /// A field rather than a lambda at the registration site because it has to
+    /// be unsubscribable: <see cref="HandOffUnhandledReporting"/> needs the
+    /// same delegate instance to remove.
+    ///
+    /// <c>ExceptionObject</c> is typed <c>object</c> and is not required to be
+    /// an <see cref="Exception"/> (a non-CLS throw, or a corrupted-state
+    /// rethrow, need not be), so the non-Exception case is reported rather
+    /// than dropped: whatever it is, it is the reason the process is dying.
+    /// </summary>
+    private static readonly UnhandledExceptionEventHandler FatalHandler = (_, e) =>
+    {
+        if (e.ExceptionObject is Exception ex)
+        {
+            ReportFatal(ex);
+            return;
+        }
+
+        ReportFatal(new Exception(
+            $"non-Exception unhandled throw: {e.ExceptionObject?.ToString() ?? "(null)"}"));
+    };
+
+    /// <summary>
+    /// Stops reporting unhandled exceptions from here, because <c>App</c> has
+    /// just installed its own handlers and owns the GUI's crash artifact.
+    ///
+    /// Called by App at the END of its own registration, not by this class
+    /// before starting the GUI, so there is no window in between where an
+    /// unhandled exception would reach neither reporter. The two overlap for
+    /// the length of App's constructor instead, which is the safe direction to
+    /// err.
+    ///
+    /// Without this, a GUI crash would produce two logs saying the same thing
+    /// in two places, and the coverage map names exactly one artifact per
+    /// class.
+    /// </summary>
+    internal static void HandOffUnhandledReporting() =>
+        AppDomain.CurrentDomain.UnhandledException -= FatalHandler;
 
     /// <summary>
     /// Last-resort reporter for an exception that escaped <see cref="MainImpl"/>.
