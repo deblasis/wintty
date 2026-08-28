@@ -1962,6 +1962,7 @@ public sealed partial class MainWindow : Window
         };
 
         _router.ReopenClosedTabRequested += (_, _) => ReopenClosedTab();
+        _router.DuplicateTabRequested += (_, tab) => DuplicateTab(tab);
         _router.ReopenClosedWindowRequested += (_, _) =>
             ((App)Application.Current).ReopenClosedWindow();
 
@@ -1983,6 +1984,38 @@ public sealed partial class MainWindow : Window
         // AdoptTab raises TabAdded -> AddPaneHost + activation, so the rebuilt
         // tab renders and focuses just like the session-restore path.
         _tabManager.AdoptTab(tab);
+    }
+
+    /// <summary>
+    /// Duplicate Tab: the source tab's pane arrangement with fresh shells,
+    /// each pane spawned at its source pane's last-reported directory
+    /// (the resolver's substitution; a pane whose shell never reported
+    /// falls back to the profile's static working-directory). A duplicate
+    /// is a capture of the live tab plus the rebuild reopen-closed-tab
+    /// already performs -- never a NewTab(), which copies nothing.
+    /// </summary>
+    private void DuplicateTab(TabModel tab)
+    {
+        var index = _tabManager.Tabs.IndexOf(tab);
+        if (index < 0) return;
+        var session = Ghostty.Core.Session.SessionCapture.CaptureTab(
+            tab.PaneHost.RootNode,
+            tab.PaneHost.ActiveLeaf,
+            tab.PaneHost.ZoomedLeaf,
+            tab.ProfileId,
+            tab.UserOverrideTitle);
+        if (new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry)
+                .BuildTab(session) is not { } clone) return;
+
+        // Adopt appends and activates. Pin comes before the move: the flag
+        // defines the zone Move clamps into, so a pinned source's clone is
+        // relocated into the prefix first and only then placed next to its
+        // source. An unpinned source skips straight to the move.
+        _tabManager.AdoptTab(clone);
+        if (tab.IsPinned) _tabManager.SetPinned(clone, pinned: true);
+        var appended = _tabManager.Tabs.IndexOf(clone);
+        if (appended >= 0) _tabManager.Move(appended, index + 1);
+        FocusActiveLeaf();
     }
 
     // Auto-dismiss timer for the Ctrl+Tab preview popup. Restarted on every

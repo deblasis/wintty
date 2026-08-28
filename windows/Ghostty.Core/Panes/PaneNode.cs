@@ -22,6 +22,17 @@ internal sealed class LeafPane : PaneNode
     /// in a no-profiles-configured cold start.
     /// </summary>
     internal Ghostty.Core.Profiles.ProfileSnapshot? Snapshot { get; set; }
+
+    /// <summary>
+    /// The last directory this pane's shell reported (OSC 7, delivered
+    /// as the pwd action). Null until the shell reports one; a profile
+    /// with no shell integration never will. Session capture persists
+    /// it, and the resolver that rebuilds a pane spawns the replacement
+    /// shell here rather than at the profile's static working-directory
+    /// -- that substitution is what "same folder" means for duplicate
+    /// and restore. Nothing else reads it.
+    /// </summary>
+    public string? LastCwd { get; set; }
 }
 
 internal sealed class SplitPane : PaneNode

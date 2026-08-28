@@ -33,6 +33,7 @@ internal static class SessionTree
                 return new LeafDto
                 {
                     ProfileId = snap?.ProfileId,
+                    Cwd = leaf.LastCwd,
                     Fallback = snap is null
                         ? null
                         : new LeafCommand

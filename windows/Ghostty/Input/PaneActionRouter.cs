@@ -368,6 +368,22 @@ internal sealed class PaneActionRouter
     }
 
     /// <summary>
+    /// Raised when the per-tab context menu asks for a duplicate of one
+    /// specific tab. MainWindow performs the clone: it owns the
+    /// capture/restore pair and the pane-host factory, none of which the
+    /// router (or the menu builder) should reach into.
+    /// </summary>
+    public event EventHandler<TabModel>? DuplicateTabRequested;
+
+    /// <summary>
+    /// Public dispatch entry for the menu's Duplicate Tab item, the same
+    /// one-hop shape as <see cref="RequestToggleTabLayout"/>: no chord
+    /// stands behind it (no defaults in v1), so there is no PaneAction.
+    /// </summary>
+    public void RequestDuplicateTab(TabModel tab)
+        => DuplicateTabRequested?.Invoke(this, tab);
+
+    /// <summary>
     /// Public dispatch entry for the sidebar collapse toggle. Reuses
     /// the existing ToggleVerticalTabsPinnedRequested event so
     /// MainWindow has one handler for every source (Ctrl+Shift+Space

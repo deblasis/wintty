@@ -33,6 +33,7 @@ internal static class TabContextMenuBuilder
         DialogTracker dialogs,
         Action toggleTabLayout,
         Action<TabModel, bool> requestPin,
+        Action<TabModel> requestDuplicate,
         bool isVertical = false,
         Func<SnapZoneSource>? getSnapSource = null,
         Action<TabModel, SnapZone>? detachWithZone = null)
@@ -86,8 +87,14 @@ internal static class TabContextMenuBuilder
         pin.Click += (_, _) => requestPin(tab, !tab.IsPinned);
         flyout.Items.Add(pin);
 
+        // Duplicate is a clone of THIS tab -- same shells, same split
+        // arrangement, each pane respawned at its source pane's
+        // last-reported directory -- so it routes through the caller's
+        // hook the way pin does. It used to be manager.NewTab() here,
+        // which copied nothing; the clone itself lives at the window
+        // layer, which owns the capture/restore pair.
         var dup = new MenuFlyoutItem { Text = "Duplicate Tab" };
-        dup.Click += (_, _) => manager.NewTab();
+        dup.Click += (_, _) => requestDuplicate(tab);
         flyout.Items.Add(dup);
 
         flyout.Items.Add(new MenuFlyoutSeparator());

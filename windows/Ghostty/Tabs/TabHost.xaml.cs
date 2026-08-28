@@ -188,6 +188,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 _dialogs,
                 toggleTabLayout: () => _router.RequestToggleTabLayout(),
                 requestPin: _router.RequestPin,
+                requestDuplicate: _router.RequestDuplicateTab,
                 getSnapSource: GetSnapSource,
                 detachWithZone: DetachWithZone),
             DataContext = tab,

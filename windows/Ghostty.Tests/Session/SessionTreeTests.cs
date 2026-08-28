@@ -55,6 +55,25 @@ public class SessionTreeTests
     }
 
     [Fact]
+    public void CaptureLeaf_CarriesThePaneSLastReportedDirectory()
+    {
+        var leaf = Leaf("pwsh");
+        leaf.LastCwd = "C:\\src";
+
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(leaf));
+
+        Assert.Equal("C:\\src", dto.Cwd);
+    }
+
+    [Fact]
+    public void CaptureLeaf_NeverReportedDirectory_StaysNull()
+    {
+        var dto = Assert.IsType<LeafDto>(SessionTree.CaptureTree(Leaf("pwsh")));
+
+        Assert.Null(dto.Cwd);
+    }
+
+    [Fact]
     public void PathOf_AndResolve_RoundTrip()
     {
         var b = Leaf("b");

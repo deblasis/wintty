@@ -56,6 +56,9 @@ internal enum GhosttyActionTag
     // ordinal it displaced is visible rather than an unexplained gap.
     SetWindowTitle = 35,
     PromptTitle = 36,
+    // The shell reported its directory (OSC 7). Recorded on the pane so
+    // duplicate tab and restore respawn the shell where it actually was.
+    Pwd = 37,
     MouseShape = 38,
     MouseVisibility = 39,
     MouseOverLink = 40,
