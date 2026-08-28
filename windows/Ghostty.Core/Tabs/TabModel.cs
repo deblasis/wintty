@@ -140,6 +140,36 @@ internal sealed class TabModel : INotifyPropertyChanged
         set { if (field != value) { field = value; Raise(); } }
     }
 
+    /// <summary>
+    /// True while the tab sits in the pinned prefix. Set through
+    /// <see cref="TabManager.SetPinned"/>, which relocates the tab to the
+    /// zone boundary; writing it directly leaves the order to be repaired
+    /// by the manager's next mutation.
+    /// </summary>
+    public bool IsPinned
+    {
+        get;
+        set { if (field != value) { field = value; Raise(); } }
+    }
+
+    /// <summary>
+    /// The tab's group, or null when ungrouped. Owned by
+    /// <see cref="TabManager"/>: its mutators keep members contiguous and
+    /// keep groups out of the pinned prefix, so a direct write is a state
+    /// change the manager repairs on its next mutation, not an order
+    /// change in itself.
+    /// </summary>
+    public TabGroup? Group
+    {
+        get;
+        set
+        {
+            if (ReferenceEquals(field, value)) return;
+            field = value;
+            Raise();
+        }
+    }
+
     // Title precedence: explicit user override beats anything; then
     // the shell's OSC 0/2 reported title (which knows what the user
     // is actually running, e.g. "vim file.txt"); then the profile's

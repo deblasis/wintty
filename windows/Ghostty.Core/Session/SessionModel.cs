@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using Ghostty.Core.Panes;
+using Ghostty.Core.Tabs;
 
 namespace Ghostty.Core.Session;
 
@@ -25,6 +27,14 @@ internal sealed class WindowSession
     public WindowGeometry Geometry { get; set; } = new();
     public int ActiveTabIndex { get; set; }
     public List<TabSession> Tabs { get; set; } = [];
+
+    /// <summary>
+    /// Groups referenced by this window's tabs. Members point at their
+    /// group by <see cref="TabSession.GroupId"/>; a tab whose id has no
+    /// entry here restores ungrouped, and the restore-side repair that
+    /// enforces that is the later PR that wires restore.
+    /// </summary>
+    public List<GroupSession> Groups { get; set; } = [];
 }
 
 /// <summary>Mirror of the geometry fields already saved by WindowState.</summary>
@@ -52,6 +62,25 @@ internal sealed class TabSession
 
     /// <summary>Path to the zoomed leaf, or null if no pane was zoomed.</summary>
     public bool[]? ZoomedLeafPath { get; set; }
+
+    /// <summary>True when the tab lived in the pinned prefix.</summary>
+    public bool IsPinned { get; set; }
+
+    /// <summary>Id of the tab's group, or null when ungrouped.</summary>
+    public Guid? GroupId { get; set; }
+}
+
+/// <summary>
+/// Identity and presentation state of one tab group; members reference it
+/// by id. Group identity survives restart, unlike per-tab color, which
+/// stays in-memory by prior decision.
+/// </summary>
+internal sealed class GroupSession
+{
+    public Guid Id { get; set; }
+    public string Title { get; set; } = "";
+    public TabColor Color { get; set; }
+    public bool Collapsed { get; set; }
 }
 
 /// <summary>Polymorphic split-tree node. Leaf or split.</summary>
