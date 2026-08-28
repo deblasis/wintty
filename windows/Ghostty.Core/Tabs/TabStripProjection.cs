@@ -79,4 +79,58 @@ internal static class TabStripProjection
         }
         return ops;
     }
+
+    /// <summary>
+    /// One row a strip renders, group-aware: a group's header, or a tab
+    /// row (grouped or not -- membership is the tab's own
+    /// <see cref="TabModel.Group"/>).
+    /// </summary>
+    public abstract record ProjectedRow
+    {
+        public sealed record Header(TabGroup Group) : ProjectedRow;
+
+        public sealed record Item(TabModel Tab) : ProjectedRow;
+    }
+
+    /// <summary>
+    /// The rows a strip renders for the manager's current state, groups
+    /// included. Order is <see cref="TabManager.Tabs"/> order with a
+    /// header in front of each run. Collapse hides members EXCEPT the
+    /// active one -- the Edge-135 rule (2.9 row 14) that keeps selection
+    /// never hidden -- so a collapsed group projects as its header plus
+    /// the active member's row, or the header alone when the run holds no
+    /// active tab: the fully-collapsed shape the vertical strip renders
+    /// as a childless header and the horizontal strip renders as a chip.
+    /// Activating a different member of a collapsed group swaps which
+    /// member survives here and nothing else; the collapse bit is never
+    /// touched by a projection.
+    ///
+    /// Contiguity (a manager invariant) is what puts each header in front
+    /// of all of its members; this walk does not re-order anything.
+    ///
+    /// The collapsed-with-active shape above is VERTICAL's. Horizontal's
+    /// is different -- the active member surfaces as a plain row and the
+    /// chip is suppressed (4.3) -- and that reading is PR 6's consumer,
+    /// not a second projection here.
+    /// </summary>
+    public static IReadOnlyList<ProjectedRow> GroupedRows(TabManager manager)
+    {
+        var rows = new List<ProjectedRow>(manager.Tabs.Count);
+        var headered = new HashSet<TabGroup>();
+        foreach (var tab in manager.Tabs)
+        {
+            if (tab.Group is { } group)
+            {
+                if (headered.Add(group))
+                    rows.Add(new ProjectedRow.Header(group));
+                if (!group.IsCollapsed || ReferenceEquals(tab, manager.ActiveTab))
+                    rows.Add(new ProjectedRow.Item(tab));
+            }
+            else
+            {
+                rows.Add(new ProjectedRow.Item(tab));
+            }
+        }
+        return rows;
+    }
 }
