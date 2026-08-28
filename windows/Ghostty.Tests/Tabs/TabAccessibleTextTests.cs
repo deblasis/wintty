@@ -92,9 +92,58 @@ public class TabAccessibleTextTests
     [Fact]
     public void Bell_IsStatus_AndLeavesTheNameAlone()
     {
-        Assert.Equal("Bell", TabAccessibleText.Status(bellRinging: true));
-        Assert.Equal(string.Empty, TabAccessibleText.Status(bellRinging: false));
+        Assert.Equal("Bell", TabAccessibleText.Status(isPinned: false, bellRinging: true));
+        Assert.Equal(string.Empty, TabAccessibleText.Status(isPinned: false, bellRinging: false));
         Assert.Equal("pwsh", TabAccessibleText.Name("pwsh"));
+    }
+
+    /// <summary>
+    /// A pin is the same kind of state: the row keeps its title and its
+    /// place in the name, and what changed rides ItemStatus. Without the
+    /// segment, a screen-reader user hears an unexplained reorder when
+    /// the tab jumps zones; the status is what says why.
+    /// </summary>
+    [Fact]
+    public void Pin_IsStatus_AndComposesWithTheBell()
+    {
+        Assert.Equal("Pinned", TabAccessibleText.Status(isPinned: true, bellRinging: false));
+        Assert.Equal("Pinned, Bell", TabAccessibleText.Status(isPinned: true, bellRinging: true));
+        Assert.Equal("Bell", TabAccessibleText.Status(isPinned: false, bellRinging: true));
+        Assert.Equal(string.Empty, TabAccessibleText.Status(isPinned: false, bellRinging: false));
+    }
+
+    /// <summary>
+    /// The tab overload is what the strips render, so a pinned tab with a
+    /// bell reads both segments and an unpinned quiet tab reads nothing.
+    /// </summary>
+    [Fact]
+    public void TabOverload_ReportsPinAndBellTogether()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.ShellReportedTitle = "build.log";
+
+        Assert.Equal(string.Empty, TabAccessibleText.Status(tab));
+
+        tab.IsPinned = true;
+        Assert.Equal("Pinned", TabAccessibleText.Status(tab));
+
+        tab.BellRinging = true;
+        Assert.Equal("Pinned, Bell", TabAccessibleText.Status(tab));
+    }
+
+    /// <summary>
+    /// The pin announcement says what happened and to which tab, the same
+    /// contract the bell announcement has: the user is not looking at the
+    /// strip, and "Tab pinned" alone leaves them counting.
+    /// </summary>
+    [Fact]
+    public void PinAnnouncement_NamesTheTabAndTheDirection()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.ShellReportedTitle = "build.log";
+
+        Assert.Equal("Tab pinned, build.log", TabAccessibleText.PinAnnouncement(tab, pinned: true));
+        Assert.Equal("Tab unpinned, build.log", TabAccessibleText.PinAnnouncement(tab, pinned: false));
     }
 
     /// <summary>
@@ -105,7 +154,7 @@ public class TabAccessibleTextTests
     [Fact]
     public void AcknowledgedBell_ClearsTheStatus()
     {
-        var status = TabAccessibleText.Status(bellRinging: false);
+        var status = TabAccessibleText.Status(isPinned: false, bellRinging: false);
         Assert.NotNull(status);
         Assert.Equal(string.Empty, status);
     }

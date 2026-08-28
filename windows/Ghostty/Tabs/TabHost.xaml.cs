@@ -187,6 +187,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 requestDetachToNewWindow: RequestDetachToNewWindow,
                 _dialogs,
                 toggleTabLayout: () => _router.RequestToggleTabLayout(),
+                requestPin: _router.RequestPin,
                 getSnapSource: GetSnapSource,
                 detachWithZone: DetachWithZone),
             DataContext = tab,
@@ -220,6 +221,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 bellGlyph.Visibility = tab.BellRinging
                     ? Visibility.Visible
                     : Visibility.Collapsed;
+                ApplyItemAccessibleText(item, tab);
+            }
+            else if (e.PropertyName == nameof(TabModel.IsPinned))
+            {
+                // "Pinned" rides ItemStatus, and the flag change is the
+                // only event that always carries it: SetPinned relocates
+                // to the zone boundary and skips TabMoved when from == to
+                // (the boundary tab pinning up, the last pinned tab
+                // unpinning), so a relocation-path refresh alone would
+                // leave the boundary tab's status stale for life.
                 ApplyItemAccessibleText(item, tab);
             }
         };

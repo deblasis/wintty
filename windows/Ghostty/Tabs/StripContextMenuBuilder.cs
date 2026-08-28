@@ -33,6 +33,18 @@ internal static class StripContextMenuBuilder
 
         flyout.Items.Add(new MenuFlyoutSeparator());
 
+        // Only meaningful once two pins exist to order (the manager
+        // no-ops below that), and the item is rebuilt on every open, so
+        // unpinning down to one pin takes the item with it rather than
+        // offering a dead command.
+        if (manager.PinCount > 1)
+        {
+            var sortPinned = new MenuFlyoutItem { Text = "Sort Pinned Tabs" };
+            sortPinned.Click += (_, _) => manager.SortPinned();
+            flyout.Items.Add(sortPinned);
+            flyout.Items.Add(new MenuFlyoutSeparator());
+        }
+
         // Label flips to match the destination state so users see
         // where they will end up. The per-tab menu (TabContextMenuBuilder)
         // offers the same switch because a filled tab bar has no empty
