@@ -358,6 +358,165 @@ public class TabManagerPinGroupTests
         Assert.Null(mgr.Tabs[0].Group);
     }
 
+    // --- Group lifecycle ops ---
+
+    [Fact]
+    public void CreateGroup_makes_the_tab_the_sole_member_in_place()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var order = new List<TabModel>(mgr.Tabs);
+        int moved = 0;
+        mgr.TabMoved += (_, _) => moved++;
+
+        var group = mgr.CreateGroup(mgr.Tabs[1]);
+
+        Assert.NotNull(group);
+        Assert.Same(group, mgr.Tabs[1].Group);
+        Assert.Contains(group!, mgr.Groups);
+        Assert.Equal(order, mgr.Tabs); // the seed keeps its position
+        Assert.Equal(0, moved);
+        Assert.Equal("New group", group!.Title);
+        Assert.Equal(TabColor.Blue, group.Color);
+        Assert.False(group.IsCollapsed);
+    }
+
+    [Fact]
+    public void CreateGroup_refuses_a_pinned_tab_and_registers_nothing()
+    {
+        var mgr = NewManager(1);
+        mgr.SetPinned(mgr.Tabs[0], true);
+
+        Assert.Null(mgr.CreateGroup(mgr.Tabs[0]));
+        Assert.Null(mgr.Tabs[0].Group);
+        Assert.Empty(mgr.Groups);
+    }
+
+    [Fact]
+    public void CreateGroup_refuses_a_tab_the_manager_does_not_own()
+    {
+        var mgr = NewManager(0);
+        var stranger = new TabModel(new FakePaneHost());
+
+        Assert.Null(mgr.CreateGroup(stranger));
+        Assert.Empty(mgr.Groups);
+    }
+
+    [Fact]
+    public void JoinGroup_moves_the_tab_into_the_run()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1] }, group);
+        var a = mgr.Tabs[0];
+        var b = mgr.Tabs[1];
+        var c = mgr.Tabs[2];
+        var d = mgr.Tabs[3];
+
+        mgr.JoinGroup(d, group);
+
+        // The gather re-forms the run at the first member's position, in
+        // the members' relative order -- the same grammar GroupTabs uses.
+        Assert.Equal(new[] { a, b, d, c }, mgr.Tabs.ToArray());
+        AssertRunContiguous(mgr, group);
+    }
+
+    [Fact]
+    public void JoinGroup_auto_expands_a_collapsed_group()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[0] }, group);
+        mgr.CollapseGroup(group, true);
+
+        mgr.JoinGroup(mgr.Tabs[2], group);
+
+        Assert.False(group.IsCollapsed); // the join is visible (2.9 row 17)
+        AssertRunContiguous(mgr, group);
+    }
+
+    [Fact]
+    public void JoinGroup_keeps_the_collapse_bit_when_nothing_joined()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        mgr.SetPinned(mgr.Tabs[0], true);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1] }, group);
+        mgr.CollapseGroup(group, true);
+
+        // A refused join (pinned) must not expand...
+        mgr.JoinGroup(mgr.Tabs[0], group);
+        Assert.True(group.IsCollapsed);
+        Assert.Null(mgr.Tabs[0].Group);
+
+        // ...and neither may re-joining a member.
+        mgr.JoinGroup(mgr.Tabs[1], group);
+        Assert.True(group.IsCollapsed);
+    }
+
+    [Fact]
+    public void DissolveGroup_ungroups_every_member_in_place()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.CollapseGroup(group, true);
+        var order = new List<TabModel>(mgr.Tabs);
+
+        mgr.DissolveGroup(group);
+
+        Assert.Equal(order, mgr.Tabs);
+        Assert.All(mgr.Tabs, t => Assert.Null(t.Group));
+        Assert.Empty(mgr.Groups);
+    }
+
+    [Fact]
+    public void DissolveGroup_of_an_unregistered_group_is_a_noop()
+    {
+        var mgr = NewManager(1);
+        var order = new List<TabModel>(mgr.Tabs);
+        int moved = 0;
+        mgr.TabMoved += (_, _) => moved++;
+
+        mgr.DissolveGroup(new TabGroup());
+
+        Assert.Equal(order, mgr.Tabs);
+        Assert.Equal(0, moved);
+        Assert.Empty(mgr.Groups);
+    }
+
+    [Fact]
+    public void HoldsActiveTab_flips_with_activation()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[0]); // start outside the group
+
+        Assert.False(mgr.HoldsActiveTab(group));
+        mgr.CollapseGroup(group, true);
+        mgr.Activate(mgr.Tabs[1]);
+
+        // The Edge-135 predicate the strips project from: a collapsed
+        // group holding the active tab is never rendered fully collapsed.
+        Assert.True(mgr.HoldsActiveTab(group));
+
+        mgr.Activate(mgr.Tabs[0]);
+        Assert.False(mgr.HoldsActiveTab(group));
+    }
+
+    [Fact]
+    public void GroupHoldsEveryTab_gates_the_close_group_command()
+    {
+        var mgr = NewManager(1);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[0], mgr.Tabs[1] }, group);
+
+        Assert.True(mgr.GroupHoldsEveryTab(group)); // nothing would survive
+
+        mgr.NewTab();
+        Assert.False(mgr.GroupHoldsEveryTab(group));
+    }
+
     // --- Collapse ---
 
     [Fact]
@@ -377,6 +536,82 @@ public class TabManagerPinGroupTests
         Assert.Equal(order, mgr.Tabs);
         mgr.CollapseGroup(group, false);
         Assert.False(group.IsCollapsed);
+    }
+
+    [Fact]
+    public void CollapseGroup_never_changes_the_active_tab()
+    {
+        var mgr = NewManager(2);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[2]);
+        var active = mgr.ActiveTab;
+        int changes = 0;
+        mgr.ActiveTabChanged += (_, _) => changes++;
+
+        mgr.CollapseGroup(group, true);
+        mgr.CollapseGroup(group, false);
+
+        Assert.Same(active, mgr.ActiveTab);
+        Assert.Equal(0, changes);
+    }
+
+    [Fact]
+    public void Activating_a_member_of_a_collapsed_group_does_not_expand_it()
+    {
+        var mgr = NewManager(2);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.CollapseGroup(group, true);
+
+        // No accordion: activation swaps which member is visible; the
+        // user's collapse bit stays as they set it.
+        mgr.Activate(mgr.Tabs[2]);
+        Assert.Same(mgr.Tabs[2], mgr.ActiveTab);
+        Assert.True(group.IsCollapsed);
+    }
+
+    [Fact]
+    public void Normalize_repairs_a_collapsed_run_and_keeps_its_members()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.CollapseGroup(group, true);
+        var a = mgr.Tabs[0];
+        var b = mgr.Tabs[1];
+        var c = mgr.Tabs[2];
+        var d = mgr.Tabs[3];
+
+        mgr.Move(1, 3); // pull B out past the run end
+
+        // Collapse is a bit, never a reordering: the repair re-gathers
+        // the run like any other, ejects no member, and leaves the bit.
+        AssertRunContiguous(mgr, group);
+        Assert.Equal(new[] { a, c, b, d }, mgr.Tabs.ToArray());
+        Assert.True(group.IsCollapsed);
+    }
+
+    [Fact]
+    public void Next_and_Prev_walk_linearly_through_a_collapsed_group()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.CollapseGroup(group, true);
+        mgr.Activate(mgr.Tabs[0]);
+
+        // Navigation is linear in list order; collapse never makes the
+        // cycle skip members (the Chrome complaint Next/Prev exists to
+        // avoid).
+        mgr.Next();
+        Assert.Same(mgr.Tabs[1], mgr.ActiveTab);
+        mgr.Next();
+        Assert.Same(mgr.Tabs[2], mgr.ActiveTab);
+        mgr.Next();
+        Assert.Same(mgr.Tabs[0], mgr.ActiveTab);
+        mgr.Prev();
+        Assert.Same(mgr.Tabs[2], mgr.ActiveTab);
     }
 
     // --- MoveGroup / MoveRun rotations ---
@@ -597,6 +832,27 @@ public class TabManagerPinGroupTests
         Assert.False(dest.Tabs[2].IsPinned);
     }
 
+    [Fact]
+    public void An_adopted_tab_arrives_ungrouped_and_the_group_stays_home()
+    {
+        var src = NewManager(1); // [s0, s1]
+        var dest = NewManager(0); // [a]
+        var group = new TabGroup();
+        src.GroupTabs(new[] { src.Tabs[0], src.Tabs[1] }, group);
+
+        var adoptee = src.DetachTab(src.Tabs[1]);
+        dest.AdoptTab(adoptee);
+
+        // Membership does not travel: the group belongs to the source
+        // window's registry, so the adoptee arrives ungrouped while the
+        // source run survives with its remaining member.
+        Assert.Null(adoptee.Group);
+        Assert.DoesNotContain(adoptee, src.Tabs);
+        AssertRunContiguous(src, group);
+        Assert.Contains(group, src.Groups);
+        Assert.Empty(dest.Groups);
+    }
+
     // --- The invariants hold across arbitrary op sequences ---
 
     [Fact]
@@ -608,7 +864,7 @@ public class TabManagerPinGroupTests
 
         for (int step = 0; step < 300; step++)
         {
-            switch (random.Next(11))
+            switch (random.Next(15))
             {
                 case 0:
                     mgr.SetPinned(mgr.Tabs[random.Next(mgr.Tabs.Count)], random.Next(2) == 0);
@@ -657,6 +913,24 @@ public class TabManagerPinGroupTests
                         mgr.AdoptTab(adoptee);
                     }
                     break;
+                case 11:
+                    mgr.CreateGroup(mgr.Tabs[random.Next(mgr.Tabs.Count)]);
+                    break;
+                case 12:
+                    if (mgr.Groups.Count > 0)
+                        mgr.JoinGroup(mgr.Tabs[random.Next(mgr.Tabs.Count)],
+                            mgr.Groups[random.Next(mgr.Groups.Count)]);
+                    break;
+                case 13:
+                    if (mgr.Groups.Count > 0)
+                        mgr.DissolveGroup(mgr.Groups[random.Next(mgr.Groups.Count)]);
+                    break;
+                case 14:
+                    if (mgr.Groups.Count > 0)
+                        mgr.CollapseGroup(
+                            mgr.Groups[random.Next(mgr.Groups.Count)],
+                            random.Next(2) == 0);
+                    break;
             }
 
             AssertInvariantsHold(mgr);
@@ -683,8 +957,14 @@ public class TabManagerPinGroupTests
             Assert.Equal(positions[^1] - positions[0] + 1, positions.Count);
         }
         foreach (var tab in mgr.Tabs)
+        {
             if (tab.Group is not null)
                 Assert.Contains(tab.Group, mgr.Groups);
+            // Groups never pin: unreachable through the manager (SetPinned
+            // ungroups, GroupTabs skips pinned), so this is checker
+            // defense-in-depth for the fuzz.
+            Assert.False(tab.IsPinned && tab.Group is not null);
+        }
     }
 
     private static void AssertRunContiguous(TabManager mgr, TabGroup group)

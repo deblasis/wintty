@@ -102,6 +102,95 @@ public class TabStripProjectionTests
         Assert.Equal(expected, rows); // the projection did not move under its reader
     }
 
+    // --- GroupedRows ---
+
+    private static List<TabModel> ItemsOf(IReadOnlyList<TabStripProjection.ProjectedRow> rows)
+    {
+        var items = new List<TabModel>(rows.Count);
+        foreach (var row in rows)
+            if (row is TabStripProjection.ProjectedRow.Item item)
+                items.Add(item.Tab);
+        return items;
+    }
+
+    [Fact]
+    public void GroupedRows_interleaves_headers_and_expands_back_to_tabs()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        mgr.SetPinned(mgr.Tabs[0], true);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+
+        var rows = TabStripProjection.GroupedRows(mgr);
+
+        // Pin prefix first, then the header in front of its run, then the
+        // ungrouped tail -- and the items, read straight off, are Tabs.
+        Assert.Collection(rows,
+            r => Assert.Equal(mgr.Tabs[0], Assert.IsType<TabStripProjection.ProjectedRow.Item>(r).Tab),
+            r => Assert.Equal(group, Assert.IsType<TabStripProjection.ProjectedRow.Header>(r).Group),
+            r => Assert.Equal(mgr.Tabs[1], Assert.IsType<TabStripProjection.ProjectedRow.Item>(r).Tab),
+            r => Assert.Equal(mgr.Tabs[2], Assert.IsType<TabStripProjection.ProjectedRow.Item>(r).Tab),
+            r => Assert.Equal(mgr.Tabs[3], Assert.IsType<TabStripProjection.ProjectedRow.Item>(r).Tab));
+        Assert.Equal(mgr.Tabs.ToArray(), ItemsOf(rows));
+    }
+
+    [Fact]
+    public void A_collapsed_group_hides_every_member_except_the_active_one()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[2]);
+
+        mgr.CollapseGroup(group, true);
+        var rows = TabStripProjection.GroupedRows(mgr);
+
+        // The Edge-135 rule at the seam the strips project from: the
+        // header stays, the active member's row stays under it, the
+        // inactive member is gone. The ungrouped leading tab renders on.
+        Assert.Equal(new[] { mgr.Tabs[0], mgr.Tabs[2] }, ItemsOf(rows));
+        Assert.IsType<TabStripProjection.ProjectedRow.Header>(rows[1]);
+    }
+
+    [Fact]
+    public void A_collapsed_group_without_the_active_member_projects_header_only()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[0]); // the active tab sits outside the run
+
+        mgr.CollapseGroup(group, true);
+        var rows = TabStripProjection.GroupedRows(mgr);
+
+        // The fully-collapsed shape: vertical renders a childless header,
+        // horizontal renders its chip from the same rows. Only the
+        // ungrouped tab survives beside it.
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(group,
+            Assert.IsType<TabStripProjection.ProjectedRow.Header>(rows[1]).Group);
+        Assert.Equal(new[] { mgr.Tabs[0] }, ItemsOf(rows));
+    }
+
+    [Fact]
+    public void Activating_across_a_collapsed_group_swaps_the_visible_member()
+    {
+        var mgr = NewManager(2); // [A, B, C]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.CollapseGroup(group, true);
+
+        mgr.Activate(mgr.Tabs[1]);
+        Assert.Equal(new[] { mgr.Tabs[0], mgr.Tabs[1] },
+            ItemsOf(TabStripProjection.GroupedRows(mgr)));
+        Assert.True(group.IsCollapsed);
+
+        mgr.Activate(mgr.Tabs[2]);
+        Assert.Equal(new[] { mgr.Tabs[0], mgr.Tabs[2] },
+            ItemsOf(TabStripProjection.GroupedRows(mgr)));
+        Assert.True(group.IsCollapsed); // no accordion: the bit never moved
+    }
+
     // --- Diff ---
 
     [Fact]

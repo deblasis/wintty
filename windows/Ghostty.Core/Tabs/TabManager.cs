@@ -386,6 +386,15 @@ internal sealed class TabManager
     /// <paramref name="targetIndex"/>, internal member order preserved.
     /// The run is clamped to land whole and clear of the pinned prefix;
     /// groups cannot be pinned.
+    ///
+    /// This is the single commit behind a whole-run crossing, and both
+    /// drag surfaces converge on it: the vertical header drag and the
+    /// horizontal chip drag hand over a MODEL index measured from
+    /// arranged positions at release (never an in-flight one), and the
+    /// clamp here is why neither caller needs pin math of its own. A
+    /// relocation raises one TabMoved per displaced member -- old index
+    /// from before the splice, new from after -- which the projector
+    /// reconciles; it is not a walkable sequence of single moves.
     /// </summary>
     public void MoveGroup(TabGroup group, int targetIndex)
     {
@@ -431,6 +440,11 @@ internal sealed class TabManager
     /// order) at the first member's position. Pinned members are skipped:
     /// the prefix outranks membership, the same rule <see cref="SetPinned"/>
     /// applies in the other direction.
+    ///
+    /// Membership only: the group's <see cref="TabGroup.IsCollapsed"/> bit
+    /// is never touched here -- the property the session restore hangs its
+    /// saved collapse state on (the auto-expanding join is
+    /// <see cref="JoinGroup"/>).
     /// </summary>
     public void GroupTabs(IReadOnlyList<TabModel> members, TabGroup group)
     {
@@ -451,6 +465,63 @@ internal sealed class TabManager
     }
 
     /// <summary>
+    /// New Group With Tab: a fresh group whose sole member is
+    /// <paramref name="tab"/>. The tab keeps its position and the gather
+    /// moves nothing (one member is already a run). Null when the tab is
+    /// pinned (the prefix outranks membership, the same refusal
+    /// <see cref="GroupTabs"/> applies) or not owned by this manager --
+    /// either way nothing is registered. The caller renames and colors the
+    /// returned group through its plain properties, which carry no
+    /// invariants to protect.
+    /// </summary>
+    public TabGroup? CreateGroup(TabModel tab)
+    {
+        ArgumentNullException.ThrowIfNull(tab);
+        if (!_tabs.Contains(tab) || tab.IsPinned) return null;
+        var group = new TabGroup();
+        GroupTabs(new[] { tab }, group);
+        return group;
+    }
+
+    /// <summary>
+    /// Add one tab to a group: the single-commit join behind the
+    /// drag-into-run drop, the Add to Group submenu, and a drop on a
+    /// collapsed chip. Joining a COLLAPSED group auto-expands it (Edge's
+    /// documented by-design rule), and the expand lives HERE -- manager
+    /// state, so neither strip mode has to remember it and a drag can
+    /// never carry it. The bit only moves when the join actually happened:
+    /// a refused join (pinned, foreign tab) or a tab that is already a
+    /// member leaves the user's collapse state exactly as they set it.
+    /// Session restore does not come through here -- it must preserve the
+    /// saved collapse bit, so it joins via <see cref="GroupTabs"/> instead.
+    /// </summary>
+    public void JoinGroup(TabModel tab, TabGroup group)
+    {
+        ArgumentNullException.ThrowIfNull(tab);
+        ArgumentNullException.ThrowIfNull(group);
+        bool wasMember = ReferenceEquals(tab.Group, group);
+        GroupTabs(new[] { tab }, group);
+        if (!wasMember && ReferenceEquals(tab.Group, group) && group.IsCollapsed)
+            group.IsCollapsed = false;
+    }
+
+    /// <summary>
+    /// Ungroup every member at once, in place: positions, activation, and
+    /// MRU are untouched, and the group -- collapse state included -- is
+    /// gone. The per-tab counterpart is <see cref="Ungroup"/>; this is the
+    /// Remove from Group command's op.
+    /// </summary>
+    public void DissolveGroup(TabGroup group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        if (!_groups.Contains(group)) return;
+        foreach (var t in _tabs)
+            if (ReferenceEquals(t.Group, group))
+                t.Group = null;
+        Normalize();
+    }
+
+    /// <summary>
     /// Remove one tab from its group. The group dissolves if this was its
     /// last member, collapse state included. The tab keeps its position.
     /// </summary>
@@ -466,11 +537,45 @@ internal sealed class TabManager
     /// and the active member of a collapsed group keeps its row once the
     /// projector lands. Collapse state lives on the group so both strip
     /// modes share one bit.
+    ///
+    /// No accordion: activating a member of a collapsed group swaps which
+    /// member is visible and does NOT expand the group -- collapse state
+    /// stays exactly as the user set it, and the strips below read the bit
+    /// rather than any activation side effect. The strips also refuse to
+    /// project a fully-collapsed group that holds the active tab
+    /// (<see cref="HoldsActiveTab"/>), so selection is never hidden.
     /// </summary>
     public void CollapseGroup(TabGroup group, bool collapsed)
     {
         ArgumentNullException.ThrowIfNull(group);
         group.IsCollapsed = collapsed;
+    }
+
+    /// <summary>
+    /// Whether the group's run contains the active tab -- the model half
+    /// of the Edge-135 rule. A collapsed group holding the active tab is
+    /// never projected as fully collapsed: the vertical strip keeps the
+    /// active member's row visible and the horizontal strip projects no
+    /// chip for it, so selection is never hidden. Both strips ask here
+    /// rather than re-deriving membership.
+    /// </summary>
+    public bool HoldsActiveTab(TabGroup group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        return ReferenceEquals(_activeTab.Group, group);
+    }
+
+    /// <summary>
+    /// Whether closing the group would close every tab in the window:
+    /// Close Group greys itself out then, the same rule as Move Tab to New
+    /// Window. The close itself stays shell-side -- sequential through the
+    /// per-tab confirmation path -- so the manager offers the guard, not
+    /// the command.
+    /// </summary>
+    public bool GroupHoldsEveryTab(TabGroup group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        return _tabs.Count > 0 && MembersOf(group).Count == _tabs.Count;
     }
 
     /// <summary>
