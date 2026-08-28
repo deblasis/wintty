@@ -811,6 +811,25 @@ public partial class App : Application
         _themePreview.ListThemesRequested += OnAppListThemesRequested;
         ApplyThemePreview = _themePreview.ApplyThemePreview;
 
+        // Start the single-instance forwarding server here, and not later.
+        // A secondary reaches its 2s Connect near the top of this method,
+        // while everything below -- session restore, MainWindow construction
+        // and Activate, the quake window's HWND, the hooks -- is the same
+        // seconds the launch splash exists to cover. Serving from the end of
+        // OnLaunched meant a launch a few hundred ms behind us routinely timed
+        // out and opened its own window, which is the whole thing
+        // windows-single-instance is for.
+        //
+        // Not earlier either, and this is the constraint that pins it here:
+        // OpenWindowFromLaunch drops a request outright if _configService,
+        // _loggerFactory, _lifetimeSupervisor or _bootstrapHost is still null,
+        // and the last of those is the line above. Listening before that turns
+        // a visible failure (the secondary cannot connect, so it opens its own
+        // window) into a silent one (it connects, exits, and its launch is
+        // discarded). Anything that wants to serve sooner has to make that
+        // drop a deferral first.
+        StartSingleInstanceServer();
+
         // App-level: High Contrast is a system-wide state and config is
         // applied app-wide, so a single monitor drives the surface override.
         // Constructed AFTER SetApp so its initial Apply() reloads into a live
@@ -958,11 +977,6 @@ public partial class App : Application
         // acted on. Anything arriving from here is a person clicking a new
         // toast, so it must be delivered even when it names the same surface.
         ToastActivations.CloseLaunchWindow();
-
-        // Start the single-instance forwarding server last, once the UI
-        // dispatcher and logger factory exist. No-op unless this process is
-        // the single-instance primary.
-        StartSingleInstanceServer();
     }
 
     /// <summary>
@@ -987,8 +1001,8 @@ public partial class App : Application
                 break;
 
             case Ghostty.Core.SingleInstance.SingleInstanceRole.Primary:
-                // The server starts at the end of OnLaunched, once the UI
-                // dispatcher exists (see StartSingleInstanceServer).
+                // The server starts inside OnLaunched, as soon as a forwarded
+                // launch can be serviced (see StartSingleInstanceServer).
                 break;
 
             case Ghostty.Core.SingleInstance.SingleInstanceRole.Failed:
@@ -1058,8 +1072,9 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Start the forwarding pipe server. Called near the end of OnLaunched
-    /// (after _uiDispatcher is set) and only on the single-instance primary.
+    /// Start the forwarding pipe server. Called from OnLaunched as soon as
+    /// <see cref="OpenWindowFromLaunch"/> can service a request, and only on
+    /// the single-instance primary.
     /// </summary>
     private void StartSingleInstanceServer()
     {
@@ -1112,7 +1127,15 @@ public partial class App : Application
     {
         if (_configService is null || _bootstrapHost is null
             || _lifetimeSupervisor is null || _loggerFactory is null)
+        {
+            // Unreachable as things stand: the server does not start until
+            // every one of these exists, and this runs on the UI thread, which
+            // is inside OnLaunched until then. Kept because the cost of being
+            // wrong is a launch that vanishes with no window and no message --
+            // the secondary has already exited believing it was served.
+            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDropped();
             return;
+        }
 
         // A notification click that spawned a secondary lands here carrying the
         // surface it was raised for. Liveness is checked BEFORE handing it to
@@ -2126,4 +2149,9 @@ internal static partial class AppLogExtensions
                    Message = "Single-instance pipe server failed to start; secondaries will launch independently.")]
     internal static partial void LogSingleInstanceServerStartFailed(
         this ILogger<App> logger, System.Exception ex);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.LaunchDropped,
+                   Level = LogLevel.Error,
+                   Message = "Forwarded launch discarded: the app was not ready to open a window. The user's launch was lost.")]
+    internal static partial void LogSingleInstanceLaunchDropped(this ILogger<App> logger);
 }
