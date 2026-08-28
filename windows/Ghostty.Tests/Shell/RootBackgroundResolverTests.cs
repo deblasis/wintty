@@ -13,46 +13,185 @@ public sealed class RootBackgroundResolverTests
     private const uint ArbitraryShellBg = 0xFF8040C0u;
 
     [Theory]
-    [InlineData(BackdropStyles.Frosted, false)]
-    [InlineData(BackdropStyles.Frosted, true)]
-    [InlineData(BackdropStyles.Crystal, false)]
-    [InlineData(BackdropStyles.Crystal, true)]
-    public void Transparent_backdrops_always_return_transparent(string style, bool shellThemeEnabled)
+    [InlineData(BackdropStyles.Frosted, false, false)]
+    [InlineData(BackdropStyles.Frosted, false, true)]
+    [InlineData(BackdropStyles.Frosted, true, false)]
+    [InlineData(BackdropStyles.Frosted, true, true)]
+    [InlineData(BackdropStyles.Crystal, false, false)]
+    [InlineData(BackdropStyles.Crystal, false, true)]
+    [InlineData(BackdropStyles.Crystal, true, false)]
+    [InlineData(BackdropStyles.Crystal, true, true)]
+    public void Transparent_backdrops_always_return_transparent(
+        string style, bool shellThemeEnabled, bool isDesktopDark)
     {
         Assert.Equal(
             RootBackgroundResolver.TransparentArgb,
-            RootBackgroundResolver.Resolve(style, shellThemeEnabled, ArbitraryShellBg));
+            RootBackgroundResolver.Resolve(style, shellThemeEnabled, ArbitraryShellBg, isDesktopDark));
     }
 
-    [Fact]
-    public void Solid_backdrop_with_shell_theme_disabled_returns_opaque_chrome()
+    /// <summary>
+    /// A solid window with no terminal palette driving the chrome used to
+    /// come up near-black whatever the desktop was doing, so a light
+    /// desktop got black chrome around a near-white terminal. The dark
+    /// half is deliberately the value the window has always used.
+    /// </summary>
+    [Theory]
+    [InlineData(true, 0xFF0C0C0Cu)]
+    [InlineData(false, 0xFFF3F3F3u)]
+    public void Solid_backdrop_without_a_shell_theme_follows_the_desktop(
+        bool isDesktopDark, uint expected)
     {
+        Assert.Equal(expected, RootBackgroundResolver.OpaqueChromeArgb(isDesktopDark));
         Assert.Equal(
-            RootBackgroundResolver.OpaqueChromeArgb,
-            RootBackgroundResolver.Resolve(BackdropStyles.Solid, shellThemeEnabled: false, ArbitraryShellBg));
-    }
-
-    [Fact]
-    public void Solid_backdrop_with_shell_theme_enabled_returns_shell_theme_color()
-    {
-        Assert.Equal(
-            ArbitraryShellBg,
-            RootBackgroundResolver.Resolve(BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg));
+            expected,
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: false, ArbitraryShellBg, isDesktopDark));
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData("unknown")]
-    public void Unknown_or_empty_style_falls_through_to_solid_behavior(string style)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Solid_backdrop_with_shell_theme_ignores_the_desktop(bool isDesktopDark)
     {
-        // No shell theme -> opaque chrome.
-        Assert.Equal(
-            RootBackgroundResolver.OpaqueChromeArgb,
-            RootBackgroundResolver.Resolve(style, shellThemeEnabled: false, ArbitraryShellBg));
-
-        // With shell theme -> shell theme color.
         Assert.Equal(
             ArbitraryShellBg,
-            RootBackgroundResolver.Resolve(style, shellThemeEnabled: true, ArbitraryShellBg));
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg, isDesktopDark));
+    }
+
+    [Theory]
+    [InlineData("", true)]
+    [InlineData("", false)]
+    [InlineData("unknown", true)]
+    [InlineData("unknown", false)]
+    public void Unknown_or_empty_style_falls_through_to_solid_behavior(string style, bool isDesktopDark)
+    {
+        Assert.Equal(
+            RootBackgroundResolver.OpaqueChromeArgb(isDesktopDark),
+            RootBackgroundResolver.Resolve(style, shellThemeEnabled: false, ArbitraryShellBg, isDesktopDark));
+
+        Assert.Equal(
+            ArbitraryShellBg,
+            RootBackgroundResolver.Resolve(style, shellThemeEnabled: true, ArbitraryShellBg, isDesktopDark));
+    }
+
+    /// <summary>
+    /// The whole window-theme x frame-style table in one place, because the
+    /// two keys are orthogonal and the resolver is where that is decided:
+    /// window-theme picks the hue, frame-style picks the material, and every
+    /// combination has to mean something.
+    ///
+    /// The row that was missing is palette + frosted. Asked with the palette
+    /// pinned off, the resolver answered "solid" for it, and all three frame
+    /// styles came out one identical opaque window under
+    /// window-theme=wintty -- the combination the key exists to create.
+    /// </summary>
+    [Theory]
+    // window-theme=system: desktop-derived when solid, backdrop when not.
+    [InlineData(BackdropStyles.Solid, false, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Frosted, false, RootBackgroundResolver.TransparentArgb)]
+    [InlineData(BackdropStyles.Crystal, false, RootBackgroundResolver.TransparentArgb)]
+    // window-theme=wintty: the palette when solid, the backdrop when not.
+    [InlineData(BackdropStyles.Solid, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Frosted, true, RootBackgroundResolver.TransparentArgb)]
+    [InlineData(BackdropStyles.Crystal, true, RootBackgroundResolver.TransparentArgb)]
+    public void The_hue_comes_from_the_theme_and_the_material_from_the_frame(
+        string frameStyle, bool shellThemeEnabled, uint expected)
+    {
+        Assert.Equal(
+            expected,
+            RootBackgroundResolver.Resolve(
+                frameStyle, shellThemeEnabled, ArbitraryShellBg, isDesktopDark: true));
+    }
+
+    /// <summary>
+    /// The two keys never collapse into each other: for one frame style the
+    /// palette has to change the answer, and for one window-theme the frame
+    /// has to. A resolver that satisfied the table above by ignoring an
+    /// argument would pass every row of it and still be the bug.
+    /// </summary>
+    [Fact]
+    public void Neither_key_can_be_ignored()
+    {
+        Assert.NotEqual(
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: false, ArbitraryShellBg, true),
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg, true));
+
+        Assert.NotEqual(
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Solid, shellThemeEnabled: true, ArbitraryShellBg, true),
+            RootBackgroundResolver.Resolve(
+                BackdropStyles.Frosted, shellThemeEnabled: true, ArbitraryShellBg, true));
+    }
+
+    /// <summary>
+    /// The regression the fold above exists to stop, asserted on the colour
+    /// rather than on the style, because the colour is what was captured:
+    /// background-style=solid with frame-style=frosted rendered a window
+    /// with no chrome in it at all, one flat #131620 from the title row down
+    /// into the terminal and across the tab strip.
+    ///
+    /// Resolving the frame transparent has nothing to expose there. There is
+    /// one SystemBackdrop per window, so what shows through is RootGrid,
+    /// which under window-theme=wintty is the palette background and is
+    /// therefore the terminal's own colour. All four corners are covered
+    /// because the opaque answer comes from two different places: the
+    /// palette when window-theme is driving it, the desktop otherwise.
+    /// </summary>
+    [Theory]
+    [InlineData(BackdropStyles.Frosted, false, true, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Frosted, false, false, 0xFFF3F3F3u)]
+    [InlineData(BackdropStyles.Frosted, true, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Frosted, true, false, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Crystal, false, true, 0xFF0C0C0Cu)]
+    [InlineData(BackdropStyles.Crystal, false, false, 0xFFF3F3F3u)]
+    [InlineData(BackdropStyles.Crystal, true, true, ArbitraryShellBg)]
+    [InlineData(BackdropStyles.Crystal, true, false, ArbitraryShellBg)]
+    public void A_translucent_frame_over_a_solid_backdrop_takes_the_opaque_colour(
+        string frameStyle, bool shellThemeEnabled, bool isDesktopDark, uint expected)
+    {
+        var effective = BackdropStyles.FrameOver(frameStyle, BackdropStyles.Solid);
+
+        Assert.Equal(
+            expected,
+            RootBackgroundResolver.Resolve(
+                effective, shellThemeEnabled, ArbitraryShellBg, isDesktopDark));
+    }
+
+    /// <summary>
+    /// And the frame still reaches the backdrop while there is a backdrop to
+    /// reach. This is the row the key exists to create, so the degradation
+    /// has to be the narrow one it claims to be rather than a frame-style
+    /// that is never translucent anywhere.
+    /// </summary>
+    [Theory]
+    [InlineData(BackdropStyles.Frosted, BackdropStyles.Frosted)]
+    [InlineData(BackdropStyles.Crystal, BackdropStyles.Frosted)]
+    [InlineData(BackdropStyles.Frosted, BackdropStyles.Crystal)]
+    [InlineData(BackdropStyles.Crystal, BackdropStyles.Crystal)]
+    public void A_translucent_frame_over_a_translucent_backdrop_still_goes_bare(
+        string frameStyle, string backdropStyle)
+    {
+        var effective = BackdropStyles.FrameOver(frameStyle, backdropStyle);
+
+        Assert.Equal(
+            RootBackgroundResolver.TransparentArgb,
+            RootBackgroundResolver.Resolve(
+                effective, shellThemeEnabled: true, ArbitraryShellBg, isDesktopDark: true));
+    }
+
+    /// <summary>
+    /// Both halves are fully opaque. A chrome colour that let the backdrop
+    /// through would defeat the one thing the solid style is for, and the
+    /// value is fed to GDI as well as to XAML.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void The_opaque_chrome_colour_is_opaque(bool isDesktopDark)
+    {
+        Assert.Equal(0xFF000000u, RootBackgroundResolver.OpaqueChromeArgb(isDesktopDark) & 0xFF000000u);
     }
 }

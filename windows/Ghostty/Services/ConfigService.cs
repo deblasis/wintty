@@ -4,8 +4,10 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Ghostty.Core.Accessibility;
 using Ghostty.Core.Config;
 using Ghostty.Core.Env;
+using Ghostty.Core.Shell;
 using Ghostty.Interop;
 using Ghostty.Logging;
 using Microsoft.Extensions.Logging;
@@ -69,18 +71,31 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public string CommandPaletteBackground { get; private set; } = "acrylic";
     public string NoColorOverride { get; private set; } = NoColorPolicy.Default;
 
-    // The High Contrast override config body to layer on top of the user's
-    // config, or null when HC is inactive/opted-out. Set by
-    // HighContrastMonitor; consumed in Reload. Only touched on the UI thread
-    // (the monitor marshals its events, and Reload runs on the UI thread).
-    private string? _highContrastOverrideBody;
+    // The High Contrast palette to layer on top of the user's config, or
+    // null when HC is inactive/opted-out. Set by HighContrastMonitor;
+    // consumed in Reload and by HighContrastBackground. Only touched on the
+    // UI thread (the monitor marshals its events, and Reload runs on the UI
+    // thread).
+    private HighContrastColors? _highContrastOverrideColors;
     public string LogLevel { get; private set; } = "info";
     public string LogFilter { get; private set; } = string.Empty;
 
     private static readonly string[] CommandPaletteBackgroundAllowed =
         { "acrylic", "mica", "opaque" };
 
-    public string BackgroundStyle { get; private set; } = "frosted";
+    public string BackgroundStyle { get; private set; } = BackdropStyles.Default;
+
+    /// <summary>
+    /// Material for the window chrome, as opposed to the terminal's own
+    /// backdrop. Never null and never unset downstream: an absent
+    /// <c>frame-style</c> means "match the backdrop", and that is resolved
+    /// once here so no consumer has to know the inheritance exists and a
+    /// later one cannot resolve it differently. An unusable value falls
+    /// back to <see cref="BackdropStyles.Default"/> rather than inheriting,
+    /// because a typo that quietly picked up another key's value reads
+    /// exactly like the typo working.
+    /// </summary>
+    public string FrameStyle { get; private set; } = BackdropStyles.Default;
     public Windows.UI.Color? BackgroundTintColor { get; private set; }
     public float? BackgroundTintOpacity { get; private set; }
     public float? BackgroundLuminosityOpacity { get; private set; }
@@ -94,7 +109,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public Ghostty.Core.Hosting.WindowSaveState WindowSaveState { get; private set; }
         = Ghostty.Core.Hosting.WindowSaveState.Default;
     public uint ForegroundColor { get; private set; } = 0x00FFFFFF;
-    public uint BackgroundColor { get; private set; } = 0x001E1E2E;
+    // libghostty's own compile-time default. Held only between construction
+    // and the first ReadFlags; anything else here reads as a terminal
+    // background that no terminal is painted with.
+    public uint BackgroundColor { get; private set; } = 0x00282C34;
     public uint? CursorColor { get; private set; }
     public uint? CursorTextColor { get; private set; }
     // Explicit chrome accent. Null when the user hasn't set accent-color;
@@ -291,6 +309,36 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// Keys are case-insensitive; each maps to the list of raw values in
     /// file order.
     /// </summary>
+    /// <summary>
+    /// Whether this launch asked for no configuration at all.
+    /// </summary>
+    /// <remarks>
+    /// libghostty honours <c>--no-config</c> by itself once the CLI args are
+    /// layered in, but that only covers the keys it parses. Wintty reads its
+    /// Windows-only keys straight off the config file, so without this the
+    /// flag would suppress <c>font-size</c> and leave <c>vertical-tabs</c>
+    /// standing, which is a worse answer than not having the flag.
+    ///
+    /// Read once from the process-wide reading rather than re-derived here,
+    /// so this service and libghostty cannot disagree about what was asked.
+    /// </remarks>
+    private readonly bool _noConfig;
+
+    /// <summary>
+    /// The config file to read as configuration, or null when this launch is
+    /// ignoring it.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="ConfigFilePath"/>, which stays populated
+    /// under <c>--no-config</c>: it is still where the file lives, and the
+    /// Settings UI, the raw editor, the "open config file" command and the
+    /// theme search path all need to know that whether or not it is in
+    /// force. Every read that puts the file's contents into effect goes
+    /// through this one instead, so suppressing the flag is one assignment
+    /// rather than a condition repeated at each read site.
+    /// </remarks>
+    private string? ConfigSourcePath => _noConfig ? null : ConfigFilePath;
+
     private Dictionary<string, List<string>>? _configFileCache;
 
     /// <summary>
@@ -347,8 +395,20 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
                 "libghostty export that touches global state.");
         }
 
+        _noConfig = Program.ConfigOverrides.NoConfig;
+
+        var isOsDark = OsTheme.IsDark();
+
         _config = NativeMethods.ConfigNew();
         NativeMethods.ConfigLoadDefaultFiles(_config);
+        NativeMethods.ConfigLoadCliArgs(_config);
+        NativeMethods.ConfigLoadRecursiveFiles(_config);
+        // Before finalize: that is where the theme is applied, and the
+        // scheme decides which half of a light/dark pair (the user's, or
+        // the built-in one) gets applied. Without it this handle resolves
+        // every conditional against light and reports colours the terminal
+        // is not rendering.
+        NativeMethods.ConfigSetColorScheme(_config, ToScheme(isOsDark));
         NativeMethods.ConfigFinalize(_config);
 
         var pathStr = NativeMethods.ConfigOpenPath();
@@ -361,8 +421,41 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         SeedConfigIfEmpty();
         CacheDiagnostics();
-        ReadFlags(OsTheme.IsDark());
+
+        try
+        {
+            ReadFlags(isOsDark);
+        }
+        catch (Exception ex)
+        {
+            // ReadFlags reads files, so it can fail on a config another
+            // process holds. Reload and RefreshForOsColorScheme already
+            // treat that as recoverable; this one used to be the exception,
+            // and an unhandled throw here kills the process inside
+            // App.OnLaunched with no window and no message.
+            //
+            // Every value it would have set has a default, so a failed read
+            // leaves a consistent snapshot rather than a torn one, and the
+            // first successful reload replaces it wholesale.
+            StaticLoggers.ConfigService.LogSnapshotRefreshFailed(ex);
+
+            // Consistent is not the same as usable, and the retry has to
+            // stay open. ReadFlags records the scheme its caches hold as its
+            // last act, so a throw leaves the field at its default of false.
+            // On a light desktop that is accidentally the truth, and
+            // RefreshForOsColorScheme's "already on this scheme" guard would
+            // then decline every retry for the life of the process, leaving
+            // the chrome on field defaults that no build renders. Point the
+            // flag at the scheme we do not have so the next flip goes
+            // through.
+            _themedValuesAreForDarkOs = !isOsDark;
+        }
     }
+
+    private static Ghostty.Core.Interop.GhosttyColorScheme ToScheme(bool isDark)
+        => isDark
+            ? Ghostty.Core.Interop.GhosttyColorScheme.Dark
+            : Ghostty.Core.Interop.GhosttyColorScheme.Light;
 
     /// <summary>
     /// Mac Ghostty seeds a comment header when it creates the config
@@ -381,6 +474,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     {
         try
         {
+            // Nothing is being read from it, so nothing should be written to
+            // it either. Seeding under --no-config would have the flag create
+            // the very file it exists to ignore.
+            if (_noConfig) return;
             if (!File.Exists(ConfigFilePath)) return;
             if (new FileInfo(ConfigFilePath).Length != 0) return;
 
@@ -436,20 +533,36 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // teardown, so _shuttingDown is the only guard against the freed app.
         if (_app.Handle == IntPtr.Zero) return false;
 
+        // Sampled once for the whole reload. Sampling again for ReadFlags
+        // would let a desktop flip between the two land a config resolved
+        // against one scheme in caches recorded as holding the other, and
+        // the second sample is the one the retry guard believes -- so the
+        // first would never be corrected.
+        var isOsDark = OsTheme.IsDark();
+
         GhosttyConfig newConfig;
         try
         {
             newConfig = NativeMethods.ConfigNew();
             NativeMethods.ConfigLoadDefaultFiles(newConfig);
+            NativeMethods.ConfigLoadCliArgs(newConfig);
+            NativeMethods.ConfigLoadRecursiveFiles(newConfig);
             // Layer the High Contrast override last so it wins over the
-            // user's colors while HC is active. Skipped (body == null) when
-            // HC is off or opted-out, restoring the user's config.
-            if (_highContrastOverrideBody is { } hcBody)
+            // user's colors while HC is active. Skipped when HC is off or
+            // opted-out, restoring the user's config.
+            //
+            // Still last now that the CLI and its config-file includes load
+            // above it: High Contrast is an accessibility override and has to
+            // outrank anything the user asked for, a file named on the command
+            // line included.
+            if (_highContrastOverrideColors is { } hcColors)
             {
+                var hcBody = Ghostty.Core.Accessibility.HighContrastConfigWriter.Render(hcColors);
                 var hcPath = Ghostty.Accessibility.HighContrastOverrideFile.Write(hcBody);
                 if (hcPath is not null)
                     NativeMethods.ConfigLoadFile(newConfig, hcPath);
             }
+            NativeMethods.ConfigSetColorScheme(newConfig, ToScheme(isOsDark));
             NativeMethods.ConfigFinalize(newConfig);
         }
         catch (Exception ex)
@@ -483,7 +596,7 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         try
         {
             CacheDiagnostics();
-            ReadFlags(OsTheme.IsDark());
+            ReadFlags(isOsDark);
         }
         catch (Exception ex)
         {
@@ -658,19 +771,36 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     public void SuppressWatcher(bool suppress) => _suppressWatcher = suppress;
 
     /// <summary>
-    /// Set (or clear, with null) the High Contrast override config body and
+    /// Set (or clear, with null) the High Contrast override palette and
     /// reload so the layered colors take effect. Called by
     /// <c>HighContrastMonitor</c> on the UI thread. Skips the reload when the
-    /// body is unchanged, so spurious palette-change events don't churn the
+    /// palette is unchanged, so spurious palette-change events don't churn the
     /// config.
     /// </summary>
-    public void SetHighContrastOverride(string? body)
+    public void SetHighContrastOverride(HighContrastColors? colors)
     {
-        if (string.Equals(_highContrastOverrideBody, body, StringComparison.Ordinal))
-            return;
-        _highContrastOverrideBody = body;
+        if (_highContrastOverrideColors == colors) return;
+        _highContrastOverrideColors = colors;
         Reload();
     }
+
+    /// <summary>
+    /// The High Contrast background the override layers over the palette,
+    /// packed 0x00RRGGBB, or null when HC is off or opted out.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="BackgroundColor"/> keeps resolving from the config and
+    /// theme files: the override is layered into the native config only, and
+    /// making the C# cache HC-aware would move every chrome consumer that
+    /// reads it under HC (VerticalTitleInk, the drag region, the title bar)
+    /// onto colours #790 verified as they are. This is the one place the
+    /// colour the terminal will actually settle on is answerable, which is
+    /// what the splash needs.
+    /// </remarks>
+    public uint? HighContrastBackground =>
+        _highContrastOverrideColors is { } hc
+            ? Ghostty.Core.Accessibility.HighContrastConfigWriter.ColorRefToRgb(hc.Background)
+            : null;
 
     private void CacheDiagnostics()
     {
@@ -745,10 +875,33 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // that looks up Windows-only keys or theme colors goes through
         // these caches, so the whole reload is bounded by at most two
         // File.ReadLines calls regardless of how many keys we probe.
-        _configFileCache = LoadIniFile(ConfigFilePath);
-        var activeTheme = ResolveActiveThemeName(isOsDark);
-        var themePath = string.IsNullOrEmpty(activeTheme) ? null : ResolveThemePath(activeTheme);
-        _activeThemeFileCache = themePath is null ? null : LoadIniFile(themePath);
+        _configFileCache = LoadIniFile(ConfigSourcePath);
+        // No theme configured is not "no theme": libghostty applies its
+        // built-in light/dark pair in that case, so the chrome has to
+        // resolve against the same one or it frames a pane in colours the
+        // pane is not filled with. Asked for by scheme rather than cached,
+        // because a flip re-enters here with the other one.
+        //
+        // Whether that happened is asked of libghostty, not of the config
+        // file. `theme` can be set in a file pulled in by `config-file`,
+        // which ResolveActiveThemeName cannot see, and reading it as "no
+        // theme" would paint the chrome from the built-in pair while the
+        // terminal renders the theme the user actually asked for.
+        //
+        // A configured-but-unresolvable theme deliberately does not land
+        // here: libghostty leaves the compile-time colours in place for
+        // that, and substituting the built-in pair would drift again.
+        if (NativeMethods.ConfigThemeIsBuiltin(_config))
+        {
+            _activeThemeFileCache = LoadBuiltinTheme(isOsDark);
+        }
+        else
+        {
+            var activeTheme = ResolveActiveThemeName(isOsDark);
+            _activeThemeFileCache = ResolveThemePath(activeTheme) is { } themePath
+                ? LoadIniFile(themePath)
+                : null;
+        }
 
         // Immediately after the assignment it certifies, so the two cannot
         // disagree. Both failure legs then stay consistent: a throw from
@@ -779,6 +932,13 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // is still read from the file cache here, which only covers the
         // top-level config file: a value set in an included file or a
         // conditional block won't be seen.
+        //
+        // Reading it from that cache is also what settles the Settings UI
+        // under --no-config, and settles it the right way: the cache is
+        // empty, so the UI is off and the only remaining OpenConfig path
+        // hands the file to an external editor. A Settings window whose
+        // toggles wrote to a file this session is ignoring would be the
+        // confusing outcome, and this avoids it without a second rule.
         SettingsUiEnabled = string.Equals(
             GetFileValue("windows-settings-ui", "false"),
             "true", StringComparison.OrdinalIgnoreCase);
@@ -842,7 +1002,16 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
         // background-style is a Windows-only key not in the Zig config
         // schema, so we read it directly from the config file.
-        BackgroundStyle = GetFileValue("background-style", "frosted");
+        BackgroundStyle = NormalizeStyle(
+            "background-style", GetFileValue("background-style", BackdropStyles.Default));
+        // Reads BackgroundStyle, so it has to stay below it: resolved first,
+        // an unset frame-style inherits whatever the previous reload left
+        // behind. Absence is the whole distinction here, which is why this
+        // asks whether the key is present rather than handing GetFileValue a
+        // default it could not tell apart from a configured value.
+        FrameStyle = TryGetFileValue("frame-style", out var rawFrameStyle)
+            ? NormalizeStyle("frame-style", rawFrameStyle)
+            : BackgroundStyle;
         BackgroundTintColor = ParseHexColor(GetFileValue("background-tint-color", ""));
         BackgroundTintOpacity = ParseFloat(GetFileValue("background-tint-opacity", ""));
         BackgroundLuminosityOpacity = ParseFloat(GetFileValue("background-luminosity-opacity", ""));
@@ -866,12 +1035,17 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         WindowSaveState = Ghostty.Core.Hosting.WindowSaveStateExtensions.Parse(
             GetString("window-save-state", "default"));
 
-        // For background and foreground we go through GetThemeValue first
-        // because libghostty's _config was finalized with the default
-        // (.light) conditional state, so for a pair theme in dark mode
-        // it would return the LIGHT theme's colors. GetThemeValue resolves
-        // the active theme name (light vs dark) based on OS state.
-        BackgroundColor = ResolveThemedColor("background", 0x001E1E2E);
+        // Resolved from the config and theme text rather than through
+        // ghostty_config_get. The native handle is finalized against the
+        // scheme that was current when it was built, and an OS light/dark
+        // flip re-enters here without rebuilding it, so on the far side of
+        // a flip it still answers for the outgoing scheme. The text path
+        // takes isOsDark per call and does not have that problem.
+        //
+        // The defaults are libghostty's own compile-time colours, reached
+        // only on a build with no built-in theme; otherwise the built-in
+        // theme has already supplied both.
+        BackgroundColor = ResolveThemedColor("background", 0x00282C34);
         ForegroundColor = ResolveThemedColor("foreground", 0x00FFFFFF);
 
         // cursor-color is a TerminalColor (tagged union) in the Zig
@@ -975,8 +1149,11 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         // is small. Readers of the five profile-view properties see a
         // consistent snapshot via the single volatile _profileView
         // assignment below.
-        var rawConfigText = File.Exists(ConfigFilePath)
-            ? File.ReadAllText(ConfigFilePath)
+        // Reads the path rather than the cache, so it needs the same
+        // suppression: _configFileCache being empty under --no-config would
+        // not stop this one from putting the file's profiles back in force.
+        var rawConfigText = ConfigSourcePath is { } profileSource && File.Exists(profileSource)
+            ? File.ReadAllText(profileSource)
             : string.Empty;
         var view = Ghostty.Core.Config.ConfigServiceProfileParser.ParseAll(
             rawConfigText,
@@ -1269,6 +1446,46 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
             : defaultValue;
 
     /// <summary>
+    /// Same lookup as <see cref="GetFileValue"/>, reporting whether the key
+    /// was there at all.
+    ///
+    /// A key whose absence means something other than its default needs
+    /// this: <c>frame-style</c> unset means "match background-style", and
+    /// with a default parameter that is indistinguishable from the user
+    /// having written the default down. A sentinel string would only move
+    /// the ambiguity onto whatever value was picked as the sentinel.
+    /// </summary>
+    private bool TryGetFileValue(string key, out string value)
+    {
+        if (_configFileCache is not null
+            && _configFileCache.TryGetValue(key, out var list)
+            && list.Count > 0)
+        {
+            value = list[0];
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// Fold a raw style value, and say so when it was not one.
+    ///
+    /// The style comparisons downstream are ordinal, so a config saying
+    /// "Frosted" ran solid with nothing in the log. Reported from here
+    /// rather than from the fold itself because by the time the value
+    /// reaches the backdrop switch there is no key name left to put in
+    /// the message, and the reader needs the line of their config.
+    /// </summary>
+    private static string NormalizeStyle(string key, string raw)
+    {
+        if (BackdropStyles.TryNormalize(raw, out var style)) return style;
+        StaticLoggers.ConfigService.LogUnknownBackdropStyle(key, raw, style);
+        return style;
+    }
+
+    /// <summary>
     /// True iff the user's config file actually sets a value for this
     /// key. Distinguishes a user-authored override from an inherited
     /// theme/default value, which the typed accessors above conflate.
@@ -1302,6 +1519,24 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     private static Dictionary<string, List<string>> LoadIniFile(string? path)
         => Ghostty.Core.Config.ConfigIniFile.Load(path);
+
+    /// <summary>
+    /// The built-in theme libghostty applies for <paramref name="isOsDark"/>
+    /// when nothing is configured, parsed into the same shape a theme file
+    /// gets. Null when the build has no built-in theme, which leaves the
+    /// per-key defaults below in charge exactly as before.
+    /// </summary>
+    private static Dictionary<string, List<string>>? LoadBuiltinTheme(bool isOsDark)
+    {
+        var str = NativeMethods.ConfigBuiltinTheme(ToScheme(isOsDark));
+        if (str.Ptr == IntPtr.Zero || str.Len == 0) return null;
+
+        var text = Marshal.PtrToStringUTF8(str.Ptr, (int)str.Len);
+        if (string.IsNullOrEmpty(text)) return null;
+
+        // Static storage on the native side, so there is nothing to free.
+        return Ghostty.Core.Config.ConfigIniFile.ParseText(text);
+    }
 
     /// <summary>
     /// Read a color config value. libghostty returns colors as
@@ -1358,12 +1593,18 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
     /// </summary>
     private uint[] GetAllPaletteColors()
     {
+        // libghostty's own defaults, from Name.default in
+        // src/terminal/color.zig -- NOT the xterm primaries. These were
+        // xterm's, which meant an unconfigured install had the chrome
+        // deriving from one palette while the terminal rendered another.
+        // Reached only when neither the built-in theme nor a configured
+        // one sets an index.
         uint[] defaults =
         [
-            0x000000, 0xCC0000, 0x00CC00, 0xCCCC00,
-            0x0000CC, 0xCC00CC, 0x00CCCC, 0xCCCCCC,
-            0x666666, 0xFF0000, 0x00FF00, 0xFFFF00,
-            0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+            0x1D1F21, 0xCC6666, 0xB5BD68, 0xF0C674,
+            0x81A2BE, 0xB294BB, 0x8ABEB7, 0xC5C8C6,
+            0x666666, 0xD54E53, 0xB9CA4A, 0xE7C547,
+            0x7AA6DA, 0xC397D8, 0x70C0B1, 0xEAEAEA,
         ];
 
         // Apply theme palette first (lower priority). Use the cached
@@ -1449,6 +1690,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
 
     private void StartWatcher()
     {
+        // A reload re-applies --no-config, so a watched save could not
+        // actually take effect; arming it would just spend a reload per
+        // keystroke in the user's editor on rebuilding the same config.
+        if (_noConfig) return;
         if (_watcher != null) return;
         var dir = Path.GetDirectoryName(ConfigFilePath);
         var file = Path.GetFileName(ConfigFilePath);
@@ -1573,6 +1818,17 @@ internal static partial class ConfigServiceLogExtensions
                    Message = "[ConfigService] Config applied natively but the C# snapshot failed to refresh")]
     internal static partial void LogSnapshotRefreshFailed(
         this ILogger<ConfigService> logger, System.Exception ex);
+
+    // Warning, not Error: the window still comes up, the user just does
+    // not get the material they asked for. The key is in the message
+    // because more than one config key folds through the same parser, and
+    // an unattributed complaint sends the reader down the wrong line.
+    [LoggerMessage(EventId = Ghostty.Core.Logging.LogEvents.Config.UnknownBackdropStyle,
+                   Level = LogLevel.Warning,
+                   Message = "[ConfigService] {Key} = '{Value}' is not a known style; "
+                             + "using '{Fallback}'. Accepted: solid, frosted, crystal")]
+    internal static partial void LogUnknownBackdropStyle(
+        this ILogger<ConfigService> logger, string key, string value, string fallback);
 
     // Surfaces each warning string returned by
     // ConfigServiceProfileParser.ParseAll so admin-visible parse

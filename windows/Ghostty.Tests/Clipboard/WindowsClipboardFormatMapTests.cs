@@ -7,36 +7,67 @@ namespace Ghostty.Tests.Clipboard;
 /// Mirrors macos/Tests/NSPasteboardTests.swift. Verifies the MIME types
 /// libghostty emits map to the Windows clipboard formats we support, and
 /// that everything else maps to null (silently skipped, not an error).
+///
+/// Readable and writable are separate questions and this file keeps them
+/// separate. Collapsing them is not cosmetic: the write path drops entries
+/// it cannot handle, so a MIME that passes the write filter and is then
+/// dropped leaves an empty DataPackage, and handing SetContent an empty
+/// package clears the user's clipboard.
 /// </summary>
 public sealed class WindowsClipboardFormatMapTests
 {
-    [Fact]
-    public void FromMime_TextPlain_ReturnsText()
+    [Theory]
+    [InlineData("text/plain", WindowsClipboardFormat.Text)]
+    [InlineData("text/html", WindowsClipboardFormat.Html)]
+    [InlineData("text/uri-list", WindowsClipboardFormat.UriList)]
+    [InlineData("image/png", WindowsClipboardFormat.Image)]
+    public void FromMime_KnownMimes_Map(string mime, WindowsClipboardFormat expected)
     {
-        Assert.Equal(WindowsClipboardFormat.Text,
-            WindowsClipboardFormatMap.FromMime("text/plain"));
+        Assert.Equal(expected, WindowsClipboardFormatMap.FromMime(mime));
     }
 
-    [Fact]
-    public void FromMime_TextHtml_ReturnsHtml()
+    [Theory]
+    [InlineData("TEXT/PLAIN")]
+    [InlineData("Text/Html")]
+    [InlineData("text/URI-LIST")]
+    public void FromMime_IsCaseInsensitive(string mime)
     {
-        Assert.Equal(WindowsClipboardFormat.Html,
-            WindowsClipboardFormatMap.FromMime("text/html"));
+        // RFC 2045 makes type and subtype case-insensitive, and these names
+        // arrive from terminal programs rather than from us.
+        Assert.NotNull(WindowsClipboardFormatMap.FromMime(mime));
     }
 
-    [Fact]
-    public void FromMime_ImagePng_ReturnsNull()
+    [Theory]
+    [InlineData("text/plain", WindowsClipboardFormat.Text)]
+    [InlineData("text/html", WindowsClipboardFormat.Html)]
+    [InlineData("image/png", WindowsClipboardFormat.Image)]
+    public void FromMimeForWrite_WritableFormats_Map(string mime, WindowsClipboardFormat expected)
     {
-        // Negative analogue of the macOS image/png test: macOS supports
-        // image/png natively via NSPasteboard.PasteboardType. We do not.
-        // Documented difference, not an oversight.
-        Assert.Null(WindowsClipboardFormatMap.FromMime("image/png"));
+        // image/png belongs here. It was excluded once, and because the write
+        // path reports DONE for every payload it accepted the protocol
+        // cheerfully acknowledged image writes that never reached the
+        // clipboard. A dropped format is not a no-op, so each writable one is
+        // pinned.
+        Assert.Equal(expected, WindowsClipboardFormatMap.FromMimeForWrite(mime));
+    }
+
+    [Theory]
+    [InlineData("text/uri-list")]
+    public void FromMimeForWrite_ReadOnlyFormats_ReturnNull(string mime)
+    {
+        // We can read StorageItems and serve them as text/uri-list, but
+        // writing them back means materialising files somewhere. Until then
+        // this must not pass the write filter, or the write path builds an
+        // empty package.
+        Assert.Null(WindowsClipboardFormatMap.FromMimeForWrite(mime));
+        Assert.NotNull(WindowsClipboardFormatMap.FromMime(mime));
     }
 
     [Fact]
     public void FromMime_UnknownMime_ReturnsNull()
     {
         Assert.Null(WindowsClipboardFormatMap.FromMime("application/x-something"));
+        Assert.Null(WindowsClipboardFormatMap.FromMimeForWrite("application/x-something"));
     }
 
     [Fact]
@@ -44,5 +75,18 @@ public sealed class WindowsClipboardFormatMapTests
     {
         Assert.Null(WindowsClipboardFormatMap.FromMime(null));
         Assert.Null(WindowsClipboardFormatMap.FromMime(""));
+        Assert.Null(WindowsClipboardFormatMap.FromMimeForWrite(null));
+        Assert.Null(WindowsClipboardFormatMap.FromMimeForWrite(""));
+    }
+
+    [Theory]
+    [InlineData(WindowsClipboardFormat.Text, "text/plain")]
+    [InlineData(WindowsClipboardFormat.Html, "text/html")]
+    [InlineData(WindowsClipboardFormat.UriList, "text/uri-list")]
+    [InlineData(WindowsClipboardFormat.Image, "image/png")]
+    public void ToMime_RoundTripsFromMime(WindowsClipboardFormat format, string expected)
+    {
+        Assert.Equal(expected, WindowsClipboardFormatMap.ToMime(format));
+        Assert.Equal(format, WindowsClipboardFormatMap.FromMime(expected));
     }
 }

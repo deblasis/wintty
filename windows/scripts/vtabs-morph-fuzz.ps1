@@ -20,6 +20,16 @@
 # keeps the strip above three tabs and kills the process at the end rather than
 # closing the window, so the cancel term keeps the oracle honest for a graceful
 # close rather than recording one this harness drove.
+#
+# All of that only says something when switches actually happened, and every
+# term of it is vacuous when none did. So the run is gated too: the desktop has
+# to accept the layout chords, and every one of them has to begin a switch. A
+# run that toggled nothing leaves with 1 - a chord nobody handled is a corpus
+# this harness could not establish, not a defect in the build.
+#
+# That gate is only affordable because the harness arms the XAML island before
+# every chord. The island drops synthesized keys until a real click lands on
+# its own pixels, and without that this harness lost most of what it sent.
 param(
     [string]$ExePath = (Join-Path $PSScriptRoot '..\Ghostty\bin\x64\Debug\net10.0-windows10.0.19041.0\Wintty.exe'),
     [int]$Seed = 0,
@@ -63,6 +73,11 @@ public static class MFz {
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
@@ -90,12 +105,45 @@ public static class MFz {
     // handle, and SetForegroundWindow fails silently under the foreground
     // lock. Every send confirms ownership first so a stray chord cannot land
     // in the developer's editor.
+    //
+    // Attaching to the foreground thread first is what lifts that lock. A
+    // bare SetForegroundWindow returns success and does nothing whenever the
+    // caller does not already own the foreground, so the retry loop below
+    // spun twenty times and reported a miss with no way to tell whether the
+    // window was wrong, gone, or simply refused.
+    static uint ThreadOf(IntPtr h) { uint pid; return GetWindowThreadProcessId(h, out pid); }
+
+    public static string Describe(IntPtr h) {
+        if (h == IntPtr.Zero) return "none";
+        if (!IsWindow(h)) return "a destroyed window";
+        var cls = new StringBuilder(256); GetClassName(h, cls, 256);
+        var txt = new StringBuilder(512); GetWindowText(h, txt, 512);
+        uint pid; GetWindowThreadProcessId(h, out pid);
+        return string.Format("class={0} pid={1} title='{2}'", cls, pid, txt);
+    }
+
+    // What is holding the foreground instead of the window we wanted. The
+    // whole point is that a FOREGROUND_MISS should name the thief rather
+    // than leaving it to be guessed from a screenshot that was never taken.
+    public static string ForegroundNow() { return Describe(GetForegroundWindow()); }
+
     public static bool Focus(IntPtr expected) {
-        if (expected == IntPtr.Zero || !IsWindow(expected)) return false;
+        if (expected == IntPtr.Zero) return false;
+        if (!IsWindow(expected)) return false;
         for (int i = 0; i < 20; i++) {
             if (GetForegroundWindow() == expected) return true;
-            SetForegroundWindow(expected);
-            Thread.Sleep(50);
+            var fg = GetForegroundWindow();
+            uint fgThread = fg == IntPtr.Zero ? 0 : ThreadOf(fg);
+            uint me = GetCurrentThreadId();
+            bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+            try {
+                SetForegroundWindow(expected);
+                BringWindowToTop(expected);
+                SetFocus(expected);
+            } finally {
+                if (attached) AttachThreadInput(me, fgThread, false);
+            }
+            Thread.Sleep(60);
         }
         return GetForegroundWindow() == expected;
     }
@@ -161,6 +209,47 @@ $Colors = @('Red', 'Orange', 'Yellow', 'Green', 'Teal', 'Blue', 'Purple', 'Pink'
 # and the morph ghost has to copy something other than a default cmd tab.
 $Shells = @('powershell -NoLogo', 'cmd', 'powershell -NoLogo -Command "$host.UI.RawUI.WindowTitle=''fuzz''; cmd"')
 
+# Clicking the terminal is what makes the app accept a chord at all: the XAML
+# island drops synthesized keys until a real click lands on its own pixels, and
+# a chrome interaction -- a tab color picked off a flyout -- moves focus off the
+# terminal and un-arms it again. Same shape as Enable-Chords in
+# mouse-fuzz-tab-close-selection.ps1, which learned it the same way.
+#
+# Three quarters across and down lands in the terminal under either layout: the
+# vertical rail owns the left edge and the horizontal header the top, and
+# neither reaches here. The window center does too, but only while the strip is
+# narrow, and this harness spends its whole run changing that.
+$script:ArmPid = 0
+$script:ArmHwnd = [IntPtr]::Zero
+function Enable-Chords {
+    # Not a silent return. Arming before the window is known leaves the island
+    # unarmed, and that resurfaces later as a layout chord nobody handled -
+    # which reads as a broken keybinding rather than as a harness that was
+    # never allowed to type.
+    if (-not $script:ArmPid) {
+        throw 'FOREGROUND_MISS: asked to arm input before the window under test was known'
+    }
+    # Rect swallows GetWindowRect's return, so a window that has gone away
+    # comes back as zeros rather than as an error. Left unchecked that aims the
+    # click at the top-left of the screen, hits whatever lives there, and
+    # reports a foreground miss for what is actually a window that no longer
+    # exists - a cause the caller reports as PRODUCT_FAIL.
+    if (-not [MFz]::IsWindow($script:ArmHwnd)) {
+        throw 'PRODUCT_FAIL: the window under test vanished before its input could be armed'
+    }
+    $rc = [MFz]::Rect($script:ArmHwnd)
+    if ($rc.R -le $rc.L -or $rc.B -le $rc.T) {
+        throw "PRODUCT_FAIL: the window under test has a degenerate rect ($($rc.L),$($rc.T))-($($rc.R),$($rc.B))"
+    }
+    $x = [int]($rc.L + ($rc.R - $rc.L) * 0.75)
+    $y = [int]($rc.T + ($rc.B - $rc.T) * 0.75)
+    if (-not [MFz]::Click([uint32]$script:ArmPid, $x, $y, $false)) {
+        throw ("FOREGROUND_MISS: could not click the terminal at $x,$y to arm input; " +
+            "foreground is $([MFz]::ForegroundNow())")
+    }
+    Start-Sleep -Milliseconds 250
+}
+
 function Get-UiaRoot([int64]$h) {
     return [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($h))
 }
@@ -206,6 +295,11 @@ $env:WINTTY_MORPH_TRACE = $log
 $proc = $null
 $actions = @{}
 $chordMisses = 0
+# Layout chords a working build answers with a SWITCH begin: the startup probe
+# plus one per toggle iteration. The interrupting second chord is deliberately
+# left out - it is aimed at a switch still in the air, which the coordinator is
+# meant to swallow, so counting it would water down the floor below.
+$toggleAttempts = 0
 $failures = New-Object System.Collections.Generic.List[string]
 # Above the try so a refusal keeps its own message: with the gate inside, the
 # sweep in the finally would bind a null stamp to a mandatory [datetime] and
@@ -230,19 +324,45 @@ try {
     [void][MFz]::MoveWindow($hwnd, 40, 40, 1400, 860, $true)
     Start-Sleep -Milliseconds 700
 
+    Write-Host ("target $([MFz]::Describe($hwnd))")
+
+    $script:ArmPid = $proc.Id
+    $script:ArmHwnd = $hwnd
+    Enable-Chords
+
     # Seed the strip so the very first switches already have a crowd.
     foreach ($i in 1..7) {
-        if (-not [MFz]::Chord($hwnd, $VK.T, $true, $false)) { throw 'FOREGROUND_MISS: seed tab' }
+        if (-not [MFz]::Chord($hwnd, $VK.T, $true, $false)) {
+            throw "FOREGROUND_MISS: seed tab; wanted $([MFz]::Describe($hwnd)), foreground is $([MFz]::ForegroundNow())"
+        }
         Start-Sleep -Milliseconds 500
     }
     $tabs = 8
 
     # One deterministic toggle up front proves the oracle is alive before
     # minutes of fuzzing are spent on a build that cannot report it.
-    if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { throw 'FOREGROUND_MISS: probe toggle' }
-    Start-Sleep -Milliseconds 1200
-    if (-not (Test-Path $log)) {
-        throw "no morph trace at $log - the app ignored WINTTY_MORPH_TRACE; this build predates the built-in trace"
+    Enable-Chords
+    if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) {
+        throw "FOREGROUND_MISS: probe toggle; foreground is $([MFz]::ForegroundNow())"
+    }
+    $toggleAttempts++
+    # Wait for the probe's own SWITCH line, not for the file. A build that
+    # ignores the env var and a build whose layout chord never reaches the
+    # router are the same absent file to Test-Path, and the second is the one
+    # that used to run a whole fuzz to a green verdict having switched nothing.
+    $probed = $false
+    $probeDl = (Get-Date).AddSeconds(6)
+    while ((Get-Date) -lt $probeDl) {
+        Start-Sleep -Milliseconds 200
+        if (-not (Test-Path $log)) { continue }
+        $seen = @(Get-Content $log -ErrorAction SilentlyContinue |
+            Where-Object { $_ -like 'SWITCH begin*' })
+        if ($seen.Count -gt 0) { $probed = $true; break }
+    }
+    if (-not $probed) {
+        throw ("the probe toggle traced no SWITCH begin in $log - either the app " +
+            'ignored WINTTY_MORPH_TRACE (a build older than the trace) or the layout ' +
+            'chord never reached the router')
     }
 
     for ($i = 0; $i -lt $Iterations; $i++) {
@@ -258,9 +378,13 @@ try {
             # nothing.
             [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             Start-Sleep -Milliseconds 90
+            Enable-Chords
+            $toggleAttempts++
             if (-not [MFz]::Chord($hwnd, $VK.Comma, $true, $true)) { $chordMisses++ }
             # Sometimes toggle again before the switch has landed: the
-            # coordinator must not leave a ghost behind when interrupted.
+            # coordinator must not leave a ghost behind when interrupted. Not
+            # counted as an attempt: a switch is normally still running, and
+            # the coordinator is supposed to drop this one.
             if ($rng.Next(100) -lt 30) {
                 Start-Sleep -Milliseconds $rng.Next(40, 320)
                 [void][MFz]::Chord($hwnd, $VK.Comma, $true, $true)
@@ -347,28 +471,44 @@ try {
                         } else { $act = 'tab-color-miss' }
                         Start-Sleep -Milliseconds 250
                         [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
-                        # UIA leaves focus on the swatch it clicked, and the
-                        # layout chord only reaches the router from the
-                        # terminal surface. Without this the fuzz spends the
-                        # rest of the run sending toggles nobody handles.
-                        $wr = [MFz]::Rect($hwnd)
-                        [void][MFz]::Click([uint32]$proc.Id,
-                            [int](($wr.L + $wr.R) / 2), [int](($wr.T + $wr.B) / 2), $false)
-                        Start-Sleep -Milliseconds 200
                     } else { $act = 'tab-color-skipped' }
                 }
             } catch {
                 $act = 'tab-color-error'
                 [void][MFz]::Chord($hwnd, $VK.Esc, $false, $false)
             }
+            # Outside the catch on purpose. UIA leaves focus on the swatch it
+            # clicked, and the layout chord only reaches the router from the
+            # terminal surface, so this is what lets the rest of the run drive
+            # anything at all. Swallowed as one more 'tab-color-error' it would
+            # leave the island unarmed, and the iterations after it would send
+            # chords nobody handles while the actions table recorded them as
+            # having happened - none of those are asserted on, so the run would
+            # go quietly useless until the next toggle threw.
+            Enable-Chords
         }
 
         $actions[$act] = 1 + ($actions[$act] ?? 0)
         Start-Sleep -Milliseconds $rng.Next(160, 700)
     }
 
-    # Let the last switch land before reading the trace.
-    Start-Sleep -Milliseconds 1200
+    # Let the last switch land before the finally kills the process, because
+    # the verdict reads the trace afterwards and a switch still in the air at
+    # kill time is a begin with no end - which the oracle would report as a
+    # switch that never finished.
+    #
+    # Waited on rather than slept through. A chord that arrives mid-switch is
+    # held as _pendingLayoutTarget and replayed when that switch completes, so
+    # the tail can be two switches deep, and arming the island made those
+    # chains common enough that a fixed settle started losing the race.
+    $settleDl = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $settleDl) {
+        Start-Sleep -Milliseconds 200
+        $tail = @(Get-Content $log -ErrorAction SilentlyContinue)
+        $b = @($tail | Where-Object { $_ -like 'SWITCH begin*' }).Count
+        $e = @($tail | Where-Object { $_ -like 'SWITCH end*' -or $_ -like 'SWITCH cancel*' }).Count
+        if ($b -eq $e) { break }
+    }
 }
 finally {
     if ($proc -and -not $proc.HasExited) { try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { } }
@@ -397,7 +537,7 @@ $cancels = @($lines | Where-Object { $_ -like 'SWITCH cancel*' }).Count
 $leaked = @($lines | Where-Object { $_ -match 'ghosts=[1-9]|morph=LEAKED' })
 
 Write-Host ''
-Write-Host "chord misses   : $chordMisses"
+Write-Host "layout chords  : $toggleAttempts  (refused: $chordMisses)"
 Write-Host "switches begun : $begins"
 Write-Host "switches ended : $ends"
 Write-Host "switches cancel: $cancels"
@@ -426,4 +566,53 @@ if ($failures.Count -gt 0) {
     # that never got to assert anything.
     exit 2
 }
+
+# Everything above is written to catch a switch that went wrong, and every one
+# of those terms is vacuous when no switch happened at all: the begin/end
+# balance reads 0 -ne 0, the immediate term is gated on $begins, and there are
+# no ghost lines to find. A build whose layout chord never reaches the router
+# therefore reported nothing and left with 0. Gate the run itself.
+#
+# Both are proportions rather than counts, because -Iterations decides how many
+# chords there are. They divide by different things on purpose: the cap by
+# every chord attempted, the floor by only those the desktop actually took.
+#
+# One switch per chord, because that is now what a chord does. Measured against
+# a clean build at 49 switches for 34 chords, 39 for 26 and 51 for 31, so 1.44
+# to 1.65 - every chord lands, and a chord that arrives mid-switch is held as
+# _pendingLayoutTarget and replayed on completion, which is where the surplus
+# comes from.
+#
+# The surplus is the margin, and it is not guaranteed: two chords inside one
+# switch share the single pending slot, so the second is lost and that run
+# converts nearer to 1. Hence exactly 1 rather than something above it.
+#
+# This floor only reads as a product statement because the harness now arms the
+# XAML island before every chord. Before that it converted 38% to 52%, the loss
+# was entirely its own, and a floor anywhere near this would have failed clean
+# builds all day.
+$MinBeginRatio = 1.0
+$MaxChordMissRatio = 0.2
+# These leave with 1, not 2. A chord the desktop refused, or one the router
+# never saw, is a corpus this harness could not establish rather than a defect
+# in the build, and 1 is the code the runner retries.
+$missCap = [Math]::Max(1, [int][Math]::Floor($toggleAttempts * $MaxChordMissRatio))
+if ($chordMisses -gt $missCap) {
+    throw ("FOREGROUND_MISS: $chordMisses of $toggleAttempts layout chords were refused " +
+        "(cap $missCap) - another window held the foreground, so the switch was never driven")
+}
+# Delivered, not attempted. A chord the desktop refused never reached the app,
+# and the build cannot be asked to have answered it - counting it here would
+# charge a foreground steal to the product and then say "the router never saw
+# them" about chords that were never sent. Safe as a denominator only because
+# the cap above has already rejected a run that lost most of them: on its own,
+# every chord refused would leave zero delivered and a floor of nothing.
+$delivered = $toggleAttempts - $chordMisses
+$beginFloor = [Math]::Max(1, [int][Math]::Ceiling($delivered * $MinBeginRatio))
+if ($begins -lt $beginFloor) {
+    throw ("only $begins switch(es) began for $delivered delivered layout chords (floor " +
+        "$beginFloor) - the chords went out but the router never saw them, so nothing " +
+        'above was measured')
+}
+
 Write-Host "PASS (seed $Seed)"

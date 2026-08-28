@@ -165,8 +165,10 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
                 oracle = 'measures the pane width through collapse and expand, so a dead toggle fails' }
     [ordered]@{ name = 'tab-colors';     script = 'mouse-fuzz-tab-colors.ps1';     tags = @('tabs');           outDir = $true;  seed = $false; minutes = 3
                 oracle = 'drives every preset plus None, recolor and a layout round-trip, and asserts the swatches were findable and the layout switched; it compares no pixel, so a build that paints them all alike passes' }
+    [ordered]@{ name = 'tab-close-selection'; script = 'mouse-fuzz-tab-close-selection.ps1'; tags = @('tabs'); outDir = $true; seed = $true; minutes = 4
+                oracle = 'closes a randomly chosen OTHER tab in both strips and checks two things about the tab that was active, once the strip has stopped changing: UIA still reports it selected (matched on the tab title, which the harness seeds distinct because every tab here runs the same shell and would otherwise be named alike), and the fill painted under the selected row differs from every unselected row while the unselected rows all match each other. The second is what catches a selection fill left on a vacated slot. It compares no absolute color, so a build that paints the right row in the wrong color passes; it samples one pixel per row, so a fill that is misplaced by less than a row height passes; it settles before it measures, so a selection that is briefly wrong and right at rest is recorded as transientOff rather than failed; and it never closes the ACTIVE tab, so the successor-selection rule is not exercised. A strip that never stops changing is exit 1 rather than a verdict. Container RuntimeIds are measured over the same closes and reported as idDrift rather than asserted on: they name a slot, not a tab' }
     [ordered]@{ name = 'morph';          script = 'vtabs-morph-fuzz.ps1';          tags = @('tabs');           outDir = $false; seed = $true;  minutes = 3
-                oracle = 'randomized layout switching against a full strip, checked against a trace the product emits; a seed replays the sequence' }
+                oracle = 'randomized layout switching against a full strip, checked against a trace the product emits: no switch ends with a ghost on the morph layer and every begin is answered. The run is gated too, since those terms are all vacuous when nothing switched - every layout chord it sends must begin a switch and no more than a fifth may be refused, so a build the chord never reaches leaves with 1 rather than a green verdict. It arms the XAML island with a real click before each chord, which is what makes that floor affordable: a healthy run measures 1.44 to 1.65 switches per chord, the surplus being chords that arrived mid-switch and were replayed on completion. A seed replays the sequence' }
     [ordered]@{ name = 'inspector';      script = 'mouse-fuzz-inspector.ps1';      tags = @('inspector');      outDir = $true;  seed = $false; minutes = 3
                 oracle = 'the inspector opens, renders something other than a flat surface, and closes; the tab-switch dismissal is gated but a missing second tab only warns' }
     [ordered]@{ name = 'dialogs';        script = 'mouse-fuzz-dialogs.ps1';        tags = @('dialogs');        outDir = $true;  seed = $false; minutes = 2
@@ -195,6 +197,8 @@ $Harnesses = [System.Collections.Generic.List[object]]@(
                 oracle = 'samples the window list for a splash owned by a secondary; demonstrates the race, does not certify its absence' }
     [ordered]@{ name = 'shader-notice';  script = 'shader-notice-fuzz.ps1';        tags = @('smoke','render','startup'); outDir = $true; seed = $true; minutes = 2
                 oracle = 'the custom-shader banner in both directions against a staged config: absent or empty raises no banner at all, an unreadable or untranslatable shader raises one reporting a load failure. A translatable shader is only checked for NOT reporting a load failure - a missing compiler or a refused pipeline are the machine as much as the build' }
+    [ordered]@{ name = 'frame-style';    script = 'frame-style-fuzz.ps1';         tags = @('chrome','render'); outDir = $true; seed = $true; minutes = 11
+                oracle = 'launches once per config over a fixed spanning set run once per half of the built-in theme pair - both window-theme values against all three frame-style values, frame-style unset, and a translucent frame over a solid backdrop - and judges two things. Contrast: the title row''s text against the title row''s own fill, and the tab strip''s text against its own, at WCAG 4.5:1 from a verbatim port of ThemeResolution.RelativeLuminance/ContrastRatio. Material: solid must paint different chrome from frosted for two configs differing only in frame-style, by more than the same channel delta the tab-close harness uses, and a translucent frame over a solid backdrop must paint the SAME chrome as a solid one. frosted against crystal is measured and reported, never asserted - they are one frame material by design, and so is the High Contrast pin, under which the material layer stands down and reports rather than asserting. Five controls run first and each can fail: this harness''s copy of BackdropGround.Estimate agrees with the one in the build under test, two captures of one unchanged window differ in no chrome pixel, a selected tab row measures differently from an unselected one, the title text yields an ink/fill gap far larger than an ink-free strip of the same chrome, and that ink-free strip scores under the floor. It reads the desktop polarity and High Contrast and sets neither. A translucent frame paints a composite, not a colour, so a failed material comparison is re-read against what the product means that composite to be - the palette the case actually loaded, tinted over the system base for the active desktop polarity, from a mirror of BackdropGround.Estimate that a control holds against the shipped Ghostty.Core.dll. A composite that lands within the same channel delta of the opaque frame''s own shade is reported as indistinguishable and exits 1 rather than being filed as a defect; the raw screen behind the window is recorded and decides nothing. It samples chrome only, so a wrong terminal background passes; it compares region MEANS, so a fill that is right on average and wrong in places passes; it scores contrast off the screen rather than off the theme, so a row that is readable against a wallpaper that happens to sit behind it passes; only the VERTICAL layout is staged, so the horizontal strip is not sampled at all; the -Random cases get the contrast layer only, because the material layer needs a matched pair of configs; and a genuine frame-style defect goes UNJUDGED rather than reported whenever the palette sits within the channel delta of the system base after tinting, which is the price of never filing a comparison the estimate says nothing was meant to move in; the theme axis is staged rather than inherited: wintty-light and wintty-dark are written as theme files under the same root the staged config lives in, so libghostty and the C# chrome resolve the name against the same directory, the catalogue is enumerated under that staging and refuses a run whose own pair is missing from it, the launches pass --config-file so libghostty gets the config by name while the XDG override still steers the shell half, and a third layer asserts the two halves of the pair paint different chrome under window-theme=wintty with a solid frame - painted from the theme, not composited, so the composite excuse does not apply - standing down under High Contrast exactly like the material layer' }
 )
 
 # Deliberately not in the manifest. This is a list rather than a comment
@@ -212,6 +216,17 @@ $NotInSuite = [ordered]@{
     'vtabs-morph-filmstrip.ps1'     = 'produces frames for a human to look at; no verdict to aggregate'
     'gen-bell.ps1'                  = 'generates a test asset'
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
+    'clipboard-fuzz.ps1'            = 'no desktop and no app; it drives the marshalling round-trip oracles in Ghostty.Tests, which the build ladder already runs at a cheaper iteration count'
+    'kitty-clipboard-roundtrip.ps1' = 'runs INSIDE Wintty rather than launching it, and its attended mode waits on a human at the permission prompt; -Unattended needs clipboard-read and clipboard-write set to allow, which is a config this suite does not stage'
+    # Both crash harnesses are written against a published NativeAOT build and
+    # are pointed at one by their own usage text: the coverage map crash-matrix
+    # asserts is the NativeAOT answer, and under the CoreCLR binary this suite
+    # hands out, Main's catch-all swallows native-seh and captures
+    # managed-unhandled, so the rows would fail on the build and not the
+    # product. Neither leaves a 2, so a coverage failure could not be told from
+    # a harness that could not run even if the build were right.
+    'crash-matrix.ps1'              = 'gates a published NativeAOT build against the crash coverage map; pointed at the Debug build this suite stages, CoreCLR answers differently and every row fails for the build rather than the product. Its exits are 0 for the map holding, 1 for it not holding or for a launch that could not happen, and nothing for findings'
+    'crash-canary.ps1'              = 'a measurement, not a gate: it exits 0 whether canaries are found or not, so a pass rules nothing out and would read as more than it is here. It also needs a crash the Debug build this suite stages does not produce, since CoreCLR swallows native-seh; no envelope means exit 1, and there is no findings exit'
 }
 
 # The one form every check compares a script path in: the path relative to this
@@ -810,6 +825,108 @@ function Write-NewLines {
 # telling the .NET side, which nothing here does, and every path a harness is
 # handed is absolute - so it costs nothing today. It is named because a harness
 # that starts reading a relative path is where it stops being free.
+
+# Minimizes every other window, and reports what would not go.
+#
+# The harnesses click at screen coordinates and refuse the click when
+# WindowFromPoint says the pixel belongs to somebody else. That guard is
+# right -- clicking blind into another app is worse than failing -- but with
+# nothing clearing the desktop first, whatever the developer left on screen
+# decides how much of the suite runs. One round lost 10 of 21 harnesses that
+# way, and the reason was a HARVEST_MISS buried in a single harness's stderr,
+# which reads as a product problem rather than a desktop one.
+#
+# Shell.Application's MinimizeAll was the obvious tool and does not work here:
+# it returned without error and left all ten windows exactly where they were.
+# ShowWindow per window does work, so this drives each one directly and then
+# CHECKS, because the first version of this reported the before-count as its
+# achievement and claimed ten successes having minimized nothing.
+#
+# The console this run prints into goes down with everything else: it belongs
+# to the terminal host, not to this process, and a terminal parked over the
+# app under test refuses a harness click like any other window. skipPid only
+# spares a window this process owns, and at the one call site there are none.
+function Clear-Desktop {
+    if (-not ('DesktopClear' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class DesktopClear {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+    public delegate bool EnumProc(IntPtr h, IntPtr lp);
+
+    public const int SW_MINIMIZE = 6;
+    const int DWMWA_CLOAKED = 14;
+
+    // A cloaked window answers IsWindowVisible with true while being nowhere
+    // on screen: a window on another virtual desktop, or a suspended UWP
+    // shell. It can neither steal a click nor be minimized, so counting it
+    // would put a permanent false entry under WOULD NOT MINIMIZE.
+    static bool OnScreen(IntPtr h) {
+        int cloaked;
+        if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    public static IntPtr[] TopLevel(uint skipPid) {
+        var found = new System.Collections.Generic.List<IntPtr>();
+        IntPtr shell = GetShellWindow();
+        EnumProc cb = (h, lp) => {
+            if (h == shell || !IsWindowVisible(h) || IsIconic(h) || !OnScreen(h)) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            if (pid == skipPid) return true;
+            var sb = new StringBuilder(256);
+            if (GetWindowText(h, sb, 256) <= 0) return true;
+            found.Add(h);
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    // Asked of the handles that were actually driven, which a second
+    // enumeration cannot answer: it scores a window that closed itself as a
+    // success, counts one that opened during the wait as a refusal, and can
+    // come out negative.
+    public static bool StillUp(IntPtr h) {
+        return IsWindow(h) && IsWindowVisible(h) && !IsIconic(h) && OnScreen(h);
+    }
+
+    public static string TitleOf(IntPtr h) {
+        var sb = new StringBuilder(256); GetWindowText(h, sb, 256); return sb.ToString();
+    }
+}
+'@
+    }
+
+    $before = @([DesktopClear]::TopLevel([uint32]$PID))
+    foreach ($h in $before) { [void][DesktopClear]::ShowWindow($h, [DesktopClear]::SW_MINIMIZE) }
+    Start-Sleep -Milliseconds 700
+
+    $stuck = @($before | Where-Object { [DesktopClear]::StillUp($_) })
+    Write-Host ("desktop: minimized {0} of {1} window(s)" -f ($before.Count - $stuck.Count), $before.Count)
+
+    if ($stuck.Count -gt 0) {
+        # Whatever refuses to minimize is the most likely thief of a later
+        # click: always-on-top overlays, and anything that re-raises itself.
+        # Named now rather than inferred from a harness failure much later.
+        $names = @($stuck | ForEach-Object { [DesktopClear]::TitleOf($_) } | Where-Object { $_ })
+        Write-Host ("  WOULD NOT MINIMIZE: {0}" -f ($names -join ', ')) -ForegroundColor Yellow
+        Write-Host '  a harness that clicks under one of these will be refused'
+    }
+}
+
 function Start-HarnessProcess {
     param(
         [Parameter(Mandatory)][string[]]$Argv,
@@ -1280,6 +1397,7 @@ if ($useFixtures) {
     # the start of a 40-minute run rather than 30 minutes in is the point.
     Assert-NoWintty -Context 'The fuzz suite'
     Write-Host "exe:  $ExePath"
+    Clear-Desktop
 }
 
 # ---- run ------------------------------------------------------------------

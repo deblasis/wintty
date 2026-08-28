@@ -170,13 +170,30 @@ internal delegate void GhosttyWakeupCb(IntPtr userdata);
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate byte GhosttyActionCb(GhosttyApp app, IntPtr targetPtr, IntPtr actionPtr);
 
+// ghostty_runtime_read_clipboard_cb. The mime filter (a NULL-terminated-ish
+// array plus its length) says which representations the caller will accept;
+// an empty filter means "anything". `listing` marks an enumerate-only
+// request, which upstream deliberately exempts from the permission prompt.
+// Returns ghostty_clipboard_read_result_e, not a bool: libghostty gates the
+// mode 5522 report on the distinction between "nothing there" and "this
+// runtime cannot do that".
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate byte GhosttyReadClipboardCb(IntPtr userdata, GhosttyClipboard kind, IntPtr state);
+internal delegate GhosttyClipboardReadResult GhosttyReadClipboardCb(
+    IntPtr userdata,
+    GhosttyClipboard kind,
+    IntPtr state,
+    IntPtr mimeFilter,      // const char* const*
+    UIntPtr mimeFilterLen,
+    byte listing);
 
+// ghostty_runtime_confirm_read_clipboard_cb. The second argument used to be
+// a plain const char* preview; it is now a ghostty_clipboard_confirm_s*
+// carrying the contents, the available MIME names, the requesting party's
+// name, and whether a "remember for this session" grant may be offered.
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void GhosttyConfirmReadClipboardCb(
     IntPtr userdata,
-    IntPtr str,
+    IntPtr confirm,         // const ghostty_clipboard_confirm_s*
     IntPtr state,
     GhosttyClipboardRequest request);
 
@@ -300,6 +317,23 @@ internal static partial class NativeMethods
     internal static partial int InitWide(IntPtr cmdline, UIntPtr len);
 
     /// <summary>
+    /// Block until the crash reporter is armed, returning whether it is.
+    /// </summary>
+    /// <remarks>
+    /// Only for the deliberate crash triggers. The reporter initialises on
+    /// its own thread, so a trigger fired straight after init can beat the
+    /// handler into place; the missing report then reads as "this class
+    /// cannot be captured" when nobody was listening yet. Do not substitute
+    /// a check that sentry's database directory exists: it is created during
+    /// init, before the handler, and it outlives the process, so after the
+    /// first run it is always already there.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_crash_wait_ready")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool CrashWaitReady(uint timeoutMs);
+
+    /// <summary>
     /// Initialize libghostty from this process's own command line.
     /// </summary>
     /// <remarks>
@@ -312,16 +346,26 @@ internal static partial class NativeMethods
     /// this method returns.
     ///
     /// This is also the choke point where a bare Windows subcommand becomes
-    /// its <c>+action</c> form, so no caller can forget it. The rewrite is
-    /// assigned back through <c>cmdline</c> on purpose: the string that gets
-    /// marshalled and the string that gets measured must be the same object,
-    /// or libghostty is handed a buffer longer than the length it is told and
-    /// silently drops the last character of the last argument.
+    /// its <c>+action</c> form, and where the Wintty config flags become the
+    /// libghostty keys they stand for, so no caller can forget either. Each
+    /// rewrite is assigned back through <c>cmdline</c> on purpose: the string
+    /// that gets marshalled and the string that gets measured must be the
+    /// same object, or libghostty is handed a buffer longer than the length
+    /// it is told and silently drops the last character of the last argument.
     /// </remarks>
-    internal static int InitWideFromProcess()
+    /// <param name="overrides">
+    /// What the command line asked of the configuration. Reported back
+    /// because the rewrite alone does not settle it: the shell reads several
+    /// Windows-only keys off the config file without libghostty, and has to
+    /// know to stop.
+    /// </param>
+    internal static int InitWideFromProcess(
+        out Ghostty.Core.Cli.ConfigOverrides overrides)
     {
         var cmdline = Environment.CommandLine;
         Ghostty.Core.Cli.CliAliases.TryRewrite(cmdline, out cmdline, out _);
+        overrides = Ghostty.Core.Cli.CliAliases.RewriteConfigFlags(cmdline);
+        cmdline = overrides.CommandLine;
         var buf = Marshal.StringToHGlobalUni(cmdline);
         return InitWide(buf, (UIntPtr)cmdline.Length);
     }
@@ -339,6 +383,76 @@ internal static partial class NativeMethods
     [LibraryImport(Dll, EntryPoint = "ghostty_config_load_default_files")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     internal static partial void ConfigLoadDefaultFiles(GhosttyConfig config);
+
+    /// <summary>
+    /// Layer this process's command line over the config, as
+    /// <c>Config.load</c> does between the default files and the recursive
+    /// ones.
+    /// </summary>
+    /// <remarks>
+    /// Reads the args libghostty was initialized with, not any it is passed
+    /// here, so the command line handed to <c>ghostty_init_wide</c> is what
+    /// takes effect. Order is not a preference: <c>loadCliArgs</c> resets
+    /// <c>config-default-files</c>, records a replay marker, and rebuilds
+    /// from that marker when the flag is unset, so it can only discard what
+    /// was loaded before it. Called first, the discard finds nothing to drop
+    /// and the flag becomes a silent no-op.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_cli_args")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadCliArgs(GhosttyConfig config);
+
+    /// <summary>
+    /// Load the files named by <c>config-file</c>, from the config itself or
+    /// from the command line, recursively to libghostty's own depth limit.
+    /// </summary>
+    /// <remarks>
+    /// Without this the key is parsed and then ignored, so a
+    /// <c>config-file</c> in the user's own config file has never taken
+    /// effect on Windows either - not just one passed as a flag.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_load_recursive_files")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial void ConfigLoadRecursiveFiles(GhosttyConfig config);
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_set_color_scheme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte ConfigSetColorSchemeNative(
+        GhosttyConfig config, GhosttyColorScheme scheme);
+
+    /// <summary>
+    /// Tell the config which desktop colour scheme to resolve against.
+    /// Returns false if nothing changed, which for a well-formed scheme
+    /// means the config was already finalized and the call came too late.
+    /// </summary>
+    internal static bool ConfigSetColorScheme(GhosttyConfig config, GhosttyColorScheme scheme)
+        => ConfigSetColorSchemeNative(config, scheme) != 0;
+
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_theme_is_builtin")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial byte ConfigThemeIsBuiltinNative(GhosttyConfig config);
+
+    /// <summary>
+    /// Whether the config resolved its colours from the built-in theme pair,
+    /// i.e. nothing anywhere in the loaded config set <c>theme</c>. Asked of
+    /// libghostty rather than of the config file, because <c>theme</c> can be
+    /// set in a file reached through <c>config-file</c>.
+    /// </summary>
+    internal static bool ConfigThemeIsBuiltin(GhosttyConfig config)
+        => ConfigThemeIsBuiltinNative(config) != 0;
+
+    /// <summary>
+    /// The built-in theme text for a scheme, in config file syntax.
+    /// </summary>
+    /// <remarks>
+    /// The returned string points at static storage on the native side. It
+    /// must not be freed, which makes it the one exception among this file's
+    /// <see cref="GhosttyString"/> producers -- see the note on the
+    /// declaration in ghostty.h.
+    /// </remarks>
+    [LibraryImport(Dll, EntryPoint = "ghostty_config_builtin_theme")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    internal static partial GhosttyString ConfigBuiltinTheme(GhosttyColorScheme scheme);
 
     [LibraryImport(Dll, EntryPoint = "ghostty_config_finalize")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
@@ -744,28 +858,43 @@ internal static partial class NativeMethods
     internal static bool SurfaceProcessExited(GhosttySurface surface)
         => SurfaceProcessExitedNative(surface) != 0;
 
-    // ghostty_surface_complete_clipboard_request(surface, text, state, confirmed)
-    // Called once per read/confirm request to return clipboard text to libghostty
-    // and release its internal request state. Must be called exactly once even on
-    // error paths -- skipping it leaks state inside libghostty.
-    // StringMarshalling.Utf8 is a first-class [LibraryImport] option and
-    // is NOT a [MarshalAs] attribute, so it coexists cleanly with
-    // DisableRuntimeMarshalling. Only `confirmed` needed the fix.
-    [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request",
-        StringMarshalling = StringMarshalling.Utf8)]
+    // ghostty_surface_complete_clipboard_request(surface, complete_s*, state)
+    // Called once per read/confirm request to return clipboard contents to
+    // libghostty and release its internal request state. Must be called
+    // exactly once even on error paths -- skipping it leaks state inside
+    // libghostty. The deny entry point below is the other way to discharge
+    // the obligation; exactly one of the two must run.
+    //
+    // `confirmed` used to be a trailing bool here. It now lives inside
+    // ghostty_clipboard_complete_s along with `remember`, so a denial is no
+    // longer expressible as "complete with confirmed = false" -- that would
+    // now complete with an EMPTY payload and a confirmed flag, which is not
+    // the same thing. Denials go through SurfaceDenyClipboardRequest.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_complete_clipboard_request")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
     private static partial void SurfaceCompleteClipboardRequestNative(
         IntPtr surface,
-        string text,
-        IntPtr state,
-        byte confirmed);
+        IntPtr complete,
+        IntPtr state);
 
     internal static void SurfaceCompleteClipboardRequest(
         IntPtr surface,
-        string text,
-        IntPtr state,
-        bool confirmed)
-        => SurfaceCompleteClipboardRequestNative(surface, text, state, confirmed ? (byte)1 : (byte)0);
+        IntPtr complete,
+        IntPtr state)
+        => SurfaceCompleteClipboardRequestNative(surface, complete, state);
+
+    // ghostty_surface_deny_clipboard_request(surface, state)
+    // Discharges the request without supplying contents. This is the correct
+    // answer for "the user said no" and for "this runtime cannot serve that",
+    // both of which previously had to be faked as an empty completion.
+    [LibraryImport(Dll, EntryPoint = "ghostty_surface_deny_clipboard_request")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static partial void SurfaceDenyClipboardRequestNative(
+        IntPtr surface,
+        IntPtr state);
+
+    internal static void SurfaceDenyClipboardRequest(IntPtr surface, IntPtr state)
+        => SurfaceDenyClipboardRequestNative(surface, state);
 
 
     // ---- inline theme picker ---------------------------------------------

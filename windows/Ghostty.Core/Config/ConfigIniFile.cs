@@ -33,11 +33,42 @@ public static class ConfigIniFile
     /// </remarks>
     public static Dictionary<string, List<string>> Load(string? path)
     {
-        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
-            return dict;
+            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var line in File.ReadLines(path))
+        // FileShare.ReadWrite rather than File.ReadLines' default of
+        // FileShare.Read. This file has writers: the settings UI rewrites it,
+        // and libghostty holds a write handle across its own config edits. A
+        // reader that refuses to share writes turns any of those into a
+        // sharing violation on a file that is merely open, not locked.
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return Parse(ReadLines(reader));
+    }
+
+    private static IEnumerable<string> ReadLines(StreamReader reader)
+    {
+        while (reader.ReadLine() is { } line) yield return line;
+    }
+
+    /// <summary>
+    /// Parse ini text that is already in memory, by the same rules as
+    /// <see cref="Load"/>. Used for the built-in theme libghostty hands back
+    /// as a string rather than a file.
+    /// </summary>
+    public static Dictionary<string, List<string>> ParseText(string? text)
+        => string.IsNullOrEmpty(text)
+            ? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
+            : Parse(text.Split('\n'));
+
+    private static Dictionary<string, List<string>> Parse(IEnumerable<string> lines)
+    {
+        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines)
         {
             var trimmed = line.TrimStart();
             if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;

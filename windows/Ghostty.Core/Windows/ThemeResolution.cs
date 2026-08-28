@@ -133,6 +133,115 @@ public static class ThemeResolution
     }
 
     /// <summary>
+    /// <paramref name="ink"/> laid over <paramref name="ground"/> at
+    /// <paramref name="alpha"/>, packed 0x00RRGGBB. Source-over onto an
+    /// opaque ground, which is what the compositor leaves on screen when a
+    /// translucent brush paints a surface.
+    /// </summary>
+    public static uint CompositeOver(uint ink, byte alpha, uint ground)
+    {
+        var r = Blend((ink >> 16) & 0xFF, (ground >> 16) & 0xFF);
+        var g = Blend((ink >> 8) & 0xFF, (ground >> 8) & 0xFF);
+        var b = Blend(ink & 0xFF, ground & 0xFF);
+        return (r << 16) | (g << 8) | b;
+
+        uint Blend(uint over, uint under)
+            => ((over * alpha) + (under * (255u - alpha)) + 127u) / 255u;
+    }
+
+    /// <summary>
+    /// Whether white or black reads better as ink drawn over
+    /// <paramref name="background"/> at <paramref name="alpha"/>.
+    ///
+    /// Scored with <see cref="ContrastRatio"/> on the composited colour, not
+    /// with <see cref="PreferLightForeground"/>. That helper answers "is this
+    /// surface dark" off a BT.709 luminance split, which is a fair proxy only
+    /// for opaque ink: muted ink is a blend of the pole and the ground, so
+    /// both candidates are pulled towards the ground and the winner can
+    /// change. The two also disagree either side of mid luminance, and mid
+    /// luminance is precisely what a translucent frame makes of the chrome.
+    /// </summary>
+    public static bool PreferLightForegroundAtAlpha(uint background, byte alpha)
+        => ContrastRatio(background, CompositeOver(0xFFFFFFu, alpha, background))
+            >= ContrastRatio(background, CompositeOver(0x000000u, alpha, background));
+
+    /// <summary>
+    /// CIE L* for a relative luminance: 0 for black, 100 for white, spaced
+    /// so that equal differences look equal.
+    /// </summary>
+    private static double Lightness(double luminance)
+        => luminance > 0.008856
+            ? (116.0 * Math.Cbrt(luminance)) - 16.0
+            : 903.3 * luminance;
+
+    /// <summary>
+    /// A tint of <paramref name="rgb"/> that sits <paramref name="deltaLStar"/>
+    /// away from it perceptually: positive for lighter, negative for darker.
+    /// Both argument and result are packed 0x00RRGGBB.
+    /// </summary>
+    /// <remarks>
+    /// <para>Perceptual rather than a step per channel, because those are not
+    /// the same thing. sRGB is gamma encoded, so a fixed number of counts
+    /// buys markedly more visible separation down at the black end than up
+    /// at the white end. Anything tuned to look right on a dark background
+    /// and then reused on a light one comes out weaker than intended, which
+    /// is how a texture calibrated in dark mode ends up nearly invisible in
+    /// light mode.</para>
+    ///
+    /// <para>Every channel moves by the same number of counts, so the result
+    /// normally stays a tint of the input rather than becoming a colour of
+    /// its own. Two things stop holding once a channel hits a rail, since a
+    /// clamped channel stops moving while the others keep going: the hue
+    /// drifts (stepping #F4F6FB up far enough reaches #FFFFFF, and the blue
+    /// cast is gone), and a colour with no headroom at all in the requested
+    /// direction comes back unchanged. Callers that cannot use the input
+    /// itself must pick the direction with room -- which is what
+    /// <c>LaunchTexture.ResolveInkRgb</c> does with its luma split.</para>
+    /// </remarks>
+    public static uint StepLightness(uint rgb, double deltaLStar)
+    {
+        // Caps the walk below. Comfortable for a deltaLStar in single digits
+        // (the worst case, pure black, needs 17 counts for 5.0), but it is a
+        // ceiling on the dial as well as on the loop: past roughly 15 the
+        // walk starts running out for mid greys and quietly under-delivering
+        // rather than failing. Raise it alongside any larger step.
+        const int maxChannelStep = 48;
+
+        var r = (int)((rgb >> 16) & 0xFF);
+        var g = (int)((rgb >> 8) & 0xFF);
+        var b = (int)(rgb & 0xFF);
+
+        var direction = deltaLStar >= 0 ? 1 : -1;
+        var target = Lightness(LuminanceOf(r, g, b)) + deltaLStar;
+
+        // Walk out a count at a time and stop on the first step that has
+        // covered the distance. Lightness is monotonic in the step, so the
+        // first hit is the closest one at or past the target, and the range
+        // is small enough that searching it beats solving it.
+        var step = maxChannelStep;
+        for (var candidate = 1; candidate <= maxChannelStep; candidate++)
+        {
+            var offset = direction * candidate;
+            var lightness = Lightness(LuminanceOf(
+                Clamp(r + offset), Clamp(g + offset), Clamp(b + offset)));
+
+            if (direction > 0 ? lightness >= target : lightness <= target)
+            {
+                step = candidate;
+                break;
+            }
+        }
+
+        step *= direction;
+        return (uint)((Clamp(r + step) << 16) | (Clamp(g + step) << 8) | Clamp(b + step));
+
+        static int Clamp(int value) => value < 0 ? 0 : value > 255 ? 255 : value;
+    }
+
+    private static double LuminanceOf(int r, int g, int b)
+        => RelativeLuminance((uint)((r << 16) | (g << 8) | b));
+
+    /// <summary>
     /// Pick a legible foreground for text drawn over
     /// <paramref name="background"/>. Keeps <paramref name="desired"/> when it
     /// already clears the WCAG AA contrast threshold (4.5:1); otherwise falls

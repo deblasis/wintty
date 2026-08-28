@@ -147,12 +147,24 @@ public sealed partial class MainWindow : Window
     // redundant SystemBackdrop swaps on config reload.
     private string _currentBackdropStyle = "";
 
+    // The chrome's own material, after the low-power override. Separate from
+    // the field above because background-style answers what the terminal is
+    // made of and frame-style what the window frame is made of; they are the
+    // same value only for as long as nobody sets the second key.
+    private string _currentFrameStyle = "";
+
     // Win32 class-brush kind currently applied via SetClassLongPtr.
     // Cached so repeated reloads on the same style don't re-invoke
     // the Win32 call (and, for the opaque case, don't leak a fresh
     // GDI brush per reload).
     private enum ClassBrushKind { Transparent, Opaque }
     private ClassBrushKind? _lastClassBrushKind;
+
+    // Colour half of the class-brush cache key. The opaque fill is derived
+    // from the palette and the desktop polarity, so a reload can change it
+    // while the kind stays put, and keying on the kind alone meant GDI kept
+    // the colour the window started with.
+    private uint _lastClassBrushArgb;
 
     // True when the HBRUSH currently installed as GCLP_HBRBACKGROUND
     // was allocated by CreateSolidBrush (and therefore must be
@@ -167,8 +179,8 @@ public sealed partial class MainWindow : Window
     // skips allocating a new SolidColorBrush when nothing changed.
     private Windows.UI.Color? _lastRootBackground;
 
-    // Vertical-mode title row: opaque fills over Mica so the top bar
-    // matches the terminal palette instead of Fluent grey.
+    // Vertical-mode title row fills. Transparent on the default path so
+    // the backdrop reaches the row; painted only for window-theme=wintty.
     private Windows.UI.Color? _lastVerticalTitleDragBg;
     private Windows.UI.Color? _lastVerticalTitleStripMirrorBg;
     private Windows.UI.Color? _lastVerticalTitleCaptionBg;
@@ -393,6 +405,16 @@ public sealed partial class MainWindow : Window
         Ghostty.Branding.WindowHelper.TryApplyAppIcon(this);
 
         _configService = configService;
+
+        // Position is load-bearing, so this does not belong down with the
+        // other service construction. ApplyBackdropStyle resolves the Win32
+        // class brush colour from the shell theme further down this
+        // constructor, and this field is what it reads. Built here it is a
+        // pure derivation of the config that has just been assigned: no
+        // XAML, no HWND, no dispatcher, nothing that InitializeComponent or
+        // the tab hosts have to have run first.
+        _shellTheme = new ShellThemeService(configService);
+
         _configEditor = App.ConfigFileEditor
             ?? throw new InvalidOperationException(
                 "MainWindow: App.ConfigFileEditor is null. " +
@@ -515,7 +537,6 @@ public sealed partial class MainWindow : Window
         ApplyTheme();
         _themeManager.ThemeChanged += OnWindowThemeChanged;
 
-        _shellTheme = new ShellThemeService(configService);
         _shellTheme.ThemeChanged += OnShellThemeChanged;
 
         // The +list-themes pipe server is process-wide, not per window: its
@@ -614,6 +635,57 @@ public sealed partial class MainWindow : Window
         Canvas.SetZIndex(_verticalTabHost, -1);
         RootGrid.Children.Add(_verticalTabHost);
 
+        // Covers the active pane's top border across the selected tab, so
+        // the tab's fill runs into the terminal with no line between them.
+        // Lives in the pane's row rather than the strip's: drawn from the
+        // strip it would have to overhang its own parent to reach the
+        // border, and that overhang is clipped.
+        _tabSeamCover = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            // Exactly the gutter every leaf keeps clear, which is what the
+            // stroke is drawn in. Deeper would reach past it and paint the
+            // tab's fill over the first row of cells: harmless while that
+            // fill matches the terminal background, visible the moment a tab
+            // carries a preset colour.
+            Height = Core.Panes.PaneChrome.SurfaceInset,
+        };
+        Grid.SetRow(_tabSeamCover, 1);
+        Grid.SetColumn(_tabSeamCover, 1);
+        RootGrid.Children.Add(_tabSeamCover);
+        _horizontalTabHost.SelectedTabSeamChanged += OnSelectedTabSeamChanged;
+
+        // The same seam on the vertical strip, rotated: there the selected
+        // row meets the pane along its right edge, so the cover is a
+        // vertical bar over the pane's left border. Placed across the whole
+        // RootGrid rather than in one cell, because the vertical strip spans
+        // both rows and a per-cell margin would need the row heights to
+        // convert; a margin in the grid's own space needs nothing.
+        _verticalSeamCover = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            // The overlap back into the row, plus exactly the gutter the
+            // stroke is drawn in. Overshooting to the left is free, since
+            // that lands on the row's own fill. Overshooting to the right is
+            // not: past the gutter are live cells, and this fill is the
+            // row's, which for a tab carrying a preset colour is that
+            // colour rather than the terminal's. Erring narrow leaves a
+            // line, so the gutter is the number to match, not to pad.
+            Width = VerticalSeamOverlap + Core.Panes.PaneChrome.SurfaceInset,
+        };
+        Grid.SetRow(_verticalSeamCover, 0);
+        Grid.SetRowSpan(_verticalSeamCover, 2);
+        Grid.SetColumn(_verticalSeamCover, 0);
+        Grid.SetColumnSpan(_verticalSeamCover, 2);
+        RootGrid.Children.Add(_verticalSeamCover);
+        _verticalTabHost.SelectionRowChanged += OnVerticalSeamChanged;
+
         // Apply initial shell theme now that tab hosts exist, then
         // paint RootGrid.Background from the resolved state.
         ApplyShellTheme();
@@ -665,12 +737,7 @@ public sealed partial class MainWindow : Window
             // or crashes never runs the close path, and the splash would
             // then keep falling back to the built-in default and flash a
             // mismatched colour on every subsequent start.
-            var splashBackground = _configService.BackgroundColor & 0x00FFFFFFu;
-            if (_windowState.BackgroundRgb != splashBackground)
-            {
-                _windowState.BackgroundRgb = splashBackground;
-                _windowState.Save();
-            }
+            if (RecordSplashBackground()) _windowState.Save();
         }
 
         _tabManager.TabAdded += (_, t) =>
@@ -691,6 +758,7 @@ public sealed partial class MainWindow : Window
         {
             SwapActivePane();
             ApplyPerTabChrome();
+            RefreshBackdropChrome();
         };
 
         foreach (var tab in _tabManager.Tabs)
@@ -706,8 +774,17 @@ public sealed partial class MainWindow : Window
         // XAML values are design-time defaults, and a comment claiming they
         // match the constant is exactly how the two drift apart.
         VerticalTitleBar.Height = Shell.TabChromeMetrics.TitleRowHeight;
+
+        // Same for the caption seam cover. Placed in the grid's own space
+        // rather than in a cell, it has to be told both where the pane row
+        // starts and how deep the stroke it hides runs. Deriving those from
+        // the values that place the stroke is what keeps the cover from
+        // ending short of it, which a hand-tuned top-and-height pair did by
+        // half a DIP.
         VerticalCaptionSeamCover.Margin = new Thickness(
-            0, Shell.TabChromeMetrics.TitleRowHeight - 2, 0, 0);
+            0, Shell.TabChromeMetrics.TitleRowHeight - CaptionSeamOverlap, 0, 0);
+        VerticalCaptionSeamCover.Height = CaptionSeamOverlap
+            + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1;
 
         _layout = new LayoutCoordinator(
             StripColumn,
@@ -729,6 +806,22 @@ public sealed partial class MainWindow : Window
         ApplyCaptionButtonChrome();
         if (_verticalTabsVisible)
             _verticalTabHost.SyncSelectionFromManager();
+
+        // Tell both strips the terminal's colours. This only ever ran from
+        // OnConfigReloadedChrome, so a session whose config was never
+        // reloaded left both hosts on their own fallbacks -- survivable in
+        // the horizontal strip, but the vertical strip's fallback calibrates
+        // the selected row's title against the system accent rather than the
+        // row it is drawn on, which put a white title on the light half of
+        // the theme at 1.11:1.
+        //
+        // Deliberately here and not earlier beside ApplyShellTheme. It drives
+        // the vertical strip's NavigationView (theme refresh, per-item
+        // brushes, selection chrome), and doing that before Snap has decided
+        // which strip is live -- and before the control is loaded -- left
+        // MUXC in a state where a later SelectedItem assignment took an
+        // access violation inside NavigationView.
+        UpdateCursorAccentColors();
 
         _titleBar = new TitleBarCoordinator(
             this,
@@ -965,6 +1058,12 @@ public sealed partial class MainWindow : Window
         _pendingLayoutTarget = null;
         _verticalTabsVisible = vertical;
         _tabHost = vertical ? _verticalTabHost : _horizontalTabHost;
+        // The seam covers are gated on the flag just set, and the strip that
+        // is coming back may not raise anything on its own (a switch does not
+        // resize it or move its selection). Ask both for a fresh placement so
+        // whichever one now owns the seam draws it, and the other hides.
+        _tabSeamCover.Visibility = Visibility.Collapsed;
+        _verticalSeamCover.Visibility = Visibility.Collapsed;
         // Paint caption/title chrome before the cross-fade so the OS
         // buttons and drag row do not flash stale horizontal colors.
         ApplyVerticalTitleBarChrome();
@@ -994,8 +1093,19 @@ public sealed partial class MainWindow : Window
             if (_isClosed) return;
 
             RefreshTabHostChrome();
-            if (vertical)
-                _verticalTabHost.SyncSelectionFromManager();
+
+            // Place the seam only now. The switch is animated, so the strip
+            // that is arriving has no final geometry until it lands -- a
+            // placement made when the switch was requested reads the offsets
+            // the strip had before it, which are non-zero and therefore look
+            // valid, and the cover ends up rubbing out a stretch of border
+            // nowhere near the tab.
+            //
+            // Only the strip that arrived. Asking the one that just left
+            // would arm its layout retry against a collapsed control that
+            // reports zero bounds and never stops.
+            if (vertical) _verticalTabHost.SyncSelectionFromManager();
+            else _horizontalTabHost.RefreshSeam();
             _titleBar.ApplyForCurrentMode();
             var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
             if (leaf is not null)
@@ -1437,6 +1547,12 @@ public sealed partial class MainWindow : Window
         _configService.ConfigChanged -= OnConfigReloaded;
         _configService.ConfigChanged -= OnConfigReloadedChrome;
         _shellTheme.ThemeChanged -= OnShellThemeChanged;
+        // Both hosts are owned by this window, so leaving these attached
+        // leaks nothing. Detached anyway: they are the only two raised from
+        // dispatcher-queued and layout callbacks, which are exactly the ones
+        // that can still land after the tree starts coming down.
+        _horizontalTabHost.SelectedTabSeamChanged -= OnSelectedTabSeamChanged;
+        _verticalTabHost.SelectionRowChanged -= OnVerticalSeamChanged;
         // UISettings is an OS object and calls back on a thread-pool thread.
         // Left attached, an OS light/dark flip, accent change or high-contrast
         // toggle during teardown puts AppSetColorScheme through the app
@@ -1482,7 +1598,7 @@ public sealed partial class MainWindow : Window
             // Carried purely for the next cold start's splash, which runs
             // before any theme has been resolved and would otherwise have
             // to guess this colour.
-            _windowState.BackgroundRgb = _configService.BackgroundColor & 0x00FFFFFFu;
+            RecordSplashBackground();
             _windowState.Save();
         }
 
@@ -2014,7 +2130,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Apply palette-derived colors to the window chrome when
-    /// window-theme=ghostty is set.
+    /// window-theme=wintty is set.
     /// </summary>
     private void ApplyShellTheme()
     {
@@ -2041,12 +2157,20 @@ public sealed partial class MainWindow : Window
         // Caption buttons: transparent in horizontal mode, opaque in
         // vertical -- see ApplyCaptionButtonChrome().
 
-        VerticalTitleText.Foreground = new SolidColorBrush(
-            Microsoft.UI.ColorHelper.FromArgb(
-                _shellTheme.TitleBarForeground.A,
-                _shellTheme.TitleBarForeground.R,
-                _shellTheme.TitleBarForeground.G,
-                _shellTheme.TitleBarForeground.B));
+        // Only while the palette is actually painting the row. The colour was
+        // picked against the tab-bar shade, and a frosted frame does not put
+        // that shade behind it -- ApplyVerticalTitleBarChrome scores the ink
+        // against the backdrop for that case, the way it does for every other
+        // bare row.
+        if (ChromePaintedFromPalette)
+        {
+            VerticalTitleText.Foreground = new SolidColorBrush(
+                Microsoft.UI.ColorHelper.FromArgb(
+                    _shellTheme.TitleBarForeground.A,
+                    _shellTheme.TitleBarForeground.R,
+                    _shellTheme.TitleBarForeground.G,
+                    _shellTheme.TitleBarForeground.B));
+        }
 
         // Push theme to both tab hosts. RootGrid.Background is owned
         // by ApplyRootGridBackground and refreshed by the caller.
@@ -2119,15 +2243,207 @@ public sealed partial class MainWindow : Window
     private bool _impactNudgeActive;
 
     /// <summary>
-    /// Opaque title-row fills for vertical-tab mode. Without this the
-    /// transparent drag region shows Mica grey over the terminal palette.
+    /// True while the High Contrast override is layered onto the config,
+    /// which makes the terminal palette the system's own HC surface
+    /// colours.
+    ///
+    /// Translucency over a backdrop nobody controls is the thing High
+    /// Contrast exists to remove, so every surface that goes to the
+    /// backdrop elsewhere keeps painting opaquely here, out of colours
+    /// Windows chose. Recomputed per call rather than cached: an HC toggle
+    /// arrives as a config reload, and the reload is what calls this.
     /// </summary>
+    private bool HighContrastChromeActive =>
+        Core.Accessibility.HighContrastState.ShouldApply(
+            Accessibility.HighContrastDetector.IsActive(),
+            userOptOut: !_configService.WindowsHighContrast);
 
+    /// <summary>
+    /// Ink for the vertical title row's excluded pieces -- the window title
+    /// and the caption glyphs -- packed 0x00RRGGBB.
+    ///
+    /// They sit on the backdrop now, which is neither the palette nor the
+    /// desktop but a blend of both, so the pole is chosen by contrast
+    /// against an estimate of that blend rather than by asking one input.
+    /// Asking the palette put white glyphs on the mid grey a dark theme
+    /// makes of a light desktop; asking the element theme put white text on
+    /// a light row whenever window-theme disagreed with the palette. The
+    /// element theme is still the preference, and it survives whenever it
+    /// clears AA against the ground.
+    ///
+    /// Under High Contrast the row is painted rather than bare, so the
+    /// ground is the palette itself -- which there is Windows' own colour.
+    /// </summary>
+    private uint VerticalTitleInk => ThemeResolution.EnsureReadableForeground(
+        HighContrastChromeActive ? _configService.BackgroundColor : EstimatedBackdropGround,
+        _themeManager.ElementTheme == ElementTheme.Dark ? 0xFFFFFFu : 0x000000u);
+
+    /// <summary>
+    /// The surface the bare-backdrop chrome sits on, packed 0x00RRGGBB.
+    /// Fed the resolver's tuning rather than the palette or the default
+    /// constants: the compositor blends the user's background-tint-color
+    /// at the user's background-tint-opacity, and scoring the ink against
+    /// any other pair means scoring it against a ground that is not on
+    /// screen.
+    /// </summary>
+    private uint EstimatedBackdropGround
+    {
+        get
+        {
+            var (tint, _, tintOpacity) = ResolveAcrylicTuning();
+            return Core.Shell.BackdropGround.Estimate(
+                ((uint)tint.R << 16) | ((uint)tint.G << 8) | tint.B,
+                // The window's own UISettings, the one the root grid is painted from.
+                // A freshly activated instance answers for whatever moment it was
+                // created in, so an OS flip could leave the row painted for one
+                // desktop and its ink scored against the other.
+                Services.OsTheme.IsDark(_systemUiSettings),
+                ChromeGroundStyle,
+                tintOpacity);
+        }
+    }
+
+    /// <summary>
+    /// The material actually behind the chrome.
+    ///
+    /// frame-style can cover the backdrop; it cannot replace it. A solid
+    /// frame is its own ground, and the other two leave whatever
+    /// background-style put there showing -- which is why frosted and crystal
+    /// are indistinguishable as frames: both mean "let the backdrop through",
+    /// and there is one backdrop per window.
+    /// </summary>
+    private string ChromeGroundStyle => _currentFrameStyle == BackdropStyles.Solid
+        ? BackdropStyles.Solid
+        : _currentBackdropStyle;
+
+    /// <summary>
+    /// The frame's material as the chrome actually gets it.
+    ///
+    /// High Contrast pins it solid. Translucency over a backdrop nobody
+    /// controls is the thing that mode exists to remove, so the key stops
+    /// being observable there.
+    ///
+    /// A solid background pins it solid too, and for the opposite reason:
+    /// there is nothing behind the frame to come through. Both pins sit in
+    /// this one expression rather than at each painter, because every
+    /// consumer of the frame's material wants the same answer and three of
+    /// them re-deriving it is three chances to disagree.
+    /// </summary>
+    private string EffectiveFrameStyle => HighContrastChromeActive
+        ? BackdropStyles.Solid
+        : BackdropStyles.FrameOver(_currentFrameStyle, _currentBackdropStyle);
+
+    /// <summary>
+    /// The fill the chrome takes, packed ARGB, where fully transparent means
+    /// "leave it to the backdrop".
+    ///
+    /// The two keys are orthogonal: window-theme picks the hue and
+    /// frame-style picks the material. So the palette is handed to the
+    /// resolver rather than pinned off -- it answers for a solid frame, and a
+    /// frosted or crystal one is transparent whichever hue it was going to
+    /// take. Pinning it off was what made frame-style unobservable under
+    /// window-theme=wintty, which is the combination the key exists to
+    /// create.
+    ///
+    /// Asked with the frame's effective material, so the transparent answer
+    /// is only ever given where something is behind the chrome to come
+    /// through.
+    /// </summary>
+    private uint ChromeFillArgb => RootBackgroundResolver.Resolve(
+        EffectiveFrameStyle,
+        _shellTheme.IsEnabled,
+        ShellThemeChromeArgb,
+        Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
+
+    /// <summary>
+    /// True while the terminal palette is actually painting the chrome: the
+    /// window asked for palette-hued chrome and the frame is solid enough to
+    /// carry it.
+    ///
+    /// A frosted or crystal frame answers no. The row is the backdrop there
+    /// whatever hue it was going to take, so everything calibrated against a
+    /// painted row -- the title ink, the caption glyphs, the row separators
+    /// -- has to go back to the bare-chrome answer.
+    /// </summary>
+    private bool ChromePaintedFromPalette =>
+        _shellTheme.IsEnabled
+        && ChromeFillArgb != RootBackgroundResolver.TransparentArgb;
+
+    /// <summary>
+    /// The same fill for the tab strips, packed 0x00RRGGBB, or null when they
+    /// are left to the backdrop.
+    ///
+    /// Nullable rather than a transparent colour because for a strip "bare"
+    /// is the absence of an override rather than a colour with no alpha in
+    /// it: the horizontal strip's surface is a theme resource, and putting it
+    /// back means removing the entry, not writing #00000000 over it.
+    /// </summary>
+    private uint? ChromeStripFill
+    {
+        get
+        {
+            var argb = ChromeFillArgb;
+            return argb == RootBackgroundResolver.TransparentArgb
+                ? null
+                : argb & 0x00FFFFFFu;
+        }
+    }
+
+    /// <summary>
+    /// Re-derive everything calibrated against the backdrop: the title row's
+    /// ink, the caption glyphs, and the row separators.
+    ///
+    /// Every input that can move the ground has to reach this. The ground is
+    /// a blend of the palette and the desktop, so it moves on a config
+    /// reload, on an OS light/dark flip, on an active-tab or tab-colour
+    /// change, and on any backdrop switch -- including the power saver's,
+    /// which swaps acrylic for Mica without touching what libghostty
+    /// renders. Missing one leaves two inks of the same row disagreeing,
+    /// which is what an OS flip did: the caption glyphs re-derived from the
+    /// new desktop and the title text stayed on the old one.
+    ///
+    /// Idempotent and brush-cached, so a site that did not need it pays a
+    /// few comparisons.
+    /// </summary>
+    private void RefreshBackdropChrome()
+    {
+        if (_isClosed) return;
+        ApplyVerticalTitleBarChrome();
+        ApplyCaptionButtonChrome();
+    }
+
+    /// <summary>
+    /// Title-row fills for vertical-tab mode.
+    ///
+    /// window-theme=wintty paints the whole row from the terminal palette,
+    /// which is the whole point of that mode. Everything else leaves the
+    /// row unpainted so the window backdrop reaches it, the way the
+    /// horizontal strip already works -- there the strip is the backdrop
+    /// and only the selected tab is painted.
+    ///
+    /// A row painted from the palette is a slab of a colour the desktop
+    /// never agreed to: the backdrop tints from the wallpaper while the
+    /// palette does not, so any palette that disagrees with the desktop
+    /// puts a band of the wrong shade across the top. Re-tuning that
+    /// shade only moves the failure to a different palette.
+    ///
+    /// The pieces that have to stay readable against a backdrop nobody
+    /// controls are excluded, not the row: the app icon (its own art),
+    /// the title text (TextFillColorPrimaryBrush, which the element theme
+    /// already calibrates) and the caption glyphs (see
+    /// <see cref="ApplyCaptionButtonChrome"/>).
+    /// </summary>
     private void ApplyVerticalTitleBarChrome()
     {
+        // Transparent as a colour, not the absence of a brush. The drag
+        // region has to keep swallowing the clicks that would otherwise
+        // reach the strip behind it, and a null Background is not
+        // hit-testable.
+        var unpainted = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+
         Windows.UI.Color dragBg;
         Windows.UI.Color stripMirrorBg;
-        if (_shellTheme.IsEnabled)
+        if (ChromePaintedFromPalette)
         {
             // One shade for the whole row, and it is the sidebar's. The
             // horizontal header paints TabBarBackground, so this row
@@ -2140,7 +2456,20 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            dragBg = UnpackTerminalColor(_configService.BackgroundColor);
+            // High Contrast ignores frame-style: translucency over a backdrop
+            // nobody controls is what that mode exists to remove, so the row
+            // stays painted out of Windows' own colours whatever the key says.
+            // It only reaches here without the palette; with it the branch
+            // above already painted the row from the shade HC put in it.
+            //
+            // Otherwise the fill is the frame's material, and for frosted and
+            // crystal that is transparent as a colour rather than the absence
+            // of a brush: the drag region has to keep swallowing the clicks
+            // that would otherwise reach the strip behind it, and a null
+            // Background is not hit-testable.
+            dragBg = HighContrastChromeActive
+                ? UnpackTerminalColor(_configService.BackgroundColor)
+                : UnpackArgb(ChromeFillArgb);
             stripMirrorBg = dragBg;
         }
 
@@ -2150,12 +2479,30 @@ public sealed partial class MainWindow : Window
             VerticalTitleDragRegion.Background = new SolidColorBrush(dragBg);
         }
 
+        // The title is one of the excluded pieces, so it is calibrated
+        // against the row rather than left on TextFillColorPrimaryBrush.
+        // That resource follows the element theme alone, which is right
+        // only while the element theme and the row agree.
+        //
+        // A bare frame under window-theme=wintty lands here too: the palette
+        // still names a title colour, but the row it was picked against is
+        // not being painted, so the ink is scored against the backdrop like
+        // any other bare chrome. ApplyShellTheme leaves it to this for the
+        // same reason.
+        if (!ChromePaintedFromPalette)
+            VerticalTitleText.Foreground = TabColorBrush.FromPackedRgb(VerticalTitleInk);
+
         if (_lastVerticalTitleStripMirrorBg != stripMirrorBg)
         {
             _lastVerticalTitleStripMirrorBg = stripMirrorBg;
             VerticalTitleStripMirrorFill.Background = new SolidColorBrush(stripMirrorBg);
         }
 
+        // The seam cover extends the row down over the caption lane, so it
+        // takes the row's fill. Transparent on the default path is the
+        // right answer and not a lost cover: measured on both builds, the
+        // pane's top stroke shows through it either way, because the pane
+        // host is declared after it and draws over it.
         if (_lastVerticalTitleCaptionBg != dragBg)
         {
             _lastVerticalTitleCaptionBg = dragBg;
@@ -2168,12 +2515,103 @@ public sealed partial class MainWindow : Window
             VerticalTitleBar.Visibility == Visibility.Visible
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+
+        ApplyChromeSeparators();
+        // After the separators, not before: that call is what tells the strips
+        // the live High Contrast flag and the ground they calibrate against,
+        // and a fill pushed ahead of it repaints them from the previous
+        // frame's answer to both.
+        ApplyStripChromeFill();
     }
 
     /// <summary>
-    /// Caption min/max/close colors. Vertical mode uses the same opaque
-    /// title-bar fill as the drag region; horizontal keeps transparent
-    /// buttons over the tab strip or Mica.
+    /// Push the chrome's own fill to both tab strips.
+    ///
+    /// The strips are the same surface as the title row, so they take the
+    /// same answer: the palette's shade under a solid frame, the desktop's
+    /// under a solid frame with no palette, and nothing at all under a
+    /// frosted or crystal frame that has a backdrop to reveal. window-theme
+    /// is asked here now -- it names the hue, and refusing to pass it on is
+    /// what left the strips opaque on the one combination frame-style exists
+    /// to create.
+    ///
+    /// High Contrast without the palette is the one answer the window does
+    /// not have. That surface comes from an HC-overridable theme resource,
+    /// which is Windows' own colour rather than one derived from it, so the
+    /// strips are left to resolve it themselves.
+    ///
+    /// Both strips take the same value from the same read. Resolving them
+    /// separately is how the two layouts end up different materials for one
+    /// config, which only shows up mid-switch when they are both on screen.
+    /// </summary>
+    private void ApplyStripChromeFill()
+    {
+        var fill = HighContrastChromeActive && !_shellTheme.IsEnabled
+            ? null
+            : ChromeStripFill;
+        _verticalTabHost.SetChromeFill(fill);
+        _horizontalTabHost.SetChromeFill(fill);
+    }
+
+    /// <summary>
+    /// True when the chrome is one uniform surface and therefore needs its
+    /// boundaries drawn.
+    ///
+    /// Both painted paths separate the rows by shade already, and a stroke
+    /// over either is a second boundary where there is one edge: High
+    /// Contrast paints from Windows' colours, window-theme=wintty from the
+    /// terminal palette.
+    ///
+    /// But window-theme only paints while the frame is solid enough to carry
+    /// it. Ask it for a frosted frame over a translucent backdrop and the
+    /// rows go to the backdrop the way any other bare chrome does, and the
+    /// shade that was dividing them goes with it -- so that case wants the
+    /// stroke back rather than inheriting the palette path's exemption.
+    /// </summary>
+    private bool ChromeSeparatorsWanted =>
+        !ChromePaintedFromPalette && !HighContrastChromeActive;
+
+    /// <summary>
+    /// Draw the boundary the backdrop cannot.
+    ///
+    /// With the chrome bare backdrop there is no change of shade between the
+    /// rows: they are two pieces of one surface, and two adjacent rows
+    /// measured 1.05:1. Nothing else is a candidate to divide them, so they
+    /// get a stroke unconditionally.
+    ///
+    /// The strip against the terminal is a different problem and is not
+    /// solved here. That boundary already has an owner: the tab content
+    /// frame is stretched around the whole terminal area in every layout and
+    /// touches the strip wherever the strip is. Making the line it already
+    /// draws legible beats drawing a second one beside it, which is a
+    /// doubled edge rather than a clearer one. See
+    /// <see cref="LegibleChromeAccent"/>.
+    ///
+    /// Idempotent and brush-cached, so every input that can move the ground
+    /// may call it.
+    /// </summary>
+    private void ApplyChromeSeparators()
+    {
+        var ground = EstimatedBackdropGround;
+
+        _verticalTabHost.SetRowSeparator(
+            ChromeSeparatorsWanted ? Core.Shell.ChromeSeparator.Resolve(ground) : null,
+            ground,
+            HighContrastChromeActive);
+
+        // The horizontal strip draws no lines -- its rows are side by side and
+        // the TabView already edges them -- but it sits on the same ground and
+        // scores its own titles against it. One read feeds both, so the two
+        // layouts cannot come out calibrated against different surfaces for
+        // one config, which only shows up mid-switch with both on screen.
+        _horizontalTabHost.SetChromeGround(ground);
+    }
+
+    /// <summary>
+    /// Caption min/max/close colors. Vertical mode matches whatever the
+    /// title row is: the tab-bar shade under a palette-painted row, the
+    /// frame's own material otherwise. Horizontal keeps transparent buttons
+    /// over the tab strip.
     /// </summary>
     private void ApplyCaptionButtonChrome()
     {
@@ -2187,7 +2625,7 @@ public sealed partial class MainWindow : Window
             Windows.UI.Color fg;
             Windows.UI.Color hoverBg;
             Windows.UI.Color pressedBg;
-            if (_shellTheme.IsEnabled)
+            if (ChromePaintedFromPalette)
             {
                 // Matches ApplyVerticalTitleBarChrome: the row is uniformly
                 // the tab-bar shade, so hover needs the OTHER theme color to
@@ -2199,12 +2637,15 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                titleBg = UnpackTerminalColor(_configService.BackgroundColor);
-                var dark = ThemeResolution.PreferLightForeground(
-                    _configService.BackgroundColor);
-                fg = dark
-                    ? Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
-                    : Windows.UI.Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+                // The same fill the rest of the row takes, so the caption lane
+                // cannot end up a different material from the row it is part
+                // of: bare under a frosted or crystal frame, painted under a
+                // solid one, and Windows' own colours under High Contrast.
+                titleBg = HighContrastChromeActive
+                    ? UnpackTerminalColor(_configService.BackgroundColor)
+                    : UnpackArgb(ChromeFillArgb);
+                fg = UnpackTerminalColor(VerticalTitleInk);
+                var dark = fg.R > 0x7F;
                 hoverBg = dark
                     ? Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)
                     : Windows.UI.Color.FromArgb(0x33, 0x00, 0x00, 0x00);
@@ -2247,6 +2688,17 @@ public sealed partial class MainWindow : Window
             (byte)(packed >> 16),
             (byte)(packed >> 8),
             (byte)packed);
+
+    /// <summary>
+    /// 0xAARRGGBB to a colour, alpha included -- what the resolvers hand out,
+    /// as opposed to the alpha-less terminal palette above.
+    /// </summary>
+    private static Windows.UI.Color UnpackArgb(uint argb)
+        => Windows.UI.Color.FromArgb(
+            (byte)(argb >> 24),
+            (byte)(argb >> 16),
+            (byte)(argb >> 8),
+            (byte)argb);
 
     /// <summary>
     /// Re-apply tab-host chrome after a horizontal/vertical layout switch.
@@ -2313,6 +2765,170 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Copy the resolved terminal background into the window state for the
+    /// next cold start's splash, which runs before any theme is resolved and
+    /// would otherwise have to guess. Returns true when anything moved, so a
+    /// caller can skip a write.
+    /// </summary>
+    /// <remarks>
+    /// One place for both callers because they used to be two, and the one
+    /// that ran at startup wrote the colour without the flag beside it. That
+    /// left every session claiming a background the desktop could not flip
+    /// out from under, and the splash went on trusting a stale colour.
+    /// </remarks>
+    private bool RecordSplashBackground()
+    {
+        // The HC colour when the override is layered, not BackgroundColor:
+        // that one resolves from the config and theme files, which the
+        // override is not layered into, so persisting it under HC would
+        // start the next HC launch's splash on the theme colour -- one step
+        // further from the colour the terminal is about to settle on
+        // (issue #793).
+        var background = (_configService.HighContrastBackground
+            ?? _configService.BackgroundColor) & 0x00FFFFFFu;
+
+        // Neither a configured background nor a configured theme means the
+        // colour is the built-in theme's, which tracks the desktop and so is
+        // only good for as long as that does not move.
+        var followsOs = !_configService.IsConfiguredInFile("background")
+            && string.IsNullOrEmpty(_configService.CurrentTheme);
+
+        if (_windowState.BackgroundRgb == background
+            && _windowState.BackgroundFollowsOsTheme == followsOs)
+        {
+            return false;
+        }
+
+        _windowState.BackgroundRgb = background;
+        _windowState.BackgroundFollowsOsTheme = followsOs;
+        return true;
+    }
+
+    private readonly Microsoft.UI.Xaml.Shapes.Rectangle _tabSeamCover;
+
+    /// <summary>
+    /// Place the seam cover under the selected tab, or hide it when the
+    /// strip has nothing to join to (vertical layout, or before the strip
+    /// has arranged).
+    /// </summary>
+    private void OnSelectedTabSeamChanged(double left, double width, Brush? fill)
+    {
+        if (_isClosed) return;
+
+        // Only meaningful in horizontal layout: in vertical the strip is
+        // beside the pane, not above it, and the seam is a different edge.
+        //
+        // Gated on the layout MainWindow last applied, NOT on the hosts'
+        // Visibility. Visibility is not a layout signal: both hosts are
+        // Visible by default until the first Snap, and PrimeHiddenStrip
+        // deliberately makes the collapsed one Visible at zero opacity for a
+        // few frames. Reading it here meant the first placement of every
+        // session decided it was in vertical layout and hid the cover, and
+        // nothing re-fired until the window happened to be resized.
+        if (width <= 0 || fill is null || _verticalTabsVisible || _stripForciblyHidden)
+        {
+            _tabSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _tabSeamCover.Margin = new Thickness(left, 0, 0, 0);
+        _tabSeamCover.Width = width;
+        _tabSeamCover.Fill = fill;
+        _tabSeamCover.Visibility = Visibility.Visible;
+    }
+
+    private readonly Microsoft.UI.Xaml.Shapes.Rectangle _verticalSeamCover;
+
+    /// <summary>
+    /// How far back into the selected row the vertical seam cover starts.
+    /// </summary>
+    private const double VerticalSeamOverlap = 4.0;
+
+    /// <summary>
+    /// How far up into the title row the caption seam cover starts, so it
+    /// also hides the hairline the strip draws against the pane.
+    /// </summary>
+    private const double CaptionSeamOverlap = 2.0;
+
+    /// <summary>
+    /// Place the vertical strip's seam cover over the pane's left border,
+    /// for the height of the selected row.
+    /// </summary>
+    private void OnVerticalSeamChanged()
+    {
+        if (_isClosed) return;
+
+        var row = _verticalTabHost.SelectionRowElement;
+        // Same reasoning as the horizontal gate: the layout MainWindow last
+        // applied, not the host's Visibility.
+        if (!_verticalTabsVisible
+            || _stripForciblyHidden
+            || row.Visibility != Visibility.Visible
+            || row.ActualWidth <= 0
+            || row.ActualHeight <= 2
+            || row is not Border { Background: { } fill })
+        {
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        // Start at the row's own right edge, which is already the terminal
+        // colour, so the cover cannot bleed back over the strip.
+        Windows.Foundation.Point start;
+        try
+        {
+            start = row.TransformToVisual(RootGrid)
+                .TransformPoint(new Windows.Foundation.Point(row.ActualWidth, 0));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            // The row is not in the tree yet, or is being torn out of it.
+            // The next SelectionRowChanged places it.
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        // Started a few pixels back inside the row rather than exactly at its
+        // edge: the row's right edge and the pane border are not flush, and
+        // the strip's own surface shows through whatever is left between
+        // them. Backing into the row costs nothing since both are filled
+        // with the same colour.
+        //
+        // Inside the row's top and bottom strokes, so those still close onto
+        // the pane border the way the horizontal tab's corners do.
+        const double edgeStroke = 1.0;
+        var top = start.Y + edgeStroke;
+        var bottom = start.Y + row.ActualHeight - edgeStroke;
+
+        // Clip to the scrolling row list. With more tabs than fit, the
+        // selected row can be scrolled out of it while its layout offset
+        // still reports where it would have been, and a cover placed there
+        // is a bar of terminal colour drawn across the pane at a height with
+        // no tab beside it.
+        //
+        // The list, not the host: the host is Row 0 with RowSpan 2, so it
+        // covers the whole window and clamping to it does nothing at all.
+        if (_verticalTabHost.SelectionViewport(RootGrid) is { } viewport)
+        {
+            top = Math.Max(top, viewport.Top);
+            bottom = Math.Min(bottom, viewport.Bottom);
+        }
+
+        if (bottom - top <= 0)
+        {
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _verticalSeamCover.Margin = new Thickness(
+            start.X - VerticalSeamOverlap, top, 0, 0);
+        _verticalSeamCover.Height = bottom - top;
+        _verticalSeamCover.Fill = fill;
+        _verticalSeamCover.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
     /// Update config-driven chrome colors: pane border and the vertical tab
     /// accent bar track cursor-color; the horizontal selected-tab background
     /// blends with the terminal background so the active tab connects to the
@@ -2330,9 +2946,17 @@ public sealed partial class MainWindow : Window
         _horizontalTabHost.SetSelectedTabColors(bgColor, fgColor);
         _verticalTabHost.SetSelectedTabColors(bgColor, fgColor);
 
-        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
+        var cc = LegibleChromeAccent(
+            _configService.CursorColor ?? _configService.ForegroundColor);
         var wuiColor = Windows.UI.Color.FromArgb(0xFF,
             (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc);
+        // Both hosts, from the one value that also draws the pane border
+        // below: the selected tab is stroked in it on the three sides that
+        // do not meet the pane, so tab and pane read as a single shape.
+        // Through the same legibility floor for the same reason -- the two
+        // halves of that shape disagreeing on colour is worse than either
+        // being wrong on its own.
+        _horizontalTabHost.SetAccentColor(wuiColor);
         _verticalTabHost.SetAccentColor(wuiColor);
 
         ApplyPerTabChrome();
@@ -2342,11 +2966,38 @@ public sealed partial class MainWindow : Window
     /// Pane borders follow the active tab's preset color when set; tab strip
     /// backgrounds refresh in both orientations.
     /// </summary>
+    /// <summary>
+    /// The accent the tab-and-pane shape is stroked in, held to a visible
+    /// minimum against the terminal it is drawn on.
+    ///
+    /// This is the strip/terminal boundary. The tab content frame is
+    /// stretched around the whole terminal area in every layout, so wherever
+    /// the strip is, that frame is the line between them; the selected tab's
+    /// folder shape closes onto the same line. When the accent it would be
+    /// drawn in cannot be seen against the terminal, the boundary is gone,
+    /// and the answer is to draw that line in something visible rather than
+    /// to add a second line beside an invisible one.
+    ///
+    /// The accent is <c>accent-color ?? cursor-color ?? foreground</c>, so a
+    /// theme that sets none of them lands on the foreground: white on a
+    /// light palette, which is where the boundary disappears.
+    ///
+    /// Applied to preset tab colours too. A preset that cannot be seen
+    /// against the terminal is not carrying the tab's identity either.
+    ///
+    /// The accent is moved in lightness rather than replaced, so a theme
+    /// whose accent is merely marginal against its own background comes back
+    /// as a lighter or darker version of itself instead of as a neutral.
+    /// Only a hue with no room left falls through to one.
+    /// </summary>
+    private uint LegibleChromeAccent(uint desired)
+        => Core.Shell.ChromeSeparator.EnsureVisible(
+            _configService.BackgroundColor, desired);
+
     private void ApplyPerTabChrome()
     {
-        var cc = _configService.CursorColor ?? _configService.ForegroundColor;
-        var defaultBorder = new SolidColorBrush(Microsoft.UI.ColorHelper.FromArgb(0xFF,
-            (byte)(cc >> 16), (byte)(cc >> 8), (byte)cc));
+        var defaultBorder = Tabs.TabColorBrush.FromPackedRgb(LegibleChromeAccent(
+            _configService.CursorColor ?? _configService.ForegroundColor));
 
         var active = _tabManager.ActiveTab;
         foreach (var tab in _tabManager.Tabs)
@@ -2355,8 +3006,8 @@ public sealed partial class MainWindow : Window
             if (ReferenceEquals(tab, active) && tab.Color != TabColor.None)
             {
                 var preset = TabColorPalette.Border(tab.Color);
-                borderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(
-                    0xFF, preset.R, preset.G, preset.B));
+                borderBrush = Tabs.TabColorBrush.FromPackedRgb(LegibleChromeAccent(
+                    (uint)((preset.R << 16) | (preset.G << 8) | preset.B)));
             }
             else
             {
@@ -2383,7 +3034,10 @@ public sealed partial class MainWindow : Window
         PropertyChangedEventHandler handler = (_, e) =>
         {
             if (e.PropertyName == nameof(TabModel.Color))
+            {
                 ApplyPerTabChrome();
+                RefreshBackdropChrome();
+            }
         };
         ((INotifyPropertyChanged)tab).PropertyChanged += handler;
         _tabColorWired[tab] = handler;
@@ -2399,6 +3053,11 @@ public sealed partial class MainWindow : Window
     /// Apply the window backdrop based on background-style and
     /// background-opacity config values. Dispatches to the correct
     /// SystemBackdrop implementation for each preset.
+    ///
+    /// Also resolves the chrome's own material from frame-style, which is a
+    /// different question with the same three answers: background-style says
+    /// what the terminal is made of, frame-style what the frame around it is.
+    /// Both live here so the low-power override lands on them from one place.
     /// </summary>
     private void ApplyBackdropStyle()
     {
@@ -2419,40 +3078,68 @@ public sealed partial class MainWindow : Window
                 ? BackdropStyles.Solid
                 : configStyle);
 
-        // Skip if the effective style hasn't changed.
-        if (style == _currentBackdropStyle && SystemBackdrop is not null)
-            return;
+        // Low power flattens the frame for the same reason it flattens the
+        // backdrop: the composition cost is in the translucency, not in which
+        // surface is carrying it. The opacity rule above is deliberately not
+        // repeated here -- background-opacity is the terminal's, and a frame
+        // has no cells to see through.
+        var frameStyle = lowPowerActive
+            ? BackdropStyles.Solid
+            : _configService.FrameStyle;
 
+        // Two decisions, not one. Swapping the SystemBackdrop is expensive and
+        // is worth skipping when the material has not moved; the colours below
+        // are palette-derived and move on a reload that leaves both styles
+        // alone. While one early return covered both, a reload that repainted
+        // the terminal without changing its style never reached the class
+        // brush, which kept the colour the window started with.
+        var backdropChanged = style != _currentBackdropStyle || SystemBackdrop is null;
         _currentBackdropStyle = style;
+        _currentFrameStyle = frameStyle;
 
-        var hwnd = WindowNative.GetWindowHandle(this);
-
-        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
+        // The class brush is the Win32 fill that lands before XAML composes,
+        // so it has to be the colour RootGrid is about to settle on or the
+        // frame flashes on the way there. Same resolver, same inputs, read
+        // after _currentBackdropStyle is already the effective style. It
+        // follows the backdrop rather than the frame: RootGrid is what it has
+        // to agree with, and RootGrid is behind the terminal too.
+        var classBrushArgb = RootBackgroundResolver.Resolve(
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
         switch (style)
         {
             case BackdropStyles.Frosted:
                 if (DesktopAcrylicController.IsSupported())
-                    SystemBackdrop = new AcrylicBackdrop(
-                        tintColor, tintOpacity, luminosityOpacity,
-                        _newAcrylicLogger());
+                {
+                    if (backdropChanged)
+                    {
+                        var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
+                        SystemBackdrop = new AcrylicBackdrop(
+                            tintColor, tintOpacity, luminosityOpacity,
+                            _newAcrylicLogger());
+                    }
+                }
                 else
+                {
                     goto case BackdropStyles.Solid;
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                }
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Crystal:
-                SystemBackdrop = new CrystalBackdrop(hwnd);
-                ApplyWindowClassBrush(ClassBrushKind.Transparent);
+                if (backdropChanged)
+                    SystemBackdrop = new CrystalBackdrop(WindowNative.GetWindowHandle(this));
+                ApplyWindowClassBrush(ClassBrushKind.Transparent, classBrushArgb);
                 break;
 
             case BackdropStyles.Solid:
             default:
-                if (MicaController.IsSupported())
-                    SystemBackdrop = new MicaBackdrop();
-                else
-                    SystemBackdrop = null;
-                ApplyWindowClassBrush(ClassBrushKind.Opaque);
+                if (backdropChanged)
+                    SystemBackdrop = MicaController.IsSupported() ? new MicaBackdrop() : null;
+                ApplyWindowClassBrush(ClassBrushKind.Opaque, classBrushArgb);
                 break;
         }
     }
@@ -2464,7 +3151,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateAcrylicTuning()
     {
-        if (_currentBackdropStyle != BackdropStyles.Frosted) return;
         if (SystemBackdrop is not AcrylicBackdrop current) return;
 
         var (tintColor, tintOpacity, luminosityOpacity) = ResolveAcrylicTuning();
@@ -2515,6 +3201,7 @@ public sealed partial class MainWindow : Window
                 UpdateAcrylicTuning();
                 ApplyGradientTint();
                 ApplyRootGridBackground();
+                RefreshBackdropChrome();
                 RefreshPowerSaverIcon();
             }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
@@ -2623,10 +3310,18 @@ public sealed partial class MainWindow : Window
     /// must not. <see cref="_classBrushOwned"/> tracks that
     /// distinction.
     /// </summary>
-    private void ApplyWindowClassBrush(ClassBrushKind kind)
+    /// <param name="kind">Whether the frame is filled or left to the backdrop.</param>
+    /// <param name="argb">
+    /// The fill colour, packed the way the resolver hands it out. Ignored
+    /// for the transparent kind, but still part of the memoisation key: the
+    /// colour is derived from the palette now, so keying on the kind alone
+    /// swallowed a reload that repainted the same solid frame a new colour.
+    /// </param>
+    private void ApplyWindowClassBrush(ClassBrushKind kind, uint argb)
     {
-        if (_lastClassBrushKind == kind) return;
+        if (_lastClassBrushKind == kind && _lastClassBrushArgb == argb) return;
         _lastClassBrushKind = kind;
+        _lastClassBrushArgb = argb;
 
         var hwnd = WindowNative.GetWindowHandle(this);
         var (brush, owned) = kind switch
@@ -2634,7 +3329,7 @@ public sealed partial class MainWindow : Window
             ClassBrushKind.Transparent =>
                 (Win32Interop.GetStockObject(Win32Interop.NULL_BRUSH), false),
             ClassBrushKind.Opaque =>
-                (CreateSolidBrush(0x000C0C0Cu), true),
+                (CreateSolidBrush(Core.Shell.ColorRef.ToColorRef(argb)), true),
             _ => throw new System.Diagnostics.UnreachableException(
                 $"Unknown ClassBrushKind: {kind}"),
         };
@@ -2698,6 +3393,13 @@ public sealed partial class MainWindow : Window
             // `dark` that drove the two calls above, so libghostty and
             // the config caches cannot describe different schemes.
             _configService.RefreshForOsColorScheme(dark);
+
+            // Not covered by the reload above. RefreshForOsColorScheme only
+            // reaches the chrome when the config it resolves actually
+            // changed, and a palette that is pinned in the file does not --
+            // but the backdrop still re-tints off the new desktop, so
+            // everything scored against it is stale until this runs.
+            RefreshBackdropChrome();
         });
     }
 
@@ -2752,6 +3454,29 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The shell theme's title bar color packed as ARGB, which is what the
+    /// resolver speaks. Both the Win32 class brush and RootGrid.Background
+    /// feed it this; packing it twice is how the two start disagreeing.
+    /// </summary>
+    private uint ShellThemeBackgroundArgb => PackArgb(_shellTheme.TitleBarBackground);
+
+    /// <summary>
+    /// The shade the palette gives the chrome, packed ARGB.
+    ///
+    /// The tab bar's rather than the title bar's: the title row, the caption
+    /// lane and both strips are one surface, and the tab bar's shade is the
+    /// one they have always taken. RootGrid sits behind the terminal instead
+    /// of beside it and keeps the title bar's, above.
+    /// </summary>
+    private uint ShellThemeChromeArgb => PackArgb(_shellTheme.TabBarBackground);
+
+    private static uint PackArgb(Windows.UI.Color color) =>
+        ((uint)color.A << 24) |
+        ((uint)color.R << 16) |
+        ((uint)color.G << 8) |
+        color.B;
+
+    /// <summary>
     /// Paint RootGrid.Background based on current backdrop style and
     /// shell-theme state. Single source of truth so
     /// ApplyBackdropStyle and ApplyShellTheme never write this
@@ -2760,21 +3485,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ApplyRootGridBackground()
     {
-        var bg = _shellTheme.TitleBarBackground;
-        uint shellBgArgb =
-            ((uint)bg.A << 24) |
-            ((uint)bg.R << 16) |
-            ((uint)bg.G << 8) |
-            bg.B;
-
         var argb = RootBackgroundResolver.Resolve(
-            _currentBackdropStyle, _shellTheme.IsEnabled, shellBgArgb);
+            _currentBackdropStyle,
+            _shellTheme.IsEnabled,
+            ShellThemeBackgroundArgb,
+            Ghostty.Services.OsTheme.IsDark(_systemUiSettings));
 
-        var next = Windows.UI.Color.FromArgb(
-            (byte)(argb >> 24),
-            (byte)(argb >> 16),
-            (byte)(argb >> 8),
-            (byte)argb);
+        var next = UnpackArgb(argb);
 
         if (_lastRootBackground == next) return;
         _lastRootBackground = next;
@@ -2868,6 +3585,7 @@ public sealed partial class MainWindow : Window
         // icon sits above the tabs instead. Layout toggle stays available via
         // the Ctrl+Shift+, chord.
         _layout.SuppressVerticalTitleBar(true, _verticalTabsVisible);
+        RefreshBackdropChrome();
 
         // Show the session-only pin button so the user can keep the quake
         // window open on focus loss. Invisible on regular windows by default.
@@ -2918,8 +3636,35 @@ public sealed partial class MainWindow : Window
         // ordering accident in another method, not a guard here.
         if (_isClosed) return;
         if (!IsQuickTerminal) return;
-        _layout.SetStripHidden(_tabManager.Tabs.Count <= 1, _verticalTabsVisible);
+
+        var hidden = _tabManager.Tabs.Count <= 1;
+        _layout.SetStripHidden(hidden, _verticalTabsVisible);
+        _stripForciblyHidden = hidden;
+        RefreshBackdropChrome();
+
+        // The seam covers join the selected tab to the pane, so with no
+        // strip there is nothing to join and the cover is a bar of tab
+        // colour lying across the terminal. Neither seam event re-fires on
+        // its own here: the strip is collapsed rather than relaid out.
+        if (hidden)
+        {
+            _tabSeamCover.Visibility = Visibility.Collapsed;
+            _verticalSeamCover.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            if (_verticalTabsVisible) _verticalTabHost.RefreshSelectionChrome();
+            else _horizontalTabHost.RefreshSeam();
+        }
     }
+
+    /// <summary>
+    /// Quake-only: the strip is forced hidden regardless of layout mode, so
+    /// the seam covers have nothing to join to. Distinct from the hosts'
+    /// Visibility, which is not a layout signal -- see
+    /// <see cref="OnSelectedTabSeamChanged"/>.
+    /// </summary>
+    private bool _stripForciblyHidden;
 
     private void OnQuakePinChanged(object sender, RoutedEventArgs e)
     {
@@ -3537,6 +4282,18 @@ public sealed partial class MainWindow : Window
 
         var sources = new List<ICommandSource> { builtIn, jump, config, version };
 
+        // Deliberate crash triggers, the same kinds and the same
+        // implementation as `wintty +crash <kind>`. Registered in every
+        // build: the shipped installer is the configuration whose capture
+        // most needs proving, and a Debug-only trigger cannot prove it.
+        //
+        // Deferred to the next tick like every other source: the fault then
+        // lands after the palette popup has torn down, so the captured stack
+        // is the trigger's own rather than WinUI's teardown on top of it.
+        sources.Add(new CrashCommandSource(
+            kind => DispatcherQueue.TryEnqueue(
+                () => Cli.CrashTrigger.Run(kind, TryExecuteBindingAction))));
+
 #if DEMO
         // Demo entries appear only when WINTTY_DEMO is set, so a demo build with
         // the var unset leaves the palette unchanged. Defer to the next tick so
@@ -3645,10 +4402,33 @@ public sealed partial class MainWindow : Window
     {
         var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
         if (leaf is null) return;
+        _ = TryExecuteBindingAction(actionKey);
+    }
+
+    /// <summary>
+    /// Dispatch a binding action against the active surface, reporting
+    /// whether it was performed.
+    ///
+    /// The crash triggers are what need the answer: "crash:render" that
+    /// found no surface, or that libghostty did not recognise, is a no-op,
+    /// and reporting a crash for it would have the operator read the absent
+    /// report as a miss by the reporter.
+    ///
+    /// The split is shaped by the tier machinery rather than by taste. Three
+    /// patch stacks carry hunks whose context is
+    /// <see cref="ExecuteBindingAction"/>'s opening three lines, and plain
+    /// `git apply` is what materialises them, so those three lines cannot
+    /// move. Everything below them can, which is why the body lives here and
+    /// the original method keeps its signature and its first three lines.
+    /// </summary>
+    private bool TryExecuteBindingAction(string actionKey)
+    {
+        var leaf = _tabManager.ActiveTab?.PaneHost?.ActiveLeaf;
+        if (leaf is null) return false;
 
         var terminal = leaf.Terminal();
         var surfaceHandle = terminal.SurfaceHandle;
-        if (surfaceHandle == IntPtr.Zero) return;
+        if (surfaceHandle == IntPtr.Zero) return false;
 
         var surface = new GhosttySurface(surfaceHandle);
         var actionBytes = Encoding.UTF8.GetBytes(actionKey);
@@ -3656,7 +4436,8 @@ public sealed partial class MainWindow : Window
         {
             fixed (byte* p = actionBytes)
             {
-                NativeMethods.SurfaceBindingAction(surface, p, (UIntPtr)actionBytes.Length);
+                return NativeMethods.SurfaceBindingAction(
+                    surface, p, (UIntPtr)actionBytes.Length);
             }
         }
     }

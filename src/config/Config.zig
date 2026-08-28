@@ -28,6 +28,7 @@ const Conditional = conditional.Conditional;
 const file_load = @import("file_load.zig");
 const formatterpkg = @import("formatter.zig");
 const themepkg = @import("theme.zig");
+const wintty_theme = @import("wintty_theme.zig");
 const url = @import("url.zig");
 pub const Key = @import("key.zig").Key;
 const MetricModifier = fontpkg.Metrics.Modifier;
@@ -2481,6 +2482,32 @@ keybind: Keybinds = .{},
 @"clipboard-read": ClipboardAccess = .ask,
 @"clipboard-write": ClipboardAccess = .allow,
 
+/// The maximum size in bytes of a single clipboard write by a program
+/// running in the terminal via the Kitty clipboard protocol (OSC 5522).
+/// This doesn't apply to OSC 52, which is limited by the maximum length
+/// of an escape sequence hardcoded into Ghostty for now.
+///
+/// Data beyond the limit fails the entire write with an `EFBIG` status,
+/// discards the transaction, and leaves the clipboard untouched. Later
+/// write-related packets are ignored until a new write begins.
+///
+/// The data is buffered in memory while the write is in progress, so
+/// this limit bounds how much memory a program can make Ghostty
+/// allocate per write. A future improvement will attempt to spool large
+/// writes to disk.
+///
+/// The default is 64 MiB, the minimum a conforming implementation must
+/// accept. Set this to `unlimited` to remove the limit, allowing writes
+/// bounded only by available memory. A value of `0` rejects every non-empty
+/// write. To reject clipboard writes entirely, use `clipboard-write = deny`
+/// instead.
+///
+/// This can be changed at runtime and applies to writes that begin
+/// after the change.
+///
+/// Available since: 1.4.0
+@"clipboard-write-limit-bytes": Limit(usize, 64 * 1024 * 1024) = .default,
+
 /// Trims trailing whitespace on data that is copied to the clipboard. This does
 /// not affect data sent to the clipboard via `clipboard-write`. This only
 /// applies to trailing whitespace on lines that have other characters.
@@ -3987,6 +4014,13 @@ _conditional_state: conditional.State = .{},
 /// loading. This is used to speed up the conditional evaluation process.
 _conditional_set: std.EnumSet(conditional.Key) = .{},
 
+/// Whether finalize has run on this config.
+///
+/// Only used to refuse the C API's set-color-scheme after the point where
+/// it would silently do nothing. Not copied by clone: a clone is expected
+/// to be finalized again.
+_finalized: bool = false,
+
 /// The steps we can use to reload the configuration after it has been loaded
 /// without reopening the files. This is used in very specific cases such
 /// as loadTheme which has more details on why.
@@ -4669,6 +4703,55 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     const file = themefile.file;
     defer file.close(global.io());
 
+    var buf: [2048]u8 = undefined;
+    var file_reader = file.reader(global.io(), &buf);
+    var iter: cli.args.LineIterator = .{
+        .r = &file_reader.interface,
+        .filepath = path,
+    };
+    try self.applyThemeOverlay(&iter);
+}
+
+/// Everything finalize does when no theme is configured, in one call so the
+/// upstream theme block stays a one-line diff and rebases cleanly.
+fn applyBuiltinTheme(self: *Config) !void {
+    // Warning: this deinits our existing config and replaces it, so all
+    // memory from self prior to this point is freed.
+    try self.loadBuiltinTheme();
+
+    // Same reasoning as the different-light-and-dark themes above: auto
+    // derives the window theme from the terminal background, which now
+    // moves with the desktop, so it would fight the desktop rather than
+    // follow it.
+    if (self.@"window-theme" == .auto) self.@"window-theme" = .system;
+
+    // Mark that we use a conditional theme.
+    self._conditional_set.insert(.theme);
+}
+
+/// Load the built-in Wintty theme for the current conditional theme state.
+///
+/// Goes through the same overlay as a user theme file, so the user's own
+/// config still overrides it and the replay steps are made conditional the
+/// same way. See `wintty_theme.zig` for why a default pair exists at all.
+fn loadBuiltinTheme(self: *Config) !void {
+    var reader: std.Io.Reader = .fixed(
+        wintty_theme.forScheme(self._conditional_state.theme),
+    );
+    var iter: cli.args.LineIterator = .{
+        .r = &reader,
+        .filepath = "<built-in theme>",
+    };
+    try self.applyThemeOverlay(&iter);
+}
+
+/// Load a theme from `iter` underneath the config already loaded into self.
+///
+/// Split out of loadTheme so the built-in theme, which is a string rather
+/// than a file, gets byte-for-byte the same precedence and replay handling.
+/// Warning: this deinits self and replaces it, so anything borrowed from
+/// self before the call is freed after it.
+fn applyThemeOverlay(self: *Config, iter: *cli.args.LineIterator) !void {
     // From this point onwards, we load the theme and do a bit of a dance
     // to achieve two separate goals:
     //
@@ -4688,11 +4771,7 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     errdefer new_config.deinit();
 
     // Load our theme
-    var buf: [2048]u8 = undefined;
-    var file_reader = file.reader(global.io(), &buf);
-    const reader = &file_reader.interface;
-    var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-    try new_config.loadIter(alloc_gpa, &iter);
+    try new_config.loadIter(alloc_gpa, iter);
 
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
@@ -4774,6 +4853,8 @@ pub fn finalize(self: *Config) !void {
             // Mark that we use a conditional theme
             self._conditional_set.insert(.theme);
         }
+    } else if (comptime wintty_theme.enabled) {
+        try self.applyBuiltinTheme();
     }
 
     // Used for a variety of defaults. See the function docs as well the
@@ -4969,6 +5050,8 @@ pub fn finalize(self: *Config) !void {
 
     // Finalize key remapping set for efficient lookups
     self.@"key-remap".finalize();
+
+    self._finalized = true;
 }
 
 /// Callback for src/cli/args.zig to allow us to handle special cases
@@ -11519,6 +11602,38 @@ test "scrollback limits" {
     );
 }
 
+test "clipboard write limit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expectEqual(
+        @as(usize, 64 * 1024 * 1024),
+        cfg.@"clipboard-write-limit-bytes".value,
+    );
+
+    var it: TestIterator = .{ .data = &.{
+        "--clipboard-write-limit-bytes=1234",
+    } };
+    try cfg.loadIter(alloc, &it);
+
+    try testing.expectEqual(
+        @as(usize, 1234),
+        cfg.@"clipboard-write-limit-bytes".value,
+    );
+
+    var unlimited_it: TestIterator = .{ .data = &.{
+        "--clipboard-write-limit-bytes=unlimited",
+    } };
+    try cfg.loadIter(alloc, &unlimited_it);
+
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"clipboard-write-limit-bytes".value,
+    );
+}
+
 test "compatibility: scrollback-limit renamed to bytes" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -11887,26 +12002,85 @@ test "issue 228: non-empty foreground still overrides theme" {
     }, cfg.foreground);
 }
 
-test "issue 228: empty foreground with no theme stays compile-time default" {
+test "issue 228: empty foreground with no theme defers to the layer below" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
 
-    // With no theme there is no lower layer to defer to, so an empty value
-    // keeps the compile-time default (#FFFFFF). This guards against the skip
-    // logic leaking into the non-theme path.
+    // An empty value defers to whatever is underneath it. What that is
+    // depends on the build: on a build with a built-in theme the theme is
+    // the layer below, and everywhere else there is no layer at all and the
+    // compile-time default stands. Either way this guards the same thing as
+    // before, that the skip logic does not turn an empty value into
+    // something other than the layer below it.
+    const expected: Color = if (comptime wintty_theme.enabled)
+        // The light half, since that is Config.default's conditional state.
+        .{ .r = 0x1E, .g = 0x23, .b = 0x33 }
+    else
+        .{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
+
     var it: TestIterator = .{ .data = &.{
         "--foreground=",
     } };
     try cfg.loadIter(alloc, &it);
     try cfg.finalize();
 
+    try testing.expectEqual(expected, cfg.foreground);
+}
+
+test "built-in theme applies when nothing is configured" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_]struct { theme: conditional.State.Theme, bg: Color }{
+        .{ .theme = .light, .bg = .{ .r = 0xF4, .g = 0xF6, .b = 0xFB } },
+        .{ .theme = .dark, .bg = .{ .r = 0x13, .g = 0x16, .b = 0x20 } },
+    }) |tc| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        cfg._conditional_state.theme = tc.theme;
+        try cfg.finalize();
+
+        try testing.expectEqual(tc.bg, cfg.background);
+
+        // window-theme must stop deriving itself from the background, which
+        // now moves with the desktop, and follow the desktop directly.
+        try testing.expectEqual(WindowTheme.system, cfg.@"window-theme");
+
+        // Registered as conditional, or an OS light/dark flip would not
+        // rebuild the config and the pair would never switch.
+        try testing.expect(cfg._conditional_set.contains(.theme));
+    }
+}
+
+test "built-in theme loses to an explicit setting" {
+    if (comptime !wintty_theme.enabled) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{"--background=#abcdef"} };
+    try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
+
     try testing.expectEqual(Color{
-        .r = 0xFF,
-        .g = 0xFF,
-        .b = 0xFF,
+        .r = 0xAB,
+        .g = 0xCD,
+        .b = 0xEF,
+    }, cfg.background);
+
+    // Only the key the user set is theirs; the rest still comes from the
+    // built-in theme.
+    try testing.expectEqual(Color{
+        .r = 0x1E,
+        .g = 0x23,
+        .b = 0x33,
     }, cfg.foreground);
 }
 

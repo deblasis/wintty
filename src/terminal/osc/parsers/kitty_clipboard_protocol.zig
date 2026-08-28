@@ -58,6 +58,7 @@ pub const Status = enum {
     DATA,
     DONE,
     EBUSY,
+    EFBIG,
     EINVAL,
     EIO,
     ENOSYS,

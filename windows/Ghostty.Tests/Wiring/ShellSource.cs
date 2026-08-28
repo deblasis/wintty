@@ -31,6 +31,24 @@ internal sealed class ShellSource
     private ShellSource(CompilationUnitSyntax root) => _root = root;
 
     /// <summary>
+    /// The configuration these scans read the shell in.
+    ///
+    /// DEMO, because demo mode is a configuration that ships and a scan
+    /// that cannot see it reports full coverage of a file it only partly
+    /// read. DEBUG, because that is the branch this test assembly is itself
+    /// built in, and because the debug-only regions are where the
+    /// destructive developer actions live: those are precisely the ones a
+    /// gating guard has to be able to see.
+    ///
+    /// Both symbols hide their opposite branch, and <see cref="Load"/>'s
+    /// refusal of any remaining disabled text is what keeps that from
+    /// widening silently. A file whose Release half needs checking needs a
+    /// text-level rule, the way <c>ParseForCorpusScan</c> describes.
+    /// </summary>
+    private static readonly CSharpParseOptions ParseOptions =
+        new(preprocessorSymbols: new[] { "DEMO", "DEBUG" });
+
+    /// <summary>
     /// Load an embedded shell source by its dotted path tail, e.g.
     /// "Controls.CommandPalette.CommandPaletteControl.xaml.cs".
     ///
@@ -58,14 +76,14 @@ internal sealed class ShellSource
         // with, because it reports full coverage of a file it only partly
         // read, and DEMO is a configuration that ships.
         //
-        // Defining the symbol reveals that branch. It cannot be the whole
-        // answer, because it hides the other one: an `#else` or `#if !DEMO`
-        // becomes the disabled region instead. So the assertion below refuses
-        // any tree that still has disabled text, which turns adding a new
-        // conditional into a decision someone has to make rather than a
-        // silent widening of the blind spot.
-        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
-        var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), options);
+        // Defining the symbol reveals that branch (see ParseOptions, which
+        // defines DEMO and DEBUG). It cannot be the whole answer, because it
+        // hides the other one: an `#else` or `#if !DEMO` becomes the disabled
+        // region instead. So the assertion below refuses any tree that still
+        // has disabled text, which turns adding a new conditional into a
+        // decision someone has to make rather than a silent widening of the
+        // blind spot.
+        var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), ParseOptions);
         var root = (CompilationUnitSyntax)tree.GetRoot();
 
         var hidden = root.DescendantTrivia()
@@ -123,8 +141,7 @@ internal sealed class ShellSource
     /// </summary>
     public static ShellSource ParseForCorpusScan(string text)
     {
-        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
-        return new ShellSource((CompilationUnitSyntax)CSharpSyntaxTree.ParseText(text, options).GetRoot());
+        return new ShellSource((CompilationUnitSyntax)CSharpSyntaxTree.ParseText(text, ParseOptions).GetRoot());
     }
 
     // MSBuild substitutes the host's directory separator into the logical
@@ -155,7 +172,6 @@ internal sealed class ShellSource
     public static IReadOnlyList<(string Resource, CompilationUnitSyntax Root)> AllShellSources()
     {
         var asm = Assembly.GetExecutingAssembly();
-        var options = new CSharpParseOptions(preprocessorSymbols: new[] { "DEMO" });
         var found = new List<(string Resource, CompilationUnitSyntax Root)>();
         foreach (var name in asm.GetManifestResourceNames())
         {
@@ -166,7 +182,7 @@ internal sealed class ShellSource
 
             using var stream = asm.GetManifestResourceStream(name)!;
             using var reader = new StreamReader(stream);
-            var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), options);
+            var tree = CSharpSyntaxTree.ParseText(reader.ReadToEnd(), ParseOptions);
             found.Add((dotted, (CompilationUnitSyntax)tree.GetRoot()));
         }
 
@@ -258,5 +274,40 @@ internal static class SyntaxQueries
             call.ArgumentList.Arguments.Count > index,
             $"'{call.Expression}' has {call.ArgumentList.Arguments.Count} arguments, wanted index {index}");
         return call.ArgumentList.Arguments[index].ToString();
+    }
+
+    /// <summary>
+    /// One argument of a call as a node rather than as text.
+    ///
+    /// A substring assertion over an argument accepts its own negation:
+    /// `Assert.Contains("OsTheme.IsDark", arg)` is just as happy with
+    /// `!OsTheme.IsDark(...)`, which is the inverted polarity such an
+    /// assertion exists to catch. The node keeps the wrapper visible.
+    /// </summary>
+    public static ExpressionSyntax ArgExpression(this InvocationExpressionSyntax call, int index)
+    {
+        Assert.True(
+            call.ArgumentList.Arguments.Count > index,
+            $"'{call.Expression}' has {call.ArgumentList.Arguments.Count} arguments, wanted index {index}");
+        return call.ArgumentList.Arguments[index].Expression;
+    }
+
+    /// <summary>
+    /// Assert that <paramref name="expression"/> is a call to
+    /// <paramref name="callee"/> and nothing wrapped around one, then hand
+    /// the call back so the caller can go on to name its arguments.
+    ///
+    /// Matches the callee as written or as any namespace-qualified spelling
+    /// of it, because the same helper is called both ways in the shell.
+    /// </summary>
+    public static InvocationExpressionSyntax AssertCallTo(
+        this ExpressionSyntax expression, string callee)
+    {
+        var invocation = Assert.IsType<InvocationExpressionSyntax>(expression);
+        var actual = invocation.CalleeText();
+        Assert.True(
+            actual == callee || actual.EndsWith("." + callee, StringComparison.Ordinal),
+            $"expected a call to '{callee}', found '{actual}'");
+        return invocation;
     }
 }

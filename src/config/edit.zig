@@ -47,17 +47,25 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
             dir.close(global.io());
         }
 
-        // Try to create file and go on if it already exists
-        _ = std.Io.Dir.createFileAbsolute(
+        // Try to create file and go on if it already exists. The handle is
+        // closed immediately: all this call needs is for the file to exist.
+        //
+        // Leaking it costs nothing on POSIX. On Windows the create asks for
+        // GENERIC_WRITE, so while the handle lives the file cannot be opened
+        // by anyone requesting FILE_SHARE_READ alone, which is what .NET's
+        // File.ReadLines and friends default to. The host reads this file
+        // right after asking for its path, and on a first run that read is
+        // the one that creates it, so it denies itself.
+        if (std.Io.Dir.createFileAbsolute(
             global.io(),
             config_path.name,
             .{ .exclusive = true },
-        ) catch |err| {
-            switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            }
-        };
+        )) |file| {
+            file.close(global.io());
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        }
     }
 
     return try alloc_gpa.dupeZ(u8, config_path.name);

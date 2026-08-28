@@ -2305,10 +2305,7 @@ extension Ghostty.SurfaceView {
 
         if let content {
             DispatchQueue.main.async {
-                self.insertText(
-                    content,
-                    replacementRange: NSRange(location: 0, length: 0)
-                )
+                self.surfaceModel?.sendText(content)
             }
             return true
         }

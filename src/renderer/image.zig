@@ -828,15 +828,12 @@ pub const State = struct {
             return;
         }
 
-        // Copy the data so we own it. The largest decoded image we expect
-        // here is bounded by the kitty graphics APC payload cap (also used
-        // by iTerm2 multipart File= after the multipart series), currently
-        // 65 MiB. DX12 uploads are chunked into row-bands so the GPU
-        // staging-heap pressure scales with band size, not full-image size.
-        const data = if (alloc.dupe(
-            u8,
-            pending.dataSlice(),
-        )) |v| v else |_| {
+        // Store it in the map. The largest decoded image we expect here is
+        // bounded by the kitty graphics APC payload cap (also used by iTerm2
+        // multipart File= after the multipart series), currently 65 MiB. DX12
+        // uploads are chunked into row-bands so the GPU staging-heap pressure
+        // scales with band size, not full-image size.
+        const new_image: Image = if (pending.convertCopy(alloc)) |v| v else |_| {
             if (!gop.found_existing) {
                 // If this is a new entry we can just remove it since it
                 // was never sent to the GPU.
@@ -853,15 +850,6 @@ pub const State = struct {
         // put into the map immediately below and our errdefer to
         // handle our map state will fix this up.
 
-        // Store it in the map
-        const new_image: Image = .{
-            .pending = .{
-                .width = pending.width,
-                .height = pending.height,
-                .pixel_format = pending.pixel_format,
-                .data = data.ptr,
-            },
-        };
         if (!gop.found_existing) {
             gop.value_ptr.* = .{
                 .image = new_image,
@@ -877,7 +865,7 @@ pub const State = struct {
         // If any error happens, we unload the image and it is invalid.
         errdefer gop.value_ptr.image.markForUnload();
 
-        gop.value_ptr.image.prepForUpload(alloc) catch |err| {
+        gop.value_ptr.image.getPendingPointer().?.prepForUpload(alloc) catch |err| {
             log.warn("error preparing image for upload err={}", .{err});
             return error.ImageConversionError;
         };
@@ -1069,6 +1057,61 @@ pub const Image = union(enum) {
                 };
             }
         };
+
+        /// Converts the image data and replaces it with a format that can be uploaded to the GPU.
+        /// If the data is already in a format that can be uploaded, this is a
+        /// no-op.
+        /// Use `convertCopy()` to convert and copy in a single-pass, such as for owning the data to upload.
+        fn convertReplace(self: *Image.Pending, alloc: Allocator) wuffs.Error!void {
+            // As things stand, we currently convert all images to RGBA before
+            // uploading to the GPU. This just makes things easier. In the future
+            // we may want to support other formats.
+            if (self.pixel_format == .rgba) return;
+            // If the pending data isn't RGBA we'll need to swizzle it.
+            const data = self.dataSlice();
+            const rgba = try switch (self.pixel_format) {
+                .gray => wuffs.swizzle.gToRgba(alloc, data),
+                .gray_alpha => wuffs.swizzle.gaToRgba(alloc, data),
+                .rgb => wuffs.swizzle.rgbToRgba(alloc, data),
+                .bgr => wuffs.swizzle.bgrToRgba(alloc, data),
+                .rgba => unreachable,
+                .bgra => wuffs.swizzle.bgraToRgba(alloc, data),
+            };
+            alloc.free(data);
+            self.data = rgba.ptr;
+            self.pixel_format = .rgba;
+        }
+
+        /// Converts the image data to a copy with a format that can be uploaded to the GPU.
+        /// If the data is already owned, use `convertReplace()` to be a no-op for data already
+        /// in a format that can be uploaded.
+        fn convertCopy(self: *const Image.Pending, alloc: Allocator) wuffs.Error!Image {
+            // As things stand, we currently convert all images to RGBA before
+            // uploading to the GPU. This just makes things easier. In the future
+            // we may want to support other formats.
+            const data = self.dataSlice();
+            const rgba = try switch (self.pixel_format) {
+                .gray => wuffs.swizzle.gToRgba(alloc, data),
+                .gray_alpha => wuffs.swizzle.gaToRgba(alloc, data),
+                .rgb => wuffs.swizzle.rgbToRgba(alloc, data),
+                .bgr => wuffs.swizzle.bgrToRgba(alloc, data),
+                .rgba => alloc.dupe(u8, data),
+                .bgra => wuffs.swizzle.bgraToRgba(alloc, data),
+            };
+            const result: Image = .{ .pending = .{
+                .height = self.height,
+                .width = self.width,
+                .pixel_format = .rgba,
+                .data = rgba.ptr,
+            } };
+            return result;
+        }
+
+        /// Prepare the pending image data for upload to the GPU.
+        /// This doesn't need GPU access so is safe to call any time.
+        fn prepForUpload(self: *Image.Pending, alloc: Allocator) wuffs.Error!void {
+            try self.convertReplace(alloc);
+        }
     };
 
     pub fn deinit(self: Image, alloc: Allocator) void {
@@ -1186,37 +1229,6 @@ pub const Image = union(enum) {
         };
     }
 
-    /// Converts the image data to a format that can be uploaded to the GPU.
-    /// If the data is already in a format that can be uploaded, this is a
-    /// no-op.
-    fn convert(self: *Image, alloc: Allocator) wuffs.Error!void {
-        const p = self.getPendingPointer().?;
-        // As things stand, we currently convert all images to RGBA before
-        // uploading to the GPU. This just makes things easier. In the future
-        // we may want to support other formats.
-        if (p.pixel_format == .rgba) return;
-        // If the pending data isn't RGBA we'll need to swizzle it.
-        const data = p.dataSlice();
-        const rgba = try switch (p.pixel_format) {
-            .gray => wuffs.swizzle.gToRgba(alloc, data),
-            .gray_alpha => wuffs.swizzle.gaToRgba(alloc, data),
-            .rgb => wuffs.swizzle.rgbToRgba(alloc, data),
-            .bgr => wuffs.swizzle.bgrToRgba(alloc, data),
-            .rgba => unreachable,
-            .bgra => wuffs.swizzle.bgraToRgba(alloc, data),
-        };
-        alloc.free(data);
-        p.data = rgba.ptr;
-        p.pixel_format = .rgba;
-    }
-
-    /// Prepare the pending image data for upload to the GPU.
-    /// This doesn't need GPU access so is safe to call any time.
-    fn prepForUpload(self: *Image, alloc: Allocator) wuffs.Error!void {
-        assert(self.isPending());
-        try self.convert(alloc);
-    }
-
     /// Upload the pending image to the GPU and change the state of this
     /// image to ready.
     pub fn upload(
@@ -1229,12 +1241,12 @@ pub const Image = union(enum) {
     })!void {
         assert(self.isPending());
 
+        // Get our pending info
+        const p = self.getPendingPointer().?;
+
         // No error recover is required after this call because it just
         // converts in place and is idempotent.
-        try self.prepForUpload(alloc);
-
-        // Get our pending info
-        const p = self.getPending().?;
+        try p.prepForUpload(alloc);
 
         // Create our texture
         const texture = Texture.init(

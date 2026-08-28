@@ -39,10 +39,12 @@ RECIPE_LEGS = {
     "test-lib-vt": (LEG_ZIG,),
     "test-full": (LEG_ZIG,),
     "test-pkg": (LEG_ZIG,),
+    "test-reachability": (LEG_ZIG,),
     "build-dll": (LEG_ZIG, LEG_WIN),
     "test-win": (LEG_WIN,),
     "build-win": (LEG_WIN,),
     "gates-selftest": (LEG_GATES,),
+    "gitversion-selftest": (LEG_GATES,),
 }
 
 # Ordered, first match wins, so a more specific prefix must precede its
@@ -71,6 +73,24 @@ PREFIX_RULES = (
 )
 
 EXACT_RULES = {
+    # The gates leg runs this script's selftest, which needs no build.
+    # Editing it must also run the check itself, and that needs the Zig
+    # toolchain, so it rides the Zig leg through `just test`.
+    ".agents/scripts/test_reachability.py": (LEG_GATES, LEG_ZIG),
+    # Both of these carry a gates-leg check on top of the Zig legs, because
+    # the contract they share -- that `tip` and `vX.Y.Z` are the only names a
+    # version may have -- is split across them and only real `git describe`
+    # against real tag layouts can say whether it still holds. GitVersion.zig
+    # owns the filter, which the selftest reads out of the source rather than
+    # copying; Config.init owns which names it then accepts, which the
+    # selftest's expectation table hardcodes. Either side moving without the
+    # other is how the two drift apart in silence.
+    #
+    # No test root reaches Config.init: src/build_config.zig imports
+    # build/Config.zig only to call fromOptions(). GitVersion.zig is reached
+    # through src/build/test.zig.
+    "src/build/GitVersion.zig": ZIG_LEGS + (LEG_GATES,),
+    "src/build/Config.zig": ZIG_LEGS + (LEG_GATES,),
     "build.zig": ZIG_LEGS,
     "build.zig.zon": ZIG_LEGS,
     "build.zig.zon.json": ZIG_LEGS,

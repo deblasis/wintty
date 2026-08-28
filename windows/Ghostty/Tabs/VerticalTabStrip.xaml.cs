@@ -39,6 +39,8 @@ internal sealed partial class VerticalTabStrip : UserControl
     private SolidColorBrush? _shellInactiveTextBrush;
     private SolidColorBrush? _defaultActiveTextBrush;
     private bool _selectionRefreshScheduled;
+    private bool _placementSettleHooked;
+    private bool _selectionSyncDeferred;
     private uint _stripBackdropPacked = 0x0C0C0C;
 
     private static readonly SolidColorBrush TransparentBrush =
@@ -116,7 +118,18 @@ internal sealed partial class VerticalTabStrip : UserControl
         SizeChanged += (_, _) => UpdateSelectionRow();
         NavView.SizeChanged += (_, _) => UpdateSelectionRow();
         NavView.Loaded += (_, _) => RefreshSelectionChrome();
-        Loaded += (_, _) => RefreshSelectionChrome();
+        Loaded += (_, _) =>
+        {
+            // Everything SyncSelectionFromManager declined to do while this
+            // strip had no template, now that it has one.
+            if (_selectionSyncDeferred)
+            {
+                _selectionSyncDeferred = false;
+                SyncSelectionFromManager();
+            }
+
+            RefreshSelectionChrome();
+        };
 
         _manager.Tabs.CollectionChanged += OnTabsCollectionChanged;
         _manager.ActiveTabChanged += (_, _) => SyncSelectionFromManager();
@@ -128,13 +141,15 @@ internal sealed partial class VerticalTabStrip : UserControl
             : new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
 
     /// <summary>
-    /// Opaque pane chrome from the terminal palette when window-theme=wintty.
+    /// Pane chrome from the terminal palette when window-theme=wintty.
+    ///
+    /// Everything except the lane's own surface, which is SetChromeFill's:
+    /// the palette names its shade, frame-style decides whether it is painted
+    /// at all, and only the window has both answers.
     /// </summary>
-    internal void ApplyShellChrome(ShellThemeService theme, SolidColorBrush paneBg)
+    internal void ApplyShellChrome(ShellThemeService theme)
     {
         _shellThemeActive = true;
-        Background = paneBg;
-        _stripBackdropPacked = PackColor(theme.TabBarBackground);
         ApplyTransparentNavPaneSurface();
 
         // Match horizontal TabHost: accent fill on the selected row.
@@ -149,14 +164,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         _shellActiveTextBrush = TabColorBrush.FromPackedRgb(
             ThemeResolution.EnsureReadableForeground(accentPacked, activePacked));
 
-        uint tabBgPacked = PackColor(theme.TabBarBackground);
-        _shellInactiveTextBrush = new SolidColorBrush(
-            ThemeResolution.PreferLightForeground(tabBgPacked)
-                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+        RefreshShellInactiveInk();
 
         ApplySelectedForegroundResources(_shellActiveTextBrush);
-        ApplyInactiveForegroundResources(_shellInactiveTextBrush);
 
         var hoverBg = ResolveThemeBrush("SubtleFillColorSecondaryBrush");
         var pressedBg = ResolveThemeBrush("SubtleFillColorTertiaryBrush");
@@ -166,6 +176,39 @@ internal sealed partial class VerticalTabStrip : UserControl
         RefreshNavViewTheme();
         RecolorNavItems();
         RefreshSelectionChrome();
+    }
+
+    /// <summary>
+    /// Unselected rows are muted rather than given a second colour, so the
+    /// selected row is the only one carrying full-strength ink.
+    /// </summary>
+    private const byte InactiveInkAlpha = 0xB3;
+
+    /// <summary>
+    /// Recalibrate the unselected rows' ink, and the ground the preset tab
+    /// colours are mixed against, on the surface the text actually lands on.
+    ///
+    /// Which is the lane's own fill only while there is one. A frosted or
+    /// crystal frame leaves the lane bare so the backdrop shows through, and
+    /// the palette's tab-bar shade is then a colour nothing paints: ink
+    /// picked against it was measured at 2.37:1 on the shade the strip really
+    /// rendered, with the other pole sitting at 4.62:1.
+    ///
+    /// Scored by ThemeResolution at the ink's own alpha rather than by
+    /// PreferLightForeground, because 70% ink is a blend of the pole and the
+    /// ground and the pole that wins opaque is not always the pole that wins
+    /// blended.
+    /// </summary>
+    private void RefreshShellInactiveInk()
+    {
+        if (!_shellThemeActive) return;
+
+        _stripBackdropPacked = _chromeFillRgb ?? _chromeGroundPacked;
+        _shellInactiveTextBrush = new SolidColorBrush(
+            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
+                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
+        ApplyInactiveForegroundResources(_shellInactiveTextBrush);
     }
 
     /// <summary>
@@ -182,17 +225,53 @@ internal sealed partial class VerticalTabStrip : UserControl
         _shellActiveTextBrush = null;
         _shellInactiveTextBrush = null;
 
-        var paneBg = ResolveThemeBrush("LayerFillColorDefaultBrush");
-        Background = paneBg;
-        _stripBackdropPacked = PackColor(paneBg.Color);
+        // Bare backdrop, not a Fluent layer. A layer over the backdrop is
+        // still a surface trying to separate itself by shade, and on a light
+        // desktop with a light palette it cannot: the layer, the backdrop and
+        // the terminal landed within a few counts of each other. The
+        // boundaries are strokes now (see SetRowSeparator), so the surface
+        // itself gets out of the way.
+        //
+        // Except under High Contrast, which gets no strokes either -- so
+        // clearing the surface there leaves the lane with nothing painting it
+        // at all. LayerFillColorDefaultBrush is HC-overridable and resolves
+        // to a system colour, which is the surface that mode wants.
+        //
+        // And except when frame-style asks for a solid frame, which is the
+        // one case where the strip is meant to be a surface again. That fill
+        // is the same one the title row takes, so the two rows stay one
+        // piece; the strokes still separate them, because a uniform fill
+        // divides them no better than a uniform backdrop did.
+        var hc = _highContrast;
+        Background = hc
+            ? ResolveThemeBrush("LayerFillColorDefaultBrush")
+            : _chromeFillRgb is { } chromeFill
+                ? TabColorBrush.FromPackedRgb(chromeFill)
+                : TransparentBrush;
+        _stripBackdropPacked = hc ? PackColor(((SolidColorBrush)Background).Color)
+                                  : _chromeGroundPacked;
         ApplyTransparentNavPaneSurface();
 
         ApplyDefaultSelectedTabResources();
 
+        // Unselected rows sit on the strip, which is a theme surface, so
+        // they go back to following the element theme.
         ClearNavResource("NavigationViewItemForeground");
         ClearNavResource("NavigationViewItemForegroundPointerOver");
-        ClearNavResource("NavigationViewItemForegroundSelected");
-        ClearNavResource("NavigationViewItemForegroundSelectedPointerOver");
+
+        // The selected row does not: it is painted with the terminal
+        // background, so its title has to keep the brush
+        // ApplyDefaultSelectedTabResources just calibrated against that
+        // background. Clearing it unconditionally, two lines after applying
+        // it, put the title back on the element theme's foreground -- which
+        // was survivable only while the terminal was always dark and that
+        // foreground was always white. Against the light half of the theme
+        // it came out white on #F4F6FB, at 1.11:1.
+        if (_defaultActiveTextBrush is null)
+        {
+            ClearNavResource("NavigationViewItemForegroundSelected");
+            ClearNavResource("NavigationViewItemForegroundSelectedPointerOver");
+        }
 
         RefreshNavViewTheme();
         RecolorNavItems();
@@ -211,10 +290,14 @@ internal sealed partial class VerticalTabStrip : UserControl
             ThemeResolution.EnsureReadableForeground(
                 PackColor(background), PackColor(foreground)));
 
-        // Tab-bar backdrop for preset tint blending is owned by
-        // ApplyShellChrome / ApplyDefaultPaneChrome. Terminal bg != tab bar.
-        if (!_shellThemeActive)
-            _stripBackdropPacked = PackColor(background);
+        // Deliberately does NOT touch _stripBackdropPacked. That value is the
+        // surface the rows sit on, and this is the terminal background, which
+        // is what the selected row is filled with -- a different thing. While
+        // both wrote it, the winner was whichever ran last, and the order
+        // differs between construction and a config reload: inactive titles
+        // came up calibrated against the terminal at about 2:1 and flipped to
+        // correct the first time the config was touched. SetRowSeparator owns
+        // it now.
 
         if (!_shellThemeActive)
         {
@@ -312,11 +395,210 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private bool _selectionRowSuppressed;
 
+    // The surface the strip actually sits on, for the text-contrast maths
+    // that used to read the Fluent layer's own colour. Fed from MainWindow,
+    // which owns the estimate; a sane default until the first push.
+    private uint _chromeGroundPacked = 0x0C0C0C;
+    // High Contrast keeps a painted surface on the strip lane; every other
+    // path lets the backdrop through. Pushed in rather than detected here so
+    // the strip and the window cannot disagree about which mode is live.
+    private bool _highContrast;
+    // The frame's own fill, or null while the strip is left to the backdrop.
+    // Pushed in for the same reason the flag above is: frame-style is a
+    // window-level answer and the strip must not re-derive it.
+    private uint? _chromeFillRgb;
+    private SolidColorBrush? _rowSeparatorBrush;
+    private readonly List<Border> _rowSeparators = new();
+
+    /// <summary>
+    /// Paint the strip lane, or leave it to the window backdrop.
+    ///
+    /// Both modes, because the palette path can be asked for a bare lane too:
+    /// window-theme names the shade and frame-style decides whether it is
+    /// painted. The default path rebuilds the whole pane chrome around the
+    /// new surface; the palette path swaps the surface alone, because
+    /// window-theme still owns the accent and the foregrounds either way.
+    ///
+    /// Only the lane's own surface. The selected row keeps its fill from the
+    /// terminal in every combination: the seam cover is cut from that fill,
+    /// and a translucent one reopens the join with the pane that the row
+    /// exists to close.
+    /// </summary>
+    internal void SetChromeFill(uint? fillRgb)
+    {
+        if (_chromeFillRgb == fillRgb) return;
+        _chromeFillRgb = fillRgb;
+        if (_shellThemeActive)
+        {
+            ApplyShellPaneSurface();
+            // The surface the rows' text sits on just changed, and on the
+            // palette path this call is where that happens: the window
+            // resolves the fill after it hands over the palette, so the ink
+            // ApplyShellChrome picked is one frame behind until here.
+            RefreshShellInactiveInk();
+            RecolorNavItems();
+        }
+        else ApplyDefaultPaneChrome(_elementTheme);
+    }
+
+    /// <summary>
+    /// The surface this control resolved for a bare lane under High
+    /// Contrast, or null on every other bare lane.
+    ///
+    /// High Contrast without the palette is the one bare lane that is a
+    /// colour at all: the window pushes no fill there precisely because the
+    /// surface is an HC-overridable theme resource it cannot name, and this
+    /// control resolves it. The host's own two rows read this rather than
+    /// resolving again, so all three lane rows come off the one resolution
+    /// -- two resolutions of the same resource can disagree about the
+    /// element theme they resolve against.
+    /// </summary>
+    internal Brush? HighContrastLaneSurface => _highContrast ? Background : null;
+
+    /// <summary>
+    /// The lane's surface on the palette path.
+    ///
+    /// No High Contrast arm, unlike the default path: that mode pins the
+    /// frame solid at the window, so the fill that arrives here is the
+    /// palette's own shade -- which under High Contrast is Windows' colour
+    /// already, because the palette is.
+    /// </summary>
+    private void ApplyShellPaneSurface() =>
+        Background = _chromeFillRgb is { } fill
+            ? TabColorBrush.FromPackedRgb(fill)
+            : TransparentBrush;
+
+    /// <summary>
+    /// Colour for the lines between rows, or null to draw none.
+    ///
+    /// Null is not "invisible": window-theme=wintty and High Contrast paint
+    /// their rows from real palettes and separate by shade already, so a
+    /// stroke there is a second boundary drawn where there is one edge.
+    /// </summary>
+    internal void SetRowSeparator(uint? separatorRgb, uint groundRgb, bool highContrast)
+    {
+        _chromeGroundPacked = groundRgb;
+        _highContrast = highContrast;
+        _rowSeparatorBrush = separatorRgb is { } rgb
+            ? TabColorBrush.FromPackedRgb(rgb)
+            : null;
+        // The palette path is on the backdrop too whenever the frame is
+        // translucent, so it takes the same ground rather than staying on the
+        // shade the palette named for a lane that is not being painted.
+        if (_shellThemeActive) RefreshShellInactiveInk();
+        else _stripBackdropPacked = groundRgb;
+        // The lane's own surface depends on the HC flag that just landed.
+        if (!_shellThemeActive) ApplyDefaultPaneChrome(_elementTheme);
+        UpdateSelectionRow();
+        RecolorNavItems();
+    }
+
+    /// <summary>
+    /// One line in each gap between rows, skipping both gaps that touch the
+    /// selected row: those two edges are already drawn, in the accent, by the
+    /// selected row's own top and bottom stroke. Drawing them again puts two
+    /// lines a pixel apart.
+    ///
+    /// Rebuilt rather than kept in sync per item, because the thing being
+    /// mirrored is MUXC's arranged layout, and the only honest read of that
+    /// is to ask every item where it ended up.
+    /// </summary>
+    private void UpdateRowSeparators(bool selectionRowVisible)
+    {
+        // Pooled by index rather than rebuilt. This runs from the same
+        // refresh the selection row rides, which the constructor keeps off
+        // LayoutUpdated specifically so it does not allocate on every layout
+        // pass; recreating N-1 Borders per call would put the allocation
+        // back by another door.
+        var used = 0;
+
+        if (_rowSeparatorBrush is null || ActualWidth <= 0)
+        {
+            HideSeparatorsFrom(0);
+            return;
+        }
+
+        var tabs = _manager.Tabs;
+        for (var i = 0; i + 1 < tabs.Count; i++)
+        {
+            // Only skip the gaps the selected row is actually covering. The
+            // row is collapsed during a layout morph and on MUXC's first
+            // frame, and skipping on those passes left two gaps with nothing
+            // drawing them and nothing hiding them either.
+            if (selectionRowVisible)
+            {
+                if (ReferenceEquals(tabs[i], _manager.ActiveTab)) continue;
+                if (ReferenceEquals(tabs[i + 1], _manager.ActiveTab)) continue;
+            }
+            if (!_items.TryGetValue(tabs[i], out var item)) continue;
+            if (item.ActualHeight <= 0 || item.ActualWidth <= 0) continue;
+
+            double bottom;
+            try
+            {
+                bottom = item.TransformToVisual(this)
+                    .TransformPoint(new Windows.Foundation.Point(0, item.ActualHeight)).Y;
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+                or System.Runtime.InteropServices.COMException or NullReferenceException)
+            {
+                // The item is not in the tree yet, or is leaving it. The next
+                // refresh places it.
+                continue;
+            }
+
+            Border line;
+            if (used < _rowSeparators.Count)
+            {
+                line = _rowSeparators[used];
+            }
+            else
+            {
+                line = new Border { Height = 1, IsHitTestVisible = false };
+                _rowSeparators.Add(line);
+                // Below the selected row in paint order, so a row that moves
+                // over a line hides it rather than showing it through.
+                SelectionRowHost.Children.Insert(0, line);
+            }
+
+            line.Width = Math.Max(0, ActualWidth - RowInsetLeft);
+            line.Background = _rowSeparatorBrush;
+            line.Visibility = Visibility.Visible;
+            Canvas.SetLeft(line, RowInsetLeft);
+            Canvas.SetTop(line, bottom - RowInsetVertical);
+            used++;
+        }
+
+        HideSeparatorsFrom(used);
+    }
+
+    /// <summary>
+    /// Park the pooled lines this pass did not place. Hidden rather than
+    /// removed, so closing a tab and opening one does not churn the pool.
+    /// </summary>
+    private void HideSeparatorsFrom(int index)
+    {
+        for (var i = index; i < _rowSeparators.Count; i++)
+            _rowSeparators[i].Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The filled row behind the selected tab. Exposed so MainWindow can
+    /// measure where it ends and cover the pane border for exactly that
+    /// span, the way the horizontal strip's seam is covered.
+    /// </summary>
+    internal FrameworkElement SelectionRowElement => SelectionRow;
+
+    /// <summary>Raised whenever the selection row moves, resizes, or hides.</summary>
+    internal event Action? SelectionRowChanged;
+
     private void UpdateSelectionRow()
     {
         if (_selectionRowSuppressed)
         {
             SelectionRow.Visibility = Visibility.Collapsed;
+            UpdateRowSeparators(selectionRowVisible: false);
+            SelectionRowChanged?.Invoke();
             return;
         }
 
@@ -327,6 +609,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             || ActualWidth <= 0)
         {
             SelectionRow.Visibility = Visibility.Collapsed;
+            UpdateRowSeparators(selectionRowVisible: false);
+            SelectionRowChanged?.Invoke();
             return;
         }
 
@@ -341,7 +625,51 @@ internal sealed partial class VerticalTabStrip : UserControl
         Canvas.SetTop(SelectionRow, topLeft.Y + RowInsetVertical);
         SelectionRow.CornerRadius = new CornerRadius(0);
         SelectionRow.Background = ResolveSelectionRowFill(_manager.ActiveTab);
+
+        // The same folder stroke the horizontal strip gets, rotated: the row
+        // meets the pane along its right edge, so that is the side left open
+        // and the other three carry the pane's own border colour. A tab with
+        // a preset colour is stroked in that colour, matching its pane.
+        SelectionRow.BorderBrush = _manager.ActiveTab.Color != TabColor.None
+            ? TabColorBrush.From(TabColorPalette.Border(_manager.ActiveTab.Color))
+            : AccentBrush;
+        SelectionRow.BorderThickness = new Thickness(1, 1, 0, 1);
+
         SelectionRow.Visibility = Visibility.Visible;
+        UpdateRowSeparators(selectionRowVisible: true);
+        SelectionRowChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Re-place the row once the pane's next layout pass has landed.
+    ///
+    /// Closing a row above the active one moves the active row without
+    /// changing any size this control watches, and MUXC has not re-arranged
+    /// the pane by the time the deferred pass runs, so TransformToVisual
+    /// still reports the offset the row had before the removal and the fill
+    /// is left marking the slot the closed tab vacated. The zero-bounds
+    /// retry does not cover it: the surviving item's bounds are non-zero,
+    /// only its offset is stale. A bring-into-view scroll moves the row the
+    /// same way, for the same reason.
+    ///
+    /// One-shot rather than the standing LayoutUpdated subscription this
+    /// control deliberately avoids: it costs one extra placement per refresh
+    /// request instead of one per layout pass anywhere in the window.
+    /// </summary>
+    private void PlaceSelectionRowAfterLayout()
+    {
+        if (_placementSettleHooked) return;
+        _placementSettleHooked = true;
+        LayoutUpdated += OnSelectionRowPlacementSettled;
+    }
+
+    private void OnSelectionRowPlacementSettled(object? sender, object e)
+    {
+        // Unhook first: placing the row invalidates layout, and a handler
+        // still attached would be re-entered on the pass that causes.
+        LayoutUpdated -= OnSelectionRowPlacementSettled;
+        _placementSettleHooked = false;
+        UpdateSelectionRow();
     }
 
     /// <summary>
@@ -431,9 +759,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_shellInactiveTextBrush is not null)
             return _shellInactiveTextBrush;
         return new SolidColorBrush(
-            ThemeResolution.PreferLightForeground(_stripBackdropPacked)
-                ? Color.FromArgb(0xB3, 0xFF, 0xFF, 0xFF)
-                : Color.FromArgb(0xB3, 0x00, 0x00, 0x00));
+            ThemeResolution.PreferLightForegroundAtAlpha(_stripBackdropPacked, InactiveInkAlpha)
+                ? Color.FromArgb(InactiveInkAlpha, 0xFF, 0xFF, 0xFF)
+                : Color.FromArgb(InactiveInkAlpha, 0x00, 0x00, 0x00));
     }
 
     private static readonly string[] NavItemForegroundKeys =
@@ -511,6 +839,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void ScheduleSelectionLayoutPass(bool retryIfZeroBounds)
     {
         UpdateSelectionRow();
+        // Both passes below read offsets from a layout that may not have
+        // caught up with the change that asked for this refresh, so the
+        // authoritative placement is the one after layout settles.
+        PlaceSelectionRowAfterLayout();
 
         if (_selectionRefreshScheduled) return;
         _selectionRefreshScheduled = true;
@@ -551,9 +883,29 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// Collapsed -- MUXC can drop <see cref="NavigationView.SelectedItem"/>
     /// and leave the active row off-screen in the pane scroller.
     /// </summary>
+    /// <remarks>
+    /// Does nothing while this strip has never been loaded, which in
+    /// horizontal-tab mode is the whole session: the coordinator collapses
+    /// this host and deliberately does not prime it, because showing a
+    /// never-laid-out NavigationView from the constructor crashed XAML's
+    /// measure walk. Assigning SelectedItem is where MUXC resolves the
+    /// selected item's container and selection indicator, and on a control
+    /// with no template there is nothing to resolve -- which is where an
+    /// access violation inside set_SelectedItem has been reported from.
+    /// The work is latched and replayed on Loaded instead; every path that
+    /// makes this strip visible already calls back in here afterwards, so
+    /// the latch only has to cover the case where nothing else does.
+    /// </remarks>
     internal void SyncSelectionFromManager()
     {
         if (_syncing) return;
+
+        if (!IsLoaded)
+        {
+            _selectionSyncDeferred = true;
+            return;
+        }
+
         if (_manager.ActiveTab is null) return;
         if (!_items.TryGetValue(_manager.ActiveTab, out var item)) return;
 
@@ -565,6 +917,53 @@ internal sealed partial class VerticalTabStrip : UserControl
         RecolorNavItems();
         EnsureActiveItemVisible();
         ScheduleSelectionLayoutPass(retryIfZeroBounds: true);
+    }
+
+    // The scroller the rows live inside, out of the NavigationView's
+    // template. Null until that template has been applied.
+    private FrameworkElement? _menuItemsScroller;
+
+    /// <summary>
+    /// Vertical bounds of the scrolling row list, in RootGrid-relative
+    /// coordinates via <paramref name="reference"/>, or null while the
+    /// template has not been applied.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the scroller and not this control: with more tabs than
+    /// fit, the selected row scrolls out of the list while its layout offset
+    /// still reports where it would have been. A caller clipping to the
+    /// control instead clips to something that always contains the row, so
+    /// the clamp does nothing and a cover gets drawn across the pane at a
+    /// height with no tab beside it.
+    /// </remarks>
+    internal (double Top, double Bottom)? SelectionViewport(UIElement reference)
+    {
+        _menuItemsScroller ??= FindDescendantByName(NavView, "MenuItemsScrollViewer");
+        if (_menuItemsScroller is not { ActualHeight: > 0 } scroller) return null;
+
+        try
+        {
+            var top = scroller.TransformToVisual(reference)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+            return (top, top + scroller.ActualHeight);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return null;
+        }
+    }
+
+    private static FrameworkElement? FindDescendantByName(DependencyObject root, string name)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is FrameworkElement fe && fe.Name == name) return fe;
+            if (FindDescendantByName(child, name) is { } found) return found;
+        }
+        return null;
     }
 
     private void EnsureActiveItemVisible()
@@ -772,10 +1171,22 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         _items[tab] = item;
         _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
-        if (index >= 0 && index <= NavView.MenuItems.Count)
-            NavView.MenuItems.Insert(index, item);
-        else
-            NavView.MenuItems.Add(item);
+
+        // Fenced because an Insert before the current selection shifts what
+        // MUXC considers selected and raises SelectionChanged for a tab the
+        // user did not pick. Unfenced, that reaches OnNavSelectionChanged,
+        // activates the wrong tab, and comes back around to assign
+        // SelectedItem while MUXC is still inside its own notification.
+        _syncing = true;
+        try
+        {
+            if (index >= 0 && index <= NavView.MenuItems.Count)
+                NavView.MenuItems.Insert(index, item);
+            else
+                NavView.MenuItems.Add(item);
+        }
+        finally { _syncing = false; }
+
         ApplyItemTabColor(item, tab);
     }
 
@@ -802,7 +1213,14 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void RemoveItem(TabModel tab)
     {
         if (!_items.TryGetValue(tab, out var item)) return;
-        NavView.MenuItems.Remove(item);
+
+        // Fenced for the same reason as the insert in AddItem: removing the
+        // selected row moves MUXC's selection to a neighbour and reports it
+        // as the user's choice.
+        _syncing = true;
+        try { NavView.MenuItems.Remove(item); }
+        finally { _syncing = false; }
+
         _items.Remove(tab);
         if (_hooks.Remove(tab, out var hooks))
             hooks.Dispose();
