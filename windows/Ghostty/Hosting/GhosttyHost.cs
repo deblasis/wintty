@@ -626,6 +626,23 @@ internal sealed partial class GhosttyHost : IDisposable
                     return 1;
                 }
 
+                case GhosttyActionTag.Pwd:
+                {
+                    // The shell reported its directory (OSC 7): char* at +8,
+                    // same shape as SetTitle. Recorded on the pane, nowhere
+                    // else; a duplicate or restore spawns the replacement
+                    // shell there instead of at the profile's static
+                    // working-directory.
+                    var pwdPtr = Marshal.ReadIntPtr(actionPtr, 8);
+                    var pwd = Marshal.PtrToStringUTF8(pwdPtr);
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (TryResolveControl(surfaceHandle, out var c) && c is not null)
+                            c.RaisePwdChanged(pwd);
+                    });
+                    return 1;
+                }
+
                 case GhosttyActionTag.PromptTitle:
                 {
                     // Switched rather than compared against Tab. Reading this
