@@ -121,47 +121,69 @@ public class TabPinZoneWiringTests
     }
 
     /// <summary>
-    /// The zone edge is the manager's PinCount, read at paint time, not a
-    /// count the strip caches: the boundary has to move the moment the
-    /// prefix does, and a cached count is the one thing that would not.
-    /// The stroke itself comes from the boundary brush, which is what
-    /// brightens while a drag is live.
+    /// The structural panel moved the pinned rows out of the scrolling
+    /// list, so the zone edge is no longer a gap in the separator pool:
+    /// it is the stroke along the shelf's bottom edge. The #808 semantics
+    /// travel with it unchanged -- the manager's PinCount is the edge's
+    /// truth at paint time, the stroke exists only while both zones do,
+    /// it never depends on which row is active, and the drag gate is what
+    /// brightens it.
     /// </summary>
     [Fact]
-    public void TheBoundaryStroke_IsPlacedFromTheManagersPinCount()
+    public void TheBoundaryStroke_RidesTheShelf_NotTheRowPool()
     {
-        var separators = Strip().Method("UpdateRowSeparators");
+        var strip = Strip();
 
-        Assert.True(
-            separators.DescendantNodes().OfType<MemberAccessExpressionSyntax>().Any(
-                m => m.Expression.ToString() == "_manager"
-                     && m.Name.Identifier.ValueText == "PinCount"),
-            "the boundary index must come from the manager's PinCount");
-        Assert.Single(separators.Calls("BoundaryStrokeBrush"));
+        // The pool draws only the ordinary row lines now. An accent stroke
+        // left in it would paint a second boundary across a body-row gap,
+        // at a slot where the zone does not end.
+        var separators = strip.Method("UpdateRowSeparators");
+        Assert.Empty(separators.Calls("BoundaryStrokeBrush"));
 
-        // The zone edge takes the accent and the ordinary gaps take the
-        // row brush; swapping them paints the boundary grey and every
-        // divider in accent.
-        var fill = separators.DescendantNodes().OfType<EqualsValueClauseSyntax>()
-            .Single(v => v.Value.ToString().Contains("BoundaryStrokeBrush"));
+        // And it only walks the body rows: the pinned prefix renders above
+        // the scroller and has no gaps in this pool to draw.
+        var loop = separators.DescendantNodes().OfType<ForStatementSyntax>().Single();
+        var start = loop.Declaration!.Variables.Single(v => v.Identifier.ValueText == "i");
+        Assert.Equal("_manager.PinCount", start.Initializer!.Value.ToString());
+
+        // The shelf refresh rides the separator pass: it is the one call
+        // every selection-placement and drag entry/exit path already makes,
+        // so the stroke's brighten/dim cannot be forgotten on an exit path.
+        Assert.Single(separators.Calls("UpdatePinnedShelfChrome"));
+
+        var shelf = strip.Method("UpdatePinnedShelfChrome");
+        Assert.Single(shelf.Calls("BoundaryStrokeBrush"));
+
+        // The shelf and the header exist only while pins do.
+        var anyPins = shelf.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
+            .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "anyPins"));
         Assert.Equal(
-            "boundary ? BoundaryStrokeBrush() : _rowSeparatorBrush",
-            fill.Value.ToString());
+            "_manager.PinCount > 0",
+            anyPins.Declaration.Variables.Single().Initializer!.Value.ToString());
+        var shelfVisible = shelf.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_pinnedShelf.Visibility");
+        Assert.Equal(
+            "anyPins ? Visibility.Visible : Visibility.Collapsed",
+            shelfVisible.Right.ToString());
 
-        // The boundary gap never skips: the zone edge stays visible even
-        // when the active row sits on it.
-        var boundaryIf = separators.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "boundary");
-        Assert.True(
-            !boundaryIf.Statement.DescendantNodesAndSelf()
-                .OfType<ContinueStatementSyntax>().Any(),
-            "the boundary gap must not skip");
+        // The stroke itself only while both zones do -- the same gate the
+        // in-list boundary always had, all tabs pinned draws no edge.
+        var bothZones = shelf.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
+            .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "bothZones"));
+        Assert.Equal(
+            "anyPins && _manager.PinCount < _manager.Tabs.Count",
+            bothZones.Declaration.Variables.Single().Initializer!.Value.ToString());
+        var strokeVisible = shelf.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_boundaryStroke.Visibility");
+        Assert.Equal(
+            "bothZones ? Visibility.Visible : Visibility.Collapsed",
+            strokeVisible.Right.ToString());
 
         // The brightening is the gesture's aiming feedback, so its
         // polarity is load-bearing: dim while idle, bright while a drag
         // is live. Inverting it darkens the boundary exactly when the
         // gesture needs it.
-        var brush = Strip().Method("BoundaryStrokeBrush");
+        var brush = strip.Method("BoundaryStrokeBrush");
         var alpha = brush.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
             .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "alpha"));
         Assert.Equal(
