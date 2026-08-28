@@ -33,16 +33,29 @@ namespace Ghostty.Tests.Wiring;
 public class UnhandledExceptionWiringTests
 {
     private const string Subscription = "AppDomain.CurrentDomain.UnhandledException";
+    private const string HandlerField = "FatalHandler";
 
     /// <summary>
-    /// Every `X += ...` or `X -= ...` under a node, in source order, paired
-    /// with the spelling of what is being subscribed to.
+    /// Every `X += ...` or `X -= ...` under a node, in source order, with
+    /// BOTH sides.
+    ///
+    /// The right-hand side is carried because a guard that reads only the
+    /// left accepts its own defeat: `UnhandledException += (_, __) => { };`
+    /// is one correctly placed subscription to the right event that reports
+    /// nothing. Worse, it accepts a real bug -
+    /// `+= new UnhandledExceptionEventHandler(FatalHandler)` - where the
+    /// wrapper is not Delegate-equal to the field, so the matching `-=`
+    /// removes nothing and every GUI crash double-logs forever.
     /// </summary>
-    private static List<(string Target, SyntaxKind Kind, int Position)> Subscriptions(SyntaxNode node) =>
+    private static List<(string Target, string Handler, SyntaxKind Kind, int Position)> Subscriptions(SyntaxNode node) =>
         node.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.IsKind(SyntaxKind.AddAssignmentExpression)
                      || a.IsKind(SyntaxKind.SubtractAssignmentExpression))
-            .Select(a => (Target: a.Left.ToString(), Kind: a.Kind(), Position: a.SpanStart))
+            .Select(a => (
+                Target: a.Left.ToString(),
+                Handler: a.Right.ToString(),
+                Kind: a.Kind(),
+                Position: a.SpanStart))
             .OrderBy(x => x.Position)
             .ToList();
 
@@ -58,6 +71,14 @@ public class UnhandledExceptionWiringTests
         Assert.True(
             subscribe.Count == 1,
             $"expected exactly one '{Subscription} +=' in Main, found {subscribe.Count}");
+
+        // The handler, not just A handler. Reading only the left-hand side
+        // accepts `+= (_, __) => { }`, which is one correctly placed
+        // subscription to the right event that reports nothing at all, and
+        // accepts `+= new UnhandledExceptionEventHandler(FatalHandler)`,
+        // where the wrapper is not Delegate-equal to the field so the
+        // matching `-=` removes nothing and every GUI crash double-logs.
+        Assert.Equal(HandlerField, subscribe[0].Handler);
 
         // Before the thread runs, not merely somewhere in the method. The
         // whole point is to cover MainImpl, so a registration that happened
@@ -94,6 +115,13 @@ public class UnhandledExceptionWiringTests
         var subs = Subscriptions(handoff).Where(s => s.Target == Subscription).ToList();
         Assert.True(subs.Count == 1, $"expected one '{Subscription}' subscription change, found {subs.Count}");
         Assert.Equal(SyntaxKind.SubtractAssignmentExpression, subs[0].Kind);
+
+        // Same delegate instance as the `+=`, spelled the same way. Removing
+        // anything else is a silent no-op: Delegate.Remove matches on
+        // equality, so `-= new UnhandledExceptionEventHandler(FatalHandler)`
+        // or `-= SomeOtherHandler` leaves the subscription in place and the
+        // GUI double-logs every crash forever, with nothing failing.
+        Assert.Equal(HandlerField, subs[0].Handler);
     }
 
     [Fact]
@@ -101,16 +129,36 @@ public class UnhandledExceptionWiringTests
     {
         var app = ShellSource.Load("App.xaml.cs");
 
-        var handoff = app.Root.Call("Program.HandOffUnhandledReporting");
+        // Inside the constructor, not merely somewhere in the file. Located
+        // by position alone, the assertion accepts the handoff being moved
+        // into a private method nobody calls, or wrapped in `if (false)`,
+        // as long as it sits later in the text than App's own registrations.
+        var ctor = Assert.Single(
+            app.Root.DescendantNodes().OfType<ConstructorDeclarationSyntax>()
+                .Where(c => c.Identifier.ValueText == "App"));
+        var handoff = ctor.Call("Program.HandOffUnhandledReporting");
+
+        // The AppDomain handler SPECIFICALLY. Counting handlers instead
+        // admits the mutation that reintroduces #442 in the GUI: delete
+        // App's `AppDomain.CurrentDomain.UnhandledException +=` and two
+        // matching installs remain (Application.UnhandledException and
+        // UnobservedTaskException), so a count-based guard stays green while
+        // Program hands off to nothing and a throw on a ThreadPool or render
+        // thread reaches neither reporter.
+        var appDomainInstall = Assert.Single(
+            Subscriptions(ctor)
+                .Where(s => s.Target == Subscription
+                         && s.Kind == SyntaxKind.AddAssignmentExpression));
 
         // Every handler App installs for an unhandled throw, whichever event
-        // carries it.
-        var installs = Subscriptions(app.Root)
+        // carries it: the handoff has to follow all of them, not just one.
+        var installs = Subscriptions(ctor)
             .Where(s => s.Kind == SyntaxKind.AddAssignmentExpression
                      && (s.Target.Contains("Unhandled", StringComparison.Ordinal)
                       || s.Target.Contains("UnobservedTask", StringComparison.Ordinal)))
             .ToList();
-        Assert.True(installs.Count >= 2, $"expected App to install its own handlers, found {installs.Count}");
+        Assert.True(installs.Count >= 3, $"expected App to install its three handlers, found {installs.Count}");
+        Assert.Contains(appDomainInstall, installs);
 
         // Last, and the ordering is the safety property rather than tidiness.
         // Standing Program down first opens a window in which neither

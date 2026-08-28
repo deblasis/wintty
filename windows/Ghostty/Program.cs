@@ -61,12 +61,19 @@ public static partial class Program
         /// exit code come from <see cref="InitGhostty"/>.</summary>
         InitFailed = 2,
 
-        /// <summary>Unhandled managed exception in the GUI startup
-        /// path. <see cref="StartGui"/>'s catch block writes
-        /// <c>ghostty-crash.log</c> in <c>AppContext.BaseDirectory</c>.
+        /// <summary>Unhandled managed exception in the startup path, on the
+        /// main thread or (via <see cref="FatalHandler"/>) on any other.
+        /// <see cref="ReportFatal"/> appends <c>ghostty-crash.log</c> in
+        /// <c>AppContext.BaseDirectory</c>, falling back to
+        /// <c>%LOCALAPPDATA%\Wintty\ghostty-crash.log</c> when the install
+        /// directory does not take writes.
         /// (A future PR should converge this with the
         /// <c>%LOCALAPPDATA%\Wintty\crash.log</c> path used by the
-        /// App-level unhandled-exception handlers.)</summary>
+        /// App-level unhandled-exception handlers. The fallback above lands
+        /// in that same folder and is still a separate file on purpose:
+        /// merging them changes which artifact each row of the crash
+        /// coverage map names, and that is the change to make deliberately
+        /// rather than as a side effect of adding a fallback.)</summary>
         ManagedUnhandled = 3,
     }
 
@@ -205,10 +212,50 @@ public static partial class Program
     }
 
     /// <summary>
+    /// Backing field for <see cref="GpuLogPath"/>. Null until the first read.
+    /// </summary>
+    private static string? _gpuLogPath;
+
+    /// <summary>
     /// Persistent GPU diagnostic log path.  Survives reboot so we can
     /// read crash details after a GPU driver crash takes down the machine.
     /// </summary>
-    private static readonly string GpuLogPath = Path.Combine(
+    /// <remarks>
+    /// Resolved on first read rather than in a static field initializer, and
+    /// that is a correctness fix rather than a micro-optimization.
+    /// <see cref="Main"/> now touches a <c>Program</c> static
+    /// (<see cref="FatalHandler"/>) on its very first statement, outside any
+    /// catch, and that touch is what runs this type's initializer.
+    /// <c>Environment.GetFolderPath</c> can fail on a broken or half-loaded
+    /// roaming profile, and a failure there does not surface as "the GPU log
+    /// path is unavailable": it surfaces as a TypeInitializationException on
+    /// the line that installs the unhandled-exception handler. Nothing is
+    /// registered, nothing catches it, and the process dies with no log and
+    /// none of the exit codes callers are told to discriminate on. That is
+    /// the bug class the registration exists to close, reintroduced by the
+    /// statement that installs it.
+    ///
+    /// Wrapping that registration in a try instead was considered and
+    /// rejected. It hides the symptom without fixing it: a failed type
+    /// initializer is permanent for the life of the process, so the very next
+    /// static call into this class (MainImpl itself) throws
+    /// TypeInitializationException again, now from a place with even less
+    /// context to report from. Moving the one initializer that can fail out of
+    /// the initializer is both the smaller and the complete change, and every
+    /// read of this property already sits inside a try that treats an
+    /// unavailable log as best effort.
+    ///
+    /// What is left in the initializer after this cannot fail the same way:
+    /// two allocations, a lambda, and <see cref="LaunchWorkingDirectory"/>,
+    /// whose <c>Environment.CurrentDirectory</c> read is a per-process value
+    /// Win32 hands back without touching the profile or the disk.
+    ///
+    /// Unsynchronized, and deliberately not cached against failure. Two
+    /// threads racing here compute two equal strings and one is discarded; a
+    /// read that threw simply tries again next time, which costs one path
+    /// combine and can only turn a failure into a success.
+    /// </remarks>
+    private static string GpuLogPath => _gpuLogPath ??= Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         AppIdentity.StateDirName, "gpu.log");
 
@@ -488,43 +535,265 @@ public static partial class Program
         AppDomain.CurrentDomain.UnhandledException -= FatalHandler;
 
     /// <summary>
-    /// Last-resort reporter for an exception that escaped <see cref="MainImpl"/>.
+    /// Name of the startup crash log. Written next to the binary when that
+    /// directory takes writes, and under <c>%LOCALAPPDATA%</c> when it does
+    /// not; see <see cref="ReportFatal"/>.
+    /// </summary>
+    private const string CrashLogFileName = "ghostty-crash.log";
+
+    /// <summary>
+    /// Serializes the whole of <see cref="ReportFatal"/>.
+    /// </summary>
+    /// <remarks>
+    /// Until <see cref="FatalHandler"/> existed, every caller of
+    /// <see cref="ReportFatal"/> was on the thread <see cref="Main"/> creates:
+    /// its own catch, and <see cref="StartGui"/>'s. Registering an AppDomain
+    /// handler removed that invariant without changing a line of the reporter.
+    /// The runtime raises UnhandledException on whichever thread is dying, and
+    /// a cascading failure (a pool thread and a render thread going down
+    /// together) raises it on several within microseconds of each other.
+    ///
+    /// Two unsynchronized reporters produce one of two outcomes, and both are
+    /// worse than a lost microsecond. The file open collides and one thread
+    /// takes an IOException that the bare catch below swallows, so one crash
+    /// is recorded nowhere at all; or the process fail-fasts while a writer is
+    /// partway through the file, leaving a truncated or empty
+    /// <see cref="CrashLogFileName"/>. The empty file is the one outcome this
+    /// reporter must never produce: it reads as "the crash reporter is
+    /// broken", which sends whoever is debugging away from the exception
+    /// instead of at it. <c>App.LogUnhandled</c> takes a lock for exactly this
+    /// reason and says so.
+    ///
+    /// Held for the whole body rather than only around the file write. The two
+    /// stderr writers are shared mutable state as well, and two interleaved
+    /// multi-line exception dumps in one console are close to unreadable.
+    ///
+    /// Held without a timeout, deliberately. A thread that fail-fasts while
+    /// holding this leaves any waiter blocked, but that waiter is inside a
+    /// process the runtime is tearing down anyway, and losing the second
+    /// report is far cheaper than tearing the first one in half. A timeout
+    /// would buy nothing: the holder is not coming back to release it.
+    /// </remarks>
+    private static readonly Lock ReportFatalLock = new();
+
+    /// <summary>
+    /// Last-resort reporter for an exception that escaped <see cref="MainImpl"/>,
+    /// or that reached <see cref="FatalHandler"/> from any other thread.
     /// Writes to stderr, tees to the terminal when stderr has been redirected,
-    /// and drops a crash log next to the binary, mirroring what
+    /// and appends a crash log next to the binary (or under
+    /// <c>%LOCALAPPDATA%</c> when that fails), mirroring what
     /// <see cref="StartGui"/>'s catch does for the GUI path.
+    ///
+    /// Every sink gets its own try, and the method as a whole is written not to
+    /// throw: an escape from here escapes <see cref="FatalHandler"/> too, and
+    /// a reporter that dies reporting is indistinguishable from no reporter.
     /// </summary>
     private static int ReportFatal(Exception ex)
     {
-        var message = $"{AppIdentity.LogTag} FATAL: {ex}";
-
-        WriteStderr(message);
-
-        // Its own try, not one shared with the write above: a stderr that
-        // refuses writes is exactly when the terminal tee is the only copy
-        // anyone sees, and sharing a try would drop it along with the write
-        // that failed. Same reasoning as InitGhostty's two-sink report.
+        // Formatted once, defensively, and shared by every sink below.
+        // ToString on an exception is not guaranteed to succeed - a custom
+        // exception can throw from it, and a broken inner exception is exactly
+        // the kind of thing that gets thrown here - so formatting it three
+        // times would give the reporter three chances to die on the failure it
+        // exists to record. The degraded form still names the type, which is
+        // most of the value.
+        string detail;
         try
         {
-            _preRedirectStderr?.WriteLine(message);
-            _preRedirectStderr?.Flush();
+            detail = ex.ToString();
         }
-        catch
+        catch (Exception formatting)
         {
-            // Reporting must not throw over the top of the real failure.
+            detail = $"{ex.GetType()} (ToString threw {formatting.GetType()})";
         }
 
-        try
+        var message = $"{AppIdentity.LogTag} FATAL: {detail}";
+
+        lock (ReportFatalLock)
         {
-            File.WriteAllText(
-                Path.Combine(AppContext.BaseDirectory, "ghostty-crash.log"),
-                $"{DateTime.UtcNow:O}\n{ex}\n");
-        }
-        catch
-        {
-            // Best effort.
+            // Wrapped, where it used to be the one bare sink of the three.
+            // WriteConsole absorbs IOException and UnauthorizedAccessException,
+            // which is the right filter for ordinary logging and the wrong one
+            // here: on an arbitrary thread during teardown Console.Error's
+            // writer can already be disposed, and ObjectDisposedException is an
+            // InvalidOperationException, so it went straight through, out of
+            // this method, out of FatalHandler, and the file log that would
+            // have outlived the process was never reached. A failing first sink
+            // must not cost the last one. See TryWriteStderr.
+            TryWriteStderr(message);
+
+            // Its own try, not one shared with the write above: a stderr that
+            // refuses writes is exactly when the terminal tee is the only copy
+            // anyone sees, and sharing a try would drop it along with the write
+            // that failed. Same reasoning as InitGhostty's two-sink report.
+            try
+            {
+                _preRedirectStderr?.WriteLine(message);
+                _preRedirectStderr?.Flush();
+            }
+            catch
+            {
+                // Reporting must not throw over the top of the real failure.
+            }
+
+            // The file sink is last and matters most: it is the only copy that
+            // outlives the process, so it is the one worth trying twice.
+            //
+            // Appended rather than truncated, with a delimiter and a timestamp
+            // on every entry. A second crash used to erase the first, which on
+            // a cascade meant the surviving log described the follow-on failure
+            // and not the one that started it. crash-matrix.ps1 identifies the
+            // log by hashing its contents rather than by length, so an append
+            // still registers as "this run wrote a crash log" - more reliably
+            // than an overwrite, in fact, since two similar exceptions can
+            // produce the same bytes. Nothing prunes the file; entries are a
+            // few KB and only ever written by a process that is already dying.
+            try
+            {
+                var entry =
+                    $"=== {AppIdentity.ProductName} crash {DateTimeOffset.UtcNow:O} " +
+                    $"(pid {Environment.ProcessId}, " +
+                    $"managed thread {Environment.CurrentManagedThreadId}) ==={Environment.NewLine}" +
+                    $"{detail}{Environment.NewLine}{Environment.NewLine}";
+
+                // AppContext.BaseDirectory first, and it stays the default:
+                // it is where the crash matrix looks, where the docs send
+                // people, and where a portable unzip-and-run keeps everything
+                // else about the run.
+                //
+                // It is not always writable, though. A per-user Velopack
+                // install is fine; a machine-wide install, anything under
+                // Program Files, and a portable copy dropped somewhere
+                // protected are not, and there the log silently vanished -
+                // proved with a deny ACE on the exe directory. So fall back to
+                // the per-user state directory, which is writable by
+                // definition for the account that is crashing.
+                //
+                // Deliberately NOT the same file as App.LogUnhandled's
+                // %LOCALAPPDATA%\Wintty\crash.log, even though it lands in the
+                // same folder. Converging the startup log with the GUI's log is
+                // a separate change with its own consequences for the coverage
+                // map (one artifact per class); see the ExitCode.ManagedUnhandled
+                // doc comment, which already carries that note.
+                var primary = Path.Combine(AppContext.BaseDirectory, CrashLogFileName);
+                if (!TryAppendCrashLog(primary, entry)
+                    && TryGetFallbackCrashLogPath() is { } fallback
+                    && TryAppendCrashLog(fallback, entry))
+                {
+                    // Say where it went, and only when it went somewhere
+                    // unexpected. A log that quietly moved is a log nobody
+                    // finds: every reader of this project has been told to look
+                    // next to the binary, so the one launch where that is wrong
+                    // is the one that has to announce itself.
+                    TryWriteStderr(
+                        $"{AppIdentity.LogTag} could not write {primary}; " +
+                        $"crash log written to {fallback} instead");
+                }
+            }
+            catch
+            {
+                // Best effort. Both helpers already swallow their own
+                // failures, so this covers the little that is left: building
+                // the entry, and combining the default path.
+            }
         }
 
         return (int)ExitCode.ManagedUnhandled;
+    }
+
+    /// <summary>
+    /// Append one crash entry to <paramref name="path"/>, creating the
+    /// directory if it is not there. Returns whether the entry landed, so the
+    /// caller can decide whether to try somewhere else, rather than throwing
+    /// out of a reporter that must not throw.
+    /// </summary>
+    private static bool TryAppendCrashLog(string path, string entry)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            File.AppendAllText(path, entry);
+            return true;
+        }
+        catch
+        {
+            // A read-only install directory, a full disk, a log another tool
+            // holds exclusively. Best effort: the caller has a second location
+            // to try, and the stderr sinks have already said what happened for
+            // anyone with a console to read it.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Where the crash log goes when the install directory refuses it, or null
+    /// when even that cannot be resolved.
+    /// </summary>
+    /// <remarks>
+    /// Its own method, and its own try, because
+    /// <c>Environment.GetFolderPath</c> is the call that fails on a broken
+    /// profile - the same call the lazy <see cref="GpuLogPath"/> exists to keep
+    /// out of the type initializer. An empty result is rejected rather than
+    /// combined, because Path.Combine would turn it into a relative path and
+    /// scatter crash logs across whatever the current directory happened to be.
+    /// </remarks>
+    private static string? TryGetFallbackCrashLogPath()
+    {
+        try
+        {
+            var localAppData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrEmpty(localAppData))
+                return null;
+
+            return Path.Combine(localAppData, AppIdentity.StateDirName, CrashLogFileName);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="WriteStderr"/> for a caller that must not let a refused write
+    /// become the failure it was in the middle of reporting.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="WriteConsole"/> catches IOException and
+    /// UnauthorizedAccessException, which is the correct filter for ordinary
+    /// logging: it absorbs what a hostile handle does and lets a real bug
+    /// through. It is the wrong filter for a reporter that now runs on
+    /// arbitrary threads while the process is being torn down, where
+    /// <see cref="Console.Error"/>'s writer may already have been disposed.
+    /// ObjectDisposedException derives from InvalidOperationException, not
+    /// IOException, so it passes straight through the filter. Hence the wider
+    /// net, at the call sites that cannot afford a narrow one, rather than
+    /// widening WriteConsole for everybody.
+    /// </remarks>
+    private static void TryWriteStderr(string message)
+    {
+        try
+        {
+            WriteStderr(message);
+        }
+        catch
+        {
+            // Not dropped on the floor, for the same reason WriteConsole does
+            // not drop the failures it does absorb: when the writer itself is
+            // gone, a debugger is the only channel left, and it is already
+            // where the DX12 debug layer reports.
+            try
+            {
+                OutputDebugStringW($"{message}{Environment.NewLine}");
+            }
+            catch
+            {
+                // There is nowhere after this one.
+            }
+        }
     }
 
     /// <summary>
