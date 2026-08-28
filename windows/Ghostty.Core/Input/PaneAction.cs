@@ -137,4 +137,11 @@ public enum PaneAction
     MruCycleNext = 63,
     MruCyclePrev = 64,
     ShowTabOverview = 65,
+
+    // Pin the active tab into / out of the pinned prefix. Palette and
+    // context menu only: no default chord ships (owner decided: no
+    // defaults in v1), so these are not matched in KeyBindings and have
+    // no keybind-catalog verb -- the palette entry is the keyboard path.
+    PinTab = 66,
+    UnpinTab = 67,
 }

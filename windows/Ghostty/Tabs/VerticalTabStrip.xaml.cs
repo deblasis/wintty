@@ -508,10 +508,39 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
+    /// Height of the pin-boundary stroke. The zone edge is a statement
+    /// about the list, not a divider between equals, so it is twice an
+    /// ordinary row line and never skippers.
+    /// </summary>
+    private const double BoundaryStrokeHeight = 2;
+
+    /// <summary>
+    /// The pin boundary's stroke. Dimmed while idle; brightened while a
+    /// drag is live -- the boundary is the thing a drag-to-pin is aiming
+    /// at, and the brightening is the gesture's aiming feedback. Resolved
+    /// from the strip accent (a theme resource) on every placement, so
+    /// High Contrast re-themes it the way every other accent use here
+    /// does; a fresh brush per call because AccentBrush is the shared
+    /// resource instance and mutating its alpha would retint the panel.
+    /// </summary>
+    private Brush BoundaryStrokeBrush()
+    {
+        var accent = AccentBrush.Color;
+        byte alpha = _drag is null ? (byte)0x59 : (byte)0xE6;
+        return new SolidColorBrush(Color.FromArgb(alpha, accent.R, accent.G, accent.B));
+    }
+
+    /// <summary>
     /// One line in each gap between rows, skipping both gaps that touch the
     /// selected row: those two edges are already drawn, in the accent, by the
     /// selected row's own top and bottom stroke. Drawing them again puts two
     /// lines a pixel apart.
+    ///
+    /// The gap after the last pinned row never skips and never takes the
+    /// row-separator brush: it is the pin zone's edge, drawn in the accent
+    /// at double height, and it is the only boundary the strip shows for
+    /// the zone (spec 5.1's section header and fixed panel are not built
+    /// here). It exists only while both zones do.
     ///
     /// Rebuilt rather than kept in sync per item, because the thing being
     /// mirrored is MUXC's arranged layout, and the only honest read of that
@@ -526,20 +555,32 @@ internal sealed partial class VerticalTabStrip : UserControl
         // back by another door.
         var used = 0;
 
-        if (_rowSeparatorBrush is null || ActualWidth <= 0)
+        if (ActualWidth <= 0)
         {
             HideSeparatorsFrom(0);
             return;
         }
 
+        // The boundary lives in the gap after the last pinned row, which
+        // is only a real gap while an unpinned tab exists below it.
+        var boundaryIndex = _manager.PinCount - 1;
+        var hasBoundary = boundaryIndex >= 0 && boundaryIndex + 1 < _manager.Tabs.Count;
+
         var tabs = _manager.Tabs;
         for (var i = 0; i + 1 < tabs.Count; i++)
         {
+            var boundary = hasBoundary && i == boundaryIndex;
+            if (boundary)
+            {
+                // The boundary marks the zone, not the row under it: it
+                // never skips, so the edge stays visible when the active
+                // row sits on it.
+            }
             // Only skip the gaps the selected row is actually covering. The
             // row is collapsed during a layout morph and on MUXC's first
             // frame, and skipping on those passes left two gaps with nothing
             // drawing them and nothing hiding them either.
-            if (selectionRowVisible)
+            else if (selectionRowVisible)
             {
                 if (ReferenceEquals(tabs[i], _manager.ActiveTab)) continue;
                 if (ReferenceEquals(tabs[i + 1], _manager.ActiveTab)) continue;
@@ -561,6 +602,12 @@ internal sealed partial class VerticalTabStrip : UserControl
                 continue;
             }
 
+            // A null row-separator brush means this theme separates by
+            // shade and wants no lines; the boundary still draws, because
+            // it is the zone's edge and drag-to-pin needs it visible.
+            Brush? fill = boundary ? BoundaryStrokeBrush() : _rowSeparatorBrush;
+            if (fill is null) continue;
+
             Border line;
             if (used < _rowSeparators.Count)
             {
@@ -576,10 +623,11 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
 
             line.Width = Math.Max(0, ActualWidth - RowInsetLeft);
-            line.Background = _rowSeparatorBrush;
+            line.Height = boundary ? BoundaryStrokeHeight : 1;
+            line.Background = fill;
             line.Visibility = Visibility.Visible;
             Canvas.SetLeft(line, RowInsetLeft);
-            Canvas.SetTop(line, bottom - RowInsetVertical);
+            Canvas.SetTop(line, bottom - RowInsetVertical - (boundary ? 1 : 0));
             used++;
         }
 
@@ -1349,6 +1397,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         public required TabModel Tab;
         public required TabDragReorder Machine;
         public required IReadOnlyList<TabModel> PreDragOrder;
+        // Pin flags at gesture start. A cancel restores them before the
+        // order replay: the pre-drag order is only expressible with the
+        // pre-drag flags set, because Move clamps against the boundary
+        // the flags define.
+        public required IReadOnlySet<TabModel> PreDragPinned;
         public required uint PointerId;
         public double PressY;
         public double PressBaseCenter;
@@ -1423,6 +1476,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             Tab = tab,
             Machine = machine,
             PreDragOrder = TabStripProjection.Rows(_manager),
+            PreDragPinned = new HashSet<TabModel>(
+                _manager.Tabs.Where(t => t.IsPinned)),
             PointerId = e.Pointer.PointerId,
             LastPointerY = point.Position.Y,
             PressY = point.Position.Y,
@@ -1543,7 +1598,14 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
-        if (drag.HidesSelectionRow) UpdateSelectionRow();
+        if (drag.HidesSelectionRow)
+            UpdateSelectionRow();
+        else
+            // The boundary stroke brightens for the length of the gesture
+            // regardless of which row is lifted; the active-row case got
+            // its refresh above. Placement of the selection row itself
+            // stays frozen mid-drag (UpdateSelectionRow's guard).
+            UpdateRowSeparators(selectionRowVisible: true);
         StartAutoscroll(drag);
         DragTrace($"DRAG begin index={drag.Machine.Index} " +
             $"rows={_manager.Tabs.Count} motion={(drag.MotionOn ? "on" : "off")}");
@@ -1891,9 +1953,38 @@ internal sealed partial class VerticalTabStrip : UserControl
         while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
         {
             var from = _manager.IndexOf(drag.Tab);
+            // The pinned prefix is a slot range to the machine; a crossing
+            // that lands on the far side of it is a zone change Move alone
+            // would clamp away. SetPinned first relocates the row to the
+            // boundary (end of the prefix pinning down, first unpinned slot
+            // pinning up), and the Move then places it at the crossing's
+            // slot inside the new zone -- the drop position, not append-last.
+            var zone = TabPinBoundary.Classify(
+                drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count, crossing.To);
             _commitChurn = true;
-            try { _manager.Move(from, crossing.To); }
+            try
+            {
+                if (zone.Op != TabPinZoneOp.None)
+                {
+                    bool pin = zone.Op == TabPinZoneOp.Pin;
+                    _manager.SetPinned(drag.Tab, pin);
+                    DragTrace($"DRAG {(pin ? "pin" : "unpin")} {crossing.From}->{crossing.To}");
+                    from = _manager.IndexOf(drag.Tab);
+                    if (from < 0) { CancelDrag("closed"); return; }
+                }
+                _manager.Move(from, crossing.To);
+            }
             finally { _commitChurn = false; }
+            if (zone.Op != TabPinZoneOp.None)
+            {
+                // The boundary is the thing this gesture aims at, so the
+                // one commit that moves it repaints it now rather than
+                // leaving the stroke at its pre-crossing gap until the
+                // drag ends. Ordinary moves keep the deliberate mid-drag
+                // freeze: nothing about the boundary changed for them.
+                if (drag.HidesSelectionRow) UpdateSelectionRow();
+                else UpdateRowSeparators(selectionRowVisible: true);
+            }
             if (!_items.ContainsKey(drag.Tab)) { CancelDrag("closed"); return; }
 
             // Move clamps at the pin boundary and no-ops on collapse, so
@@ -1902,7 +1993,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             // tick would re-cross it for the rest of the gesture. Tell
             // the machine where the row actually is, skip the rebind,
             // and break: re-evaluating now would re-fire the identical
-            // refused crossing. Pin-aware ordering itself is PR 4.
+            // refused crossing.
             var actual = _manager.IndexOf(drag.Tab);
             if (actual != crossing.To)
             {
@@ -2080,6 +2171,20 @@ internal sealed partial class VerticalTabStrip : UserControl
         EndDrag(drag, settle: false, velocity: 0);
         try
         {
+            // Flags come home before the order does. A mid-drag boundary
+            // crossing committed a SetPinned, and the pre-drag order is
+            // not expressible until the pre-drag flags are back: Move
+            // clamps against the boundary the flags define. Each restore
+            // is its own relocation, so the order diff below has to be
+            // computed against the state the flags leave behind.
+            foreach (var tab in TabStripProjection.Rows(_manager))
+            {
+                bool wasPinned = drag.PreDragPinned.Contains(tab);
+                if (tab.IsPinned == wasPinned) continue;
+                _commitChurn = true;
+                try { _manager.SetPinned(tab, wasPinned); }
+                finally { _commitChurn = false; }
+            }
             foreach (var op in TabStripProjection.Diff(
                 drag.PreDragOrder, TabStripProjection.Rows(_manager)))
             {
