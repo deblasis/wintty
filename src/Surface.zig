@@ -524,6 +524,7 @@ pub fn init(
         &derived_config.font,
         font_size,
     );
+    errdefer app.font_grid_set.deref(font_grid_key);
 
     // Build our size struct which has all the sizes we need.
     const size: rendererpkg.Size = size: {
@@ -604,14 +605,24 @@ pub fn init(
     // below clean up the values `self` actually keeps rather than a copy,
     // and so `&self.renderer` and `&self.renderer_state` are handed out
     // pointing at initialized memory.
-    self.renderer = try Renderer.init(alloc, .{
-        .config = try .init(alloc, config),
-        .font_grid = font_grid,
-        .size = size,
-        .surface_mailbox = .{ .surface = self, .app = app_mailbox },
-        .rt_surface = rt_surface,
-        .thread = &self.renderer_thread,
-    });
+    // The derived config is built inside this block so its errdefer covers
+    // only the window before Renderer.init takes ownership. Renderer.init
+    // does not clean the config up on its own failure paths, so passing an
+    // inline `try .init(...)` would leak the arena; leaving the errdefer at
+    // function scope would instead double free it alongside self.renderer.
+    self.renderer = renderer: {
+        var renderer_config: Renderer.DerivedConfig = try .init(alloc, config);
+        errdefer renderer_config.deinit();
+
+        break :renderer try Renderer.init(alloc, .{
+            .config = renderer_config,
+            .font_grid = font_grid,
+            .size = size,
+            .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .rt_surface = rt_surface,
+            .thread = &self.renderer_thread,
+        });
+    };
     errdefer self.renderer.deinit();
 
     self.renderer_thread = try rendererpkg.Thread.init(
@@ -680,10 +691,15 @@ pub fn init(
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
         errdefer io_mailbox.deinit(alloc);
 
+        // Same reasoning as the renderer config above: Termio.init only
+        // takes ownership once it succeeds.
+        var io_config: termio.Termio.DerivedConfig = try .init(alloc, config);
+        errdefer io_config.deinit();
+
         try termio.Termio.init(&self.io, alloc, .{
             .size = size,
             .full_config = config,
-            .config = try termio.Termio.DerivedConfig.init(alloc, config),
+            .config = io_config,
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
