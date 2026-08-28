@@ -437,6 +437,15 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     internal void RaiseFirstRender() => FirstRender?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
+    /// The shell reported its directory (OSC 7 via the pwd action).
+    /// PaneHost records it on the pane so a duplicate or restore spawns
+    /// the replacement shell there; the control itself does nothing
+    /// else with it.
+    /// </summary>
+    internal event EventHandler<string?>? PwdChanged;
+    internal void RaisePwdChanged(string? pwd) => PwdChanged?.Invoke(this, pwd);
+
+    /// <summary>
     /// Notify the UIA automation peer that the terminal selection changed so
     /// assistive tech re-queries it. No-op when no automation peer has been
     /// created (i.e. no AT client is attached), so non-AT users pay nothing.

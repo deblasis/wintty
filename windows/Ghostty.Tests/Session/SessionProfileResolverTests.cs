@@ -122,4 +122,63 @@ public class SessionProfileResolverTests
     {
         Assert.Null(SessionProfileResolver.ResolveLeaf(new FakeProfileRegistry(), Leaf(null, null)));
     }
+
+    private static LeafDto LeafWithCwd(string? profileId, string? cwd) => new()
+    {
+        ProfileId = profileId,
+        Cwd = cwd,
+    };
+
+    private static ResolvedProfile ProfileWithDirectory(string id) =>
+        new(id, id, $"{id}.exe", WorkingDirectory: "C:\\profile-wd",
+            Icon: new IconSpec.BundledKey("default"), TabTitle: id,
+            Visuals: EffectiveVisualOverrides.Empty, ProbeId: null,
+            OrderIndex: 0, IsDefault: false);
+
+    [Fact]
+    public void ResolveLeaf_ReportedCwd_OverridesTheProfileSDirectory()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Add(ProfileWithDirectory("pwsh"));
+
+        var snap = SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", "C:\\src"));
+
+        Assert.NotNull(snap);
+        // "Same folder" is where the shell actually was, not where the
+        // profile's config points.
+        Assert.Equal("C:\\src", snap!.WorkingDirectory);
+        Assert.Equal("pwsh.exe", snap.ResolvedCommand);
+    }
+
+    [Fact]
+    public void ResolveLeaf_NeverReportedCwd_KeepsTheProfileSDirectory()
+    {
+        var reg = new FakeProfileRegistry();
+        reg.Add(ProfileWithDirectory("pwsh"));
+
+        Assert.Equal(
+            "C:\\profile-wd",
+            SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", null))!.WorkingDirectory);
+        // Empty is "never reported" too: the surface config treats an
+        // empty working-directory as unset, so it must not shadow the
+        // profile's value with a string that spawns nowhere.
+        Assert.Equal(
+            "C:\\profile-wd",
+            SessionProfileResolver.ResolveLeaf(reg, LeafWithCwd("pwsh", ""))!.WorkingDirectory);
+    }
+
+    [Fact]
+    public void ResolveLeaf_ReportedCwd_OverridesTheFallbackCommandSDirectory()
+    {
+        var reg = new FakeProfileRegistry();
+        var leaf = Leaf("deleted", "cmd.exe /k echo hi");
+        leaf.Fallback!.WorkingDirectory = "C:\\saved-wd";
+        leaf.Cwd = "C:\\moved-on";
+
+        var snap = SessionProfileResolver.ResolveLeaf(reg, leaf);
+
+        Assert.NotNull(snap);
+        Assert.Equal("C:\\moved-on", snap!.WorkingDirectory);
+        Assert.Equal("cmd.exe /k echo hi", snap.ResolvedCommand);
+    }
 }
