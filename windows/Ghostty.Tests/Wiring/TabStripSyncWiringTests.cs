@@ -41,6 +41,15 @@ public sealed class TabStripSyncWiringTests
             liveIndex.Count == 1,
             $"MoveItem should read the item's index from TabItems once; found {liveIndex.Count}.");
 
+        // The event's index counts tabs; the strip's slots also hold
+        // chips. The raw `to` never reaches a comparison with a strip
+        // index -- it crosses the projection's forward mapping first,
+        // which is the polarity the in-place guard below depends on.
+        Assert.True(
+            moveItem.Calls("TabStripProjection.ModelIndexToVisibleIndex").Count == 1,
+            "MoveItem must translate the event's raw index through the " +
+            "projection's forward mapping; a raw tab index is not a slot index.");
+
         var firstMutation = moveItem.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .First(c => c.CalleeText().EndsWith("TabItems.Remove", StringComparison.Ordinal));
@@ -208,8 +217,10 @@ public sealed class TabStripSyncWiringTests
 
         var rebuildMethod = ShellSource.Load(TabHostSource).Method("RebuildStripFromManager");
         Assert.True(
-            rebuildMethod.Calls("TabStripProjection.Rows").Count == 1,
-            "The rebuild must take its order from the projector, like the reconcile does.");
+            rebuildMethod.Calls("TabStripProjection.HorizontalRows").Count == 1,
+            "The rebuild must take its order from the projector's horizontal " +
+            "reading, like the reconcile does: chips occupy slots, so the " +
+            "flat Rows list would drop every chip from the strip.");
     }
 
     [Fact]
@@ -320,12 +331,14 @@ public sealed class TabStripSyncWiringTests
         return reader.ReadToEnd();
     }
 
-    // An equality check between the item's current index and the target.
+    // An equality check between the item's current slot and the target.
+    // The target is the projection-mapped slot, not the event's raw `to`:
+    // chips occupy slots, so a tab index is not a slot index (chips rung).
     private static bool IsAlreadyInPlaceGuard(IfStatementSyntax ifStatement)
         => ifStatement.Condition is BinaryExpressionSyntax binary
             && binary.IsKind(SyntaxKind.EqualsExpression)
             && binary.ToString().Contains("current", StringComparison.Ordinal)
-            && binary.ToString().Contains("to", StringComparison.Ordinal);
+            && binary.ToString().Contains("slot", StringComparison.Ordinal);
 
     private static bool SetsFlag(MethodDeclarationSyntax method, string field, SyntaxKind literal)
         => method.DescendantNodes()

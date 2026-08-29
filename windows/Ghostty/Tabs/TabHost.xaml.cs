@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
@@ -39,6 +41,21 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // the Foreground directly without replacing the StackPanel header
     // (which would drop the 2px progress bar and the tab-color tint).
     private readonly Dictionary<TabModel, TextBlock> _headerTextByModel = new();
+
+    // One chip per group the projection renders as collapsed-without-the-
+    // active-tab. A chip is a real TabViewItem occupying a strip slot, so
+    // every slot count and every slot index now includes chips; the maps
+    // above alone no longer describe what TabItems holds.
+    private readonly Dictionary<TabGroup, ChipVisuals> _chipByGroup = new();
+
+    /// <summary>
+    /// The renderable parts of one chip, kept so INPC updates land on the
+    /// live elements instead of rebuilding the header -- the same reason
+    /// a header TextBlock is kept per tab.
+    /// </summary>
+    private sealed record ChipVisuals(
+        TabViewItem Item, TextBlock Title, TextBlock Count, Border Swatch, FontIcon Chevron);
+
     private bool _suppressSelectionEvent;
     // From the process-wide factory rather than injected: this control is
     // built before DI contexts exist and logs one terminal condition only.
@@ -74,10 +91,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         foreach (var t in _manager.Tabs) AddItem(t);
         SelectActive();
 
-        _manager.TabAdded += (_, t) => { AddItem(t); SelectActive(); QueueBridgeUpdate(); };
-        _manager.TabRemoved += (_, t) => { RemoveItem(t); QueueBridgeUpdate(); };
-        _manager.TabMoved += (_, e) => { MoveItem(e.tab, e.to); QueueBridgeUpdate(); };
-        _manager.ActiveTabChanged += (_, _) => { SelectActive(); QueueBridgeUpdate(); };
+        // ReconcileChips rides every manager event because chip presence
+        // is a projection function all four can move: a restore can
+        // arrive grouped, a close can retire a run's last member, a move
+        // can join a chip'd run, and activation is what decides which
+        // collapsed run shows its member versus its chip. The events
+        // raise whether or not this host is the visible layout, so the
+        // strip stays in step while hidden; RefreshSeam re-derives the
+        // whole pass as belt and braces.
+        _manager.TabAdded += (_, t) => { AddItem(t); ReconcileChips(); ReconcileStripOrder(); SelectActive(); QueueBridgeUpdate(); };
+        _manager.TabRemoved += (_, t) => { RemoveItem(t); ReconcileChips(); ReconcileStripOrder(); QueueBridgeUpdate(); };
+        _manager.TabMoved += (_, e) => { MoveItem(e.tab, e.to); ReconcileChips(); ReconcileStripOrder(); QueueBridgeUpdate(); };
+        _manager.ActiveTabChanged += (_, _) => { ReconcileChips(); ReconcileStripOrder(); SelectActive(); QueueBridgeUpdate(); };
 
         // Every one of the calls above can run before the strip has arranged,
         // and the bridge is placed from the selected item's layout slot, so
@@ -237,6 +262,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // leave the boundary tab's status stale for life.
                 ApplyItemAccessibleText(item, tab);
             }
+            else if (e.PropertyName == nameof(TabModel.Group))
+            {
+                // Membership moved and the run shapes changed with it:
+                // chip presence, chip counts, and the order they sit in
+                // all re-read. A join into a chip'd run also strands this
+                // tab's slot; the reconcile's rebuild is what removes it.
+                ReconcileChips();
+                ReconcileStripOrder();
+            }
         };
         _itemByModel[tab] = item;
         _headerTextByModel[tab] = headerText;
@@ -265,23 +299,210 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // PaneHost detach from the shared container is MainWindow's job.
     }
 
+    // -----------------------------------------------------------------
+    // Chips: the horizontal strip's rendering of a collapsed run. A chip
+    // is a real TabViewItem so TabView treats it as strip inventory -- it
+    // occupies a slot, it drags, it parks the strip selection -- but it
+    // is not a tab: it closes nothing (IsClosable=false), it carries the
+    // GROUP on Tag, and its DataContext stays null on purpose. The strip
+    // used to read its tab order out of DataContext; a chip there would
+    // masquerade as a tab.
+    // -----------------------------------------------------------------
+
+    private void AddGroupChip(TabGroup group)
+    {
+        if (_chipByGroup.ContainsKey(group)) return;
+
+        // Swatch, title, member count, chevron: the vertical header row's
+        // four-part language, laid out horizontally. Collapsed points
+        // right and there is no expanded glyph because a chip only exists
+        // while collapsed -- expanding retires it and the members render
+        // as themselves.
+        var swatch = new Border
+        {
+            Width = 10,
+            Height = 10,
+            CornerRadius = new CornerRadius(2),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        };
+        var title = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(0, 0, 4, 0),
+            Text = group.Title,
+        };
+        var count = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            Opacity = 0.7,
+        };
+        var chevron = new FontIcon
+        {
+            // FontIcon's default FontFamily is not guaranteed to be the
+            // symbol font, so pin it explicitly or the glyph can render
+            // as nothing.
+            FontFamily = Application.Current.Resources.TryGetValue(
+                "SymbolThemeFontFamily", out var ff) && ff is FontFamily fam
+                ? fam
+                : null,
+            Glyph = "\uE76C", // Segoe Fluent / MDL2 "ChevronRight"
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
+        headerPanel.Children.Add(swatch);
+        headerPanel.Children.Add(title);
+        headerPanel.Children.Add(count);
+        headerPanel.Children.Add(chevron);
+
+        var chip = new TabViewItem
+        {
+            Header = headerPanel,
+            Content = null,
+            IsClosable = false,
+            Tag = group,
+        };
+        _chipByGroup[group] = new ChipVisuals(chip, title, count, swatch, chevron);
+        group.PropertyChanged += OnGroupPropertyChanged;
+        TabViewControl.TabItems.Add(chip);
+        RefreshChip(group);
+    }
+
+    private void RemoveGroupChip(TabGroup group)
+    {
+        if (!_chipByGroup.Remove(group, out var chip)) return;
+        group.PropertyChanged -= OnGroupPropertyChanged;
+        TabViewControl.TabItems.Remove(chip.Item);
+    }
+
+    /// <summary>
+    /// Chip presence, the pass before every order pass: build the chips
+    /// the projection names, retire the ones it dropped, and re-read every
+    /// survivor. The standing subscriptions keep this current event by
+    /// event; it stays a pass so a rebuild and the switch-on seam refresh
+    /// can re-derive presence outright instead of trusting the events.
+    /// </summary>
+    private void ReconcileChips()
+    {
+        var desired = new HashSet<TabGroup>();
+        foreach (var row in TabStripProjection.HorizontalRows(_manager))
+            if (row is TabStripProjection.HorizontalRow.Chip { Group: { } group })
+                desired.Add(group);
+
+        foreach (var group in _chipByGroup.Keys.ToArray())
+            if (!desired.Contains(group))
+                RemoveGroupChip(group);
+        foreach (var group in desired)
+            if (!_chipByGroup.ContainsKey(group))
+                AddGroupChip(group);
+        foreach (var group in desired)
+            RefreshChip(group);
+    }
+
+    private void OnGroupPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is not TabGroup group) return;
+        if (e.PropertyName == nameof(TabGroup.IsCollapsed))
+        {
+            // Only the bit changes what the strip HOLDS: expanding retires
+            // the chip and the members render as themselves; collapsing
+            // mints one when the run does not hold the active tab. Title
+            // and color are in-place refreshes and fall through to one.
+            ReconcileChips();
+            ReconcileStripOrder();
+            return;
+        }
+        RefreshChip(group);
+    }
+
+    /// <summary>
+    /// Re-read one chip's renderable state; every group change lands here
+    /// once no matter which op moved it, the same single-door shape the
+    /// vertical header row uses.
+    /// </summary>
+    private void RefreshChip(TabGroup group)
+    {
+        if (!_chipByGroup.TryGetValue(group, out var chip)) return;
+        var members = _manager.MembersOf(group).Count;
+        chip.Title.Text = group.Title;
+        chip.Count.Text = members.ToString();
+        // The swatch paints unconditionally: a group has no "no color" state.
+        chip.Swatch.Background = TabColorBrush.From(
+            TabColorPalette.Background(group.Color, selected: false));
+        // A panel header gives a TabViewItem no name, so the chip is named
+        // and statused the way tabs are -- else a screen reader hears how
+        // many rows the strip holds and nothing about any of them.
+        AutomationProperties.SetName(chip.Item, TabAccessibleText.GroupChipName(group));
+        AutomationProperties.SetItemStatus(chip.Item,
+            TabAccessibleText.GroupChipStatus(group, members));
+    }
+
+    /// <summary>
+    /// Chip ink. A group has no "no color" state, so every chip takes the
+    /// colored-title path; selected:false because a chip is never the
+    /// selected item.
+    /// </summary>
+    private void RecolorChips()
+    {
+        foreach (var (group, chip) in _chipByGroup)
+        {
+            var fg = TabColorBrush.FromPackedRgb(TabColorPalette.ForegroundRgb(
+                group.Color, selected: false, _stripBackdropPacked));
+            chip.Title.Foreground = fg;
+            chip.Count.Foreground = fg;
+            chip.Chevron.Foreground = fg;
+        }
+    }
+
+    /// <summary>
+    /// The horizontal consumer of a collapse COMMAND (keyboard chord or
+    /// palette), the twin of the vertical strip's command entry: the
+    /// manager op plus focus re-homing. The render follows from the
+    /// group's INPC raise, so this only has to move focus after the bit
+    /// lands -- onto the chip the fold mints, or back onto the active
+    /// member's item when the fold touches the run holding it.
+    /// </summary>
+    internal void CollapseGroupFromCommand(TabGroup group, bool collapsed)
+    {
+        if (_stripDragActive) return; // the strip stands down under a drag
+        if (_manager.Groups.Contains(group) && group.IsCollapsed != collapsed)
+            _manager.CollapseGroup(group, collapsed);
+        if (_chipByGroup.TryGetValue(group, out var chip))
+            chip.Item.Focus(FocusState.Programmatic);
+        else
+            SelectActive();
+    }
+
     private void MoveItem(TabModel tab, int to)
     {
         if (!_itemByModel.TryGetValue(tab, out var item)) return;
         var current = TabViewControl.TabItems.IndexOf(item);
+        // The event's index counts TABS; the strip's slots also hold
+        // chips, so the raw `to` is not a slot index and must not reach a
+        // strip comparison. The projection translates it, and answers -1
+        // for a tab its run's chip hides: no slot equals -1, so the
+        // in-place guard declines that case and the reconcile below
+        // re-derives the strip -- the chip stands, the stray slot goes.
+        var slot = TabStripProjection.ModelIndexToVisibleIndex(_manager, to);
         // A drag drop raises this event after TabView has applied the
         // move itself, so the common case is in-place, and re-inserting
         // at the index the item already occupies churns the strip for
         // nothing. But "in-place" is measured against the moved item only
         // -- Normalize can have repaired the rest of the strip around it
         // (group re-gather), so the early return still runs the reconcile.
-        if (current == to)
+        if (current == slot)
         {
             ReconcileStripOrder();
             return;
         }
-        TabViewControl.TabItems.Remove(item);
-        TabViewControl.TabItems.Insert(to, item);
+        if (slot >= 0)
+        {
+            TabViewControl.TabItems.Remove(item);
+            TabViewControl.TabItems.Insert(slot, item);
+        }
         // _paneHostContainer order does not matter — Visibility picks
         // the active one. No reorder needed there.
 
@@ -292,12 +513,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
-    /// Bring TabItems back into the order the manager holds, via
-    /// <see cref="TabStripProjection"/>. The repair for every seam where
-    /// the two can disagree: Normalize's silent relocations after a raw
-    /// move, and TabView's own reorder that the manager refused or
-    /// clamped. Zero ops when they already agree, so the calls on the
-    /// happy paths cost one comparison per tab.
+    /// Bring TabItems back into the order the projection holds, chips
+    /// included -- a chip occupies a slot, so the flat tab list stopped
+    /// describing the strip the run chips landed. The repair for every
+    /// seam where the two can disagree: Normalize's silent relocations
+    /// after a raw move, TabView's own reorder that the manager refused
+    /// or clamped, and chip presence drift. Zero ops when they already
+    /// agree, so the calls on the happy paths cost one comparison per
+    /// row.
     /// </summary>
     private void ReconcileStripOrder()
     {
@@ -309,21 +532,59 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _suppressSelectionEvent = true;
         try
         {
-            foreach (var op in TabStripProjection.Diff(
-                TabStripProjection.Rows(_manager), StripOrder()))
+            // The desired slot sequence off the projection: items AND
+            // chips. A row this host holds no element for is skew an
+            // order pass cannot repair -- counts can agree while a row is
+            // missing on both sides -- so the miss flag and the count
+            // funnel into one refusal, and the refusal is the rebuild.
+            var desired = new List<object>(TabViewControl.TabItems.Count);
+            var missing = false;
+            foreach (var row in TabStripProjection.HorizontalRows(_manager))
             {
-                var item = _itemByModel[op.Tab];
-                TabViewControl.TabItems.Remove(item);
-                TabViewControl.TabItems.Insert(op.To, item);
+                switch (row)
+                {
+                    case TabStripProjection.HorizontalRow.Chip { Group: { } group }:
+                        if (_chipByGroup.TryGetValue(group, out var chip))
+                            desired.Add(chip.Item);
+                        else
+                            missing = true;
+                        break;
+                    case TabStripProjection.HorizontalRow.Item { Tab: { } tab }:
+                        if (_itemByModel.TryGetValue(tab, out var item))
+                            desired.Add(item);
+                        else
+                            missing = true;
+                        break;
+                }
+                if (missing) break;
+            }
+            if (missing || TabViewControl.TabItems.Count != desired.Count)
+                throw new InvalidOperationException(
+                    "TabHost reconcile: the strip and the projection hold " +
+                    "different rows. Order is repairable; presence skew " +
+                    "is a wiring bug, not a projection.");
+            for (var i = 0; i < desired.Count; i++)
+            {
+                if (ReferenceEquals(TabViewControl.TabItems[i], desired[i])) continue;
+                // Counts agreeing is not presence agreeing: a stray element
+                // no desired row names removes nothing here and would ride
+                // out the pass stranded with the repair flag claiming
+                // health. Same refusal as above, same funnel.
+                if (!TabViewControl.TabItems.Remove(desired[i]))
+                    throw new InvalidOperationException(
+                        "TabHost reconcile: the strip holds a row the " +
+                        "projection does not name. Order is repairable; " +
+                        "presence skew is a wiring bug, not a projection.");
+                TabViewControl.TabItems.Insert(i, desired[i]);
                 repaired = true;
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
         {
-            // Diff throws on membership skew, the lookup on a model
-            // without an item; neither is producible today. The pure
-            // layer keeps its throws as the oracle; here a terminal's
-            // strip must not die, so rebuild from the manager.
+            // Skew is not producible today: the subscriptions and the
+            // handlers above hold presence in step. The projection keeps
+            // its refusal as the contract; here a terminal's strip must
+            // not die, so rebuild from the manager.
             _log.LogReconcileFailed(ex);
             RebuildStripFromManager();
             repaired = true;
@@ -336,30 +597,31 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
-    /// The reconcile's last resort: rebuild TabItems in manager order
-    /// from the items this host owns, repairing skew in both directions
-    /// (a tab the strip lost, an item the manager does not hold).
+    /// The reconcile's last resort: rebuild TabItems in projection order
+    /// from the rows this host owns -- chips included, else a rebuild
+    /// would silently drop every group's chip from the strip -- repairing
+    /// skew in both directions (a row the strip lost, an element the
+    /// manager does not hold).
     /// </summary>
     private void RebuildStripFromManager()
     {
+        // Presence first: the walk below reads chips this host must hold.
+        ReconcileChips();
         TabViewControl.TabItems.Clear();
-        foreach (var tab in TabStripProjection.Rows(_manager))
-            if (_itemByModel.TryGetValue(tab, out var item))
-                TabViewControl.TabItems.Add(item);
-    }
-
-    /// <summary>
-    /// The strip's current order, as models. AddItem put the TabModel in
-    /// each item's DataContext, so the order reads back without a second
-    /// map to keep in step.
-    /// </summary>
-    private List<TabModel> StripOrder()
-    {
-        var order = new List<TabModel>(TabViewControl.TabItems.Count);
-        foreach (var item in TabViewControl.TabItems)
-            if (item is TabViewItem { DataContext: TabModel tab })
-                order.Add(tab);
-        return order;
+        foreach (var row in TabStripProjection.HorizontalRows(_manager))
+        {
+            switch (row)
+            {
+                case TabStripProjection.HorizontalRow.Chip { Group: { } group }
+                    when _chipByGroup.TryGetValue(group, out var chip):
+                    TabViewControl.TabItems.Add(chip.Item);
+                    break;
+                case TabStripProjection.HorizontalRow.Item { Tab: { } tab }
+                    when _itemByModel.TryGetValue(tab, out var item):
+                    TabViewControl.TabItems.Add(item);
+                    break;
+            }
+        }
     }
 
     private void SelectActive()
@@ -368,6 +630,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // shared container. This method only syncs the TabView strip
         // selection.
         if (!_itemByModel.TryGetValue(_manager.ActiveTab, out var item)) return;
+        // Reverse sync never targets a chip. Under the Edge-135 walk the
+        // active tab always owns an item -- its collapsed run shows the
+        // member, not the chip -- so this is a tripwire, not a live
+        // branch: a chip holding the selection would make every later
+        // activation read as an expand request.
+        if (item.Tag is TabGroup) return;
 
         // Re-apply tab header fills for selection and preset colors.
         foreach (var (model, viewItem) in _itemByModel)
@@ -446,6 +714,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </remarks>
     internal void RefreshSeam()
     {
+        // Belt and braces. The standing subscriptions hold the strip in
+        // step event by event -- the manager raises whether or not this
+        // host is the visible layout -- so this switch-on pass should
+        // find nothing. It exists for drift a missed subscription cannot
+        // confess to: re-derive presence, order, and selection from the
+        // projection before the seam reads a slot.
+        ReconcileChips();
+        ReconcileStripOrder();
+        SelectActive();
         QueueBridgeUpdate();
         ArmBridgeRetry();
     }
@@ -477,6 +754,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // and come back on the pass that gives it bounds.
             SelectedTabSeamChanged?.Invoke(0, 0, null);
             ArmBridgeRetry();
+            return;
+        }
+
+        // Edge-135 keeps the active tab an item even inside a collapsed
+        // run -- the run shows the member, not the chip -- so the cover
+        // always reads a tab's slot. A chip here would place the cover
+        // from a group; hide rather than guess.
+        if (item.Tag is TabGroup)
+        {
+            SelectedTabSeamChanged?.Invoke(0, 0, null);
             return;
         }
 
@@ -861,6 +1148,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (args.Item is TabViewItem item)
         {
+            // Chips are IsClosable=false, so a close request can only
+            // name a tab; a chip here would mean close chrome leaked
+            // onto a group.
+            if (item.Tag is TabGroup) return;
             foreach (var (model, vi) in _itemByModel)
             {
                 if (vi == item) { await RequestCloseTabAsync(model); return; }
@@ -884,6 +1175,37 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (_suppressSelectionEvent) return;
         if (TabViewControl.SelectedItem is TabViewItem item)
         {
+            // A chip's selection is not an activation. Selecting the chip
+            // is the expand gesture: it asks the run to unfold through the
+            // same command path every other source uses -- never an
+            // Activate, and never onto the chip itself.
+            if (item.Tag is TabGroup group)
+            {
+                // Expanding retires this very chip on this same stack: the
+                // command reaches the manager, the group's INPC raise
+                // reconciles, and the chip the selection is parked on is
+                // removed -- which TabView answers by re-targeting the
+                // selection and raising this event again. Unfenced, that
+                // re-entry cascade-expands a neighbouring chip or
+                // activates whatever it picked. Hold the fence across the
+                // command so the nested raises no-op; the SelectActive
+                // after it lands the real active tab once the strip has
+                // settled. This is the one site that can hold a chip
+                // selection, so the fence lives here and not in
+                // RemoveGroupChip, whose disarm would cut short the
+                // reconcile's own fence window during a rebuild.
+                _suppressSelectionEvent = true;
+                try
+                {
+                    _router.RequestCollapseGroup(group, collapsed: false);
+                }
+                finally
+                {
+                    _suppressSelectionEvent = false;
+                }
+                SelectActive();
+                return;
+            }
             foreach (var (model, vi) in _itemByModel)
             {
                 if (vi == item) { _manager.Activate(model); return; }
@@ -936,17 +1258,27 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
     {
         _stripDragActive = false;
-        if (args.Item is TabViewItem item)
+        if (args.Item is TabViewItem item && item.Tag is not TabGroup)
         {
-            var newIndex = TabViewControl.TabItems.IndexOf(item);
-            foreach (var (model, vi) in _itemByModel)
+            // The strip's slot is not a manager index: chips occupy slots
+            // too, so the raw IndexOf would land past every run left of
+            // the drop. The projection translates, and a drop that came
+            // to rest AT a chip's slot refuses outright -- the chip keeps
+            // its slot and the reconcile restores the strip. A later rung
+            // routes chip-shaped drops into joins.
+            var slot = TabViewControl.TabItems.IndexOf(item);
+            var newIndex = TabStripProjection.VisibleIndexToModelIndex(_manager, slot);
+            if (newIndex >= 0)
             {
-                if (vi == item)
+                foreach (var (model, vi) in _itemByModel)
                 {
-                    var oldIndex = _manager.IndexOf(model);
-                    if (oldIndex != newIndex && oldIndex >= 0)
-                        _manager.Move(oldIndex, newIndex);
-                    break;
+                    if (vi == item)
+                    {
+                        var oldIndex = _manager.IndexOf(model);
+                        if (oldIndex != newIndex && oldIndex >= 0)
+                            _manager.Move(oldIndex, newIndex);
+                        break;
+                    }
                 }
             }
         }
@@ -1120,6 +1452,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
             else
                 tb.ClearValue(TextBlock.ForegroundProperty);
         }
+
+        // Chips ride the same ink pass: they never sit on the selected
+        // fill (a chip is never the selected item), but they live on the
+        // same backdrop and under the same group-colour rule tabs do.
+        RecolorChips();
     }
 
     // Pack/unpack between WinUI's Windows.UI.Color and the 0x00RRGGBB form
