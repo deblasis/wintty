@@ -2810,7 +2810,9 @@ public sealed partial class MainWindow : Window
         // scores its own titles against it. One read feeds both, so the two
         // layouts cannot come out calibrated against different surfaces for
         // one config, which only shows up mid-switch with both on screen.
-        _horizontalTabHost.SetChromeGround(ground);
+        // High Contrast rides along: it is the horizontal strip's motion
+        // gate, composed from the same window chrome truth.
+        _horizontalTabHost.SetChromeGround(ground, HighContrastChromeActive);
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Numerics;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
 using Ghostty.Dialogs;
@@ -10,10 +11,12 @@ using Ghostty.Panes;
 using Ghostty.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Ghostty.Core.Windows;
 using Microsoft.UI.Xaml.Media;
@@ -131,6 +134,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // under Equal sizing, so the strip resizing moves it too.
         Loaded += (_, _) => QueueBridgeUpdate();
         TabViewControl.SizeChanged += (_, _) => UpdateSelectedTabBridge();
+
+        // A lift cannot outlive the strip: teardown finishes it, the same
+        // door the vertical's drag and its pin flight go out through.
+        Unloaded += (_, _) => FinishLift("teardown");
 
         // The drag lifecycle gates the seam cover below: mid-drag the
         // strip's slots are TabView's reorder preview, not the manager's
@@ -579,12 +586,21 @@ internal sealed partial class TabHost : UserControl, ITabHost
         group.PropertyChanged += OnGroupPropertyChanged;
         TabViewControl.TabItems.Add(chip);
         RefreshChip(group);
+        // The mint is the swap's appear-hand: the chip takes the slots
+        // its members just left, so it arrives on the fade token rather
+        // than snapping into a strip the eye was reading a moment ago.
+        FadeInAppearing(chip);
     }
 
     private void RemoveGroupChip(TabGroup group)
     {
         if (!_chipByGroup.Remove(group, out var chip)) return;
         group.PropertyChanged -= OnGroupPropertyChanged;
+        // The retirement is the swap's other half: the run's members
+        // re-enter through the rebuild that follows, and that pass fades
+        // them in. The removal itself stays immediate -- TabView has no
+        // item exit, and a retiring chip must not linger.
+        _swapFadePending = true;
         TabViewControl.TabItems.Remove(chip.Item);
     }
 
@@ -829,6 +845,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         {
             _suppressSelectionEvent = false;
         }
+        // The swap pass ends here, whatever it did: a chip that retired
+        // without a rebuild (a run's last member closed; nothing
+        // re-entered) must not fade some later pass's re-adds. One
+        // clear, owned by the pass, so the flag can never outlive the
+        // retirement that set it.
+        _swapFadePending = false;
         if (repaired) SelectActive();
     }
 
@@ -843,6 +865,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         // Presence first: the walk below reads chips this host must hold.
         ReconcileChips();
+        // The swap's appear-hand is measured against the slots this pass
+        // started with: a row the strip did not hold is one the chip <->
+        // members swap just revealed, and it fades in. Every other
+        // re-add is the rebuild's own repair, and a repair is not motion.
+        var held = new HashSet<object>(TabViewControl.TabItems);
         TabViewControl.TabItems.Clear();
         foreach (var row in TabStripProjection.HorizontalRows(_manager))
         {
@@ -855,6 +882,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 case TabStripProjection.HorizontalRow.Item { Tab: { } tab }
                     when _itemByModel.TryGetValue(tab, out var item):
                     TabViewControl.TabItems.Add(item);
+                    if (_swapFadePending && !held.Contains(item))
+                        FadeInAppearing(item);
                     break;
             }
         }
@@ -1623,6 +1652,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // and anything the strip does from here moves slots the manager
         // has not agreed to yet.
         SelectedTabSeamChanged?.Invoke(0, 0, null);
+        // The lift is decoration and stands last: everything above lands
+        // the state the drag's truth needs, and the visual must never be
+        // a dependency of it.
+        if (args.Item is TabViewItem lifted) StartLift(lifted);
     }
 
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
@@ -1725,6 +1758,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // scan.
         ReconcileStripOrder();
         QueueBridgeUpdate();
+        // The settle is decoration and stands last: the commit above has
+        // landed, the reconcile has spoken, and the handback runs on
+        // whatever element the tab has now.
+        SettleLift();
     }
 
     /// <summary>
@@ -1821,6 +1858,232 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!_stripDragActive) return;
         _lastDropPosition = e.GetPosition(TabViewControl);
         _dropPositionValid = true;
+    }
+
+    // -----------------------------------------------------------------
+    // The horizontal lift, and the collapse swap's appear-hand. TabView
+    // owns the drag itself -- the reorder preview, the drop, the ghost
+    // it hands the OS -- so what lands here is polish on the slot it
+    // already animates: the pressed tab's own visual lifts on the grab
+    // and settles back on the release, and a shadow carries the depth a
+    // scale alone does not. There is no machine velocity to inherit:
+    // TabView exposes none, so both springs start at rest -- the
+    // programmatic policy the vertical's pin flight runs on.
+    // -----------------------------------------------------------------
+
+    // The one live lift, zero or one. A fresh grab supersedes a settle
+    // that is still handing back, and every callback that can end the
+    // lift checks the field before it runs -- the batch and the guard
+    // fire long after the grab that armed them.
+    private HorizontalLift? _lift;
+
+    /// <summary>
+    /// The renderable parts of one lift, kept so every ending can undo
+    /// exactly what the grab did. The visual is the tab's at grab time;
+    /// the shadow is the child sprite, anchored to the element, so it
+    /// stays reachable no matter what the strip does to slots in
+    /// between.
+    /// </summary>
+    private sealed record HorizontalLift(
+        TabViewItem Item,
+        Visual Visual,
+        SpriteVisual Shadow,
+        Microsoft.UI.Dispatching.DispatcherQueueTimer Guard);
+
+    // The chip <-> members swap's appear-hand, armed when a chip retires
+    // and consumed by the rebuild that re-enters its members. Cleared at
+    // the end of every reconcile pass: a retirement with nothing to
+    // re-enter (a run's last member closed) must not fade some later
+    // pass's re-adds.
+    private bool _swapFadePending;
+
+    private void StartLift(TabViewItem item)
+    {
+        // The gate is first, and the cut is total: with motion off the
+        // grab performs no composition work at all -- no spring, no
+        // shadow, no guard -- and the release finds no lift to settle.
+        if (!TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast)) return;
+        // One lift at a time: a fresh grab yields the settle still
+        // handing back.
+        FinishLift("superseded");
+
+        Visual visual;
+        try
+        {
+            visual = ElementCompositionPreview.GetElementVisual(item);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            // Composition refusing here is a cut, the same refusal
+            // family every geometry read in the drag guards.
+            return;
+        }
+        var compositor = visual.Compositor;
+
+        // The shadow rides a child sprite: it composes behind the item's
+        // own content, so only the blur's halo extends past the tab. It
+        // is sized once, at the grab -- TabView resizes slots mid-drag
+        // under Equal width, and a stale halo for the length of one drag
+        // beats re-anchoring the element tree mid-gesture.
+        var shadow = compositor.CreateSpriteVisual();
+        shadow.Size = new Vector2((float)item.ActualWidth, (float)item.ActualHeight);
+        var drop = compositor.CreateDropShadow();
+        drop.BlurRadius = (float)TabStripMotion.LiftShadowBlurRadiusPx;
+        drop.Offset = new Vector3(0f, (float)TabStripMotion.LiftShadowOffsetYPx, 0f);
+        shadow.Shadow = drop;
+
+        var lift = new HorizontalLift(
+            item, visual, shadow, DispatcherQueue.CreateTimer());
+        _lift = lift;
+
+        // State first, decoration second: the field and the child visual
+        // land before any animation starts, so every later ending can
+        // reach the things it must undo.
+        ElementCompositionPreview.SetElementChildVisual(item, shadow);
+
+        // The lift is the grab's own spring, on the vertical's lift
+        // tokens: the same growth the rows use, pivoting from the tab's
+        // center so it grows where the pointer holds it.
+        visual.CenterPoint = new Vector3(
+            (float)item.ActualWidth / 2f, (float)item.ActualHeight / 2f, 0f);
+        var scale = compositor.CreateSpringVector3Animation();
+        scale.DampingRatio = TabStripMotion.LiftDampingRatio;
+        scale.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
+        scale.FinalValue = new Vector3(
+            TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
+        visual.StartAnimation("Scale", scale);
+
+        // The shadow breathes with the grab: the same spring family,
+        // scalar, so the depth arrives on the clock the height does.
+        var shadowIn = compositor.CreateSpringScalarAnimation();
+        shadowIn.DampingRatio = TabStripMotion.LiftDampingRatio;
+        shadowIn.Period = TimeSpan.FromMilliseconds(TabStripMotion.LiftPeriodMs);
+        shadowIn.FinalValue = TabStripMotion.LiftShadowOpacity;
+        shadow.StartAnimation("Opacity", shadowIn);
+
+        // The guard is the completion path's backstop, the pin flight's
+        // rule: a batch that never fires must not leave the tab lifted
+        // under a shadow. One shot, longer than the lift and the
+        // handback together; landing through it is identical to landing
+        // through a batch.
+        lift.Guard.IsRepeating = false;
+        lift.Guard.Interval = TimeSpan.FromMilliseconds(
+            3 * (TabStripMotion.LiftPeriodMs + TabStripMotion.SettlePeriodMs)
+            + TabStripMotion.UnliftFadeMs + 250);
+        lift.Guard.Tick += (_, _) =>
+        {
+            if (!ReferenceEquals(_lift, lift)) return;
+            FinishLift("timeout");
+        };
+        lift.Guard.Start();
+    }
+
+    /// <summary>
+    /// The release handback. The scale springs down on the drop-settle
+    /// tokens -- at rest, since TabView exposes no machine velocity --
+    /// and the shadow fades out alongside: the spring is the landing,
+    /// and the fade is what keeps the shadow from popping off a tab
+    /// that is still visibly settling.
+    /// </summary>
+    private void SettleLift()
+    {
+        if (_lift is not { } lift) return;
+        // The element is read fresh: a refused or repaired commit can
+        // churn the strip, and the settle must drive the visual the tab
+        // has now, not the one the grab lifted.
+        Visual visual;
+        try
+        {
+            visual = ElementCompositionPreview.GetElementVisual(lift.Item);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            FinishLift("churned");
+            return;
+        }
+        var compositor = visual.Compositor;
+        var settle = compositor.CreateSpringVector3Animation();
+        settle.DampingRatio = TabStripMotion.SettleDampingRatio;
+        settle.Period = TimeSpan.FromMilliseconds(TabStripMotion.SettlePeriodMs);
+        settle.FinalValue = new Vector3(1f, 1f, 1f);
+        var settling = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        settling.Completed += (_, _) =>
+        {
+            if (!ReferenceEquals(_lift, lift)) return;
+            FinishLift("landed");
+        };
+        var fadeOut = compositor.CreateScalarKeyFrameAnimation();
+        fadeOut.Duration = TimeSpan.FromMilliseconds(TabStripMotion.UnliftFadeMs);
+        fadeOut.InsertKeyFrame(1f, 0f);
+        lift.Shadow.StartAnimation("Opacity", fadeOut);
+        visual.StartAnimation("Scale", settle);
+        settling.End();
+    }
+
+    /// <summary>
+    /// The lift's every ending: landing, timeout, a superseding grab, a
+    /// churned commit, and the strip's teardown. Stopping the
+    /// animations is bookkeeping; the real undo is detaching the child
+    /// sprite, which is anchored to the element and so reaches the tab
+    /// whatever the strip did to its slots in between.
+    /// </summary>
+    private void FinishLift(string reason)
+    {
+        if (_lift is not { } lift) return;
+        _lift = null;
+        lift.Guard.Stop();
+        lift.Visual.StopAnimation("Scale");
+        lift.Shadow.StopAnimation("Opacity");
+        ElementCompositionPreview.SetElementChildVisual(lift.Item, null);
+    }
+
+    /// <summary>
+    /// The collapse swap's appear-hand: what the chip &lt;-&gt; members
+    /// swap just revealed fades in on the fade token. What the swap
+    /// removed does not linger -- TabView has no item exit, and the
+    /// removals stay immediate. Gate off is a cut: the element simply
+    /// appears, and no animation is built at all.
+    /// </summary>
+    private void FadeInAppearing(FrameworkElement appearing)
+    {
+        if (!TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast)) return;
+        Visual visual;
+        try
+        {
+            visual = ElementCompositionPreview.GetElementVisual(appearing);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return;
+        }
+        var fadeIn = visual.Compositor.CreateScalarKeyFrameAnimation();
+        fadeIn.Duration = TimeSpan.FromMilliseconds(TabStripMotion.FadeMs);
+        fadeIn.InsertKeyFrame(0f, 0f);
+        fadeIn.InsertKeyFrame(1f, 1f);
+        var batch = visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        batch.Completed += (_, _) => visual.StopAnimation("Opacity");
+        visual.StartAnimation("Opacity", fadeIn);
+        batch.End();
+    }
+
+    /// <summary>
+    /// The window animations preference, read at the gesture, never
+    /// cached: reading can throw in packaged/sandboxed contexts
+    /// (App.xaml.cs notes the same); unreadable is not "off", so the
+    /// gate fails open and High Contrast still collapses the motion
+    /// through its own pushed flag.
+    /// </summary>
+    private static bool SystemAnimationsEnabled()
+    {
+        try { return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled; }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return true;
+        }
     }
 
     /// <summary>
@@ -1920,14 +2183,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// change on different inputs, and folding them into one call would drop
     /// an OS light/dark flip that never moved the fill.
     /// </summary>
-    internal void SetChromeGround(uint groundRgb)
+    internal void SetChromeGround(uint groundRgb, bool highContrast)
     {
-        if (_chromeGroundPacked == groundRgb) return;
+        var groundChanged = _chromeGroundPacked != groundRgb;
         _chromeGroundPacked = groundRgb;
-        RefreshShellInactiveInk();
+        // The motion gate's High Contrast half rides the same push: it is
+        // a window chrome truth composed from the same inputs the
+        // separators read, and the strip must not re-derive it.
+        _highContrast = highContrast;
+        if (groundChanged) RefreshShellInactiveInk();
     }
 
     private uint _chromeGroundPacked = 0x0C0C0C;
+
+    // High Contrast as the window composed it (detector composed through
+    // the opt-out, the one read the vertical's gate uses too). Motion
+    // input, not ink input: it gates the lift and the swap fade and
+    // touches no brush.
+    private bool _highContrast;
 
     private SolidColorBrush? _shellActiveTextBrush;
     private SolidColorBrush? _shellInactiveTextBrush;
