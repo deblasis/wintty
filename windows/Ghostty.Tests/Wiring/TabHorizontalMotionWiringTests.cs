@@ -235,7 +235,10 @@ public class TabHorizontalMotionWiringTests
     /// field before they run, because they fire long after the grab
     /// that armed them. FinishLift itself is the one door: it clears the
     /// field first, so a re-entrant ending cannot tear down a lift it
-    /// does not own.
+    /// does not own. The backstop is pinned armed, not merely
+    /// configured: a guard that never starts stops nothing, and the
+    /// wedged settle batch it exists for is exactly the case no batch
+    /// callback reports.
     /// </summary>
     [Fact]
     public void TheLift_CannotOutliveItsSupersedeOrItsTeardown()
@@ -245,6 +248,7 @@ public class TabHorizontalMotionWiringTests
         var start = host.Method("StartLift");
         Assert.Contains(start.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             c => c.CalleeText() == "FinishLift" && c.Arg(0) == "\"superseded\"");
+        Assert.Single(start.Calls("lift.Guard.Start"));
 
         var unloaded = host.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "Unloaded");
