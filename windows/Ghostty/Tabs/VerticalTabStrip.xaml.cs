@@ -163,7 +163,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         NavView.ItemInvoked += OnNavItemInvoked;
 
         HookDragInput();
-        Unloaded += (_, _) => CancelDrag("teardown");
+        Unloaded += (_, _) =>
+        {
+            CancelDrag("teardown");
+            FinishPinFlight("teardown");
+        };
     }
 
     internal SolidColorBrush AccentBrush =>
@@ -466,6 +470,22 @@ internal sealed partial class VerticalTabStrip : UserControl
     // honours it still commits through the zone grammar (Classify /
     // SetPinned / read-back), never through the ghost.
     private VerticalTabPinnedRow? _pinPreview;
+
+    // The release-path flight at most one of: the ghost flying the pinned
+    // row from its released slot to the prefix end. One field is the whole
+    // identity guard -- a superseding flight, a teardown, or a completed
+    // phase checks it before touching anything, so no stale callback can
+    // reach into a flight that is no longer this one.
+    private PinFlight? _pinFlight;
+
+    /// <summary>One flight's live parts, released together on landing.</summary>
+    private sealed class PinFlight
+    {
+        public required Ghostty.Shell.TabMorphGhost Ghost;
+        public required Visual Visual;
+        public required FrameworkElement Row;
+        public required DispatcherQueueTimer Guard;
+    }
 
     // The tab whose row held focus when a churn removed it, so the rebuilt
     // row can take the focus with it (AddItem). Focus is unique, so at
@@ -1511,13 +1531,14 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         // Outside MUXC, the row owns its own keyboard story: Enter/Space
         // activate through the same fenced path a shelf click uses, and
-        // Up/Down walk within the shelf and across the boundary. The focus
-        // indicator is the pane's hover-fill resource -- pinned rows paint
-        // no hover state today, so the fill is focus's alone -- because
-        // the row has no focus rect of its own to lean on.
+        // Up/Down walk within the shelf and across the boundary. Focus
+        // and pointer hover share one painter, so neither state can erase
+        // the other and the row has no focus rect of its own to lean on.
         row.KeyDown += OnPinnedRowKeyDown;
         row.GotFocus += OnPinnedRowFocusVisual;
         row.LostFocus += OnPinnedRowFocusVisual;
+        row.PointerEntered += OnShelfRowPointerEntered;
+        row.PointerExited += OnShelfRowPointerExited;
     }
 
     /// <summary>
@@ -2027,16 +2048,46 @@ internal sealed partial class VerticalTabStrip : UserControl
         e.Handled = true;
     }
 
-    private void OnPinnedRowFocusVisual(object sender, RoutedEventArgs e)
+    // The shelf row under the pointer, if any. Enter/exit pairs are
+    // trusted: a drag holds capture and suppresses them, so nothing has
+    // to re-derive hover from drag state.
+    private VerticalTabPinnedRow? _hoveredShelfRow;
+
+    private void OnShelfRowPointerEntered(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not VerticalTabPinnedRow row) return;
-        // The pane's hover-fill resource, reused as the focus indicator:
-        // pinned rows paint no hover state today, so this fill is focus's
-        // alone, and the row's FocusState is what picks it over the
-        // transparent rest state.
-        row.Background = row.FocusState == FocusState.Unfocused
-            ? TransparentBrush
-            : ResolveThemeBrush("SubtleFillColorSecondaryBrush");
+        _hoveredShelfRow = row;
+        PaintShelfRow(row);
+    }
+
+    private void OnShelfRowPointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not VerticalTabPinnedRow row) return;
+        if (!ReferenceEquals(_hoveredShelfRow, row)) return;
+        _hoveredShelfRow = null;
+        PaintShelfRow(row);
+    }
+
+    private void OnPinnedRowFocusVisual(object sender, RoutedEventArgs e)
+    {
+        if (sender is VerticalTabPinnedRow row) PaintShelfRow(row);
+    }
+
+    /// <summary>
+    /// One painter for the shelf row's two pointer-adjacent states, focus
+    /// and hover, on the pane's own hover-fill resource -- the same fill a
+    /// body row's hover carries. Focus wins when both apply, so a
+    /// keyboard user's indicator never flickers off because the pointer
+    /// wandered across; the rest state is transparent, the lane the rows
+    /// sit on.
+    /// </summary>
+    private void PaintShelfRow(VerticalTabPinnedRow row)
+    {
+        row.Background =
+            row.FocusState != FocusState.Unfocused
+            || ReferenceEquals(_hoveredShelfRow, row)
+                ? ResolveThemeBrush("SubtleFillColorSecondaryBrush")
+                : TransparentBrush;
     }
 
     /// <summary>The row rendering <paramref name="tab"/>, if built.</summary>
@@ -2321,9 +2372,26 @@ internal sealed partial class VerticalTabStrip : UserControl
         // op, SetPinned relocates to the prefix's last slot (exactly where
         // the ghost sat), and the read-back traces what landed. The churn
         // has replaced the dragged row's element, so there is no live
-        // visual to settle: the row lands as a cut, in the ghost's slot.
+        // visual to settle: the row lands as a cut, in the ghost's slot --
+        // or, with motion on, as the flight below.
         if (_pinPreview is not null)
         {
+            // Both flight endpoints are read BEFORE the commit: the start
+            // from the arranged row plus the follow offset the eye holds,
+            // the destination from the preview itself, which has been
+            // sitting on the exact slot the drop is about to fill. After
+            // SetPinned the churn has replaced both elements, and a
+            // freshly inserted row has no arranged truth to measure.
+            Rect? start = null, dest = null;
+            if (drag.MotionOn)
+            {
+                start = DraggedRowRect(drag);
+                if (_pinPreview is { } preview && preview.ActualWidth > 0)
+                    dest = new Rect(
+                        Canvas.GetLeft(preview), Canvas.GetTop(preview),
+                        preview.Width, VerticalTabPinnedRow.RowHeight);
+            }
+
             var zone = TabPinBoundary.Classify(
                 drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count,
                 _manager.PinCount - 1);
@@ -2337,6 +2405,8 @@ internal sealed partial class VerticalTabStrip : UserControl
                     $"to={zone.To}");
             }
             EndDrag(drag, settle: false, velocity: 0);
+            if (start is { } from && dest is { } to)
+                StartPinFlight(drag, from, to);
             return;
         }
         // Capture is not released here: a synchronous PointerCaptureLost
@@ -2369,6 +2439,10 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void StartDragVisual(DragSession drag, PointerRoutedEventArgs e)
     {
+        // A fresh gesture outranks a flight still in the air: one flight
+        // at a time, and the new drag's churn must not share the shelf
+        // with a ghost from the old one.
+        FinishPinFlight("superseded");
         // Existence is the rep row's answer for both kinds; the anchor --
         // the element the follow rides -- is the header for a run.
         if (RowElementOf(drag.Tab) is not { } row) { CancelDrag("closed"); return; }
@@ -3478,6 +3552,233 @@ internal sealed partial class VerticalTabStrip : UserControl
         PreviewHost.Visibility = Visibility.Collapsed;
     }
 
+    // -----------------------------------------------------------------
+    // The pin flight (release path only). The mid-drag hysteresis commit
+    // never flights: it lands the row through SetPinned + Move and the
+    // follow expression carries it through the churn -- the row never
+    // detaches, so there is nothing to fly. A release on the preview is
+    // different: the churn replaces the dragged element outright, so the
+    // settle spring has nothing left to move -- the ghost does instead.
+    // It departs from where the eye holds the row (arranged slot plus the
+    // follow offset), travels to the slot the preview promised, bounces
+    // once, and crossfades into the real prefix-end row. State has
+    // already landed before any of it runs; the flight is decoration,
+    // and with motion off the release stays the cut it always was.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Where the dragged row sits right now, in this control's coordinates:
+    /// the arranged slot plus the follow offset the row rides under the
+    /// pointer. Arranged truth plus the one offset the drag owns -- never a
+    /// neighbour's glide-in-flight position.
+    /// </summary>
+    private Rect? DraggedRowRect(DragSession drag)
+    {
+        if (RowElementOf(drag.Tab) is not { } row) return null;
+        try
+        {
+            var pos = row.TransformToVisual(this)
+                .TransformPoint(new Point(0, 0));
+            if (double.IsNaN(pos.X) || double.IsNaN(pos.Y)
+                || row.ActualWidth <= 0 || row.ActualHeight <= 0)
+                return null;
+            return new Rect(
+                pos.X, pos.Y + (drag.LastPointerY - drag.AnchorY),
+                row.ActualWidth, row.ActualHeight);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fly the just-pinned row from <paramref name="start"/> to
+    /// <paramref name="dest"/>, the slot the preview showed. Unreadable
+    /// endpoints are a cut, the same honesty the preview's own NaN gate
+    /// keeps -- an unmeasurable flight is no flight.
+    /// </summary>
+    private void StartPinFlight(DragSession drag, Rect start, Rect dest)
+    {
+        // The gate is the drag's own, read at lift: OS animation sources
+        // are the wiring's business, never re-derived mid-gesture.
+        if (!drag.MotionOn) return;
+        // One flight at a time: a live one yields to the fresh release.
+        FinishPinFlight("superseded");
+        if (RowElementOf(drag.Tab) is not { } row) return;
+
+        var chrome = ActiveRowChrome(drag.Tab);
+        var ghost = new Ghostty.Shell.TabMorphGhost(
+            drag.Tab, chrome.Fill, chrome.Foreground, new CornerRadius(0))
+        {
+            Width = dest.Width,
+            Height = dest.Height,
+        };
+        // The destination is an icon-only shelf row, so the ghost travels
+        // as one: it arrives in the shape it hands over to.
+        ghost.Label.Visibility = Visibility.Collapsed;
+
+        // Placed at the destination and offset back to the start, the gap
+        // glides' pattern: the canvas slot stays the truth and the
+        // animation only ever travels to zero.
+        Canvas.SetLeft(ghost, dest.X);
+        Canvas.SetTop(ghost, dest.Y);
+        PreviewHost.Children.Add(ghost);
+        PreviewHost.Visibility = Visibility.Visible;
+
+        try
+        {
+            ElementCompositionPreview.SetIsTranslationEnabled(ghost, true);
+            // The row's visual is probed, not kept: composition refusing
+            // here is a cut, the same refusal family every layout read
+            // in the drag guards.
+            _ = ElementCompositionPreview.GetElementVisual(row);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            PreviewHost.Children.Remove(ghost);
+            return;
+        }
+
+        var visual = ElementCompositionPreview.GetElementVisual(ghost);
+        var compositor = visual.Compositor;
+        var flight = new PinFlight
+        {
+            Ghost = ghost,
+            Visual = visual,
+            Row = row,
+            Guard = DispatcherQueue.CreateTimer(),
+        };
+        _pinFlight = flight;
+
+        // State first, then the hide: the field write above is the
+        // flight's birth, and anything that throws before it must leave
+        // the row untouched -- nothing would exist to restore it. From
+        // here the real row waits hidden for the crossfade, and only
+        // the flight's completion restores it -- never the reverse.
+        row.Opacity = 0;
+
+        // The guard is the completion path's backstop: a batch that never
+        // fires (composition wedged, window minimized through the flight)
+        // must not leave the real row at opacity zero. One shot, longer
+        // than every phase together; landing through it is identical to
+        // landing through a batch.
+        flight.Guard.IsRepeating = false;
+        flight.Guard.Interval = TimeSpan.FromMilliseconds(
+            TabStripMotion.PinFlightMs + 3 * TabStripMotion.PinSettlePeriodMs
+            + TabStripMotion.FadeMs + 250);
+        flight.Guard.Tick += (_, _) =>
+        {
+            if (!ReferenceEquals(_pinFlight, flight)) return;
+            FinishPinFlight("timeout");
+        };
+        flight.Guard.Start();
+
+        // Phase 1: the flight itself, on the neighbours' curve. The ghost
+        // is programmatic -- it starts at velocity 0, never the gesture's.
+        var fly = compositor.CreateVector3KeyFrameAnimation();
+        fly.Duration = TimeSpan.FromMilliseconds(TabStripMotion.PinFlightMs);
+        fly.InsertKeyFrame(1f, Vector3.Zero,
+            compositor.CreateCubicBezierEasingFunction(
+                new Vector2(0.55f, 0.55f), new Vector2(0f, 1f)));
+        visual.Properties.InsertVector3("Translation", new Vector3(
+            (float)(start.X - dest.X), (float)(start.Y - dest.Y), 0f));
+        var flying = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        // Identity-guarded, the settle batch's rule: these callbacks fire
+        // long after the release, and only the flight still in the field
+        // may run its next phase or its landing.
+        flying.Completed += (_, _) =>
+        {
+            if (!ReferenceEquals(_pinFlight, flight)) return;
+            StartPinSettle(flight);
+        };
+        visual.StartAnimation("Translation", fly);
+        flying.End();
+        DragTrace($"DRAG flight start dy={start.Y - dest.Y:0}");
+    }
+
+    /// <summary>
+    /// Phase 2: the landing's one visible bounce, the bounciest tier in
+    /// the strip and the only overshoot the strip spends on purpose. The
+    /// ghost arrives slightly lifted and the spring settles it to rest.
+    /// </summary>
+    private void StartPinSettle(PinFlight flight)
+    {
+        flight.Visual.Scale = new Vector3(
+            TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
+        var spring = flight.Visual.Compositor.CreateSpringVector3Animation();
+        spring.DampingRatio = TabStripMotion.PinSettleDampingRatio;
+        spring.Period = TimeSpan.FromMilliseconds(TabStripMotion.PinSettlePeriodMs);
+        spring.FinalValue = new Vector3(1f, 1f, 1f);
+        var settling = flight.Visual.Compositor.CreateScopedBatch(
+            CompositionBatchTypes.Animation);
+        settling.Completed += (_, _) =>
+        {
+            if (!ReferenceEquals(_pinFlight, flight)) return;
+            StartPinHandback(flight);
+        };
+        flight.Visual.StartAnimation("Scale", spring);
+        settling.End();
+    }
+
+    /// <summary>
+    /// Phase 3: the handoff. Ghost and real row crossfade on one batch --
+    /// one clock, so there is no frame where both are gone.
+    /// </summary>
+    private void StartPinHandback(PinFlight flight)
+    {
+        var compositor = flight.Visual.Compositor;
+        var fadeOut = compositor.CreateScalarKeyFrameAnimation();
+        fadeOut.Duration = TimeSpan.FromMilliseconds(TabStripMotion.FadeMs);
+        fadeOut.InsertKeyFrame(1f, 0f);
+        var fadeIn = compositor.CreateScalarKeyFrameAnimation();
+        fadeIn.Duration = TimeSpan.FromMilliseconds(TabStripMotion.FadeMs);
+        fadeIn.InsertKeyFrame(1f, 1f);
+        var handing = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        handing.Completed += (_, _) =>
+        {
+            if (!ReferenceEquals(_pinFlight, flight)) return;
+            FinishPinFlight("landed");
+        };
+        flight.Visual.StartAnimation("Opacity", fadeOut);
+        ElementCompositionPreview.GetElementVisual(flight.Row)
+            .StartAnimation("Opacity", fadeIn);
+        handing.End();
+    }
+
+    /// <summary>
+    /// Take the flight down and hand the row back at full strength, on
+    /// every path that can reach here: landing, a superseding flight, a
+    /// new drag, strip teardown, or the guard's timeout. Idempotent by
+    /// the single-field identity: whoever runs first clears it.
+    /// </summary>
+    private void FinishPinFlight(string reason)
+    {
+        if (_pinFlight is not { } flight) return;
+        _pinFlight = null;
+        flight.Guard.Stop();
+        try
+        {
+            flight.Visual.StopAnimation("Translation");
+            flight.Visual.StopAnimation("Scale");
+            flight.Visual.StopAnimation("Opacity");
+            // Stopping an animation reverts the property to its set value,
+            // so the row's opacity is written, not assumed.
+            flight.Row.Opacity = 1;
+            ElementCompositionPreview.GetElementVisual(flight.Row)
+                .StopAnimation("Opacity");
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // The row's tree went away mid-flight; the ghost's removal
+            // below is the part that still matters.
+        }
+        PreviewHost.Children.Remove(flight.Ghost);
+        if (PreviewHost.Children.Count == 0)
+            PreviewHost.Visibility = Visibility.Collapsed;
+        DragTrace($"DRAG flight {reason} ghosts={CountLeakedMotion()}");
+    }
+
     /// <summary>
     /// The drag machine's slots: every row with a position on screen, in
     /// manager order, paired with its manager index (SLOT -> MANAGER).
@@ -3712,11 +4013,13 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     /// <summary>
     /// Rows the strip still believes carry drag composition: gap glides
-    /// not yet handed back, plus any teardown step that had to be
-    /// abandoned. The oracle reads anything above zero as a leak.
+    /// not yet handed back, any teardown step that had to be abandoned,
+    /// and a pin flight still in the air. The oracle reads anything above
+    /// zero as a leak.
     /// </summary>
     private int CountLeakedMotion() =>
-        _gapMotion.Count + _gapMotionHeaders.Count + _teardownFailures;
+        _gapMotion.Count + _gapMotionHeaders.Count + _teardownFailures
+        + (_pinFlight is null ? 0 : 1);
 
     /// <summary>
     /// Windows' animation-effects setting. Constructing UISettings can
