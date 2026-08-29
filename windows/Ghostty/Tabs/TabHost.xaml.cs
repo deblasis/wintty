@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
@@ -16,6 +17,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Ghostty.Core.Windows;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 
 namespace Ghostty.Tabs;
@@ -364,6 +366,21 @@ internal sealed partial class TabHost : UserControl, ITabHost
             Content = null,
             IsClosable = false,
             Tag = group,
+            // While the run is folded, the chip IS the run's surface: the
+            // group commands live here. BuildGroupMenu is host-agnostic
+            // (the vertical header uses the same builder), and every item
+            // routes through the router, so a commanded rename, color,
+            // collapse or close announces exactly like the vertical's --
+            // a direct manager call here would move state silently.
+            ContextFlyout = TabContextMenuBuilder.BuildGroupMenu(
+                _manager,
+                group,
+                _dialogs,
+                requestCollapseGroup: _router.RequestCollapseGroup,
+                requestDissolveGroup: _router.RequestDissolveGroup,
+                requestCloseGroup: _router.RequestCloseGroup,
+                requestRenameGroup: _router.RequestRenameGroup,
+                requestColorGroup: _router.RequestColorGroup),
         };
         _chipByGroup[group] = new ChipVisuals(chip, title, count, swatch, chevron);
         group.PropertyChanged += OnGroupPropertyChanged;
@@ -1246,9 +1263,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     private bool _stripDragActive;
 
+    // The drop point, and whether it is this drag's. Recorded by
+    // OnTabStripDrop for the drop-at-a-run fork in OnTabDragCompleted,
+    // which carries no position of its own; the flag is the guard that
+    // makes the record honest -- a release off the strip fires no
+    // TabStripDrop, so the last drag's stale point must not answer for
+    // this one. Invalidated at drag start and consumed at completion.
+    private Windows.Foundation.Point _lastDropPosition;
+    private bool _dropPositionValid;
+
     private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
     {
         _stripDragActive = true;
+        _dropPositionValid = false;
         // Hidden synchronously: the drag is live from this call onward,
         // and anything the strip does from here moves slots the manager
         // has not agreed to yet.
@@ -1258,27 +1285,83 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
     {
         _stripDragActive = false;
-        if (args.Item is TabViewItem item && item.Tag is not TabGroup)
+        _dropPositionValid = false;
+        if (args.Item is TabViewItem item)
         {
-            // The strip's slot is not a manager index: chips occupy slots
-            // too, so the raw IndexOf would land past every run left of
-            // the drop. The projection translates, and a drop that came
-            // to rest AT a chip's slot refuses outright -- the chip keeps
-            // its slot and the reconcile restores the strip. A later rung
-            // routes chip-shaped drops into joins.
-            var slot = TabViewControl.TabItems.IndexOf(item);
-            var newIndex = TabStripProjection.VisibleIndexToModelIndex(_manager, slot);
-            if (newIndex >= 0)
+            if (item.Tag is TabGroup draggedGroup)
             {
-                foreach (var (model, vi) in _itemByModel)
+                // A chip drags its whole run. The strip's slot is not a
+                // manager index: chips occupy slots too, and the members
+                // a collapsed run hides occupy none. The commit is
+                // MoveGroup even for a single-member run, so a chip drag
+                // can never split the run it is carrying.
+                //
+                // The left neighbour is the element the strip arranged at
+                // slot - 1, read as an identity and never as a slot: on a
+                // downward move TabView shifts every strip slot left
+                // between the origin and the rest, so re-reading slot - 1
+                // through the pre-drag projection names the dragged chip
+                // itself.
+                var slot = TabViewControl.TabItems.IndexOf(item);
+                TabModel? leftTab = null;
+                TabGroup? leftChip = null;
+                var known = slot <= 0;
+                if (!known
+                    && TabViewControl.ContainerFromIndex(slot - 1) is TabViewItem neighbour)
                 {
-                    if (vi == item)
+                    if (neighbour.Tag is TabGroup neighbourChip)
                     {
-                        var oldIndex = _manager.IndexOf(model);
-                        if (oldIndex != newIndex && oldIndex >= 0)
-                            _manager.Move(oldIndex, newIndex);
-                        break;
+                        leftChip = neighbourChip;
+                        known = true;
                     }
+                    else
+                    {
+                        foreach (var (model, vi) in _itemByModel)
+                        {
+                            if (vi != neighbour) continue;
+                            leftTab = model;
+                            known = true;
+                            break;
+                        }
+                    }
+                }
+
+                // A rest whose left neighbour the strip cannot name is
+                // skew the reconcile owns: refuse the commit rather than
+                // guess at the strip head.
+                if (known)
+                {
+                    var target =
+                        TabChipDrop.GroupTarget(_manager, draggedGroup, leftTab, leftChip);
+                    if (target >= 0) _manager.MoveGroup(draggedGroup, target);
+                }
+            }
+            else
+            {
+                // The strip's slot is not a manager index: chips occupy
+                // slots too, so the raw IndexOf would land past every run
+                // left of the drop. The projection translates; a slot that
+                // maps back to a tab commits the move the strip previewed,
+                // and a slot that maps to a chip falls to the
+                // drop-at-a-run fork.
+                var slot = TabViewControl.TabItems.IndexOf(item);
+                var newIndex = TabStripProjection.VisibleIndexToModelIndex(_manager, slot);
+                if (newIndex >= 0)
+                {
+                    foreach (var (model, vi) in _itemByModel)
+                    {
+                        if (vi == item)
+                        {
+                            var oldIndex = _manager.IndexOf(model);
+                            if (oldIndex != newIndex && oldIndex >= 0)
+                                _manager.Move(oldIndex, newIndex);
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    ResolveDropAtChip(item, slot);
                 }
             }
         }
@@ -1291,6 +1374,102 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // scan.
         ReconcileStripOrder();
         QueueBridgeUpdate();
+    }
+
+    /// <summary>
+    /// A tab dropped at a slot the projection names with a chip: the drop
+    /// landed at a collapsed run. Geometry splits the fork. ON the chip
+    /// joins the run -- and the join is visible, because JoinGroup is the
+    /// manager's own auto-expanding join, so the run the tab actually
+    /// joined unfolds on the same commit. BESIDE the chip positions the
+    /// tab relative to the run's edge without joining: the run's hidden
+    /// members are room the landing clears either way.
+    ///
+    /// The group comes from the projection, never from the strip's item
+    /// order: the members are hidden at drop time, so no TabItems index
+    /// can say which run took the drop. A slot the projection does not
+    /// name, or a drop with no usable point (released off the strip,
+    /// where TabStripDrop never fired), refuses outright and the
+    /// reconcile after the commit restores the strip.
+    /// </summary>
+    private void ResolveDropAtChip(TabViewItem dragged, int slot)
+    {
+        if (TabStripProjection.VisibleGroupAt(_manager, slot) is not { } chipGroup
+            || !_chipByGroup.TryGetValue(chipGroup, out var chip))
+            return;
+
+        TabModel? dropped = null;
+        foreach (var (model, vi) in _itemByModel)
+        {
+            if (vi == dragged) { dropped = model; break; }
+        }
+        if (dropped is null) return;
+
+        var bounds = DropPointIn(chip.Item);
+        if (bounds is null) return;
+
+        if (bounds.Value.Contains(_lastDropPosition))
+        {
+            _manager.JoinGroup(dropped, chipGroup);
+            return;
+        }
+
+        var before = _lastDropPosition.X < bounds.Value.X + bounds.Value.Width / 2;
+        var beside = before
+            ? TabChipDrop.MemberTargetBefore(_manager, chipGroup)
+            : TabChipDrop.MemberTargetAfter(_manager, chipGroup);
+        var oldIndex = _manager.IndexOf(dropped);
+        if (beside >= 0 && oldIndex >= 0 && oldIndex != beside)
+            _manager.Move(oldIndex, beside);
+    }
+
+    /// <summary>
+    /// The recorded drop point against <paramref name="target"/>'s
+    /// arranged bounds, or null when there is nothing to compare: the
+    /// drag released off the strip (no TabStripDrop, no point) or the
+    /// bounds read failed. Null is not a join and not a side -- the fork
+    /// refuses and the reconcile speaks, because a geometry guess would
+    /// join a tab the user parked beside a run.
+    /// </summary>
+    private Rect? DropPointIn(TabViewItem target)
+    {
+        if (!_dropPositionValid) return null;
+        try
+        {
+            var origin = target.TransformToVisual(TabViewControl)
+                .TransformPoint(new Point(0, 0));
+            return new Rect(origin, new Size(target.ActualWidth, target.ActualHeight));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            // The item is not in the tree yet, or is leaving it. There is
+            // no honest answer without geometry.
+            return null;
+        }
+    }
+
+    private void OnTabStripDragOver(object sender, DragEventArgs e)
+    {
+        // Only this strip's own tab drags are drop material: an external
+        // drag has no reorder to land and must stay declined, which an
+        // untouched accepted-operation does. The accept exists so the
+        // drop has somewhere to land -- and so TabStripDrop fires with
+        // the pointer position the drop-at-a-run fork reads.
+        if (!_stripDragActive) return;
+        e.AcceptedOperation = DataPackageOperation.Move;
+        e.Handled = true;
+    }
+
+    private void OnTabStripDrop(object sender, DragEventArgs e)
+    {
+        // Record, nothing else. The commit belongs to OnTabDragCompleted
+        // -- TabView fires this first, then completes the drag -- and the
+        // strip's own reorder is already TabView's, applied in its live
+        // preview.
+        if (!_stripDragActive) return;
+        _lastDropPosition = e.GetPosition(TabViewControl);
+        _dropPositionValid = true;
     }
 
     /// <summary>
