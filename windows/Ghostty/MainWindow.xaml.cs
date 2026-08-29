@@ -909,12 +909,15 @@ public sealed partial class MainWindow : Window
         };
 
         // Collapse must re-home keyboard focus under the folding run, and
-        // only the vertical strip knows where focus sits -- so the command
-        // forwards to it and comes back through the strip's command entry.
+        // only the active strip knows where focus sits -- so the command
+        // forwards to whichever host is live and comes back through its
+        // command entry.
         _router.GroupCollapseRequested += (_, e) =>
         {
             if (_tabHost is VerticalTabHost vertical)
                 vertical.CollapseGroupFromCommand(e.Group, e.Collapsed);
+            else if (_tabHost is TabHost horizontal)
+                horizontal.CollapseGroupFromCommand(e.Group, e.Collapsed);
         };
 
         // Close Group is sequential through the per-tab confirmation path
