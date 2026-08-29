@@ -1,4 +1,6 @@
 using System;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 
 namespace Ghostty.Core.Tabs;
 
@@ -7,17 +9,17 @@ namespace Ghostty.Core.Tabs;
 /// membership lives on <see cref="TabModel.Group"/> and the registry on
 /// <see cref="TabManager.Groups"/>, so a group with no members is an
 /// orphan the manager dissolves rather than state in its own right.
+/// Groups are never pinned: pinning a member removes it from the group,
+/// so a run always sits in the unpinned zone.
 ///
-/// Groups are never pinned: pinning a member removes it from the group
-/// (the Chrome rule <see cref="TabManager.SetPinned"/> applies), so a
-/// run always sits in the unpinned zone.
-///
-/// Plain get/set properties on purpose: the model invariants read these
-/// directly and mutate them through the manager, and the strips that
-/// will render title, color, and collapse state arrive in later PRs
-/// with whatever change plumbing they need at that point.
+/// Title, Color, and IsCollapsed raise <see cref="PropertyChanged"/>:
+/// the registry has no collection event of its own, so the group itself
+/// is the carrier. Membership is NOT carried here: it rides
+/// <see cref="TabModel.Group"/>'s own notification, and a dissolved
+/// group raises nothing because the strips re-read the projection that
+/// no longer names it.
 /// </summary>
-internal sealed class TabGroup
+internal sealed class TabGroup : INotifyPropertyChanged
 {
     public Guid Id { get; }
 
@@ -31,20 +33,35 @@ internal sealed class TabGroup
     internal TabGroup(Guid id) => Id = id;
 
     /// <summary>Label shown on the vertical header row / horizontal chip.</summary>
-    public string Title { get; set; } = "New group";
+    public string Title
+    {
+        get => field;
+        set { if (field != value) { field = value; Raise(); } }
+    } = "New group";
 
     /// <summary>
-    /// Swatch shared with the per-tab tint palette. Unlike a tab, a group
-    /// has no "no color" state to render (the rail and the chip are its
-    /// identity), so the default is the palette's first swatch rather
-    /// than <see cref="TabColor.None"/>.
+    /// Swatch shared with the per-tab tint palette: a group has no "no
+    /// color" state, so the default is the palette's first swatch.
     /// </summary>
-    public TabColor Color { get; set; } = TabColor.Blue;
+    public TabColor Color
+    {
+        get => field;
+        set { if (field != value) { field = value; Raise(); } }
+    } = TabColor.Blue;
 
     /// <summary>
     /// One bit shared by both strip modes, so a layout switch mid-collapse
-    /// needs no repair. Purely presentational: collapsing never mutates
-    /// the tab list and never touches activation.
+    /// needs no repair. Purely presentational: it never mutates the tab
+    /// list and never touches activation.
     /// </summary>
-    public bool IsCollapsed { get; set; }
+    public bool IsCollapsed
+    {
+        get => field;
+        set { if (field != value) { field = value; Raise(); } }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void Raise([CallerMemberName] string? name = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

@@ -31,10 +31,20 @@ internal sealed partial class VerticalTabStrip : UserControl
 {
     private const double RowInsetLeft = 4;
     private const double RowInsetVertical = 2;
+    // Grouped members indent under their header: collapse hides members,
+    // so this margin is the whole membership cue.
+    private const double GroupInsetLeft = 14;
 
     private readonly TabManager _manager;
     private readonly Dictionary<TabModel, NavigationViewItem> _items = new();
     private readonly Dictionary<TabModel, TabHooks> _hooks = new();
+    // Group headers. Top-level items like member rows (the flat projection
+    // is what renders Edge-135), so MenuItems walkers must expect them.
+    private readonly Dictionary<TabGroup, NavigationViewItem> _headers = new();
+    // The header's one subscription. Membership is deliberately not
+    // watched: it rides each member's own TabModel.Group notification, and
+    // the projection that no longer names a dissolved group retires the row.
+    private readonly Dictionary<TabGroup, AotBinding> _groupHooks = new();
     private bool _syncing;
     private bool _shellThemeActive;
     private ElementTheme _elementTheme = ElementTheme.Default;
@@ -52,20 +62,23 @@ internal sealed partial class VerticalTabStrip : UserControl
         new(Microsoft.UI.Colors.Transparent);
 
     /// <summary>
-    /// Per-row subscriptions. Held together so a row teardown cannot
-    /// release one and leak the others.
+    /// Per-row subscriptions, held together so a teardown cannot release
+    /// one and leak the others. The group binding is body-only: a pinned
+    /// tab cannot carry a group.
     /// </summary>
     private sealed record TabHooks(
         AotBinding Text,
         AotBinding Color,
         TabIconViewModel IconVm,
-        PropertyChangedEventHandler IconHandler)
+        PropertyChangedEventHandler IconHandler,
+        AotBinding? Group)
     {
         public void Dispose()
         {
             Text.Dispose();
             Color.Dispose();
             IconVm.PropertyChanged -= IconHandler;
+            Group?.Dispose();
         }
     }
 
@@ -138,7 +151,16 @@ internal sealed partial class VerticalTabStrip : UserControl
         };
 
         _manager.Tabs.CollectionChanged += OnTabsCollectionChanged;
-        _manager.ActiveTabChanged += (_, _) => SyncSelectionFromManager();
+        _manager.ActiveTabChanged += (_, _) =>
+        {
+            // Activation inside a collapsed group swaps which member the
+            // projection keeps visible (Edge 135, no accordion), so the
+            // reconcile lands before the selection sync that targets it.
+            ReconcileRowOrder();
+            SyncSelectionFromManager();
+        };
+        // Headers select for nothing; their one interaction is the toggle.
+        NavView.ItemInvoked += OnNavItemInvoked;
 
         HookDragInput();
         Unloaded += (_, _) => CancelDrag("teardown");
@@ -903,6 +925,13 @@ internal sealed partial class VerticalTabStrip : UserControl
                     ? ActiveRowChrome(model).Foreground
                     : ResolveInactiveTextBrush());
         }
+
+        // Headers are never the active row, so their ink is always the
+        // muted text brush; the swatch keeps its own palette fill (the
+        // group color is content, not chrome).
+        foreach (var (_, item) in _headers)
+            if (item.Content is VerticalTabGroupHeaderRow header)
+                header.ApplyInk(ResolveInactiveTextBrush());
     }
 
     private static void ApplyItemForeground(NavigationViewItem item, Brush? fg, bool active)
@@ -1280,14 +1309,28 @@ internal sealed partial class VerticalTabStrip : UserControl
         // Remove by what we hold, not by what the manager still has:
         // on a Reset the manager is already empty and rows we own would
         // otherwise stay in their container with their subscriptions live.
+        foreach (var group in _groupHooks.Keys.ToArray())
+            RemoveGroupRow(group);
         foreach (var tab in _hooks.Keys.Concat(_pinnedHooks.Keys).ToArray())
             RemoveItem(tab);
         // Row order comes from the projector, the same source the
         // horizontal strip reconciles against, so the two strips cannot
-        // disagree by construction. AddItem is membership-only, so adding
-        // in projection order lands every row in its container at its slot.
-        foreach (var tab in TabStripProjection.Rows(_manager))
-            AddItem(tab);
+        // disagree by construction. Headers and member rows land as
+        // top-level items in projection order -- flat, because the
+        // Edge-135 shape cannot render nested (MUXC hides every child of
+        // a collapsed item, and the rule keeps the active member visible).
+        foreach (var projected in TabStripProjection.GroupedRows(_manager))
+        {
+            switch (projected)
+            {
+                case TabStripProjection.ProjectedRow.Header { Group: { } group }:
+                    AddGroupRow(group);
+                    break;
+                case TabStripProjection.ProjectedRow.Item { Tab: { } tab }:
+                    AddItem(tab);
+                    break;
+            }
+        }
         UpdatePinnedShelfChrome();
     }
 
@@ -1388,6 +1431,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         var colorBinding = AotBinding.Create(tab, _ => RefreshTabColors(),
             nameof(TabModel.Color));
 
+        // Membership has no manager event: TabModel.Group raising is the
+        // only carrier. Deferred so a multi-tab op coalesces.
+        var groupBinding = AotBinding.Create(tab, _ => OnTabGroupStateChanged(tab),
+            nameof(TabModel.Group));
+
         var vm = tab.TabIcon;
         PropertyChangedEventHandler iconHandler = (_, e) =>
         {
@@ -1402,7 +1450,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         vm.PropertyChanged += iconHandler;
 
         _items[tab] = item;
-        _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
+        _hooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler, groupBinding);
+        ApplyGroupInset(item, tab);
 
         // One seam into the shelf: Up from the first body row walks into
         // it. Every other arrow reaches MUXC's own traversal untouched.
@@ -1457,7 +1506,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         vm.PropertyChanged += iconHandler;
 
         _pinnedRows[tab] = row;
-        _pinnedHooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler);
+        _pinnedHooks[tab] = new TabHooks(textBinding, colorBinding, vm, iconHandler, Group: null);
         _pinnedPanel.Children.Add(row);
 
         // Outside MUXC, the row owns its own keyboard story: Enter/Space
@@ -1531,34 +1580,218 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// Bring both containers' row order back to the projection's. Rows are
-    /// reordered in place -- the element instance each dict holds is moved,
-    /// never rebuilt -- so a plain move churns nothing a drag is still
-    /// following that the Remove+Add pair did not churn already. A
-    /// membership skew (a dict holding a tab its container's projection no
-    /// longer names, or counts gone apart) is not something an order pass
-    /// can repair; that is what the rebuild is for.
+    /// Build the header row <paramref name="group"/> renders as. It never
+    /// selects, so selection chrome stays on the member rows around it.
+    /// </summary>
+    private void AddGroupRow(TabGroup group)
+    {
+        if (_headers.ContainsKey(group)) return;
+        var item = new NavigationViewItem
+        {
+            Tag = group,
+            SelectsOnInvoked = false,
+            Content = new VerticalTabGroupHeaderRow(group, _manager.MembersOf(group).Count),
+        };
+        ApplyGroupChrome(item, group);
+
+        var binding = AotBinding.Create(group, _ => ScheduleReconcile(),
+            nameof(TabGroup.IsCollapsed), nameof(TabGroup.Title), nameof(TabGroup.Color));
+        _headers[group] = item;
+        _groupHooks[group] = binding;
+
+        // Keyboard invoke: handled HERE, before MUXC's list sees the key,
+        // or the same Enter also arrives as ItemInvoked and toggles twice.
+        item.KeyDown += OnGroupHeaderKeyDown;
+
+        _syncing = true;
+        try { NavView.MenuItems.Add(item); }
+        finally { _syncing = false; }
+    }
+
+    private void RemoveGroupRow(TabGroup group)
+    {
+        if (!_headers.Remove(group, out var item)) return;
+        // One fence rule for every MenuItems mutation.
+        _syncing = true;
+        try { NavView.MenuItems.Remove(item); }
+        finally { _syncing = false; }
+        if (_groupHooks.Remove(group, out var hooks))
+            hooks.Dispose();
+    }
+
+    /// <summary>
+    /// Everything on the header item that follows the group: tooltip, name,
+    /// and the collapse state on ItemStatus. (The ExpandCollapse pattern is
+    /// 5b-2's, with the group commands.)
+    /// </summary>
+    private static void ApplyGroupChrome(NavigationViewItem item, TabGroup group)
+    {
+        ToolTipService.SetToolTip(item, group.Title);
+        AutomationProperties.SetName(item, group.Title);
+        AutomationProperties.SetItemStatus(
+            item, group.IsCollapsed ? "Collapsed" : string.Empty);
+    }
+
+    /// <summary>
+    /// Grouped members indent, ungrouped rows do not. Collapse re-parents
+    /// nothing: a member leaving a group un-indents through this same pass.
+    /// </summary>
+    private void ApplyGroupInset(NavigationViewItem item, TabModel tab)
+    {
+        if (item.Content is not VerticalTabNavRow row) return;
+        row.Margin = tab.Group is null
+            ? default(Thickness)
+            : new Thickness(GroupInsetLeft, 0, 0, 0);
+    }
+
+    private void OnTabGroupStateChanged(TabModel tab)
+    {
+        // Chrome is immediate; the layout answer is the deferred reconcile,
+        // so a multi-tab op coalesces.
+        if (_items.TryGetValue(tab, out var item))
+        {
+            ApplyItemTitleChrome(item, tab);
+            ApplyGroupInset(item, tab);
+        }
+        ScheduleReconcile();
+    }
+
+    private bool _reconcileScheduled;
+
+    /// <summary>
+    /// Group changes arrive one property at a time (no manager event behind
+    /// them); one dispatcher pass keeps a burst from running a reconcile
+    /// per mutation.
+    /// </summary>
+    private void ScheduleReconcile()
+    {
+        if (_reconcileScheduled) return;
+        _reconcileScheduled = true;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
+        {
+            _reconcileScheduled = false;
+            ReconcileRowOrder();
+            SyncSelectionFromManager();
+        });
+    }
+
+    /// <summary>
+    /// The header's only interaction. A drag stands it down, as every other
+    /// row mutation: collapsing reorders visible rows under a live gesture.
+    /// </summary>
+    private void ToggleGroup(TabGroup group)
+    {
+        if (_drag is not null) return;
+        _syncing = true;
+        try { _manager.CollapseGroup(group, !group.IsCollapsed); }
+        finally { _syncing = false; }
+    }
+
+    private void OnNavItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        // Body rows activate through SelectionChanged; a header cannot
+        // raise that (SelectsOnInvoked=false), so ItemInvoked is the
+        // pointer path for the toggle and nothing else.
+        if (args.InvokedItemContainer is not NavigationViewItem { Tag: TabGroup group })
+            return;
+        // Pointer-only: the keyboard toggle already sits on the header,
+        // so only this path can hide the row that holds focus.
+        if (!group.IsCollapsed) RestoreFocusUnder(group);
+        ToggleGroup(group);
+    }
+
+    /// <summary>
+    /// Collapse hides member rows in place -- no churn, so the _refocusTab
+    /// hand-off in AddItem never fires and a focused member's focus would
+    /// drop unmanaged. Land it on the group's header, and only when the
+    /// folding group is the one holding focus: an unrelated collapse must
+    /// not move focus at all.
+    /// </summary>
+    private void RestoreFocusUnder(TabGroup group)
+    {
+        if (FocusManager.GetFocusedElement()
+            is not NavigationViewItem { Tag: TabModel focused }) return;
+        if (!ReferenceEquals(focused.Group, group)) return;
+        if (_headers.TryGetValue(group, out var header))
+            header.Focus(FocusState.Programmatic);
+    }
+
+    private void OnGroupHeaderKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space))
+            return;
+        e.Handled = true;
+        if (sender is NavigationViewItem { Tag: TabGroup group })
+            ToggleGroup(group);
+    }
+
+    /// <summary>
+    /// The first body row a keyboard crossing can land on: a visible
+    /// top-level TAB. Both filters are load-bearing: headers are top-level
+    /// too, and hidden collapsed members sit ahead of the visible one.
+    /// </summary>
+    private NavigationViewItem? FirstBodyItem() =>
+        NavView.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(
+            i => i.Tag is TabModel && i.Visibility == Visibility.Visible);
+
+    /// <summary>
+    /// Bring both containers' rows back to the projection's: order in
+    /// place (elements moved, never rebuilt, so a drag survives), collapse
+    /// as visibility (the active member lands under its header -- Edge-135),
+    /// header contents re-read. Membership skew is the rebuild's job.
     /// </summary>
     private void ReconcileRowOrder()
     {
-        var rows = TabStripProjection.Rows(_manager);
         var pinCount = _manager.PinCount;
-        var pinned = rows.Take(pinCount).ToList();
-        var body = rows.Skip(pinCount).ToList();
+        // Desired MenuItems sequence and the visible set, from ONE walk of
+        // the projection: headers at their run's start, rows in tab order,
+        // pinned items skipped (the shelf renders them).
+        var desired = new List<NavigationViewItem>(NavView.MenuItems.Count);
+        var shown = new HashSet<TabModel>();
+        var missing = false;
+        foreach (var projected in TabStripProjection.GroupedRows(_manager))
+        {
+            switch (projected)
+            {
+                case TabStripProjection.ProjectedRow.Header { Group: { } group }:
+                    if (!_headers.TryGetValue(group, out var header))
+                    {
+                        missing = true;
+                        break;
+                    }
+                    desired.Add(header);
+                    break;
+                case TabStripProjection.ProjectedRow.Item { Tab: { } tab }:
+                    if (tab.IsPinned) continue; // the shelf renders the prefix
+                    shown.Add(tab);
+                    if (!_items.TryGetValue(tab, out var item))
+                    {
+                        missing = true;
+                        break;
+                    }
+                    desired.Add(item);
+                    break;
+            }
+            if (missing) break;
+        }
 
-        if (_pinnedRows.Count != pinned.Count || _items.Count != body.Count
-            || _pinnedPanel.Children.Count != pinned.Count
-            || NavView.MenuItems.Count != body.Count
-            || pinned.Any(t => !_pinnedRows.ContainsKey(t))
-            || body.Any(t => !_items.ContainsKey(t)))
+        // A projection-named row the strip holds no element for is skew an
+        // order pass cannot repair -- counts can agree while a row is
+        // missing on both sides -- so the miss flag joins the counts.
+        if (missing
+            || _pinnedRows.Count != pinCount
+            || _items.Count != _manager.Tabs.Count - pinCount
+            || _pinnedPanel.Children.Count != pinCount
+            || NavView.MenuItems.Count != desired.Count)
         {
             RebuildAllItems();
             return;
         }
 
-        for (var i = 0; i < pinned.Count; i++)
+        for (var i = 0; i < pinCount; i++)
         {
-            var row = _pinnedRows[pinned[i]];
+            var tab = _manager.Tabs[i];
+            var row = _pinnedRows[tab];
             if (ReferenceEquals(_pinnedPanel.Children[i], row)) continue;
             var idx = _pinnedPanel.Children.IndexOf(row);
             if (idx >= 0) _pinnedPanel.Children.RemoveAt(idx);
@@ -1569,16 +1802,32 @@ internal sealed partial class VerticalTabStrip : UserControl
         _syncing = true;
         try
         {
-            for (var i = 0; i < body.Count; i++)
+            for (var i = 0; i < desired.Count; i++)
             {
-                var row = _items[body[i]];
-                if (ReferenceEquals(items[i], row)) continue;
-                var idx = items.IndexOf(row);
+                if (ReferenceEquals(items[i], desired[i])) continue;
+                var idx = items.IndexOf(desired[i]);
                 if (idx >= 0) items.RemoveAt(idx);
-                items.Insert(i, row);
+                items.Insert(i, desired[i]);
             }
         }
         finally { _syncing = false; }
+
+        // Which rows show: the projection's items, pinned ones excluded
+        // (they live in the shelf; their list entries are their visibility
+        // anyway -- there are none). This assignment is the whole toggle.
+        foreach (var (tab, item) in _items)
+        {
+            var want = shown.Contains(tab) ? Visibility.Visible : Visibility.Collapsed;
+            if (item.Visibility != want) item.Visibility = want;
+            ApplyGroupInset(item, tab);
+        }
+
+        foreach (var (group, header) in _headers)
+        {
+            if (header.Content is VerticalTabGroupHeaderRow row)
+                row.Refresh(group, _manager.MembersOf(group).Count);
+            ApplyGroupChrome(header, group);
+        }
 
         UpdatePinnedShelfChrome();
     }
@@ -1684,9 +1933,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (i >= 0 && i < _pinnedPanel.Children.Count)
             return _pinnedPanel.Children[i].Focus(FocusState.Programmatic);
 
-        if (delta > 0
-            && NavView.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()
-            is { } firstBody)
+        if (delta > 0 && FirstBodyItem() is { } firstBody)
             return firstBody.Focus(FocusState.Programmatic);
 
         return false;
@@ -1703,8 +1950,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (e.Key != Windows.System.VirtualKey.Up) return;
         if (_manager.PinCount == 0) return;
         if (sender is not NavigationViewItem) return;
-        if (NavView.MenuItems.OfType<NavigationViewItem>().FirstOrDefault()
-            is not { } first || !ReferenceEquals(first, sender)) return;
+        if (FirstBodyItem() is not { } first || !ReferenceEquals(first, sender)) return;
         if (_pinnedPanel.Children.Count == 0) return;
         if (!_pinnedPanel.Children[^1].Focus(FocusState.Programmatic)) return;
         e.Handled = true;
@@ -1861,7 +2107,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_manager.Tabs.Count < 2) return;
 
         var point = e.GetCurrentPoint(this);
-        var machine = new TabDragReorder(_manager.Tabs.Count, _manager.IndexOf(tab));
+        var (_, managerIndex) = DragSlots();
+        var machine = new TabDragReorder(managerIndex.Count, SlotIndexOf(managerIndex, tab));
         machine.Press(point.Position.Y);
         // Each begin..settle pair owns its census: a teardown failure in
         // one drag must not inflate the ghost count of the next.
@@ -1983,7 +2230,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         drag.Item = item;
         drag.MotionOn = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
         drag.HidesSelectionRow = ReferenceEquals(drag.Tab, _manager.ActiveTab);
-        drag.Machine.UpdateIndex(_manager.IndexOf(drag.Tab));
+        drag.Machine.UpdateIndex(SlotIndexOf(DragSlots().ManagerIndex, drag.Tab));
         try
         {
             var (center, centers) = MeasureRows(drag.Tab);
@@ -2098,7 +2345,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private void RemeasureCenters(DragSession drag)
     {
-        var rows = TabStripProjection.Rows(_manager);
+        var (rows, _) = DragSlots();
         var centers = new double[rows.Count];
         for (int i = 0; i < rows.Count; i++)
         {
@@ -2157,7 +2404,10 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// exactly as it was.
     ///
     /// The delta is measured between the pre-commit arranged centers of
-    /// the two slots involved, so scroll motion cancels out of it.
+    /// the two slots involved, so scroll motion cancels out of it. Both
+    /// sides are slot lists (visible rows only): a hidden member of a
+    /// collapsed group has no arranged center to glide from, and an
+    /// invisible row animating to a slot it does not paint is a ghost.
     /// </summary>
     private void StartGapGlides(IReadOnlyList<TabModel> beforeRows,
         IReadOnlyList<double> beforeCenters, TabModel dragged)
@@ -2165,7 +2415,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (_drag is not { } drag || !drag.MotionOn) return;
         if (drag.Glide is null || drag.Visual is null) return;
 
-        var afterRows = TabStripProjection.Rows(_manager);
+        var (afterRows, _) = DragSlots();
         CompositionScopedBatch? batch = null;
         for (int i = 0; i < afterRows.Count; i++)
         {
@@ -2378,7 +2628,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
-        drag.Machine.UpdateIndex(_manager.IndexOf(drag.Tab));
+        var (_, managerIndex) = DragSlots();
+        drag.Machine.UpdateIndex(SlotIndexOf(managerIndex, drag.Tab));
         RemeasureCenters(drag);
         double arranged = RowCenterY(drag.Tab);
         if (double.IsNaN(arranged))
@@ -2396,7 +2647,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         // glides read their slot deltas out of this frame, so every delta
         // is scroll-consistent and layout-race-free (arrange cannot run
         // mid-tick).
-        var beforeRows = TabStripProjection.Rows(_manager);
+        var (beforeRows, _) = DragSlots();
         var beforeCenters = new double[beforeRows.Count];
         for (int i = 0; i < beforeRows.Count; i++)
             beforeCenters[i] = RowCenterY(beforeRows[i]);
@@ -2404,15 +2655,24 @@ internal sealed partial class VerticalTabStrip : UserControl
         var committed = false;
         while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
         {
+            // The machine speaks in visible slots, the manager in tabs;
+            // a slot the pairing does not name is refused, never guessed.
+            var managerTo = crossing.To >= 0 && crossing.To < managerIndex.Count
+                ? managerIndex[crossing.To]
+                : -1;
+            if (managerTo < 0)
+            {
+                drag.Machine.UpdateIndex(crossing.To);
+                DragTrace($"DRAG unmapped {crossing.From}->{crossing.To}");
+                break;
+            }
             var from = _manager.IndexOf(drag.Tab);
-            // The pinned prefix is a slot range to the machine; a crossing
-            // that lands on the far side of it is a zone change Move alone
-            // would clamp away. SetPinned first relocates the row to the
-            // boundary (end of the prefix pinning down, first unpinned slot
-            // pinning up), and the Move then places it at the crossing's
-            // slot inside the new zone -- the drop position, not append-last.
+            // A crossing over the pin boundary is a zone change Move alone
+            // would clamp away: SetPinned first relocates the row to the
+            // boundary, then the Move places it at the crossing's slot in
+            // the new zone -- the drop position, not append-last.
             var zone = TabPinBoundary.Classify(
-                drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count, crossing.To);
+                drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count, managerTo);
             _commitChurn = true;
             try
             {
@@ -2424,35 +2684,35 @@ internal sealed partial class VerticalTabStrip : UserControl
                     from = _manager.IndexOf(drag.Tab);
                     if (from < 0) { CancelDrag("closed"); return; }
                 }
-                _manager.Move(from, crossing.To);
+                _manager.Move(from, managerTo);
             }
             finally { _commitChurn = false; }
             if (zone.Op != TabPinZoneOp.None)
             {
-                // The boundary is the thing this gesture aims at, so the
-                // one commit that moves it repaints it now rather than
-                // leaving the stroke at its pre-crossing gap until the
-                // drag ends. Ordinary moves keep the deliberate mid-drag
-                // freeze: nothing about the boundary changed for them.
+                // The boundary is what this gesture aims at, so the one
+                // commit that moves it repaints it now; ordinary moves keep
+                // the deliberate mid-drag freeze.
                 if (drag.HidesSelectionRow) UpdateSelectionRow();
                 else UpdateRowSeparators(selectionRowVisible: true);
             }
             if (RowElementOf(drag.Tab) is null) { CancelDrag("closed"); return; }
 
-            // Move clamps at the pin boundary and no-ops on collapse, so
-            // read the truth back: a crossing that did not land must not
-            // re-anchor the row to a slot it never reached -- the next
-            // tick would re-cross it for the rest of the gesture. Tell
-            // the machine where the row actually is, skip the rebind,
-            // and break: re-evaluating now would re-fire the identical
-            // refused crossing.
+            // Move clamps at the boundary and no-ops on collapse, so read
+            // the truth back: a crossing that did not land must not
+            // re-anchor the row to a slot it never reached. The pairing is
+            // re-walked post-commit -- the move displaced other rows, so
+            // the pre-commit pairing is stale past any hidden member.
+            var (nowRows, nowIndex) = DragSlots();
             var actual = _manager.IndexOf(drag.Tab);
-            if (actual != crossing.To)
+            var actualSlot = nowIndex.IndexOf(actual);
+            if (actual != managerTo || actualSlot < 0)
             {
-                drag.Machine.UpdateIndex(actual);
+                if (actualSlot >= 0) drag.Machine.UpdateIndex(actualSlot);
                 DragTrace($"DRAG refused {crossing.From}->{crossing.To}");
                 break;
             }
+            drag.Machine.UpdateIndex(actualSlot);
+            managerIndex = nowIndex;
             RebindFollow(drag, beforeCenters[crossing.To]);
             committed = true;
             DragTrace($"DRAG commit {crossing.From}->{crossing.To}");
@@ -2588,9 +2848,48 @@ internal sealed partial class VerticalTabStrip : UserControl
         PreviewHost.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// The drag machine's slots: every row with a position on screen, in
+    /// manager order, paired with its manager index (SLOT -> MANAGER).
+    /// Collapse-as-visibility is what creates the rows this list omits:
+    /// a hidden member has no arranged center, and a NaN center would
+    /// swallow every crossing past the group, so the machine speaks slots
+    /// and its crossing contract holds in their presence. The inverse
+    /// lookup is <see cref="SlotIndexOf"/>.
+    /// </summary>
+    private (List<TabModel> Rows, List<int> ManagerIndex) DragSlots()
+    {
+        var rows = new List<TabModel>(_manager.Tabs.Count);
+        var managerIndex = new List<int>(_manager.Tabs.Count);
+        var tabs = _manager.Tabs;
+        for (int i = 0; i < tabs.Count; i++)
+        {
+            var tab = tabs[i];
+            if (tab.Group is { } group && group.IsCollapsed
+                && !ReferenceEquals(tab, _manager.ActiveTab))
+                continue; // hidden under a collapsed header: no slot at all
+            rows.Add(tab);
+            managerIndex.Add(i);
+        }
+        return (rows, managerIndex);
+    }
+
+    /// <summary>
+    /// MANAGER -> SLOT: the inverse of DragSlots' SLOT -> MANAGER pairing.
+    /// A drag knows its row by manager position while the machine speaks
+    /// slots; indexing the list BY the manager index answers a different
+    /// row's slot -- the first row past a hidden run is out of range or a
+    /// stranger. -1 when the tab holds no slot.
+    /// </summary>
+    private int SlotIndexOf(List<int> managerIndex, TabModel tab)
+    {
+        var manager = _manager.IndexOf(tab);
+        return manager >= 0 ? managerIndex.IndexOf(manager) : -1;
+    }
+
     private (double Center, double[] Centers) MeasureRows(TabModel dragged)
     {
-        var rows = TabStripProjection.Rows(_manager);
+        var (rows, _) = DragSlots();
         var centers = new double[rows.Count];
         int draggedIndex = -1;
         for (int i = 0; i < rows.Count; i++)
