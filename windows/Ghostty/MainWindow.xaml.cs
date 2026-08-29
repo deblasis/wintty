@@ -473,7 +473,12 @@ public sealed partial class MainWindow : Window
             Activated += (_, args) =>
             {
                 if (args.WindowActivationState != Microsoft.UI.Xaml.WindowActivationState.Deactivated)
+                {
                     App.NoteRegularWindowActivated(this);
+                }
+                // The Deactivated arm carries no bookkeeping; the run
+                // label's hide rule for it is wired below, once the hosts
+                // exist.
             };
         }
 
@@ -809,6 +814,34 @@ public sealed partial class MainWindow : Window
             activeTab: () => _tabManager.Tabs.Count > 0 ? _tabManager.ActiveTab : null,
             impact: NudgeWindowForImpact);
         _layout.Snap(_verticalTabsVisible);
+
+        // The horizontal strip's group run label lives here, on the morph
+        // canvas: the one overlay both strips are measured in, above the
+        // chrome, hit-test-transparent so it can never take a click that
+        // belongs to the strip beneath. The window owns it because three
+        // of its hide rules are the window's to know -- the vertical
+        // strip's drag start, a layout switch request, and deactivation.
+        _runLabel = new TabRunLabel();
+        TabMorphLayer.Children.Add(_runLabel);
+        _runLabel.MotionEnabled = () => TabStripMotion.Enabled(
+            SystemAnimationsEnabled(), HighContrastChromeActive);
+        _horizontalTabHost.AttachRunLabel(_runLabel);
+        _verticalTabHost.DragVisualStarted += () =>
+            _horizontalTabHost.CloseRunLabelForDrag();
+        _verticalTabHost.DragVisualEnded += () =>
+            _horizontalTabHost.EndRunLabelDrag();
+        // Deactivation is the last window-owned hide rule: whatever run
+        // the label was naming belongs to a window the user is no longer
+        // looking at. Through the strip's machine door, not a bare element
+        // hide -- the door lands the machine on Idle, which cancels the
+        // pending timers a bare hide would leave armed to surface the
+        // label later on a window nobody is looking at.
+        Activated += (_, args) =>
+        {
+            if (args.WindowActivationState
+                == Microsoft.UI.Xaml.WindowActivationState.Deactivated)
+                _horizontalTabHost.CloseRunLabelForDeactivation();
+        };
         // The strip that starts hidden has never realized its tab
         // containers, so the first switch to it would have nothing for the
         // active-tab morph to aim at.
@@ -1985,6 +2018,11 @@ public sealed partial class MainWindow : Window
         if (_layout.IsSwitching) return;
         var toVertical = !_verticalTabsVisible;
 
+        // The run label is anchored to the outgoing strip's arrangement
+        // and reads pointer state the switch invalidates: it hides by
+        // rule before the morph starts, not after it lands.
+        _horizontalTabHost.CloseRunLabelForLayoutSwitch();
+
         // Persist through the shared debounced scheduler so rapid
         // toggling (Ctrl+Shift+, held down, or the context-menu
         // sibling firing at the same time as the settings toggle)
@@ -3006,6 +3044,29 @@ public sealed partial class MainWindow : Window
     }
 
     private readonly Microsoft.UI.Xaml.Shapes.Rectangle _verticalSeamCover;
+
+    // The horizontal strip's group run label, hosted on TabMorphLayer.
+    // Built here rather than in XAML so it stays code-built and
+    // non-focusable by construction -- visual sugar, no automation
+    // surface, no light-dismiss plumbing to fight.
+    private TabRunLabel? _runLabel;
+
+    /// <summary>
+    /// The motion gate the run label reads per fade. Same sources as the
+    /// strips: OS animation effects on, and High Contrast composed through
+    /// HighContrastState, never raw IsActive.
+    /// </summary>
+    private static bool SystemAnimationsEnabled()
+    {
+        try { return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled; }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            // Unreadable is not "off": fail open, as VerticalTabStrip and
+            // App.xaml.cs both do in packaged/sandboxed contexts.
+            return true;
+        }
+    }
 
     /// <summary>
     /// How far back into the selected row the vertical seam cover starts.

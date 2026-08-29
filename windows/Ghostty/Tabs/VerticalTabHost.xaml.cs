@@ -71,6 +71,28 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     public event EventHandler<double>? StripWidthChangeRequested;
 
+    /// <summary>
+    /// The strip's drag-live moment, surfaced for the window: the
+    /// horizontal run label hides on it, in the same dispatch pass, so a
+    /// vertical drag can never overlap the label's fade.
+    /// </summary>
+    internal event Action? DragVisualStarted
+    {
+        add => _strip.DragVisualStarted += value;
+        remove => _strip.DragVisualStarted -= value;
+    }
+
+    /// <summary>
+    /// The strip's drag end, surfaced for the window: the horizontal run
+    /// label's machine lifts its drag refusal here, or one vertical drag
+    /// would silence the label for the rest of the session.
+    /// </summary>
+    internal event Action? DragVisualEnded
+    {
+        add => _strip.DragVisualEnded += value;
+        remove => _strip.DragVisualEnded -= value;
+    }
+
     internal double CurrentStripTarget =>
         _pinnedExpanded
             ? _expandedWidth
