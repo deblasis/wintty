@@ -106,6 +106,8 @@ internal static class LogEvents
         public const int ServerStartFailed = 2905;
         public const int InboundLaunchFailed = 2906;
         public const int LaunchDropped     = 2907;
+        public const int LaunchDeferred    = 2908;
+        public const int LaunchEvicted     = 2909;
     }
 
     // 3000-3099: Inspector
