@@ -30,6 +30,21 @@ public class FakeTransportTests
         t.Input.Write(new byte[] { 0x00 }, 0, 1);
         t.Input.Flush();
 
+        // Wait for the responder's FIRST call before writing again. Issuing
+        // the second write while the IO thread was still parking into its
+        // first Read let both writes coalesce into one (observed as a single
+        // two-byte Read under full-suite contention), so the responder ran
+        // once and the count below could never reach 2. The responder runs
+        // BEFORE the response write, so at first call the IO thread holds no
+        // reader on the output pipe: the write-under-test is already in
+        // flight, which is the state this test exists to pin.
+        var sw = Stopwatch.StartNew();
+        while (Volatile.Read(ref responderCalls) < 1 && sw.Elapsed < BoundedWait)
+            Thread.Sleep(10);
+
+        Assert.True(Volatile.Read(ref responderCalls) >= 1,
+            $"scripted responder never ran within {BoundedWait.TotalSeconds:F0}s");
+
         // Second input chunk from a background task: pre-fix the IO thread
         // never comes back for it (stuck in the first response write), so
         // this write blocks. Keeping it off the test thread lets the poll
@@ -42,7 +57,6 @@ public class FakeTransportTests
 
         // The responder only runs its second call after the first response
         // write completed with zero readers on the output pipe.
-        var sw = Stopwatch.StartNew();
         while (Volatile.Read(ref responderCalls) < 2 && sw.Elapsed < BoundedWait)
             Thread.Sleep(10);
 
