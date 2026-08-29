@@ -55,6 +55,29 @@ internal static class TabStripMotion
     public const float LiftScale = 1.03f;
 
     /// <summary>
+    /// The pin flight: the ghost travels from the released row to the slot
+    /// it promised, on the neighbours' Existing Elements curve. The flight
+    /// is programmatic -- it starts at velocity 0, never the gesture's.
+    /// </summary>
+    public const double PinFlightMs = 250;
+
+    /// <summary>
+    /// The landing's one visible bounce: the bounciest tier in the strip,
+    /// spent on the ghost because a programmatic flourish is the one place
+    /// an overshoot reads as delight instead of slop. DampingRatio and
+    /// Period are written explicitly -- the WinRT spring classes document
+    /// no defaults.
+    /// </summary>
+    public const float PinSettleDampingRatio = 0.6f;
+    public const double PinSettlePeriodMs = 60;
+
+    /// <summary>The Fade token: ghost handoff and header crossfades.</summary>
+    public const double FadeMs = 83;
+
+    /// <summary>The drag visual handing back after a release.</summary>
+    public const double UnliftFadeMs = 83;
+
+    /// <summary>
     /// The motion gate: springs and glides run only when Windows
     /// animation effects are on and High Contrast is not. Disabled means
     /// every spring collapses to a cut; state correctness never waits on
