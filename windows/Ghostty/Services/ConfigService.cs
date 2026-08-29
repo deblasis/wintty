@@ -66,6 +66,10 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         = Ghostty.Core.Config.WindowsOnlyKeyParsers.VerticalTabsWidthDefault;
     public bool VerticalTabsPinned { get; private set; }
     public bool VerticalTabsHoverExpand { get; private set; }
+    // A newly spawned pane's border glows while its shell starts up.
+    // Default true; `pane-startup-glow = false` turns it off. Read by
+    // MainWindow and pushed to each PaneHost with the tab border colors.
+    public bool PaneStartupGlow { get; private set; } = true;
     public bool CommandPaletteGroupCommands { get; private set; }
     public bool WindowsHighContrast { get; private set; } = true;
     public string CommandPaletteBackground { get; private set; } = "acrylic";
@@ -964,6 +968,9 @@ internal sealed partial class ConfigService : IConfigService, Ghostty.Core.Profi
         VerticalTabsHoverExpand = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("vertical-tabs-hover-expand", ""),
             defaultValue: false);
+        PaneStartupGlow = WindowsOnlyKeyParsers.ParseBool(
+            GetFileValue("pane-startup-glow", ""),
+            defaultValue: true);
         CommandPaletteGroupCommands = WindowsOnlyKeyParsers.ParseBool(
             GetFileValue("command-palette-group-commands", ""),
             defaultValue: false);
