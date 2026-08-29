@@ -335,6 +335,52 @@ internal sealed class PaneActionRouter
                     RequestPin(tab, action == PaneAction.PinTab);
                 break;
             }
+            // Group ops act on the active tab's group; an ungrouped active
+            // tab falls out silently, and each Request's own refusal guards
+            // (pinned refusal, same-state silence, landed-bit gate) decide
+            // the rest -- the palette adds no policy of its own.
+            case PaneAction.NewGroupWithTab:
+            {
+                var tab = _tabs.ActiveTab;
+                if (tab is not null) RequestNewGroupWithTab(tab);
+                break;
+            }
+            case PaneAction.RemoveFromGroup:
+            {
+                var tab = _tabs.ActiveTab;
+                if (tab is not null) RequestRemoveFromGroup(tab);
+                break;
+            }
+            case PaneAction.CollapseGroup:
+            case PaneAction.ExpandGroup:
+            {
+                var group = _tabs.ActiveTab?.Group;
+                if (group is not null)
+                    RequestCollapseGroup(group, action == PaneAction.CollapseGroup);
+                break;
+            }
+            case PaneAction.DissolveGroup:
+            case PaneAction.CloseGroup:
+            {
+                var group = _tabs.ActiveTab?.Group;
+                if (group is null) break;
+                if (action == PaneAction.DissolveGroup) RequestDissolveGroup(group);
+                else RequestCloseGroup(group);
+                break;
+            }
+            // Rename and color are dialog ops: the op itself is a plain
+            // INPC set, but opening the dialog and the picker needs a
+            // XamlRoot, so the window hosts them and hands the result
+            // back through the Request below.
+            case PaneAction.RenameGroup:
+            case PaneAction.ColorGroup:
+            {
+                var group = _tabs.ActiveTab?.Group;
+                if (group is null) break;
+                if (action == PaneAction.RenameGroup) GroupRenameRequested?.Invoke(this, group);
+                else GroupColorRequested?.Invoke(this, group);
+                break;
+            }
             default:
                 throw new ArgumentOutOfRangeException(nameof(action), action, null);
         }
@@ -422,6 +468,8 @@ internal sealed class PaneActionRouter
         Removed,
         Dissolved,
         Collapsed,
+        Renamed,
+        Colored,
     }
 
     /// <summary>
@@ -430,12 +478,16 @@ internal sealed class PaneActionRouter
     /// the announcement source falls back to the focused element).
     /// <paramref name="MemberCount"/> is PRE-op on purpose: it feeds
     /// Dissolved, and after the op the group owns no members to count.
+    /// <paramref name="OldTitle"/> is pre-op too: Renamed lands the new
+    /// title on the group, so the text could otherwise only say the new
+    /// name twice.
     /// </summary>
     internal readonly record struct GroupCommandData(
         GroupCommandKind Kind,
         TabGroup Group,
         TabModel? Tab,
-        int MemberCount);
+        int MemberCount,
+        string? OldTitle = null);
 
     /// <summary>
     /// Raised after a commanded group change has landed, for the window to
@@ -460,6 +512,22 @@ internal sealed class PaneActionRouter
     /// path, which needs a XamlRoot the manager and this router lack.
     /// </summary>
     public event EventHandler<TabGroup>? GroupCloseRequested;
+
+    /// <summary>
+    /// Raised when a command asks to rename a group. Rename is a dialog
+    /// op: the router has no XamlRoot to host RenameTabDialog, so the
+    /// window shows it and hands the result back through
+    /// <see cref="RequestRenameGroup"/>, which performs the set and the
+    /// announce. The menu path opens the same dialog directly.
+    /// </summary>
+    public event EventHandler<TabGroup>? GroupRenameRequested;
+
+    /// <summary>
+    /// Raised when a command asks to recolor a group. The palette picker
+    /// is a Flyout, so like rename this forwards to the window, which owns
+    /// both the XamlRoot and an element to anchor it on.
+    /// </summary>
+    public event EventHandler<TabGroup>? GroupColorRequested;
 
     /// <summary>
     /// New Group With Tab: a fresh group whose sole member is the given
@@ -546,6 +614,35 @@ internal sealed class PaneActionRouter
     {
         if (!_tabs.Groups.Contains(group)) return;
         GroupCloseRequested?.Invoke(this, group);
+    }
+
+    /// <summary>
+    /// Rename a group: a plain INPC set, no manager op -- the title lives
+    /// on the group alone and the strips re-read it through their group
+    /// bindings. A blank title, a group the manager no longer registers
+    /// (a dialog can outlive a dissolve), or the title the group already
+    /// has is a no-op that announces nothing.
+    /// </summary>
+    public void RequestRenameGroup(TabGroup group, string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return;
+        if (!_tabs.Groups.Contains(group)) return;
+        if (group.Title == title) return;
+        var old = group.Title;
+        group.Title = title;
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Renamed, group, null, 0, old));
+    }
+
+    /// <summary>
+    /// Recolor a group: the same plain-set shape as rename. Picking the
+    /// color the group already wears is a no-op that announces nothing.
+    /// </summary>
+    public void RequestColorGroup(TabGroup group, TabColor color)
+    {
+        if (!_tabs.Groups.Contains(group)) return;
+        if (group.Color == color) return;
+        group.Color = color;
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Colored, group, null, 0));
     }
 
     /// <summary>

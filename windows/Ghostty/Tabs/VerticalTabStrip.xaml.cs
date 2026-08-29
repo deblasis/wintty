@@ -1531,7 +1531,9 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         ToolTipService.SetToolTip(item, tab.EffectiveTitle);
         AutomationProperties.SetName(item, TabAccessibleText.Name(tab));
-        AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(tab));
+        AutomationProperties.SetItemStatus(item, tab.Group is { } group
+            ? TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)
+            : TabAccessibleText.Status(tab));
     }
 
     private void OnRowCloseClick(object sender, RoutedEventArgs e)
@@ -1586,12 +1588,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     private void AddGroupRow(TabGroup group)
     {
         if (_headers.ContainsKey(group)) return;
-        var item = new NavigationViewItem
+        var item = new VerticalTabGroupHeaderItem
         {
             Tag = group,
             SelectsOnInvoked = false,
             Content = new VerticalTabGroupHeaderRow(group, _manager.MembersOf(group).Count),
         };
+        // The header's UIA ExpandCollapse pattern is keyboard-equivalent:
+        // it lands on the strip's command event (routes through the
+        // router, announces), never on the chevron's direct toggle.
+        item.GroupToggleRequested += (_, e) =>
+            GroupToggleFromCommandRequested?.Invoke(this, e);
         ApplyGroupChrome(item, group);
 
         var binding = AotBinding.Create(group, _ => ScheduleReconcile(),

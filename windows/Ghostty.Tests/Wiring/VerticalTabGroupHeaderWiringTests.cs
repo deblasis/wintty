@@ -51,7 +51,7 @@ public class VerticalTabGroupHeaderWiringTests
     {
         var add = Strip().Method("AddGroupRow");
         var item = add.DescendantNodes().OfType<ObjectCreationExpressionSyntax>()
-            .Single(o => o.Type.ToString() == "NavigationViewItem");
+            .Single(o => o.Type.ToString() == "VerticalTabGroupHeaderItem");
         var initializers = item.Initializer!.Expressions.OfType<AssignmentExpressionSyntax>()
             .ToDictionary(a => a.Left.ToString(), a => a.Right.ToString());
         Assert.Equal("group", initializers["Tag"]);
@@ -313,5 +313,55 @@ public class VerticalTabGroupHeaderWiringTests
             restore.Calls("header.Focus").Single().Arg(0));
         // The shared toggle stays focus-free: only the pointer path repairs.
         Assert.Empty(strip.Method("ToggleGroup").Calls("RestoreFocusUnder"));
+    }
+
+    /// <summary>
+    /// The header's UIA ExpandCollapse pattern is the keyboard route in a
+    /// screen reader's hands. The item carries the toggle event and raises
+    /// it only from the pattern -- never from pointer, which toggles in
+    /// place -- and the strip forwards it to the command event the key
+    /// handler uses, which is the whole reason the pattern announces. The
+    /// peer mirrors the keyboard polarity (Expand asks for expanded) and
+    /// reads its state live off the group.
+    /// </summary>
+    [Fact]
+    public void TheUIAPattern_FeedsTheCommandEvent_WithTheKeyboardPolarity()
+    {
+        var add = Strip().Method("AddGroupRow");
+        var wiring = add.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "item.GroupToggleRequested");
+        Assert.Contains("GroupToggleFromCommandRequested?.Invoke", wiring.Right.ToString());
+
+        var item = ShellSource.Load("Tabs.VerticalTabGroupHeaderItem.cs");
+        // One raiser, and it is pattern-only: nothing else in the item may
+        // toggle the group on its own.
+        Assert.Single(item.Root.Calls("GroupToggleRequested?.Invoke"));
+        var raiser = item.Method("RaiseGroupToggleFromPattern");
+        var guard = Assert.IsType<IfStatementSyntax>(raiser.Body!.Statements.Single());
+        Assert.Equal("Tag is TabGroup group", guard.Condition.ToString());
+        Assert.Contains("VerticalTabGroupHeaderItemAutomationPeer",
+            item.Method("OnCreateAutomationPeer").ExpressionBody!.ToString());
+
+        var peer = ShellSource.Load(
+            "Accessibility.VerticalTabGroupHeaderItemAutomationPeer.cs");
+        var pattern = Assert.IsType<ConditionalExpressionSyntax>(
+            peer.Method("GetPatternCore").ExpressionBody!.Expression);
+        Assert.Equal("patternInterface == PatternInterface.ExpandCollapse",
+            pattern.Condition.ToString());
+        Assert.Equal("this", pattern.WhenTrue.ToString());
+
+        var state = peer.Root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "ExpandCollapseState");
+        var polarity = Assert.IsType<ConditionalExpressionSyntax>(
+            state.ExpressionBody!.Expression);
+        Assert.Equal("ExpandCollapseState.Collapsed", polarity.WhenTrue.ToString());
+        Assert.Equal("ExpandCollapseState.Expanded", polarity.WhenFalse.ToString());
+
+        Assert.Contains("AutomationControlType.ListItem",
+            peer.Method("GetAutomationControlTypeCore").ExpressionBody!.ToString());
+        Assert.Contains("collapsed: false",
+            peer.Method("Expand").ExpressionBody!.ToString());
+        Assert.Contains("collapsed: true",
+            peer.Method("Collapse").ExpressionBody!.ToString());
     }
 }
