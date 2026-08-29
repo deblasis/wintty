@@ -73,18 +73,32 @@ public class VerticalTabGroupHeaderWiringTests
     }
 
     /// <summary>
-    /// The toggle stands down under a drag, fences the MUXC list the
+    /// The toggle stands down under a LIVE drag, fences the MUXC list the
     /// following reconcile mutates, and routes through the manager op --
     /// never a direct IsCollapsed write (the complement polarity IS the
     /// toggle: a same-direction write is invisible).
     /// </summary>
+    /// <remarks>
+    /// The stand-down is phase-aware on purpose (5b-3b). A header press
+    /// arms a drag session immediately, and on a plain click MUXC raises
+    /// ItemInvoked from its own release handler -- deeper in the tree, so
+    /// BEFORE the strip's release handler clears the still-unlifted
+    /// session. The old `_drag is not null` gate ate every header click
+    /// the moment header presses armed; only a gesture that actually
+    /// lifted (Dragging) is a drag, and a lifted gesture holds the
+    /// pointer capture, so MUXC never raises ItemInvoked for it at all.
+    /// The command gate keeps the strict session-exists form -- commands
+    /// have no unlifted session to race -- which the drag wiring facts
+    /// pin as the deliberate asymmetry.
+    /// </remarks>
     [Fact]
     public void TheToggle_StandsDownUnderDrag_Fences_AndRoutesThroughTheManager()
     {
         var toggle = Strip().Method("ToggleGroup");
 
         var standDown = toggle.DescendantNodes().OfType<IfStatementSyntax>().First();
-        Assert.Equal("_drag is not null", standDown.Condition.ToString());
+        Assert.Equal("_drag is { Machine.Phase: TabDragPhase.Dragging }",
+            standDown.Condition.ToString());
         Assert.Contains(
             standDown.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>()
                 .Select(r => r.ToString()),

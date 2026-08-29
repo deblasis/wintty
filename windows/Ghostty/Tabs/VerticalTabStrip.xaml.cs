@@ -1683,12 +1683,23 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// The header's only interaction. A drag stands it down, as every other
-    /// row mutation: collapsing reorders visible rows under a live gesture.
+    /// The header's only interaction. A live drag stands it down, as every
+    /// other row mutation: collapsing reorders visible rows under a live
+    /// gesture.
     /// </summary>
+    /// <remarks>
+    /// The gate is phase-aware on purpose. A header press now arms a drag
+    /// session immediately, and on a plain click MUXC raises ItemInvoked
+    /// from its own release handler -- deeper in the tree, so BEFORE the
+    /// strip's release handler clears the still-unlifted session. A
+    /// session-exists gate would eat every header click; only a gesture
+    /// that actually lifted (Dragging) is a drag, and a lifted gesture
+    /// holds the pointer capture, so MUXC never raises ItemInvoked for it
+    /// at all.
+    /// </remarks>
     private void ToggleGroup(TabGroup group)
     {
-        if (_drag is not null) return;
+        if (_drag is { Machine.Phase: TabDragPhase.Dragging }) return;
         _syncing = true;
         try { _manager.CollapseGroup(group, !group.IsCollapsed); }
         finally { _syncing = false; }
@@ -2071,6 +2082,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     private sealed class DragSession
     {
         public required TabModel Tab;
+        // A header drag drags a RUN: Tab is the run's first member (the
+        // identity the churn and close guards already speak), Group names
+        // the run, and null here means the ordinary one-row drag.
+        public TabGroup? Group;
+        // The run's visible member rows riding the header's follow. Hidden
+        // members are never in here: they have no arranged geometry, and
+        // a row translated to a slot it does not paint is a ghost. List
+        // containers only, like VisibleRunRows builds.
+        public readonly List<NavigationViewItem> CoDragRows = new();
         public required TabDragReorder Machine;
         public required IReadOnlyList<TabModel> PreDragOrder;
         // Pin flags at gesture start. A cancel restores them before the
@@ -2143,9 +2163,22 @@ internal sealed partial class VerticalTabStrip : UserControl
         // in the shelf; both carry the tab on Tag.
         var item = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source)
                 ?? (FrameworkElement?)VisualTreeHelperEx.FindAncestor<VerticalTabPinnedRow>(source);
-        if (item is null || item.Tag is not TabModel tab) return;
+        if (item is null) return;
         // The close button owns its own presses; no drag grows out of one.
         if (VisualTreeHelperEx.FindAncestor<Button>(source) is not null) return;
+
+        // A press on a group header arms the run drag: the machine drags
+        // the whole run as one unit, the header is the visual that
+        // follows, and MoveGroup is the commit behind every crossing.
+        // The click (no lift) falls through to ItemInvoked's toggle
+        // exactly as before.
+        if (item is VerticalTabGroupHeaderItem { Tag: TabGroup group })
+        {
+            ArmGroupDrag(group, item, e);
+            return;
+        }
+
+        if (item.Tag is not TabModel tab) return;
         if (RowElementOf(tab) is not { } owned || !ReferenceEquals(owned, item)) return;
         if (_manager.Tabs.Count < 2) return;
 
@@ -2168,6 +2201,58 @@ internal sealed partial class VerticalTabStrip : UserControl
             LastPointerY = point.Position.Y,
             PressY = point.Position.Y,
         };
+    }
+
+    /// <summary>
+    /// Arm the run drag on a header press. The machine's slots are the
+    /// unit space (one unit per body run, DragUnits below), not the tab
+    /// rows: a crossing swaps the run past an entire neighbouring run or
+    /// lone tab, because landing between another group's header and its
+    /// members would split a run the projector cannot render. The pinned
+    /// prefix contributes no units, so the drag never even offers a
+    /// crossing into the zone MoveGroup's clamp would refuse.
+    /// </summary>
+    private void ArmGroupDrag(TabGroup group, FrameworkElement header, PointerRoutedEventArgs e)
+    {
+        var run = _manager.MembersOf(group);
+        if (run.Count == 0) return;
+        var units = TabGroupDragUnits.Build(_manager);
+        if (units.Count < 2) return;
+        int grabbed = RunUnitIndex(units, group);
+        if (grabbed < 0) return;
+
+        var point = e.GetCurrentPoint(this);
+        var machine = new TabDragReorder(units.Count, grabbed);
+        machine.Press(point.Position.Y);
+        // Each begin..settle pair owns its census: a teardown failure in
+        // one drag must not inflate the ghost count of the next.
+        _teardownFailures = 0;
+        _drag = new DragSession
+        {
+            Tab = run[0],
+            Group = group,
+            Machine = machine,
+            PreDragOrder = TabStripProjection.Rows(_manager),
+            PreDragPinned = new HashSet<TabModel>(
+                _manager.Tabs.Where(t => t.IsPinned)),
+            PointerId = e.Pointer.PointerId,
+            PressRow = header,
+            LastPointerY = point.Position.Y,
+            PressY = point.Position.Y,
+        };
+    }
+
+    /// <summary>
+    /// The dragged unit's slot, found by IDENTITY. The manager-index
+    /// arithmetic that DragSlots needs an inverse for answers a different
+    /// unit's slot here -- the same 5b-1 lesson one level up -- so the
+    /// unit space is matched by group, never by index math.
+    /// </summary>
+    private static int RunUnitIndex(IReadOnlyList<GroupDragUnit> units, TabGroup group)
+    {
+        for (int i = 0; i < units.Count; i++)
+            if (ReferenceEquals(units[i].Group, group)) return i;
+        return -1;
     }
 
     private void OnDragPointerMoved(object sender, PointerRoutedEventArgs e)
@@ -2267,19 +2352,45 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void StartDragVisual(DragSession drag, PointerRoutedEventArgs e)
     {
-        if (RowElementOf(drag.Tab) is not { } item) { CancelDrag("closed"); return; }
+        // Existence is the rep row's answer for both kinds; the anchor --
+        // the element the follow rides -- is the header for a run.
+        if (RowElementOf(drag.Tab) is not { } row) { CancelDrag("closed"); return; }
         if (!CapturePointer(e.Pointer)) { CancelDrag("capture"); return; }
 
+        var item = drag.Group is { } group && _headers.TryGetValue(group, out var header)
+            ? header
+            : row;
         drag.Item = item;
         drag.MotionOn = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
-        drag.HidesSelectionRow = ReferenceEquals(drag.Tab, _manager.ActiveTab);
-        drag.Machine.UpdateIndex(SlotIndexOf(DragSlots().ManagerIndex, drag.Tab));
+        // The selection row is parked while a drag could paint over it; a
+        // run drag parks it when the active member is INSIDE the run, not
+        // merely when it is the grabbed row.
+        drag.HidesSelectionRow = drag.Group is { } g
+            ? _manager.MembersOf(g).Contains(_manager.ActiveTab)
+            : ReferenceEquals(drag.Tab, _manager.ActiveTab);
+        if (drag.Group is null)
+            drag.Machine.UpdateIndex(SlotIndexOf(DragSlots().ManagerIndex, drag.Tab));
+        else
+            drag.Machine.UpdateIndex(RunUnitIndex(TabGroupDragUnits.Build(_manager), drag.Group));
         try
         {
-            var (center, centers) = MeasureRows(drag.Tab);
-            drag.PressBaseCenter = center;
-            drag.AssumedCenter = center;
-            drag.Machine.UpdateCenters(centers);
+            if (drag.Group is null)
+            {
+                var (center, centers) = MeasureRows(drag.Tab);
+                drag.PressBaseCenter = center;
+                drag.AssumedCenter = center;
+                drag.Machine.UpdateCenters(centers);
+            }
+            else
+            {
+                // The anchor arithmetic stays in HEADER coordinates -- the
+                // header is the element the pointer drags -- while the
+                // machine judges crossings in unit midpoints. The two
+                // frames meet in the pointer delta, which both share.
+                drag.PressBaseCenter = ElementCenterY(item);
+                drag.AssumedCenter = drag.PressBaseCenter;
+                drag.Machine.UpdateCenters(MeasureUnitMids(drag));
+            }
         }
         catch (InvalidOperationException)
         {
@@ -2293,6 +2404,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         try
         {
             AttachFollow(drag);
+            if (drag.Group is not null) AttachCoDrag(drag);
             if (drag.MotionOn)
             {
                 AttachLift(drag);
@@ -2325,7 +2437,8 @@ internal sealed partial class VerticalTabStrip : UserControl
             UpdateRowSeparators(selectionRowVisible: true);
         StartAutoscroll(drag);
         DragTrace($"DRAG begin index={drag.Machine.Index} " +
-            $"rows={_manager.Tabs.Count} motion={(drag.MotionOn ? "on" : "off")}");
+            $"rows={_manager.Tabs.Count} run={(drag.Group is null ? "no" : "yes")} " +
+            $"motion={(drag.MotionOn ? "on" : "off")}");
     }
 
     /// <summary>
@@ -2360,7 +2473,13 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     private void RebindFollow(DragSession drag, double assumedCenter)
     {
-        if (RowElementOf(drag.Tab) is not { } item) return;
+        if (RowElementOf(drag.Tab) is not { } row) return;
+        // A run drag's follow lives on the header -- the one element the
+        // churn does not rebuild -- but the header's MenuItems slot moved,
+        // so the re-anchor below is what keeps it glued to the pointer.
+        var item = drag.Group is { } group && _headers.TryGetValue(group, out var header)
+            ? header
+            : row;
         drag.Item = item;
         if (!double.IsNaN(assumedCenter)) drag.AssumedCenter = assumedCenter;
         ElementCompositionPreview.SetIsTranslationEnabled(item, true);
@@ -2378,6 +2497,11 @@ internal sealed partial class VerticalTabStrip : UserControl
             visual.Scale = new Vector3(TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
         if (drag.Follow is not null)
             visual.StartAnimation("Translation", drag.Follow);
+        // The commit churned the member containers too: every rebuilt row
+        // lost its translation and its accent, so the stack re-arms or it
+        // tears -- members sitting at their layout slots while the header
+        // rides the pointer.
+        if (drag.Group is not null) AttachCoDrag(drag);
     }
 
     /// <summary>
@@ -2404,6 +2528,433 @@ internal sealed partial class VerticalTabStrip : UserControl
                 : drag.Machine.CenterOf(i);
         }
         drag.Machine.UpdateCenters(centers);
+    }
+
+    // -----------------------------------------------------------------
+    // The run drag (5b-3): a header press drags the whole group as one
+    // unit. The machine is the PR 3 machine unchanged -- it still speaks
+    // slots, thresholds, and crossings -- but its slot list here is the
+    // unit space (TabGroupDragUnits: one unit per body run), the dragged
+    // center is the run's visible-span midpoint, and a crossing commits
+    // through MoveGroup with a whole-run target. Hidden members never
+    // enter any of it: they have no arranged geometry, and collapse
+    // stays exactly as the user left it (Chrome's contract, not Edge's
+    // grab-expands bug).
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Arranged unit midpoints for the machine. The dragged unit's
+    /// midpoint is the dragged center's arranged half; an unreadable one
+    /// refuses the lift (the gesture degrades to the click it started
+    /// as), matching MeasureRows' contract for the one-row drag.
+    /// </summary>
+    private double[] MeasureUnitMids(DragSession drag)
+    {
+        var units = TabGroupDragUnits.Build(_manager);
+        var mids = new double[units.Count];
+        double draggedMid = double.NaN;
+        for (int i = 0; i < units.Count; i++)
+        {
+            mids[i] = UnitCenter(units[i], out _);
+            if (drag.Group is { } g && ReferenceEquals(units[i].Group, g))
+                draggedMid = mids[i];
+        }
+        if (double.IsNaN(draggedMid))
+            throw new InvalidOperationException(
+                "drag row is not realized; crossings cannot be judged");
+        return mids;
+    }
+
+    /// <summary>
+    /// One unit's arranged midpoint and visible span in strip
+    /// coordinates. The head is the header for a group, the row itself
+    /// for a lone tab, and the span reaches over the visible member rows
+    /// only -- collapse-as-visibility means the visible rows are
+    /// adjacent, so the span is the geometry a swap actually shifts.
+    /// Only a failed HEAD read is NaN: unreadable tail rows are skipped,
+    /// and the unit reports a partial-span midpoint rather than no
+    /// crossing opinion this tick.
+    /// </summary>
+    private double UnitCenter(GroupDragUnit unit, out double span)
+    {
+        span = 0;
+        FrameworkElement? head;
+        List<NavigationViewItem> tail;
+        if (unit.Group is { } group)
+        {
+            head = _headers.TryGetValue(group, out var h) ? h : null;
+            tail = head is null ? new List<NavigationViewItem>() : VisibleRunRows(group);
+        }
+        else
+        {
+            head = RowElementOf(unit.Rep);
+            tail = new List<NavigationViewItem>();
+        }
+        if (head is null) return double.NaN;
+        double top = ElementTopY(head);
+        if (double.IsNaN(top)) return double.NaN;
+        double bottom = top + head.ActualHeight;
+        foreach (var memberRow in tail)
+        {
+            double rowTop = ElementTopY(memberRow);
+            if (double.IsNaN(rowTop)) continue;
+            bottom = Math.Max(bottom, rowTop + memberRow.ActualHeight);
+        }
+        span = bottom - top;
+        return (top + bottom) / 2;
+    }
+
+    /// <summary>
+    /// The run's visible member rows. Visibility is the projection's own
+    /// rule (collapse hides members except the active one, Edge-135), so
+    /// the drag moves exactly the stack the user can see and never
+    /// measures a row that has no arranged geometry. List containers
+    /// only: a member renders in the scrolling list, never in the shelf.
+    /// </summary>
+    private List<NavigationViewItem> VisibleRunRows(TabGroup group)
+    {
+        var rows = new List<NavigationViewItem>();
+        foreach (var tab in _manager.MembersOf(group))
+        {
+            if (group.IsCollapsed && !ReferenceEquals(tab, _manager.ActiveTab)) continue;
+            if (RowElementOf(tab) is NavigationViewItem item) rows.Add(item);
+        }
+        return rows;
+    }
+
+    private double ElementTopY(FrameworkElement item)
+    {
+        if (item.ActualHeight <= 0) return double.NaN;
+        try
+        {
+            return item.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return double.NaN;
+        }
+    }
+
+    private double ElementCenterY(FrameworkElement item)
+    {
+        double top = ElementTopY(item);
+        return double.IsNaN(top) ? double.NaN : top + item.ActualHeight / 2;
+    }
+
+    /// <summary>
+    /// Bind every visible member row to the header's follow: the same
+    /// expression over the same property set reads the same translation
+    /// on each row, so the stack moves rigidly. The rows take no lift and
+    /// no glide of their own -- they are cargo -- and wear the 1px accent
+    /// that says so. Called again after every commit, because the churn
+    /// rebuilds member containers and a rebuilt row has neither the
+    /// translation nor the accent until this re-arms it.
+    /// </summary>
+    private void AttachCoDrag(DragSession drag)
+    {
+        drag.CoDragRows.Clear();
+        if (drag.Group is null || drag.Follow is null) return;
+        foreach (var row in VisibleRunRows(drag.Group))
+        {
+            ElementCompositionPreview.SetIsTranslationEnabled(row, true);
+            ElementCompositionPreview.GetElementVisual(row)
+                .StartAnimation("Translation", drag.Follow);
+            (row.Content as VerticalTabNavRow)?.SetCoDragAccent(true, AccentBrush);
+            drag.CoDragRows.Add(row);
+        }
+    }
+
+    /// <summary>
+    /// Hand the co-drag rows back: translation off lands each on its
+    /// arranged slot, the accent comes off, and the parked selection
+    /// overlay catches up through the same tail the header's handback
+    /// runs.
+    /// </summary>
+    private void DetachCoDrag(DragSession drag)
+    {
+        foreach (var row in drag.CoDragRows)
+        {
+            try
+            {
+                var visual = ElementCompositionPreview.GetElementVisual(row);
+                visual.StopAnimation("Translation");
+                visual.Properties.InsertVector3("Translation", Vector3.Zero);
+                ElementCompositionPreview.SetIsTranslationEnabled(row, false);
+            }
+            catch (Exception ex) when (IsLayoutReadFailure(ex))
+            {
+                _teardownFailures++;
+            }
+            (row.Content as VerticalTabNavRow)?.SetCoDragAccent(false, AccentBrush);
+        }
+        drag.CoDragRows.Clear();
+    }
+
+    /// <summary>
+    /// The header's post-swap arranged center, for the re-anchor: the
+    /// whole run shifts by the pivot unit's visible span, down when the
+    /// run swapped past the pivot below, up when past the pivot above.
+    /// Both sides are pre-commit arranged reads, the same frame the
+    /// one-row drag's re-anchor uses. NaN keeps the current anchor, and
+    /// the next tick's measurement confirms the estimate either way.
+    /// </summary>
+    private double RunLandingCenter(
+        DragSession drag, IReadOnlyList<GroupDragUnit> units, int pivot, bool down)
+    {
+        if (drag.Item is null) return double.NaN;
+        double head = ElementCenterY(drag.Item);
+        double pivotMid = UnitCenter(units[pivot], out var pivotSpan);
+        if (double.IsNaN(head) || double.IsNaN(pivotMid)) return double.NaN;
+        return head + (down ? pivotSpan : -pivotSpan);
+    }
+
+    /// <summary>
+    /// The run drag's tick: the tab path's skeleton -- re-index, re-feed,
+    /// judge crossings, read the truth back after every commit -- with
+    /// MoveGroup as the commit and the unit formulas as the only mapping
+    /// between a crossing and a manager index. No pin work and no ghost:
+    /// groups cannot be pinned, and the unit space never offers a
+    /// crossing into the prefix the clamp would refuse.
+    /// </summary>
+    private void EvaluateRunDrag(DragSession drag)
+    {
+        var group = drag.Group!;
+        if (_manager.MembersOf(group).Count == 0 || !_headers.ContainsKey(group))
+        {
+            CancelDrag("closed");
+            return;
+        }
+
+        var units = TabGroupDragUnits.Build(_manager);
+        int dragged = RunUnitIndex(units, group);
+        if (dragged < 0) { CancelDrag("closed"); return; }
+        drag.Machine.UpdateIndex(dragged);
+        double[] mids;
+        try
+        {
+            mids = MeasureUnitMids(drag);
+        }
+        catch (InvalidOperationException)
+        {
+            // A container the projection holds is not realized this
+            // tick -- a mid-drag rebuild (config reload, session
+            // restore, theme flip) that has not re-arranged yet. The
+            // lift path refuses the gesture on this throw; a tick
+            // mid-flight only drops the frame and keeps its belief, the
+            // same no-crossing outcome the NaN keep below grants a
+            // merely unmeasured unit. The next tick retries after
+            // relayout.
+            return;
+        }
+        // A unit the strip cannot measure keeps its previous belief, the
+        // same keep RemeasureCenters grants an unreadable row: Evaluate
+        // treats NaN as no crossing and the next tick re-feeds it.
+        for (int i = 0; i < mids.Length; i++)
+            mids[i] = !double.IsNaN(mids[i]) || i >= drag.Machine.RowCount
+                ? mids[i]
+                : drag.Machine.CenterOf(i);
+        drag.Machine.UpdateCenters(mids);
+        double mid = mids[dragged];
+        if (double.IsNaN(mid))
+        {
+            // The dragged run has no arranged truth this tick; an
+            // unreadable measurement is no promise, and the anchor holds.
+            return;
+        }
+        var draggedCenter = mid + (drag.LastPointerY - drag.AnchorY);
+
+        // Pre-commit unit frame: the glides and the landing estimate both
+        // read their deltas out of it.
+        var beforeUnits = units;
+        var beforeMids = mids;
+
+        var committed = false;
+        while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
+        {
+            int pivot = crossing.To;
+            if (pivot < 0 || pivot >= units.Count)
+            {
+                drag.Machine.UpdateIndex(pivot);
+                DragTrace($"DRAG unmapped {crossing.From}->{crossing.To}");
+                break;
+            }
+            bool down = crossing.To > crossing.From;
+            var target = down
+                ? TabGroupDragUnits.TargetAfter(units, units[dragged], pivot)
+                : TabGroupDragUnits.TargetBefore(units, pivot);
+            var landing = RunLandingCenter(drag, units, pivot, down);
+            _commitChurn = true;
+            try { _manager.MoveGroup(group, target); }
+            finally { _commitChurn = false; }
+            if (!_manager.Tabs.Contains(drag.Tab)) { CancelDrag("closed"); return; }
+
+            // MoveGroup clamps, so read the truth back: a crossing that
+            // did not land must not re-anchor the run to a slot it never
+            // reached.
+            var nowUnits = TabGroupDragUnits.Build(_manager);
+            int now = RunUnitIndex(nowUnits, group);
+            if (now < 0 || nowUnits[now].First != target)
+            {
+                if (now >= 0) drag.Machine.UpdateIndex(now);
+                DragTrace($"DRAG refused {crossing.From}->{crossing.To}");
+                break;
+            }
+            drag.Machine.UpdateIndex(now);
+            units = nowUnits;
+            dragged = now;
+            RebindFollow(drag, landing);
+            committed = true;
+            DragTrace($"DRAG commit {crossing.From}->{crossing.To}");
+        }
+
+        StartRunGapGlides(beforeUnits, beforeMids, group);
+
+        // Same adoption rule as the tab path, in the anchor's own frame:
+        // a measurement that drifted off the header's assumed center is
+        // layout truth catching up, and is adopted only on a tick with no
+        // commit -- after a commit the stale pre-arrange read is exactly
+        // what the anchor already modeled.
+        if (!committed && drag.Item is not null)
+        {
+            double measured = ElementCenterY(drag.Item);
+            if (!double.IsNaN(measured) && Math.Abs(measured - drag.AssumedCenter) > 0.5)
+            {
+                drag.AssumedCenter = measured;
+                if (drag.Properties is not null) ApplyAnchor(drag, drag.Properties);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Displaced units' visible rows glide to their new slots, exactly as
+    /// the one-row drag glides displaced rows: the delta is measured
+    /// between pre-commit arranged midpoints of the two unit slots, so
+    /// scroll motion cancels out of it. The dragged run's rows are
+    // skipped -- they are the follow's cargo -- and a hidden member
+    /// never glides, because an invisible row animating to a slot it
+    /// does not paint is a ghost.
+    /// </summary>
+    private void StartRunGapGlides(IReadOnlyList<GroupDragUnit> beforeUnits,
+        IReadOnlyList<double> beforeMids, TabGroup dragged)
+    {
+        if (_drag is not { } drag || !drag.MotionOn) return;
+        if (drag.Glide is null || drag.Visual is null) return;
+
+        var afterUnits = TabGroupDragUnits.Build(_manager);
+        CompositionScopedBatch? batch = null;
+        for (int i = 0; i < afterUnits.Count; i++)
+        {
+            var unit = afterUnits[i];
+            if (ReferenceEquals(unit.Group, dragged)) continue;
+            int old = IndexOfUnit(beforeUnits, unit);
+            if (old < 0 || old == i) continue;
+            if (old >= beforeMids.Count || i >= beforeMids.Count) continue;
+            double delta = beforeMids[i] - beforeMids[old];
+            if (double.IsNaN(delta) || Math.Abs(delta) < 0.5) continue;
+
+            batch ??= drag.Visual.Compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+            GlideUnit(unit, delta, batch);
+        }
+        // Completed lands after the glide's 250ms; only units still
+        // riding THIS batch are handed back, so a re-glide inside the
+        // window is not killed by the batch it superseded.
+        if (batch is not null)
+        {
+            var settled = batch;
+            settled.Completed += (_, _) =>
+            {
+                foreach (var entry in _gapMotion.Where(g => ReferenceEquals(g.Value.Batch, settled))
+                             .ToList())
+                    HandBackRow(entry.Key);
+                foreach (var entry in _gapMotionHeaders
+                             .Where(g => ReferenceEquals(g.Value.Batch, settled)).ToList())
+                    HandBackHeader(entry.Key);
+                DragTrace($"DRAG glide ghosts={CountLeakedMotion()}");
+            };
+            settled.End();
+        }
+    }
+
+    private static int IndexOfUnit(IReadOnlyList<GroupDragUnit> units, GroupDragUnit unit)
+    {
+        for (int i = 0; i < units.Count; i++)
+        {
+            if (unit.Group is null
+                ? units[i].Group is null && ReferenceEquals(units[i].Rep, unit.Rep)
+                : ReferenceEquals(units[i].Group, unit.Group))
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// One displaced unit's glide: every visible row of the run shifts by
+    /// the unit delta -- a unit is rigid -- with the header stored under
+    /// its own leak census so the ghost count stays honest.
+    /// </summary>
+    private void GlideUnit(GroupDragUnit unit, double delta, CompositionScopedBatch batch)
+    {
+        if (_drag is not { } drag) return;
+        if (unit.Group is { } group)
+        {
+            if (_headers.TryGetValue(group, out var header))
+                GlideHeader(group, header, drag, delta, batch);
+            foreach (var tab in VisibleRunRowTabs(group))
+                GlideRow(tab, delta, batch);
+        }
+        else if (RowElementOf(unit.Rep) is not null)
+        {
+            GlideRow(unit.Rep, delta, batch);
+        }
+    }
+
+    private List<TabModel> VisibleRunRowTabs(TabGroup group)
+    {
+        var tabs = new List<TabModel>();
+        foreach (var tab in _manager.MembersOf(group))
+        {
+            if (group.IsCollapsed && !ReferenceEquals(tab, _manager.ActiveTab)) continue;
+            if (RowElementOf(tab) is not null) tabs.Add(tab);
+        }
+        return tabs;
+    }
+
+    private void GlideHeader(
+        TabGroup group, FrameworkElement item, DragSession drag, double delta,
+        CompositionScopedBatch batch)
+    {
+        try
+        {
+            var visual = ElementCompositionPreview.GetElementVisual(item);
+            visual.StopAnimation("Translation");
+            ElementCompositionPreview.SetIsTranslationEnabled(item, true);
+            visual.Properties.InsertVector3("Translation", new Vector3(0, (float)-delta, 0));
+            if (drag.Glide is not null)
+                visual.StartAnimation("Translation", drag.Glide);
+            _gapMotionHeaders[group] = (item, batch);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            // Composition refused: this row lands as a cut, like the
+            // motion-off path. State never depends on the glide.
+        }
+    }
+
+    private void HandBackHeader(TabGroup group)
+    {
+        if (!_gapMotionHeaders.Remove(group, out var entry)) return;
+        try
+        {
+            var visual = ElementCompositionPreview.GetElementVisual(entry.Item);
+            visual.StopAnimation("Translation");
+            visual.Properties.InsertVector3("Translation", Vector3.Zero);
+            ElementCompositionPreview.SetIsTranslationEnabled(entry.Item, false);
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            _teardownFailures++;
+        }
     }
 
     /// <summary>
@@ -2435,6 +2986,11 @@ internal sealed partial class VerticalTabStrip : UserControl
     // ghost the trace reports.
     private readonly Dictionary<TabModel, (FrameworkElement Item, CompositionScopedBatch Batch)>
         _gapMotion = new();
+    // The same census for run glides, keyed by the displaced group: a
+    // unit's header glides beside its member rows and needs its own
+    // handback slot, or the ghost count under-counts exactly the run case.
+    private readonly Dictionary<TabGroup, (FrameworkElement Item, CompositionScopedBatch Batch)>
+        _gapMotionHeaders = new();
     private int _teardownFailures;
 
     /// <summary>
@@ -2541,6 +3097,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         foreach (var tab in _gapMotion.Keys.ToList())
             HandBackRow(tab);
         _gapMotion.Clear();
+        foreach (var group in _gapMotionHeaders.Keys.ToList())
+            HandBackHeader(group);
+        _gapMotionHeaders.Clear();
     }
 
     private void StartAutoscroll(DragSession drag)
@@ -2668,6 +3227,16 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (!_manager.Tabs.Contains(drag.Tab) || RowElementOf(drag.Tab) is null)
         {
             CancelDrag("closed");
+            return;
+        }
+
+        // A header press drags a RUN: its tick is EvaluateRunDrag's, and
+        // none of the one-row tick below applies to it -- no slot pairing
+        // (the machine speaks unit midpoints) and no pin work (groups
+        // cannot be pinned, so there is no ghost to promise either).
+        if (drag.Group is not null)
+        {
+            EvaluateRunDrag(drag);
             return;
         }
 
@@ -3052,6 +3621,12 @@ internal sealed partial class VerticalTabStrip : UserControl
                 ElementCompositionPreview.SetIsTranslationEnabled(drag.Item, false);
         }
         catch (Exception ex) when (IsLayoutReadFailure(ex)) { }
+        // The co-drag rows are the dragged visual's cargo: they come home
+        // in the same handback, on every path that reaches here (cut and
+        // settled alike -- a settle's batch never fires for a superseded
+        // session, and a superseding drag on the same header re-arms the
+        // stack itself before this could run).
+        DetachCoDrag(drag);
         UpdateSelectionRow();
     }
 
@@ -3115,7 +3690,8 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// not yet handed back, plus any teardown step that had to be
     /// abandoned. The oracle reads anything above zero as a leak.
     /// </summary>
-    private int CountLeakedMotion() => _gapMotion.Count + _teardownFailures;
+    private int CountLeakedMotion() =>
+        _gapMotion.Count + _gapMotionHeaders.Count + _teardownFailures;
 
     /// <summary>
     /// Windows' animation-effects setting. Constructing UISettings can

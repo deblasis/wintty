@@ -14,6 +14,7 @@ internal sealed partial class VerticalTabNavRow : Grid
     private readonly TextBlock _title;
     private readonly FontIcon _bell;
     private readonly Button _close;
+    private Border? _coDragAccent;
 
     public VerticalTabNavRow(TabModel tab, SolidColorBrush accentBrush, RoutedEventHandler closeClick)
     {
@@ -82,5 +83,32 @@ internal sealed partial class VerticalTabNavRow : Grid
         ToolTipService.SetToolTip(_title, tab.EffectiveTitle);
         _bell.Visibility = tab.BellRinging ? Visibility.Visible : Visibility.Collapsed;
         _close.Tag = tab;
+    }
+
+    /// <summary>
+    /// The 1px left edge a member row wears while its group's header is
+    /// dragging the run: the marker that says this row is cargo, not a
+    /// drag source of its own. An overlay Border rather than a column, so
+    /// the row's layout does not move by a pixel when the gesture starts;
+    /// the accent is presentation, and nothing reads it back.
+    /// </summary>
+    internal void SetCoDragAccent(bool on, Brush accent)
+    {
+        if (on == (_coDragAccent is not null)) return;
+        if (!on)
+        {
+            Children.Remove(_coDragAccent);
+            _coDragAccent = null;
+            return;
+        }
+        _coDragAccent = new Border
+        {
+            Width = 1,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Background = accent,
+            IsHitTestVisible = false,
+        };
+        Children.Add(_coDragAccent);
     }
 }
