@@ -214,6 +214,30 @@ internal static class TabStripProjection
     }
 
     /// <summary>
+    /// The group whose chip renders at visible slot
+    /// <paramref name="visibleIndex"/>, or null when the slot renders a
+    /// tab row or does not exist. The complement of
+    /// <see cref="VisibleIndexToModelIndex"/>'s -1, which its own doc
+    /// promises to route to "the slot's group": that answer says a chip
+    /// took the slot without saying which, and the drop-at-a-run fork
+    /// needs it said. Read through the projection because the members
+    /// were hidden at drop time -- a TabItems index cannot say which run
+    /// took the drop when the strip's own order has already been
+    /// reordered under it.
+    /// </summary>
+    public static TabGroup? VisibleGroupAt(TabManager manager, int visibleIndex)
+    {
+        var slot = 0;
+        foreach (var row in HorizontalRows(manager))
+        {
+            if (slot == visibleIndex)
+                return row is HorizontalRow.Chip { Group: { } group } ? group : null;
+            slot++;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Visible slot of the tab at manager index
     /// <paramref name="modelIndex"/>, or -1 when the index is out of range
     /// or the tab has no slot: a member hidden by a chip'd run renders
