@@ -179,8 +179,11 @@ def required_legs(paths, justfile_legs=None):
 # skip nobody is reminded of is indistinguishable from a pass.
 
 LEDGER_NAME = "deferred.json"
-DEFER_MAX_OUTSTANDING = 5
-DEFER_MAX_AGE_DAYS = 3
+# Batch-sized on 2026-08-29 for the tab-reorder ladder, whose rungs defer by
+# owner protocol and settle in one full ladder at the end of the stack; the
+# old 5/3 defaults refused credit before a stack that size could finish.
+DEFER_MAX_OUTSTANDING = 10
+DEFER_MAX_AGE_DAYS = 10
 DEFER_MIN_REASON_CHARS = 25
 
 
