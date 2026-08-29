@@ -1721,9 +1721,45 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (e.Key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space))
             return;
         e.Handled = true;
+        // The keyboard gesture is a command, not the watched chevron: it
+        // routes through the host to the router, which announces it, and
+        // comes back through ToggleGroupFromCommand for the re-home and
+        // the toggle.
         if (sender is NavigationViewItem { Tag: TabGroup group })
-            ToggleGroup(group);
+            GroupToggleFromCommandRequested?.Invoke(this, (group, !group.IsCollapsed));
     }
+
+    /// <summary>
+    /// Raised when a keyboard gesture (or, in 2b, the header's UIA
+    /// ExpandCollapse pattern) asks a group to toggle. The pointer chevron
+    /// stays direct: the user is watching it land, so it announces nothing
+    /// and needs no router round trip.
+    /// </summary>
+    internal event EventHandler<(TabGroup Group, bool Collapsed)>? GroupToggleFromCommandRequested;
+
+    /// <summary>
+    /// The command entry for collapse/expand: the router lands here (via
+    /// the host) after announcing is guaranteed. Same drag stand-down as
+    /// the chevron, and the explicit target state means a same-state
+    /// command is a no-op rather than an accidental flip. Collapsing can
+    /// hide the row that holds keyboard focus, so the re-home runs only
+    /// on the collapse arm -- expanding hides nothing.
+    /// </summary>
+    internal void ToggleGroupFromCommand(TabGroup group, bool collapsed)
+    {
+        if (_drag is not null) return;
+        if (group.IsCollapsed == collapsed) return;
+        if (collapsed) RestoreFocusUnder(group);
+        ToggleGroup(group);
+    }
+
+    /// <summary>
+    /// Resolve the TabGroup for a hit-test target: the header row's Tag.
+    /// Body rows and pinned rows carry TabModel on the same slot, so this
+    /// answers null for them and the host falls through to the tab menu.
+    /// </summary>
+    internal TabGroup? GroupFromElement(DependencyObject? source) =>
+        VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source)?.Tag as TabGroup;
 
     /// <summary>
     /// The first body row a keyboard crossing can land on: a visible

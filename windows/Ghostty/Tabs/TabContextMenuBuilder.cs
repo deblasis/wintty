@@ -34,6 +34,9 @@ internal static class TabContextMenuBuilder
         Action toggleTabLayout,
         Action<TabModel, bool> requestPin,
         Action<TabModel> requestDuplicate,
+        Action<TabModel> requestNewGroupWithTab,
+        Action<TabModel, TabGroup> requestAddToGroup,
+        Action<TabModel> requestRemoveFromGroup,
         bool isVertical = false,
         Func<SnapZoneSource>? getSnapSource = null,
         Action<TabModel, SnapZone>? detachWithZone = null)
@@ -86,6 +89,47 @@ internal static class TabContextMenuBuilder
         };
         pin.Click += (_, _) => requestPin(tab, !tab.IsPinned);
         flyout.Items.Add(pin);
+
+        // The group block rides build-time state only, unlike the pin
+        // label's Opening pass: the hosts build this flyout fresh per
+        // right-click, membership cannot move inside one interaction, and
+        // a click that DID move it closes the menu.
+        if (!tab.IsPinned)
+        {
+            if (tab.Group is null)
+            {
+                var newGroup = new MenuFlyoutItem { Text = "New Group With Tab" };
+                newGroup.Click += (_, _) => requestNewGroupWithTab(tab);
+                flyout.Items.Add(newGroup);
+            }
+            else
+            {
+                var removeFromGroup = new MenuFlyoutItem { Text = "Remove from Group" };
+                removeFromGroup.Click += (_, _) => requestRemoveFromGroup(tab);
+                flyout.Items.Add(removeFromGroup);
+            }
+
+            // One run per registered group, the tab's own excluded: joining
+            // it again is the no-op the router refuses, so offering it
+            // would menu-speak a dead entry. No groups besides the tab's
+            // own means nothing to offer and the submenu stays hidden.
+            var others = new List<TabGroup>();
+            foreach (var g in manager.Groups)
+                if (!ReferenceEquals(g, tab.Group))
+                    others.Add(g);
+            if (others.Count > 0)
+            {
+                var addToGroup = new MenuFlyoutSubItem { Text = "Add to Group" };
+                foreach (var g in others)
+                {
+                    var target = g;
+                    var join = new MenuFlyoutItem { Text = g.Title };
+                    join.Click += (_, _) => requestAddToGroup(tab, target);
+                    addToGroup.Items.Add(join);
+                }
+                flyout.Items.Add(addToGroup);
+            }
+        }
 
         // Duplicate is a clone of THIS tab -- same shells, same split
         // arrangement, each pane respawned at its source pane's
@@ -179,6 +223,52 @@ internal static class TabContextMenuBuilder
             ShowColorPicker(target, tab);
         };
         flyout.Items.Add(colorPick);
+
+        return flyout;
+    }
+
+    /// <summary>
+    /// The header row's right-click menu (vertical only; horizontal grows
+    /// a chip equivalent in PR 6). Collapse routes through the router so
+    /// the command announces and the strip re-homes focus under the folding
+    /// run; Close Group greys out exactly when the group's members are all
+    /// the window's tabs, the same rule as Move Tab to New Window. Built
+    /// fresh per right-click, so the collapse label reads the live bit --
+    /// but the label still re-evaluates on Opening, because the header can
+    /// be toggled (chevron) between build and open.
+    /// </summary>
+    public static MenuFlyout BuildGroupMenu(
+        TabManager manager,
+        TabGroup group,
+        Action<TabGroup, bool> requestCollapseGroup,
+        Action<TabGroup> requestDissolveGroup,
+        Action<TabGroup> requestCloseGroup)
+    {
+        var flyout = new MenuFlyout();
+
+        var collapse = new MenuFlyoutItem
+        {
+            Text = group.IsCollapsed ? "Expand Group" : "Collapse Group",
+        };
+        collapse.Click += (_, _) => requestCollapseGroup(group, !group.IsCollapsed);
+        flyout.Items.Add(collapse);
+
+        flyout.Items.Add(new MenuFlyoutSeparator());
+
+        var dissolve = new MenuFlyoutItem { Text = "Dissolve Group" };
+        dissolve.Click += (_, _) => requestDissolveGroup(group);
+        flyout.Items.Add(dissolve);
+
+        var close = new MenuFlyoutItem { Text = "Close Group" };
+        close.Click += (_, _) => requestCloseGroup(group);
+        flyout.Items.Add(close);
+
+        flyout.Opening += (_, _) =>
+        {
+            collapse.Text = group.IsCollapsed ? "Expand Group" : "Collapse Group";
+            close.IsEnabled = !manager.GroupHoldsEveryTab(group);
+        };
+        close.IsEnabled = !manager.GroupHoldsEveryTab(group);
 
         return flyout;
     }

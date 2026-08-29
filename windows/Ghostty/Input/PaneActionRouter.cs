@@ -406,6 +406,148 @@ internal sealed class PaneActionRouter
         TabCloseRequestedFromKeyboard?.Invoke(this, EventArgs.Empty);
     }
 
+    // -----------------------------------------------------------------
+    // Group commands (5b-2a). One dispatch discipline with pins: every
+    // source (context menu, the keyboard chevron, later the palette)
+    // routes through a Request, each Request guards + mutates + raises,
+    // and the WINDOW announces. The manager op alone stays silent, so a
+    // drag-join or a session restore narrates nothing.
+    // -----------------------------------------------------------------
+
+    /// <summary>What a <see cref="GroupChangedFromCommand"/> payload did.</summary>
+    internal enum GroupCommandKind
+    {
+        Created,
+        Joined,
+        Removed,
+        Dissolved,
+        Collapsed,
+    }
+
+    /// <summary>
+    /// One command's announce data. <paramref name="Tab"/> is the affected
+    /// tab when the command is tab-shaped (null for dissolve/collapse, and
+    /// the announcement source falls back to the focused element).
+    /// <paramref name="MemberCount"/> is PRE-op on purpose: it feeds
+    /// Dissolved, and after the op the group owns no members to count.
+    /// </summary>
+    internal readonly record struct GroupCommandData(
+        GroupCommandKind Kind,
+        TabGroup Group,
+        TabModel? Tab,
+        int MemberCount);
+
+    /// <summary>
+    /// Raised after a commanded group change has landed, for the window to
+    /// announce. Pointer drags and session restores perform the same ops
+    /// through the manager and never pass through here, which is exactly
+    /// the dispatch-path discipline.
+    /// </summary>
+    public event EventHandler<GroupCommandData>? GroupChangedFromCommand;
+
+    /// <summary>
+    /// Raised when a command asks a group to collapse or expand. Collapse
+    /// re-homes keyboard focus under the folding group, and only the strip
+    /// knows where focus sits, so the window forwards this to the vertical
+    /// host and the op runs through the strip's command entry -- the same
+    /// toggle the chevron uses, stand-down and fence included.
+    /// </summary>
+    public event EventHandler<(TabGroup Group, bool Collapsed)>? GroupCollapseRequested;
+
+    /// <summary>
+    /// Raised when a command asks a group to close. The close runs
+    /// shell-side -- each member goes through the per-tab confirmation
+    /// path, which needs a XamlRoot the manager and this router lack.
+    /// </summary>
+    public event EventHandler<TabGroup>? GroupCloseRequested;
+
+    /// <summary>
+    /// New Group With Tab: a fresh group whose sole member is the given
+    /// tab. Refused silently for a pinned tab (the prefix outranks
+    /// membership, and the manager returns null), so nothing announces.
+    /// </summary>
+    public void RequestNewGroupWithTab(TabModel tab)
+    {
+        if (_tabs.IndexOf(tab) < 0) return;
+        if (_tabs.CreateGroup(tab) is not { } group) return;
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Created, group, tab, 1));
+    }
+
+    /// <summary>
+    /// Add one tab to a group. A tab that is already a member is a no-op
+    /// that announces nothing -- narrating a membership that did not
+    /// change is a lie, and re-joining would also auto-expand a collapsed
+    /// group the user folded on purpose.
+    /// </summary>
+    public void RequestAddToGroup(TabModel tab, TabGroup group)
+    {
+        if (_tabs.IndexOf(tab) < 0) return;
+        if (!_tabs.Groups.Contains(group)) return;
+        // JoinGroup silently skips pinned members: a refusal must not narrate.
+        if (tab.IsPinned) return;
+        if (ReferenceEquals(tab.Group, group)) return;
+        _tabs.JoinGroup(tab, group);
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Joined, group, tab, 0));
+    }
+
+    /// <summary>
+    /// Remove one tab from its group. The announcement names the PRE-op
+    /// group: after the op the tab answers "no group" and the text would
+    /// name nothing.
+    /// </summary>
+    public void RequestRemoveFromGroup(TabModel tab)
+    {
+        if (tab.Group is not { } group) return;
+        if (_tabs.IndexOf(tab) < 0) return;
+        _tabs.Ungroup(tab);
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Removed, group, tab, 0));
+    }
+
+    /// <summary>
+    /// Dissolve a group: every member ungroups in place. A group the
+    /// manager no longer registers is a no-op, so nothing announces --
+    /// dissolving twice would narrate the second one too.
+    /// </summary>
+    public void RequestDissolveGroup(TabGroup group)
+    {
+        if (!_tabs.Groups.Contains(group)) return;
+        var count = _tabs.MembersOf(group).Count;
+        _tabs.DissolveGroup(group);
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Dissolved, group, null, count));
+    }
+
+    /// <summary>
+    /// Collapse or expand a group. A command naming the state the group
+    /// already has is a no-op that announces nothing, exactly like
+    /// <see cref="RequestPin"/>. Execution forwards to the strip (focus
+    /// re-homing lives there); the announce rides behind it, so the state
+    /// read at announce time is the landed one -- and a stood-down
+    /// forward (drag in flight) leaves that bit untouched, so it refuses
+    /// to announce an op that did not happen.
+    /// </summary>
+    public void RequestCollapseGroup(TabGroup group, bool collapsed)
+    {
+        if (!_tabs.Groups.Contains(group)) return;
+        if (group.IsCollapsed == collapsed) return;
+        GroupCollapseRequested?.Invoke(this, (group, collapsed));
+        // The forward can be a no-op: the strip stands down under a drag.
+        // The chain is synchronous on the UI thread, so the landed bit is
+        // post-forward truth.
+        if (group.IsCollapsed != collapsed) return;
+        GroupChangedFromCommand?.Invoke(this, new(GroupCommandKind.Collapsed, group, _tabs.ActiveTab, 0));
+    }
+
+    /// <summary>
+    /// Close every member of a group. The guard is registration, not
+    /// emptiness: a group with no members cannot be right-clicked, and the
+    /// shell-side loop stops on its own once the members run out.
+    /// </summary>
+    public void RequestCloseGroup(TabGroup group)
+    {
+        if (!_tabs.Groups.Contains(group)) return;
+        GroupCloseRequested?.Invoke(this, group);
+    }
+
     /// <summary>
     /// Open the profile at 1-based <paramref name="slot"/> in the live
     /// registry snapshot. Silent no-op (no exception) when the slot is out

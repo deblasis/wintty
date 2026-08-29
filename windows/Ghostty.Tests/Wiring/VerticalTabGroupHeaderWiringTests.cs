@@ -102,9 +102,11 @@ public class VerticalTabGroupHeaderWiringTests
     }
 
     /// <summary>
-    /// Pointer and keyboard both land on the one toggle, and the keyboard
-    /// claims the key BEFORE MUXC's list sees it -- or the same Enter also
-    /// arrives as ItemInvoked and toggles the group twice.
+    /// Both gestures land on the one toggle, by different roads: the
+    /// pointer chevron toggles directly (the user is watching it land), the
+    /// keyboard claims the key BEFORE MUXC's list sees it -- or the same
+    /// Enter also arrives as ItemInvoked and toggles twice -- and routes
+    /// through the router as a command that announces.
     /// </summary>
     [Fact]
     public void BothGestures_FeedTheOneToggle_AndTheKeyboardClaimsTheKeyFirst()
@@ -130,9 +132,18 @@ public class VerticalTabGroupHeaderWiringTests
 
         var handled = Assign(key, "e.Handled");
         Assert.Equal("true", handled.Right.ToString());
-        Assert.True(handled.Span.Start < key.Calls("ToggleGroup").Single().Span.Start,
-            "the key must be claimed before the toggle, or MUXC re-fires it as " +
+        Assert.True(handled.Span.Start < key.Calls("GroupToggleFromCommandRequested?.Invoke").Single().Span.Start,
+            "the key must be claimed before the route, or MUXC re-fires it as " +
             "ItemInvoked and collapses the group twice");
+        Assert.Empty(key.Calls("ToggleGroup"));
+
+        // The command comes back to the one toggle: same-state guard, focus
+        // re-home under the folding group, then the chevron's own toggle.
+        var command = strip.Method("ToggleGroupFromCommand");
+        Assert.Equal("_drag is not null",
+            command.DescendantNodes().OfType<IfStatementSyntax>().First().Condition.ToString());
+        Assert.Equal("group.IsCollapsed == collapsed",
+            command.DescendantNodes().OfType<IfStatementSyntax>().ToList()[1].Condition.ToString());
     }
 
     /// <summary>

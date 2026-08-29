@@ -85,4 +85,50 @@ internal static class TabAccessibleText
     /// </summary>
     internal static string BellAnnouncement(TabModel tab)
         => $"Bell in {Name(tab)}";
+
+    // --- Group commands (5b-2a) ---
+    //
+    // Group ops announce from the dispatch path, exactly like pins: the
+    // router raises only for commands, so the same manager op stays silent
+    // when a drag or a session restore performs it. Every text carries the
+    // group title -- the title is the only handle a listener has on a
+    // group, which owns no focus and no row of its own to read.
+
+    /// <summary>Spoken when a command turns one tab into a new group.</summary>
+    internal static string GroupCreatedAnnouncement(TabModel tab, TabGroup group)
+        => $"New group {group.Title}, with {Name(tab)}";
+
+    /// <summary>Spoken when a command joins one tab to an existing group.</summary>
+    internal static string TabJoinedGroupAnnouncement(TabModel tab, TabGroup group)
+        => $"{Name(tab)} joined group {group.Title}";
+
+    /// <summary>
+    /// Spoken when a command removes one tab from its group. The group is
+    /// the pre-op membership: once the command lands, the tab answers
+    /// "no group", which would make the announcement name nothing.
+    /// </summary>
+    internal static string TabRemovedFromGroupAnnouncement(TabModel tab, TabGroup group)
+        => $"{Name(tab)} removed from group {group.Title}";
+
+    /// <summary>
+    /// Spoken when a command dissolves a group. The count is pre-op:
+    /// after the dissolve the group owns no members to count, and "how
+    /// many tabs just ungrouped" is the fact a listener cannot see.
+    /// </summary>
+    internal static string GroupDissolvedAnnouncement(TabGroup group, int memberCount)
+        => $"Group {group.Title} dissolved, {memberCount} {Tabs(memberCount)} ungrouped";
+
+    /// <summary>
+    /// Spoken when a command collapses or expands a group. The bit is read
+    /// live: the command has landed by the time anything announces, and a
+    /// pre-op snapshot would narrate the opposite of what happened.
+    /// </summary>
+    internal static string GroupCollapseAnnouncement(TabGroup group)
+        => group.IsCollapsed ? $"Group {group.Title} collapsed" : $"Group {group.Title} expanded";
+
+    /// <summary>Spoken when a Close Group command starts.</summary>
+    internal static string GroupCloseAnnouncement(TabGroup group, int memberCount)
+        => $"Closing group {group.Title}, {memberCount} {Tabs(memberCount)}";
+
+    private static string Tabs(int count) => count == 1 ? "tab" : "tabs";
 }
