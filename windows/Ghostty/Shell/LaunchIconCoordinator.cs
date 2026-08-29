@@ -26,11 +26,10 @@ namespace Ghostty.Shell;
 /// produced content, so a surface whose shell never writes anything
 /// will never raise it. Hence the grace period: once composition has
 /// happened, the splash waits a bounded time for the surface and then
-/// gives up rather than outstaying its welcome. The bound is shorter
-/// than the coldest compose-to-present gap on record, so a start that
-/// slow now shows the last of the gap through; the trade is deliberate,
-/// because the grace is spent only by a surface with nothing to say and
-/// a splash held over a ready app is its own defect.</para>
+/// gives up rather than outstaying its welcome. That is the only case
+/// the bound is reached in, so shortening it risks only a surface with
+/// nothing to say, and a splash held over an app that is ready to show
+/// itself is its own defect.</para>
 ///
 /// <para>Lifted out of MainWindow for the same reason as
 /// <see cref="LayoutCoordinator"/>: the window is a composition root,
@@ -40,19 +39,16 @@ internal sealed class LaunchIconCoordinator
 {
     /// <summary>
     /// How long to wait for the surface to present after WinUI has
-    /// composed. Sized to hold over most of the cold compose-to-present
-    /// gap without outstaying a warm start, where the surface has content
-    /// almost immediately and the splash is the only thing left to
-    /// dismiss; past this the splash comes down regardless, on the
+    /// composed. Past this the splash comes down regardless, on the
     /// assumption the surface has nothing to draw.
     /// </summary>
     /// <remarks>
-    /// Only a surface that never raises <c>first_render</c> waits the whole
-    /// grace out. A shell that writes anything dismisses the splash the
-    /// moment its first frame presents, so the cap binds on the empty
-    /// surface and on nothing else -- which is why it can be shorter than
-    /// the coldest gap ever observed and still not cost a normal start its
-    /// coverage.
+    /// The bound is reached in exactly one case: composition happened and
+    /// <c>first_render</c> never did, because the surface has nothing to
+    /// draw. A shell that writes anything dismisses the splash the moment
+    /// its first frame presents, well inside this, so the shorter value
+    /// costs a content-less surface the last stretch of its wait and costs
+    /// a normal start nothing at all.
     /// </remarks>
     private const int SurfaceGraceMs = 1500;
 

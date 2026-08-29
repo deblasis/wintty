@@ -833,21 +833,25 @@ public partial class App : Application
         // out and opened its own window, which is the whole thing
         // windows-single-instance is for.
         //
-        // Not earlier either. It used to be a correctness constraint: the
-        // drop inside OpenWindowFromLaunch turned a listener that came up
-        // too soon into a discarded launch, which is worse than the visible
-        // failure of a secondary that cannot connect and opens its own
-        // window. That drop is a deferral now, so an earlier listener would
-        // be safe; nothing wants it earlier, because every expensive step is
-        // below this line and a request served here still waits on the same
-        // window the splash is covering.
+        // Here, and not earlier, because every one of the four things
+        // OpenWindowFromLaunch needs is already built above this line. That
+        // stopped being a safety constraint when the drop inside it became a
+        // deferral: a request reaching the server before its dependencies
+        // existed used to be discarded, and now waits. So moving this call
+        // above the dependency block would be safe, and nothing wants it
+        // today -- everything expensive is below this line, and a request
+        // served here still waits on the same window the splash is covering.
+        // The wiring guard pins the drain coming after this call, which is
+        // what would keep a move of that kind honest rather than accidental.
         StartSingleInstanceServer();
 
-        // Replay whatever arrived while the dependencies above were still
-        // being built. Today the server does not start until they exist, so
-        // this drains an empty queue; it is here rather than folded into the
-        // null check in OpenWindowFromLaunch because there has to be one
-        // readiness edge and it has to be findable.
+        // Replay whatever the queue is holding. Today it holds nothing: the
+        // server does not start until every dependency exists, so no request
+        // can be waiting by the time this runs. It is still this method that
+        // latches readiness, because there has to be one edge and it has to
+        // be findable, and because that is what makes the branch in
+        // OpenWindowFromLaunch a net for a future earlier listener rather
+        // than a second decision site.
         DrainDeferredLaunches();
 
         // App-level: High Contrast is a system-wide state and config is
@@ -1108,22 +1112,33 @@ public partial class App : Application
         {
             _singleInstanceServer = new Ghostty.Hosting.SingleInstanceServer(
                 election.Names.Pipe,
-                req => _uiDispatcher?.TryEnqueue(() =>
+                req =>
                 {
-                    try
+                    // TryEnqueue answers false on a queue that is shutting
+                    // down, and reads null when the dispatcher is already
+                    // gone. Either way the request has nowhere to go, and
+                    // this is the only place that would ever know: the
+                    // secondary has already exited believing it was served.
+                    var queued = _uiDispatcher?.TryEnqueue(() =>
                     {
-                        OpenWindowFromLaunch(req);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Enqueued from a pipe thread onto the UI thread, so
-                        // nothing above catches it: an escape here is an
-                        // unhandled UI-thread exception and the process goes
-                        // down. Losing one forwarded launch is the cheaper
-                        // failure.
-                        Ghostty.Logging.StaticLoggers.App.LogInboundLaunchFailed(ex);
-                    }
-                }),
+                        try
+                        {
+                            OpenWindowFromLaunch(req);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Enqueued from a pipe thread onto the UI thread, so
+                            // nothing above catches it: an escape here is an
+                            // unhandled UI-thread exception and the process goes
+                            // down. Losing one forwarded launch is the cheaper
+                            // failure.
+                            Ghostty.Logging.StaticLoggers.App.LogInboundLaunchFailed(ex);
+                        }
+                    }) == true;
+
+                    if (!queued)
+                        Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDropped();
+                },
                 _loggerFactory.CreateLogger<Ghostty.Hosting.SingleInstanceServer>());
             _singleInstanceServer.Start();
         }
@@ -1148,12 +1163,15 @@ public partial class App : Application
         if (_configService is null || _bootstrapHost is null
             || _lifetimeSupervisor is null || _loggerFactory is null)
         {
-            // Reachable once the server listens before OnLaunched has finished
-            // building these, and after teardown has begun on a half-disposed
-            // app whose pipe callback is still enqueued. The secondary has
-            // already exited believing it was served, so what happens to the
-            // request here decides whether the user gets the window they asked
-            // for or nothing at all.
+            // Reachable today only in teardown, on a half-disposed app whose
+            // pipe callback is still enqueued: the forwarding server does not
+            // start until every one of these exists, so nothing reaches here
+            // during startup. Written as a net rather than an assertion
+            // because the server is free to move above the dependency block,
+            // and the day it does, a request arriving early waits here instead
+            // of vanishing. The secondary has already exited believing it was
+            // served either way, so this branch decides whether the user gets
+            // the window they asked for or nothing at all.
             if (!_deferredLaunches.Defer(req, out var evicted))
             {
                 // Only the post-readiness half of that: the edge in OnLaunched
@@ -1204,8 +1222,22 @@ public partial class App : Application
     /// </remarks>
     private void DrainDeferredLaunches()
     {
+        // MarkReady has already emptied the queue by the time the loop runs,
+        // so a throw out of one replay would take every launch behind it and
+        // unwind OnLaunched to the fatal path. Same contract as the pipe
+        // callback above: one launch failing costs that launch, not the
+        // process and not the launches queued behind it.
         foreach (var req in _deferredLaunches.MarkReady())
-            OpenWindowFromLaunch(req);
+        {
+            try
+            {
+                OpenWindowFromLaunch(req);
+            }
+            catch (Exception ex)
+            {
+                Ghostty.Logging.StaticLoggers.App.LogInboundLaunchFailed(ex);
+            }
+        }
     }
 
     // Toast activation ---------------------------------------------------

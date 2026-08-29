@@ -21,7 +21,10 @@ namespace Ghostty.Tests.Wiring;
 /// </summary>
 public class LaunchDeferralWiringTests
 {
-    private static ShellSource OnLaunched() => ShellSource.Load("App.xaml.cs").Method("OnLaunched");
+    // MethodDeclarationSyntax, not ShellSource: Method() unwraps to the node,
+    // and every assertion below walks its body rather than the file.
+    private static MethodDeclarationSyntax OnLaunched()
+        => ShellSource.Load("App.xaml.cs").Method("OnLaunched");
 
     /// <summary>
     /// There has to be exactly one readiness edge, and it has to come after
