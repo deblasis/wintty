@@ -248,7 +248,11 @@ public sealed class TabStripSyncWiringTests
     {
         var rebuild = ShellSource.Load(VerticalSource).Method("RebuildAllItems");
 
-        Assert.Single(rebuild.Calls("TabStripProjection.Rows"));
+        // Group-aware since the headers rung: the flat Rows list cannot
+        // name a header, and a rebuild that walked it would drop every
+        // group's header row from the strip.
+        Assert.Single(rebuild.Calls("TabStripProjection.GroupedRows"));
+        Assert.Empty(rebuild.Calls("TabStripProjection.Rows"));
     }
 
     // --- Unwired events: no detach path, no re-entrant validation ---

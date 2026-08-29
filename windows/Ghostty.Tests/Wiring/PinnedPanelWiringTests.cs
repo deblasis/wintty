@@ -140,27 +140,36 @@ public class PinnedPanelWiringTests
     /// longer be the order authority for the body. The reconcile applies
     /// the projection to both containers, repairs membership skew with a
     /// rebuild, fences the MUXC list it reorders, and refreshes the shelf.
+    /// Group headers join the projection's output: the desired sequence and
+    /// the visible set are one GroupedRows pass.
     /// </summary>
     [Fact]
     public void Order_ComesFromTheProjection_AndSkewRebuilds()
     {
         var reconcile = Strip().Method("ReconcileRowOrder");
 
-        Assert.Single(reconcile.Calls("TabStripProjection.Rows"));
+        // One consult, and it is the group-aware walk: a header projected
+        // but not rendered, or a hidden member the strip still shows, is
+        // exactly the drift this walk exists to catch.
+        Assert.Single(reconcile.Calls("TabStripProjection.GroupedRows"));
+        Assert.Empty(reconcile.Calls("TabStripProjection.Rows"));
         Assert.Single(reconcile.Calls("UpdatePinnedShelfChrome"));
         Assert.Single(reconcile.Calls("RebuildAllItems"));
 
-        // Skew is checked against BOTH registries. A condition that names
-        // only one of them passes a body container that drifted (or a panel
-        // one) straight into an indexer miss or a silently wrong order.
+        // Skew is checked against BOTH registries, plus the rows the
+        // projection named but the strip holds no element for -- counts can
+        // agree while a row is missing on both sides, and only the walk's
+        // miss flag sees that. Dropping any of these passes a drifted
+        // container straight into an indexer miss or a wrong order.
         var skew = reconcile.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.DescendantNodes().OfType<InvocationExpressionSyntax>()
                              .Any(c => c.CalleeText() == "RebuildAllItems"));
         var condition = skew.Condition.ToString();
-        Assert.Contains("_pinnedRows.Count != pinned.Count", condition);
-        Assert.Contains("_items.Count != body.Count", condition);
-        Assert.Contains("_pinnedPanel.Children.Count != pinned.Count", condition);
-        Assert.Contains("NavView.MenuItems.Count != body.Count", condition);
+        Assert.Contains("missing", condition);
+        Assert.Contains("_pinnedRows.Count != pinCount", condition);
+        Assert.Contains("_items.Count != _manager.Tabs.Count - pinCount", condition);
+        Assert.Contains("_pinnedPanel.Children.Count != pinCount", condition);
+        Assert.Contains("NavView.MenuItems.Count != desired.Count", condition);
 
         // The MUXC list is fenced while the reconcile mutates it: reordering
         // under a live selection raises SelectionChanged for a row the user

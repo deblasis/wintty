@@ -614,6 +614,39 @@ public class TabManagerPinGroupTests
         Assert.Same(mgr.Tabs[2], mgr.ActiveTab);
     }
 
+    // --- Group change notification ---
+
+    /// <summary>
+    /// The group is the change carrier for its own chrome: the registry
+    /// has no collection event and membership rides TabModel.Group, so a
+    /// strip learning a header's label, swatch, or collapse bit changed
+    /// has nothing else to listen to. Same-value silence is half the
+    /// contract: a raising no-op write churns the strip for nothing.
+    /// </summary>
+    [Fact]
+    public void Group_property_changes_raise_and_same_value_writes_do_not()
+    {
+        var group = new TabGroup();
+        var raised = new List<string>();
+        group.PropertyChanged += (_, e) => raised.Add(e.PropertyName ?? "");
+
+        group.Title = "build";
+        group.Color = TabColor.Red;
+        group.IsCollapsed = true;
+        Assert.Equal(
+            new[] { nameof(TabGroup.Title), nameof(TabGroup.Color), nameof(TabGroup.IsCollapsed) },
+            raised);
+
+        group.Title = "build";
+        group.Color = TabColor.Red;
+        group.IsCollapsed = true;
+        Assert.Equal(3, raised.Count);
+
+        // Membership rides TabModel.Group, never the group.
+        new TabModel(new FakePaneHost()).Group = group;
+        Assert.Equal(3, raised.Count);
+    }
+
     // --- MoveGroup / MoveRun rotations ---
 
     [Fact]
