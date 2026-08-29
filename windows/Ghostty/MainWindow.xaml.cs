@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -864,6 +865,76 @@ public sealed partial class MainWindow : Window
                 BellAnnouncementSource(e.Tab),
                 TabAccessibleText.PinAnnouncement(e.Tab, e.Pinned),
                 "tab-pin");
+
+        // Group commands announce from the same dispatch path: the router
+        // raises only for commands, so drags and session restores, which
+        // perform the identical manager ops, narrate nothing. The collapse
+        // announcement runs AFTER the forward below has landed the state,
+        // so the text reads the new bit, not the old one.
+        _router.GroupChangedFromCommand += (_, e) =>
+        {
+            var text = e.Kind switch
+            {
+                PaneActionRouter.GroupCommandKind.Created =>
+                    TabAccessibleText.GroupCreatedAnnouncement(e.Tab!, e.Group),
+                PaneActionRouter.GroupCommandKind.Joined =>
+                    TabAccessibleText.TabJoinedGroupAnnouncement(e.Tab!, e.Group),
+                PaneActionRouter.GroupCommandKind.Removed =>
+                    TabAccessibleText.TabRemovedFromGroupAnnouncement(e.Tab!, e.Group),
+                PaneActionRouter.GroupCommandKind.Dissolved =>
+                    TabAccessibleText.GroupDissolvedAnnouncement(e.Group, e.MemberCount),
+                PaneActionRouter.GroupCommandKind.Collapsed =>
+                    TabAccessibleText.GroupCollapseAnnouncement(e.Group),
+                // A kind added later must pick its announcement arm: the
+                // trap fails the announce loudly rather than narrating a
+                // collapse that did not happen. (A default-less enum
+                // switch warns CS8524 even when fully covered.)
+                _ => throw new UnreachableException("unnamed GroupCommandKind"),
+            };
+            // Dissolve is group-level, so it carries no tab: ride the
+            // focused element and fall back to the active tab's item, or
+            // Announce refuses the null and the op narrates nothing.
+            UiaAnnouncer.Announce(
+                e.Tab is null
+                    ? (FocusManager.GetFocusedElement(Content.XamlRoot) as FrameworkElement)
+                        ?? (_tabManager.ActiveTab is { } active ? _tabHost.TabElement(active) : null)
+                    : BellAnnouncementSource(e.Tab),
+                text,
+                "tab-group");
+        };
+
+        // Collapse must re-home keyboard focus under the folding run, and
+        // only the vertical strip knows where focus sits -- so the command
+        // forwards to it and comes back through the strip's command entry.
+        _router.GroupCollapseRequested += (_, e) =>
+        {
+            if (_tabHost is VerticalTabHost vertical)
+                vertical.CollapseGroupFromCommand(e.Group, e.Collapsed);
+        };
+
+        // Close Group is sequential through the per-tab confirmation path
+        // (it needs the XamlRoot the router lacks), announced once for the
+        // group-sized intent rather than once per tab.
+        _router.GroupCloseRequested += async (_, group) =>
+        {
+            var members = _tabManager.MembersOf(group);
+            if (members.Count == 0) return;
+            UiaAnnouncer.Announce(
+                BellAnnouncementSource(_tabManager.ActiveTab ?? members[0]),
+                TabAccessibleText.GroupCloseAnnouncement(group, members.Count),
+                "tab-group-close");
+            while (_tabManager.Groups.Contains(group))
+            {
+                members = _tabManager.MembersOf(group);
+                if (members.Count == 0) break;
+                var first = members[0];
+                await _tabHost.RequestCloseTabAsync(first);
+                // A declined confirmation leaves the tab in place; closing
+                // it again next pass would loop forever, so the run stops.
+                members = _tabManager.MembersOf(group);
+                if (members.Count > 0 && ReferenceEquals(members[0], first)) break;
+            }
+        };
 
         AppWindow.Changed += (_, args) =>
         {
