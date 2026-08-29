@@ -127,6 +127,30 @@ public sealed class TabRunLabelWiringTests
             "_strip.DragVisualEnded -= value", remove.ToString());
     }
 
+    /// <summary>
+    /// The start half of the pair carries the same swallowed-accessor
+    /// hole as the end half: the window's subscription compiles against
+    /// the event's name, so a no-op add accessor compiles clean, keeps
+    /// every other link here green, and decapitates the chain -- the
+    /// label would stay up across every vertical drag. Same pin as the
+    /// end pair, same reason: the bodies, not the shape.
+    /// </summary>
+    [Fact]
+    public void The_drag_start_passthrough_IsPairedLikeItsEnd()
+    {
+        var passthrough = ShellSource.Load(VerticalHostSource).Root
+            .DescendantNodes().OfType<EventDeclarationSyntax>()
+            .First(e => e.Identifier.ValueText == "DragVisualStarted");
+        var add = passthrough.AccessorList!.Accessors
+            .First(a => a.Keyword.ValueText == "add");
+        var remove = passthrough.AccessorList!.Accessors
+            .First(a => a.Keyword.ValueText == "remove");
+        Assert.Contains(
+            "_strip.DragVisualStarted += value", add.ToString());
+        Assert.Contains(
+            "_strip.DragVisualStarted -= value", remove.ToString());
+    }
+
     [Fact]
     public void The_label_is_hit_test_sugar_only()
     {

@@ -180,11 +180,17 @@ public class PinnedRowFocusWiringTests
 
         var pinned = strip.Method("AddPinnedRow");
         var pinnedWiring = pinned.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() is "row.KeyDown" or "row.GotFocus" or "row.LostFocus")
+            .Where(a => a.Left.ToString() is "row.KeyDown" or "row.GotFocus"
+                or "row.LostFocus" or "row.PointerEntered" or "row.PointerExited")
             .Select(a => a.Left.ToString())
             .ToList();
         Assert.Equal(
-            new[] { "row.KeyDown", "row.GotFocus", "row.LostFocus" }, pinnedWiring);
+            new[]
+            {
+                "row.KeyDown", "row.GotFocus", "row.LostFocus",
+                "row.PointerEntered", "row.PointerExited",
+            },
+            pinnedWiring);
 
         var bodyItem = strip.Method("AddBodyRow");
         var bodyWiring = bodyItem.DescendantNodes().OfType<AssignmentExpressionSyntax>()
@@ -192,12 +198,13 @@ public class PinnedRowFocusWiringTests
             .ToList();
         Assert.Single(bodyWiring);
 
-        // The focus visual is the pane's hover-fill resource, resolved
-        // through the strip's theme resources -- not a second colour
-        // invented for focus. Pinned rows paint no hover state today, so
-        // this fill is focus's alone.
+        // The fill is the pane's hover resource, resolved through the
+        // strip's theme resources -- not a second colour invented for
+        // focus or for hover. Both states route through the one painter,
+        // so neither can erase the other.
         var visual = strip.Method("OnPinnedRowFocusVisual");
-        Assert.Single(visual.Calls("ResolveThemeBrush"));
+        Assert.Single(visual.Calls("PaintShelfRow"));
+        Assert.Single(strip.Method("PaintShelfRow").Calls("ResolveThemeBrush"));
     }
 
     /// <summary>
