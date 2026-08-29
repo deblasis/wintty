@@ -252,6 +252,342 @@ public sealed class TabStripSyncWiringTests
             + "the manager's active tab.");
     }
 
+    // --- The horizontal chip machinery ---
+
+    [Fact]
+    public void The_chip_expand_fence_holds_the_selection_event_shut_until_the_strip_settles()
+    {
+        var handler = ShellSource.Load(TabHostSource).Method("OnSelectionChanged");
+        var chipArm = ChipSelectionArm(handler);
+
+        // (1) The handler opens with the suppress guard. Everything the arm
+        // does below runs behind a fence that is DOWN on entry, so the
+        // fence it arms itself is the only protection the nested raises
+        // have.
+        var guard = handler.Body!.Statements.First() as IfStatementSyntax;
+        Assert.True(
+            guard?.Condition is IdentifierNameSyntax id
+                && id.Identifier.ValueText == "_suppressSelectionEvent"
+                && guard.Statement is ReturnStatementSyntax { Expression: null },
+            "OnSelectionChanged must open with `if (_suppressSelectionEvent) return;`: "
+            + "the reverse-sync writes depend on it to no-op nested raises.");
+
+        // (2) The command runs fenced: an arm-true write precedes it. The
+        // expand retires the selected chip on this same stack (command ->
+        // manager -> group INPC -> reconcile -> TabItems.Remove), and
+        // TabView answers that removal by re-targeting the selection and
+        // raising this event again -- unfenced, the re-entry either
+        // cascade-expands a neighbouring chip or activates whatever it
+        // picked.
+        var command = chipArm.Call("_router.RequestCollapseGroup");
+        var arm = chipArm.AssignsTo("_suppressSelectionEvent")
+            .Where(a => a.Right.IsKind(SyntaxKind.TrueLiteralExpression)).ToList();
+        Assert.True(
+            arm.Count == 1 && arm[0].SpanStart < command.SpanStart,
+            "The chip arm must arm _suppressSelectionEvent BEFORE RequestCollapseGroup: "
+            + "the expand removes the chip the selection is parked on, and the "
+            + "re-entry SelectionChanged must no-op.");
+
+        // (3) The command sits inside the try whose finally disarms after
+        // it -- an arm without a finally leaks a stuck fence the first time
+        // the command throws.
+        var fence = command.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault();
+        var disarm = fence?.Finally?.Block?.DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .FirstOrDefault(a => a.Left is IdentifierNameSyntax fid
+                && fid.Identifier.ValueText == "_suppressSelectionEvent"
+                && a.Right.IsKind(SyntaxKind.FalseLiteralExpression));
+        Assert.True(
+            fence is not null && disarm is not null
+                && fence.Block.Span.Contains(command.Span)
+                && disarm.SpanStart > command.SpanStart,
+            "The fenced command must sit inside the try block, with the disarm in a "
+            + "finally that runs after it.");
+
+        // (4) SelectActive follows the disarm and (5) runs unconditionally:
+        // it is the half that lands the real active tab once the strip has
+        // settled. Guarded or inside the try, the strip could rest on
+        // whatever TabView picked while the chip was removed.
+        var select = chipArm.Call("SelectActive");
+        Assert.True(
+            select.SpanStart > disarm.SpanStart,
+            "The chip arm must call SelectActive AFTER the disarm, outside the fence.");
+        Assert.True(
+            !select.Ancestors().OfType<IfStatementSyntax>()
+                .Any(a => a.Span.Start > chipArm.Span.Start),
+            "The chip arm's SelectActive must be unconditional: it is the settle-up, "
+            + "not a branch of the expand.");
+
+        // (6) And the fence lives HERE, not in RemoveGroupChip. A second
+        // fence site is the actively unsafe shape: the rebuild calls
+        // ReconcileChips from inside the reconcile's catch, while that
+        // fence is still armed, so a disarm in RemoveGroupChip would cut
+        // the window short and leave TabItems.Clear() and the re-adds
+        // unprotected.
+        Assert.Empty(
+            ShellSource.Load(TabHostSource).Method("RemoveGroupChip")
+                .AssignsTo("_suppressSelectionEvent"));
+    }
+
+    [Fact]
+    public void The_chip_selection_fork_expands_through_the_command_and_never_activates()
+    {
+        var chipArm = ChipSelectionArm(
+            ShellSource.Load(TabHostSource).Method("OnSelectionChanged"));
+
+        // The expand goes out through the same command path every other
+        // collapse/expand source uses, and it never reads as an activation:
+        // an Activate here would fire on a click the user aimed at a group,
+        // and the wrongly-activated tab would stick, because the arm's
+        // SelectActive faithfully re-selects the manager's active tab.
+        Assert.Single(chipArm.Calls("_router.RequestCollapseGroup"));
+        Assert.Empty(chipArm.Calls("_manager.Activate"));
+    }
+
+    [Fact]
+    public void The_drop_translates_its_slot_through_the_projection_and_refuses_chip_shaped_drops()
+    {
+        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+
+        // The gate and the translation are one polarity: only a TAB drop
+        // maps its strip slot through the projection (a raw IndexOf is a
+        // slot, not a manager index -- chips occupy slots), because a chip
+        // has no manager index to move to.
+        var gate = completed.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is not TabGroup", StringComparison.Ordinal));
+        var mapping = gate.Call("TabStripProjection.VisibleIndexToModelIndex");
+        Assert.True(
+            gate.DescendantNodes().Contains(mapping),
+            "The drop's slot translation must sit inside the chip-drag gate: a chip "
+            + "drop has no manager index to map to.");
+
+        // The refuse: the move is gated on the mapped index, so a drop that
+        // came to rest AT a chip's slot maps to -1 and refuses outright --
+        // the reconcile after the gate restores the strip. A later rung
+        // routes chip-shaped drops into joins.
+        var move = completed.Call("_manager.Move");
+        Assert.True(
+            move.Ancestors().OfType<IfStatementSyntax>()
+                .Any(a => a.Condition.ToString() == "newIndex >= 0"),
+            "The drop's move must be gated on the mapped index (newIndex >= 0): a "
+            + "chip-slot rest maps to -1 and must refuse, not clamp.");
+    }
+
+    [Fact]
+    public void SelectActive_never_hands_the_selection_to_a_chip()
+    {
+        var selectActive = ShellSource.Load(TabHostSource).Method("SelectActive");
+
+        // Insurance, not a live branch: chips never enter _itemByModel
+        // (AddItem is its only writer, keyed by TabModel), so the item
+        // fetched here always carries a null Tag and the bail is
+        // unreachable while that holds. Pinned anyway because the whole
+        // reverse sync depends on the fetched item BEING the active tab's
+        // item -- if a chip ever got in, this bail is what keeps every
+        // later activation from reading as an expand request.
+        var bail = selectActive.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
+        Assert.True(
+            bail.Statement is ReturnStatementSyntax { Expression: null },
+            "SelectActive's chip tripwire must bail outright, not re-select the chip.");
+        var write = selectActive.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .First(a => a.Left.ToString().EndsWith("SelectedItem", StringComparison.Ordinal));
+        Assert.True(
+            bail.SpanStart < write.SpanStart,
+            "The chip tripwire must sit before the selection write.");
+    }
+
+    [Fact]
+    public void The_seam_bridge_hides_rather_than_places_from_a_group()
+    {
+        var bridge = ShellSource.Load(TabHostSource).Method("UpdateSelectedTabBridge");
+
+        // Insurance again, same mechanism as SelectActive's bail: the item
+        // out of _itemByModel never carries a group on Tag. The polarity is
+        // the point -- a chip here must HIDE the cover (0, 0, null), ahead
+        // of the placement math, not place it from a group's slot.
+        var bail = bridge.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
+        var hide = bail.Statement.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .First(c => c.CalleeText() == "SelectedTabSeamChanged?.Invoke");
+        var placement = bridge.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .First(c => c.CalleeText().Contains("TransformToVisual", StringComparison.Ordinal));
+        Assert.True(
+            hide.Arg(0) == "0" && hide.Arg(1) == "0" && hide.Arg(2) == "null"
+                && bail.SpanStart < placement.SpanStart,
+            "A chip at the bridge must hide the cover with (0, 0, null), ahead of "
+            + "the placement math.");
+    }
+
+    [Fact]
+    public void A_close_request_for_a_chip_declines()
+    {
+        var close = ShellSource.Load(TabHostSource).Method("OnTabCloseRequested");
+
+        // Insurance a third time: chips are IsClosable=false, so no close
+        // request can name one while that holds. If close chrome ever
+        // leaked onto a chip, this bail is the difference between a
+        // declined click and a group closed member by member.
+        var bail = close.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
+        Assert.True(
+            bail.Statement is ReturnStatementSyntax { Expression: null },
+            "A chip named by a close request must decline outright.");
+        var requestClose = close.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .First(c => c.CalleeText().EndsWith("RequestCloseTabAsync", StringComparison.Ordinal));
+        Assert.True(
+            bail.SpanStart < requestClose.SpanStart,
+            "The chip decline must precede the close request.");
+    }
+
+    [Fact]
+    public void The_rebuild_derives_chip_presence_before_it_reads_the_projection()
+    {
+        var rebuild = ShellSource.Load(TabHostSource).Method("RebuildStripFromManager");
+
+        var presence = rebuild.Call("ReconcileChips");
+        var rows = rebuild.Call("TabStripProjection.HorizontalRows");
+        Assert.True(
+            presence.SpanStart < rows.SpanStart,
+            "The rebuild must run ReconcileChips BEFORE walking HorizontalRows: the "
+            + "walk reads chips this host must hold, and a rebuild that derived "
+            + "presence after it would add rows the walk never saw. Rebuild is what "
+            + "the reconcile's refusal falls back to, so this order is load-bearing "
+            + "on the skew path, not just the happy one.");
+    }
+
+    [Fact]
+    public void Every_manager_event_re_derives_chip_presence()
+    {
+        var ctor = ShellSource.Load(TabHostSource).Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>()
+            .Single(c => c.Identifier.ValueText == "TabHost");
+
+        // Chip presence is a projection function all four manager events can
+        // move -- a restore arrives grouped, a close retires a run's last
+        // member, a move joins a chip'd run, activation decides which run
+        // shows member versus chip -- and the events raise whether or not
+        // this host is the visible layout. This is the standing half of the
+        // belt and braces; RefreshSeam below is the re-derive half.
+        foreach (var eventName in new[] { "TabAdded", "TabRemoved", "TabMoved", "ActiveTabChanged" })
+        {
+            var subscription = ctor.DescendantNodes()
+                .OfType<AssignmentExpressionSyntax>()
+                .Where(a => a.OperatorToken.IsKind(SyntaxKind.PlusEqualsToken)
+                            && a.Left.ToString().EndsWith(eventName, StringComparison.Ordinal))
+                .ToList();
+            Assert.True(
+                subscription.Count == 1
+                    && subscription[0].Right.DescendantNodes()
+                        .OfType<InvocationExpressionSyntax>()
+                        .Count(i => i.CalleeText() == "ReconcileChips") == 1,
+                $"The manager's {eventName} handler must call ReconcileChips exactly "
+                    + "once: chip presence drifts on every one of the four events.");
+        }
+    }
+
+    [Fact]
+    public void The_group_INPC_ride_reconciles_on_collapse_and_refreshes_in_place()
+    {
+        var handler = ShellSource.Load(TabHostSource).Method("OnGroupPropertyChanged");
+
+        // Collapse raises NO manager event -- group INPC only -- so this
+        // handler is the one non-manager ride site for chip presence, and
+        // the manager-event census above is structurally blind to it. The
+        // IsCollapsed bit changes what the strip HOLDS (a chip mints on
+        // fold, retires on unfold), so it takes the full presence-then-
+        // order pass before returning; Title and Color are in-place
+        // refreshes and fall through to the single-door refresh alone.
+        var collapsedBranch = handler.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("IsCollapsed", StringComparison.Ordinal));
+        var presence = collapsedBranch.Call("ReconcileChips");
+        var order = collapsedBranch.Call("ReconcileStripOrder");
+        Assert.True(
+            presence.SpanStart < order.SpanStart,
+            "A collapse must run the presence pass BEFORE the order pass: the chip "
+            + "the fold mints (or retires) has to exist before the order pass reads it.");
+
+        var fallThrough = handler.Call("RefreshChip");
+        Assert.True(
+            collapsedBranch.Span.End < fallThrough.SpanStart,
+            "Title and Color changes must fall through to RefreshChip alone: re-running "
+            + "the presence and order passes for an in-place refresh churns the strip "
+            + "for nothing.");
+
+        // The ride site is only as live as its wiring: the subscription is
+        // minted with the chip and severed with it. Folded into this fact
+        // rather than the manager-event census because this is group INPC,
+        // not a manager event -- the handler and its wire are one story.
+        var src = ShellSource.Load(TabHostSource);
+        Assert.Single(src.Method("AddGroupChip").DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.OperatorToken.IsKind(SyntaxKind.PlusEqualsToken)
+                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)));
+        Assert.Single(src.Method("RemoveGroupChip").DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.OperatorToken.IsKind(SyntaxKind.MinusEqualsToken)
+                        && a.Left.ToString().EndsWith("PropertyChanged", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void RefreshSeam_re_derives_presence_order_and_selection_and_stays_unfenced()
+    {
+        var seam = ShellSource.Load(TabHostSource).Method("RefreshSeam");
+
+        var presence = seam.Call("ReconcileChips");
+        var order = seam.Call("ReconcileStripOrder");
+        var selection = seam.Call("SelectActive");
+        Assert.True(
+            presence.SpanStart < order.SpanStart && order.SpanStart < selection.SpanStart,
+            "The switch-on pass must re-derive presence, then order, then selection: "
+            + "the belt for drift a missed subscription cannot confess to.");
+
+        // And it stays UNFENCED. The residual's truthfulness is not the
+        // comment but the fork's pin above: the only code that can hold a
+        // chip as SelectedItem hands the selection back before returning,
+        // so no switch-on removal can leak a selection. A fence added here
+        // would look like the fix and paper over that pin instead.
+        Assert.Empty(seam.AssignsTo("_suppressSelectionEvent"));
+    }
+
+    [Fact]
+    public void An_equal_count_content_skew_throws_into_the_rebuild()
+    {
+        var reconcile = ShellSource.Load(TabHostSource).Method("ReconcileStripOrder");
+
+        // Counts agreeing is not presence agreeing: a stray element no
+        // desired row names removes nothing, so the Remove is guarded and
+        // the refusal funnels into the same rebuild the count mismatch
+        // uses -- the one skew shape the miss flag and the count check
+        // slip past.
+        var guardedRemove = reconcile.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .Single(i => i.Condition is PrefixUnaryExpressionSyntax not
+                && not.IsKind(SyntaxKind.LogicalNotExpression)
+                && not.Operand is InvocationExpressionSyntax call
+                && call.CalleeText().EndsWith("TabItems.Remove", StringComparison.Ordinal));
+        var refusal = guardedRemove.Statement as ThrowStatementSyntax;
+        Assert.True(
+            refusal is not null,
+            "The failed Remove must refuse outright -- a silent fall-through strands "
+                + "the stray element past the pass with the repair flag claiming "
+                + "health.");
+        Assert.True(
+            refusal!.Expression is ObjectCreationExpressionSyntax created
+                && created.Type.ToString().Contains("InvalidOperationException", StringComparison.Ordinal),
+            "The Remove refusal must throw InvalidOperationException -- the filtered "
+                + "catch only funnels the skew family.");
+        Assert.True(
+            refusal.Ancestors().OfType<TryStatementSyntax>().Any(t =>
+                t.Catches.Any(c =>
+                    c.Filter?.ToString().Contains("InvalidOperationException", StringComparison.Ordinal) == true)),
+            "The Remove refusal must sit inside the fenced try, so the filtered catch "
+                + "-- not the caller -- sees the skew.");
+    }
+
     // --- Vertical strip reads its order from the projector ---
 
     [Fact]
@@ -339,6 +675,13 @@ public sealed class TabStripSyncWiringTests
             && binary.IsKind(SyntaxKind.EqualsExpression)
             && binary.ToString().Contains("current", StringComparison.Ordinal)
             && binary.ToString().Contains("slot", StringComparison.Ordinal);
+
+    // The `if (item.Tag is TabGroup group)` arm of OnSelectionChanged: the
+    // chip click fork every chip-fact below anchors on.
+    private static IfStatementSyntax ChipSelectionArm(MethodDeclarationSyntax handler)
+        => handler.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains(
+                "item.Tag is TabGroup", StringComparison.Ordinal));
 
     private static bool SetsFlag(MethodDeclarationSyntax method, string field, SyntaxKind literal)
         => method.DescendantNodes()
