@@ -115,6 +115,12 @@ public class WindowTeardownWiringTests
         ("_host", "this window's own GhosttyHost; its events are raised from surface input, "
                   + "which a closing window no longer receives"),
         ("_tabManager", "this window's own TabManager"),
+        ("_verticalTabHost", "this window's own vertical tab host, constructed and held only by "
+                             + "this window; its events are raised from strip drag and selection "
+                             + "input, which a closing window no longer receives"),
+        ("picker", "a TabColorPalettePicker this window builds into the group-color flyout; "
+                   + "it takes only input routed through that flyout, which a closing "
+                   + "window no longer receives"),
         ("_themeManager", "per-window; OnClosedAsync disposes it before the first await, "
                           + "and WindowThemeManager.Dispose nulls ThemeChanged"),
         ("seedHost.ActiveLeaf.Terminal()", "a leaf of this window's pane tree; "
