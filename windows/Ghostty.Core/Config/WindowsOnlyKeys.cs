@@ -43,6 +43,8 @@ public static class WindowsOnlyKeys
             "Strength of the gradient tint layer."),
         new("accent-color",
             "Color of the active tab background, focus border, and tab strip rail. When unset, the chrome follows cursor-color."),
+        new("pane-startup-glow",
+            "When true (default), a newly spawned pane's border glows while its shell starts up. The glow ends on the pane's first render, or after ten seconds."),
         new("vertical-tabs",
             "Tab strip orientation. When true, tabs render in a vertical sidebar instead of the default horizontal strip."),
         new("vertical-tabs-width",

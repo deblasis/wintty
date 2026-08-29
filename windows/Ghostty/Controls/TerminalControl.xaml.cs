@@ -681,6 +681,10 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     /// glow.</summary>
     public event EventHandler? FirstRender;
 
+    /// <summary>Raised once, right after this control's libghostty surface is
+    /// created and registered. PaneHost uses it to start the startup glow.</summary>
+    public event EventHandler? SurfaceSpawned;
+
     /// <summary>Raised from <see cref="DisposeSurface"/> while the surface is
     /// still valid, for holders of native state keyed on this control's
     /// surface pointer -- the window's inline theme picker keeps input,
@@ -930,6 +934,11 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             this.Focus(FocusState.Programmatic);
         }
 
+        // Surface exists and is registered; tell the host the shell has
+        // spawned. Last statement of OnLoaded on purpose: the startup glow
+        // reads the control's bounds right after this, and anything that
+        // still has to happen first belongs above this line.
+        SurfaceSpawned?.Invoke(this, EventArgs.Empty);
     }
 
     private void DisableAncestorScrollViewerTabStop()
@@ -1107,6 +1116,7 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         ProgressChanged = null;
         PromptReady = null;
         FirstRender = null;
+        SurfaceSpawned = null;
         BellRang = null;
         BellAcknowledged = null;
         // Already raised above; dropping it here is for a subscriber that did
