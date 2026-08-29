@@ -19,7 +19,16 @@ namespace Ghostty.Core.Tabs;
 /// </summary>
 internal sealed class TabGroup
 {
-    public Guid Id { get; } = Guid.NewGuid();
+    public Guid Id { get; }
+
+    public TabGroup() => Id = Guid.NewGuid();
+
+    /// <summary>
+    /// Session restore's ctor: group identity survives restart, so the
+    /// saved id comes back AS the live one (<see
+    /// cref="TabManager.RestoreGroup"/>). Fresh groups mint their own.
+    /// </summary>
+    internal TabGroup(Guid id) => Id = id;
 
     /// <summary>Label shown on the vertical header row / horizontal chip.</summary>
     public string Title { get; set; } = "New group";

@@ -522,6 +522,36 @@ internal sealed class TabManager
     }
 
     /// <summary>
+    /// Session restore's group op: recreate one saved group -- the saved
+    /// id comes back as the live id, so group identity survives restart
+    /// -- and gather <paramref name="members"/> into one run in saved
+    /// tab order. The saved collapse bit is applied AS SAVED: unlike
+    /// <see cref="JoinGroup"/>, restoring never auto-expands, which is
+    /// why restore comes through here and
+    /// <see cref="GroupTabs"/>-shaped membership, never the join.
+    ///
+    /// Repairs, never crashes, on corrupt saved state: a member that is
+    /// somehow both pinned and grouped is skipped here (membership
+    /// yields to the prefix), a member this manager does not own is
+    /// skipped, and a group none of whose members made it back
+    /// registers nothing -- Normalize then prunes it, so no orphan
+    /// header or chip can reach a strip.
+    /// </summary>
+    public TabGroup RestoreGroup(Guid id, string title, TabColor color,
+        bool collapsed, IReadOnlyList<TabModel> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+        var group = new TabGroup(id)
+        {
+            Title = title,
+            Color = color,
+            IsCollapsed = collapsed,
+        };
+        GroupTabs(members, group);
+        return group;
+    }
+
+    /// <summary>
     /// Remove one tab from its group. The group dissolves if this was its
     /// last member, collapse state included. The tab keeps its position.
     /// </summary>
