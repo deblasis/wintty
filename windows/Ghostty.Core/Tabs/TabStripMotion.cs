@@ -74,9 +74,6 @@ internal static class TabStripMotion
     /// <summary>The Fade token: ghost handoff and header crossfades.</summary>
     public const double FadeMs = 83;
 
-    /// <summary>The drag visual handing back after a release.</summary>
-    public const double UnliftFadeMs = 83;
-
     /// <summary>
     /// The motion gate: springs and glides run only when Windows
     /// animation effects are on and High Contrast is not. Disabled means

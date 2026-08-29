@@ -3640,10 +3640,6 @@ internal sealed partial class VerticalTabStrip : UserControl
             return;
         }
 
-        // State first: the real row waits hidden for the crossfade, and
-        // only the flight's completion restores it -- never the reverse.
-        row.Opacity = 0;
-
         var visual = ElementCompositionPreview.GetElementVisual(ghost);
         var compositor = visual.Compositor;
         var flight = new PinFlight
@@ -3654,6 +3650,13 @@ internal sealed partial class VerticalTabStrip : UserControl
             Guard = DispatcherQueue.CreateTimer(),
         };
         _pinFlight = flight;
+
+        // State first, then the hide: the field write above is the
+        // flight's birth, and anything that throws before it must leave
+        // the row untouched -- nothing would exist to restore it. From
+        // here the real row waits hidden for the crossfade, and only
+        // the flight's completion restores it -- never the reverse.
+        row.Opacity = 0;
 
         // The guard is the completion path's backstop: a batch that never
         // fires (composition wedged, window minimized through the flight)

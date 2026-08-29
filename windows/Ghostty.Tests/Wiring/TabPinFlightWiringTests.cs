@@ -248,7 +248,10 @@ public class TabPinFlightWiringTests
     /// The flight cannot outlive the strip or dodge the census. The
     /// leak count folds the live flight in -- one field, zero or one --
     /// so the trace oracle's any-N-above-zero rule covers it like every
-    /// other composition the strip believes it is driving. Teardown
+    /// other composition the strip believes it is driving. The
+    /// backstop is pinned armed, not merely configured: a guard that
+    /// never starts stops nothing, and the wedged batch it exists for
+    /// is exactly the case no batch callback reports. Teardown
     /// finishes it, a fresh drag supersedes it, and landing restores the
     /// row's opacity by writing it: stopping an animation reverts the
     /// property to its set value, so an assumed end state would land
@@ -266,6 +269,8 @@ public class TabPinFlightWiringTests
             .Single(a => a.Left.ToString() == "Unloaded");
         Assert.NotEmpty(unloaded.Right.Calls("FinishPinFlight"));
         Assert.Single(strip.Method("StartDragVisual").Calls("FinishPinFlight"));
+
+        Assert.Single(strip.Method("StartPinFlight").Calls("flight.Guard.Start"));
 
         var finish = strip.Method("FinishPinFlight");
         Assert.NotEmpty(finish.Calls("flight.Guard.Stop"));
