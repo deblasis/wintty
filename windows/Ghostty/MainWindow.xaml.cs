@@ -31,6 +31,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Win32;
@@ -885,15 +886,19 @@ public sealed partial class MainWindow : Window
                     TabAccessibleText.GroupDissolvedAnnouncement(e.Group, e.MemberCount),
                 PaneActionRouter.GroupCommandKind.Collapsed =>
                     TabAccessibleText.GroupCollapseAnnouncement(e.Group),
+                PaneActionRouter.GroupCommandKind.Renamed =>
+                    TabAccessibleText.GroupRenamedAnnouncement(e.Group, e.OldTitle!),
+                PaneActionRouter.GroupCommandKind.Colored =>
+                    TabAccessibleText.GroupColoredAnnouncement(e.Group, e.Group.Color),
                 // A kind added later must pick its announcement arm: the
                 // trap fails the announce loudly rather than narrating a
                 // collapse that did not happen. (A default-less enum
                 // switch warns CS8524 even when fully covered.)
                 _ => throw new UnreachableException("unnamed GroupCommandKind"),
             };
-            // Dissolve is group-level, so it carries no tab: ride the
-            // focused element and fall back to the active tab's item, or
-            // Announce refuses the null and the op narrates nothing.
+            // Group-level kinds carry no tab: ride the focused element and
+            // fall back to the active tab's item, or Announce refuses the
+            // null and the op narrates nothing.
             UiaAnnouncer.Announce(
                 e.Tab is null
                     ? (FocusManager.GetFocusedElement(Content.XamlRoot) as FrameworkElement)
@@ -934,6 +939,42 @@ public sealed partial class MainWindow : Window
                 members = _tabManager.MembersOf(group);
                 if (members.Count > 0 && ReferenceEquals(members[0], first)) break;
             }
+        };
+
+        // Rename and color are dialog ops the router cannot host (no
+        // XamlRoot): the palette entry forwards here, the dialog or the
+        // picker collects the value, and the Request performs the plain
+        // INPC set and the announce. The header menu opens the same dialog
+        // directly.
+        _router.GroupRenameRequested += async (_, group) =>
+        {
+            if (Content?.XamlRoot is null) return;
+            var dlg = new RenameTabDialog(group.Title) { XamlRoot = Content.XamlRoot };
+            using (_dialogs.Track(dlg))
+            {
+                var res = await dlg.ShowAsync();
+                if (res == ContentDialogResult.Primary)
+                    _router.RequestRenameGroup(group, dlg.Result);
+            }
+        };
+
+        _router.GroupColorRequested += (_, group) =>
+        {
+            var anchor = _tabManager.ActiveTab is { } tab ? _tabHost.TabElement(tab) : null;
+            if (anchor is null) return;
+            var picker = new TabColorPalettePicker(group.Color);
+            var pickerFlyout = new Flyout
+            {
+                Content = picker,
+                Placement = FlyoutPlacementMode.Bottom,
+                ShouldConstrainToRootBounds = true,
+            };
+            picker.ColorSelected += (_, color) =>
+            {
+                pickerFlyout.Hide();
+                _router.RequestColorGroup(group, color);
+            };
+            pickerFlyout.ShowAt(anchor);
         };
 
         AppWindow.Changed += (_, args) =>
