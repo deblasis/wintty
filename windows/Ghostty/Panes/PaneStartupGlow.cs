@@ -20,7 +20,7 @@ namespace Ghostty.Panes;
 /// Tuning constants (thickness, radius, stops, loop period) live here; the
 /// lifecycle timing (cap, fade) lives in PaneStartupGlowState.
 /// </summary>
-internal sealed class PaneStartupGlow : IDisposable
+internal sealed partial class PaneStartupGlow : IDisposable
 {
     private const float CoreThickness = 4f;
     private const float HaloThickness = 12f;
@@ -30,8 +30,10 @@ internal sealed class PaneStartupGlow : IDisposable
     private readonly FrameworkElement _mount;
     private readonly Compositor _compositor;
     private readonly ShapeVisual _shapeVisual;
-    private readonly SpriteShape _coreShape;
-    private readonly SpriteShape _haloShape;
+    // WinUI 3 prefixed the type (CompositionSpriteShape); only the factory
+    // kept the UWP-era name.
+    private readonly CompositionSpriteShape _coreShape;
+    private readonly CompositionSpriteShape _haloShape;
     private readonly CompositionRoundedRectangleGeometry _geometry;
     private readonly CompositionColorGradientStopCollection _coreStops;
     private readonly CompositionColorGradientStopCollection _haloStops;
@@ -178,13 +180,13 @@ internal sealed class PaneStartupGlow : IDisposable
         _geometry.Dispose();
 
         // Each brush's gradient graph. The stops are composition objects of
-        // their own and go before the collection holding them: enumerating a
-        // closed collection is the one order that would throw.
+        // their own and go before the brush holding them: enumerating a
+        // released collection is the one order that would throw. WinUI 3
+        // gives the stop collection itself no Dispose; releasing the brush
+        // releases it.
         DisposeStops(_coreStops);
-        _coreStops.Dispose();
         _coreBrush.Dispose();
         DisposeStops(_haloStops);
-        _haloStops.Dispose();
         _haloBrush.Dispose();
 
         // The animations themselves, the forever orbit included: left running

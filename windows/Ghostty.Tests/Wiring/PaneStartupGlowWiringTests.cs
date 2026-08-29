@@ -299,6 +299,10 @@ public class PaneStartupGlowWiringTests
     /// parsed file, because a unit test cannot build a compositor; the list is
     /// explicit so dropping one of them from Dispose has to delete a line
     /// here too.
+    ///
+    /// The stop collections are the deliberate absence: WinUI 3 gives
+    /// <c>CompositionColorGradientStopCollection</c> no Dispose, so releasing
+    /// the owning brush is the whole teardown they get.
     /// </summary>
     [Fact]
     public void Dispose_ReleasesEveryCompositionObjectTheGlowCreated()
@@ -311,7 +315,7 @@ public class PaneStartupGlowWiringTests
         foreach (var owner in new[]
                  {
                      "_shapeVisual", "_coreShape", "_haloShape", "_geometry",
-                     "_coreBrush", "_coreStops", "_haloBrush", "_haloStops",
+                     "_coreBrush", "_haloBrush",
                      "_fade", "_orbit", "_easing",
                  })
         {
@@ -323,6 +327,10 @@ public class PaneStartupGlowWiringTests
         var invokes = dispose.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>();
         foreach (var stops in new[] { "_coreStops", "_haloStops" })
             Assert.Contains(invokes, i => i.CalleeText() == "DisposeStops" && i.Arg(0) == stops);
+
+        // ...and the absence stays absent: a direct Dispose on the collection
+        // is the CS1061 that broke the build, so pin that it never comes back.
+        Assert.DoesNotContain(calls, c => c is "_coreStops.Dispose" or "_haloStops.Dispose");
 
         // Stopping an animation on a closed object throws, so the stops all
         // come before the first release.
