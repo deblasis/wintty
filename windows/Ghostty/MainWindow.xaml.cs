@@ -548,9 +548,12 @@ public sealed partial class MainWindow : Window
         // it rebuilds at least one tab; otherwise fall through to the normal
         // "fresh tab (or seedTab) via the factory" path.
         List<TabModel>? restoredTabs = null;
+        // One restorer for both halves: BuildTabs records the saved-tab
+        // pairing the group restore reads back, so the seeding block and
+        // the group block must use the same instance.
+        var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
         if (restore is { Tabs.Count: > 0 })
         {
-            var restorer = new Ghostty.Session.SessionRestorer(_factory, App.ProfileRegistry);
             var built = restorer.BuildTabs(restore);
             if (built.Count > 0) restoredTabs = built;
         }
@@ -563,6 +566,12 @@ public sealed partial class MainWindow : Window
                 closedTabs: ClosedTabsStore);
             for (int i = 1; i < restoredTabs.Count; i++)
                 _tabManager.AdoptTab(restoredTabs[i]);
+            // Group state needs every member in the manager first: the
+            // restore gathers runs, so it comes after the seeding loop
+            // and rebuilds the saved ids, titles, colors, and collapse
+            // bits. Restore never auto-expands; JoinGroup is not on this
+            // path.
+            restorer.RestoreGroups(_tabManager, restore!);
             if (restore!.ActiveTabIndex >= 0 && restore.ActiveTabIndex < restoredTabs.Count)
                 _tabManager.ActivateIndex(restore.ActiveTabIndex);
         }
@@ -4036,8 +4045,14 @@ public sealed partial class MainWindow : Window
                 tab.PaneHost.ActiveLeaf,
                 tab.PaneHost.ZoomedLeaf,
                 tab.ProfileId,
-                tab.UserOverrideTitle));
+                tab.UserOverrideTitle,
+                tab.IsPinned,
+                tab.Group?.Id));
         }
+        // Membership rides the tabs (GroupId); the registry supplies the
+        // groups' identity, title, color, and shared collapse bit.
+        win.Groups.AddRange(Ghostty.Core.Session.SessionCapture.CaptureGroups(
+            _tabManager.Groups));
         return win;
     }
 
