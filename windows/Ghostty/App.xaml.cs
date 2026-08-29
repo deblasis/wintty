@@ -98,6 +98,11 @@ public partial class App : Application
     // This field is the forwarding pipe server, which only a primary runs.
     private Ghostty.Hosting.SingleInstanceServer? _singleInstanceServer;
 
+    // Where a forwarded launch waits when nothing here can open a window for
+    // it yet. UI-thread only, and drained once, from OnLaunched; see
+    // DrainDeferredLaunches.
+    private readonly Ghostty.Core.SingleInstance.LaunchDeferralQueue _deferredLaunches = new();
+
 
     // The quake chord comes from the quick-terminal-key config value
     // (read via ConfigService.QuickTerminalKeyChord). QuickTerminalKeyChord.Default
@@ -828,15 +833,22 @@ public partial class App : Application
         // out and opened its own window, which is the whole thing
         // windows-single-instance is for.
         //
-        // Not earlier either, and this is the constraint that pins it here:
-        // OpenWindowFromLaunch drops a request outright if _configService,
-        // _loggerFactory, _lifetimeSupervisor or _bootstrapHost is still null,
-        // and the last of those is the line above. Listening before that turns
-        // a visible failure (the secondary cannot connect, so it opens its own
-        // window) into a silent one (it connects, exits, and its launch is
-        // discarded). Anything that wants to serve sooner has to make that
-        // drop a deferral first.
+        // Not earlier either. It used to be a correctness constraint: the
+        // drop inside OpenWindowFromLaunch turned a listener that came up
+        // too soon into a discarded launch, which is worse than the visible
+        // failure of a secondary that cannot connect and opens its own
+        // window. That drop is a deferral now, so an earlier listener would
+        // be safe; nothing wants it earlier, because every expensive step is
+        // below this line and a request served here still waits on the same
+        // window the splash is covering.
         StartSingleInstanceServer();
+
+        // Replay whatever arrived while the dependencies above were still
+        // being built. Today the server does not start until they exist, so
+        // this drains an empty queue; it is here rather than folded into the
+        // null check in OpenWindowFromLaunch because there has to be one
+        // readiness edge and it has to be findable.
+        DrainDeferredLaunches();
 
         // App-level: High Contrast is a system-wide state and config is
         // applied app-wide, so a single monitor drives the surface override.
@@ -1136,12 +1148,24 @@ public partial class App : Application
         if (_configService is null || _bootstrapHost is null
             || _lifetimeSupervisor is null || _loggerFactory is null)
         {
-            // Unreachable as things stand: the server does not start until
-            // every one of these exists, and this runs on the UI thread, which
-            // is inside OnLaunched until then. Kept because the cost of being
-            // wrong is a launch that vanishes with no window and no message --
-            // the secondary has already exited believing it was served.
-            Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDropped();
+            // Reachable once the server listens before OnLaunched has finished
+            // building these, and after teardown has begun on a half-disposed
+            // app whose pipe callback is still enqueued. The secondary has
+            // already exited believing it was served, so what happens to the
+            // request here decides whether the user gets the window they asked
+            // for or nothing at all.
+            if (!_deferredLaunches.Defer(req, out var evicted))
+            {
+                // Only the post-readiness half of that: the edge in OnLaunched
+                // has already passed, so there is no later one to wait for.
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDropped();
+                return;
+            }
+
+            if (evicted is not null)
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchEvicted();
+            else
+                Ghostty.Logging.StaticLoggers.App.LogSingleInstanceLaunchDeferred();
             return;
         }
 
@@ -1164,6 +1188,24 @@ public partial class App : Application
         HandleJumpListLaunch(
             Ghostty.Core.JumpList.JumpListLaunch.Parse(req.Args),
             req.WorkingDirectory);
+    }
+
+    /// <summary>
+    /// Open the windows for the launches that arrived before
+    /// <see cref="OpenWindowFromLaunch"/> could act on them. Called once, from
+    /// OnLaunched, at the readiness edge.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Ghostty.Core.SingleInstance.LaunchDeferralQueue.MarkReady"/>
+    /// latches, so a launch that re-defers part way through this loop, because
+    /// teardown nulled a dependency under it, is reported as lost rather than
+    /// parked for an edge that will never come. The queue is bounded and this
+    /// is its only drain, which is what keeps that an error and not a leak.
+    /// </remarks>
+    private void DrainDeferredLaunches()
+    {
+        foreach (var req in _deferredLaunches.MarkReady())
+            OpenWindowFromLaunch(req);
     }
 
     // Toast activation ---------------------------------------------------
@@ -2162,4 +2204,14 @@ internal static partial class AppLogExtensions
                    Level = LogLevel.Error,
                    Message = "Forwarded launch discarded: the app was not ready to open a window. The user's launch was lost.")]
     internal static partial void LogSingleInstanceLaunchDropped(this ILogger<App> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.LaunchDeferred,
+                   Level = LogLevel.Information,
+                   Message = "Forwarded launch deferred: no window could be opened yet. It will be replayed once one is ready.")]
+    internal static partial void LogSingleInstanceLaunchDeferred(this ILogger<App> logger);
+
+    [LoggerMessage(EventId = Ghostty.Logging.LogEvents.SingleInstance.LaunchEvicted,
+                   Level = LogLevel.Error,
+                   Message = "Forwarded launch discarded: the deferral queue reached its cap and the oldest waiting launch was evicted. The user's launch was lost.")]
+    internal static partial void LogSingleInstanceLaunchEvicted(this ILogger<App> logger);
 }
