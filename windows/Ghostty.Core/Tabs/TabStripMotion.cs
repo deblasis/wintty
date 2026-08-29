@@ -75,6 +75,23 @@ internal static class TabStripMotion
     public const double FadeMs = 83;
 
     /// <summary>
+    /// The horizontal drag's handback: the lifted tab's shadow fades out
+    /// on this clock while its scale springs down. The spring is the
+    /// landing; the fade is what keeps the shadow from popping off a tab
+    /// that is still visibly settling.
+    /// </summary>
+    public const double UnliftFadeMs = 83;
+
+    /// <summary>
+    /// The lifted tab's shadow: the one depth cue the horizontal drag
+    /// spends. BlurRadius, offset, and opacity are written explicitly at
+    /// the use site.
+    /// </summary>
+    public const double LiftShadowBlurRadiusPx = 16;
+    public const double LiftShadowOffsetYPx = 4;
+    public const float LiftShadowOpacity = 0.25f;
+
+    /// <summary>
     /// The motion gate: springs and glides run only when Windows
     /// animation effects are on and High Contrast is not. Disabled means
     /// every spring collapses to a cut; state correctness never waits on
