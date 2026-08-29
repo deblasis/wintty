@@ -181,8 +181,11 @@ def required_legs(paths, justfile_legs=None):
 LEDGER_NAME = "deferred.json"
 # Batch-sized on 2026-08-29 for the tab-reorder ladder, whose rungs defer by
 # owner protocol and settle in one full ladder at the end of the stack; the
-# old 5/3 defaults refused credit before a stack that size could finish.
-DEFER_MAX_OUTSTANDING = 10
+# old 5/3 defaults refused credit before a stack that size could finish. The
+# first raise to 10 was sized before PR 6 split into six rungs -- its 10th
+# deferral filled the cap with 6b, PR 7, and the two tail rungs still owed.
+# 16 covers the known remainder with margin (owner decision 2026-08-29).
+DEFER_MAX_OUTSTANDING = 16
 DEFER_MAX_AGE_DAYS = 10
 DEFER_MIN_REASON_CHARS = 25
 
