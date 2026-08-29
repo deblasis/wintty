@@ -184,8 +184,11 @@ LEDGER_NAME = "deferred.json"
 # old 5/3 defaults refused credit before a stack that size could finish. The
 # first raise to 10 was sized before PR 6 split into six rungs -- its 10th
 # deferral filled the cap with 6b, PR 7, and the two tail rungs still owed.
-# 16 covers the known remainder with margin (owner decision 2026-08-29).
-DEFER_MAX_OUTSTANDING = 16
+# 16 covered that remainder but assumed PR 7 was one rung; its survey split
+# it into three, and with both tails counted the batch prices out at five
+# more deferrals, which 16 refuses to merge at its edge. 20 covers the true
+# remainder with margin (owner decision 2026-08-29).
+DEFER_MAX_OUTSTANDING = 20
 DEFER_MAX_AGE_DAYS = 10
 DEFER_MIN_REASON_CHARS = 25
 
