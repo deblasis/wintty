@@ -60,6 +60,8 @@
             TabCloseRequested="OnTabCloseRequested"
             ContextRequested="OnTabViewContextRequested"
             SelectionChanged="OnSelectionChanged"
+            TabStripDragOver="OnTabStripDragOver"
+            TabStripDrop="OnTabStripDrop"
             TabDragCompleted="OnTabDragCompleted">
             <controls:TabView.TabStripHeader>
                 <branding:AppIconBadge x:Name="IconBadgeHost" />
