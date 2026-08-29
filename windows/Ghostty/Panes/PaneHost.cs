@@ -854,6 +854,15 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
             // alive) so undo can resurrect it. The history entry retains
             // the leaf; teardown is deferred to eviction.
             CaptureForUndo(Core.Panes.PaneOpKind.Close);
+
+            // The retained shell keeps the surface alive, but the leaf still
+            // leaves the visual tree below, so a pane closed before its first
+            // render would otherwise keep its glow orbiting a frozen rectangle
+            // until the cap. Close the state here: Idle raises StateChanged,
+            // which enqueues the same TeardownGlow a fade ending would, and
+            // that stops the animation and lifts the mount off the overlay.
+            if (_glowStates.TryGetValue(leaf.Terminal(), out var closingGlow))
+                closingGlow.Close();
         }
         else
         {
@@ -969,7 +978,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         // this is only a guard against a future second raise landing here.
         if (_glowStates.ContainsKey(terminal)) return;
 
-        var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), terminal));
+        var leaf = LeafForTerminal(PaneTree.Leaves(_root), terminal);
         if (leaf is null) return;
 
         // Bounds may not be settled at spawn time (SurfaceSpawned fires from
@@ -1002,7 +1011,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         // Size now if layout is already available (splitting an
         // already-laid-out window); otherwise the layout handler catches it.
-        PositionGlowMount(terminal, mount);
+        PositionGlowMount(terminal, mount, leaf);
     }
 
     private void OnLeafFirstRender(object? sender, EventArgs e)
@@ -1039,12 +1048,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     }
 
     // Position+size one glow mount over its leaf, enforcing the minimum-size
-    // degradation. Called per-spawn and from the layout handler. When the leaf
-    // is too small or not yet laid out, the mount is collapsed to zero size so
-    // the glow is simply invisible (and reappears if the pane later grows).
-    private void PositionGlowMount(TerminalControl terminal, Canvas mount)
+    // degradation. Called per-spawn and from the layout handler, both of which
+    // already resolved the leaf; the layout pass walks the tree once for every
+    // overlay layer, so a lookup here would be a second traversal per mount
+    // per tick. When the leaf is too small or not yet laid out, the mount is
+    // collapsed to zero size so the glow is simply invisible (and reappears if
+    // the pane later grows).
+    private void PositionGlowMount(TerminalControl terminal, Canvas mount, LeafPane? leaf)
     {
-        var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), terminal));
         if (leaf is null) return;
 
         var ctl = leaf.Terminal();
@@ -1072,6 +1083,18 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         mount.Height = bounds.Height;
         if (_glows.TryGetValue(terminal, out var glow))
             glow.UpdateSize(new Vector2((float)bounds.Width, (float)bounds.Height));
+    }
+
+    // The one leaf of these whose control is this terminal, matched by
+    // reference rather than by any key the leaf does not have.
+    private static LeafPane? LeafForTerminal(IEnumerable<LeafPane> leaves, TerminalControl terminal)
+    {
+        foreach (var leaf in leaves)
+        {
+            if (ReferenceEquals(leaf.Terminal(), terminal)) return leaf;
+        }
+
+        return null;
     }
 
     private void CollapseGlowMount(TerminalControl terminal, Canvas mount)
@@ -1603,9 +1626,11 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
 
         // Keep each live startup-glow mount tracked over its leaf while the
         // glow lasts. Cheap when the dictionary is empty (the common case
-        // once every pane has rendered).
+        // once every pane has rendered): the loop simply does not run, and
+        // each mount takes its leaf from the walk above rather than sending
+        // the tree through Leaves() again.
         foreach (var (terminal, mount) in _glowMounts)
-            PositionGlowMount(terminal, mount);
+            PositionGlowMount(terminal, mount, LeafForTerminal(currentLeaves, terminal));
     }
 
     private void PositionActiveBorderOverLeaf(LeafPane leaf)

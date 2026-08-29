@@ -103,6 +103,44 @@ public class PaneStartupGlowWiringTests
     }
 
     /// <summary>
+    /// A soft-closed leaf keeps its shell alive for undo but leaves the visual
+    /// tree at once, so its glow would keep orbiting a frozen rectangle until
+    /// the cap unless the branch closes the state itself. Stated against the
+    /// soft-close branch rather than the method as a whole: the hard-close
+    /// branch already reaches the glow through TeardownLeaf, so a method-wide
+    /// scan would keep passing with only that path left.
+    /// </summary>
+    [Fact]
+    public void CloseLeaf_SoftCloseBranch_ClosesTheClosingLeafGlow()
+    {
+        // Two overloads share the name, and ShellSource.Method refuses that,
+        // so name the one with the undoable flag.
+        var close = Host().Root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+            .Single(m => m.Identifier.ValueText == "CloseLeaf"
+                         && m.ParameterList.Parameters.Count == 2);
+
+        var softClose = close.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "softClose");
+        var retained = Assert.IsType<BlockSyntax>(softClose.Statement);
+
+        // The undo snapshot stays in the branch; the glow close is added to
+        // it, not swapped for it.
+        Assert.Contains(retained.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "CaptureForUndo");
+
+        var closed = Assert.Single(retained.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText().EndsWith(".Close", System.StringComparison.Ordinal));
+
+        // The closed state is the CLOSING leaf's, resolved by that leaf's own
+        // terminal, so a sibling's glow cannot be closed in its place.
+        var guard = close.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString()
+                == "_glowStates.TryGetValue(leaf.Terminal(), out var closingGlow)");
+        Assert.Contains(closed, guard.DescendantNodes());
+    }
+
+    /// <summary>
     /// Window teardown sweeps whatever is still in flight. Stated against
     /// the glow dictionary rather than against the tree walk, because the
     /// tree walk is gated on every leaf already being closed and a glow is
@@ -202,20 +240,95 @@ public class PaneStartupGlowWiringTests
 
     /// <summary>
     /// The window pushes the glow config alongside the border colours, per
-    /// tab, in the same pass. A push from a later hook would land after a
-    /// newly created host's deferred Loaded, and that first pane would read
+    /// tab, in the same pass. Pinned against the enclosing loop rather than
+    /// the method as a whole, because that is the part that carries the
+    /// guarantee: hoisted above the loop the push configures no tab that
+    /// exists only as a loop iteration, and hoisted below it the push lands
+    /// after a newly created host's deferred Loaded, so that first pane reads
     /// the default (enabled, default colours) instead of the user's.
     /// </summary>
     [Fact]
-    public void ApplyPerTabChrome_PushesTheGlowConfigWithTheBorderColors()
+    public void ApplyPerTabChrome_PushesTheGlowConfigInsideThePerTabLoop()
     {
-        var pushes = MainWindow().Method("ApplyPerTabChrome").Body!.Statements
-            .SelectMany(s => s.DescendantNodesAndSelf())
-            .OfType<InvocationExpressionSyntax>()
-            .Where(i => i.CalleeText().EndsWith("SetStartupGlowConfig", System.StringComparison.Ordinal))
+        var loop = Assert.Single(MainWindow().Method("ApplyPerTabChrome").Body!.Statements
+                .SelectMany(s => s.DescendantNodesAndSelf())
+                .OfType<ForEachStatementSyntax>(),
+            f => f.Expression.ToString() == "_tabManager.Tabs");
+
+        var push = Assert.Single(loop.Statement.DescendantNodesAndSelf()
+                .OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText().EndsWith("SetStartupGlowConfig", System.StringComparison.Ordinal));
+        Assert.Equal("_configService.PaneStartupGlow", push.Arg(0));
+    }
+
+    /// <summary>
+    /// The glow pass rides the leaf set UpdateHighlightPosition already walked
+    /// for the dim rects, and PositionGlowMount takes that leaf instead of
+    /// finding its own: the layout pass runs on every layout tick, so a
+    /// per-mount Leaves().FirstOrDefault() is a full tree traversal plus an
+    /// enumerator allocation per mount per tick, spent re-deriving an answer
+    /// the caller was holding. Both halves are pinned, because reverting
+    /// either one alone puts the walk back.
+    /// </summary>
+    [Fact]
+    public void UpdateHighlightPosition_GlowPass_ReusesTheLeavesItAlreadyWalked()
+    {
+        var host = Host();
+
+        var position = host.Method("PositionGlowMount");
+        Assert.Contains(position.ParameterList.Parameters,
+            p => p.Type?.ToString() == "LeafPane?");
+        Assert.DoesNotContain(position.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>(),
+            i => i.CalleeText() == "PaneTree.Leaves");
+
+        var glowPass = host.Method("UpdateHighlightPosition").DescendantNodesAndSelf()
+            .OfType<CommonForEachStatementSyntax>()
+            .Single(f => f.Expression.ToString() == "_glowMounts");
+
+        var calls = glowPass.Statement.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>();
+        Assert.DoesNotContain(calls, i => i.CalleeText() == "PaneTree.Leaves");
+        Assert.DoesNotContain(calls,
+            i => i.CalleeText().EndsWith("FirstOrDefault", System.StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Dispose releases every composition object the glow creates, not only
+    /// the ones it was first written with: a forever key-frame animation left
+    /// running keeps the compositor animating a brush nobody paints with, and
+    /// a gradient stop is a composition object in its own right. Stated as the
+    /// parsed file, because a unit test cannot build a compositor; the list is
+    /// explicit so dropping one of them from Dispose has to delete a line
+    /// here too.
+    /// </summary>
+    [Fact]
+    public void Dispose_ReleasesEveryCompositionObjectTheGlowCreated()
+    {
+        var dispose = ShellSource.Load("Panes.PaneStartupGlow.cs").Method("Dispose");
+        var calls = dispose.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
+            .Select(i => i.CalleeText())
             .ToList();
 
-        var push = Assert.Single(pushes);
-        Assert.Equal("_configService.PaneStartupGlow", push.Arg(0));
+        foreach (var owner in new[]
+                 {
+                     "_shapeVisual", "_coreShape", "_haloShape", "_geometry",
+                     "_coreBrush", "_coreStops", "_haloBrush", "_haloStops",
+                     "_fade", "_orbit", "_easing",
+                 })
+        {
+            Assert.Contains(calls, c => c == owner + ".Dispose");
+        }
+
+        // The stops are enumerated out of their collection, so each collection
+        // has to still be open when Dispose reaches it.
+        var invokes = dispose.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>();
+        foreach (var stops in new[] { "_coreStops", "_haloStops" })
+            Assert.Contains(invokes, i => i.CalleeText() == "DisposeStops" && i.Arg(0) == stops);
+
+        // Stopping an animation on a closed object throws, so the stops all
+        // come before the first release.
+        var stopped = calls.FindIndex(c => c.EndsWith(".StopAnimation", System.StringComparison.Ordinal));
+        var released = calls.FindIndex(c => c.EndsWith(".Dispose", System.StringComparison.Ordinal));
+        Assert.True(stopped >= 0 && stopped < released,
+            $"the first StopAnimation (index {stopped}) must come before the first Dispose (index {released})");
     }
 }

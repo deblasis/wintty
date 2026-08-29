@@ -30,9 +30,16 @@ internal sealed class PaneStartupGlow : IDisposable
     private readonly FrameworkElement _mount;
     private readonly Compositor _compositor;
     private readonly ShapeVisual _shapeVisual;
+    private readonly SpriteShape _coreShape;
+    private readonly SpriteShape _haloShape;
     private readonly CompositionRoundedRectangleGeometry _geometry;
+    private readonly CompositionColorGradientStopCollection _coreStops;
+    private readonly CompositionColorGradientStopCollection _haloStops;
     private readonly CompositionRadialGradientBrush _coreBrush;
     private readonly CompositionRadialGradientBrush _haloBrush;
+    private readonly ScalarKeyFrameAnimation _fade;
+    private readonly Vector2KeyFrameAnimation _orbit;
+    private readonly LinearEasingFunction _easing;
     private bool _disposed;
 
     /// <param name="mount">An empty FrameworkElement (sized/positioned by
@@ -55,9 +62,10 @@ internal sealed class PaneStartupGlow : IDisposable
         _coreBrush.MappingMode = CompositionMappingMode.Relative;
         _coreBrush.EllipseRadius = new Vector2(0.5f, 0.5f);
         _coreBrush.EllipseCenter = new Vector2(0f, 0f);
-        _coreBrush.ColorStops.Add(_compositor.CreateColorGradientStop(0.0f, lead));
-        _coreBrush.ColorStops.Add(_compositor.CreateColorGradientStop(0.40f, trail));
-        _coreBrush.ColorStops.Add(_compositor.CreateColorGradientStop(
+        _coreStops = _coreBrush.ColorStops;
+        _coreStops.Add(_compositor.CreateColorGradientStop(0.0f, lead));
+        _coreStops.Add(_compositor.CreateColorGradientStop(0.40f, trail));
+        _coreStops.Add(_compositor.CreateColorGradientStop(
             1.0f, Windows.UI.Color.FromArgb(70, trail.R, trail.G, trail.B)));
 
         // Halo: wide, soft, low-alpha accent bloom following the same head.
@@ -65,11 +73,12 @@ internal sealed class PaneStartupGlow : IDisposable
         _haloBrush.MappingMode = CompositionMappingMode.Relative;
         _haloBrush.EllipseRadius = new Vector2(0.7f, 0.7f);
         _haloBrush.EllipseCenter = new Vector2(0f, 0f);
-        _haloBrush.ColorStops.Add(_compositor.CreateColorGradientStop(
+        _haloStops = _haloBrush.ColorStops;
+        _haloStops.Add(_compositor.CreateColorGradientStop(
             0.0f, Windows.UI.Color.FromArgb(150, trail.R, trail.G, trail.B)));
-        _haloBrush.ColorStops.Add(_compositor.CreateColorGradientStop(
+        _haloStops.Add(_compositor.CreateColorGradientStop(
             0.6f, Windows.UI.Color.FromArgb(45, trail.R, trail.G, trail.B)));
-        _haloBrush.ColorStops.Add(_compositor.CreateColorGradientStop(
+        _haloStops.Add(_compositor.CreateColorGradientStop(
             1.0f, Windows.UI.Color.FromArgb(0, trail.R, trail.G, trail.B)));
 
         _geometry = _compositor.CreateRoundedRectangleGeometry();
@@ -78,20 +87,37 @@ internal sealed class PaneStartupGlow : IDisposable
 
         // Halo drawn first (under), bright core on top. Both stroke the same
         // rounded-rect path.
-        var haloShape = _compositor.CreateSpriteShape(_geometry);
-        haloShape.StrokeThickness = HaloThickness;
-        haloShape.FillBrush = null;
-        haloShape.StrokeBrush = _haloBrush;
+        _haloShape = _compositor.CreateSpriteShape(_geometry);
+        _haloShape.StrokeThickness = HaloThickness;
+        _haloShape.FillBrush = null;
+        _haloShape.StrokeBrush = _haloBrush;
 
-        var coreShape = _compositor.CreateSpriteShape(_geometry);
-        coreShape.StrokeThickness = CoreThickness;
-        coreShape.FillBrush = null;
-        coreShape.StrokeBrush = _coreBrush;
+        _coreShape = _compositor.CreateSpriteShape(_geometry);
+        _coreShape.StrokeThickness = CoreThickness;
+        _coreShape.FillBrush = null;
+        _coreShape.StrokeBrush = _coreBrush;
 
         _shapeVisual = _compositor.CreateShapeVisual();
         _shapeVisual.Size = size;
-        _shapeVisual.Shapes.Add(haloShape);
-        _shapeVisual.Shapes.Add(coreShape);
+        _shapeVisual.Shapes.Add(_haloShape);
+        _shapeVisual.Shapes.Add(_coreShape);
+
+        // Animations are built here rather than at start/fade time so that
+        // Dispose owns every composition object this class creates. Nothing
+        // is lost: the orbit's key frames are fixed (four corners, clockwise),
+        // the fade's target is fixed (transparent), and only the two
+        // durations wait for their caller.
+        _easing = _compositor.CreateLinearEasingFunction();
+        _orbit = _compositor.CreateVector2KeyFrameAnimation();
+        _orbit.InsertKeyFrame(0.00f, new Vector2(0f, 0f), _easing); // top-left
+        _orbit.InsertKeyFrame(0.25f, new Vector2(1f, 0f), _easing); // top-right
+        _orbit.InsertKeyFrame(0.50f, new Vector2(1f, 1f), _easing); // bottom-right
+        _orbit.InsertKeyFrame(0.75f, new Vector2(0f, 1f), _easing); // bottom-left
+        _orbit.InsertKeyFrame(1.00f, new Vector2(0f, 0f), _easing); // back to start
+        _orbit.Duration = LoopPeriod;
+        _orbit.IterationBehavior = AnimationIterationBehavior.Forever;
+        _fade = _compositor.CreateScalarKeyFrameAnimation();
+        _fade.InsertKeyFrame(1f, 0f);
 
         ElementCompositionPreview.SetElementChildVisual(_mount, _shapeVisual);
     }
@@ -100,17 +126,8 @@ internal sealed class PaneStartupGlow : IDisposable
     public void StartGlow()
     {
         if (_disposed) return;
-        var linear = _compositor.CreateLinearEasingFunction();
-        var orbit = _compositor.CreateVector2KeyFrameAnimation();
-        orbit.InsertKeyFrame(0.00f, new Vector2(0f, 0f), linear); // top-left
-        orbit.InsertKeyFrame(0.25f, new Vector2(1f, 0f), linear); // top-right
-        orbit.InsertKeyFrame(0.50f, new Vector2(1f, 1f), linear); // bottom-right
-        orbit.InsertKeyFrame(0.75f, new Vector2(0f, 1f), linear); // bottom-left
-        orbit.InsertKeyFrame(1.00f, new Vector2(0f, 0f), linear); // back to start
-        orbit.Duration = LoopPeriod;
-        orbit.IterationBehavior = AnimationIterationBehavior.Forever;
-        _coreBrush.StartAnimation("EllipseCenter", orbit);
-        _haloBrush.StartAnimation("EllipseCenter", orbit);
+        _coreBrush.StartAnimation("EllipseCenter", _orbit);
+        _haloBrush.StartAnimation("EllipseCenter", _orbit);
     }
 
     /// <summary>Fade the whole glow to transparent over <paramref name="duration"/>.
@@ -118,10 +135,8 @@ internal sealed class PaneStartupGlow : IDisposable
     public void BeginFadeOut(TimeSpan duration)
     {
         if (_disposed) return;
-        var fade = _compositor.CreateScalarKeyFrameAnimation();
-        fade.InsertKeyFrame(1f, 0f);
-        fade.Duration = duration;
-        _shapeVisual.StartAnimation("Opacity", fade);
+        _fade.Duration = duration;
+        _shapeVisual.StartAnimation("Opacity", _fade);
     }
 
     /// <summary>Resize the glow when the leaf bounds change.</summary>
@@ -148,13 +163,41 @@ internal sealed class PaneStartupGlow : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // Animations stop before the objects they drive, then owners go
+        // before their dependents: the visual that holds both shapes, the
+        // shapes, and the geometry they both stroke.
         _coreBrush.StopAnimation("EllipseCenter");
         _haloBrush.StopAnimation("EllipseCenter");
         _shapeVisual.StopAnimation("Opacity");
         ElementCompositionPreview.SetElementChildVisual(_mount, null);
+
         _shapeVisual.Dispose();
+        _coreShape.Dispose();
+        _haloShape.Dispose();
         _geometry.Dispose();
+
+        // Each brush's gradient graph. The stops are composition objects of
+        // their own and go before the collection holding them: enumerating a
+        // closed collection is the one order that would throw.
+        DisposeStops(_coreStops);
+        _coreStops.Dispose();
         _coreBrush.Dispose();
+        DisposeStops(_haloStops);
+        _haloStops.Dispose();
         _haloBrush.Dispose();
+
+        // The animations themselves, the forever orbit included: left running
+        // it keeps the compositor animating the property of a brush nobody
+        // paints with, for the rest of the window's life.
+        _fade.Dispose();
+        _orbit.Dispose();
+        _easing.Dispose();
+    }
+
+    private static void DisposeStops(CompositionColorGradientStopCollection stops)
+    {
+        foreach (var stop in stops)
+            stop.Dispose();
     }
 }
