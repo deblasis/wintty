@@ -189,13 +189,17 @@ public class TabPinMotionStateFuzzTests
     [Fact]
     public void TheMotionTokens_AreTheSanctionedValues()
     {
-        // The flight and its landing, and the fade. Values live in
-        // Core next to the machine so both strips and the tests read
-        // one copy.
+        // The flight and its landing, the fade, and the horizontal
+        // lift's shadow. Values live in Core next to the machine so
+        // both strips and the tests read one copy.
         Assert.Equal(250, TabStripMotion.PinFlightMs);
         Assert.Equal(0.6f, TabStripMotion.PinSettleDampingRatio);
         Assert.Equal(60, TabStripMotion.PinSettlePeriodMs);
         Assert.Equal(83, TabStripMotion.FadeMs);
+        Assert.Equal(83, TabStripMotion.UnliftFadeMs);
+        Assert.Equal(16, TabStripMotion.LiftShadowBlurRadiusPx);
+        Assert.Equal(4, TabStripMotion.LiftShadowOffsetYPx);
+        Assert.Equal(0.25f, TabStripMotion.LiftShadowOpacity);
     }
 
     [Fact]
