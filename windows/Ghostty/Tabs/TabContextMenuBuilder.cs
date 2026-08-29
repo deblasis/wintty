@@ -229,22 +229,54 @@ internal static class TabContextMenuBuilder
 
     /// <summary>
     /// The header row's right-click menu (vertical only; horizontal grows
-    /// a chip equivalent in PR 6). Collapse routes through the router so
-    /// the command announces and the strip re-homes focus under the folding
-    /// run; Close Group greys out exactly when the group's members are all
-    /// the window's tabs, the same rule as Move Tab to New Window. Built
-    /// fresh per right-click, so the collapse label reads the live bit --
-    /// but the label still re-evaluates on Opening, because the header can
-    /// be toggled (chevron) between build and open.
+    /// a chip equivalent in PR 6). Rename and color are dialog ops like
+    /// the per-tab menu's: the item hosts the dialog and hands the result
+    /// to the router, so a commanded rename announces and a drag-performed
+    /// title change stays silent. Collapse routes through the router so
+    /// the command announces and the strip re-homes focus under the
+    /// folding run; Close Group greys out exactly when the group's members
+    /// are all the window's tabs, the same rule as Move Tab to New Window.
+    /// Built fresh per right-click, so the collapse label reads the live
+    /// bit -- but the label still re-evaluates on Opening, because the
+    /// header can be toggled (chevron) between build and open.
     /// </summary>
     public static MenuFlyout BuildGroupMenu(
         TabManager manager,
         TabGroup group,
+        DialogTracker dialogs,
         Action<TabGroup, bool> requestCollapseGroup,
         Action<TabGroup> requestDissolveGroup,
-        Action<TabGroup> requestCloseGroup)
+        Action<TabGroup> requestCloseGroup,
+        Action<TabGroup, string?> requestRenameGroup,
+        Action<TabGroup, TabColor> requestColorGroup)
     {
         var flyout = new MenuFlyout();
+
+        var rename = new MenuFlyoutItem { Text = "Rename Group" };
+        rename.Click += async (_, _) =>
+        {
+            var target = flyout.Target;
+            if (target?.XamlRoot is null) return;
+            var dlg = new RenameTabDialog(group.Title) { XamlRoot = target.XamlRoot };
+            using (dialogs.Track(dlg))
+            {
+                var res = await dlg.ShowAsync();
+                if (res == ContentDialogResult.Primary)
+                    requestRenameGroup(group, dlg.Result);
+            }
+        };
+        flyout.Items.Add(rename);
+
+        var color = new MenuFlyoutItem { Text = "Group Color..." };
+        color.Click += (_, _) =>
+        {
+            var target = flyout.Target as FrameworkElement;
+            if (target is null) return;
+            ShowColorPicker(target, group.Color, c => requestColorGroup(group, c));
+        };
+        flyout.Items.Add(color);
+
+        flyout.Items.Add(new MenuFlyoutSeparator());
 
         var collapse = new MenuFlyoutItem
         {
@@ -274,11 +306,15 @@ internal static class TabContextMenuBuilder
     }
 
     private static void ShowColorPicker(FrameworkElement anchor, TabModel tab)
+        => ShowColorPicker(anchor, tab.Color, color => tab.Color = color);
+
+    private static void ShowColorPicker(
+        FrameworkElement anchor, TabColor initial, Action<TabColor> apply)
     {
         // Build the secondary flyout fresh each invocation. Cheap, and
         // avoids any stale selection-ring state from the previous
         // right-click.
-        var picker = new TabColorPalettePicker(tab.Color);
+        var picker = new TabColorPalettePicker(initial);
         var subFlyout = new Flyout
         {
             Content = picker,
@@ -288,7 +324,7 @@ internal static class TabContextMenuBuilder
 
         picker.ColorSelected += (_, color) =>
         {
-            tab.Color = color;
+            apply(color);
             subFlyout.Hide();
         };
 

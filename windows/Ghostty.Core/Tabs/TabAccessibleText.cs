@@ -57,9 +57,27 @@ internal static class TabAccessibleText
     /// switcher, pane title) still agrees on.
     /// </summary>
     internal static string Status(bool isPinned, bool bellRinging)
+        => Status(isPinned, bellRinging, groupTitle: null, isCollapsed: false);
+
+    /// <summary>
+    /// The same state plus the membership the row renders under: a grouped
+    /// member carries "Group {title}" so a listener inside a long run
+    /// knows which run they are in -- the row's own title says nothing
+    /// about it, and the header row sits outside keyboard traversal of the
+    /// members. Collapsed rides along because the state is already in
+    /// hand at the call site; a collapsed member is hidden in the vertical
+    /// strip, so the segment mostly matters to clients reading the raw
+    /// tree, where the member still exists.
+    /// </summary>
+    internal static string Status(
+        bool isPinned, bool bellRinging, string? groupTitle, bool isCollapsed)
     {
-        if (!isPinned) return bellRinging ? "Bell" : string.Empty;
-        return bellRinging ? "Pinned, Bell" : "Pinned";
+        var segments = new List<string>();
+        if (isPinned) segments.Add("Pinned");
+        if (!string.IsNullOrEmpty(groupTitle)) segments.Add($"Group {groupTitle}");
+        if (isCollapsed) segments.Add("Collapsed");
+        if (bellRinging) segments.Add("Bell");
+        return string.Join(", ", segments);
     }
 
     /// <summary>
@@ -129,6 +147,22 @@ internal static class TabAccessibleText
     /// <summary>Spoken when a Close Group command starts.</summary>
     internal static string GroupCloseAnnouncement(TabGroup group, int memberCount)
         => $"Closing group {group.Title}, {memberCount} {Tabs(memberCount)}";
+
+    /// <summary>
+    /// Spoken when a rename command lands. The old title is pre-op data
+    /// (the router captures it before the set): after the rename the group
+    /// only knows its new name, and the listener needs the one they heard
+    /// to be told it changed.
+    /// </summary>
+    internal static string GroupRenamedAnnouncement(TabGroup group, string oldTitle)
+        => $"Group {oldTitle} renamed to {group.Title}";
+
+    /// <summary>
+    /// Spoken when a color command lands. The name is the palette's own
+    /// label, the same word the swatch tooltip shows.
+    /// </summary>
+    internal static string GroupColoredAnnouncement(TabGroup group, TabColor color)
+        => $"Group {group.Title} color set to {TabColorPalette.LocalizedName(color)}";
 
     private static string Tabs(int count) => count == 1 ? "tab" : "tabs";
 }

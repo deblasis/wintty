@@ -144,4 +144,22 @@ public enum PaneAction
     // no keybind-catalog verb -- the palette entry is the keyboard path.
     PinTab = 66,
     UnpinTab = 67,
+
+    // Group operations on the ACTIVE TAB'S GROUP (ungrouped active tab is
+    // a silent no-op; the router's refusal guards decide the rest). Same
+    // palette-and-menu-only ruling as PinTab/UnpinTab: no KeyBindings
+    // match and no keybind-catalog verb -- catalog verbs for these are a
+    // separately approved follow-up. AddToGroup is deliberately absent:
+    // the palette has no group chooser, so joining stays a context-menu
+    // op until one exists. RenameGroup/ColorGroup are dialog ops: the
+    // router forwards them to the window, which owns the XamlRoot the
+    // dialog and the picker need.
+    NewGroupWithTab = 68,
+    RemoveFromGroup = 69,
+    CollapseGroup = 70,
+    ExpandGroup = 71,
+    DissolveGroup = 72,
+    CloseGroup = 73,
+    RenameGroup = 74,
+    ColorGroup = 75,
 }

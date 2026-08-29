@@ -216,9 +216,12 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
             var groupFlyout = TabContextMenuBuilder.BuildGroupMenu(
                 _manager,
                 group,
+                _dialogs,
                 requestCollapseGroup: _router.RequestCollapseGroup,
                 requestDissolveGroup: _router.RequestDissolveGroup,
-                requestCloseGroup: _router.RequestCloseGroup);
+                requestCloseGroup: _router.RequestCloseGroup,
+                requestRenameGroup: _router.RequestRenameGroup,
+                requestColorGroup: _router.RequestColorGroup);
 
             var header = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
             if (header is not null && e.TryGetPosition(header, out Point groupPos))

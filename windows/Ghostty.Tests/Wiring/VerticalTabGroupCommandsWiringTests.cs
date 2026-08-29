@@ -239,9 +239,12 @@ public class VerticalTabGroupCommandsWiringTests
             .Single(a => a.Left.ToString() == "_strip.GroupToggleFromCommandRequested");
         Assert.Contains("RequestCollapseGroup", wiring.Right.ToString());
 
-        // One wiring, not one per gesture: the strip raises from the key
-        // path only (2b adds the UIA pattern to the same event).
-        Assert.Single(Strip().Root.Calls("GroupToggleFromCommandRequested?.Invoke"));
+        // One wiring, not one per gesture: the strip-wide raise set is
+        // exactly the key handler and the header item's UIA pattern
+        // forward (pinned next door in VerticalTabGroupHeaderWiringTests).
+        // Both are commands that announce; the pointer chevron toggles in
+        // place and raises nothing.
+        Assert.Equal(2, Strip().Root.Calls("GroupToggleFromCommandRequested?.Invoke").Count);
     }
 
     /// <summary>
@@ -274,5 +277,211 @@ public class VerticalTabGroupCommandsWiringTests
             declined.Statement.DescendantNodesAndSelf().OfType<BreakStatementSyntax>()
                 .Select(b => b.ToString()),
             s => s == "break;");
+    }
+
+    /// <summary>
+    /// The palette is the keyboard path for the group ops (no default chord
+    /// ships, so the entry IS the keyboard gesture, exactly like Pin Tab):
+    /// one entry per op, and deliberately no Add To Group. The palette is
+    /// a flat command list with no chooser, so an entry there could only
+    /// pick the group for the user or dead-end; the member menu's submenu
+    /// stays that command's keyboard path.
+    /// </summary>
+    [Fact]
+    public void ThePalette_ListsTheGroupOps_AndAddsNoChooser()
+    {
+        var entries = ShellSource.Load("Commands.BuiltInCommandSource.cs")
+            .Root.Calls("AddPaneCommand").ToList();
+        foreach (var (op, label) in new[]
+                 {
+                     ("NewGroupWithTab", "New Group With Tab"),
+                     ("RemoveFromGroup", "Remove From Group"),
+                     ("CollapseGroup", "Collapse Group"),
+                     ("ExpandGroup", "Expand Group"),
+                     ("DissolveGroup", "Dissolve Group"),
+                     ("CloseGroup", "Close Group"),
+                     ("RenameGroup", "Rename Group"),
+                     ("ColorGroup", "Group Color"),
+                 })
+        {
+            var entry = entries.Single(e => e.Arg(1) == $"PaneAction.{op}");
+            Assert.Equal($"\"{label}\"", entry.Arg(2));
+        }
+
+        Assert.DoesNotContain(entries, e => e.Arg(1) == "PaneAction.AddToGroup");
+    }
+
+    /// <summary>
+    /// Palette dispatch resolves every group op against the ACTIVE tab's
+    /// group, and an ungrouped active tab falls out before any Request
+    /// runs. The guard is what keeps the ops listable unconditionally:
+    /// there is no palette shape for "grey out when ungrouped", so the
+    /// silence has to live here.
+    /// </summary>
+    [Fact]
+    public void PaletteDispatch_ActsOnTheActiveTabsGroup_AndFallsOutSilently()
+    {
+        var invoke = Router();
+
+        var collapse = invoke.Case("Invoke", "PaneAction.CollapseGroup");
+        var guarded = collapse.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "group is not null");
+        Assert.Contains("_tabs.ActiveTab?.Group", collapse.ToString());
+        // The target rides the action, not the live bit: collapse asks for
+        // collapsed and expand for expanded, so a same-state command is the
+        // Request's no-op instead of an accidental flip.
+        Assert.Equal("action == PaneAction.CollapseGroup",
+            guarded.Calls("RequestCollapseGroup").Single().Arg(1));
+
+        var dissolve = invoke.Case("Invoke", "PaneAction.DissolveGroup");
+        var fallOut = dissolve.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString() == "group is null");
+        Assert.Contains(
+            fallOut.Statement.DescendantNodesAndSelf().OfType<BreakStatementSyntax>()
+                .Select(b => b.ToString()),
+            s => s == "break;");
+        var arms = dissolve.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "action == PaneAction.DissolveGroup");
+        Assert.Contains("RequestDissolveGroup(group)", arms.Statement.ToString());
+        Assert.Contains("RequestCloseGroup(group)", arms.Else!.Statement.ToString());
+
+        var newGroup = invoke.Case("Invoke", "PaneAction.NewGroupWithTab");
+        Assert.Contains("_tabs.ActiveTab", newGroup.ToString());
+        Assert.Contains("RequestNewGroupWithTab(tab)", newGroup.ToString());
+
+        var dialogs = invoke.Case("Invoke", "PaneAction.RenameGroup");
+        var forward = dialogs.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "action == PaneAction.RenameGroup");
+        Assert.Contains("GroupRenameRequested?.Invoke(this, group)",
+            forward.Statement.ToString());
+        Assert.Contains("GroupColorRequested?.Invoke(this, group)",
+            forward.Else!.Statement.ToString());
+    }
+
+    /// <summary>
+    /// The dialog ops are plain INPC sets, so their guards are the whole
+    /// no-op story: a blank title, a group the manager no longer registers
+    /// (a dialog can outlive its dissolve), and the value already in place
+    /// each return before anything mutates or announces. The rename text
+    /// needs the OLD title, so it is captured before the set -- afterwards
+    /// the announcement could only say the new name twice.
+    /// </summary>
+    [Fact]
+    public void RenameAndColorRequests_GuardBeforeSet_BeforeRaise()
+    {
+        var rename = Router().Method("RequestRenameGroup");
+        var blank = rename.DescendantNodes().OfType<IfStatementSyntax>().First();
+        Assert.Equal("string.IsNullOrWhiteSpace(title)", blank.Condition.ToString());
+        var registered = rename.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "!_tabs.Groups.Contains(group)");
+        var sameTitle = rename.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "group.Title == title");
+        var capture = rename.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
+            .First(d => d.Declaration.Variables.Single().Identifier.ValueText == "old");
+        var set = rename.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "group.Title");
+        var raise = rename.Calls("GroupChangedFromCommand?.Invoke").Single();
+        Assert.True(
+            blank.Span.Start < registered.Span.Start
+            && registered.Span.Start < sameTitle.Span.Start
+            && sameTitle.Span.Start < capture.Span.Start
+            && capture.Span.Start < set.Span.Start
+            && set.Span.Start < raise.Span.Start,
+            "every refusal must precede the set, and the old title must be " +
+            "captured before it is overwritten");
+        Assert.Contains("GroupCommandKind.Renamed", raise.ToString());
+        Assert.Contains("0, old)", raise.ToString());
+
+        var color = Router().Method("RequestColorGroup");
+        var sameColor = color.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "group.Color == color");
+        var colorSet = color.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "group.Color");
+        var colorRaise = color.Calls("GroupChangedFromCommand?.Invoke").Single();
+        Assert.True(
+            sameColor.Span.Start < colorSet.Span.Start
+            && colorSet.Span.Start < colorRaise.Span.Start,
+            "a same-color pick is a no-op that announces nothing");
+        Assert.Contains("GroupCommandKind.Colored", colorRaise.ToString());
+    }
+
+    /// <summary>
+    /// The window hosts the dialog ops because only it owns a XamlRoot and
+    /// an anchor, and it hands the results back through the Requests so the
+    /// announce stays behind the guards. The picker hides before the raise:
+    /// a flyout left open over an applied color invites a second pick that
+    /// can only be the no-op the Request refuses.
+    /// </summary>
+    [Fact]
+    public void TheWindowHostsTheDialogOps_AndHandsResultsBackThroughTheRequests()
+    {
+        var window = Window();
+        var rename = window.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_router.GroupRenameRequested");
+        Assert.Contains("RenameTabDialog", rename.Right.ToString());
+        Assert.Contains("_dialogs.Track(dlg)", rename.Right.ToString());
+        Assert.Contains("ContentDialogResult.Primary", rename.Right.ToString());
+        Assert.Contains("RequestRenameGroup(group, dlg.Result)", rename.Right.ToString());
+
+        var color = window.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_router.GroupColorRequested");
+        Assert.Contains("TabColorPalettePicker", color.Right.ToString());
+        var hide = color.Right.Calls("pickerFlyout.Hide").Single();
+        var raise = color.Right.Calls("_router.RequestColorGroup").Single();
+        Assert.True(hide.Span.Start < raise.Span.Start,
+            "the picker closes before the Request runs");
+    }
+
+    /// <summary>
+    /// Renamed and Colored speak what changed, and each kind owns a named
+    /// arm: the trap arm behind them means the next kind added to the enum
+    /// fails the announce loudly instead of narrating nothing (or, with a
+    /// plain default, narrating a collapse that did not happen).
+    /// </summary>
+    [Fact]
+    public void RenamedAndColored_HaveNamedArms_AndTheTrapStays()
+    {
+        var announce = Window().Root.DescendantNodes().OfType<SwitchExpressionSyntax>()
+            .Single(s => s.ToString().Contains("GroupCommandKind"));
+        var arms = announce.Arms.Select(a => a.ToString()).ToList();
+        Assert.Contains(arms, a => a.Contains("GroupCommandKind.Renamed")
+            && a.Contains("GroupRenamedAnnouncement(e.Group, e.OldTitle!)"));
+        Assert.Contains(arms, a => a.Contains("GroupCommandKind.Colored")
+            && a.Contains("GroupColoredAnnouncement(e.Group, e.Group.Color)"));
+        Assert.Contains(arms, a => a.Contains("throw new UnreachableException"));
+    }
+
+    /// <summary>
+    /// The header menu is the full Rename/Color surface, as dialog ops: the
+    /// dialog's result routes through the Request (never a direct set), and
+    /// the color click reuses the per-tab picker core pointed at the
+    /// router. Both lead the menu; collapse stays below its separator.
+    /// </summary>
+    [Fact]
+    public void TheHeaderMenu_CarriesRenameAndColor_AsDialogOpsThroughTheRequests()
+    {
+        var menu = Builder().Method("BuildGroupMenu");
+
+        var renameRoute = menu.Calls("requestRenameGroup").Single();
+        Assert.Equal("dlg.Result", renameRoute.Arg(1));
+        var renameLambda = renameRoute.Ancestors()
+            .OfType<AnonymousFunctionExpressionSyntax>().First();
+        Assert.Contains("RenameTabDialog", renameLambda.ToString());
+        Assert.Contains("dialogs.Track(dlg)", renameLambda.ToString());
+        Assert.Contains("ContentDialogResult.Primary", renameLambda.ToString());
+        // A flyout can outlive its window; a dialog needs somewhere to show.
+        Assert.Contains("XamlRoot is null", renameLambda.ToString());
+
+        var colorRoute = menu.Calls("requestColorGroup").Single();
+        Assert.Equal("c", colorRoute.Arg(1));
+        Assert.Contains("ShowColorPicker(target, group.Color", menu.ToString());
+
+        Assert.True(colorRoute.Span.Start
+            < menu.Calls("requestCollapseGroup").Single().Span.Start,
+            "rename and color lead the menu");
+
+        // The per-tab half of the shared picker keeps its direct INPC set:
+        // a tab color has no command to announce, only a swatch to repaint.
+        Assert.Contains("color => tab.Color = color", Builder().Root.ToString());
     }
 }

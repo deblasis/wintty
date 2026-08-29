@@ -67,6 +67,19 @@ internal sealed class BuiltInCommandSource : ICommandSource
         AddPaneCommand(commands, PaneAction.MoveTabLeft, "Move Tab Left", "Move the active tab one position left", CommandCategory.Tab);
         AddPaneCommand(commands, PaneAction.PinTab, "Pin Tab", "Pin the active tab into the pinned zone", CommandCategory.Tab, "\uE718");
         AddPaneCommand(commands, PaneAction.UnpinTab, "Unpin Tab", "Unpin the active tab from the pinned zone", CommandCategory.Tab, "\uE77A");
+        // Group ops act on the active tab's group and no-op silently when
+        // it is ungrouped, so every entry lists unconditionally (the pin
+        // pair lists the same way). No Add To Group here: the palette has
+        // no group chooser, and a chooser-less entry would either pick
+        // for the user or dead-end.
+        AddPaneCommand(commands, PaneAction.NewGroupWithTab, "New Group With Tab", "Start a group from the active tab", CommandCategory.Tab, "\uE71F");
+        AddPaneCommand(commands, PaneAction.RemoveFromGroup, "Remove From Group", "Take the active tab out of its group", CommandCategory.Tab, "\uE74D");
+        AddPaneCommand(commands, PaneAction.CollapseGroup, "Collapse Group", "Fold the active tab's group under its header", CommandCategory.Tab, "\uE70D");
+        AddPaneCommand(commands, PaneAction.ExpandGroup, "Expand Group", "Unfold the active tab's group", CommandCategory.Tab, "\uE70E");
+        AddPaneCommand(commands, PaneAction.DissolveGroup, "Dissolve Group", "Ungroup every member of the active tab's group", CommandCategory.Tab, "\uE74D");
+        AddPaneCommand(commands, PaneAction.CloseGroup, "Close Group", "Close every member of the active tab's group", CommandCategory.Tab, "\uE711");
+        AddPaneCommand(commands, PaneAction.RenameGroup, "Rename Group", "Rename the active tab's group", CommandCategory.Tab, "\uE8AC");
+        AddPaneCommand(commands, PaneAction.ColorGroup, "Group Color", "Pick a color for the active tab's group", CommandCategory.Tab, "\uE790");
         AddPaneCommand(commands, PaneAction.ToggleVerticalTabsPinned, "Toggle Vertical Tabs Pinned", "Pin or unpin the vertical tab sidebar", CommandCategory.Tab);
         AddTabLayoutSwitchCommand(commands);
         AddPaneCommand(commands, PaneAction.ToggleQuickTerminal, "Toggle Quake Terminal", "Show or hide the singleton drop-down terminal", CommandCategory.Terminal, icon: null, pathKey: "quake");
