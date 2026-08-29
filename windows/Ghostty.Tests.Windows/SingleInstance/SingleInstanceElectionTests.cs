@@ -235,6 +235,41 @@ public sealed class SingleInstanceElectionTests
     }
 
     /// <summary>
+    /// The warm seam is read through this property, not alongside it, so a
+    /// decision type that drifted away from the election would still compile
+    /// and every launch would splash again. Pinned here rather than over the
+    /// decision type alone because this is the member the shell reads.
+    /// </summary>
+    [Fact]
+    public void TheSplashGate_ReadsTheInstalledWarmProbe()
+    {
+        var (election, incumbent) = ElectionWithRole(SingleInstanceRole.Primary);
+        try
+        {
+            LaunchSplashDecision.WarmSessionProbe = () => true;
+            try
+            {
+                Assert.False(election.ShouldShowLaunchSplash);
+            }
+            finally
+            {
+                LaunchSplashDecision.WarmSessionProbe = null;
+            }
+
+            // Reset rather than assumed: the false half only means something
+            // if the probe really is gone, and a leak here would suppress the
+            // splash for the rest of the run.
+            Assert.Null(LaunchSplashDecision.WarmSessionProbe);
+            Assert.True(election.ShouldShowLaunchSplash);
+        }
+        finally
+        {
+            election.Dispose();
+            incumbent?.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Drive a real election into <paramref name="role"/>, so the theory above
     /// tests reachable states rather than a hand-built object.
     /// </summary>

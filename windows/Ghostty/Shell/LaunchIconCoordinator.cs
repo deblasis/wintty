@@ -26,7 +26,10 @@ namespace Ghostty.Shell;
 /// produced content, so a surface whose shell never writes anything
 /// will never raise it. Hence the grace period: once composition has
 /// happened, the splash waits a bounded time for the surface and then
-/// gives up rather than outstaying its welcome.</para>
+/// gives up rather than outstaying its welcome. That is the only case
+/// the bound is reached in, so shortening it risks only a surface with
+/// nothing to say, and a splash held over an app that is ready to show
+/// itself is its own defect.</para>
 ///
 /// <para>Lifted out of MainWindow for the same reason as
 /// <see cref="LayoutCoordinator"/>: the window is a composition root,
@@ -36,11 +39,18 @@ internal sealed class LaunchIconCoordinator
 {
     /// <summary>
     /// How long to wait for the surface to present after WinUI has
-    /// composed. Sized to cover the observed compose-to-present gap with
-    /// headroom; past this the splash comes down regardless, on the
+    /// composed. Past this the splash comes down regardless, on the
     /// assumption the surface has nothing to draw.
     /// </summary>
-    private const int SurfaceGraceMs = 2500;
+    /// <remarks>
+    /// The bound is reached in exactly one case: composition happened and
+    /// <c>first_render</c> never did, because the surface has nothing to
+    /// draw. A shell that writes anything dismisses the splash the moment
+    /// its first frame presents, well inside this, so the shorter value
+    /// costs a content-less surface the last stretch of its wait and costs
+    /// a normal start nothing at all.
+    /// </remarks>
+    private const int SurfaceGraceMs = 1500;
 
     private readonly DispatcherQueue _dispatcher;
 
