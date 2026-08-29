@@ -650,6 +650,21 @@ public class TabStripProjectionTests
     }
 
     [Fact]
+    public void VisibleGroupAt_names_only_chip_slots()
+    {
+        var (mgr, _, collapsed) = NewChipFixture();
+
+        // The complement of VisibleIndexToModelIndex's -1: the same slot
+        // answers which run took a drop there, and item slots or no slot
+        // at all answer null rather than a stranger's group.
+        Assert.Null(TabStripProjection.VisibleGroupAt(mgr, 0));
+        Assert.Same(collapsed, TabStripProjection.VisibleGroupAt(mgr, 5));
+        Assert.Null(TabStripProjection.VisibleGroupAt(mgr, 6));
+        Assert.Null(TabStripProjection.VisibleGroupAt(mgr, -1));
+        Assert.Null(TabStripProjection.VisibleGroupAt(mgr, 7));
+    }
+
+    [Fact]
     public void ModelIndexToVisibleIndex_answers_the_slot_or_minus_one_when_hidden()
     {
         var (mgr, _, _) = NewChipFixture();

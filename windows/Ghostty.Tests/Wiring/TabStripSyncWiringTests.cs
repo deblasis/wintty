@@ -345,32 +345,222 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
-    public void The_drop_translates_its_slot_through_the_projection_and_refuses_chip_shaped_drops()
+    public void A_chip_drag_commits_MoveGroup_through_the_drop_map_and_never_Move()
     {
         var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
 
-        // The gate and the translation are one polarity: only a TAB drop
-        // maps its strip slot through the projection (a raw IndexOf is a
-        // slot, not a manager index -- chips occupy slots), because a chip
-        // has no manager index to move to.
-        var gate = completed.DescendantNodes().OfType<IfStatementSyntax>()
-            .First(i => i.Condition.ToString().Contains("item.Tag is not TabGroup", StringComparison.Ordinal));
-        var mapping = gate.Call("TabStripProjection.VisibleIndexToModelIndex");
+        // A chip drags its whole run, and the commit is MoveGroup even for
+        // a single-member run -- a Move here would relocate one member out
+        // of the run it is carrying and let Normalize re-gather the rest
+        // somewhere else. The strip's rest slot is not a manager index
+        // (chips occupy slots; hidden members occupy none), so the target
+        // comes from the drop map, never from the slot arithmetic.
+        var chipGate = completed.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
+        // Scope to the gate's own statement: the if node's descendants
+        // include its else arm, and the tab path's Move lives there.
+        var chipArm = chipGate.Statement;
+        var map = chipArm.Call("TabChipDrop.GroupTarget");
+        var commit = chipArm.Call("_manager.MoveGroup");
         Assert.True(
-            gate.DescendantNodes().Contains(mapping),
-            "The drop's slot translation must sit inside the chip-drag gate: a chip "
-            + "drop has no manager index to map to.");
+            commit.Arg(1) == "target" && map.SpanStart < commit.SpanStart,
+            "The chip drag must commit MoveGroup with the drop map's target, not a "
+            + "slot the strip happened to land on.");
+        Assert.True(
+            map.Arg(2) == "leftTab" && map.Arg(3) == "leftChip",
+            "The drop map must be fed the neighbour's IDENTITY, not a slot: on a "
+            + "downward move TabView shifts the strip slots left, and a slot "
+            + "re-read through the pre-drag projection names the dragged chip "
+            + "itself.");
 
-        // The refuse: the move is gated on the mapped index, so a drop that
-        // came to rest AT a chip's slot maps to -1 and refuses outright --
-        // the reconcile after the gate restores the strip. A later rung
-        // routes chip-shaped drops into joins.
-        var move = completed.Call("_manager.Move");
+        // The neighbour's identity is read off the strip's own final
+        // arrangement, from the slot LEFT of the rest. The transposed
+        // read (slot + 1) is the boundary flip this rung exists to make
+        // impossible, so the argument is pinned verbatim.
+        var neighbour = chipArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText().EndsWith("ContainerFromIndex", StringComparison.Ordinal));
+        Assert.True(
+            neighbour.ArgumentList.ToString() == "(slot - 1)",
+            "The left neighbour must be read from slot - 1, the strip's own "
+            + "arrangement: slot + 1 is the transposed boundary, and a projector "
+            + "slot read is the pre-drag order the drag just overruled.");
+
+        // A rest the strip cannot name a neighbour for is skew: the whole
+        // commit sits behind that refusal rather than guessing at the
+        // strip head, and behind the map's own -1, since MoveGroup clamps
+        // a guess into a landing.
+        Assert.True(
+            map.Ancestors().OfType<IfStatementSyntax>()
+                .Any(a => a.Condition.ToString() == "known"),
+            "The commit must be refused when the left neighbour is unresolvable: "
+            + "a guessed head target yanks the run to the front of the strip.");
+        Assert.True(
+            commit.Ancestors().OfType<IfStatementSyntax>()
+                .Any(a => a.Condition.ToString() == "target >= 0"),
+            "The MoveGroup commit must sit behind the map's refusal (target >= 0): "
+            + "a strip the projection cannot describe is the reconcile's, not the "
+            + "drop map's to guess at.");
+
+        Assert.Empty(chipArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void A_tab_drop_moves_through_the_projection_and_forks_at_chip_slots()
+    {
+        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+
+        // The tab path is exactly the chip gate's else arm: one of the two
+        // owns every drop. The translation is still the projection's (a
+        // raw IndexOf is a slot, not a manager index -- chips occupy
+        // slots), and the move is still gated on the mapped index.
+        var chipGate = completed.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
+        var tabArm = chipGate.Else?.Statement;
+        Assert.True(
+            tabArm is not null,
+            "The chip gate must carry the tab path as its else arm: neither drop "
+            + "shape may fall through both arms or between them.");
+        Assert.Single(
+            tabArm!.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(c => c.CalleeText().EndsWith(
+                    "TabStripProjection.VisibleIndexToModelIndex", StringComparison.Ordinal)));
+
+        var move = tabArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal));
         Assert.True(
             move.Ancestors().OfType<IfStatementSyntax>()
                 .Any(a => a.Condition.ToString() == "newIndex >= 0"),
-            "The drop's move must be gated on the mapped index (newIndex >= 0): a "
-            + "chip-slot rest maps to -1 and must refuse, not clamp.");
+            "The tab drop's move must be gated on the mapped index (newIndex >= 0).");
+
+        // A slot that maps to a chip is the join fork's, and the fork
+        // lives in its own method so its pins read one story below.
+        var newIndexGate = move.Ancestors().OfType<IfStatementSyntax>()
+            .First(a => a.Condition.ToString() == "newIndex >= 0");
+        Assert.True(
+            newIndexGate.Else?.Statement.DescendantNodes()
+                .OfType<InvocationExpressionSyntax>()
+                .Any(c => c.CalleeText().EndsWith("ResolveDropAtChip", StringComparison.Ordinal))
+            == true,
+            "The unmapped arm (-1, a chip's slot) must route to the drop-at-a-run "
+            + "fork; refusing outright would bounce every drop a chip borders.");
+    }
+
+    [Fact]
+    public void A_drop_on_a_chip_joins_through_the_projector_and_only_by_geometry()
+    {
+        var fork = ShellSource.Load(TabHostSource).Method("ResolveDropAtChip");
+
+        // The run that took the drop comes from the projection: the
+        // members were hidden at drop time, so no TabItems index can say
+        // which run a chip slot names.
+        Assert.Empty(fork.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("TabItems.IndexOf", StringComparison.Ordinal)));
+        Assert.Single(fork.Calls("TabStripProjection.VisibleGroupAt"));
+
+        // ON the chip joins, and only ON: the same -1 slot also serves a
+        // drop parked beside the chip, and only the recorded pointer
+        // geometry tells those apart. An unconditional join would swallow
+        // every positioning drop a chip borders.
+        var join = fork.Call("_manager.JoinGroup");
+        Assert.True(
+            join.Ancestors().OfType<IfStatementSyntax>()
+                .Any(a => a.Condition.ToString().Contains("Contains(_lastDropPosition)",
+                    StringComparison.Ordinal)),
+            "The join must be gated on the pointer landing inside the chip's bounds: "
+            + "a drop beside the chip positions, it does not join.");
+
+        // Beside the chip positions relative to the run's edge -- both
+        // directions present, and through Move, never a membership write.
+        Assert.Single(fork.Calls("TabChipDrop.MemberTargetBefore"));
+        Assert.Single(fork.Calls("TabChipDrop.MemberTargetAfter"));
+        var beside = fork.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal));
+        Assert.True(
+            beside.SpanStart > join.SpanStart,
+            "The positioning move must be the fork's second arm, after the join.");
+    }
+
+    [Fact]
+    public void The_strip_accepts_only_its_own_drags_and_records_the_drop_point()
+    {
+        var src = ShellSource.Load(TabHostSource);
+        var over = src.Method("OnTabStripDragOver");
+        var drop = src.Method("OnTabStripDrop");
+
+        // Both handlers open with the live-drag guard: an external drag
+        // must stay declined, which an untouched accepted operation does.
+        foreach (var handler in new[] { over, drop })
+        {
+            var guard = handler.Body!.Statements.First() as IfStatementSyntax;
+            Assert.True(
+                guard?.Condition is PrefixUnaryExpressionSyntax not
+                    && not.Operand is IdentifierNameSyntax id
+                    && id.Identifier.ValueText == "_stripDragActive"
+                    && guard.Statement is ReturnStatementSyntax { Expression: null },
+                handler.Identifier.ValueText + " must open with `if (!_stripDragActive) "
+                + "return;`: accepting a foreign drag lets a drop the strip never "
+                + "started write state.");
+        }
+
+        var accept = over.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .First(a => a.Left.ToString().EndsWith("AcceptedOperation", StringComparison.Ordinal));
+        Assert.True(
+            accept.Right.ToString().Contains("DataPackageOperation.Move", StringComparison.Ordinal),
+            "The strip accepts Move only: the accept exists so TabStripDrop fires "
+            + "with the pointer position the join fork reads.");
+
+        // The drop records and stops there -- the commit is OnTabDrag-
+        // Completed's, and neither handler may move anything itself.
+        var record = drop.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .First(a => a.Left is IdentifierNameSyntax lid
+                        && lid.Identifier.ValueText == "_lastDropPosition");
+        Assert.True(
+            record.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Any(c => c.CalleeText().EndsWith("GetPosition", StringComparison.Ordinal)),
+            "The recorded point must come from the drop event's position.");
+        Assert.Empty(drop.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)
+                        || c.CalleeText().EndsWith("JoinGroup", StringComparison.Ordinal)));
+        Assert.Empty(over.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)
+                        || c.CalleeText().EndsWith("JoinGroup", StringComparison.Ordinal)));
+
+        // The handlers are wired in markup, where the code-behind sweep
+        // cannot see them (the TabDroppedOutside pin's lesson).
+        var xaml = ReadEmbedded(TabHostXaml);
+        Assert.True(
+            xaml.Contains("TabStripDragOver", StringComparison.Ordinal)
+                && xaml.Contains("TabStripDrop", StringComparison.Ordinal),
+            "TabHost.xaml must wire TabStripDragOver and TabStripDrop: without the "
+            + "drop the fork never gets a pointer position and refuses every join.");
+    }
+
+    [Fact]
+    public void The_chip_carries_the_group_menu_through_the_router()
+    {
+        var addChip = ShellSource.Load(TabHostSource).Method("AddGroupChip");
+        var menu = addChip.Call("TabContextMenuBuilder.BuildGroupMenu");
+
+        // The menu is the chip's ContextFlyout: while the run is folded,
+        // the chip is the run's only surface, so the group commands live
+        // there and nowhere else.
+        Assert.True(
+            menu.Ancestors().OfType<AssignmentExpressionSyntax>()
+                .Any(a => a.Left.ToString() == "ContextFlyout"),
+            "BuildGroupMenu must be attached as the chip's ContextFlyout.");
+
+        // Every item routes through the router, which is where the
+        // announcement is guaranteed; a direct manager call here would
+        // move group state silently.
+        var args = menu.ArgumentList.ToString();
+        foreach (var route in new[] { "RequestCollapseGroup", "RequestDissolveGroup",
+                     "RequestCloseGroup", "RequestRenameGroup", "RequestColorGroup" })
+        {
+            Assert.True(
+                args.Contains(route, StringComparison.Ordinal),
+                $"The chip menu's {route} must route through the router.");
+        }
     }
 
     [Fact]
