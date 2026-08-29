@@ -14,7 +14,10 @@ namespace Ghostty.Core.Panes;
 /// injected timer's callback (which may run on a threadpool thread) and the
 /// owner's calls (Start/Close/Dispose) cannot corrupt state.
 /// <see cref="StateChanged"/> is raised outside the lock; handlers that touch
-/// UI must still marshal onto the dispatcher.
+/// UI must still marshal onto the dispatcher. Delivery order is not
+/// guaranteed across threads either: each raise runs on whatever thread fired
+/// it, so the lock serializes the transitions but not the handlers that
+/// observe them.
 /// </summary>
 public sealed class PaneStartupGlowState : IDisposable
 {
@@ -24,6 +27,7 @@ public sealed class PaneStartupGlowState : IDisposable
     private readonly ISchedulerTimer _timer;
     private readonly TimeSpan _cap;
     private readonly TimeSpan _fade;
+    private bool _disposed;
 
     public Phase Current { get; private set; } = Phase.Idle;
 
@@ -41,14 +45,15 @@ public sealed class PaneStartupGlowState : IDisposable
         _timer.Callback = OnTimerFired;
     }
 
-    /// <summary>Begin glowing. No-op if already past Idle. The caller is
-    /// responsible for deciding whether to start (enablement, pane size).</summary>
+    /// <summary>Begin glowing. No-op if already past Idle, or once disposed.
+    /// The caller is responsible for deciding whether to start (enablement,
+    /// pane size).</summary>
     public void Start()
     {
         Phase? changed = null;
         lock (_gate)
         {
-            if (Current != Phase.Idle) return;
+            if (_disposed || Current != Phase.Idle) return;
             Current = Phase.Glowing;
             changed = Phase.Glowing;
             _timer.Schedule(_cap);
@@ -57,8 +62,8 @@ public sealed class PaneStartupGlowState : IDisposable
     }
 
     /// <summary>The surface produced its first render: end the glow early.
-    /// No-op unless currently <see cref="Phase.Glowing"/> (Idle/FadingOut
-    /// ignore it). The fade timer supersedes the pending cap
+    /// No-op unless currently <see cref="Phase.Glowing"/> (Idle/FadingOut/
+    /// disposed all ignore it). The fade timer supersedes the pending cap
     /// (last-schedule-wins), so the cap is the fallback only for surfaces
     /// that never render.</summary>
     public void NotifyReady()
@@ -66,17 +71,20 @@ public sealed class PaneStartupGlowState : IDisposable
         Phase? changed = null;
         lock (_gate)
         {
-            if (Current == Phase.Glowing) changed = BeginFadeLocked();
+            if (_disposed || Current != Phase.Glowing) return;
+            changed = BeginFadeLocked();
         }
         Raise(changed);
     }
 
-    /// <summary>Pane closed: cancel any pending timer and return to Idle.</summary>
+    /// <summary>Pane closed: cancel any pending timer and return to Idle.
+    /// No-op once disposed, where there is no timer left to cancel.</summary>
     public void Close()
     {
         Phase? changed = null;
         lock (_gate)
         {
+            if (_disposed) return;
             _timer.Cancel();
             if (Current != Phase.Idle)
             {
@@ -122,7 +130,16 @@ public sealed class PaneStartupGlowState : IDisposable
         // Cancel under the lock, but dispose the timer OUTSIDE it: the real
         // timer's Dispose waits for an in-flight callback to finish, and that
         // callback takes _gate. Disposing under the lock would deadlock.
-        lock (_gate) { _timer.Cancel(); }
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            // A disposed lifecycle is not glowing, and every later call is a
+            // no-op. Deliberately not raised: the owner is tearing down, and
+            // an Idle raise here would only re-enter it.
+            Current = Phase.Idle;
+            _timer.Cancel();
+        }
         _timer.Dispose();
     }
 }

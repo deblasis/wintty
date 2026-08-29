@@ -128,4 +128,51 @@ public class PaneStartupGlowStateTests
         s.Dispose();
         Assert.Equal(1, t.DisposeCount);
     }
+
+    [Fact]
+    public void Start_after_Dispose_is_a_no_op()
+    {
+        var (s, t, log) = Make();
+        s.Dispose();
+        s.Start();
+        Assert.Equal(PaneStartupGlowState.Phase.Idle, s.Current);
+        Assert.Equal(0, t.ScheduleCount);
+        Assert.Empty(log);
+    }
+
+    [Fact]
+    public void NotifyReady_after_Dispose_is_a_no_op()
+    {
+        var (s, t, log) = Make();
+        s.Dispose();
+        s.NotifyReady();
+        Assert.Equal(PaneStartupGlowState.Phase.Idle, s.Current);
+        Assert.Equal(0, t.ScheduleCount);
+        Assert.Empty(log);
+    }
+
+    [Fact]
+    public void Close_after_Dispose_is_a_no_op()
+    {
+        var (s, t, log) = Make();
+        s.Start();
+        s.Dispose();
+        var cancels = t.CancelCount;
+        s.Close();
+        Assert.Equal(PaneStartupGlowState.Phase.Idle, s.Current);
+        Assert.Equal(cancels, t.CancelCount);
+        // Nothing further raised: the Glowing entry is Start's.
+        Assert.Equal([PaneStartupGlowState.Phase.Glowing], log);
+    }
+
+    [Fact]
+    public void Dispose_twice_disposes_the_timer_once()
+    {
+        var t = new FakeTimer();
+        var s = new PaneStartupGlowState(t, Cap, Fade);
+        s.Dispose();
+        s.Dispose();
+        Assert.Equal(1, t.DisposeCount);
+        Assert.Equal(1, t.CancelCount);
+    }
 }
