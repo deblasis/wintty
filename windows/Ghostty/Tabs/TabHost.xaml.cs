@@ -50,6 +50,25 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // above alone no longer describe what TabItems holds.
     private readonly Dictionary<TabGroup, ChipVisuals> _chipByGroup = new();
 
+    // The 2px group rail per tab, in the header's top slot. Kept like the
+    // header TextBlock so a group change repaints the live element instead
+    // of rebuilding the header.
+    private readonly Dictionary<TabModel, Microsoft.UI.Xaml.Shapes.Rectangle>
+        _railByModel = new();
+
+    // The group run label. The rule machine decides; ApplyLabelPhase
+    // translates each phase into timer arms and element ops. The element
+    // lives on the window's morph canvas -- MainWindow attaches it here --
+    // because the hide rules come from both strips and the window, and the
+    // morph canvas is the one coordinate space all three already share.
+    private readonly TabRunLabelRules _labelRules = new();
+    private TabRunLabel? _runLabel;
+    private TabRunLabelRules.Phase _labelPhase = TabRunLabelRules.Phase.Idle;
+    private TabGroup? _labelGroup;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _labelShowTimer;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _labelGraceTimer;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _labelKeyboardTimer;
+
     /// <summary>
     /// The renderable parts of one chip, kept so INPC updates land on the
     /// live elements instead of rebuilding the header -- the same reason
@@ -102,8 +121,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // strip stays in step while hidden; RefreshSeam re-derives the
         // whole pass as belt and braces.
         _manager.TabAdded += (_, t) => { AddItem(t); ReconcileChips(); ReconcileStripOrder(); SelectActive(); QueueBridgeUpdate(); };
-        _manager.TabRemoved += (_, t) => { RemoveItem(t); ReconcileChips(); ReconcileStripOrder(); QueueBridgeUpdate(); };
-        _manager.TabMoved += (_, e) => { MoveItem(e.tab, e.to); ReconcileChips(); ReconcileStripOrder(); QueueBridgeUpdate(); };
+        _manager.TabRemoved += (_, t) => { RemoveItem(t); ReconcileChips(); ReconcileStripOrder(); ApplyPinZoneChrome(); QueueBridgeUpdate(); };
+        _manager.TabMoved += (_, e) => { MoveItem(e.tab, e.to); ReconcileChips(); ReconcileStripOrder(); ApplyPinZoneChrome(); QueueBridgeUpdate(); };
         _manager.ActiveTabChanged += (_, _) => { ReconcileChips(); ReconcileStripOrder(); SelectActive(); QueueBridgeUpdate(); };
 
         // Every one of the calls above can run before the strip has arranged,
@@ -118,6 +137,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // order, so the cover (placed from the active item's slot) is
         // suppressed for the drag and re-placed at the drop.
         TabViewControl.TabDragStarting += OnTabDragStarting;
+
+        // The run label's timers. Each stops itself before translating, so
+        // a timer that fires twice in a pass cannot double-apply.
+        _labelShowTimer = DispatcherQueue.CreateTimer();
+        _labelShowTimer.Interval = TimeSpan.FromMilliseconds(TabRunLabelShape.HoverShowMs);
+        _labelShowTimer.Tick += (_, _) => { _labelShowTimer.Stop(); ApplyLabelPhase(_labelRules.HoverTimerFired()); };
+        _labelGraceTimer = DispatcherQueue.CreateTimer();
+        _labelGraceTimer.Interval = TimeSpan.FromMilliseconds(TabRunLabelShape.LeaveGraceMs);
+        _labelGraceTimer.Tick += (_, _) => { _labelGraceTimer.Stop(); ApplyLabelPhase(_labelRules.GraceTimerFired()); };
+        _labelKeyboardTimer = DispatcherQueue.CreateTimer();
+        _labelKeyboardTimer.Interval = TimeSpan.FromMilliseconds(TabRunLabelShape.KeyboardShowMs);
+        _labelKeyboardTimer.Tick += (_, _) => { _labelKeyboardTimer.Stop(); ApplyLabelPhase(_labelRules.KeyboardTimerFired()); };
 
         // TabView.TabItemsChanged stays unwired on purpose. It fires for
         // this control's own writes as much as for TabView's, so a
@@ -170,6 +201,27 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // would drag a UI dependency into Ghostty.Core. The presenter
         // subscribes to the TabIconViewModel's INPC events directly.
         var iconRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 0 };
+
+        // The pin mark: Segoe Fluent E718 in the leading slot of the
+        // icon row. Equal-width keeps a pinned tab full-size -- shrinking
+        // it to the icon alone would read as a different kind of slot, not
+        // a pinned tab -- so this glyph is the pinned tab's only inline
+        // marker. Collapsed until the tab pins; the IsPinned branch below
+        // is the only thing that shows it.
+        var pinGlyph = new FontIcon
+        {
+            Glyph = "\uE718", // Segoe Fluent / MDL2 "Pin"
+            // FontIcon's default FontFamily is not guaranteed to be the
+            // symbol font, so pin it explicitly (as the close button and
+            // the bell do) or the glyph can render as nothing.
+            FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)
+                Application.Current.Resources["SymbolThemeFontFamily"],
+            FontSize = 12,
+            Margin = new Thickness(0, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = tab.IsPinned ? Visibility.Visible : Visibility.Collapsed,
+        };
+        iconRow.Children.Add(pinGlyph);
         var iconHost = new TabIconPresenter
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -200,8 +252,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
         };
         iconRow.Children.Add(bellGlyph);
 
+        // The group rail: a 2px line in the group's color in the header's
+        // TOP slot. The progress bar owns the bottom slot; the two
+        // never fight. Collapsed until a chrome pass finds a group to
+        // paint -- membership, not this build loop, decides its color.
+        var rail = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            Height = 2,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Visibility = Visibility.Collapsed,
+        };
+        headerPanel.Children.Add(rail);
         headerPanel.Children.Add(iconRow);
         headerPanel.Children.Add(headerBar);
+        _railByModel[tab] = rail;
 
         var item = new TabViewItem
         {
@@ -224,6 +288,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
             DataContext = tab,
         };
         ApplyItemAccessibleText(item, tab);
+        // Hover anywhere on the run shows the label. The handlers
+        // ride every member item and guard at entry: a tab that is not in
+        // an expanded run is not a run surface. Crossing between members
+        // of one run fires Exited then Entered, which is exactly what the
+        // 150ms grace exists to absorb.
+        item.PointerEntered += (_, _) => OnRunMemberPointerEntered(tab);
+        item.PointerExited += (_, _) => ApplyLabelPhase(_labelRules.HoverExit());
         tab.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(TabModel.EffectiveTitle) ||
@@ -262,6 +333,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // (the boundary tab pinning up, the last pinned tab
                 // unpinning), so a relocation-path refresh alone would
                 // leave the boundary tab's status stale for life.
+                pinGlyph.Visibility = tab.IsPinned
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
                 ApplyItemAccessibleText(item, tab);
             }
             else if (e.PropertyName == nameof(TabModel.Group))
@@ -270,8 +344,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 // chip presence, chip counts, and the order they sit in
                 // all re-read. A join into a chip'd run also strands this
                 // tab's slot; the reconcile's rebuild is what removes it.
+                // The rail re-derives on the next chrome pass, which the
+                // reconcile's SelectActive neighbors already run -- but a
+                // move that lands neither selection nor chip still needs
+                // the line to follow the tab, so paint it here too.
                 ReconcileChips();
                 ReconcileStripOrder();
+                ApplyTabChrome(item, headerPanel, tab,
+                    ReferenceEquals(tab, _manager.ActiveTab));
             }
         };
         _itemByModel[tab] = item;
@@ -298,7 +378,120 @@ internal sealed partial class TabHost : UserControl, ITabHost
         TabViewControl.TabItems.Remove(item);
         _itemByModel.Remove(tab);
         _headerTextByModel.Remove(tab);
+        _railByModel.Remove(tab);
         // PaneHost detach from the shared container is MainWindow's job.
+    }
+
+    // -----------------------------------------------------------------
+    // The group run label. The rules live in
+    // TabRunLabelRules (Core, host-free); this half only translates each
+    // phase into timer arms and element ops. Every event lands in
+    // ApplyLabelPhase, so a hide rule cannot be forgotten by arriving
+    // through a door the strip did not expect.
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Attach the window-owned label element. MainWindow builds and hosts
+    /// it on the morph canvas -- the surface both strips are measured in
+    /// and the window already owns -- and hands it over here.
+    /// </summary>
+    internal void AttachRunLabel(TabRunLabel label) => _runLabel = label;
+
+    /// <summary>
+    /// The cross-host hide: the vertical strip's drag start reaches this
+    /// through the window, in the same dispatch pass as its own lift. The
+    /// label cannot know about the vertical strip and must not -- the
+    /// window owns the fact that both strips share one drag surface.
+    /// </summary>
+    internal void CloseRunLabelForDrag() => ApplyLabelPhase(_labelRules.DragStarting());
+
+    /// <summary>
+    /// The cross-host lift: the vertical drag ended, so the refusal stops.
+    /// Without this the machine's DragLive flag has no off-switch on the
+    /// vertical path -- the first vertical drag would kill the label for
+    /// the session, hover and keyboard shows alike. The horizontal drag
+    /// has no counterpart here: its own completed handler applies this
+    /// same rule in its body.
+    /// </summary>
+    internal void EndRunLabelDrag() => ApplyLabelPhase(_labelRules.DragEnded());
+
+    /// <summary>
+    /// Deactivation is a hide rule for the run label: whatever run it was
+    /// naming belongs to a window the user is no longer looking at. It
+    /// goes through the machine, not a bare element hide -- a bare hide
+    /// leaves the phase pending and its timers armed, and the label
+    /// surfaces again on a window nobody is looking at.
+    /// </summary>
+    internal void CloseRunLabelForDeactivation()
+        => ApplyLabelPhase(_labelRules.Deactivated());
+
+    /// <summary>
+    /// A layout switch was requested. A hide rule in its own right: the
+    /// label is anchored to this strip's arrangement, and the switch is
+    /// about to replace both.
+    /// </summary>
+    internal void CloseRunLabelForLayoutSwitch()
+        => ApplyLabelPhase(_labelRules.LayoutSwitchRequested());
+
+    private void OnRunMemberPointerEntered(TabModel tab)
+    {
+        if (tab.Group is not { } group || group.IsCollapsed) return;
+        if (_chipByGroup.ContainsKey(group)) return;
+        _labelGroup = group;
+        ApplyLabelPhase(_labelRules.HoverEnter());
+    }
+
+    /// <summary>
+    /// The one door every label event goes through. Each target phase
+    /// names its own timer work and element op, so the translation is
+    /// total: nothing pending survives into a phase that should not carry
+    /// it, and Idle reads the machine's cut flag -- a drag start hides as
+    /// a cut, everything else as a fade.
+    /// </summary>
+    private void ApplyLabelPhase(TabRunLabelRules.Phase to)
+    {
+        _labelPhase = to;
+        switch (to)
+        {
+            case TabRunLabelRules.Phase.HoverPending:
+                _labelGraceTimer.Stop();
+                _labelKeyboardTimer.Stop();
+                _labelShowTimer.Stop();
+                _labelShowTimer.Start();
+                break;
+            case TabRunLabelRules.Phase.Shown:
+                _labelShowTimer.Stop();
+                _labelGraceTimer.Stop();
+                _labelKeyboardTimer.Stop();
+                if (_labelRules.KeyboardShown) _labelKeyboardTimer.Start();
+                ShowRunLabel();
+                break;
+            case TabRunLabelRules.Phase.GracePending:
+                _labelShowTimer.Stop();
+                _labelKeyboardTimer.Stop();
+                _labelGraceTimer.Stop();
+                _labelGraceTimer.Start();
+                break;
+            case TabRunLabelRules.Phase.Idle:
+                _labelShowTimer.Stop();
+                _labelGraceTimer.Stop();
+                _labelKeyboardTimer.Stop();
+                _runLabel?.Hide(_labelRules.CutOnHide);
+                break;
+        }
+    }
+
+    private void ShowRunLabel()
+    {
+        if (_runLabel is null || _labelGroup is not { } group) return;
+        var members = _manager.MembersOf(group);
+        if (members.Count == 0) return;
+        // The label spans the run: anchored at the head, sized by the
+        // tail. Both elements come from the strip's own map -- the same
+        // identity lookup TabElement serves -- never from strip order.
+        if (_itemByModel.TryGetValue(members[0], out var head)
+            && _itemByModel.TryGetValue(members[^1], out var tail))
+            _runLabel.ShowFor(group, members.Count, head, tail);
     }
 
     // -----------------------------------------------------------------
@@ -428,11 +621,37 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // the chip and the members render as themselves; collapsing
             // mints one when the run does not hold the active tab. Title
             // and color are in-place refreshes and fall through to one.
+            // A collapse is a hide rule for the label: the run it named
+            // is about to stop being a run of visible members.
+            ApplyLabelPhase(_labelRules.Collapsed());
             ReconcileChips();
             ReconcileStripOrder();
             return;
         }
         RefreshChip(group);
+        // The run's members carry the group's name and color on their own
+        // chrome now; the same single-door pass the chip's swatch rides
+        // repaints them, so a recolor never leaves a two-tone run.
+        RefreshRunRails(group);
+    }
+
+    /// <summary>
+    /// Re-derive the chrome of every member of one expanded run. The rail
+    /// and the tint both read the group, so a group change re-runs the
+    /// same per-item pass a selection runs -- one door, no per-element
+    /// special cases to forget.
+    /// </summary>
+    private void RefreshRunRails(TabGroup group)
+    {
+        foreach (var member in _manager.MembersOf(group))
+        {
+            if (_itemByModel.TryGetValue(member, out var item)
+                && item.Header is StackPanel headerPanel)
+            {
+                ApplyTabChrome(item, headerPanel, member,
+                    ReferenceEquals(member, _manager.ActiveTab));
+            }
+        }
     }
 
     /// <summary>
@@ -673,6 +892,42 @@ internal sealed partial class TabHost : UserControl, ITabHost
         _suppressSelectionEvent = true;
         TabViewControl.SelectedItem = item;
         _suppressSelectionEvent = false;
+        OnSelectionLanded(item);
+    }
+
+    /// <summary>
+    /// The label's selection rule, run only when the strip's selection
+    /// actually landed somewhere new. One door for every path that moves
+    /// the active tab -- TabView keyboard selection, move_tab, Ctrl+Tab,
+    /// MRU, a click. Reverse sync suppresses SelectionChanged, so the
+    /// event cannot carry this; this is what always runs. The old run's
+    /// label hides (the selection hide rule); a landing INSIDE an
+    /// expanded run is the keyboard show, 1200ms then faded. A click on
+    /// a member takes that restart path rather than hover's: the phase
+    /// at click time is still HoverPending, so the landing cancels the
+    /// armed 500ms and shows at once as the courtesy. Only a label
+    /// already Shown is left alone -- re-selecting into its run must not
+    /// stretch the courtesy into a stuck label.
+    /// </summary>
+    private void OnSelectionLanded(TabViewItem item)
+    {
+        if (_runLabel is null) return;
+        var active = _manager.ActiveTab;
+        if (active?.Group is { } group && !group.IsCollapsed
+            && !_chipByGroup.ContainsKey(group))
+        {
+            if (!ReferenceEquals(group, _labelGroup)
+                || _labelPhase != TabRunLabelRules.Phase.Shown)
+            {
+                ApplyLabelPhase(_labelRules.SelectionChanged());
+                _labelGroup = group;
+                ApplyLabelPhase(_labelRules.KeyboardRequested());
+            }
+        }
+        else if (_labelPhase != TabRunLabelRules.Phase.Idle)
+        {
+            ApplyLabelPhase(_labelRules.SelectionChanged());
+        }
     }
 
     private static readonly SolidColorBrush TransparentHeaderSelected =
@@ -696,6 +951,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 selectedItem = viewItem;
         }
         RecolorTabText();
+        // The stroke's ink is the accent resolved per call: the theme
+        // refresh is what re-reads it.
+        ApplyPinZoneChrome();
         RefreshTabViewTheme();
         if (selectedItem is not null)
             NudgeTabViewItemVisual(selectedItem);
@@ -1037,7 +1295,83 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
         SetItemHeaderBrush(viewItem, "TabViewSelectedItemBorderBrush", selectedBorder);
 
+        // The group rail rides every chrome pass, so a join, a leave, or a
+        // color change each land on a pass that already runs. Painted
+        // through the chip swatch's palette path: a group has no "no
+        // color" state, and the rail is the run's identity mark, not a
+        // theme choice for the user to override per color.
+        if (_railByModel.TryGetValue(tab, out var rail))
+        {
+            if (tab.Group is { } group)
+            {
+                rail.Fill = TabColorBrush.From(
+                    TabColorPalette.Background(group.Color, selected: false));
+                rail.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                rail.Visibility = Visibility.Collapsed;
+            }
+        }
+
         headerPanel.Background = TransparentHeaderSelected;
+    }
+
+    /// <summary>
+    /// The pin zone's edge, horizontal: a 1px right border stroke on
+    /// the LAST pinned tab, nothing on its neighbours. One writer owns the
+    /// border -- this pass -- so a stale stroke has exactly one place to
+    /// come from and every drag exit lands here to clear it. The predicate
+    /// reads manager truth: during a drag the strip's order is TabView's
+    /// preview, and the zone edge is the manager's prefix length, not the
+    /// preview's.
+    ///
+    /// The brighten/dim is the vertical stroke's semantics (4b-1), alpha
+    /// for alpha: dim at 0x59 while idle, bright at 0xE6 while a drag is
+    /// live -- the boundary is what a drag-to-pin is aiming at. The swap
+    /// is deliberate rather than a color animation: the vertical edition
+    /// ships the same swap, refreshed by passes that already run, so the
+    /// state never waits on an animation (the 167ms BoundaryStroke token
+    /// governs a transition neither strip draws).
+    /// </summary>
+    private void ApplyPinZoneChrome()
+    {
+        var boundary = _manager.PinCount > 0
+            ? _manager.Tabs[_manager.PinCount - 1]
+            : null;
+        foreach (var (model, item) in _itemByModel)
+        {
+            if (ReferenceEquals(model, boundary))
+            {
+                item.BorderThickness = new Thickness(0, 0, 1, 0);
+                item.BorderBrush = PinBoundaryBrush();
+            }
+            else
+            {
+                item.BorderThickness = default;
+                item.BorderBrush = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The boundary stroke's ink: the accent, resolved from the theme
+    /// resources on every call the way the bell glyph's is, so High
+    /// Contrast re-themes it and a runtime theme change is picked up by
+    /// the next pass (RefreshTabColors re-runs this). A fresh brush per
+    /// call because mutating one shared brush's alpha would retint every
+    /// other reader of the resource.
+    /// </summary>
+    private Brush PinBoundaryBrush()
+    {
+        // Bright only while a drag is LIVE: an armed-but-not-dragging
+        // strip keeps the idle stroke, or the boundary would flash on
+        // every session the strip opens.
+        byte alpha = _stripDragActive ? (byte)0xE6 : (byte)0x59;
+        if (Application.Current.Resources.TryGetValue("SystemAccentColor", out var v)
+            && v is Windows.UI.Color accent)
+            return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, accent.R, accent.G, accent.B));
+        return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, 0x60, 0xCD, 0xFF));
     }
 
     private static void ApplyTabViewItemHeaderBrushes(
@@ -1276,6 +1610,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         _stripDragActive = true;
         _dropPositionValid = false;
+        // The label hides HERE, in the drag start's own dispatch pass, as
+        // a cut: an 83ms fade would overlap the drag ghost, which is the
+        // one overlap the label rule exists to forbid. No timer stands
+        // between this event and the hide.
+        ApplyLabelPhase(_labelRules.DragStarting());
+        // The boundary stroke brightens for the length of the drag: the
+        // zone edge is what a drag-to-pin is aiming at, and the flag this
+        // reads is live from the line above.
+        ApplyPinZoneChrome();
         // Hidden synchronously: the drag is live from this call onward,
         // and anything the strip does from here moves slots the manager
         // has not agreed to yet.
@@ -1286,6 +1629,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         _stripDragActive = false;
         _dropPositionValid = false;
+        // The drag is over: the cut demand lifts, and hover may show the
+        // label again. The label is already hidden (the start hid it), so
+        // this is bookkeeping, not a second hide.
+        ApplyLabelPhase(_labelRules.DragEnded());
+        // The boundary stroke dims back -- and because this handler is the
+        // one pass every completed drag runs, the dim is the cleanup: a
+        // bright stroke cannot outlive the drag that brightened it.
+        ApplyPinZoneChrome();
         if (args.Item is TabViewItem item)
         {
             if (item.Tag is TabGroup draggedGroup)
