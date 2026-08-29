@@ -1756,6 +1756,23 @@ internal sealed partial class VerticalTabStrip : UserControl
     internal event EventHandler<(TabGroup Group, bool Collapsed)>? GroupToggleFromCommandRequested;
 
     /// <summary>
+    /// Raised the moment this strip's drag goes live -- the pass where the
+    /// row lifts and the follow expression starts. The horizontal strip's
+    /// run label listens through the window: a drag anywhere that shares
+    /// the drag surface must close the label in that same pass, so the
+    /// label can never overlap a drag ghost it does not belong to.
+    /// </summary>
+    internal event Action? DragVisualStarted;
+
+    /// <summary>
+    /// The live drag ended, raised once from EndDrag -- the funnel every
+    /// exit (drop, cancel, teardown) passes through. The counterpart of
+    /// DragVisualStarted: the window listens so the horizontal run label's
+    /// machine can stop refusing shows.
+    /// </summary>
+    internal event Action? DragVisualEnded;
+
+    /// <summary>
     /// The command entry for collapse/expand: the router lands here (via
     /// the host) after announcing is guaranteed. Same drag stand-down as
     /// the chevron, and the explicit target state means a same-state
@@ -2362,6 +2379,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             : row;
         drag.Item = item;
         drag.MotionOn = TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast);
+        DragVisualStarted?.Invoke();
         // The selection row is parked while a drag could paint over it; a
         // run drag parks it when the active member is INSIDE the run, not
         // merely when it is the grabbed row.
@@ -3599,6 +3617,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         }
         DragTrace($"DRAG end ghosts={CountLeakedMotion()}");
         if (!settled) ResetDragVisual(drag);
+        // This method is the funnel every exit passes through -- drop,
+        // drop with nothing committed, cancel, and strip teardown all land
+        // here -- so the end of a live drag has exactly one home. The
+        // horizontal run label's machine lifts its drag refusal through
+        // the window on this raise; without it the refusal would outlive
+        // every vertical drag.
+        DragVisualEnded?.Invoke();
     }
 
     /// <summary>
