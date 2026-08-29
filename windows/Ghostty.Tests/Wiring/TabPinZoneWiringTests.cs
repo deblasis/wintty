@@ -77,14 +77,19 @@ public class TabPinZoneWiringTests
     /// The refused-crossing contract 3b landed applies to zone crossings
     /// too: a clamp that swallowed the placement updates the machine and
     /// BREAKS. A `continue` here would re-fire the identical refused
-    /// crossing forever, because Evaluate is pure per tick.
+    /// crossing forever, because Evaluate is pure per tick. The read-back
+    /// is manager truth (the crossing's translated destination, not the
+    /// machine's slot) plus the row's post-commit slot resolvability --
+    /// the machine speaks in visible slots, and a hidden collapsed member
+    /// shifts manager indices without shifting slots, so the slot is
+    /// re-derived from the fresh pairing, never the pre-commit one.
     /// </summary>
     [Fact]
     public void ARefusedCrossing_BreaksTheCommitLoop()
     {
         var refuse = Strip().Method("EvaluateDrag").DescendantNodes()
             .OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "actual != crossing.To");
+            .Single(i => i.Condition.ToString() == "actual != managerTo || actualSlot < 0");
 
         Assert.True(
             refuse.Statement.DescendantNodesAndSelf().OfType<BreakStatementSyntax>().Any(),

@@ -750,7 +750,12 @@ internal sealed class TabManager
         }
     }
 
-    private List<TabModel> MembersOf(TabGroup group)
+    /// <summary>
+    /// The group's members in tab order. Public because a strip header
+    /// renders the member count, and the count rides the tabs: the
+    /// registry cannot answer it without this walk.
+    /// </summary>
+    public List<TabModel> MembersOf(TabGroup group)
     {
         var members = new List<TabModel>();
         foreach (var t in _tabs)
