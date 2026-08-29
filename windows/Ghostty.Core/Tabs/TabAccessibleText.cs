@@ -158,6 +158,25 @@ internal static class TabAccessibleText
         => $"Group {oldTitle} renamed to {group.Title}";
 
     /// <summary>
+    /// Accessible name for a group chip -- the horizontal strip's one item
+    /// for a collapsed run. The chip names itself from the group title, not
+    /// from a member count: the title is the identity every other surface
+    /// (vertical header, rename dialog, announcements) agrees on, and a
+    /// chip named "3 tabs" would be unfindable by the name its swatch and
+    /// label show.
+    /// </summary>
+    internal static string GroupChipName(TabGroup group) => Name(group.Title);
+
+    /// <summary>
+    /// Accessible status for a group chip. The member count rides
+    /// ItemStatus beside the collapsed state -- it is state under an item,
+    /// not identity -- and it is the one place the count is spoken: the
+    /// chip hides the members it counts.
+    /// </summary>
+    internal static string GroupChipStatus(TabGroup group, int memberCount)
+        => $"Collapsed, {memberCount} {Tabs(memberCount)}";
+
+    /// <summary>
     /// Spoken when a color command lands. The name is the palette's own
     /// label, the same word the swatch tooltip shows.
     /// </summary>
