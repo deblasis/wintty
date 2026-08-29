@@ -75,8 +75,13 @@ public sealed class SingleInstanceElection : IDisposable
     /// A secondary must not, even for the moment before it forwards: the splash
     /// is full-size, opaque and topmost, and the window it would cover is the
     /// primary's. Every other role goes on to open a window of its own.
+    ///
+    /// The warm-session half lives in <see cref="LaunchSplashDecision"/>, which
+    /// reads a probe installed before <c>Application.Start</c>. Left null here,
+    /// so an election with no warm layer behind it answers exactly as it always
+    /// has.
     /// </remarks>
-    public bool ShouldShowLaunchSplash => Role != SingleInstanceRole.Secondary;
+    public bool ShouldShowLaunchSplash => LaunchSplashDecision.ShouldShow(Role);
 
     /// <summary>
     /// Hold the election. Creates nothing when <paramref name="enabled"/> is
