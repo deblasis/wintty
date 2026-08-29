@@ -90,6 +90,8 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
             expanded: false,
             width: Ghostty.Shell.LayoutCoordinator.VerticalStripCollapsedWidth);
         _strip.CloseRequestedFromRow += async tab => await RequestCloseTabAsync(tab);
+        _strip.GroupToggleFromCommandRequested += (_, e) =>
+            _router.RequestCollapseGroup(e.Group, e.Collapsed);
         StripHost.Content = _strip;
 
         _dragHandle = new ColumnDragHandle(
@@ -155,6 +157,15 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     internal void TogglePinnedFromKeyboard() => TogglePinned();
 
+    /// <summary>
+    /// The router's collapse command lands here and goes to the strip's
+    /// command entry, where the focus re-home and the drag stand-down
+    /// live -- the horizontal strip has no headers until PR 6, so it has
+    /// nothing to forward and simply never calls this.
+    /// </summary>
+    internal void CollapseGroupFromCommand(TabGroup group, bool collapsed)
+        => _strip.ToggleGroupFromCommand(group, collapsed);
+
     internal void AttachOwner(MainWindow owner) => NewTabButton.Owner = owner;
 
     private void OnPaneToggleClick(object sender, RoutedEventArgs e) => TogglePinned();
@@ -196,6 +207,28 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
     private void OnStripContextRequested(UIElement sender, ContextRequestedEventArgs e)
     {
         var source = e.OriginalSource as DependencyObject;
+
+        // A header right-click must branch FIRST: the header's Tag is a
+        // TabGroup, so the tab resolver below it answers null and the
+        // right-click used to fall through to the strip-wide menu.
+        if (_strip.GroupFromElement(source) is { } group)
+        {
+            var groupFlyout = TabContextMenuBuilder.BuildGroupMenu(
+                _manager,
+                group,
+                requestCollapseGroup: _router.RequestCollapseGroup,
+                requestDissolveGroup: _router.RequestDissolveGroup,
+                requestCloseGroup: _router.RequestCloseGroup);
+
+            var header = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source);
+            if (header is not null && e.TryGetPosition(header, out Point groupPos))
+                groupFlyout.ShowAt(header, new FlyoutShowOptions { Position = groupPos });
+            else
+                groupFlyout.ShowAt((FrameworkElement)sender);
+            e.Handled = true;
+            return;
+        }
+
         if (_strip.TabFromElement(source) is { } tab)
         {
             var tabFlyout = TabContextMenuBuilder.Build(
@@ -207,6 +240,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
                 toggleTabLayout: () => _router.RequestToggleTabLayout(),
                 requestPin: _router.RequestPin,
                 requestDuplicate: _router.RequestDuplicateTab,
+                requestNewGroupWithTab: _router.RequestNewGroupWithTab,
+                requestAddToGroup: _router.RequestAddToGroup,
+                requestRemoveFromGroup: _router.RequestRemoveFromGroup,
                 isVertical: true,
                 getSnapSource: () => TabWindowActions.GetSnapSource(XamlRoot),
                 detachWithZone: (t, z) => TabWindowActions.DetachWithZone(XamlRoot, t, z));

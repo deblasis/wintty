@@ -197,22 +197,38 @@ public class TabPinZoneWiringTests
     }
 
     /// <summary>
-    /// Pointer drags announce nothing (5.6): the user is watching the row
-    /// cross. The strip watches SetPinned happen all day and never speaks;
-    /// the announcement hangs off the router, which is what makes a pin a
-    /// commanded one (palette, chord, or context menu).
+    /// The dispatch path announces; the state change never does (5.6).
+    /// Pointer drags and the pointer chevron are watched as they land and
+    /// speak nothing -- the strip performs the same manager ops all day and
+    /// never calls the announcer. Pins and group commands both announce
+    /// from MainWindow's router subscriptions: the router is what makes an
+    /// op a commanded one.
     /// </summary>
     [Fact]
-    public void TheStrip_NeverAnnounces_AndTheWindowAnnouncesCommandedPins()
+    public void TheStrip_StaysSilent_AndTheWindowAnnouncesCommandedPinsAndGroups()
     {
         Assert.Empty(Strip().Root.Calls("UiaAnnouncer.Announce"));
 
         var window = ShellSource.Load("MainWindow.xaml.cs");
-        var subscription = window.Root.DescendantNodes()
+        var subscriptions = window.Root.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "_router.TabPinChangedFromCommand");
+            .Where(a => a.Left.ToString() is "_router.TabPinChangedFromCommand"
+                or "_router.GroupChangedFromCommand")
+            .ToList();
+        Assert.Equal(2, subscriptions.Count);
+        foreach (var subscription in subscriptions)
+            Assert.NotEmpty(subscription.Right.Calls("UiaAnnouncer.Announce"));
 
-        Assert.NotEmpty(subscription.Right.Calls("UiaAnnouncer.Announce"));
+        // Group no-ops announce nothing: the router's guards sit before
+        // every raise, so a same-state collapse or a rejoin is never
+        // narrated as a change.
+        var router = ShellSource.Load("Input.PaneActionRouter.cs");
+        var collapse = router.Method("RequestCollapseGroup");
+        var guard = collapse.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "group.IsCollapsed == collapsed");
+        Assert.True(
+            guard.Span.Start < collapse.Calls("GroupChangedFromCommand?.Invoke").Single().Span.Start,
+            "the no-op guard must precede the announce raise");
     }
 
     /// <summary>

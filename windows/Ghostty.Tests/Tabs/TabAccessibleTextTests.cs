@@ -173,6 +173,67 @@ public class TabAccessibleTextTests
     }
 
     /// <summary>
+    /// A group owns no row of its own, so its title is the only handle a
+    /// listener gets; created and joined both name the tab that moved and
+    /// the group it landed in.
+    /// </summary>
+    [Fact]
+    public void GroupAnnouncements_NameTheTabAndTheGroup()
+    {
+        var tab = new TabModel(new FakePaneHost());
+        tab.ShellReportedTitle = "build.log";
+        var group = new TabGroup { Title = "build" };
+
+        Assert.Equal(
+            "New group build, with build.log",
+            TabAccessibleText.GroupCreatedAnnouncement(tab, group));
+        Assert.Equal(
+            "build.log joined group build",
+            TabAccessibleText.TabJoinedGroupAnnouncement(tab, group));
+        Assert.Equal(
+            "build.log removed from group build",
+            TabAccessibleText.TabRemovedFromGroupAnnouncement(tab, group));
+    }
+
+    /// <summary>
+    /// Dissolve and Close Group speak a count, and one tab must not read
+    /// "1 tabs" -- the count is the only measure of what the command did.
+    /// Dissolve's count arrives pre-op for exactly this sentence.
+    /// </summary>
+    [Theory]
+    [InlineData(1, "tab")]
+    [InlineData(3, "tabs")]
+    public void DissolveAndCloseAnnouncements_CountTheMembers(int count, string unit)
+    {
+        var group = new TabGroup { Title = "build" };
+
+        Assert.Equal(
+            $"Group build dissolved, {count} {unit} ungrouped",
+            TabAccessibleText.GroupDissolvedAnnouncement(group, count));
+        Assert.Equal(
+            $"Closing group build, {count} {unit}",
+            TabAccessibleText.GroupCloseAnnouncement(group, count));
+    }
+
+    /// <summary>
+    /// The collapse bit is read live at announce time, so the same helper
+    /// narrates both directions and cannot be fed a stale snapshot: the
+    /// text names the state the group is IN, not the one it was asked for.
+    /// </summary>
+    [Fact]
+    public void CollapseAnnouncement_ReadsTheLiveBit()
+    {
+        var group = new TabGroup { Title = "build" };
+
+        Assert.Equal(
+            "Group build expanded", TabAccessibleText.GroupCollapseAnnouncement(group));
+
+        group.IsCollapsed = true;
+        Assert.Equal(
+            "Group build collapsed", TabAccessibleText.GroupCollapseAnnouncement(group));
+    }
+
+    /// <summary>
     /// The vertical strip is where this was reported. The name has to be
     /// on the NavigationViewItem, not on the row inside it: the item is
     /// what surfaces as the ListItem.
