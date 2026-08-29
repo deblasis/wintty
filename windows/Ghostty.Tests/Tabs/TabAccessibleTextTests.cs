@@ -234,6 +234,53 @@ public class TabAccessibleTextTests
     }
 
     /// <summary>
+    /// A grouped member announces its run: the row's own title says nothing
+    /// about which group it sits in, and inside a long list "which run am I
+    /// in" is exactly the question the status has to answer. Collapsed
+    /// composes rather than replaces -- a hidden member that also rings
+    /// must read both -- and an ungrouped member names no group at all.
+    /// </summary>
+    [Fact]
+    public void GroupStatus_NamesTheRun_AndComposesWithTheOtherSegments()
+    {
+        Assert.Equal(
+            "Group build",
+            TabAccessibleText.Status(isPinned: false, bellRinging: false,
+                groupTitle: "build", isCollapsed: false));
+        Assert.Equal(
+            "Group build, Collapsed",
+            TabAccessibleText.Status(isPinned: false, bellRinging: false,
+                groupTitle: "build", isCollapsed: true));
+        Assert.Equal(
+            "Pinned, Group build, Bell",
+            TabAccessibleText.Status(isPinned: true, bellRinging: true,
+                groupTitle: "build", isCollapsed: false));
+        Assert.Equal(
+            "Pinned",
+            TabAccessibleText.Status(isPinned: true, bellRinging: false,
+                groupTitle: null, isCollapsed: false));
+    }
+
+    /// <summary>
+    /// Rename and color speak the change, not just the fact: the rename
+    /// names both titles (a listener cannot follow "group renamed" with no
+    /// from), and the color uses the palette's own label, the same word
+    /// the swatch tooltip shows.
+    /// </summary>
+    [Fact]
+    public void RenameAndColorAnnouncements_NameWhatChanged()
+    {
+        var group = new TabGroup { Title = "build2" };
+
+        Assert.Equal(
+            "Group build renamed to build2",
+            TabAccessibleText.GroupRenamedAnnouncement(group, "build"));
+        Assert.Equal(
+            "Group build2 color set to Green",
+            TabAccessibleText.GroupColoredAnnouncement(group, TabColor.Green));
+    }
+
+    /// <summary>
     /// The vertical strip is where this was reported. The name has to be
     /// on the NavigationViewItem, not on the row inside it: the item is
     /// what surfaces as the ListItem.
@@ -245,7 +292,12 @@ public class TabAccessibleTextTests
         var apply = MethodBody(strip, "private static void ApplyItemTitleChrome");
 
         Assert.Contains("AutomationProperties.SetName(item, TabAccessibleText.Name(", apply);
-        Assert.Contains("AutomationProperties.SetItemStatus(item, TabAccessibleText.Status(", apply);
+        Assert.Contains("AutomationProperties.SetItemStatus(item,", apply);
+        // The status is the tab's; a grouped member adds the run it sits in.
+        Assert.Contains(
+            "TabAccessibleText.Status(tab.IsPinned, tab.BellRinging, group.Title, group.IsCollapsed)",
+            apply);
+        Assert.Contains("TabAccessibleText.Status(tab)", apply);
     }
 
     /// <summary>
