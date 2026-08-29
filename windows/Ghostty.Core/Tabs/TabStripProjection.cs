@@ -108,10 +108,10 @@ internal static class TabStripProjection
     /// Contiguity (a manager invariant) is what puts each header in front
     /// of all of its members; this walk does not re-order anything.
     ///
-    /// The collapsed-with-active shape above is VERTICAL's. Horizontal's
-    /// is different -- the active member surfaces as a plain row and the
-    /// chip is suppressed (4.3) -- and that reading is PR 6's consumer,
-    /// not a second projection here.
+    /// The collapsed-with-active shape above is VERTICAL's. Horizontal
+    /// lowers these same rows -- see <see cref="HorizontalRows"/> -- so
+    /// the two strips read one walk and cannot disagree on what is
+    /// visible.
     /// </summary>
     public static IReadOnlyList<ProjectedRow> GroupedRows(TabManager manager)
     {
@@ -132,5 +132,110 @@ internal static class TabStripProjection
             }
         }
         return rows;
+    }
+
+    /// <summary>
+    /// One row the horizontal strip renders: the <see cref="GroupedRows"/>
+    /// sequence with each header lowered to the shape the strip draws.
+    /// </summary>
+    public abstract record HorizontalRow
+    {
+        /// <summary>
+        /// A collapsed run that does not hold the active tab, rendered as
+        /// ONE item. Its members are hidden and reachable only by
+        /// expanding.
+        /// </summary>
+        public sealed record Chip(TabGroup Group) : HorizontalRow;
+
+        /// <summary>
+        /// A tab rendered as itself: ungrouped, pinned, a member of an
+        /// expanded run, or the active member of a collapsed run.
+        /// </summary>
+        public sealed record Item(TabModel Tab) : HorizontalRow;
+    }
+
+    /// <summary>
+    /// The horizontal strip's reading. An expanded run contributes its
+    /// members alone -- the strip draws no header rows, and the run label
+    /// names a run the strip itself does not draw. A collapsed run
+    /// contributes one chip, except when the run holds the active tab:
+    /// the walk already projects that member as an item, and a chip
+    /// beside it would draw the same run twice, so the chip is suppressed
+    /// and the run reads as its member.
+    ///
+    /// The suppression is the reading's one deliberate loss: the other
+    /// members of an active-holding collapsed run appear nowhere in these
+    /// rows. That is why <see cref="ModelIndexToVisibleIndex"/> answers
+    /// -1 for them rather than a slot, and why the expansion invariant
+    /// these rows are tested under holds per chip'd run.
+    /// </summary>
+    public static IReadOnlyList<HorizontalRow> HorizontalRows(TabManager manager)
+    {
+        var rows = new List<HorizontalRow>(manager.Tabs.Count);
+        foreach (var projected in GroupedRows(manager))
+        {
+            switch (projected)
+            {
+                case ProjectedRow.Header { Group: { } group }:
+                    // The walk keeps the active member visible under its
+                    // header, so a chip here would show the run twice.
+                    if (group.IsCollapsed
+                        && !ReferenceEquals(manager.ActiveTab?.Group, group))
+                        rows.Add(new HorizontalRow.Chip(group));
+                    break;
+                case ProjectedRow.Item { Tab: { } tab }:
+                    rows.Add(new HorizontalRow.Item(tab));
+                    break;
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Manager index of the tab rendered at visible slot
+    /// <paramref name="visibleIndex"/>, or -1 when the slot renders a chip
+    /// or is out of range. Chips are slots -- the strip's item collection
+    /// holds them -- so no TabItems index may be compared with a manager
+    /// index without crossing here first. The caller routes a -1 to the
+    /// slot's group instead: selecting a chip expands, dropping on a chip
+    /// joins.
+    /// </summary>
+    public static int VisibleIndexToModelIndex(TabManager manager, int visibleIndex)
+    {
+        var slot = 0;
+        foreach (var row in HorizontalRows(manager))
+        {
+            if (slot == visibleIndex)
+                return row is HorizontalRow.Item { Tab: { } tab }
+                    ? manager.IndexOf(tab) : -1;
+            slot++;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Visible slot of the tab at manager index
+    /// <paramref name="modelIndex"/>, or -1 when the index is out of range
+    /// or the tab has no slot: a member hidden by a chip'd run renders
+    /// nowhere, so there is nothing to select, bridge, or reorder for it.
+    /// Chips occupy slots, so every slot past a chip is one further along
+    /// than the manager index suggests -- the round trip through
+    /// <see cref="VisibleIndexToModelIndex"/> is identity in both
+    /// directions on exactly the slots and indices that exist, which the
+    /// tests pin by execution.
+    /// </summary>
+    public static int ModelIndexToVisibleIndex(TabManager manager, int modelIndex)
+    {
+        if (modelIndex < 0 || modelIndex >= manager.Tabs.Count) return -1;
+        var tab = manager.Tabs[modelIndex];
+        var slot = 0;
+        foreach (var row in HorizontalRows(manager))
+        {
+            if (row is HorizontalRow.Item { Tab: { } candidate }
+                && ReferenceEquals(candidate, tab))
+                return slot;
+            slot++;
+        }
+        return -1;
     }
 }
