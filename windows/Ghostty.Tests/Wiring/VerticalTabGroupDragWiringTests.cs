@@ -545,4 +545,38 @@ public class VerticalTabGroupDragWiringTests
             + "frame can be MUXC's own container realization.");
         Assert.Equal("RebuildAllItems", retry.Arg(1));
     }
+
+    /// <summary>
+    /// PIN-OUT is RELEASE-CLASSIFIED: a row the drag pinned mid-gesture
+    /// ends where the user let go. Released over the shelf/zone: stay
+    /// pinned (the in-zone landing). Released outside: unpin and place
+    /// at the body slot under the release point. The position is fresh
+    /// pointer truth -- never machine centers, whose staleness after a
+    /// pin is the trap this replaces. No mid-drag unpin crossing exists:
+    /// there is no center threshold to fall short of.
+    /// </summary>
+    [Fact]
+    public void Pin_out_is_release_classified()
+    {
+        var released = Strip().Method("OnDragPointerReleased");
+        var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "drag.Tab.IsPinned");
+        var arm = Assert.IsType<BlockSyntax>(gate.Statement);
+
+        // The branch reads fresh pointer truth and the shelf bounds: the
+        // release Y against the pinned panel, the body slot under the
+        // point from the strip's own pairing.
+        Assert.Contains(arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("GetCurrentPoint", StringComparison.Ordinal)).ToList(),
+            c => true);
+        Assert.Contains(arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "BodySlotAtY").ToList(),
+            c => true);
+
+        // The out-of-zone arm unpins and places -- never a bare keep.
+        Assert.Contains("SetPinned(drag.Tab, false);", arm.ToFullString(),
+            StringComparison.Ordinal);
+    }
 }

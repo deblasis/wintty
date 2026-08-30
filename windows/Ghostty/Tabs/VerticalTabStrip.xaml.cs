@@ -2387,6 +2387,50 @@ internal sealed partial class VerticalTabStrip : UserControl
                 ActivateFromShelf(drag.Tab);
             return;
         }
+        // PIN-OUT (release-classified): a row the drag pinned mid-gesture
+        // ends where the user LET GO -- the same signal the horizontal
+        // engine honors. Released over the shelf/zone: stay pinned (the
+        // 4b-2 in-zone landing; the mid-drag crossings already placed the
+        // row). Released out in the body: unpin and place at the body
+        // slot under the release point. The position is fresh pointer
+        // truth -- never machine centers, whose staleness after a pin is
+        // the trap this replaces.
+        if (drag.Tab.IsPinned)
+        {
+            var releaseY = e.GetCurrentPoint(this).Position.Y;
+            double shelfTop = double.NaN, shelfBottom = double.NaN;
+            try
+            {
+                var origin = _pinnedPanel.TransformToVisual(this)
+                    .TransformPoint(new Windows.Foundation.Point(0, 0));
+                shelfTop = origin.Y;
+                shelfBottom = origin.Y + _pinnedPanel.ActualHeight;
+            }
+            catch (Exception ex) when (IsLayoutReadFailure(ex))
+            {
+                // No honest shelf bounds: keep the mid-drag state (the row
+                // stays pinned) rather than guess at the pointer.
+            }
+            var inZone = !double.IsNaN(shelfTop)
+                && releaseY >= shelfTop && releaseY <= shelfBottom;
+            if (!inZone)
+            {
+                _commitChurn = true;
+                try
+                {
+                    _manager.SetPinned(drag.Tab, false);
+                    var bodySlot = BodySlotAtY(releaseY);
+                    var from = _manager.IndexOf(drag.Tab);
+                    if (bodySlot >= 0 && from >= 0 && from != bodySlot)
+                        _manager.Move(from, bodySlot);
+                    DragTrace($"DRAG unpin drop body={bodySlot} from={from}");
+                }
+                finally { _commitChurn = false; }
+            }
+            DragTrace("DRAG pin release kept" + (inZone ? " in zone" : " -> unpinned"));
+            EndDrag(drag, settle: drag.MotionOn, velocity: 0);
+            return;
+        }
         // Drop inside the pinned zone pins (5.5). The preview is the
         // promise -- it shows only while the row is still unpinned and its
         // center is over the shelf -- so honouring it at release is the
@@ -3837,6 +3881,27 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// while the row has no layout to read (the same failure family the
     /// separator and selection-row reads guard).
     /// </summary>
+    /// <summary>
+    /// The body slot whose row band contains <paramref name="y"/> -- the
+    /// row the release point is over. Above the first row: the first
+    /// slot; below the last: the last. -1 when the body has no rendered
+    /// rows (the caller keeps the mid-drag state rather than guess).
+    /// </summary>
+    private int BodySlotAtY(double y)
+    {
+        var (rows, managerIndex) = DragSlots();
+        var best = -1;
+        var bestDist = double.MaxValue;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var center = RowCenterY(rows[i]);
+            if (double.IsNaN(center)) continue;
+            var d = Math.Abs(center - y);
+            if (d < bestDist) { bestDist = d; best = managerIndex[i]; }
+        }
+        return best;
+    }
+
     private double RowCenterY(TabModel tab)
     {
         if (RowElementOf(tab) is not { } item || item.ActualHeight <= 0)
