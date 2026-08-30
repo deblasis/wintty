@@ -425,4 +425,23 @@ public class VerticalTabGroupDragWiringTests
             .Single(a => a.Left.ToString() == "_gapMotionHeaders[group]");
         Assert.Equal("(item, batch)", parked.Right.ToString());
     }
+
+    /// <summary>
+    /// The order pass's drift check must expect what the projection
+    /// RENDERS. The old formula (tabs minus pinned) predates chip'd
+    /// collapses: the rebuild correctly removes a hidden member's row,
+    /// dropping the count below the formula, so every pass re-detected
+    /// drift and re-ran RebuildAllItems -- a dispatcher-looped rebuild
+    /// that spun the UI thread and ballooned the working set.
+    /// </summary>
+    [Fact]
+    public void The_order_drift_check_counts_what_the_projection_renders()
+    {
+        var strip = Strip();
+        var order = strip.Method("ReconcileRowOrder");
+        var gate = order.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString().Contains("_items.Count !=", StringComparison.Ordinal));
+        Assert.Contains("_items.Count != shown.Count", gate.Condition.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("_manager.Tabs.Count - pinCount", gate.Condition.ToString(), StringComparison.Ordinal);
+    }
 }

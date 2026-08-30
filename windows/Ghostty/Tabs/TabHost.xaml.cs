@@ -1765,7 +1765,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private sealed class HorizontalDragSession
     {
         public required TabDragReorder Machine;
-        public required TabModel Tab;
+
+        // Exactly one of the two names what the drag carries: a tab for
+        // a plain drag, a group for a chip drag. The chip's machine
+        // speaks unit space (one slot per run, TabGroupDragUnits'), the
+        // plain tab's speaks DragSlots row space.
+        public TabModel? Tab;
+        public TabGroup? Group;
+
         public required TabViewItem Item;
 
         // Press position and the dragged item's arranged center at the
@@ -1817,43 +1824,133 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // never the drag's.
         if (VisualTreeHelperEx.FindAncestor<ButtonBase>(source) is not null) return;
         if (VisualTreeHelperEx.FindAncestor<TabViewItem>(source) is not { } item) return;
-        // A chip press never arms: a chip drags its whole run, and the
-        // run's commit is the group rung's, not this one's.
-        if (item.Tag is TabGroup) return;
 
+        var pressX = e.GetCurrentPoint(TabViewControl).Position.X;
+        var drag = item.Tag is TabGroup group
+            ? ArmChipDrag(group, item, pressX)
+            : ArmTabDrag(item, pressX);
+        if (drag is null) return;
+        _horizontalDrag = drag;
+    }
+
+    /// <summary>
+    /// Arm a plain tab drag: row space, the machine seeded at the tab's
+    /// slot. Centers are measured once, at the arm, and survive commits
+    /// on the machine's own invariant: rows occupy slots in manager
+    /// order, so a committed crossing leaves them describing the layout
+    /// the strip is arranging toward. They are exact only while slots
+    /// stay equal-width -- TabWidthMode="Equal" in TabHost.xaml is a
+    /// dependency of this gesture, not a styling choice. A variable-
+    /// width mode would need UpdateCenters re-fed per commit, which the
+    /// machine already supports.
+    /// </summary>
+    private HorizontalDragSession? ArmTabDrag(TabViewItem item, double pressX)
+    {
         TabModel? dragged = null;
         foreach (var (model, vi) in _itemByModel)
         {
             if (ReferenceEquals(vi, item)) { dragged = model; break; }
         }
-        if (dragged is null) return;
+        if (dragged is null) return null;
 
         var (rows, managerIndex) = TabStripProjection.DragSlots(_manager);
         var slot = TabStripProjection.SlotIndexOf(_manager, managerIndex, dragged);
-        if (slot < 0 || rows.Count < 2) return;
-        var (grabbed, centers) = MeasureSlots(rows, dragged);
-        if (double.IsNaN(grabbed)) return;
+        if (slot < 0 || rows.Count < 2) return null;
 
-        var pressX = e.GetCurrentPoint(TabViewControl).Position.X;
-        var drag = new HorizontalDragSession
+        var reps = new FrameworkElement[rows.Count];
+        for (var i = 0; i < rows.Count; i++)
         {
-            Machine = new TabDragReorder(rows.Count, slot),
-            Tab = dragged,
+            if (!_itemByModel.TryGetValue(rows[i], out var rowItem)) return null;
+            reps[i] = rowItem;
+        }
+        return BuildSession(dragged, null, item, pressX, reps, slot);
+    }
+
+    /// <summary>
+    /// Arm a chip drag: unit space, one machine slot per body run. The
+    /// run is the atom -- the chip can swap past a whole neighbouring
+    /// run and never land inside one, because a run landed between
+    /// another group's head and its members would split a run the
+    /// projector cannot render. The pinned prefix contributes no units
+    /// (groups cannot be pinned, and MoveGroup would clamp the crossing
+    // right back), so the unit space never offers a crossing the
+    /// commit would refuse; the clamp stays as the backstop.
+    /// </summary>
+    private HorizontalDragSession? ArmChipDrag(TabGroup group, TabViewItem chip, double pressX)
+    {
+        var units = TabGroupDragUnits.Build(_manager);
+        var dragged = -1;
+        for (var i = 0; i < units.Count; i++)
+        {
+            if (ReferenceEquals(units[i].Group, group)) { dragged = i; break; }
+        }
+        if (dragged < 0 || units.Count < 2) return null;
+
+        var reps = new FrameworkElement[units.Count];
+        for (var i = 0; i < units.Count; i++)
+        {
+            var rep = UnitRepresentative(units[i]);
+            if (rep is null) return null;
+            reps[i] = rep;
+        }
+        return BuildSession(null, group, chip, pressX, reps, dragged);
+    }
+
+    /// <summary>
+    /// The element a unit's center is measured from. The minted chip
+    /// first: a chip'd collapse renders no member at all -- collapse
+    /// does not prune the item map, so the first entry can be the
+    /// run's DETACHED head, whose geometry is a refusal, not a center
+    /// -- and the chip is the run's visible atom, the honest center.
+    /// Else the first member the strip actually renders: an expanded
+    /// run, or a collapsed one still holding the active member.
+    /// </summary>
+    private FrameworkElement? UnitRepresentative(GroupDragUnit unit)
+    {
+        if (unit.Group is { } group)
+        {
+            if (_chipByGroup.TryGetValue(group, out var chip)) return chip.Item;
+            foreach (var member in _manager.MembersOf(group))
+            {
+                if (_itemByModel.TryGetValue(member, out var item)
+                    && TabViewControl.TabItems.IndexOf(item) >= 0)
+                    return item;
+            }
+            return null;
+        }
+        return _itemByModel.TryGetValue(unit.Rep, out var lone) ? lone : null;
+    }
+
+    /// <summary>
+    /// The shared arm tail: measure the representative centers, seed the
+    /// machine, and build the session -- or answer null when the strip
+    /// cannot measure what the gesture needs. Measurement is the arm's
+    /// contract: a NaN center would swallow every crossing past that
+    /// slot, so an unmeasurable arm refuses the gesture and the press
+    /// stays a click.
+    /// </summary>
+    private HorizontalDragSession? BuildSession(
+        TabModel? tab, TabGroup? group, TabViewItem item, double pressX,
+        IReadOnlyList<FrameworkElement> reps, int grabSlot)
+    {
+        var centers = new double[reps.Count];
+        for (var i = 0; i < reps.Count; i++)
+        {
+            centers[i] = MeasuredCenterX(reps[i]);
+            if (double.IsNaN(centers[i])) return null;
+        }
+        var machine = new TabDragReorder(reps.Count, grabSlot);
+        machine.Press(pressX);
+        machine.UpdateCenters(centers);
+        return new HorizontalDragSession
+        {
+            Machine = machine,
+            Tab = tab,
+            Group = group,
             Item = item,
             PressX = pressX,
-            GrabCenterX = grabbed,
+            GrabCenterX = centers[grabSlot],
         };
-        drag.Machine.Press(pressX);
-        drag.Machine.UpdateCenters(centers);
-        // Centers are measured once, at the arm, and survive commits on
-        // the machine's own invariant: rows occupy slots in manager
-        // order, so a committed crossing leaves them describing the
-        // layout the strip is arranging toward. They are exact only
-        // while slots stay equal-width -- TabWidthMode="Equal" in
-        // TabHost.xaml is a dependency of this gesture, not a styling
-        // choice. A variable-width mode would need UpdateCenters re-fed
-        // per commit, which the machine already supports.
-        _horizontalDrag = drag;
     }
 
     private void OnStripPointerMoved(object sender, PointerRoutedEventArgs e)
@@ -1873,7 +1970,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // following the machine rather than waiting for a release.
         var draggedCenter = drag.GrabCenterX + (x - drag.PressX);
         while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
-            CommitHorizontalCrossing(drag, crossing);
+        {
+            // A refused crossing rewinds the machine to where the strip
+            // really shows the dragged row; the same center would re-earn
+            // the same refusal forever, so the tick stops there -- the
+            // next pointer move retries with fresh geometry.
+            if (!CommitHorizontalCrossing(drag, crossing)) break;
+        }
     }
 
     private void OnStripPointerReleased(object sender, PointerRoutedEventArgs e)
@@ -1907,7 +2010,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void BeginHorizontalDragVisual(HorizontalDragSession drag)
     {
         TabDragTrace.Line($"DRAG begin index={drag.Machine.Index} " +
-            $"rows={drag.Machine.RowCount} run=no motion=" +
+            $"rows={drag.Machine.RowCount} run={(drag.Group is null ? "no" : "yes")} motion=" +
             (TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast) ? "on" : "off"));
         _stripDragActive = true;
         _stoodDownSelectionRaises = 0;
@@ -1933,26 +2036,142 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// index is rewound: crossing a chip is the group rung's grammar,
     /// not a move this rung may guess at.
     /// </summary>
-    private void CommitHorizontalCrossing(HorizontalDragSession drag, TabDragCrossing crossing)
+    /// <summary>
+    /// One committed crossing. Answers false when the crossing refused --
+    /// the manager would not take it, or the read-back caught a clamp --
+    /// so the tick stops instead of re-earning the same refusal.
+    /// </summary>
+    private bool CommitHorizontalCrossing(HorizontalDragSession drag, TabDragCrossing crossing)
+        => drag.Group is { } group
+            ? CommitGroupCrossing(drag, group, crossing)
+            : CommitTabCrossing(drag, crossing);
+
+    /// <summary>
+    /// A plain tab's crossing: the machine's row slot translated through
+    /// the projection, the pin boundary classified FIRST -- a crossing
+    /// over the prefix is a zone change Move alone would clamp away, so
+    /// SetPinned relocates the row to the boundary and the Move then
+    /// places it at the crossing's slot in the new zone -- and the truth
+    /// read back, because Move clamps at the boundary and no-ops on
+    /// collapse. A crossing that did not land rewinds the machine to the
+    /// slot the strip actually shows the row in and refuses the tick.
+    /// </summary>
+    private bool CommitTabCrossing(HorizontalDragSession drag, TabDragCrossing crossing)
     {
-        var (rows, _) = TabStripProjection.DragSlots(_manager);
-        if (crossing.To < 0 || crossing.To >= rows.Count)
+        var (rows, managerIndex) = TabStripProjection.DragSlots(_manager);
+        if (crossing.To < 0 || crossing.To >= managerIndex.Count)
         {
             drag.Machine.UpdateIndex(crossing.From);
-            return;
+            return false;
         }
-        var target = _manager.IndexOf(rows[crossing.To]);
-        var old = _manager.IndexOf(drag.Tab);
-        if (target < 0 || old < 0 || old == target)
+        var managerTo = managerIndex[crossing.To];
+        var from = _manager.IndexOf(drag.Tab!);
+        var zone = TabPinBoundary.Classify(
+            drag.Tab!.IsPinned, _manager.PinCount, _manager.Tabs.Count, managerTo);
+        if (zone.Op != TabPinZoneOp.None)
         {
-            drag.Machine.UpdateIndex(crossing.From);
-            TabDragTrace.Line($"DRAG refused {crossing.From}->{crossing.To}");
-            return;
+            bool pin = zone.Op == TabPinZoneOp.Pin;
+            // Groups cannot be pinned: a grouped row crossing the
+            // boundary leaves its run, the manager's own SetPinned
+            // contract. The commit speaks the truth the projection will
+            // render, never a tab dragged through the boundary still
+            // pretending to belong to a run.
+            _manager.SetPinned(drag.Tab, pin);
+            TabDragTrace.Line($"DRAG {(pin ? "pin" : "unpin")} {crossing.From}->{crossing.To}");
+            from = _manager.IndexOf(drag.Tab);
+            if (from < 0) { CancelHorizontalDrag("closed"); return false; }
         }
         TabDragTrace.Line($"DRAG commit {crossing.From}->{crossing.To}");
-        TabDragTrace.Line($"COMMIT move old={old} new={target}");
-        _manager.Move(old, target);
+        TabDragTrace.Line($"COMMIT move old={from} new={managerTo}");
+        _manager.Move(from, managerTo);
+
+        // Read the truth back: the pairing is re-walked post-commit, the
+        // move having displaced other rows.
+        var (_, nowIndex) = TabStripProjection.DragSlots(_manager);
+        var actual = _manager.IndexOf(drag.Tab);
+        var actualSlot = nowIndex.IndexOf(actual);
+        if (actualSlot < 0)
+        {
+            // The row left the pairing mid-drag -- a chord-collapse of
+            // its run, say. The drag's subject is gone; committing
+            // further crossings for a row the strip does not show would
+            // zombie the gesture on.
+            CancelHorizontalDrag("closed");
+            return false;
+        }
+        if (actual != managerTo)
+        {
+            // Clamped, not vanished: rewind to the slot the strip
+            // actually shows and refuse the tick.
+            drag.Machine.UpdateIndex(actualSlot);
+            TabDragTrace.Line($"DRAG refused {crossing.From}->{crossing.To}");
+            return false;
+        }
+        drag.Machine.UpdateIndex(actualSlot);
         RebindLift(drag.Item);
+        return true;
+    }
+
+    /// <summary>
+    /// A chip's crossing in unit space: the crossing's pivot run maps
+    /// through the unit formulas -- the only crossing-to-index mapping
+    /// this commit accepts, because a run landed by slot arithmetic
+    /// would split the pivot run across its own head. MoveGroup clamps,
+    /// so the truth is read back against a fresh unit build: a crossing
+    /// that did not land rewinds the machine to the run's actual unit
+    /// and refuses the tick. The group stays collapsed through the drag
+    /// -- MoveGroup relocates a run and touches no collapse bit -- which
+    /// is the contract: a chip drag is a relocation, never an
+    /// expansion.
+    /// </summary>
+    private bool CommitGroupCrossing(
+        HorizontalDragSession drag, TabGroup group, TabDragCrossing crossing)
+    {
+        var units = TabGroupDragUnits.Build(_manager);
+        var dragged = -1;
+        for (var i = 0; i < units.Count; i++)
+        {
+            if (ReferenceEquals(units[i].Group, group)) { dragged = i; break; }
+        }
+        var pivot = crossing.To;
+        if (dragged < 0 || pivot < 0 || pivot >= units.Count || pivot == dragged)
+        {
+            drag.Machine.UpdateIndex(crossing.From);
+            return false;
+        }
+        bool down = pivot > dragged;
+        var target = down
+            ? TabGroupDragUnits.TargetAfter(units, units[dragged], pivot)
+            : TabGroupDragUnits.TargetBefore(units, pivot);
+        TabDragTrace.Line($"DRAG commit {crossing.From}->{crossing.To}");
+        TabDragTrace.Line($"COMMIT movegroup target={target}");
+        _manager.MoveGroup(group, target);
+
+        var nowUnits = TabGroupDragUnits.Build(_manager);
+        var now = -1;
+        for (var i = 0; i < nowUnits.Count; i++)
+        {
+            if (ReferenceEquals(nowUnits[i].Group, group)) { now = i; break; }
+        }
+        if (now < 0)
+        {
+            // The run left the unit space mid-drag -- dissolved or
+            // regrouped by another actor. Same zombie rule as the tab
+            // path: the subject is gone, so the gesture ends.
+            CancelHorizontalDrag("closed");
+            return false;
+        }
+        if (nowUnits[now].First != target)
+        {
+            // Clamped, not vanished: rewind to the run's actual unit and
+            // refuse the tick.
+            drag.Machine.UpdateIndex(now);
+            TabDragTrace.Line($"DRAG refused {crossing.From}->{crossing.To}");
+            return false;
+        }
+        drag.Machine.UpdateIndex(now);
+        RebindLift(drag.Item);
+        return true;
     }
 
     /// <summary>
@@ -2010,9 +2229,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (VisualTreeHelperEx.FindAncestor<TabViewItem>(e.OriginalSource as DependencyObject)
             is { } releasedOn && releasedOn.Tag is TabGroup)
         {
-            var slot = TabViewControl.TabItems.IndexOf(drag.Item);
-            TabDragTrace.Line($"COMMIT drop at chip slot={slot}");
-            ResolveDropAtChip(drag.Item, slot);
+            // The fork resolves the run whose CHIP the release landed on:
+            // the dragged tab's own slot is an item slot by definition, so
+            // feeding it to the projector names no group and refuses every
+            // join before geometry is ever asked.
+            var chipSlot = TabViewControl.TabItems.IndexOf(releasedOn);
+            TabDragTrace.Line($"COMMIT drop at chip slot={chipSlot}");
+            ResolveDropAtChip(drag.Item, chipSlot);
         }
         _stripDragActive = false;
         // The drag is over: the cut demand lifts, and hover may show the
@@ -2055,29 +2278,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// arm rather than feeding the machine a NaN that would swallow every
     /// crossing past that slot.
     /// </summary>
-    private (double Grabbed, double[] Centers) MeasureSlots(
-        IReadOnlyList<TabModel> rows, TabModel dragged)
+    /// <summary>
+    /// A row's arranged center in TabViewControl space, or NaN when there
+    /// is no arranged truth: the item is not in the tree yet, or is
+    /// leaving it. The arm refuses on NaN -- an unmeasured slot would
+    /// swallow every crossing past it.
+    /// </summary>
+    private double MeasuredCenterX(FrameworkElement item)
     {
-        var centers = new double[rows.Count];
-        double grabbed = double.NaN;
-        for (var i = 0; i < rows.Count; i++)
+        try
         {
-            if (!_itemByModel.TryGetValue(rows[i], out var item)) return (double.NaN, centers);
-            double x;
-            try
-            {
-                x = item.TransformToVisual(TabViewControl)
-                    .TransformPoint(new Point(0, 0)).X + item.ActualWidth / 2;
-            }
-            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
-                or System.Runtime.InteropServices.COMException or NullReferenceException)
-            {
-                return (double.NaN, centers);
-            }
-            centers[i] = x;
-            if (ReferenceEquals(rows[i], dragged)) grabbed = x;
+            return item.TransformToVisual(TabViewControl)
+                .TransformPoint(new Point(0, 0)).X + item.ActualWidth / 2;
         }
-        return (grabbed, centers);
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return double.NaN;
+        }
     }
 
     /// <summary>
@@ -2123,6 +2341,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
 
         var before = _lastDropPosition.X < bounds.Value.X + bounds.Value.Width / 2;
+        // Dead-today insurance: under TabWidthMode="Equal" the chip's arranged
+        // bounds span its entire slot, so a release that hit-tests to the chip
+        // is always inside bounds and the join above always wins. Beside is
+        // live only under a variable-width mode or a tighter bounds source;
+        // the fork stays because it is manager-state-tested and one XAML
+        // attribute away from reachable.
         var beside = before
             ? TabChipDrop.MemberTargetBefore(_manager, chipGroup)
             : TabChipDrop.MemberTargetAfter(_manager, chipGroup);

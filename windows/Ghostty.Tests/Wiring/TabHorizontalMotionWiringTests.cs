@@ -240,7 +240,7 @@ public class TabHorizontalMotionWiringTests
     public void A_crossing_rebinds_the_lift_set_not_respringed()
     {
         var host = Host();
-        var commit = host.Method("CommitHorizontalCrossing");
+        var commit = host.Method("CommitTabCrossing");
         var move = commit.Call("_manager.Move");
         var rebind = commit.Call("RebindLift");
         Assert.True(
