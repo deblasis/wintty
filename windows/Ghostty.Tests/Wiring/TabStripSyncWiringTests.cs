@@ -1213,4 +1213,34 @@ public sealed class TabStripSyncWiringTests
             .Any(a => a.Left is IdentifierNameSyntax id
                       && id.Identifier.ValueText == field
                       && a.Right.IsKind(literal));
+
+    [Fact]
+    public void The_body_session_carries_its_tab_and_the_fork_resolves_the_chips_slot()
+    {
+        var src = ShellSource.Load(TabHostSource);
+
+        // The body session must CARRY the dragged tab: a null tab survives
+        // the arm, then the first crossing dies on
+        // _manager.IndexOf(null) -- a NullReferenceException mid-gesture,
+        // mid-strip, with the pointer still down.
+        var armTab = src.Method("ArmTabDrag");
+        var build = armTab.Call("BuildSession");
+        Assert.Equal("dragged", build.Arg(0));
+
+        // And a release that lands on a chip resolves THAT chip's slot
+        // for the join fork: the dragged tab's own slot is an item slot by
+        // definition, so feeding it to the projector refuses every join
+        // before geometry is ever asked.
+        var finish = src.Method("FinishHorizontalDrag");
+        var chipSlot = finish.Body!.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "chipSlot");
+        var fork = finish.Calls("ResolveDropAtChip").Single();
+        Assert.True(
+            chipSlot.SpanStart < fork.SpanStart
+                && fork.Arg(1) == "chipSlot",
+            "The join fork must resolve the released-on chip's slot: the "
+            + "dragged tab's own slot never names a group, so the fork "
+            + "refused every join before geometry was asked.");
+    }
 }

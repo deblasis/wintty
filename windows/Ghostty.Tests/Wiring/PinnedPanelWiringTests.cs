@@ -159,15 +159,19 @@ public class PinnedPanelWiringTests
         // Skew is checked against BOTH registries, plus the rows the
         // projection named but the strip holds no element for -- counts can
         // agree while a row is missing on both sides, and only the walk's
-        // miss flag sees that. Dropping any of these passes a drifted
-        // container straight into an indexer miss or a wrong order.
+        // miss flag sees that. The body-row expectation is the
+        // projection's rendered count (shown.Count), NOT tabs-minus-pinned:
+        // a chip'd run hides members on purpose, and a formula that counts
+        // them would disagree with the rebuild's own output every pass
+        // forever. Dropping any of these passes a drifted container
+        // straight into an indexer miss or a wrong order.
         var skew = reconcile.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.DescendantNodes().OfType<InvocationExpressionSyntax>()
                              .Any(c => c.CalleeText() == "RebuildAllItems"));
         var condition = skew.Condition.ToString();
         Assert.Contains("missing", condition);
         Assert.Contains("_pinnedRows.Count != pinCount", condition);
-        Assert.Contains("_items.Count != _manager.Tabs.Count - pinCount", condition);
+        Assert.Contains("_items.Count != shown.Count", condition);
         Assert.Contains("_pinnedPanel.Children.Count != pinCount", condition);
         Assert.Contains("NavView.MenuItems.Count != desired.Count", condition);
 

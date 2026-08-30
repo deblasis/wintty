@@ -1863,7 +1863,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
             if (!_itemByModel.TryGetValue(rows[i], out var rowItem)) return null;
             reps[i] = rowItem;
         }
-        return BuildSession(null, null, item, pressX, reps, slot);
+        return BuildSession(dragged, null, item, pressX, reps, slot);
     }
 
     /// <summary>
@@ -2229,9 +2229,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (VisualTreeHelperEx.FindAncestor<TabViewItem>(e.OriginalSource as DependencyObject)
             is { } releasedOn && releasedOn.Tag is TabGroup)
         {
-            var slot = TabViewControl.TabItems.IndexOf(drag.Item);
-            TabDragTrace.Line($"COMMIT drop at chip slot={slot}");
-            ResolveDropAtChip(drag.Item, slot);
+            // The fork resolves the run whose CHIP the release landed on:
+            // the dragged tab's own slot is an item slot by definition, so
+            // feeding it to the projector names no group and refuses every
+            // join before geometry is ever asked.
+            var chipSlot = TabViewControl.TabItems.IndexOf(releasedOn);
+            TabDragTrace.Line($"COMMIT drop at chip slot={chipSlot}");
+            ResolveDropAtChip(drag.Item, chipSlot);
         }
         _stripDragActive = false;
         // The drag is over: the cut demand lifts, and hover may show the
@@ -2337,6 +2341,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
         }
 
         var before = _lastDropPosition.X < bounds.Value.X + bounds.Value.Width / 2;
+        // Dead-today insurance: under TabWidthMode="Equal" the chip's arranged
+        // bounds span its entire slot, so a release that hit-tests to the chip
+        // is always inside bounds and the join above always wins. Beside is
+        // live only under a variable-width mode or a tighter bounds source;
+        // the fork stays because it is manager-state-tested and one XAML
+        // attribute away from reachable.
         var beside = before
             ? TabChipDrop.MemberTargetBefore(_manager, chipGroup)
             : TabChipDrop.MemberTargetAfter(_manager, chipGroup);
