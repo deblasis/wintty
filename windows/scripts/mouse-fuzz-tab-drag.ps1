@@ -390,7 +390,13 @@ function Find-ByNameRetry($root, [string]$Name, [int]$ms = 2200) {
 function Get-StripRows([bool]$Vertical) {
     $root = Get-UiaRoot $script:MainHwnd64
     $hostId = if ($Vertical) { 'NavView' } else { 'TabViewControl' }
-    $stripEl = Find-ById $root $hostId
+    # The UIA tree hiccups under harness load; a bounded retry keeps a
+    # transient miss from killing an otherwise green run.
+    $stripEl = $null
+    for ($try = 0; $try -lt 3 -and $null -eq $stripEl; $try++) {
+        $stripEl = Find-ById $root $hostId
+        if ($null -eq $stripEl) { Start-Sleep -Milliseconds 250 }
+    }
     if ($null -eq $stripEl) { throw "HARVEST_MISS: no strip with AutomationId $hostId" }
     $ct = if ($Vertical) { $CTRL::ListItem } else { $CTRL::TabItem }
     $cond = New-Object System.Windows.Automation.PropertyCondition($UIA::ControlTypeProperty, $ct)
@@ -906,9 +912,17 @@ try {
             [void][MzTD]::DragMove($fromX, $zoneY + [int](($homeY - $zoneY) * $i / 8))
             Start-Sleep -Milliseconds 30
         }
+        # Carry one full row BELOW the zone edge: the release must be
+        # unambiguously outside the shelf bounds for the release-classified
+        # unpin to fire (a release ON the edge reads as in-zone).
+        [void][MzTD]::DragMove($fromX, $homeY + 40)
+        Start-Sleep -Milliseconds 120
         [void][MzTD]::DragRelease()
         Start-Sleep -Milliseconds 750
-        Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5')
+        # Release-classified grammar: the row unpins and lands at the body
+        # slot under the release point -- one row deeper than its pre-leg
+        # home (the return carried a full row past the zone edge).
+        Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-2', 'fuzzdrag-3', 'fuzzdrag-4', 'fuzzdrag-5')
         Assert-RowStatus $V 'fuzzdrag-3' { param($s) $s -notmatch 'Pinned' } 'crossed into the pin zone and back out, so it must not be pinned'
         $script:Orders.boundaryOut = (Get-Order $V) -join ','
     }
