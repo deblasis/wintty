@@ -408,6 +408,86 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
+    public void The_chip_swap_hides_and_restores_the_run_under_a_saved_fence()
+    {
+        var src = ShellSource.Load(TabHostSource);
+        var chips = src.Method("ReconcileChips");
+
+        // The swap owns BOTH halves of presence. A mint replaces the run's
+        // rendered members -- whose items must LEAVE TabItems -- and a
+        // retirement brings them back. Missing the hide half is the
+        // collapse-activate crash: the strip holds one more row than the
+        // projection names, the order pass refuses, and the rebuild's
+        // Clear runs re-entrantly from inside the raising
+        // SelectionChanged -- 0x8000FFFF, the family that killed three
+        // owner sessions.
+        var retire = chips.Calls("RemoveGroupChip").Single();
+        var restore = chips.Call("RestoreRunMembers");
+        var mint = chips.Calls("AddGroupChip").Single();
+        var hide = chips.Call("HideRunMembers");
+        Assert.True(
+            retire.SpanStart < restore.SpanStart
+                && mint.SpanStart < hide.SpanStart
+                && hide.SpanStart > mint.Span.End,
+            "Each swap half must carry its presence work: the retirement "
+            + "restores the run's members, the mint hides them -- a mint "
+            + "without the hide is the presence skew that forces the "
+            + "rebuild.");
+
+        // The swap runs under the selection fence, saved and restored --
+        // not disarmed. This pass runs inside RebuildStripFromManager's
+        // own fence window on the rebuild path, and a naive disarm would
+        // cut the outer window short, the RemoveGroupChip fence lesson
+        // at the pass that owns the swap.
+        var writes = chips.AssignsTo("_suppressSelectionEvent").ToList();
+        Assert.True(
+            writes.Count == 2
+                && writes[0].Right.ToString() == "true"
+                && writes[1].Right.ToString() == "outerSuppress"
+                && writes[1].Ancestors().OfType<FinallyClauseSyntax>().Any()
+                && writes[0].SpanStart < hide.SpanStart
+                && writes[1].SpanStart > hide.Span.End,
+            "The fence must arm before the swap and restore from the saved "
+            + "outer state in the finally: a naive disarm would cut "
+            + "RebuildStripFromManager's window short mid-rebuild.");
+
+        // And the halves themselves: the hide removes exactly the run's
+        // members, the restore re-adds exactly what is missing.
+        var hideBody = src.Method("HideRunMembers");
+        Assert.True(
+            hideBody.Calls("TabViewControl.TabItems.Remove").Count == 1
+                && hideBody.DescendantNodes()
+                    .OfType<InvocationExpressionSyntax>()
+                    .Any(c => c.CalleeText() == "_itemByModel.TryGetValue"),
+            "The hide removes the run's member items and nothing else.");
+        var restoreBody = src.Method("RestoreRunMembers");
+        var add = restoreBody.Call("TabViewControl.TabItems.Add");
+        Assert.True(
+            add.Ancestors().OfType<IfStatementSyntax>()
+                .Any(i => i.Condition.ToString().Contains(
+                    "!TabViewControl.TabItems.Contains(item)", StringComparison.Ordinal)),
+            "The restore re-adds a member only when the strip does not hold "
+            + "it: re-adding a rendered row duplicates it.");
+
+        // And the fade is real, not prose: the Add is followed by the
+        // swap flag's guarded FadeInAppearing -- the appear-hand the
+        // retirement armed, spent on exactly these rows. Deleted, the
+        // members snap in past the appear-hand and nothing else in the
+        // suite would know.
+        var guardedFade = restoreBody.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "_swapFadePending");
+        Assert.True(
+            guardedFade.SpanStart > add.Span.End
+                && guardedFade.Statement.DescendantNodes()
+                    .OfType<InvocationExpressionSyntax>()
+                    .Any(c => c.CalleeText() == "FadeInAppearing"),
+            "The restore's Add must be followed by the swap flag's guarded "
+            + "FadeInAppearing: the retirement armed the flag for exactly "
+            + "these rows, and a restore without the fade snaps the run in "
+            + "past the swap's appear-hand.");
+    }
+
+    [Fact]
     public void The_chip_selection_fork_expands_through_the_command_and_never_activates()
     {
         var chipArm = ChipSelectionArm(

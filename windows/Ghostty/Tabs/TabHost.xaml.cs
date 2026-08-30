@@ -618,14 +618,76 @@ internal sealed partial class TabHost : UserControl, ITabHost
             if (row is TabStripProjection.HorizontalRow.Chip { Group: { } group })
                 desired.Add(group);
 
-        foreach (var group in _chipByGroup.Keys.ToArray())
-            if (!desired.Contains(group))
-                RemoveGroupChip(group);
-        foreach (var group in desired)
-            if (!_chipByGroup.ContainsKey(group))
-                AddGroupChip(group);
+        // The swap's mutations raise SelectionChanged -- hiding the
+        // previously-active member removes the SELECTED item, and TabView
+        // re-targets its selection synchronously. Suppressed here, the
+        // raise cannot re-enter Activate and chain a second reconcile
+        // onto a strip this pass is still mid-swap on. Saved and
+        // restored, not disarmed: this pass runs inside
+        // RebuildStripFromManager's own fence window on the rebuild path,
+        // and a naive disarm there would cut the outer window short (the
+        // RemoveGroupChip fence lesson, at the pass that owns the swap).
+        var outerSuppress = _suppressSelectionEvent;
+        _suppressSelectionEvent = true;
+        try
+        {
+            foreach (var group in _chipByGroup.Keys.ToArray())
+                if (!desired.Contains(group))
+                {
+                    RemoveGroupChip(group);
+                    RestoreRunMembers(group);
+                }
+            foreach (var group in desired)
+                if (!_chipByGroup.ContainsKey(group))
+                {
+                    AddGroupChip(group);
+                    HideRunMembers(group);
+                }
+        }
+        finally
+        {
+            _suppressSelectionEvent = outerSuppress;
+        }
         foreach (var group in desired)
             RefreshChip(group);
+    }
+
+    /// <summary>
+    /// The hide half of the chip swap: a minted chip replaces the run's
+    /// rendered members, whose items leave TabItems here. Left in, the
+    /// strip holds one more row than the projection names -- presence
+    /// skew the order pass must refuse, and its rebuild runs
+    /// TabItems.Clear re-entrantly from inside the raising
+    /// SelectionChanged, the 0x8000FFFF family. The order pass owns the
+    /// last word; this pass owes it consistent presence.
+    /// </summary>
+    private void HideRunMembers(TabGroup group)
+    {
+        foreach (var member in _manager.MembersOf(group))
+        {
+            if (_itemByModel.TryGetValue(member, out var item))
+                TabViewControl.TabItems.Remove(item);
+        }
+    }
+
+    /// <summary>
+    /// The restore half: a retiring chip's members re-enter TabItems, in
+    /// manager order for now -- the order pass re-seats them. The
+    /// retirement armed the swap flag for exactly these rows, and the
+    /// restore spends it: each re-entering row fades in, the swap's
+    /// appear-hand.
+    /// </summary>
+    private void RestoreRunMembers(TabGroup group)
+    {
+        foreach (var member in _manager.MembersOf(group))
+        {
+            if (_itemByModel.TryGetValue(member, out var item)
+                && !TabViewControl.TabItems.Contains(item))
+            {
+                TabViewControl.TabItems.Add(item);
+                if (_swapFadePending) FadeInAppearing(item);
+            }
+        }
     }
 
     private void OnGroupPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -859,7 +921,20 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // its refusal as the contract; here a terminal's strip must
             // not die, so rebuild from the manager.
             _log.LogReconcileFailed(ex);
-            RebuildStripFromManager();
+            // The skew is named in the log; this line is the trace half
+            // of the same fact -- the rebuild is the last resort, and a
+            // rung that lands one must be able to see it fire.
+            TabDragTrace.Line($"DIAG reconcile failed items={TabViewControl.TabItems.Count} " +
+                $"ex={ex.Message}");
+            try
+            {
+                RebuildStripFromManager();
+            }
+            catch (Exception rex)
+            {
+                TabDragTrace.Line($"DIAG rebuild threw {rex.GetType().Name}: {rex.Message}");
+                throw;
+            }
             rebuilt = true;
             TabDragTrace.Line("COMMIT reconcile rebuilt from manager");
         }
