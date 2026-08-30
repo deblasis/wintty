@@ -42,7 +42,7 @@
          both tab hosts can share a single container without ever
          reparenting the SwapChainPanels. This UserControl now renders
          only the tab strip chrome. -->
-    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Top">
+    <Grid x:Name="HostRoot" HorizontalAlignment="Stretch" VerticalAlignment="Top">
         <!-- Trim the default 8px top gap above the tab strip
              (TabViewHeaderPadding) so the strip is not taller than it
              needs to be. The vertical-mode title bar height and the
@@ -53,16 +53,13 @@
             x:Name="TabViewControl"
             Padding="0,2,0,0"
             HorizontalAlignment="Stretch"
-            CanReorderTabs="True"
-            CanDragTabs="True"
+            CanReorderTabs="False"
+            CanDragTabs="False"
             TabWidthMode="Equal"
             IsAddTabButtonVisible="False"
             TabCloseRequested="OnTabCloseRequested"
             ContextRequested="OnTabViewContextRequested"
-            SelectionChanged="OnSelectionChanged"
-            TabStripDragOver="OnTabStripDragOver"
-            TabStripDrop="OnTabStripDrop"
-            TabDragCompleted="OnTabDragCompleted">
+            SelectionChanged="OnSelectionChanged">
             <controls:TabView.TabStripHeader>
                 <branding:AppIconBadge x:Name="IconBadgeHost" />
             </controls:TabView.TabStripHeader>

@@ -107,15 +107,15 @@ public sealed class TabStripSyncWiringTests
     public void Drag_start_hides_the_seam_cover_and_the_drop_replaces_it()
     {
         var src = ShellSource.Load(TabHostSource);
-        var starting = src.Method("OnTabDragStarting");
-        var completed = src.Method("OnTabDragCompleted");
+        var starting = src.Method("BeginHorizontalDragVisual");
+        var completed = src.Method("FinishHorizontalDrag");
 
         Assert.True(
             SetsFlag(starting, "_stripDragActive", SyntaxKind.TrueLiteralExpression),
-            "OnTabDragStarting must raise _stripDragActive (audit 3.2, item 1).");
+            "BeginHorizontalDragVisual must raise _stripDragActive (audit 3.2, item 1).");
         Assert.True(
             SetsFlag(completed, "_stripDragActive", SyntaxKind.FalseLiteralExpression),
-            "OnTabDragCompleted must lower _stripDragActive so the cover is placed again.");
+            "FinishHorizontalDrag must lower _stripDragActive so the cover is placed again.");
 
         // Synchronous, not queued: a dispatcher hop paints one frame
         // against the stale slot. Nothing else runs between the flag
@@ -124,21 +124,21 @@ public sealed class TabStripSyncWiringTests
         Assert.True(
             hide.Count == 1
                 && hide[0].Arg(0) == "0" && hide[0].Arg(1) == "0" && hide[0].Arg(2) == "null",
-            "OnTabDragStarting must hide the cover synchronously with (0, 0, null).");
+            "BeginHorizontalDragVisual must hide the cover synchronously with (0, 0, null).");
 
-        // Wired even though TabHost.xaml predates it: the drag start is
-        // where the stale-slot window opens.
+        // Wired in the constructor: the pointer hooks are where the
+        // stale-slot window opens.
         var ctor = src.Root.DescendantNodes()
             .OfType<ConstructorDeclarationSyntax>()
             .Single(c => c.Identifier.ValueText == "TabHost");
         var hooked = ctor.DescendantNodes()
-            .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.OperatorToken.IsKind(SyntaxKind.PlusEqualsToken)
-                        && a.Left.ToString().EndsWith("TabDragStarting", StringComparison.Ordinal))
+            .OfType<ExpressionStatementSyntax>()
+            .Where(s => s.Expression.ToString().StartsWith("HookStripDragInput()", StringComparison.Ordinal))
             .ToList();
         Assert.True(
             hooked.Count == 1,
-            "The constructor must subscribe OnTabDragStarting on TabViewControl.TabDragStarting.");
+            "The constructor must call HookStripDragInput: the engine's pointer " +
+            "hooks are the drag lifecycle's front door.");
     }
 
     [Fact]
@@ -176,17 +176,17 @@ public sealed class TabStripSyncWiringTests
     [Fact]
     public void The_drop_reconciles_even_when_the_manager_refused_the_move()
     {
-        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+        var finish = ShellSource.Load(TabHostSource).Method("FinishHorizontalDrag");
 
-        var reconcile = completed.Calls("ReconcileStripOrder").ToList();
+        var reconcile = finish.Calls("ReconcileStripOrder").ToList();
         Assert.True(
             reconcile.Count == 1,
-            "OnTabDragCompleted must reconcile the strip to the manager's order.");
+            "FinishHorizontalDrag must reconcile the strip to the manager's order.");
         Assert.Empty(reconcile[0].Ancestors().OfType<IfStatementSyntax>());
 
-        // The refused drop raises no TabMoved, so nothing else would run
-        // the reconcile: a clamp against the pin boundary (PR 4's grammar)
-        // leaves TabView's own reorder standing unless the reconcile is
+        // A crossing the manager refused or clamped raises no TabMoved,
+        // so nothing else would run the reconcile: the refusal leaves
+        // the machine's slot belief standing unless the sweep is
         // unconditional.
     }
 
@@ -247,25 +247,24 @@ public sealed class TabStripSyncWiringTests
     [Fact]
     public void The_drop_lands_the_selection_once_after_the_batch_has_closed()
     {
-        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+        var finish = ShellSource.Load(TabHostSource).Method("FinishHorizontalDrag");
 
         // The stand-down swallows every selection raise the drag produced,
         // so this landing is the only thing that can end a drop with the
-        // strip and the manager agreeing: after the commit and the
-        // reconcile, outside TabView's batch, exactly once.
-        var reconcile = completed.Calls("ReconcileStripOrder").ToList();
-        var landing = completed.Calls("SelectActive").ToList();
+        // strip and the manager agreeing: after the last commit and the
+        // reconcile, exactly once.
+        var reconcile = finish.Calls("ReconcileStripOrder").ToList();
+        var landing = finish.Calls("SelectActive").ToList();
         Assert.True(
             landing.Count == 1 && reconcile.Count == 1
                 && landing[0].SpanStart > reconcile[0].Span.End,
-            "OnTabDragCompleted must land the selection exactly once, after the " +
+            "FinishHorizontalDrag must land the selection exactly once, after the " +
             "commit's reconcile: the order has to be settled before the selection " +
             "is re-asserted against it.");
 
         // Unconditional. A refused commit and a repaired one must end the
-        // same way, and the off-strip release (TabView re-applies the inner
-        // ListView's possibly cleared selection just before this handler
-        // runs) is the drift a guarded landing would leave standing.
+        // same way -- the strip resting on the manager's active tab is the
+        // only end state a reorder may leave.
         Assert.Empty(landing[0].Ancestors().OfType<IfStatementSyntax>());
     }
 
@@ -424,105 +423,109 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
-    public void A_chip_drag_commits_MoveGroup_through_the_drop_map_and_never_Move()
+    public void A_chip_press_never_arms_the_engine()
     {
-        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+        var pressed = ShellSource.Load(TabHostSource).Method("OnStripPointerPressed");
 
-        // A chip drags its whole run, and the commit is MoveGroup even for
-        // a single-member run -- a Move here would relocate one member out
-        // of the run it is carrying and let Normalize re-gather the rest
-        // somewhere else. The strip's rest slot is not a manager index
-        // (chips occupy slots; hidden members occupy none), so the target
-        // comes from the drop map, never from the slot arithmetic.
-        var chipGate = completed.DescendantNodes().OfType<IfStatementSyntax>()
-            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
-        // Scope to the gate's own statement: the if node's descendants
-        // include its else arm, and the tab path's Move lives there.
-        var chipArm = chipGate.Statement;
-        var map = chipArm.Call("TabChipDrop.GroupTarget");
-        var commit = chipArm.Call("_manager.MoveGroup");
+        // A chip drags its whole run, and the run's commit is the group
+        // rung's grammar -- not a Move this engine may guess at. The chip
+        // refusal sits before the identity walk and before any session
+        // is built, so a press on a chip stays exactly what it was: a
+        // click that may expand, and nothing else.
+        var chipGate = pressed.DescendantNodes().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString() == "item.Tag is TabGroup");
         Assert.True(
-            commit.Arg(1) == "target" && map.SpanStart < commit.SpanStart,
-            "The chip drag must commit MoveGroup with the drop map's target, not a "
-            + "slot the strip happened to land on.");
-        Assert.True(
-            map.Arg(2) == "leftTab" && map.Arg(3) == "leftChip",
-            "The drop map must be fed the neighbour's IDENTITY, not a slot: on a "
-            + "downward move TabView shifts the strip slots left, and a slot "
-            + "re-read through the pre-drag projection names the dragged chip "
-            + "itself.");
+            chipGate.Statement is ReturnStatementSyntax { Expression: null },
+            "A chip press must fall through without arming: the engine's plain "
+            + "reorder must never relocate a run it does not understand.");
 
-        // The neighbour's identity is read off the strip's own final
-        // arrangement, from the slot LEFT of the rest. The transposed
-        // read (slot + 1) is the boundary flip this rung exists to make
-        // impossible, so the argument is pinned verbatim.
-        var neighbour = chipArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Single(c => c.CalleeText().EndsWith("ContainerFromIndex", StringComparison.Ordinal));
-        Assert.True(
-            neighbour.ArgumentList.ToString() == "(slot - 1)",
-            "The left neighbour must be read from slot - 1, the strip's own "
-            + "arrangement: slot + 1 is the transposed boundary, and a projector "
-            + "slot read is the pre-drag order the drag just overruled.");
-
-        // A rest the strip cannot name a neighbour for is skew: the whole
-        // commit sits behind that refusal rather than guessing at the
-        // strip head, and behind the map's own -1, since MoveGroup clamps
-        // a guess into a landing.
-        Assert.True(
-            map.Ancestors().OfType<IfStatementSyntax>()
-                .Any(a => a.Condition.ToString() == "known"),
-            "The commit must be refused when the left neighbour is unresolvable: "
-            + "a guessed head target yanks the run to the front of the strip.");
-        Assert.True(
-            commit.Ancestors().OfType<IfStatementSyntax>()
-                .Any(a => a.Condition.ToString() == "target >= 0"),
-            "The MoveGroup commit must sit behind the map's refusal (target >= 0): "
-            + "a strip the projection cannot describe is the reconcile's, not the "
-            + "drop map's to guess at.");
-
-        Assert.Empty(chipArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)));
+        // And nothing in the arm path builds a session for one: no chip
+        // drag may reach the machine through any other door.
+        Assert.Empty(pressed.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "_manager.MoveGroup"));
     }
 
     [Fact]
-    public void A_tab_drop_moves_through_the_projection_and_forks_at_chip_slots()
+    public void A_sub_threshold_release_is_a_click_the_engine_leaves_alone()
     {
-        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+        var released = ShellSource.Load(TabHostSource).Method("OnStripPointerReleased");
 
-        // The tab path is exactly the chip gate's else arm: one of the two
-        // owns every drop. The translation is still the projection's (a
-        // raw IndexOf is a slot, not a manager index -- chips occupy
-        // slots), and the move is still gated on the mapped index.
-        var chipGate = completed.DescendantNodes().OfType<IfStatementSyntax>()
-            .First(i => i.Condition.ToString().Contains("item.Tag is TabGroup", StringComparison.Ordinal));
-        var tabArm = chipGate.Else?.Statement;
+        // The begin bundle never ran for a press still under the
+        // threshold: the flag is down, the seam is placed, the lift does
+        // not exist. The release must answer that press with nothing but
+        // the machine's own cancel -- finishing it as a drag would run
+        // the landing, reconcile against a pointer the strip never
+        // showed, and steal the click the item's own pipeline is
+        // answering on the same event.
+        var gate = Assert.IsType<IfStatementSyntax>(
+            released.Body!.Statements.ElementAt(2));
+        Assert.Equal("drag.Machine.Phase != TabDragPhase.Dragging",
+            gate.Condition.ToString());
+        var arm = Assert.IsType<BlockSyntax>(gate.Statement);
+        Assert.Equal(2, arm.Statements.Count);
+        Assert.Contains(arm.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            c => c.CalleeText() == "drag.Machine.Cancel");
         Assert.True(
-            tabArm is not null,
-            "The chip gate must carry the tab path as its else arm: neither drop "
-            + "shape may fall through both arms or between them.");
-        Assert.Single(
-            tabArm!.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                .Where(c => c.CalleeText().EndsWith(
-                    "TabStripProjection.VisibleIndexToModelIndex", StringComparison.Ordinal)));
+            arm.Statements.Last() is ReturnStatementSyntax { Expression: null },
+            "the sub-threshold arm must return: the finish pass is for drags "
+            + "that began, never for clicks.");
 
-        var move = tabArm.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Single(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal));
+        // And the disarm stands before everything else: the guard is the
+        // handler's first statement, and the field is down at the second,
+        // so a re-entrant release finds no session to finish a second
+        // time.
+        var statements = released.Body!.Statements.ToList();
+        var guard = Assert.IsType<IfStatementSyntax>(statements[0]);
+        Assert.Equal("_horizontalDrag is not { } drag", guard.Condition.ToString());
         Assert.True(
-            move.Ancestors().OfType<IfStatementSyntax>()
-                .Any(a => a.Condition.ToString() == "newIndex >= 0"),
-            "The tab drop's move must be gated on the mapped index (newIndex >= 0).");
+            guard.Statement is ReturnStatementSyntax { Expression: null },
+            "a release with no session of ours belongs to whoever owns it.");
+        Assert.True(
+            statements[1] is ExpressionStatementSyntax
+            {
+                Expression: AssignmentExpressionSyntax
+                {
+                    Left: IdentifierNameSyntax { Identifier.ValueText: "_horizontalDrag" },
+                    Right: LiteralExpressionSyntax { Token.ValueText: "null" }
+                }
+            },
+            "the handler must disarm before any pass runs: a re-entrant release "
+            + "must not finish the same drag twice.");
+    }
 
-        // A slot that maps to a chip is the join fork's, and the fork
-        // lives in its own method so its pins read one story below.
-        var newIndexGate = move.Ancestors().OfType<IfStatementSyntax>()
-            .First(a => a.Condition.ToString() == "newIndex >= 0");
+    [Fact]
+    public void A_crossing_commits_through_the_projection_and_rewinds_at_chip_slots()
+    {
+        var commit = ShellSource.Load(TabHostSource).Method("CommitHorizontalCrossing");
+
+        // The machine speaks slots; the manager speaks model indices.
+        // The translation is the projection's, taken fresh per crossing
+        // because every prior commit reordered the manager the machine
+        // cannot see.
+        Assert.Single(commit.Calls("TabStripProjection.DragSlots"));
+        var move = commit.Call("_manager.Move");
+        var refusal = commit.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "target < 0 || old < 0 || old == target");
         Assert.True(
-            newIndexGate.Else?.Statement.DescendantNodes()
-                .OfType<InvocationExpressionSyntax>()
-                .Any(c => c.CalleeText().EndsWith("ResolveDropAtChip", StringComparison.Ordinal))
-            == true,
-            "The unmapped arm (-1, a chip's slot) must route to the drop-at-a-run "
-            + "fork; refusing outright would bounce every drop a chip borders.");
+            refusal.Statement is BlockSyntax arm
+                && arm.Statements.Last() is ReturnStatementSyntax { Expression: null }
+                && move.SpanStart > refusal.Span.End,
+            "The crossing's move must sit behind the projection's translation: an "
+            + "unmapped target, a lost tab, and the no-op are all refusals that "
+            + "return, not moves the strip guesses at.");
+
+        // A slot the projection cannot map is a chip's, and the machine's
+        // index is rewound to the crossing's origin: the next Evaluate
+        // measures from the slot the strip actually shows.
+        var rewinds = commit.Calls("drag.Machine.UpdateIndex").ToList();
+        Assert.True(
+            rewinds.Count == 2
+                && rewinds.All(r => r.Arg(0) == "crossing.From")
+                && rewinds.All(r => r.SpanStart < move.SpanStart),
+            "Every refused crossing must rewind the machine to the crossing's "
+            + "origin before the commit returns: a stranded index would let the "
+            + "next Evaluate commit from a slot the strip never showed.");
     }
 
     [Fact]
@@ -561,58 +564,53 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
-    public void The_strip_accepts_only_its_own_drags_and_records_the_drop_point()
+    public void The_engine_hooks_the_pointer_without_capture_and_owns_the_drop_point()
     {
         var src = ShellSource.Load(TabHostSource);
-        var over = src.Method("OnTabStripDragOver");
-        var drop = src.Method("OnTabStripDrop");
+        var hook = src.Method("HookStripDragInput");
+        var finish = src.Method("FinishHorizontalDrag");
 
-        // Both handlers open with the live-drag guard: an external drag
-        // must stay declined, which an untouched accepted operation does.
-        foreach (var handler in new[] { over, drop })
-        {
-            var guard = handler.Body!.Statements.First() as IfStatementSyntax;
-            Assert.True(
-                guard?.Condition is PrefixUnaryExpressionSyntax not
-                    && not.Operand is IdentifierNameSyntax id
-                    && id.Identifier.ValueText == "_stripDragActive"
-                    && guard.Statement is ReturnStatementSyntax { Expression: null },
-                handler.Identifier.ValueText + " must open with `if (!_stripDragActive) "
-                + "return;`: accepting a foreign drag lets a drop the strip never "
-                + "started write state.");
-        }
+        // The five pointer handlers are wired on the host's own root with
+        // handledEventsToo, the vertical's proven shape -- and nowhere in
+        // the hook or the handlers does a capture appear: presses route
+        // by hit-testing, which is why a sub-threshold press is still the
+        // click it started as.
+        Assert.Equal(5, hook.Calls("HostRoot.AddHandler").Count());
+        Assert.All(
+            hook.Calls("HostRoot.AddHandler"),
+            c => Assert.True(
+                c.Arg(1).StartsWith("new PointerEventHandler", StringComparison.Ordinal)
+                && c.Arg(2) == "true",
+                "every pointer hook must carry its handler with handledEventsToo: "
+                + "true -- a press over any part of an item arms."));
+        // CalleeText keeps the receiver, so the no-capture pin must match
+        // by suffix: a bare-name match can never go red, because
+        // CapturePointer is only ever spelled with something before the
+        // dot.
+        Assert.Empty(src.Root.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("CapturePointer", StringComparison.Ordinal)));
 
-        var accept = over.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .First(a => a.Left.ToString().EndsWith("AcceptedOperation", StringComparison.Ordinal));
-        Assert.True(
-            accept.Right.ToString().Contains("DataPackageOperation.Move", StringComparison.Ordinal),
-            "The strip accepts Move only: the accept exists so TabStripDrop fires "
-            + "with the pointer position the join fork reads.");
-
-        // The drop records and stops there -- the commit is OnTabDrag-
-        // Completed's, and neither handler may move anything itself.
-        var record = drop.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+        // The drop point is the engine's own release event now, recorded
+        // in the finish pass: TabView no longer supplies one (no OLE
+        // drag), and the join fork's geometry reads what the pointer
+        // actually did.
+        var record = finish.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .First(a => a.Left is IdentifierNameSyntax lid
                         && lid.Identifier.ValueText == "_lastDropPosition");
         Assert.True(
             record.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                .Any(c => c.CalleeText().EndsWith("GetPosition", StringComparison.Ordinal)),
-            "The recorded point must come from the drop event's position.");
-        Assert.Empty(drop.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)
-                        || c.CalleeText().EndsWith("JoinGroup", StringComparison.Ordinal)));
-        Assert.Empty(over.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith(".Move", StringComparison.Ordinal)
-                        || c.CalleeText().EndsWith("JoinGroup", StringComparison.Ordinal)));
+                .Any(c => c.CalleeText().EndsWith("GetCurrentPoint", StringComparison.Ordinal)),
+            "The recorded point must come from the release event's position.");
 
-        // The handlers are wired in markup, where the code-behind sweep
-        // cannot see them (the TabDroppedOutside pin's lesson).
+        // The switch-off is total: no OLE drag handshake in the markup,
+        // and the reorder engine it used to feed is off with it.
         var xaml = ReadEmbedded(TabHostXaml);
-        Assert.True(
-            xaml.Contains("TabStripDragOver", StringComparison.Ordinal)
-                && xaml.Contains("TabStripDrop", StringComparison.Ordinal),
-            "TabHost.xaml must wire TabStripDragOver and TabStripDrop: without the "
-            + "drop the fork never gets a pointer position and refuses every join.");
+        Assert.Contains("CanReorderTabs=\"False\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("CanDragTabs=\"False\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("TabStripDragOver", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("TabStripDrop", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("TabDragStarting", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("TabDragCompleted", xaml, StringComparison.Ordinal);
     }
 
     [Fact]

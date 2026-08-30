@@ -262,4 +262,45 @@ internal static class TabStripProjection
         }
         return -1;
     }
+
+    /// <summary>
+    /// The slot space a drag speaks: the manager's tabs in order, minus
+    /// the members a collapsed run hides. A hidden member has no slot at
+    /// all -- no row renders for it, so no crossing can name it -- and
+    /// the pairing list preserves each row's manager index so a slot can
+    /// be turned back into the manager position a commit needs. The
+    /// vertical strip builds its machine on these rows; the horizontal
+    /// engine reads the same shape, with chips layered on top of the
+    /// slot order through <see cref="HorizontalRows"/>.
+    /// </summary>
+    public static (List<TabModel> Rows, List<int> ManagerIndex) DragSlots(TabManager manager)
+    {
+        var rows = new List<TabModel>(manager.Tabs.Count);
+        var managerIndex = new List<int>(manager.Tabs.Count);
+        var tabs = manager.Tabs;
+        for (int i = 0; i < tabs.Count; i++)
+        {
+            var tab = tabs[i];
+            if (tab.Group is { } group && group.IsCollapsed
+                && !ReferenceEquals(tab, manager.ActiveTab))
+                continue; // hidden under a collapsed header: no slot at all
+            rows.Add(tab);
+            managerIndex.Add(i);
+        }
+        return (rows, managerIndex);
+    }
+
+    /// <summary>
+    /// SLOT -> MANAGER lookup is <see cref="DragSlots"/>' pairing list
+    /// itself; this is the inverse: which slot the tab at manager index
+    /// <c>IndexOf(tab)</c> occupies. Indexing the pairing list BY the
+    /// manager index answers a different row's slot -- the first row past
+    /// a hidden run is out of range or a stranger. -1 when the tab holds
+    /// no slot.
+    /// </summary>
+    public static int SlotIndexOf(TabManager manager, List<int> managerIndex, TabModel tab)
+    {
+        var at = manager.IndexOf(tab);
+        return at >= 0 ? managerIndex.IndexOf(at) : -1;
+    }
 }

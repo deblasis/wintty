@@ -20,7 +20,6 @@ using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Ghostty.Core.Windows;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 
 namespace Ghostty.Tabs;
@@ -140,10 +139,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
         Unloaded += (_, _) => FinishLift("teardown");
 
         // The drag lifecycle gates the seam cover below: mid-drag the
-        // strip's slots are TabView's reorder preview, not the manager's
-        // order, so the cover (placed from the active item's slot) is
-        // suppressed for the drag and re-placed at the drop.
-        TabViewControl.TabDragStarting += OnTabDragStarting;
+        // strip's slots are the engine's crossing preview, not the
+        // manager's settled order, so the cover (placed from the active
+        // item's slot) is suppressed for the drag and re-placed at the
+        // drop.
+        HookStripDragInput();
 
         // The run label's timers. Each stops itself before translating, so
         // a timer that fires twice in a pass cannot double-apply.
@@ -161,7 +161,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // this control's own writes as much as for TabView's, so a
         // validation handler on it would re-enter the reconcile that
         // mutates TabItems. The validation points are the reconciles in
-        // MoveItem and OnTabDragCompleted; both read the manager.
+        // MoveItem and the engine's finish pass; both read the manager.
     }
 
     private void AddItem(TabModel tab)
@@ -1576,17 +1576,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
     {
         if (_suppressSelectionEvent) return;
         // A live drag holds the strip, and nothing raised while it does is
-        // an intent. TabView's reorder commits as a remove-then-insert on
-        // TabItems, and the selection model's reaction to the remove
-        // re-targets the selection -- raising this event while the dragged
-        // tab is still absent from the strip. Acting on that raise would
-        // reconcile, and the reconcile's refusal path would Clear()
-        // TabItems, inside TabView's still-open modification: the
-        // collection refuses a nested modification with 0x8000FFFF, and on
-        // the UI thread that refusal is process death. The drag's drop is
-        // where the selection truth lands instead: OnTabDragCompleted
-        // re-asserts the manager's active tab after the commit, once the
-        // batch has closed.
+        // an intent. The engine's crossings commit through the manager as
+        // they land, each a remove-then-insert on TabItems, and the
+        // selection model's reaction to the remove re-targets the
+        // selection -- raising this event while the dragged tab is still
+        // settling. Acting on that raise would reconcile mid-crossing.
+        // The drag's release is where the selection truth lands instead:
+        // the engine's finish re-asserts the manager's active tab after
+        // the last commit. No MUXC drag batch can be open under the
+        // engine, so the old batch-collision constraint is gone; what
+        // remains is that a crossing's churn is not an intent.
         if (_stripDragActive)
         {
             _stoodDownSelectionRaises++;
@@ -1661,185 +1660,349 @@ internal sealed partial class TabHost : UserControl, ITabHost
     }
 
     /// <summary>
-    /// True while a TabView drag has the strip. The seam cover derives
+    /// True while the drag engine has the strip. The seam cover derives
     /// from the active item's arranged slot, and during a drag that slot
-    /// is TabView's reorder preview rather than the manager's order.
+    /// is the engine's crossing preview rather than the manager's order.
     /// </summary>
     private bool _stripDragActive;
 
     // The selection raises a live drag's stand-down has swallowed, since
-    // the last drag began. Every one is TabView's mid-batch churn, and
+    // the last drag began. Every one is a commit's mid-drag churn, and
     // the count says how much churn a single drop actually produces.
     private int _stoodDownSelectionRaises;
 
-    // The drop point, and whether it is this drag's. Recorded by
-    // OnTabStripDrop for the drop-at-a-run fork in OnTabDragCompleted,
-    // which carries no position of its own; the flag is the guard that
-    // makes the record honest -- a release off the strip fires no
-    // TabStripDrop, so the last drag's stale point must not answer for
-    // this one. Invalidated at drag start and consumed at completion.
+    // The release point the drop-at-a-run fork reads, with the flag that
+    // says the point is this drag's own. The engine records a fresh
+    // point at every live release before the fork can run, so the flag
+    // is never seen false today; it stays as DropPointIn's shape guard,
+    // whose refusal (no honest point, no join, no side) is the contract
+    // any future caller of the fork inherits.
     private Windows.Foundation.Point _lastDropPosition;
     private bool _dropPositionValid;
 
-    private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
+    // The one live horizontal drag, zero or one. A press over the strip
+    // arms a session that stays a click until the pointer travels past
+    // the start threshold; the engine never captures the pointer, so a
+    // session is ended by its release, a cancel, or the next press after
+    // a release the window never saw.
+    private HorizontalDragSession? _horizontalDrag;
+
+    private sealed class HorizontalDragSession
     {
-        TabDragTrace.Line($"DRAG start item={args.Item?.GetType().Name ?? "null"}");
-        _stripDragActive = true;
-        _stoodDownSelectionRaises = 0;
-        _dropPositionValid = false;
-        // The label hides HERE, in the drag start's own dispatch pass, as
-        // a cut: an 83ms fade would overlap the drag ghost, which is the
-        // one overlap the label rule exists to forbid. No timer stands
-        // between this event and the hide.
-        ApplyLabelPhase(_labelRules.DragStarting());
-        // The boundary stroke brightens for the length of the drag: the
-        // zone edge is what a drag-to-pin is aiming at, and the flag this
-        // reads is live from the line above.
-        ApplyPinZoneChrome();
-        // Hidden synchronously: the drag is live from this call onward,
-        // and anything the strip does from here moves slots the manager
-        // has not agreed to yet.
-        SelectedTabSeamChanged?.Invoke(0, 0, null);
-        // The lift is decoration and stands last: everything above lands
-        // the state the drag's truth needs, and the visual must never be
-        // a dependency of it.
-        if (args.Item is TabViewItem lifted) StartLift(lifted);
+        public required TabDragReorder Machine;
+        public required TabModel Tab;
+        public required TabViewItem Item;
+
+        // Press position and the dragged item's arranged center at the
+        // press, both in TabViewControl space, so the machine's dragged
+        // center rides the pointer without a live follow: the row moves
+        // at crossings, and the pointer's travel supplies the intent.
+        public required double PressX;
+        public required double GrabCenterX;
     }
 
-    private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
+    /// <summary>
+    /// The horizontal strip's drag engine: the shared capture-less
+    /// machine fed by pointer handlers on the host's own root, with
+    /// handledEventsToo so a press over any part of an item still arms.
+    /// Nothing here sets Handled and nothing captures: presses route by
+    /// hit-testing exactly as they did before the engine existed, which
+    /// is why a click survives it untouched -- the item's own pipeline
+    /// answers a sub-threshold press-release, and the flag the selection
+    /// stand-down reads never goes up for one.
+    /// </summary>
+    private void HookStripDragInput()
     {
-        // First, before the point is invalidated below: whether the drop
-        // landed on the strip is exactly what the recorded point answers.
-        TabDragTrace.Line($"DRAG completed item={args.Item?.GetType().Name ?? "null"} " +
-            $"point={(_dropPositionValid ? "live" : "stale")}");
-        _stripDragActive = false;
-        _dropPositionValid = false;
-        // The drag is over: the cut demand lifts, and hover may show the
-        // label again. The label is already hidden (the start hid it), so
-        // this is bookkeeping, not a second hide.
-        ApplyLabelPhase(_labelRules.DragEnded());
-        // The boundary stroke dims back -- and because this handler is the
-        // one pass every completed drag runs, the dim is the cleanup: a
-        // bright stroke cannot outlive the drag that brightened it.
-        ApplyPinZoneChrome();
-        if (args.Item is TabViewItem item)
-        {
-            if (item.Tag is TabGroup draggedGroup)
-            {
-                // A chip drags its whole run. The strip's slot is not a
-                // manager index: chips occupy slots too, and the members
-                // a collapsed run hides occupy none. The commit is
-                // MoveGroup even for a single-member run, so a chip drag
-                // can never split the run it is carrying.
-                //
-                // The left neighbour is the element the strip arranged at
-                // slot - 1, read as an identity and never as a slot: on a
-                // downward move TabView shifts every strip slot left
-                // between the origin and the rest, so re-reading slot - 1
-                // through the pre-drag projection names the dragged chip
-                // itself.
-                var slot = TabViewControl.TabItems.IndexOf(item);
-                TabModel? leftTab = null;
-                TabGroup? leftChip = null;
-                var known = slot <= 0;
-                if (!known
-                    && TabViewControl.ContainerFromIndex(slot - 1) is TabViewItem neighbour)
-                {
-                    if (neighbour.Tag is TabGroup neighbourChip)
-                    {
-                        leftChip = neighbourChip;
-                        known = true;
-                    }
-                    else
-                    {
-                        foreach (var (model, vi) in _itemByModel)
-                        {
-                            if (vi != neighbour) continue;
-                            leftTab = model;
-                            known = true;
-                            break;
-                        }
-                    }
-                }
+        HostRoot.AddHandler(PointerPressedEvent,
+            new PointerEventHandler(OnStripPointerPressed), true);
+        HostRoot.AddHandler(PointerMovedEvent,
+            new PointerEventHandler(OnStripPointerMoved), true);
+        HostRoot.AddHandler(PointerReleasedEvent,
+            new PointerEventHandler(OnStripPointerReleased), true);
+        HostRoot.AddHandler(PointerCanceledEvent,
+            new PointerEventHandler(OnStripPointerCanceled), true);
+        HostRoot.AddHandler(PointerCaptureLostEvent,
+            new PointerEventHandler(OnStripPointerCaptureLost), true);
+    }
 
-                // A rest whose left neighbour the strip cannot name is
-                // skew the reconcile owns: refuse the commit rather than
-                // guess at the strip head.
-                if (known)
-                {
-                    var target =
-                        TabChipDrop.GroupTarget(_manager, draggedGroup, leftTab, leftChip);
-                    if (target >= 0)
-                    {
-                        TabDragTrace.Line($"COMMIT movegroup slot={slot} target={target}");
-                        _manager.MoveGroup(draggedGroup, target);
-                    }
-                    else
-                    {
-                        TabDragTrace.Line($"COMMIT movegroup refused reason=target-negative slot={slot}");
-                    }
-                }
-                else
-                {
-                    TabDragTrace.Line($"COMMIT movegroup refused reason=unknown-neighbour slot={slot}");
-                }
-            }
-            else
-            {
-                // The strip's slot is not a manager index: chips occupy
-                // slots too, so the raw IndexOf would land past every run
-                // left of the drop. The projection translates; a slot that
-                // maps back to a tab commits the move the strip previewed,
-                // and a slot that maps to a chip falls to the
-                // drop-at-a-run fork.
-                var slot = TabViewControl.TabItems.IndexOf(item);
-                var newIndex = TabStripProjection.VisibleIndexToModelIndex(_manager, slot);
-                if (newIndex >= 0)
-                {
-                    foreach (var (model, vi) in _itemByModel)
-                    {
-                        if (vi == item)
-                        {
-                            var oldIndex = _manager.IndexOf(model);
-                            TabDragTrace.Line(oldIndex == newIndex
-                                ? $"COMMIT move skipped in-place old={oldIndex} new={newIndex}"
-                                : $"COMMIT move old={oldIndex} new={newIndex}");
-                            if (oldIndex != newIndex && oldIndex >= 0)
-                                _manager.Move(oldIndex, newIndex);
-                            break;
-                        }
-                    }
-                }
-                else
-                {
-                    TabDragTrace.Line($"COMMIT drop at chip slot={slot}");
-                    ResolveDropAtChip(item, slot);
-                }
-            }
+    private void OnStripPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_horizontalDrag is not null)
+        {
+            // A button that came up off the window is a release the host
+            // never saw; the stale session ends here rather than blocking
+            // every drag after it.
+            CancelHorizontalDrag("stale");
         }
-        // The drop is where the two orders can end up disagreeing with
-        // nobody left to fix it: TabView has already applied whatever
-        // reorder it wanted, and the manager may have refused the move
-        // outright (an invariant clamp mutates nothing and raises
-        // nothing) or repaired further than the op asked. The strip
-        // yields to the manager; on an accepted drag this is a no-op
-        // scan.
+        if (!e.GetCurrentPoint(TabViewControl).Properties.IsLeftButtonPressed) return;
+
+        var source = e.OriginalSource as DependencyObject;
+        // The item's own controls keep their gestures: a press on the
+        // close button or any other button descendant is that button's,
+        // never the drag's.
+        if (VisualTreeHelperEx.FindAncestor<ButtonBase>(source) is not null) return;
+        if (VisualTreeHelperEx.FindAncestor<TabViewItem>(source) is not { } item) return;
+        // A chip press never arms: a chip drags its whole run, and the
+        // run's commit is the group rung's, not this one's.
+        if (item.Tag is TabGroup) return;
+
+        TabModel? dragged = null;
+        foreach (var (model, vi) in _itemByModel)
+        {
+            if (ReferenceEquals(vi, item)) { dragged = model; break; }
+        }
+        if (dragged is null) return;
+
+        var (rows, managerIndex) = TabStripProjection.DragSlots(_manager);
+        var slot = TabStripProjection.SlotIndexOf(_manager, managerIndex, dragged);
+        if (slot < 0 || rows.Count < 2) return;
+        var (grabbed, centers) = MeasureSlots(rows, dragged);
+        if (double.IsNaN(grabbed)) return;
+
+        var pressX = e.GetCurrentPoint(TabViewControl).Position.X;
+        var drag = new HorizontalDragSession
+        {
+            Machine = new TabDragReorder(rows.Count, slot),
+            Tab = dragged,
+            Item = item,
+            PressX = pressX,
+            GrabCenterX = grabbed,
+        };
+        drag.Machine.Press(pressX);
+        drag.Machine.UpdateCenters(centers);
+        // Centers are measured once, at the arm, and survive commits on
+        // the machine's own invariant: rows occupy slots in manager
+        // order, so a committed crossing leaves them describing the
+        // layout the strip is arranging toward. They are exact only
+        // while slots stay equal-width -- TabWidthMode="Equal" in
+        // TabHost.xaml is a dependency of this gesture, not a styling
+        // choice. A variable-width mode would need UpdateCenters re-fed
+        // per commit, which the machine already supports.
+        _horizontalDrag = drag;
+    }
+
+    private void OnStripPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_horizontalDrag is not { } drag) return;
+        var x = e.GetCurrentPoint(TabViewControl).Position.X;
+        if (drag.Machine.Phase == TabDragPhase.Pressed)
+        {
+            if (!drag.Machine.Begin(x)) return;
+            BeginHorizontalDragVisual(drag);
+        }
+        drag.Machine.SampleVelocity(x, Environment.TickCount64);
+        if (drag.Machine.Phase != TabDragPhase.Dragging) return;
+
+        // The dragged center travels with the pointer from its grab
+        // position; the crossings it earns commit live, the strip
+        // following the machine rather than waiting for a release.
+        var draggedCenter = drag.GrabCenterX + (x - drag.PressX);
+        while (drag.Machine.Evaluate(draggedCenter) is { } crossing)
+            CommitHorizontalCrossing(drag, crossing);
+    }
+
+    private void OnStripPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_horizontalDrag is not { } drag) return;
+        _horizontalDrag = null;
+        if (drag.Machine.Phase != TabDragPhase.Dragging)
+        {
+            // A press that never crossed the threshold was a click, and
+            // the item's own pipeline answers this release. The engine
+            // never held the pointer, so there is nothing to hand back
+            // and no side effect to undo.
+            drag.Machine.Cancel();
+            return;
+        }
+        FinishHorizontalDrag(drag, e);
+    }
+
+    private void OnStripPointerCanceled(object sender, PointerRoutedEventArgs e)
+        => CancelHorizontalDrag("canceled");
+
+    private void OnStripPointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        => CancelHorizontalDrag("capture");
+
+    /// <summary>
+    /// The begin bundle, run once at the threshold, never at the press:
+    /// everything here changes what a click looks like or suppresses, so
+    /// a gesture that is still a click must not run it. The lift is
+    /// decoration and stands last, as it always did.
+    /// </summary>
+    private void BeginHorizontalDragVisual(HorizontalDragSession drag)
+    {
+        TabDragTrace.Line($"DRAG begin index={drag.Machine.Index} " +
+            $"rows={drag.Machine.RowCount} run=no motion=" +
+            (TabStripMotion.Enabled(SystemAnimationsEnabled(), _highContrast) ? "on" : "off"));
+        _stripDragActive = true;
+        _stoodDownSelectionRaises = 0;
+        // The label hides HERE, in the begin pass, as a cut: an 83ms fade
+        // would overlap the dragged tab's lift, which is the one overlap
+        // the label rule exists to forbid.
+        ApplyLabelPhase(_labelRules.DragStarting());
+        // The boundary stroke brightens for the length of the drag: the
+        // zone edge is what a drag-to-pin is aiming at.
+        ApplyPinZoneChrome();
+        // Hidden synchronously: the drag is live from this call onward,
+        // and the crossings below move slots the manager is asked to
+        // agree to as they land.
+        SelectedTabSeamChanged?.Invoke(0, 0, null);
+        StartLift(drag.Item);
+    }
+
+    /// <summary>
+    /// One committed crossing: the machine's slot space translated
+    /// through the projection into the manager move, the same seam the
+    /// old bridge committed through. A slot the projection cannot map is
+    /// a chip's -- a chip is a slot but not a model -- and the machine's
+    /// index is rewound: crossing a chip is the group rung's grammar,
+    /// not a move this rung may guess at.
+    /// </summary>
+    private void CommitHorizontalCrossing(HorizontalDragSession drag, TabDragCrossing crossing)
+    {
+        var (rows, _) = TabStripProjection.DragSlots(_manager);
+        if (crossing.To < 0 || crossing.To >= rows.Count)
+        {
+            drag.Machine.UpdateIndex(crossing.From);
+            return;
+        }
+        var target = _manager.IndexOf(rows[crossing.To]);
+        var old = _manager.IndexOf(drag.Tab);
+        if (target < 0 || old < 0 || old == target)
+        {
+            drag.Machine.UpdateIndex(crossing.From);
+            TabDragTrace.Line($"DRAG refused {crossing.From}->{crossing.To}");
+            return;
+        }
+        TabDragTrace.Line($"DRAG commit {crossing.From}->{crossing.To}");
+        TabDragTrace.Line($"COMMIT move old={old} new={target}");
+        _manager.Move(old, target);
+        RebindLift(drag.Item);
+    }
+
+    /// <summary>
+    /// The commit churned the dragged tab's slot -- MoveItem's remove and
+    /// insert keeps the same element, but whether the composition visual
+    /// carries its running scale, center, and shadow sprite across that
+    /// is a runtime question the rebind refuses to ask. Re-assert all
+    /// three, the way the vertical's RebindFollow does at every crossing.
+    /// Set, not re-spring: re-running the lift spring per crossing would
+    /// re-bounce the tab all the way across the strip.
+    /// </summary>
+    private void RebindLift(TabViewItem item)
+    {
+        if (_lift is not { } lift || !ReferenceEquals(lift.Item, item)) return;
+        Visual visual;
+        try
+        {
+            visual = ElementCompositionPreview.GetElementVisual(item);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return;
+        }
+        // The churned container scales from its own middle, the same
+        // center the grab set, or the lift pivots from the corner after
+        // the first mid-drag commit.
+        visual.CenterPoint = new Vector3(
+            (float)item.ActualWidth / 2f, (float)item.ActualHeight / 2f, 0f);
+        visual.Scale = new Vector3(
+            TabStripMotion.LiftScale, TabStripMotion.LiftScale, 1f);
+        ElementCompositionPreview.SetElementChildVisual(item, lift.Shadow);
+        if (!ReferenceEquals(lift.Visual, visual)) _lift = lift with { Visual = visual };
+    }
+
+    /// <summary>
+    /// The release bundle, run once per live drag. The commit is already
+    /// in the manager -- every crossing moved it -- so this pass is the
+    /// landing: the join fork for a release that came down on a chip,
+    /// the unconditional reconcile sweep, the selection landing the
+    /// stand-down owes, and the settle last.
+    /// </summary>
+    private void FinishHorizontalDrag(HorizontalDragSession drag, PointerRoutedEventArgs e)
+    {
+        var index = drag.Machine.Drop();
+        TabDragTrace.Line($"DRAG completed item=TabViewItem drop={index}");
+        // The release point the join fork reads, recorded now that it is
+        // this drag's own and none earlier's.
+        _lastDropPosition = e.GetCurrentPoint(TabViewControl).Position;
+        _dropPositionValid = true;
+        // A release that came down on a chip is the drop-at-a-run fork:
+        // ON the chip joins, beside it positions, by the same geometry
+        // the old bridge used -- now from a point the engine actually
+        // saw.
+        if (VisualTreeHelperEx.FindAncestor<TabViewItem>(e.OriginalSource as DependencyObject)
+            is { } releasedOn && releasedOn.Tag is TabGroup)
+        {
+            var slot = TabViewControl.TabItems.IndexOf(drag.Item);
+            TabDragTrace.Line($"COMMIT drop at chip slot={slot}");
+            ResolveDropAtChip(drag.Item, slot);
+        }
+        _stripDragActive = false;
+        // The drag is over: the cut demand lifts, and hover may show the
+        // label again; the boundary stroke dims back, the cleanup every
+        // completed drag runs.
+        ApplyLabelPhase(_labelRules.DragEnded());
+        ApplyPinZoneChrome();
+        // The sweep is unconditional: a crossing the manager refused or
+        // clamped raised no TabMoved, so nothing else would run it.
         ReconcileStripOrder();
         QueueBridgeUpdate();
-        // The drop's selection landing. OnSelectionChanged stands down for
-        // the whole drag, so the selection raises the drop produced --
-        // TabView's mid-batch churn, and the inner ListView's possibly
-        // cleared selection on an off-strip release, which TabView
-        // re-applies just before this handler runs -- meet the manager
-        // here instead: after the commit, outside the batch, once.
-        // Unconditional, because a refused commit and a repaired one must
-        // end the same way: the strip resting on the manager's active tab,
-        // a reorder never having switched one.
+        // The selection landing the stand-down owes: after the commit and
+        // the reconcile, once, the strip resting on the manager's active
+        // tab, a reorder never having switched one.
         SelectActive();
-        // The settle is decoration and stands last: the commit above has
-        // landed, the reconcile has spoken, and the handback runs on
-        // whatever element the tab has now.
+        // The settle is decoration and stands last.
         SettleLift();
+    }
+
+    private void CancelHorizontalDrag(string reason)
+    {
+        if (_horizontalDrag is not { } drag) return;
+        _horizontalDrag = null;
+        var wasDragging = drag.Machine.Phase == TabDragPhase.Dragging;
+        drag.Machine.Cancel();
+        if (!wasDragging) return;
+        TabDragTrace.Line($"DRAG cancel reason={reason}");
+        _stripDragActive = false;
+        ApplyLabelPhase(_labelRules.DragEnded());
+        ApplyPinZoneChrome();
+        ReconcileStripOrder();
+        SelectActive();
+        SettleLift();
+    }
+
+    /// <summary>
+    /// Arranged slot centers in TabViewControl space, one per row, with
+    /// the dragged row's center answered separately. FINAL arranged
+    /// positions only: a center the strip cannot measure yet refuses the
+    /// arm rather than feeding the machine a NaN that would swallow every
+    /// crossing past that slot.
+    /// </summary>
+    private (double Grabbed, double[] Centers) MeasureSlots(
+        IReadOnlyList<TabModel> rows, TabModel dragged)
+    {
+        var centers = new double[rows.Count];
+        double grabbed = double.NaN;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (!_itemByModel.TryGetValue(rows[i], out var item)) return (double.NaN, centers);
+            double x;
+            try
+            {
+                x = item.TransformToVisual(TabViewControl)
+                    .TransformPoint(new Point(0, 0)).X + item.ActualWidth / 2;
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+                or System.Runtime.InteropServices.COMException or NullReferenceException)
+            {
+                return (double.NaN, centers);
+            }
+            centers[i] = x;
+            if (ReferenceEquals(rows[i], dragged)) grabbed = x;
+        }
+        return (grabbed, centers);
     }
 
     /// <summary>
@@ -1854,9 +2017,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// The group comes from the projection, never from the strip's item
     /// order: the members are hidden at drop time, so no TabItems index
     /// can say which run took the drop. A slot the projection does not
-    /// name, or a drop with no usable point (released off the strip,
-    /// where TabStripDrop never fired), refuses outright and the
-    /// reconcile after the commit restores the strip.
+    /// name, or a drop whose point the engine did not record, refuses
+    /// outright and the reconcile after the commit restores the strip.
     /// </summary>
     private void ResolveDropAtChip(TabViewItem dragged, int slot)
     {
@@ -1925,30 +2087,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // no honest answer without geometry.
             return null;
         }
-    }
-
-    private void OnTabStripDragOver(object sender, DragEventArgs e)
-    {
-        // Only this strip's own tab drags are drop material: an external
-        // drag has no reorder to land and must stay declined, which an
-        // untouched accepted-operation does. The accept exists so the
-        // drop has somewhere to land -- and so TabStripDrop fires with
-        // the pointer position the drop-at-a-run fork reads.
-        if (!_stripDragActive) return;
-        e.AcceptedOperation = DataPackageOperation.Move;
-        e.Handled = true;
-    }
-
-    private void OnTabStripDrop(object sender, DragEventArgs e)
-    {
-        // Record, nothing else. The commit belongs to OnTabDragCompleted
-        // -- TabView fires this first, then completes the drag -- and the
-        // strip's own reorder is already TabView's, applied in its live
-        // preview.
-        if (!_stripDragActive) return;
-        _lastDropPosition = e.GetPosition(TabViewControl);
-        _dropPositionValid = true;
-        TabDragTrace.Line($"DRAG drop point x={_lastDropPosition.X:0} y={_lastDropPosition.Y:0}");
     }
 
     // -----------------------------------------------------------------

@@ -289,9 +289,16 @@ public class VerticalTabGroupHeaderWiringTests
     {
         var strip = Strip();
         var method = strip.Method("SlotIndexOf");
-        var ret = method.DescendantNodes().OfType<ReturnStatementSyntax>().Single();
-        Assert.Equal("manager >= 0 ? managerIndex.IndexOf(manager) : -1",
-            ret.Expression!.ToString());
+
+        // The inverse lives once, on the projection, where both strips
+        // read it and its guard is execution-tested; the strip's helper
+        // is the delegation, and nothing here may re-derive the pairing
+        // by indexing the forward list.
+        var delegated = method.ExpressionBody?.Expression?.ToString()
+            ?? method.DescendantNodes().OfType<ReturnStatementSyntax>()
+                .Single().Expression!.ToString();
+        Assert.Equal("TabStripProjection.SlotIndexOf(_manager, managerIndex, tab)",
+            delegated);
         Assert.DoesNotContain("managerIndex[_manager.IndexOf", method.ToString());
 
         // The three machine-index sites (press, zone churn, drag tick) all

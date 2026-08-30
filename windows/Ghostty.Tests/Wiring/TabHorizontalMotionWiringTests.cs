@@ -8,19 +8,20 @@ namespace Ghostty.Tests.Wiring;
 
 /// <summary>
 /// The horizontal strip's motion: the drag lift and the collapse swap's
-/// appear-hand. TabView owns the drag itself -- the reorder preview, the
-/// drop, the OS ghost -- so what is pinned here is the polish the host
-/// adds around it: the pressed tab's own visual lifts on the grab and
-/// settles back on the release, a shadow carries the depth, and the
-/// chip &lt;-&gt; members swap fades what appears while removals stay
-/// immediate.
+/// appear-hand. The capture-less engine owns the drag itself -- the arm,
+/// the crossings, the release -- so what is pinned here is the polish
+/// the host adds around it: the pressed tab's own visual lifts at the
+/// threshold and settles back on the release, a shadow carries the
+/// depth, and the chip &lt;-&gt; members swap fades what appears while
+/// removals stay immediate.
 ///
 /// Two properties are pinned. The motion gate is the first statement of
 /// everything that animates, and its cut is total: motion off means no
 /// composition work at all, not different composition work -- state
 /// correctness never waits on an animation. And every animation is
-/// programmatic: TabView exposes no machine velocity, so both springs
-/// start at rest, the policy the vertical's pin flight runs on.
+/// programmatic: the machine's velocity is not spent on any settle yet,
+/// so both springs start at rest, the policy the vertical's pin flight
+/// runs on.
 ///
 /// Wiring guards, not behaviour tests: what a lift looks like on screen
 /// is only observable on a live strip.
@@ -70,20 +71,20 @@ public class TabHorizontalMotionWiringTests
             host.Method("SettleLift").Body!.Statements.First());
         Assert.Equal("_lift is not { } lift", settle.Condition.ToString());
 
-        // Decoration stands last in the drag handlers: the lift runs
+        // Decoration stands last in the engine's passes: the lift runs
         // after the seam cover is suppressed, and the settle runs after
         // the reconcile and the bridge update have spoken.
-        var starting = host.Method("OnTabDragStarting");
-        var seam = starting.Calls("SelectedTabSeamChanged?.Invoke").Single();
-        var lift = starting.Calls("StartLift").Single();
+        var begin = host.Method("BeginHorizontalDragVisual");
+        var seam = begin.Calls("SelectedTabSeamChanged?.Invoke").Single();
+        var lift = begin.Calls("StartLift").Single();
         Assert.True(seam.Span.Start < lift.Span.Start,
-            "the lift is decoration and stands last in the drag start");
+            "the lift is decoration and stands last in the drag begin");
 
-        var completed = host.Method("OnTabDragCompleted");
-        var bridge = completed.Calls("QueueBridgeUpdate").Single();
-        var settleCall = completed.Calls("SettleLift").Single();
+        var finish = host.Method("FinishHorizontalDrag");
+        var bridge = finish.Calls("QueueBridgeUpdate").Single();
+        var settleCall = finish.Calls("SettleLift").Single();
         Assert.True(bridge.Span.Start < settleCall.Span.Start,
-            "the settle is decoration and stands last in the drag completion");
+            "the settle is decoration and stands last in the drag finish");
     }
 
     /// <summary>
@@ -100,14 +101,12 @@ public class TabHorizontalMotionWiringTests
     {
         var host = Host();
 
-        // The dragged tab is the event's own item pattern: the container
-        // TabView names, not a container lookup that can answer for a
-        // different slot.
-        var starting = host.Method("OnTabDragStarting");
-        var liftCall = starting.Calls("StartLift").Single();
-        var pattern = Assert.IsType<IfStatementSyntax>(
-            liftCall.Ancestors().OfType<IfStatementSyntax>().First());
-        Assert.Equal("args.Item is TabViewItem lifted", pattern.Condition.ToString());
+        // The dragged tab is the session's own item: the element the arm
+        // resolved the press through by identity, not a container lookup
+        // that can answer for a different slot.
+        var begin = host.Method("BeginHorizontalDragVisual");
+        var liftCall = begin.Calls("StartLift").Single();
+        Assert.Equal("drag.Item", liftCall.Arg(0));
 
         // Springs only, and every parameter named: the WinRT spring
         // classes document no defaults, so an implicit period would be a
@@ -145,7 +144,8 @@ public class TabHorizontalMotionWiringTests
         // the whole gesture is at rest, the flight's policy.
         foreach (var name in new[]
                  {
-                     "OnTabDragStarting", "OnTabDragCompleted", "StartLift", "SettleLift"
+                     "BeginHorizontalDragVisual", "FinishHorizontalDrag",
+                     "StartLift", "SettleLift"
                  })
         {
             Assert.DoesNotContain(
@@ -225,6 +225,58 @@ public class TabHorizontalMotionWiringTests
         // pin flight's handoff uses -- not on a duration of its own.
         var fadeIn = Assign(host.Method("FadeInAppearing"), "fadeIn.Duration");
         Assert.Contains("TabStripMotion.FadeMs", fadeIn.Right.ToString());
+    }
+
+    /// <summary>
+    /// A mid-drag commit churns the dragged tab's slot, and the rebind
+    /// refuses to let the lift depend on whether composition carries a
+    /// visual's scale, center, and child sprite across that: every
+    /// crossing re-asserts all three from the element's fresh visual,
+    /// set rather than re-springed -- the vertical's RebindFollow
+    /// precedent, and the reason the lift neither drops to rest nor
+    /// re-bounces at the first commit.
+    /// </summary>
+    [Fact]
+    public void A_crossing_rebinds_the_lift_set_not_respringed()
+    {
+        var host = Host();
+        var commit = host.Method("CommitHorizontalCrossing");
+        var move = commit.Call("_manager.Move");
+        var rebind = commit.Call("RebindLift");
+        Assert.True(
+            move.SpanStart < rebind.SpanStart,
+            "the rebind must follow the move: it re-asserts the lift on the "
+            + "element the churn just re-slotted, so it cannot run first.");
+
+        var rebindBody = host.Method("RebindLift");
+        // The guard is first and names the one live lift on the dragged
+        // element: nothing else's churn may rebind, and a no-lift strip
+        // does no composition work.
+        var first = Assert.IsType<IfStatementSyntax>(
+            rebindBody.Body!.Statements.First());
+        Assert.Equal(
+            "_lift is not { } lift || !ReferenceEquals(lift.Item, item)",
+            first.Condition.ToString());
+
+        // Center from the element's own size, scale to the lift tokens as
+        // a SET -- no spring in the rebind, or every crossing re-bounces
+        // the tab the way a fresh grab does.
+        Assert.Contains("item.ActualWidth", rebindBody
+            .DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "visual.CenterPoint").Right.ToString());
+        Assert.Equal(
+            "newVector3(TabStripMotion.LiftScale,TabStripMotion.LiftScale,1f)",
+            Assign(rebindBody, "visual.Scale").Right.ToString()
+                .Replace(" ", "").Replace("\n", "").Replace("\r", ""));
+        Assert.Empty(rebindBody.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("CreateSpring", StringComparison.Ordinal)));
+
+        // And the shadow rides the element again: the sprite is the one
+        // part that anchors to the element tree, and the churn's answer
+        // is to re-attach it, not to rebuild it.
+        var attach = rebindBody.Call("ElementCompositionPreview.SetElementChildVisual");
+        Assert.Equal("item", attach.Arg(0));
+        Assert.Equal("lift.Shadow", attach.Arg(1));
     }
 
     /// <summary>
