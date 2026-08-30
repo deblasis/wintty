@@ -444,4 +444,81 @@ public class VerticalTabGroupDragWiringTests
         Assert.Contains("_items.Count != shown.Count", gate.Condition.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("_manager.Tabs.Count - pinCount", gate.Condition.ToString(), StringComparison.Ordinal);
     }
+
+    // --- The capture-less engine (iv): the host refuses CapturePointer
+    // for every gesture -- human hand 5/5 holder=none -- so the vertical
+    // runs on hover-routed events exactly like the horizontal. ---
+
+    /// <summary>
+    /// The engine holds no capture anywhere. Matched by SUFFIX over parsed
+    /// invocations: CapturePointer is an instance method only ever spelled
+    /// with a receiver, so a bare-name pin could never go red -- the
+    /// vacuous-pin lesson. The one surviving mention is the why-comment in
+    /// StartDragVisual, which is prose, not an invocation.
+    /// </summary>
+    [Fact]
+    public void The_vertical_engine_never_captures_the_pointer()
+    {
+        var strip = Strip();
+        Assert.Empty(strip.Root.DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("CapturePointer", StringComparison.Ordinal)));
+
+        // And no CaptureLost hook either: the engine holds no capture, so
+        // no CaptureLost is ours -- the one the strip sees is MUXC's item
+        // layer releasing its own press capture the moment a drag starts
+        // moving, and acting on that murdered every real drag (the probe
+        // caught a cancel mid-drag, then a zombie crossing landing the
+        // right order by luck). A re-added hook must go red here.
+        Assert.DoesNotContain("PointerCaptureLostEvent", ReadStrip(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A release the strip never saw -- the button coming up off the
+    /// strip -- leaves the session behind, and the next press ends it
+    /// here rather than blocking every drag after it.
+    /// </summary>
+    [Fact]
+    public void A_stale_session_ends_at_the_next_press()
+    {
+        var pressed = Strip().Method("OnDragPointerPressed");
+        var gate = Assert.IsType<IfStatementSyntax>(pressed.Body!.Statements.First());
+        Assert.Equal("_drag is not null", gate.Condition.ToString());
+        var arm = gate.Statement;
+        Assert.Contains(arm.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+            c => c.CalleeText() == "CancelDrag");
+        Assert.Equal("stale", arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .First(c => c.CalleeText() == "CancelDrag").Arg(0).Trim('"'));
+    }
+
+    /// <summary>
+    /// The arm guards that keep clicks clicks: a press under a button
+    /// (the close glyph) never arms, and the sub-threshold gate lives in
+    /// the machine's Pressed phase -- a release under the threshold
+    /// cancels silently, which is the click.
+    /// </summary>
+    [Fact]
+    public void Button_presses_and_sub_threshold_releases_never_arm()
+    {
+        var pressed = Strip().Method("OnDragPointerPressed");
+        var buttonGate = pressed.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString().Contains(
+                "FindAncestor<Button>", StringComparison.Ordinal));
+        Assert.True(
+            buttonGate.Statement is ReturnStatementSyntax { Expression: null },
+            "A press under a button is the button's: the arm must fall "
+            + "through before any session is built.");
+    }
+
+    private static string ReadStrip()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        var name = asm.GetManifestResourceNames()
+            .Single(n => n.EndsWith("VerticalTabStrip.xaml.cs", StringComparison.OrdinalIgnoreCase));
+        using var stream = asm.GetManifestResourceStream(name);
+        Assert.NotNull(stream);
+        using var reader = new System.IO.StreamReader(stream);
+        return reader.ReadToEnd();
+    }
 }
