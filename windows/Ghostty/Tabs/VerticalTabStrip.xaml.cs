@@ -3768,38 +3768,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// Collapse-as-visibility is what creates the rows this list omits:
     /// a hidden member has no arranged center, and a NaN center would
     /// swallow every crossing past the group, so the machine speaks slots
-    /// and its crossing contract holds in their presence. The inverse
-    /// lookup is <see cref="SlotIndexOf"/>.
+    /// and its crossing contract holds in their presence. The shape and
+    /// its inverse live on the projection, which both strips read.
     /// </summary>
     private (List<TabModel> Rows, List<int> ManagerIndex) DragSlots()
-    {
-        var rows = new List<TabModel>(_manager.Tabs.Count);
-        var managerIndex = new List<int>(_manager.Tabs.Count);
-        var tabs = _manager.Tabs;
-        for (int i = 0; i < tabs.Count; i++)
-        {
-            var tab = tabs[i];
-            if (tab.Group is { } group && group.IsCollapsed
-                && !ReferenceEquals(tab, _manager.ActiveTab))
-                continue; // hidden under a collapsed header: no slot at all
-            rows.Add(tab);
-            managerIndex.Add(i);
-        }
-        return (rows, managerIndex);
-    }
+        => TabStripProjection.DragSlots(_manager);
 
     /// <summary>
     /// MANAGER -> SLOT: the inverse of DragSlots' SLOT -> MANAGER pairing.
-    /// A drag knows its row by manager position while the machine speaks
-    /// slots; indexing the list BY the manager index answers a different
-    /// row's slot -- the first row past a hidden run is out of range or a
-    /// stranger. -1 when the tab holds no slot.
     /// </summary>
     private int SlotIndexOf(List<int> managerIndex, TabModel tab)
-    {
-        var manager = _manager.IndexOf(tab);
-        return manager >= 0 ? managerIndex.IndexOf(manager) : -1;
-    }
+        => TabStripProjection.SlotIndexOf(_manager, managerIndex, tab);
 
     private (double Center, double[] Centers) MeasureRows(TabModel dragged)
     {
