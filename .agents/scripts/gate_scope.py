@@ -188,8 +188,14 @@ LEDGER_NAME = "deferred.json"
 # it into three, and with both tails counted the batch prices out at five
 # more deferrals, which 16 refuses to merge at its edge. 20 covers the true
 # remainder with margin (owner decision 2026-08-29).
-DEFER_MAX_OUTSTANDING = 20
-DEFER_MAX_AGE_DAYS = 10
+# 26 is the third raise (owner standing authorization, 2026-08-30): the
+# shared drag engine's survey priced its four rungs plus two tails at 23
+# outstanding, and #844's probe already spent one more on a fix rung, so
+# 20 refused to merge at the arc's edge with rungs still owed. The age
+# window moves with it so the arc's own deferrals stay inside the window
+# until the ladder settles and they are paid down together.
+DEFER_MAX_OUTSTANDING = 26
+DEFER_MAX_AGE_DAYS = 26
 DEFER_MIN_REASON_CHARS = 25
 
 
