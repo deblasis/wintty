@@ -521,4 +521,28 @@ public class VerticalTabGroupDragWiringTests
         using var reader = new System.IO.StreamReader(stream);
         return reader.ReadToEnd();
     }
+
+    /// <summary>
+    /// The drift gate's rebuild is the last resort, and its worst failure
+    /// mode was landing inside MUXC's still-open container realization
+    /// (the state spans frames with virtualized hosts). The gate must
+    /// hand the rebuild to the retry executor -- which yields off the
+    /// foreign frame and re-queues -- instead of running it bare on
+    /// whatever frame the drift was detected on.
+    /// </summary>
+    [Fact]
+    public void The_drift_gate_defers_its_rebuild_off_the_foreign_frame()
+    {
+        var order = Strip().Method("ReconcileRowOrder");
+        var gate = order.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString().Contains("_items.Count != shown.Count", StringComparison.Ordinal));
+        var retry = gate.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText() == "ReconcileRetry.Rebuild");
+        Assert.True(
+            gate.SpanStart < retry.Span.Start,
+            "The drift gate must route its rebuild through the retry: a bare "
+            + "rebuild lands on whatever frame detected the drift, and that "
+            + "frame can be MUXC's own container realization.");
+        Assert.Equal("RebuildAllItems", retry.Arg(1));
+    }
 }

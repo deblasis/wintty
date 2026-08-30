@@ -1326,6 +1326,7 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void RebuildAllItems()
     {
+        TabDragTrace.Line($"DIAG rebuild enter items={NavView.MenuItems.Count} t={Environment.TickCount64}");
         // Remove by what we hold, not by what the manager still has:
         // on a Reset the manager is already empty and rows we own would
         // otherwise stay in their container with their subscriptions live.
@@ -1352,6 +1353,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
         }
         UpdatePinnedShelfChrome();
+        TabDragTrace.Line($"DIAG rebuild walked items={NavView.MenuItems.Count} t={Environment.TickCount64}");
     }
 
     private void OnTabsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -1370,6 +1372,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 break;
             case NotifyCollectionChangedAction.Reset:
             case NotifyCollectionChangedAction.Move:
+                TabDragTrace.Line($"DIAG churn {e.Action} t={Environment.TickCount64}");
                 RebuildAllItems();
                 break;
             case NotifyCollectionChangedAction.Replace:
@@ -1695,11 +1698,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_reconcileScheduled) return;
         _reconcileScheduled = true;
+        var queuedAt = Environment.TickCount64;
+        TabDragTrace.Line($"DIAG reconcile queued t={queuedAt}");
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
         {
             _reconcileScheduled = false;
+            TabDragTrace.Line($"DIAG reconcile run t={Environment.TickCount64} delta={Environment.TickCount64 - queuedAt}");
             ReconcileRowOrder();
             SyncSelectionFromManager();
+            TabDragTrace.Line($"DIAG reconcile done t={Environment.TickCount64}");
         });
     }
 
@@ -1886,7 +1893,18 @@ internal sealed partial class VerticalTabStrip : UserControl
             || _pinnedPanel.Children.Count != pinCount
             || NavView.MenuItems.Count != desired.Count)
         {
-            RebuildAllItems();
+            // The rebuild may land inside MUXC's still-open container
+            // realization -- with virtualized hosts that state spans
+            // frames. The retry yields off the foreign frame; every
+            // attempt re-reads manager truth at run time.
+            ReconcileRetry.Rebuild(
+                "vertical rebuild",
+                RebuildAllItems,
+                SyncSelectionFromManager,
+                m => TabDragTrace.Line($"DIAG {m}"),
+                next => global::Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().TryEnqueue(
+                    global::Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal,
+                    () => next()));
             return;
         }
 
