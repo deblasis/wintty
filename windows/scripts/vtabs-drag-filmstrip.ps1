@@ -420,10 +420,10 @@ function Get-Pixel([hashtable]$Px, [int]$X, [int]$Y) {
 # Topmost y in the crop whose pixel is within $Tol of $Ref on every
 # channel. -1 when there is none. Inlined byte access rather than a
 # per-pixel helper call: this runs over every frame's crop.
-function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol) {
+function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0) {
     $bytes = $Px.bytes
     $stride = $Px.stride
-    for ($y = 0; $y -lt $Px.h; $y++) {
+    for ($y = $From; $y -lt $Px.h; $y++) {
         $rowOff = $y * $stride
         for ($x = 0; $x -lt $Px.w; $x++) {
             $o = $rowOff + $x * 4
@@ -546,14 +546,42 @@ try {
     $px0 = Get-Pixels $full
     # Sampled right of centre: the title text ends well before that, and a
     # sample on the text ink would calibrate to the wrong colour.
-    $bandRef = Get-Pixel $px0 ([int]($full.Width * 0.72)) ([int]($row3.Rect.Y - $cropY + $row3.Rect.Height / 2))
-    $bandTop0 = Find-BandTop $px0 $bandRef 24
-    $expectedTop = [int]($row3.Rect.Y - $cropY)
-    if ($bandTop0 -lt 0 -or [math]::Abs($bandTop0 - $expectedTop) -gt 10) {
-        Write-Host ("calibration: band ref rgb({0},{1},{2}) found at y={3}, row 3 at y={4}" -f $bandRef[0], $bandRef[1], $bandRef[2], $bandTop0, $expectedTop)
-        throw 'HARVEST_MISS: could not calibrate the band in frame 0 - the selected row is not pixel-distinct in this theme'
+    #
+    # The selected row's chrome in the current theme is a RING (a rounded
+    # bright stroke around the row), not a filled band, so its colour
+    # cannot be sampled from the row's interior -- the interior is the
+    # strip background, and scanning for it finds the whole strip. The
+    # edge is found instead by diffing the selected row's column against
+    # the UNSELECTED row directly above it (same geometry, same fill):
+    # their colours agree everywhere except where the selection chrome
+    # draws. The stroke's colour is then sampled AT that edge, in frame 0
+    # -- the calibration still comes from frame 0, not hard-coded colours.
+    $colX = [int]($full.Width * 0.72)
+    $r3Top = [int]($row3.Rect.Y - $cropY)
+    $rowH = [int]($row3.Rect.Height)
+    $r2Top = $r3Top - $rowH
+    $bestY = -1
+    $bestD = -1
+    for ($y = $r2Top; $y -lt $r3Top + $rowH; $y++) {
+        if ($y -lt 0 -or ($y + $rowH) -ge $full.Height) { continue }
+        $a = Get-Pixel $px0 $colX $y
+        $b = Get-Pixel $px0 $colX ($y - $rowH)
+        $d = [math]::Abs($a[0] - $b[0]) + [math]::Abs($a[1] - $b[1]) + [math]::Abs($a[2] - $b[2])
+        if ($d -gt $bestD) { $bestD = $d; $bestY = $y }
     }
-    Write-Host "calibrated: band rgb($($bandRef -join ',')) at y=$bandTop0"
+    if ($bestY -lt 0 -or $bestD -lt 60 -or [math]::Abs($bestY - $r3Top) -gt 10) {
+        Write-Host ("calibration: selection edge not distinct at x={0} (best delta {1} at y={2}, row 3 top {3})" -f $colX, $bestD, $bestY, $r3Top)
+        # Leave the evidence behind: the calibration frame is what a
+        # re-author needs to find the current chrome's distinct feature.
+        $diag = Join-Path $OutDir 'calibration-frame0.png'
+        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "calibration: frame 0 saved to $diag"
+        throw 'HARVEST_MISS: could not calibrate the selection edge in frame 0 - the selected row is not pixel-distinct in this theme'
+    }
+    $bandRef = Get-Pixel $px0 $colX $bestY
+    $bandTop0 = $bestY
+    $expectedTop = $r3Top
+    Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
 
     # The scripted gesture, on one clock with the capture. The press, the
     # waypoints and the release are scheduled at fixed times; the crossing
@@ -606,11 +634,15 @@ try {
     }
     Write-Host ("captured {0} frames over {1}ms" -f $frames.Count, $sw.ElapsedMilliseconds)
 
-    # Analysis: band top per frame, saved as PNGs for the transcript.
+    # Analysis: band top per frame, saved as PNGs for the transcript. The
+    # scan starts one row above the calibrated position: the crop's top
+    # chrome (the window border) carries bright pixels that would match a
+    # white stroke from y=0 and pin the tracker to the border forever.
+    $scanFrom = [Math]::Max(1, $bandTop0 - $rowH)
     $tops = New-Object int[] $frames.Count
     for ($i = 0; $i -lt $frames.Count; $i++) {
         $px = Get-Pixels $frames[$i].bmp
-        $tops[$i] = Find-BandTop $px $bandRef 24
+        $tops[$i] = Find-BandTop $px $bandRef 24 $scanFrom
         $frames[$i].bmp.Save((Join-Path $OutDir ("frames\frame-{0:d3}-{1:d4}ms.png" -f $i, $frames[$i].t)))
     }
     for ($i = 0; $i -lt $frames.Count; $i++) {
