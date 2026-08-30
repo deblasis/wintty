@@ -190,6 +190,83 @@ public sealed class TabStripSyncWiringTests
         // unconditional.
     }
 
+    // --- The drop batch: the selection churn a reorder produces ---
+
+    [Fact]
+    public void A_live_drag_stands_the_selection_handler_down()
+    {
+        var handler = ShellSource.Load(TabHostSource).Method("OnSelectionChanged");
+
+        // TabView commits a reorder as a remove-then-insert on TabItems,
+        // and the selection model's reaction to the remove re-targets the
+        // selection while the dragged tab is still absent: the raise
+        // carries a strip the projection cannot describe. Acting on it
+        // reconciles inside TabView's still-open modification, and the
+        // reconcile's refusal path rebuilds by Clear()ing TabItems there
+        // -- the collection refuses a nested modification with
+        // 0x8000FFFF, and on the UI thread that is process death.
+        var opener = handler.Body!.Statements.First() as IfStatementSyntax;
+        Assert.True(
+            opener?.Condition is IdentifierNameSyntax id
+                && id.Identifier.ValueText == "_suppressSelectionEvent"
+                && opener.Statement is ReturnStatementSyntax { Expression: null },
+            "OnSelectionChanged must keep the suppress guard as its first statement: " +
+            "the reverse-sync writes depend on it before anything else runs.");
+
+        var standDown = handler.DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition is IdentifierNameSyntax flag
+                        && flag.Identifier.ValueText == "_stripDragActive"
+                        && i.Statement is ReturnStatementSyntax { Expression: null })
+            .ToList();
+        Assert.True(
+            standDown.Count == 1,
+            "OnSelectionChanged needs exactly one bare `if (_stripDragActive) return;` " +
+            "stand-down: every selection raise a live drag produces is TabView's " +
+            "mid-batch churn, not an intent.");
+        Assert.True(
+            standDown.Count == 1 && standDown[0].SpanStart > opener!.Span.End,
+            "The stand-down must follow the suppress guard, which must stay first.");
+
+        // Before the chip fork, because a mid-batch retarget that lands on
+        // a chip must not read as the expand gesture, and before the
+        // activation walk, because the churn raise is exactly what must
+        // never reach the manager as an activation.
+        var chipFork = ChipSelectionArm(handler);
+        var activate = handler.Calls("_manager.Activate").ToList();
+        Assert.True(
+            standDown.Count == 1
+                && standDown[0].SpanStart < chipFork.SpanStart
+                && activate.Count == 1
+                && chipFork.SpanStart < activate[0].SpanStart,
+            "The stand-down must sit before the chip fork and the activation walk: " +
+            "the churn raise would otherwise expand a group or switch the active tab.");
+    }
+
+    [Fact]
+    public void The_drop_lands_the_selection_once_after_the_batch_has_closed()
+    {
+        var completed = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+
+        // The stand-down swallows every selection raise the drag produced,
+        // so this landing is the only thing that can end a drop with the
+        // strip and the manager agreeing: after the commit and the
+        // reconcile, outside TabView's batch, exactly once.
+        var reconcile = completed.Calls("ReconcileStripOrder").ToList();
+        var landing = completed.Calls("SelectActive").ToList();
+        Assert.True(
+            landing.Count == 1 && reconcile.Count == 1
+                && landing[0].SpanStart > reconcile[0].Span.End,
+            "OnTabDragCompleted must land the selection exactly once, after the " +
+            "commit's reconcile: the order has to be settled before the selection " +
+            "is re-asserted against it.");
+
+        // Unconditional. A refused commit and a repaired one must end the
+        // same way, and the off-strip release (TabView re-applies the inner
+        // ListView's possibly cleared selection just before this handler
+        // runs) is the drift a guarded landing would leave standing.
+        Assert.Empty(landing[0].Ancestors().OfType<IfStatementSyntax>());
+    }
+
     // --- The reconcile is defensive at the UI boundary ---
 
     [Fact]
