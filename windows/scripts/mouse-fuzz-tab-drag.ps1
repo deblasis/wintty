@@ -136,9 +136,40 @@ public static class MzTD {
         return (wr.W < 80 || wr.Hh < 80) ? null : wr;
     }
 
+    public static long TargetHwnd;
+    public static bool GuardTripped;
+
+    // The per-injection guard: SendInput lands on the FOCUSED window, and
+    // focus drifts across UIA waits, menu opens, and the window
+    // deactivations this harness itself causes. Every injection batch
+    // re-verifies; on a mismatch it re-steals foreground with the
+    // AttachThreadInput recipe and, if the steal still fails, refuses to
+    // inject blind -- the leg aborts.
+    public static void EnsureForeground() {
+        if (TargetHwnd == 0) return;
+        IntPtr target = P(TargetHwnd);
+        if (GetForegroundWindow() == target) return;
+        for (int i = 0; i < 3; i++) {
+            IntPtr fg = GetForegroundWindow();
+            uint fgThread = GetWindowThreadProcessId(fg, out _);
+            uint myThread = GetCurrentThreadId();
+            bool attached = fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, true);
+            try {
+                BringWindowToTop(target);
+                SetForegroundWindow(target);
+                SetFocus(target);
+            } finally { if (attached) AttachThreadInput(myThread, fgThread, false); }
+            Thread.Sleep(120);
+            if (GetForegroundWindow() == target) return;
+        }
+        GuardTripped = true;
+        throw new InvalidOperationException("GUARD: foreground mismatch after re-steal -- refusing to inject blind");
+    }
+
     // A refused injection returns a short count and no exception, and the
     // harness would then blame the app for ignoring input it never got.
     static void Send(INPUT[] inputs) {
+        EnsureForeground();
         uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
         if (sent != inputs.Length) {
             throw new InvalidOperationException(
@@ -523,9 +554,15 @@ function Set-RowTitle([bool]$Vertical, [object]$Row, [string]$Want, [uint32]$Pro
 function Invoke-MenuItem([string]$Name, [uint32]$ProcId, [string]$What) {
     $el = Find-ByNameRetry (Get-UiaRoot $script:MainHwnd64) $Name 2500
     if ($null -eq $el) { throw "HARVEST_MISS: context menu item '$Name' ($What)" }
+    # Task #32: log the RESOLUTION -- a menu resolved by name after the pin
+    # legs reordered the strip is the prime mis-addressing suspect, and the
+    # log must name exactly what was resolved before anything is invoked.
+    Write-Host ("DIAG menu resolve '{0}' -> AutoId='{1}' class={2} ({3})" -f
+        $Name, $el.Current.AutomationId, $el.Current.ClassName, $What)
     try {
         $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
         $pat.Invoke()
+        Write-Host ("DIAG menu invoked '{0}' via InvokePattern" -f $Name)
         Start-Sleep -Milliseconds 450
         return
     } catch { }
@@ -765,7 +802,18 @@ $script:Phases = [System.Collections.Generic.List[object]]::new()
 $script:MotionLegs = [System.Collections.Generic.List[object]]::new()
 $script:Orders = [ordered]@{}
 $script:nextName = $null
-function Add-Phase([string]$name, [scriptblock]$body) {
+    # Task #32: the expected VISIBLE row count after each phase, asserted
+    # between phases -- a phase that starts with the wrong count fails here
+    # with the count in the error.
+    function Assert-TabCount([bool]$Vertical, [int]$want, [string]$what) {
+        $order = Get-Order $Vertical
+        if ($order.Count -ne $want) {
+            throw ("COUNT_MISS: {0} expects {1} visible rows, sees {2} [{3}]" -f
+                $what, $want, $order.Count, ($order -join ','))
+        }
+    }
+
+    function Add-Phase([string]$name, [scriptblock]$body) {
     try {
         & $body
         $script:Phases.Add([ordered]@{ name = $name; ok = $true })
@@ -773,6 +821,13 @@ function Add-Phase([string]$name, [scriptblock]$body) {
     } catch {
         $script:Phases.Add([ordered]@{ name = $name; ok = $false; error = $_.Exception.Message })
         throw
+    }
+    # Task #32: a phase that kills the app must die HERE with the exit
+    # code and the phase name, not three legs later against a dead
+    # process.
+    if ($proc -and $proc.HasExited) {
+        throw ("APP_EXIT: the app exited during phase '{0}' (code {1})" -f
+            $name, $proc.ExitCode)
     }
 }
 
@@ -790,6 +845,7 @@ try {
     $pid32 = [uint32]$proc.Id
     $main = Wait-Ready $proc
     $script:MainHwnd64 = [int64]$main.Hwnd64
+    [MzTD]::TargetHwnd = $script:MainHwnd64
     $hwnd64 = $script:MainHwnd64
     [void][MzTD]::MoveWindow([MzTD]::P($hwnd64), 60, 60, 1280, 820, $true)
     Start-Sleep -Milliseconds 600
@@ -927,6 +983,10 @@ try {
         $script:Orders.boundaryOut = (Get-Order $V) -join ','
     }
 
+    Add-Phase 'pin-legs-count' {
+        Assert-TabCount $true 5 'after the pin boundary legs (5 tabs, none grouped)'
+    }
+
     Add-Phase 'pin-boundary-drop' {
         $row = Get-Row $V 'fuzzdrag-3'
         $zone = Get-Row $V 'fuzzdrag-1'
@@ -940,6 +1000,10 @@ try {
     # 4. Group collapse and the drop-on-chip join. A click on the header
     # row folds the run; a drag released on the folded header joins the
     # dropped tab and the group must re-open by itself.
+    Add-Phase 'group-legs-count' {
+        Assert-TabCount $true 5 'after the group legs'
+    }
+
     Add-Phase 'group-collapse' {
         Show-RowMenu $V 'fuzzdrag-5' $pid32
         Invoke-MenuItem 'New Group With Tab' $pid32 'group fuzzdrag-5'
