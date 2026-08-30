@@ -216,13 +216,15 @@ public sealed class TabStripSyncWiringTests
         var standDown = handler.DescendantNodes().OfType<IfStatementSyntax>()
             .Where(i => i.Condition is IdentifierNameSyntax flag
                         && flag.Identifier.ValueText == "_stripDragActive"
-                        && i.Statement is ReturnStatementSyntax { Expression: null })
+                        && StandDownIsInert(i))
             .ToList();
         Assert.True(
             standDown.Count == 1,
-            "OnSelectionChanged needs exactly one bare `if (_stripDragActive) return;` " +
-            "stand-down: every selection raise a live drag produces is TabView's " +
-            "mid-batch churn, not an intent.");
+            "OnSelectionChanged needs exactly one `if (_stripDragActive)` " +
+            "stand-down, and it must stay inert: a bare return, or at most " +
+            "the trace's count-and-line before the return. Every selection " +
+            "raise a live drag produces is TabView's mid-batch churn, not " +
+            "an intent.");
         Assert.True(
             standDown.Count == 1 && standDown[0].SpanStart > opener!.Span.End,
             "The stand-down must follow the suppress guard, which must stay first.");
@@ -949,6 +951,29 @@ public sealed class TabStripSyncWiringTests
         => handler.DescendantNodes().OfType<IfStatementSyntax>()
             .First(i => i.Condition.ToString().Contains(
                 "item.Tag is TabGroup", StringComparison.Ordinal));
+
+    // The stand-down may count and trace, and nothing else. A bare return
+    // is the original inert shape; the block form is inert exactly when it
+    // holds only the counter bump, the trace line, and the return -- any
+    // other statement in there would be the drag acting on its own churn.
+    private static bool StandDownIsInert(IfStatementSyntax standDown) => standDown.Statement switch
+    {
+        ReturnStatementSyntax { Expression: null } => true,
+        BlockSyntax block => block.Statements.Count == 3
+            && block.Statements[0] is ExpressionStatementSyntax bump
+            && bump.Expression is PostfixUnaryExpressionSyntax
+            {
+                OperatorToken.ValueText: "++"
+            } counted
+            && counted.Operand is IdentifierNameSyntax
+            {
+                Identifier.ValueText: "_stoodDownSelectionRaises"
+            }
+            && block.Statements[1] is ExpressionStatementSyntax trace
+            && trace.Expression.AssertCallTo("TabDragTrace.Line") is not null
+            && block.Statements[2] is ReturnStatementSyntax { Expression: null },
+        _ => false,
+    };
 
     private static bool SetsFlag(MethodDeclarationSyntax method, string field, SyntaxKind literal)
         => method.DescendantNodes()
