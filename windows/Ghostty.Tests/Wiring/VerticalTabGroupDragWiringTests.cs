@@ -595,5 +595,16 @@ public class VerticalTabGroupDragWiringTests
             polarityGate.SpanStart < unpin.SpanStart,
             "the unpin must sit inside the !inZone gate: the polarity is the "
             + "fix -- hoisted out it always unpins, inverted it never does.");
+
+        // The inZone initializer is the second prong: the ancestors-pin
+        // cannot catch a VALUE-level flip (swapping >=/<= inside inZone's
+        // initializer still passes everything). The initializer must
+        // compare releaseY against BOTH shelf bounds.
+        Assert.Contains("releaseY >= shelfTop && releaseY <= shelfBottom",
+            arm.DescendantNodes()
+               .OfType<VariableDeclaratorSyntax>()
+               .Single(v => v.Identifier.ValueText == "inZone")
+               .Initializer!.Value.ToFullString(),
+            StringComparison.Ordinal);
     }
 }

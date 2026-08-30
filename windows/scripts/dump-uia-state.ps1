@@ -100,9 +100,43 @@ if ($null -ne $nav) {
     Note ("(b) root children=" + $kids.Count)
 }
 
-# Flush the window/CPU answers BEFORE the UIA walk: a hang in that walk
-# must not swallow the evidence the earlier probes already collected.
+# Flush incrementally: the (a)/(c)/(c2) answers go to disk BEFORE the UIA
+# walk, so a hang there cannot swallow them. The walk's results are
+# appended after.
 $out = if ($OutFile) { $OutFile } else { '' }
-if ($out) { [System.IO.File]::WriteAllLines($out, $lines) } else { $lines | ForEach-Object { Write-Host $_ } }
+if ($out) { [System.IO.File]::WriteAllLines($out, $lines) }
+$lines.Clear()
+
+# (b) FRESH-PROCESS UIA query: this process IS the fresh client (spawned
+# separately by the harness). Walk the window for NavView by AutomationId.
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+$cond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'NavView')
+$sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+$nav = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+$sw2.Stop()
+if ($null -ne $nav) {
+    $r = $nav.Current.BoundingRectangle
+    $lines.Add("(b) FRESH NavView FOUND rect=" + $r.Width + "x" + $r.Height +
+        " walk=" + $sw2.ElapsedMilliseconds + "ms")
+    $items = $nav.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::ListItem)))
+    $lines.Add("(b) FRESH NavView ListItems=" + $items.Count)
+} else {
+    $lines.Add("(b) FRESH NavView NOT FOUND walk=" + $sw2.ElapsedMilliseconds + "ms")
+    $kids = $root.FindAll([System.Windows.Automation.TreeScope]::Children,
+        [System.Windows.Automation.Condition]::TrueCondition)
+    $lines.Add("(b) root children=" + $kids.Count)
+}
+
+# Flush the walk's answers too.
+if ($out) {
+    $all = [System.IO.File]::ReadAllLines($out)
+    [System.IO.File]::WriteAllLines($out, $all + $lines)
+} else { $lines | ForEach-Object { Write-Host $_ } }
 
 Note "=== END BATTERY ==="
