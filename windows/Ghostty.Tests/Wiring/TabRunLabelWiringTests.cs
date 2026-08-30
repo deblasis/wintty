@@ -23,16 +23,16 @@ public sealed class TabRunLabelWiringTests
     [Fact]
     public void The_drag_start_hides_the_label_in_its_own_dispatch_pass()
     {
-        var dragStart = ShellSource.Load(TabHostSource).Method("OnTabDragStarting");
+        var dragStart = ShellSource.Load(TabHostSource).Method("BeginHorizontalDragVisual");
 
-        // The hide is the machine's drag rule applied in this handler's
+        // The hide is the machine's drag rule applied in the begin pass's
         // own body: not a timer arm, not a deferred close. A timer between
-        // the drag start and the hide is the exact overlap the rule
+        // the threshold and the hide is the exact overlap the rule
         // forbids, so its absence is asserted, not assumed.
         var cut = dragStart.InvocationWithArgument("_labelRules.DragStarting");
         Assert.True(
             cut is not null,
-            "OnTabDragStarting must apply the label rule machine's drag start.");
+            "BeginHorizontalDragVisual must apply the label rule machine's drag start.");
         var seamRaise = dragStart.Calls("SelectedTabSeamChanged?.Invoke")
             .Select(c => c.SpanStart)
             .DefaultIfEmpty(-1)
@@ -47,10 +47,10 @@ public sealed class TabRunLabelWiringTests
         // The drag's end lifts the cut demand; the label stays hidden and
         // hover may show it again. Without this the next ordinary hide
         // would still read the drag's cut.
-        var dragEnd = ShellSource.Load(TabHostSource).Method("OnTabDragCompleted");
+        var dragEnd = ShellSource.Load(TabHostSource).Method("FinishHorizontalDrag");
         Assert.True(
             dragEnd.InvocationWithArgument("_labelRules.DragEnded") is not null,
-            "OnTabDragCompleted must end the label's drag state.");
+            "FinishHorizontalDrag must end the label's drag state.");
 
         // The cross-host half: the vertical strip raises its drag-live
         // moment, and the window closes the horizontal label with it --

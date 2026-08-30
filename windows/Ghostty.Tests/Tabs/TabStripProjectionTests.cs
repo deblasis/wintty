@@ -54,8 +54,9 @@ public class TabStripProjectionTests
     }
 
     /// <summary>
-    /// OnTabDragCompleted's shape, driven against a live mirror: read the
-    /// strip index, Move in manager space, reconcile via the projector.
+    /// The engine's crossing-commit shape, driven against a live mirror:
+    /// read the strip index, Move in manager space, reconcile via the
+    /// projector.
     /// </summary>
     private static void CompleteDrag(TabManager mgr, Strip strip, TabModel dragged)
     {

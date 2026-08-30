@@ -70,24 +70,22 @@ public sealed class TabPinZoneChromeWiringTests
     public void The_boundary_stroke_cleans_up_on_every_drag_exit()
     {
         var tabHost = ShellSource.Load(TabHostSource);
-        var dragEnd = tabHost.Method("OnTabDragCompleted");
+        var dragEnd = tabHost.Method("FinishHorizontalDrag");
 
-        // The drop is the one pass every completed drag runs, so it is
+        // The release is the one pass every completed drag runs, so it is
         // where the dim has to live -- a cleanup on any narrower event is
         // a stroke a cancelled or off-strip release can outlive. The leak
         // census is the shape: ApplyPinZoneChrome is the border's ONLY
         // writer in the shell, so any assignment outside it is a stroke
-        // this handler does not own.
+        // this pass does not own.
         var apply = tabHost.Method("ApplyPinZoneChrome");
         Assert.True(
             dragEnd.Calls("ApplyPinZoneChrome").Count == 1,
-            "OnTabDragCompleted must run the boundary pass: the dim is " +
-            "the cleanup, and the drop is the pass every drag exits by.");
-        // What a parse cannot see: the Escape or capture-loss terminal.
-        // Mux completes the drag either way, so the drop pass is the exit
-        // every observed release takes; whether a capture loss can arrive
-        // here un-completed is not decidable from source -- settling that
-        // would take a live-strip probe, not a stronger assertion.
+            "FinishHorizontalDrag must run the boundary pass: the dim is " +
+            "the cleanup, and the release is the pass every drag exits by.");
+        // The other exit: CancelHorizontalDrag runs the same pass for a
+        // canceled, captured-away, or stale session, so those ends dim
+        // the stroke too.
         var stray = tabHost.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => (a.Left.ToString().EndsWith(".BorderBrush")
                     || a.Left.ToString().EndsWith(".BorderThickness"))
@@ -126,15 +124,16 @@ public sealed class TabPinZoneChromeWiringTests
         Assert.Contains("0x59", branch[0].WhenFalse.ToString());
 
         // And the brighten pass itself reads the flag already live: the
-        // raise precedes the pass in the drag-start handler, so the first
-        // boundary brush of a drag is the bright one, not a frame late.
-        var dragStart = tabHost.Method("OnTabDragStarting");
+        // raise precedes the pass in the engine's begin pass, so the
+        // first boundary brush of a drag is the bright one, not a frame
+        // late.
+        var dragStart = tabHost.Method("BeginHorizontalDragVisual");
         var flagRaise = dragStart.AssignsTo("_stripDragActive")
             .First(a => a.Right.ToString() == "true");
         var brighten = dragStart.Call("ApplyPinZoneChrome");
         Assert.True(
             flagRaise.SpanStart < brighten.SpanStart,
-            "the drag start must raise the flag before its boundary pass.");
+            "the drag begin must raise the flag before its boundary pass.");
     }
 
     [Fact]
