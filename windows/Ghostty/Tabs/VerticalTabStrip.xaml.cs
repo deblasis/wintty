@@ -2114,30 +2114,13 @@ internal sealed partial class VerticalTabStrip : UserControl
     // -----------------------------------------------------------------
 
     /// <summary>
-    /// Oracle for the drag harness, the same shape as
-    /// LayoutCoordinator's morph trace: the env var is the per-run log
-    /// path, so concurrent instances never interleave one file, and the
-    /// trace is inert (a null check) when it is unset. Lines pair
-    /// DRAG begin/end, one per commit, and the ghosts counts report
+    /// The strip's half of the shared drag oracle. Lines pair DRAG
+    /// begin/end, one per commit, and the ghosts counts report
     /// composition the strip still believes it is driving -- the oracle
     /// reads any N above zero as a leak, and a `drop` line without a
     /// later `DRAG settle` as a settle that never completed.
     /// </summary>
-    private static readonly string? DragTracePath =
-        Environment.GetEnvironmentVariable("WINTTY_TABDRAG_TRACE");
-
-    private static void DragTrace(string message)
-    {
-        if (DragTracePath is null) return;
-        try
-        {
-            System.IO.File.AppendAllText(DragTracePath, message + Environment.NewLine);
-        }
-        catch
-        {
-            // A locked or unwritable log must never take the drag down.
-        }
-    }
+    private static void DragTrace(string message) => TabDragTrace.Line(message);
 
     private DragSession? _drag;
     private bool _evalPending;

@@ -764,6 +764,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         ReconcileStripOrder();
     }
 
+    /// <summary>A row's trace name: which kind, and whose. A chip and a
+    /// tab can carry the same title, so the kind prefix is the identity.
+    /// </summary>
+    private static string RowName(object? row) => row switch
+    {
+        TabViewItem { Tag: TabGroup group } => "chip:" + group.Title,
+        TabViewItem { Tag: TabModel tab } => "tab:" + tab.EffectiveTitle,
+        _ => row?.GetType().Name ?? "null",
+    };
+
     /// <summary>
     /// Bring TabItems back into the order the projection holds, chips
     /// included -- a chip occupies a slot, so the flat tab list stopped
@@ -776,7 +786,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     private void ReconcileStripOrder()
     {
-        var repaired = false;
+        var repairedRows = 0;
+        var rebuilt = false;
+        var actualOrder = new List<string>();
         // ListView drops its selection when the selected item is removed
         // and does not restore it on re-insert; live, that drop surfaces
         // as an activation of whatever TabView picked instead. A repair
@@ -815,6 +827,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
                     "TabHost reconcile: the strip and the projection hold " +
                     "different rows. Order is repairable; presence skew " +
                     "is a wiring bug, not a projection.");
+            // The strip's order as the pass found it, taken before any
+            // repair: the repair trace's "actual" half must describe what
+            // was wrong, not the already-fixed strip.
+            if (TabDragTrace.Enabled)
+                actualOrder.AddRange(TabViewControl.TabItems.Select(RowName));
             for (var i = 0; i < desired.Count; i++)
             {
                 if (ReferenceEquals(TabViewControl.TabItems[i], desired[i])) continue;
@@ -828,8 +845,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
                         "projection does not name. Order is repairable; " +
                         "presence skew is a wiring bug, not a projection.");
                 TabViewControl.TabItems.Insert(i, desired[i]);
-                repaired = true;
+                repairedRows++;
             }
+            if (repairedRows > 0)
+                TabDragTrace.Line($"COMMIT reconcile repaired={repairedRows} " +
+                    $"desired=[{string.Join(",", desired.Select(RowName))}] " +
+                    $"actual=[{string.Join(",", actualOrder)}]");
         }
         catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
         {
@@ -839,7 +860,8 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // not die, so rebuild from the manager.
             _log.LogReconcileFailed(ex);
             RebuildStripFromManager();
-            repaired = true;
+            rebuilt = true;
+            TabDragTrace.Line("COMMIT reconcile rebuilt from manager");
         }
         finally
         {
@@ -851,7 +873,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // clear, owned by the pass, so the flag can never outlive the
         // retirement that set it.
         _swapFadePending = false;
-        if (repaired) SelectActive();
+        if (repairedRows > 0 || rebuilt) SelectActive();
     }
 
     /// <summary>
@@ -1565,7 +1587,13 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // where the selection truth lands instead: OnTabDragCompleted
         // re-asserts the manager's active tab after the commit, once the
         // batch has closed.
-        if (_stripDragActive) return;
+        if (_stripDragActive)
+        {
+            _stoodDownSelectionRaises++;
+            TabDragTrace.Line($"COMMIT selection stood-down " +
+                $"count={_stoodDownSelectionRaises} item={RowName(TabViewControl.SelectedItem)}");
+            return;
+        }
         if (TabViewControl.SelectedItem is TabViewItem item)
         {
             // A chip's selection is not an activation. Selecting the chip
@@ -1639,6 +1667,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// </summary>
     private bool _stripDragActive;
 
+    // The selection raises a live drag's stand-down has swallowed, since
+    // the last drag began. Every one is TabView's mid-batch churn, and
+    // the count says how much churn a single drop actually produces.
+    private int _stoodDownSelectionRaises;
+
     // The drop point, and whether it is this drag's. Recorded by
     // OnTabStripDrop for the drop-at-a-run fork in OnTabDragCompleted,
     // which carries no position of its own; the flag is the guard that
@@ -1650,7 +1683,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
     {
+        TabDragTrace.Line($"DRAG start item={args.Item?.GetType().Name ?? "null"}");
         _stripDragActive = true;
+        _stoodDownSelectionRaises = 0;
         _dropPositionValid = false;
         // The label hides HERE, in the drag start's own dispatch pass, as
         // a cut: an 83ms fade would overlap the drag ghost, which is the
@@ -1673,6 +1708,10 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     private void OnTabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
     {
+        // First, before the point is invalidated below: whether the drop
+        // landed on the strip is exactly what the recorded point answers.
+        TabDragTrace.Line($"DRAG completed item={args.Item?.GetType().Name ?? "null"} " +
+            $"point={(_dropPositionValid ? "live" : "stale")}");
         _stripDragActive = false;
         _dropPositionValid = false;
         // The drag is over: the cut demand lifts, and hover may show the
@@ -1730,7 +1769,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 {
                     var target =
                         TabChipDrop.GroupTarget(_manager, draggedGroup, leftTab, leftChip);
-                    if (target >= 0) _manager.MoveGroup(draggedGroup, target);
+                    if (target >= 0)
+                    {
+                        TabDragTrace.Line($"COMMIT movegroup slot={slot} target={target}");
+                        _manager.MoveGroup(draggedGroup, target);
+                    }
+                    else
+                    {
+                        TabDragTrace.Line($"COMMIT movegroup refused reason=target-negative slot={slot}");
+                    }
+                }
+                else
+                {
+                    TabDragTrace.Line($"COMMIT movegroup refused reason=unknown-neighbour slot={slot}");
                 }
             }
             else
@@ -1750,6 +1801,9 @@ internal sealed partial class TabHost : UserControl, ITabHost
                         if (vi == item)
                         {
                             var oldIndex = _manager.IndexOf(model);
+                            TabDragTrace.Line(oldIndex == newIndex
+                                ? $"COMMIT move skipped in-place old={oldIndex} new={newIndex}"
+                                : $"COMMIT move old={oldIndex} new={newIndex}");
                             if (oldIndex != newIndex && oldIndex >= 0)
                                 _manager.Move(oldIndex, newIndex);
                             break;
@@ -1758,6 +1812,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 }
                 else
                 {
+                    TabDragTrace.Line($"COMMIT drop at chip slot={slot}");
                     ResolveDropAtChip(item, slot);
                 }
             }
@@ -1817,10 +1872,15 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (dropped is null) return;
 
         var bounds = DropPointIn(chip.Item);
-        if (bounds is null) return;
+        if (bounds is null)
+        {
+            TabDragTrace.Line("COMMIT drop at chip refused reason=no-geometry");
+            return;
+        }
 
         if (bounds.Value.Contains(_lastDropPosition))
         {
+            TabDragTrace.Line($"COMMIT join group={chipGroup.Title}");
             _manager.JoinGroup(dropped, chipGroup);
             return;
         }
@@ -1831,7 +1891,14 @@ internal sealed partial class TabHost : UserControl, ITabHost
             : TabChipDrop.MemberTargetAfter(_manager, chipGroup);
         var oldIndex = _manager.IndexOf(dropped);
         if (beside >= 0 && oldIndex >= 0 && oldIndex != beside)
+        {
+            TabDragTrace.Line($"COMMIT move beside old={oldIndex} new={beside}");
             _manager.Move(oldIndex, beside);
+        }
+        else
+        {
+            TabDragTrace.Line($"COMMIT move beside refused old={oldIndex} target={beside}");
+        }
     }
 
     /// <summary>
@@ -1881,6 +1948,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         if (!_stripDragActive) return;
         _lastDropPosition = e.GetPosition(TabViewControl);
         _dropPositionValid = true;
+        TabDragTrace.Line($"DRAG drop point x={_lastDropPosition.X:0} y={_lastDropPosition.Y:0}");
     }
 
     // -----------------------------------------------------------------
