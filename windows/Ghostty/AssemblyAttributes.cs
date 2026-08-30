@@ -5,3 +5,7 @@
 // All P/Invoke structs in this project are already blittable (no managed references,
 // explicit layouts, fixed-size fields), so disabling runtime marshalling is safe.
 [assembly: System.Runtime.CompilerServices.DisableRuntimeMarshalling]
+
+// The tests execute the app's internal helpers directly (ReconcileRetry,
+// the reconcile retry executor, is pure and unit-drivable).
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Ghostty.Tests")]

@@ -154,7 +154,10 @@ public class PinnedPanelWiringTests
         Assert.Single(reconcile.Calls("TabStripProjection.GroupedRows"));
         Assert.Empty(reconcile.Calls("TabStripProjection.Rows"));
         Assert.Single(reconcile.Calls("UpdatePinnedShelfChrome"));
-        Assert.Single(reconcile.Calls("RebuildAllItems"));
+        // The drift gate's rebuild routes through the retry executor (the
+        // attempt is RebuildAllItems, pinned by the vertical drag's own
+        // fact) -- a bare rebuild lands on MUXC's frames and wedges.
+        Assert.Single(reconcile.Calls("ReconcileRetry.Rebuild"));
 
         // Skew is checked against BOTH registries, plus the rows the
         // projection named but the strip holds no element for -- counts can
@@ -167,7 +170,7 @@ public class PinnedPanelWiringTests
         // straight into an indexer miss or a wrong order.
         var skew = reconcile.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.DescendantNodes().OfType<InvocationExpressionSyntax>()
-                             .Any(c => c.CalleeText() == "RebuildAllItems"));
+                             .Any(c => c.CalleeText() == "ReconcileRetry.Rebuild"));
         var condition = skew.Condition.ToString();
         Assert.Contains("missing", condition);
         Assert.Contains("_pinnedRows.Count != pinCount", condition);

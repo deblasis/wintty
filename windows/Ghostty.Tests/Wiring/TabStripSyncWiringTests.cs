@@ -314,8 +314,15 @@ public sealed class TabStripSyncWiringTests
         // and does not restore it on re-insert; live, that drop arrives as
         // an activation of whatever TabView picked instead.
         var assigns = reconcile.AssignsTo("_suppressSelectionEvent").ToList();
-        var arms = assigns.Where(a => a.Right.IsKind(SyntaxKind.TrueLiteralExpression)).ToList();
-        var disarms = assigns.Where(a => a.Right.IsKind(SyntaxKind.FalseLiteralExpression)).ToList();
+        // Only the pass's OWN fence counts: the catch's deferred rebuild
+        // carries a lambda-nested saved/restored fence of its own (the
+        // deferred attempt runs outside this method's window and owns
+        // its fence), and that pair is not this pass's arm and disarm.
+        var direct = assigns
+            .Where(a => !a.Ancestors().OfType<ParenthesizedLambdaExpressionSyntax>().Any())
+            .ToList();
+        var arms = direct.Where(a => a.Right.IsKind(SyntaxKind.TrueLiteralExpression)).ToList();
+        var disarms = direct.Where(a => a.Right.IsKind(SyntaxKind.FalseLiteralExpression)).ToList();
         Assert.True(
             arms.Count == 1 && arms[0].SpanStart < firstMutation.SpanStart,
             "ReconcileStripOrder must arm _suppressSelectionEvent before its first removal.");
@@ -323,7 +330,9 @@ public sealed class TabStripSyncWiringTests
             disarms.Count == 1 && disarms[0].SpanStart > firstMutation.SpanStart,
             "ReconcileStripOrder must disarm _suppressSelectionEvent after the loop.");
 
-        var activate = reconcile.Calls("SelectActive").ToList();
+        var activate = reconcile.Calls("SelectActive")
+            .Where(c => !c.Ancestors().OfType<ParenthesizedLambdaExpressionSyntax>().Any())
+            .ToList();
         Assert.True(
             activate.Count == 1 && activate[0].SpanStart > firstMutation.SpanStart,
             "ReconcileStripOrder must call SelectActive after the loop to re-assert "
@@ -1242,5 +1251,34 @@ public sealed class TabStripSyncWiringTests
             "The join fork must resolve the released-on chip's slot: the "
             + "dragged tab's own slot never names a group, so the fork "
             + "refused every join before geometry was asked.");
+    }
+
+    /// <summary>
+    /// The reconcile's rebuild is the last resort, and its worst failure
+    /// mode was landing inside MUXC's still-open container state (the
+    /// collapse-activate crash). The catch must therefore hand the
+    /// rebuild to the retry executor -- which yields off the foreign
+    /// frame and re-queues -- with the attempt carrying its own
+    /// saved/restored selection fence (fence-down owns its fence).
+    /// </summary>
+    [Fact]
+    public void The_rebuild_defers_off_the_foreign_frame_through_the_retry()
+    {
+        var reconcile = ShellSource.Load(TabHostSource).Method("ReconcileStripOrder");
+        var retry = reconcile.Call("ReconcileRetry.Rebuild");
+
+        // The retry carries the rebuild and the landing: the attempt is
+        // fenced saved/restored (a deferred attempt runs OUTSIDE this
+        // method's fence window and owns its own), and the landing
+        // re-asserts selection, because the tail's gate has already
+        // run by the time a deferred attempt lands.
+        var attempt = Assert.IsType<ParenthesizedLambdaExpressionSyntax>(
+            retry.ArgExpression(1));
+        var attemptText = attempt.ToFullString();
+        Assert.Contains("_suppressSelectionEvent = true", attemptText, StringComparison.Ordinal);
+        Assert.Contains("_suppressSelectionEvent = outerSuppress",
+            attemptText, StringComparison.Ordinal);
+        var landed = Assert.IsType<ParenthesizedLambdaExpressionSyntax>(retry.ArgExpression(2));
+        Assert.Contains("SelectActive()", landed.ToFullString(), StringComparison.Ordinal);
     }
 }
