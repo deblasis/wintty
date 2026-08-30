@@ -926,17 +926,31 @@ internal sealed partial class TabHost : UserControl, ITabHost
             // rung that lands one must be able to see it fire.
             TabDragTrace.Line($"DIAG reconcile failed items={TabViewControl.TabItems.Count} " +
                 $"ex={ex.Message}");
-            try
-            {
-                RebuildStripFromManager();
-            }
-            catch (Exception rex)
-            {
-                TabDragTrace.Line($"DIAG rebuild threw {rex.GetType().Name}: {rex.Message}");
-                throw;
-            }
-            rebuilt = true;
-            TabDragTrace.Line("COMMIT reconcile rebuilt from manager");
+            // The rebuild may land inside MUXC's still-open container
+            // state (the raise that led here came from a strip commit).
+            // The retry yields off the foreign frame; every attempt
+            // carries its own saved/restored selection fence and re-reads
+            // manager truth at run time.
+            ReconcileRetry.Rebuild(
+                "horizontal rebuild",
+                () =>
+                {
+                    var outerSuppress = _suppressSelectionEvent;
+                    _suppressSelectionEvent = true;
+                    try { RebuildStripFromManager(); }
+                    finally { _suppressSelectionEvent = outerSuppress; }
+                },
+                () =>
+                {
+                    _swapFadePending = false;
+                    SelectActive();
+                    TabDragTrace.Line("COMMIT reconcile rebuilt from manager");
+                },
+                m => TabDragTrace.Line($"DIAG {m}"),
+                next => global::Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().TryEnqueue(
+                    global::Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal,
+                    () => next()));
+            return;
         }
         finally
         {
