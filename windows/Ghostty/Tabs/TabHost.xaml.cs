@@ -1553,6 +1553,19 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSelectionEvent) return;
+        // A live drag holds the strip, and nothing raised while it does is
+        // an intent. TabView's reorder commits as a remove-then-insert on
+        // TabItems, and the selection model's reaction to the remove
+        // re-targets the selection -- raising this event while the dragged
+        // tab is still absent from the strip. Acting on that raise would
+        // reconcile, and the reconcile's refusal path would Clear()
+        // TabItems, inside TabView's still-open modification: the
+        // collection refuses a nested modification with 0x8000FFFF, and on
+        // the UI thread that refusal is process death. The drag's drop is
+        // where the selection truth lands instead: OnTabDragCompleted
+        // re-asserts the manager's active tab after the commit, once the
+        // batch has closed.
+        if (_stripDragActive) return;
         if (TabViewControl.SelectedItem is TabViewItem item)
         {
             // A chip's selection is not an activation. Selecting the chip
@@ -1758,6 +1771,16 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // scan.
         ReconcileStripOrder();
         QueueBridgeUpdate();
+        // The drop's selection landing. OnSelectionChanged stands down for
+        // the whole drag, so the selection raises the drop produced --
+        // TabView's mid-batch churn, and the inner ListView's possibly
+        // cleared selection on an off-strip release, which TabView
+        // re-applies just before this handler runs -- meet the manager
+        // here instead: after the commit, outside the batch, once.
+        // Unconditional, because a refused commit and a repaired one must
+        // end the same way: the strip resting on the manager's active tab,
+        // a reorder never having switched one.
+        SelectActive();
         // The settle is decoration and stands last: the commit above has
         // landed, the reconcile has spoken, and the handback runs on
         // whatever element the tab has now.
