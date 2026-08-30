@@ -503,27 +503,70 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
-    public void A_chip_press_never_arms_the_engine()
+    public void A_chip_press_arms_the_unit_space_machine()
     {
         var pressed = ShellSource.Load(TabHostSource).Method("OnStripPointerPressed");
+        var armChip = ShellSource.Load(TabHostSource).Method("ArmChipDrag");
 
-        // A chip drags its whole run, and the run's commit is the group
-        // rung's grammar -- not a Move this engine may guess at. The chip
-        // refusal sits before the identity walk and before any session
-        // is built, so a press on a chip stays exactly what it was: a
-        // click that may expand, and nothing else.
-        var chipGate = pressed.DescendantNodes().OfType<IfStatementSyntax>()
-            .First(i => i.Condition.ToString() == "item.Tag is TabGroup");
-        Assert.True(
-            chipGate.Statement is ReturnStatementSyntax { Expression: null },
-            "A chip press must fall through without arming: the engine's plain "
-            + "reorder must never relocate a run it does not understand.");
+        // A chip drags its whole run, and the arm routes the press to the
+        // unit-space machine: one slot per body run, the run the atom, so
+        // a crossing can offer a landing inside a neighbouring run that
+        // the projector could not render.
+        // The arm routes on the tag, in one expression: a chip's press
+        // goes to the unit-space arm, anything else to the plain one.
+        var route = pressed.DescendantNodes().OfType<ConditionalExpressionSyntax>()
+            .Single(c => c.Condition.ToString() == "item.Tag is TabGroup group");
+        var arm = Assert.IsType<InvocationExpressionSyntax>(route.WhenTrue);
+        Assert.Equal("ArmChipDrag", arm.CalleeText());
+        Assert.Equal("(group, item, pressX)", arm.ArgumentList.ToString());
+        Assert.Equal("ArmTabDrag",
+            Assert.IsType<InvocationExpressionSyntax>(route.WhenFalse).CalleeText());
 
-        // And nothing in the arm path builds a session for one: no chip
-        // drag may reach the machine through any other door.
-        Assert.Empty(pressed.DescendantNodes()
+        // The unit machine is TabGroupDragUnits' build, and the dragged
+        // unit is found by GROUP IDENTITY -- index arithmetic here is how
+        // a wrong-run drag hides.
+        Assert.Single(armChip.Calls("TabGroupDragUnits.Build"));
+        var identity = armChip.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText() == "_manager.MoveGroup"));
+            .Single(c => c.CalleeText() == "ReferenceEquals");
+        Assert.True(
+            identity.ArgumentList.ToString() == "(units[i].Group, group)",
+            "The dragged unit must be found by group identity: positioning the "
+            + "machine on any other run drags a run the user never grabbed.");
+
+        // The pinned prefix contributes no units and MoveGroup clamps as
+        // the backstop, but the arm itself still refuses a strip it
+        // cannot measure: BuildSession answers null, the press stays a
+        // click.
+        Assert.Single(armChip.Calls("BuildSession"));
+
+        // And WHICH element a unit's center comes from: the minted chip
+        // first -- a chip'd collapse renders no member at all, so the
+        // chip is the run's visible atom and the honest center -- else
+        // the first member the strip ACTUALLY renders. Collapse does not
+        // prune the item map, so first-in-map can answer the run's
+        // detached head, whose geometry is a refusal: that is exactly
+        // the trap that dead-drove every chip drag once, and its old
+        // bytes must stay red here.
+        var rep = ShellSource.Load(TabHostSource).Method("UnitRepresentative");
+        var chipTry = rep.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText() == "_chipByGroup.TryGetValue");
+        var chipGate = chipTry.Ancestors().OfType<IfStatementSyntax>()
+            .First(i => i.Condition.ToString().StartsWith(
+                "_chipByGroup.TryGetValue", StringComparison.Ordinal));
+        var memberLoop = rep.DescendantNodes().OfType<ForEachStatementSyntax>()
+            .Single(f => f.Expression.ToString() == "_manager.MembersOf(group)");
+        var rendered = memberLoop.Statement.DescendantNodes()
+            .OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString().Contains(
+                "TabViewControl.TabItems.IndexOf(item) >= 0", StringComparison.Ordinal));
+        Assert.True(
+            chipGate.SpanStart < memberLoop.SpanStart,
+            "The chip must speak before the member walk: under a chip'd "
+            + "collapse the first map entry is a detached head, and measuring "
+            + "it refuses every chip drag at the arm.");
+        Assert.Contains("TabViewControl.TabItems.IndexOf(item) >= 0",
+            rendered.Condition.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -575,37 +618,148 @@ public sealed class TabStripSyncWiringTests
     }
 
     [Fact]
-    public void A_crossing_commits_through_the_projection_and_rewinds_at_chip_slots()
+    public void A_crossing_dispatches_and_refusals_stop_the_tick()
     {
         var commit = ShellSource.Load(TabHostSource).Method("CommitHorizontalCrossing");
+        var moved = ShellSource.Load(TabHostSource).Method("OnStripPointerMoved");
 
-        // The machine speaks slots; the manager speaks model indices.
-        // The translation is the projection's, taken fresh per crossing
-        // because every prior commit reordered the manager the machine
-        // cannot see.
-        Assert.Single(commit.Calls("TabStripProjection.DragSlots"));
+        // The dispatcher is identity-only: a session carries exactly one
+        // of tab or group, and each kind owns its own commit. Both arms
+        // answer a bool, and the moved loop stops on false -- a refused
+        // crossing rewound the machine, so the same center would re-earn
+        // the same refusal forever if the tick kept asking.
+        Assert.Contains("CommitTabCrossing(drag, crossing)",
+            commit.ExpressionBody?.Expression.ToString(), StringComparison.Ordinal);
+        Assert.Contains("CommitGroupCrossing(drag, group, crossing)",
+            commit.ExpressionBody?.Expression.ToString(), StringComparison.Ordinal);
+        var loop = moved.DescendantNodes().OfType<WhileStatementSyntax>().Single();
+        Assert.Contains("if (!CommitHorizontalCrossing(drag, crossing)) break;",
+            loop.Statement.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_tab_crossing_classifies_the_pin_boundary_before_the_move()
+    {
+        var commit = ShellSource.Load(TabHostSource).Method("CommitTabCrossing");
+
+        // The boundary is classified FIRST, against the projection's
+        // manager target: a crossing over the pinned prefix is a zone
+        // change Move alone would clamp away, so SetPinned relocates the
+        // row to the boundary and the Move then places it at the
+        // crossing's slot in the new zone.
+        var classify = commit.Call("TabPinBoundary.Classify");
+        Assert.True(
+            classify.Arg(0) == "drag.Tab!.IsPinned"
+                && classify.Arg(1) == "_manager.PinCount"
+                && classify.Arg(2) == "_manager.Tabs.Count"
+                && classify.Arg(3) == "managerTo",
+            "The boundary must be classified from the machine's manager target: "
+            + "classifying from the strip slot, or after the move, pins the "
+            + "wrong row or pins nothing.");
+        var setPinned = commit.Call("_manager.SetPinned");
         var move = commit.Call("_manager.Move");
-        var refusal = commit.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "target < 0 || old < 0 || old == target");
         Assert.True(
-            refusal.Statement is BlockSyntax arm
-                && arm.Statements.Last() is ReturnStatementSyntax { Expression: null }
-                && move.SpanStart > refusal.Span.End,
-            "The crossing's move must sit behind the projection's translation: an "
-            + "unmapped target, a lost tab, and the no-op are all refusals that "
-            + "return, not moves the strip guesses at.");
+            setPinned.SpanStart < move.SpanStart,
+            "SetPinned must precede the Move: the pin relocates the row to the "
+            + "boundary, and the move's `from` is read fresh from it.");
 
-        // A slot the projection cannot map is a chip's, and the machine's
-        // index is rewound to the crossing's origin: the next Evaluate
-        // measures from the slot the strip actually shows.
-        var rewinds = commit.Calls("drag.Machine.UpdateIndex").ToList();
+        // The truth is read back after the commit, and the two failures
+        // have two ends. A clamp -- Move no-ops at the boundary -- rewinds
+        // the machine to the slot the strip actually shows and refuses
+        // the tick. A vanished row -- the pairing no longer names it, a
+        // chord-collapse of its run, say -- CANCELS: refusing without
+        // rewinding or cancelling leaves a zombie session committing for
+        // a row the strip does not show.
+        var vanish = commit.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "actualSlot < 0");
         Assert.True(
-            rewinds.Count == 2
-                && rewinds.All(r => r.Arg(0) == "crossing.From")
-                && rewinds.All(r => r.SpanStart < move.SpanStart),
-            "Every refused crossing must rewind the machine to the crossing's "
-            + "origin before the commit returns: a stranded index would let the "
-            + "next Evaluate commit from a slot the strip never showed.");
+            vanish.Statement.DescendantNodes()
+                .OfType<InvocationExpressionSyntax>()
+                .Any(c => c.CalleeText() == "CancelHorizontalDrag")
+                && vanish.Statement.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
+            "A vanished row must cancel the drag: a refuse-without-rewind arm "
+            + "zombies the session on, committing for a row the strip does "
+            + "not show.");
+        var clamp = commit.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "actual != managerTo");
+        Assert.True(
+            clamp.Statement.DescendantNodes()
+                .OfType<InvocationExpressionSyntax>()
+                .Any(c => c.CalleeText() == "drag.Machine.UpdateIndex"),
+            "A crossing that did not land must rewind the machine to the actual "
+            + "slot and refuse: the engine owns the visual now, and a silent "
+            + "clamp would strand the row on a slot it never reached.");
+
+        // The read-back comes after the Move: it reads the post-commit
+        // pairing, the pre-commit one being stale past the displaced rows.
+        Assert.True(clamp.SpanStart > move.Span.End,
+            "The read-back must follow the move; before it, the pairing is the "
+            + "pre-commit state and the read lies.");
+    }
+
+    [Fact]
+    public void A_chip_crossing_maps_through_the_unit_formulas_and_reads_the_truth_back()
+    {
+        var commit = ShellSource.Load(TabHostSource).Method("CommitGroupCrossing");
+
+        // The crossing maps through the unit formulas and nothing else:
+        // down swaps past the pivot's whole span (After, with the dragged
+        // run's own departure subtracted), up lands before the pivot's
+        // head (Before). Slot arithmetic here is the transposition trap
+        // 5a flagged -- a strip-slot read past a chip names a member, not
+        // a run, and would split the run the projector draws as one.
+        var down = commit.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText() == "TabGroupDragUnits.TargetAfter");
+        Assert.True(
+            down.ArgumentList.ToString() == "(units, units[dragged], pivot)",
+            "The downward target must come from TargetAfter with the dragged "
+            + "unit and the pivot: any other index math splits a run the "
+            + "projector renders as one.");
+        var up = commit.Call("TabGroupDragUnits.TargetBefore");
+        Assert.Equal("(units, pivot)", up.ArgumentList.ToString());
+        var direction = commit.Body!.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "down");
+        Assert.Equal("pivot > dragged", direction.Initializer!.Value.ToString());
+        var chosen = commit.DescendantNodes().OfType<ConditionalExpressionSyntax>()
+            .Single(c => c.Condition.ToString() == "down");
+        Assert.True(
+            chosen.WhenTrue.ToString().EndsWith("TargetAfter(units, units[dragged], pivot)",
+                StringComparison.Ordinal)
+            && chosen.WhenFalse.ToString().EndsWith("TargetBefore(units, pivot)",
+                StringComparison.Ordinal),
+            "Direction decides the formula: After for a downward crossing, "
+            + "Before for an upward one -- swapped, every drag lands one run "
+            + "short.");
+
+        // MoveGroup clamps, so the truth is read back against a fresh
+        // unit build: a crossing that did not land rewinds the machine to
+        // the run's actual unit and refuses the tick.
+        var groupCommit = commit.Call("_manager.MoveGroup");
+        var groupVanish = commit.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "now < 0");
+        Assert.True(
+            groupVanish.SpanStart > groupCommit.Span.End
+                && groupVanish.Statement.DescendantNodes()
+                    .OfType<InvocationExpressionSyntax>()
+                    .Any(c => c.CalleeText() == "CancelHorizontalDrag"),
+            "A run that left the unit space mid-drag must cancel the drag, the "
+            + "same zombie rule the tab path follows.");
+        var readBack = commit.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "nowUnits[now].First != target");
+        Assert.True(
+            readBack.SpanStart > groupCommit.Span.End
+                && readBack.Statement.DescendantNodes()
+                    .OfType<InvocationExpressionSyntax>()
+                    .Any(c => c.CalleeText() == "drag.Machine.UpdateIndex"),
+            "The read-back must follow MoveGroup and rewind on a clamp: the "
+            + "formula's promise is checked against the manager's answer, "
+            + "never assumed.");
+
+        // The commit is MoveGroup's, never a member Move: a Move here
+        // would relocate one member out of the run the chip is carrying.
+        Assert.Empty(commit.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "_manager.Move"));
     }
 
     [Fact]
@@ -1059,4 +1213,34 @@ public sealed class TabStripSyncWiringTests
             .Any(a => a.Left is IdentifierNameSyntax id
                       && id.Identifier.ValueText == field
                       && a.Right.IsKind(literal));
+
+    [Fact]
+    public void The_body_session_carries_its_tab_and_the_fork_resolves_the_chips_slot()
+    {
+        var src = ShellSource.Load(TabHostSource);
+
+        // The body session must CARRY the dragged tab: a null tab survives
+        // the arm, then the first crossing dies on
+        // _manager.IndexOf(null) -- a NullReferenceException mid-gesture,
+        // mid-strip, with the pointer still down.
+        var armTab = src.Method("ArmTabDrag");
+        var build = armTab.Call("BuildSession");
+        Assert.Equal("dragged", build.Arg(0));
+
+        // And a release that lands on a chip resolves THAT chip's slot
+        // for the join fork: the dragged tab's own slot is an item slot by
+        // definition, so feeding it to the projector refuses every join
+        // before geometry is ever asked.
+        var finish = src.Method("FinishHorizontalDrag");
+        var chipSlot = finish.Body!.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "chipSlot");
+        var fork = finish.Calls("ResolveDropAtChip").Single();
+        Assert.True(
+            chipSlot.SpanStart < fork.SpanStart
+                && fork.Arg(1) == "chipSlot",
+            "The join fork must resolve the released-on chip's slot: the "
+            + "dragged tab's own slot never names a group, so the fork "
+            + "refused every join before geometry was asked.");
+    }
 }
