@@ -6,11 +6,11 @@ using Xunit;
 namespace Ghostty.Tests.Tabs;
 
 /// <summary>
-/// The drag state machine behind the vertical strip's drag-to-reorder:
-/// press threshold, commit-on-center-crossing with hysteresis,
+/// The drag state machine behind a strip's drag-to-reorder, either
+/// axis: press threshold, commit-on-center-crossing with hysteresis,
 /// autoscroll ramp, release velocity, and the terminal transitions.
 /// Pure class, so the gesture grammar is pinned without a WinUI host;
-/// the composition wiring it feeds is in VerticalTabStrip and the
+/// the composition wiring it feeds is in the strips and the
 /// SendInput-level harness is the noted follow-up.
 /// </summary>
 public class TabDragReorderTests
@@ -31,6 +31,38 @@ public class TabDragReorderTests
 
         Assert.False(machine.Begin(23));
         Assert.Equal(TabDragPhase.Pressed, machine.Phase);
+    }
+
+    // The machine's positions are scalars along whichever axis the strip
+    // feeds. The facts above are written in the vertical's vocabulary;
+    // this one speaks the horizontal's -- X centers left to right, travel
+    // toward the strip's end -- and pins that nothing in the grammar
+    // cares which axis it is.
+    [Fact]
+    public void The_grammar_is_axis_neutral()
+    {
+        // Four equal-width slots of 90px: arranged centers 50, 140, 230, 320.
+        var machine = new TabDragReorder(4, 1);
+        machine.UpdateCenters(new double[] { 50, 140, 230, 320 });
+
+        machine.Press(140);
+        Assert.False(machine.Begin(143));
+        Assert.True(machine.Begin(148));
+
+        // Right past slot 2's center plus hysteresis commits 1 -> 2.
+        Assert.Equal(new TabDragCrossing(1, 2), machine.Evaluate(240));
+        // Left back past slot 1 costs the full row, not the 8px.
+        Assert.Equal(new TabDragCrossing(2, 1), machine.Evaluate(100));
+        Assert.Equal(1, machine.Index);
+
+        machine.SampleVelocity(300, 1_000);
+        machine.SampleVelocity(180, 1_050);
+        // Remaining distance signed toward the axis start; the fling ran
+        // the same way, so the velocity survives the direction guard.
+        Assert.True(machine.ReleaseVelocity(-90) < 0);
+
+        machine.Drop();
+        Assert.Equal(TabDragPhase.Idle, machine.Phase);
     }
 
     [Fact]
