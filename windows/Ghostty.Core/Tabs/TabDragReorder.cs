@@ -20,16 +20,18 @@ public enum TabDragPhase
 public readonly record struct TabDragCrossing(int From, int To);
 
 /// <summary>
-/// State machine for the vertical strip's drag-to-reorder gesture: the
-/// press threshold, commit-on-center-crossing with hysteresis, the
+/// State machine for a strip's drag-to-reorder gesture, either axis:
+/// the press threshold, commit-on-center-crossing with hysteresis, the
 /// autoscroll ramp, release velocity, and the terminal drop/cancel
 /// transitions. Pure data in, decisions out, so the whole gesture
 /// grammar is unit-testable without a WinUI host.
 ///
 /// The strip owns every measurement and all composition, and feeds
-/// results in here. Row centers are ARRANGED positions in strip space
-/// (never raw pointer positions, so scroll cannot corrupt a crossing),
-/// and a crossing is reported, not applied -- the strip turns it into
+/// results in here. Every position is a scalar ALONG THE AXIS -- the
+/// vertical strip feeds Y, the horizontal strip feeds X -- and row
+/// centers are ARRANGED positions in strip space (never raw pointer
+/// positions, so scroll cannot corrupt a crossing), and a crossing is
+/// reported, not applied -- the strip turns it into
 /// <see cref="TabManager.Move"/>, keeping the manager the truth
 /// mid-drag.
 /// </summary>
@@ -48,9 +50,9 @@ public sealed class TabDragReorder
     private double[] _centers;
     private int _index;
     private TabDragPhase _phase;
-    private double _pressY;
+    private double _pressPosition;
     // Trailing window of pointer samples release velocity reads from.
-    private readonly List<(double Ms, double Y)> _samples = new();
+    private readonly List<(double Ms, double Position)> _samples = new();
 
     public TabDragReorder(int rowCount, int grabIndex)
         : this(rowCount, grabIndex,
@@ -75,22 +77,22 @@ public sealed class TabDragReorder
     public int Index => _index;
 
     /// <summary>Arm the gesture on a pointer press over row <c>grabIndex</c>.</summary>
-    public void Press(double pointerY)
+    public void Press(double position)
     {
         if (_phase != TabDragPhase.Idle) return;
-        _pressY = pointerY;
+        _pressPosition = position;
         _phase = TabDragPhase.Pressed;
     }
 
     /// <summary>
-    /// Lift to <see cref="TabDragPhase.Dragging"/> once vertical travel
-    /// passes the start threshold. Horizontal movement never starts the
-    /// drag, so a jittering grab stays a click.
+    /// Lift to <see cref="TabDragPhase.Dragging"/> once travel along the
+    /// axis passes the start threshold. Movement along the OTHER axis
+    /// never starts the drag, so a jittering grab stays a click.
     /// </summary>
-    public bool Begin(double pointerY)
+    public bool Begin(double position)
     {
         if (_phase != TabDragPhase.Pressed) return false;
-        if (Math.Abs(pointerY - _pressY) < _startThresholdPx) return false;
+        if (Math.Abs(position - _pressPosition) < _startThresholdPx) return false;
         _phase = TabDragPhase.Dragging;
         return true;
     }
@@ -160,18 +162,18 @@ public sealed class TabDragReorder
     /// measures against the neighbour's new slot, and undoing a swap
     /// costs a full row of travel, not the 8px that committed it.
     /// </summary>
-    public TabDragCrossing? Evaluate(double draggedCenterY)
+    public TabDragCrossing? Evaluate(double draggedCenter)
     {
         if (_phase != TabDragPhase.Dragging) return null;
 
         if (_index + 1 < _centers.Length
-            && draggedCenterY > _centers[_index + 1] + _hysteresisPx)
+            && draggedCenter > _centers[_index + 1] + _hysteresisPx)
         {
             _index++;
             return new TabDragCrossing(_index - 1, _index);
         }
 
-        if (_index > 0 && draggedCenterY < _centers[_index - 1] - _hysteresisPx)
+        if (_index > 0 && draggedCenter < _centers[_index - 1] - _hysteresisPx)
         {
             _index--;
             return new TabDragCrossing(_index + 1, _index);
@@ -181,16 +183,17 @@ public sealed class TabDragReorder
     }
 
     /// <summary>
-    /// Signed autoscroll speed in px/s at <paramref name="pointerY"/>
-    /// against the scrolling viewport's bounds: negative scrolls up,
-    /// positive down, zero outside the edge band. Ramps with distance so
-    /// the ramp-up is proportional to how far into the band the drag is.
+    /// Signed autoscroll speed in px/s at <paramref name="position"/>
+    /// against the scrolling viewport's bounds along the axis: negative
+    /// scrolls toward the start, positive toward the end, zero outside
+    /// the edge band. Ramps with distance so the ramp-up is proportional
+    /// to how far into the band the drag is.
     /// </summary>
-    public double AutoscrollSpeed(double pointerY, double viewportTop, double viewportBottom)
+    public double AutoscrollSpeed(double position, double viewportStart, double viewportEnd)
     {
-        double fromTop = pointerY - viewportTop;
-        double fromBottom = viewportBottom - pointerY;
-        double d = Math.Min(fromTop, fromBottom);
+        double fromStart = position - viewportStart;
+        double fromEnd = viewportEnd - position;
+        double d = Math.Min(fromStart, fromEnd);
         if (d > TabStripMotion.AutoscrollBandPx) return 0;
 
         double speed = d <= TabStripMotion.AutoscrollInnerBandPx
@@ -200,11 +203,11 @@ public sealed class TabDragReorder
               * (TabStripMotion.AutoscrollBandPx - d)
               / (TabStripMotion.AutoscrollBandPx - TabStripMotion.AutoscrollInnerBandPx);
 
-        return fromTop <= fromBottom ? -speed : speed;
+        return fromStart <= fromEnd ? -speed : speed;
     }
 
     /// <summary>Feed the velocity window. <paramref name="ms"/> is monotonic.</summary>
-    public void SampleVelocity(double y, double ms)
+    public void SampleVelocity(double position, double ms)
     {
         // Front-prune rather than RemoveAll: this runs per pointer move,
         // and a lambda there allocates a closure on every call.
@@ -212,7 +215,7 @@ public sealed class TabDragReorder
         int stale = 0;
         while (stale < _samples.Count && _samples[stale].Ms < cutoff) stale++;
         if (stale > 0) _samples.RemoveRange(0, stale);
-        _samples.Add((ms, y));
+        _samples.Add((ms, position));
     }
 
     /// <summary>
@@ -223,10 +226,10 @@ public sealed class TabDragReorder
     /// spring owns the direction, and handing it a fling against the
     /// travel would throw the row the wrong way before reeling it back.
     ///
-    /// <paramref name="remainingDistancePx"/> is signed on the same axis
-    /// as <see cref="SampleVelocity"/>, positive = down; passing a bare
-    /// magnitude makes every velocity read as running away from the slot
-    /// and this guard kills legitimate upward settles.
+    /// <paramref name="remainingDistancePx"/> is signed on the machine's
+    /// axis, positive = toward the axis end; passing a bare magnitude
+    /// makes every velocity read as running away from the slot and this
+    /// guard kills legitimate settles against the travel.
     ///
     /// Read BEFORE <see cref="Drop"/> or <see cref="Cancel"/>: both clear
     /// the sample window, so the natural call order reports 0 forever

@@ -54,8 +54,9 @@ public class TabStripProjectionTests
     }
 
     /// <summary>
-    /// OnTabDragCompleted's shape, driven against a live mirror: read the
-    /// strip index, Move in manager space, reconcile via the projector.
+    /// The engine's crossing-commit shape, driven against a live mirror:
+    /// read the strip index, Move in manager space, reconcile via the
+    /// projector.
     /// </summary>
     private static void CompleteDrag(TabManager mgr, Strip strip, TabModel dragged)
     {
@@ -710,5 +711,42 @@ public class TabStripProjectionTests
                 Assert.Equal(-1, model); // a chip is a slot, never a model
             }
         }
+    }
+
+    [Fact]
+    public void DragSlots_pairs_every_visible_row_with_its_manager_index()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        mgr.SetPinned(mgr.Tabs[0], true);
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[1]);
+        mgr.CollapseGroup(group, true);
+
+        var (rows, managerIndex) = TabStripProjection.DragSlots(mgr);
+
+        // The chip'd run hides its inactive member, so the slot space is
+        // the pinned lead, the active member, and the ungrouped tail --
+        // each paired with the manager index it commits through.
+        Assert.Equal(new[] { mgr.Tabs[0], mgr.Tabs[1], mgr.Tabs[3] }, rows);
+        Assert.Equal(new[] { 0, 1, 3 }, managerIndex);
+    }
+
+    [Fact]
+    public void SlotIndexOf_answers_the_pairing_not_the_forward_list()
+    {
+        var mgr = NewManager(3); // [A, B, C, D]
+        var group = new TabGroup();
+        mgr.GroupTabs(new[] { mgr.Tabs[1], mgr.Tabs[2] }, group);
+        mgr.Activate(mgr.Tabs[1]);
+        mgr.CollapseGroup(group, true);
+
+        var (_, managerIndex) = TabStripProjection.DragSlots(mgr);
+
+        // Tab D sits at manager index 3 but slot 2: indexing the pairing
+        // list BY the manager index would answer 3, a slot the strip
+        // does not render. The hidden member holds no slot at all.
+        Assert.Equal(2, TabStripProjection.SlotIndexOf(mgr, managerIndex, mgr.Tabs[3]));
+        Assert.Equal(-1, TabStripProjection.SlotIndexOf(mgr, managerIndex, mgr.Tabs[2]));
     }
 }
