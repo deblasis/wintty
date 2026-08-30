@@ -552,8 +552,10 @@ public class VerticalTabGroupDragWiringTests
     /// pinned (the in-zone landing). Released outside: unpin and place
     /// at the body slot under the release point. The position is fresh
     /// pointer truth -- never machine centers, whose staleness after a
-    /// pin is the trap this replaces. No mid-drag unpin crossing exists:
-    /// there is no center threshold to fall short of.
+    /// pin is the trap this replaces. The mid-drag crossing arm PINS only:
+    /// an Unpin classification there rewinds and refuses, so the one-
+    /// grammar contract (pin-in by crossing, out by release) is true in
+    /// bytes.
     /// </summary>
     [Fact]
     public void Pin_out_is_release_classified()
@@ -578,5 +580,20 @@ public class VerticalTabGroupDragWiringTests
         // The out-of-zone arm unpins and places -- never a bare keep.
         Assert.Contains("SetPinned(drag.Tab, false);", arm.ToFullString(),
             StringComparison.Ordinal);
+
+        // POLARITY: the SetPinned(false) invocation sits INSIDE the
+        // !inZone gate -- the unpin fires only when the release point is
+        // provably outside the shelf bounds. Hoisted out (always-unpin)
+        // or inverted (unpin only when in-zone), both go red here. The
+        // mutation record must be verified in the same run as the claim.
+        var unpin = arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText() == "_manager.SetPinned");
+        var polarityGate = unpin.Ancestors().OfType<IfStatementSyntax>()
+            .First(a => a.Condition.ToString() == "!inZone");
+        Assert.True(
+            polarityGate.SpanStart < unpin.SpanStart,
+            "the unpin must sit inside the !inZone gate: the polarity is the "
+            + "fix -- hoisted out it always unpins, inverted it never does.");
     }
 }

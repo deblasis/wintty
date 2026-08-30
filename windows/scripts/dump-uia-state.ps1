@@ -22,7 +22,6 @@ public static class Wnd {
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr GetFocus();
-    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -101,6 +100,9 @@ if ($null -ne $nav) {
     Note ("(b) root children=" + $kids.Count)
 }
 
-Note "=== END BATTERY ==="
+# Flush the window/CPU answers BEFORE the UIA walk: a hang in that walk
+# must not swallow the evidence the earlier probes already collected.
 $out = if ($OutFile) { $OutFile } else { '' }
 if ($out) { [System.IO.File]::WriteAllLines($out, $lines) } else { $lines | ForEach-Object { Write-Host $_ } }
+
+Note "=== END BATTERY ==="
