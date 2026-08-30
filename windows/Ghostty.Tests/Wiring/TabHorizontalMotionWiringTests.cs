@@ -217,7 +217,11 @@ public class TabHorizontalMotionWiringTests
         Assert.Equal("_swapFadePending && !held.Contains(item)",
             guard.Condition.ToString());
 
+        // Only the pass's own clear counts: the catch's deferred rebuild
+        // lands in a lambda that also clears the flag for its deferred
+        // landing, and that pair is not this pass's clear.
         var clear = host.Method("ReconcileStripOrder").AssignsTo("_swapFadePending")
+            .Where(a => !a.Ancestors().OfType<ParenthesizedLambdaExpressionSyntax>().Any())
             .Single();
         Assert.Equal("false", clear.Right.ToString());
 

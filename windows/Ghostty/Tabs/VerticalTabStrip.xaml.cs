@@ -1326,6 +1326,7 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void RebuildAllItems()
     {
+        TabDragTrace.Line($"DIAG rebuild enter items={NavView.MenuItems.Count} t={Environment.TickCount64}");
         // Remove by what we hold, not by what the manager still has:
         // on a Reset the manager is already empty and rows we own would
         // otherwise stay in their container with their subscriptions live.
@@ -1352,6 +1353,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
         }
         UpdatePinnedShelfChrome();
+        TabDragTrace.Line($"DIAG rebuild walked items={NavView.MenuItems.Count} t={Environment.TickCount64}");
     }
 
     private void OnTabsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -1370,6 +1372,7 @@ internal sealed partial class VerticalTabStrip : UserControl
                 break;
             case NotifyCollectionChangedAction.Reset:
             case NotifyCollectionChangedAction.Move:
+                TabDragTrace.Line($"DIAG churn {e.Action} t={Environment.TickCount64}");
                 RebuildAllItems();
                 break;
             case NotifyCollectionChangedAction.Replace:
@@ -1695,11 +1698,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_reconcileScheduled) return;
         _reconcileScheduled = true;
+        var queuedAt = Environment.TickCount64;
+        TabDragTrace.Line($"DIAG reconcile queued t={queuedAt}");
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
         {
             _reconcileScheduled = false;
+            TabDragTrace.Line($"DIAG reconcile run t={Environment.TickCount64} delta={Environment.TickCount64 - queuedAt}");
             ReconcileRowOrder();
             SyncSelectionFromManager();
+            TabDragTrace.Line($"DIAG reconcile done t={Environment.TickCount64}");
         });
     }
 
@@ -1886,7 +1893,18 @@ internal sealed partial class VerticalTabStrip : UserControl
             || _pinnedPanel.Children.Count != pinCount
             || NavView.MenuItems.Count != desired.Count)
         {
-            RebuildAllItems();
+            // The rebuild may land inside MUXC's still-open container
+            // realization -- with virtualized hosts that state spans
+            // frames. The retry yields off the foreign frame; every
+            // attempt re-reads manager truth at run time.
+            ReconcileRetry.Rebuild(
+                "vertical rebuild",
+                RebuildAllItems,
+                SyncSelectionFromManager,
+                m => TabDragTrace.Line($"DIAG {m}"),
+                next => global::Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().TryEnqueue(
+                    global::Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal,
+                    () => next()));
             return;
         }
 
@@ -2206,15 +2224,26 @@ internal sealed partial class VerticalTabStrip : UserControl
             new PointerEventHandler(OnDragPointerReleased), true);
         AddHandler(UIElement.PointerCanceledEvent,
             new PointerEventHandler(OnDragPointerCanceled), true);
-        AddHandler(UIElement.PointerCaptureLostEvent,
-            new PointerEventHandler(OnDragPointerCaptureLost), true);
+        // No PointerCaptureLost hook, on purpose: the engine holds no
+        // capture, so no CaptureLost is ours. The one this strip DOES see
+        // is MUXC's own item layer releasing its press capture the moment
+        // a drag starts moving -- acted on, it murders every real drag
+        // (the probe caught exactly that: a cancel mid-drag, then a
+        // zombie crossing landing the right order by luck).
         AddHandler(UIElement.KeyDownEvent,
             new KeyEventHandler(OnDragKeyDown), true);
     }
 
     private void OnDragPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (_drag is not null) return;
+        if (_drag is not null)
+        {
+            // Without capture a release the strip never saw -- the button
+            // coming up off the strip -- leaves the session behind; the
+            // next press ends it here rather than blocking every drag
+            // after it.
+            CancelDrag("stale");
+        }
         // A layout switch stages through SetSelectionRowSuppressed; a
         // drag never starts under one.
         if (_selectionRowSuppressed) return;
@@ -2402,10 +2431,9 @@ internal sealed partial class VerticalTabStrip : UserControl
                 StartPinFlight(drag, from, to);
             return;
         }
-        // Capture is not released here: a synchronous PointerCaptureLost
-        // off our own release would re-enter as a cancel and roll the
-        // drop back. The platform releases capture on lift anyway, and
-        // by then the session is gone.
+        // Nothing is held: the engine captures no pointer, so this
+        // release is just the gesture's last hover-routed event, arriving
+        // with the session still live for the handler to finish.
         DragTrace($"DRAG drop index={index} velocity={velocity:0}");
         EndDrag(drag, settle: drag.MotionOn, velocity: velocity);
     }
@@ -2414,12 +2442,6 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
         CancelDrag("canceled");
-    }
-
-    private void OnDragPointerCaptureLost(object sender, PointerRoutedEventArgs e)
-    {
-        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
-        CancelDrag("capture");
     }
 
     private void OnDragKeyDown(object sender, KeyRoutedEventArgs e)
@@ -2439,7 +2461,11 @@ internal sealed partial class VerticalTabStrip : UserControl
         // Existence is the rep row's answer for both kinds; the anchor --
         // the element the follow rides -- is the header for a run.
         if (RowElementOf(drag.Tab) is not { } row) { CancelDrag("closed"); return; }
-        if (!CapturePointer(e.Pointer)) { CancelDrag("capture"); return; }
+        // No capture: the host refuses CapturePointer for every gesture
+        // (human and injected alike -- the loop's settled finding), and
+        // the machine runs on the hover-routed pointer events, which
+        // provably arrive: presses arm end to end through this entry, the
+        // same shape the horizontal engine shipped.
 
         var item = drag.Group is { } group && _headers.TryGetValue(group, out var header)
             ? header
