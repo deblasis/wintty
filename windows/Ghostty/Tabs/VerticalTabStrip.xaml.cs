@@ -1870,9 +1870,19 @@ internal sealed partial class VerticalTabStrip : UserControl
         // A projection-named row the strip holds no element for is skew an
         // order pass cannot repair -- counts can agree while a row is
         // missing on both sides -- so the miss flag joins the counts.
+        //
+        // The body-row expectation is `shown.Count`, the projection's own
+        // rendered-item count, and NOT tabs-minus-pinned: a chip'd run
+        // hides members on purpose, and they render no row. Expecting
+        // tabs-minus-pinned here contradicted the rebuild's own output
+        // (it removes the hidden member, dropping the count below the
+        // formula), so every pass re-detected drift and re-ran
+        // RebuildAllItems -- a dispatcher-looped rebuild that spun the UI
+        // thread and ballooned the working set. The check must describe
+        // what the rebuild produces, or the rebuild can never converge.
         if (missing
             || _pinnedRows.Count != pinCount
-            || _items.Count != _manager.Tabs.Count - pinCount
+            || _items.Count != shown.Count
             || _pinnedPanel.Children.Count != pinCount
             || NavView.MenuItems.Count != desired.Count)
         {
