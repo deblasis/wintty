@@ -167,6 +167,13 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             CancelDrag("teardown");
             FinishPinFlight("teardown");
+            // A latched selection replay would fire for passes this strip
+            // no longer attends; drop it with the rest of the wiring.
+            if (_selectionRealizationLatch)
+            {
+                LayoutUpdated -= OnSelectionRealizationPass;
+                _selectionRealizationLatch = false;
+            }
         };
     }
 
@@ -1049,6 +1056,17 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// The work is latched and replayed on Loaded instead; every path that
     /// makes this strip visible already calls back in here afterwards, so
     /// the latch only has to cover the case where nothing else does.
+    ///
+    /// The loaded-but-not-realized state is the same fence one level down,
+    /// and it is the churn crash (0xC000027B / XAML 800F1000) read out of
+    /// a full dump: a rebuild writes MenuItems, MUXC realizes containers
+    /// across the NEXT layout pass, and set_SelectedItem inside that
+    /// window resolves the item's container as the host's base-class
+    /// ContentControl -- the selection style targets NavigationViewItem,
+    /// the application fails, XAML stows it, and the dispatcher turn ends
+    /// in a fail-fast. The assignment therefore waits until the selected
+    /// item is realized (IsLoaded), on a latched LayoutUpdated replay;
+    /// deferring again re-arms the latch, so a re-churn cannot strand it.
     /// </remarks>
     internal void SyncSelectionFromManager()
     {
@@ -1062,6 +1080,16 @@ internal sealed partial class VerticalTabStrip : UserControl
 
         if (_manager.ActiveTab is null) return;
 
+        var item = _items.TryGetValue(_manager.ActiveTab, out var selected)
+            ? selected
+            : null;
+        if (item is not null && !item.IsLoaded)
+        {
+            DeferSelectionSync();
+            return;
+        }
+        _selectionSyncDeferred = false;
+
         _syncing = true;
         try
         {
@@ -1071,9 +1099,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             // selected while the strip's active chrome sits on a pinned
             // row, so park the selection at null: the selection overlay is
             // the active chrome for a pinned row and does not consult MUXC.
-            NavView.SelectedItem = _items.TryGetValue(_manager.ActiveTab, out var item)
-                ? item
-                : null;
+            NavView.SelectedItem = item;
         }
         finally { _syncing = false; }
 
@@ -1081,6 +1107,35 @@ internal sealed partial class VerticalTabStrip : UserControl
         RecolorNavItems();
         EnsureActiveItemVisible();
         ScheduleSelectionLayoutPass(retryIfZeroBounds: true);
+    }
+
+    /// <summary>
+    /// The realization latch for the selection sync: subscribed once, and
+    /// every layout pass gives the deferred sync one attempt -- a pass
+    /// where MUXC has realized the churned containers lands it, and a pass
+    /// where it has not re-arms the latch through the defer. Detached the
+    /// moment the sync lands, and on teardown.
+    /// </summary>
+    private bool _selectionRealizationLatch;
+
+    private void DeferSelectionSync()
+    {
+        _selectionSyncDeferred = true;
+        if (_selectionRealizationLatch) return;
+        _selectionRealizationLatch = true;
+        LayoutUpdated += OnSelectionRealizationPass;
+    }
+
+    private void OnSelectionRealizationPass(object? sender, object e)
+    {
+        if (!_selectionSyncDeferred)
+        {
+            LayoutUpdated -= OnSelectionRealizationPass;
+            _selectionRealizationLatch = false;
+            return;
+        }
+        _selectionSyncDeferred = false;
+        SyncSelectionFromManager();
     }
 
     // The scroller the rows live inside, out of the NavigationView's
