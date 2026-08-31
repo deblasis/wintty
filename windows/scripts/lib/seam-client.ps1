@@ -102,7 +102,12 @@ function Wait-SeamReady($proc) {
 function Start-SeamSession(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$ConfigText,
-    [string]$TraceFile = ''
+    [string]$TraceFile = '',
+    # Extra command line for the launch, e.g. --no-config. Kept separate
+    # from $ConfigText because the two are not interchangeable: a leg that
+    # measures the unconfigured build has to pass the flag AND still get an
+    # isolated XDG dir, so nothing the developer has on disk leaks in.
+    [string[]]$Arguments = @()
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -115,14 +120,27 @@ function Start-SeamSession(
         OrigXdg   = if (Test-Path Env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $null }
         OrigSeam  = if (Test-Path Env:WINTTY_TEST_SEAM) { $env:WINTTY_TEST_SEAM } else { $null }
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
+        OrigNoColorSet = (Test-Path Env:NO_COLOR)
+        OrigNoColor    = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
     }
     $env:XDG_CONFIG_HOME = $tempXdg
     $env:WINTTY_TEST_SEAM = '1'
+    # NO_COLOR inherited from the driver's shell raises a notice banner over
+    # roughly a third of the window, which moves every rect a UIA-locating
+    # harness reads and covers the surfaces a capture harness samples. Every
+    # older harness strips it around its own launch; the shared launcher did
+    # not, so a harness that used only this path inherited the banner.
+    Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
     if ($TraceFile) { $env:WINTTY_TABDRAG_TRACE = $TraceFile }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
 
-    $proc = Start-Process -FilePath $session.ExePath -PassThru `
-        -WorkingDirectory (Split-Path -Parent $session.ExePath)
+    $startArgs = @{
+        FilePath         = $session.ExePath
+        PassThru         = $true
+        WorkingDirectory = (Split-Path -Parent $session.ExePath)
+    }
+    if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
+    $proc = Start-Process @startArgs
     $session.Proc = $proc
     $main = Wait-SeamReady $proc
     $session.Hwnd64 = [int64]$main.Hwnd64
@@ -202,5 +220,7 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:WINTTY_TEST_SEAM -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigTrace) { $env:WINTTY_TABDRAG_TRACE = $Session.OrigTrace }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
+    if ($Session.OrigNoColorSet) { $env:NO_COLOR = $Session.OrigNoColor }
+    else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
 }
