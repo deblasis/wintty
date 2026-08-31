@@ -101,8 +101,10 @@ public class PinnedRowFocusWiringTests
         Assert.True(fence[0].Span.Start < managerActivate.Span.Start,
             "the activation must be fenced, not just performed");
 
-        // And the click path shares it: one seam, two callers.
-        Assert.NotEmpty(Strip().Method("OnDragPointerReleased")
+        // And the click path shares it: one seam, two callers. (The
+        // release body lives in DragRelease since the test-seam
+        // parameterization; the pointer handler is its wrapper.)
+        Assert.NotEmpty(Strip().Method("DragRelease")
             .Calls("ActivateFromShelf"));
     }
 

@@ -60,6 +60,9 @@ internal sealed partial class VerticalTabHost : UserControl, ITabHost
 
     public FrameworkElement HostElement => this;
 
+    /// <summary>The strip, for the test seam's drag driver.</summary>
+    internal VerticalTabStrip StripForTestSeam => _strip;
+
     public FrameworkElement? TabElement(TabModel tab) => _strip.TabElement(tab);
 
     internal void SetSelectionRowSuppressed(bool suppressed)

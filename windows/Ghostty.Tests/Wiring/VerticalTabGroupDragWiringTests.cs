@@ -35,7 +35,10 @@ public class VerticalTabGroupDragWiringTests
     [Fact]
     public void AHeaderPress_ArmsTheRunDrag_ThroughTheSameMachine()
     {
-        var pressed = Strip().Method("OnDragPointerPressed");
+        // The parameterized press: the pointer handler and the test seam
+        // both resolve values OUTSIDE this method; everything from the row
+        // resolution down -- the header arm included -- lives in DragPress.
+        var pressed = Strip().Method("DragPress");
         var arm = pressed.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString()
                 == "item is VerticalTabGroupHeaderItem { Tag: TabGroup group }");
@@ -481,7 +484,7 @@ public class VerticalTabGroupDragWiringTests
     [Fact]
     public void A_stale_session_ends_at_the_next_press()
     {
-        var pressed = Strip().Method("OnDragPointerPressed");
+        var pressed = Strip().Method("DragPress");
         var gate = Assert.IsType<IfStatementSyntax>(pressed.Body!.Statements.First());
         Assert.Equal("_drag is not null", gate.Condition.ToString());
         var arm = gate.Statement;
@@ -501,7 +504,7 @@ public class VerticalTabGroupDragWiringTests
     [Fact]
     public void Button_presses_and_sub_threshold_releases_never_arm()
     {
-        var pressed = Strip().Method("OnDragPointerPressed");
+        var pressed = Strip().Method("DragPress");
         var buttonGate = pressed.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString().Contains(
                 "FindAncestor<Button>", StringComparison.Ordinal));
@@ -560,18 +563,24 @@ public class VerticalTabGroupDragWiringTests
     [Fact]
     public void Pin_out_is_release_classified()
     {
-        var released = Strip().Method("OnDragPointerReleased");
+        // The parameterization moved the release body into DragRelease;
+        // the fresh pointer truth is the Y the pointer handler resolved,
+        // so the chain is pinned at both ends: the wrapper reads the
+        // event's position, and the pin branch takes that Y as its own.
+        var wrapper = Strip().Method("OnDragPointerReleased");
+        Assert.Single(wrapper.Calls("e.GetCurrentPoint"));
+        var released = Strip().Method("DragRelease");
         var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "drag.Tab.IsPinned");
         var arm = Assert.IsType<BlockSyntax>(gate.Statement);
 
         // The branch reads fresh pointer truth and the shelf bounds: the
-        // release Y against the pinned panel, the body slot under the
-        // point from the strip's own pairing.
-        Assert.Contains(arm.DescendantNodes()
-            .OfType<InvocationExpressionSyntax>()
-            .Where(c => c.CalleeText().EndsWith("GetCurrentPoint", StringComparison.Ordinal)).ToList(),
-            c => true);
+        // release Y the wrapper resolved, the body slot under the point
+        // from the strip's own pairing.
+        var releaseY = arm.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "releaseY");
+        Assert.Equal("y", releaseY.Initializer!.Value.ToString());
         Assert.Contains(arm.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Where(c => c.CalleeText() == "BodySlotAtY").ToList(),

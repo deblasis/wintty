@@ -102,6 +102,28 @@ public sealed partial class MainWindow : Window
     /// <summary>This window's tab manager, exposed for session capture.</summary>
     internal TabManager TabManager => _tabManager;
 
+    // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
+    // Internal surface, reachable only in-process: the pipe is the gate.
+    // Named TestSeam* so the seam's footprint on this class is greppable
+    // and removable as one shape.
+    internal Input.PaneActionRouter TestSeamRouter => _router;
+    internal bool TestSeamVerticalTabs => _verticalTabsVisible;
+    internal bool TestSeamLayoutSwitching => _layout.IsSwitching;
+
+    /// <summary>
+    /// The vertical strip when it is this window's active host, else null:
+    /// the seam's drag driver speaks the vertical engine only.
+    /// </summary>
+    internal Tabs.VerticalTabStrip? TestSeamVerticalStrip
+        => _tabHost is Tabs.VerticalTabHost vertical ? vertical.StripForTestSeam : null;
+
+    /// <summary>
+    /// A synchronous layout pass before a seam ack: the command's C# state
+    /// AND the XAML layout it caused are both settled when the driver hears
+    /// back, so the next command can never run mid-arrange.
+    /// </summary>
+    internal void TestSeamSettleLayout() => (Content as UIElement)?.UpdateLayout();
+
     /// <summary>
     /// The closed-tab store this window feeds. The quake window is excluded so
     /// its drop-down tabs never leak into the regular reopen-closed-tab history
@@ -1163,6 +1185,11 @@ public sealed partial class MainWindow : Window
         // retries until the input site exists, then unsubscribes).
         _beepSuppressor = new SysCharBeepSuppressor();
         Activated += OnActivatedInstallBeepSuppressor;
+
+        // The opt-in test seam: zero surface unless WINTTY_TEST_SEAM=1,
+        // and then one named pipe whose commands drive the real handlers
+        // on this UI thread. See Testing.TestSeam.
+        Testing.TestSeam.Start(this);
 
         Closed += OnClosedAsync;
     }
