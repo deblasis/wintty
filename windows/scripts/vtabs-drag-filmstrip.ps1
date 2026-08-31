@@ -52,7 +52,7 @@ param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
     [int]$IntervalMs = 60,
-    [int]$MaxFrames = 46
+    [int]$MaxFrames = 52
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
@@ -447,17 +447,22 @@ function Get-Pixel([hashtable]$Px, [int]$X, [int]$Y) {
 
 # Topmost y in the crop whose pixel is within $Tol of $Ref on every
 # channel, over the column band [x - HalfW, x + HalfW] when $X is given,
-# the full width otherwise. -1 when there is none. Column-scoped is what
-# the band tracking wants: the calibrated colour is only known
-# discriminating at the column it was sampled at, and a full-width scan
-# happily matches ink or chrome on other rows first. Inlined byte access
-# rather than a per-pixel helper call: this runs over every frame's crop.
-function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [int]$X = -1, [int]$HalfW = -1) {
+# the full width otherwise, and only between $From and $To when $To is
+# given. -1 when there is none. Column-scoped is what the band tracking
+# wants: the calibrated colour is only known discriminating at the column
+# it was sampled at, and a full-width scan happily matches ink or chrome
+# on other rows first. The $To ceiling is the other half: the tracked
+# band physically cannot leave the measured span, so rows outside it
+# (another row's title ink) must not be readable at all. Inlined byte
+# access rather than a per-pixel helper call: this runs over every
+# frame's crop.
+function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [int]$X = -1, [int]$HalfW = -1, [int]$To = -1) {
     $bytes = $Px.bytes
     $stride = $Px.stride
     $x0 = if ($X -ge 0 -and $HalfW -ge 0) { [Math]::Max(0, $X - $HalfW) } else { 0 }
     $x1 = if ($X -ge 0 -and $HalfW -ge 0) { [Math]::Min($Px.w - 1, $X + $HalfW) } else { $Px.w - 1 }
-    for ($y = $From; $y -lt $Px.h; $y++) {
+    $yMax = if ($To -ge 0) { [Math]::Min($Px.h - 1, $To) } else { $Px.h - 1 }
+    for ($y = $From; $y -le $yMax; $y++) {
         $rowOff = $y * $stride
         for ($x = $x0; $x -le $x1; $x++) {
             $o = $rowOff + $x * 4
@@ -570,6 +575,11 @@ try {
     # the pointer canceled mid-gesture (the press's selection change
     # churns the arm path -- begin, cancel reason=canceled, end). The
     # tracked band therefore rides the drag itself, rising past row 2.
+    # The programmatic Select() can silently not land (the ring stays on
+    # whatever row held it), and the ring is the selection's only
+    # observable -- so the selection retry lives inside the calibration:
+    # each attempt selects, re-captures frame 0, and re-runs the edge
+    # diff. Three strikes and the run refuses with the evidence frame.
     $row3 = $rows | Where-Object { $_.Name -eq 'fuzzfilm-3' }
     $selPat = $row3.El.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     $selPat.Select()
@@ -589,14 +599,6 @@ try {
     if ($rowH -lt 16 -or $cropW -lt 40) { throw 'HARVEST_MISS: strip geometry too small to film' }
     Write-Host "crop=${cropX},${cropY} ${cropW}x${cropH} rowH=$rowH"
 
-    # Frame 0, before any input: the band reference comes from inside row
-    # 3's own rect, and the calibration is only good if that reference
-    # actually finds the band there.
-    $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
-    $g = [System.Drawing.Graphics]::FromImage($full)
-    $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
-    $g.Dispose()
-    $px0 = Get-Pixels $full
     # Sampled right of centre: the title text ends well before that, and a
     # sample on the text ink would calibrate to the wrong colour.
     #
@@ -609,64 +611,74 @@ try {
     # their colours agree everywhere except where the selection chrome
     # draws. The stroke's colour is then sampled AT that edge, in frame 0
     # -- the calibration still comes from frame 0, not hard-coded colours.
-    $colX = [int]($full.Width * 0.72)
-    $r3Top = [int]($row3.Rect.Y - $cropY)
-    $rowH = [int]($row3.Rect.Height)
-    $r2Top = $r3Top - $rowH
-    $bestY = -1
-    $bestD = -1
-    for ($y = $r2Top; $y -lt $r3Top + $rowH; $y++) {
-        if ($y -lt 0 -or ($y + $rowH) -ge $full.Height) { continue }
-        $a = Get-Pixel $px0 $colX $y
-        $b = Get-Pixel $px0 $colX ($y - $rowH)
-        $d = [math]::Abs($a[0] - $b[0]) + [math]::Abs($a[1] - $b[1]) + [math]::Abs($a[2] - $b[2])
-        if ($d -gt $bestD) { $bestD = $d; $bestY = $y }
+    $colX = [int]($cropW * 0.72)
+    $calibrated = $false
+    $bestY = -1; $bestD = -1; $bandRef = $null; $trackerTop0 = -1
+    $full = $null; $px0 = $null
+    for ($calAttempt = 1; $calAttempt -le 3 -and -not $calibrated; $calAttempt++) {
+        if ($calAttempt -gt 1) {
+            $selPat.Select()
+            Start-Sleep -Milliseconds 500
+        }
+        $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
+        $g = [System.Drawing.Graphics]::FromImage($full)
+        $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
+        $g.Dispose()
+        $px0 = Get-Pixels $full
+        $r3Top = [int]($row3.Rect.Y - $cropY)
+        $r2Top = $r3Top - $rowH
+        $bestY = -1
+        $bestD = -1
+        for ($y = $r2Top; $y -lt $r3Top + $rowH; $y++) {
+            if ($y -lt 0 -or ($y + $rowH) -ge $full.Height) { continue }
+            $a = Get-Pixel $px0 $colX $y
+            $b = Get-Pixel $px0 $colX ($y - $rowH)
+            $d = [math]::Abs($a[0] - $b[0]) + [math]::Abs($a[1] - $b[1]) + [math]::Abs($a[2] - $b[2])
+            if ($d -gt $bestD) { $bestD = $d; $bestY = $y }
+        }
+        if ($bestY -lt 0 -or $bestD -lt 60 -or [math]::Abs($bestY - $r3Top) -gt 10) {
+            Write-Host ("calibration attempt {0}: selection edge not distinct at x={1} (best delta {2} at y={3}, row 3 top {4})" -f $calAttempt, $colX, $bestD, $bestY, $r3Top)
+            continue
+        }
+        $bandRef = Get-Pixel $px0 $colX $bestY
+        # The sampled colour must not be the strip's UNSELECTED background:
+        # whether the selection chrome is a ring or a fill, the tracked
+        # colour has to differ from what the other rows show, or the
+        # per-frame scan matches every row and tracks nothing. (The row's
+        # OWN interior is the wrong yardstick -- a fill chrome agrees with
+        # itself by design.)
+        $bgRef = Get-Pixel $px0 $colX ($r2Top + [int]($rowH * 0.5))
+        if (([math]::Abs($bandRef[0] - $bgRef[0]) -le 12) -and
+            ([math]::Abs($bandRef[1] - $bgRef[1]) -le 12) -and
+            ([math]::Abs($bandRef[2] - $bgRef[2]) -le 12)) {
+            Write-Host ("calibration attempt {0}: band sample rgb({1}) matches the unselected background rgb({2}) at x={3}" -f $calAttempt, ($bandRef -join ','), ($bgRef -join ','), $colX)
+            continue
+        }
+        # bandTop0 and the scan origin come from the SAME pass the per-frame
+        # tracker uses, cross-checked against the diff edge above: if the
+        # tracker's frame-0 reading disagrees with the feature the diff
+        # found, the colour is not discriminating (text ink or chrome
+        # elsewhere matches it first) and the run would measure the wrong
+        # feature. The scan is column-scoped for the same reason -- the
+        # colour is only known discriminating at the column it was sampled
+        # at.
+        $releaseTop = $bestY - $rowH
+        $trackerTop0 = Find-BandTop $px0 $bandRef 24 ([Math]::Max(1, $releaseTop - [int]($rowH * 0.4))) $colX 8 ([Math]::Min($px0.h - 1, $bestY + [int]($rowH * 0.25)))
+        if ($trackerTop0 -lt 0 -or [math]::Abs($trackerTop0 - $bestY) -gt 4) {
+            Write-Host ("calibration attempt {0}: tracker found band at y={1} but the diff edge is y={2} (band rgb({3}) at x={4})" -f $calAttempt, $trackerTop0, $bestY, ($bandRef -join ','), $colX)
+            continue
+        }
+        $calibrated = $true
     }
-    if ($bestY -lt 0 -or $bestD -lt 60 -or [math]::Abs($bestY - $r3Top) -gt 10) {
-        Write-Host ("calibration: selection edge not distinct at x={0} (best delta {1} at y={2}, row 3 top {3})" -f $colX, $bestD, $bestY, $r3Top)
-        # Leave the evidence behind: the calibration frame is what a
-        # re-author needs to find the current chrome's distinct feature.
+    if (-not $calibrated) {
         $diag = Join-Path $OutDir 'calibration-frame0.png'
-        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
+        if ($null -ne $full) { $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png) }
         Write-Host "calibration: frame 0 saved to $diag"
-        throw 'HARVEST_MISS: could not calibrate the selection edge in frame 0 - the selected row is not pixel-distinct in this theme'
-    }
-    $bandRef = Get-Pixel $px0 $colX $bestY
-    # The sampled colour must not be the strip's UNSELECTED background:
-    # whether the selection chrome is a ring or a fill, the tracked colour
-    # has to differ from what the other rows show, or the per-frame scan
-    # matches every row and tracks nothing. (The row's OWN interior is the
-    # wrong yardstick -- a fill chrome agrees with itself by design.)
-    # Fail here, with the sampled RGB in the message, rather than film a
-    # run the tracker cannot see.
-    $bgRef = Get-Pixel $px0 $colX ($r2Top + [int]($rowH * 0.5))
-    if (([math]::Abs($bandRef[0] - $bgRef[0]) -le 12) -and
-        ([math]::Abs($bandRef[1] - $bgRef[1]) -le 12) -and
-        ([math]::Abs($bandRef[2] - $bgRef[2]) -le 12)) {
-        Write-Host ("calibration: band sample rgb({0}) matches the unselected background rgb({1}) at x={2}" -f ($bandRef -join ','), ($bgRef -join ','), $colX)
-        $diag = Join-Path $OutDir 'calibration-frame0.png'
-        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
-        Write-Host "calibration: frame 0 saved to $diag"
-        throw 'HARVEST_MISS: the sampled selection colour is the background colour - the tracker would have nothing to follow'
-    }
-
-    # bandTop0 and the scan origin come from the SAME pass the per-frame
-    # tracker uses, cross-checked against the diff edge above: if the
-    # tracker's frame-0 reading disagrees with the feature the diff found,
-    # the colour is not discriminating (text ink or chrome elsewhere
-    # matches it first) and the run would measure the wrong feature. The
-    # scan is column-scoped for the same reason -- the colour is only
-    # known discriminating at the column it was sampled at.
-    $trackerTop0 = Find-BandTop $px0 $bandRef 24 ([Math]::Max(1, $bestY - $rowH)) $colX 8
-    if ($trackerTop0 -lt 0 -or [math]::Abs($trackerTop0 - $bestY) -gt 4) {
-        Write-Host ("calibration: tracker found band at y={0} but the diff edge is y={1} (band rgb({2}) at x={3})" -f $trackerTop0, $bestY, ($bandRef -join ','), $colX)
-        $diag = Join-Path $OutDir 'calibration-frame0.png'
-        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
-        Write-Host "calibration: frame 0 saved to $diag"
-        throw 'HARVEST_MISS: the tracker cannot reproduce the calibrated edge in frame 0 - the band colour matches something else first'
+        throw 'HARVEST_MISS: could not calibrate the tracked band on the selected row (3 attempts) - the selection never landed where the diff could see it'
     }
     $bandTop0 = $trackerTop0
     $expectedTop = $r3Top
+    Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
     Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
 
     # The scripted gesture, on one clock with the capture. The press, the
@@ -702,6 +714,12 @@ try {
         if ($crossAt -lt 0 -and $y -le $crossY) { $crossAt = $moveT }
         $moveT += 70
     }
+    # The release happens INSIDE the dragged row's new slot: the release
+    # selects the row under the pointer, and releasing over the wrong slot
+    # moves the selection off the tracked band mid-measurement.
+    $returnAt = $crossAt + 80
+    $settleY = $grabY - $rowH
+    $schedule.Add([pscustomobject]@{ at = $returnAt; act = 'move'; x = $grabX; y = $settleY })
     $releaseAt = $crossAt + 150
     $schedule.Add([pscustomobject]@{ at = $releaseAt; act = 'release' })
     if ($crossAt -lt 0) { throw 'HARVEST_MISS: gesture never schedules a crossing of row 3' }
@@ -730,57 +748,82 @@ try {
     Write-Host ("captured {0} frames over {1}ms" -f $frames.Count, $sw.ElapsedMilliseconds)
 
     # Analysis: band top per frame, saved as PNGs for the transcript. The
-    # scan starts one row above the calibrated position: the crop's top
-    # chrome (the window border) carries bright pixels that would match a
-    # white stroke from y=0 and pin the tracker to the border forever.
-    # The scan origin sits half a row ABOVE one row up: the committed
-    # row's new band top lands almost exactly one row up, and the settle
-    # spring overshoots past it before coming back -- the scan must cover
-    # the overshoot or the glide's most interesting frames read -1.
-    $scanFrom = [Math]::Max(1, $bandTop0 - $rowH - [int]($rowH * 0.5))
+    # scan is SPAN-SCOPED: the tracked band physically cannot leave the
+    # span between the release row's band top (minus the settle spring's
+    # overshoot headroom) and a little below the grab row's band top, so
+    # rows outside that span -- notably another row's title ink -- are not
+    # readable at all, and a reading inside the span is the band by
+    # construction (colour match at the calibrated column, span-checked).
+    $scanFrom = [Math]::Max(1, $releaseTop - [int]($rowH * 0.4))
+    $scanTo = [Math]::Min($frames[0].bmp.Height - 1, $bandTop0 + [int]($rowH * 0.25))
     $tops = New-Object int[] $frames.Count
     for ($i = 0; $i -lt $frames.Count; $i++) {
         $px = Get-Pixels $frames[$i].bmp
-        $tops[$i] = Find-BandTop $px $bandRef 24 $scanFrom $colX 8
+        $tops[$i] = Find-BandTop $px $bandRef 24 $scanFrom $colX 8 $scanTo
         $frames[$i].bmp.Save((Join-Path $OutDir ("frames\frame-{0:d3}-{1:d4}ms.png" -f $i, $frames[$i].t)))
     }
     for ($i = 0; $i -lt $frames.Count; $i++) {
         Write-Host ("frame {0:d3} t={1:d4}ms bandTop={2}" -f $i, $frames[$i].t, $tops[$i])
     }
 
-    $bad = @($tops | Where-Object { $_ -lt 0 })
-    if ($bad.Count -gt 2) {
-        throw "PRODUCT_FAIL: the band left the crop in $($bad.Count) frames - the tracked row did not stay on screen"
+    # A lost band inside the measured window is the tracker saying
+    # "unreadable" -- the fast glide motion-blurs the stroke below the
+    # colour match. That is tolerable (the freeze-and-resume contract) as
+    # long as the window stays mostly readable and both measurements land
+    # on real, uncarried readings; it is not tolerable when the tracker
+    # loses the drag outright.
+    $measureEndMs = $crossAt + 500
+    $windowFrames = @(0..($frames.Count - 1) | Where-Object { $frames[$_].t -le $measureEndMs })
+    $bad = @($windowFrames | Where-Object { $tops[$_] -lt 0 })
+    if ($bad.Count -gt [int]([Math]::Ceiling($windowFrames.Count / 2.0))) {
+        throw "PRODUCT_FAIL: the band was unreadable in $($bad.Count) of $($windowFrames.Count) measured-window frames - the tracker lost the drag"
     }
-    # A frame that lost the band carries its predecessor's reading rather
-    # than poisoning the run detectors with a -1 spike.
-    for ($i = 1; $i -lt $tops.Count; $i++) { if ($tops[$i] -lt 0) { $tops[$i] = $tops[$i - 1] } }
 
-    # Gap open: the first frame whose band top has risen 5px or more off
-    # its pre-crossing position, measured from the scheduled crossing.
+    # Gap open: the first REAL reading (never a carried or blurred frame)
+    # whose band top has risen 5px or more off its pre-crossing position,
+    # measured from the scheduled crossing.
     $commitFrame = -1
     for ($i = 0; $i -lt $frames.Count; $i++) { if ($frames[$i].t -ge $crossAt) { $commitFrame = $i; break } }
     if ($commitFrame -lt 0) { throw 'HARVEST_MISS: no frame at or after the crossing' }
     $gapFrame = -1
     for ($i = $commitFrame; $i -lt $frames.Count; $i++) {
-        if ($tops[$i] -le ($bandTop0 - 5)) { $gapFrame = $i; break }
+        if ($tops[$i] -ge 0 -and $tops[$i] -le ($bandTop0 - 5)) { $gapFrame = $i; break }
     }
     $gapMs = if ($gapFrame -ge 0) { $frames[$gapFrame].t - $crossAt } else { -1 }
     Write-Host "gap: commitFrame=$commitFrame gapFrame=$gapFrame gapMs=$gapMs"
 
-    # Convergence: the band within 2px of its final position for 6
-    # consecutive frames, within 500ms of the crossing.
-    $tail = @($tops | Select-Object -Last 6)
-    $finalTop = [int](($tail | Measure-Object -Average).Average)
+    # Convergence: the band STOPS -- six consecutive real readings within
+    # 2px of each other, at a position within one row of the release
+    # row's band top, within 500ms of the crossing. The stop position is
+    # verified against the release geometry only loosely (the ring's
+    # inset shifts it a few px); WHERE the row landed is the order
+    # assertion's job, and the colour match inside the span is the
+    # re-lock's identity proof.
     $settledMs = -1
-    $run = 0
+    $settledTop = -1
     for ($i = $commitFrame; $i -lt $frames.Count; $i++) {
-        if ([math]::Abs($tops[$i] - $finalTop) -le 2) { $run++ } else { $run = 0 }
-        if ($run -ge 6) { $settledMs = $frames[$i].t - $crossAt; break }
+        if ($frames[$i].t -gt $measureEndMs) { break }
+        if ($tops[$i] -lt 0) { continue }
+        if ([math]::Abs($tops[$i] - $releaseTop) -gt $rowH) { continue }
+        $run = 1
+        for ($j = $i + 1; $j -lt $frames.Count -and $run -lt 6; $j++) {
+            if ($tops[$j] -ge 0 -and [math]::Abs($tops[$j] - $tops[$i]) -le 2) { $run++ } else { break }
+        }
+        if ($run -ge 6) {
+            $settledMs = $frames[$i].t - $crossAt
+            $settledTop = $tops[$i]
+            break
+        }
     }
-    Write-Host "converge: finalTop=$finalTop settledMs=$settledMs"
+    $finalTop = $settledTop
+    Write-Host "converge: releaseTop=$releaseTop settledTop=$settledTop settledMs=$settledMs"
 
-    $travel = $bandTop0 - $tops[$frames.Count - 1]
+    # The travel reads the last REAL reading: a trailing blur frame says
+    # nothing about where the band went, and treating it as -1 would
+    # inflate the travel and fake the displacement gate.
+    $lastReal = $bandTop0
+    for ($i = $frames.Count - 1; $i -ge 0; $i--) { if ($tops[$i] -ge 0) { $lastReal = $tops[$i]; break } }
+    $travel = $bandTop0 - $lastReal
 
     # The layout really swapped.
     Start-Sleep -Milliseconds 600
