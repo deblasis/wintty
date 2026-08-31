@@ -146,7 +146,7 @@ public class PinnedPreviewWiringTests
     [Fact]
     public void TheDrop_HonoursTheVisibleGhost_ThroughTheZoneGrammar()
     {
-        var released = Strip().Method("OnDragPointerReleased");
+        var released = Strip().Method("DragRelease");
 
         var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_pinPreview is not null");
@@ -186,9 +186,12 @@ public class PinnedPreviewWiringTests
         Assert.NotEmpty(strip.Method("CancelDrag").Calls("EndDrag"));
 
         // Each exit family: escape, pointer cancel, capture loss, the
-        // mid-drag row close, the layout switch, and teardown.
+        // mid-drag row close, the layout switch, and teardown. The cancel
+        // wrapper hops through DragCancel (the seam's parameterized core)
+        // before the funnel.
         Assert.NotEmpty(strip.Method("OnDragKeyDown").Calls("CancelDrag"));
-        Assert.NotEmpty(strip.Method("OnDragPointerCanceled").Calls("CancelDrag"));
+        Assert.NotEmpty(strip.Method("OnDragPointerCanceled").Calls("DragCancel"));
+        Assert.NotEmpty(strip.Method("DragCancel").Calls("CancelDrag"));
         Assert.NotEmpty(strip.Method("OnDragPointerCaptureLost").Calls("CancelDrag"));
         Assert.NotEmpty(strip.Method("RemoveItem").Calls("CancelDrag"));
         Assert.NotEmpty(strip.Method("SetSelectionRowSuppressed").Calls("CancelDrag"));

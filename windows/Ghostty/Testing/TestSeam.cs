@@ -21,7 +21,16 @@ namespace Ghostty.Testing;
 /// The gate is the whole surface: without WINTTY_TEST_SEAM=1 in the app's
 /// environment this class never creates a pipe and costs one env-var read
 /// per window. With it, the pipe is session-local and serves one client at
-/// a time; a second command connection waits for the first to hang up.
+/// a time; a second command connection waits for the first to hang up. A
+/// second opted-in process does not spin: the fixed name belongs to
+/// whoever took it first, and the loser goes quiet (one seam per machine).
+///
+/// Trust model, spike-honest: the pipe carries no ACL of its own, so any
+/// process running as the same local user can connect to an opted-in
+/// instance and drive its UI -- the same-user bar every dev tool on the
+/// box already clears. A user-scoped ACL (or a per-start nonce in the
+/// pipe name) is the hardening step for when the seam ships beyond this
+/// opt-in.
 ///
 /// Protocol: each request is one line of JSON, {"op": "...", ...args}; each
 /// response is one line, {"ok": true, ...} or {"ok": false, "error": "..."}.
@@ -69,12 +78,22 @@ internal static class TestSeam
     {
         while (!token.IsCancellationRequested)
         {
-            NamedPipeServerStream? pipe = null;
+            NamedPipeServerStream pipe;
             try
             {
                 pipe = new NamedPipeServerStream(
                     PipeName, PipeDirection.InOut, maxNumberOfServerInstances: 1,
                     PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The name belongs to another opted-in instance. One seam
+                // per machine is the honest semantics, so this process goes
+                // quiet instead of hot-spinning on a name it can never take.
+                return;
+            }
+            try
+            {
                 await pipe.WaitForConnectionAsync(token);
                 await ServeConnectionAsync(pipe, window, token);
             }
@@ -88,7 +107,7 @@ internal static class TestSeam
             {
                 try { if (pipe is { IsConnected: true }) pipe.Disconnect(); }
                 catch { /* the name must free up either way */ }
-                pipe?.Dispose();
+                pipe.Dispose();
             }
         }
     }

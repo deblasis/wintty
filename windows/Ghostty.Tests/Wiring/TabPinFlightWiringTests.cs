@@ -55,7 +55,7 @@ public class TabPinFlightWiringTests
     [Fact]
     public void BothFlightEndpoints_AreRead_BeforeTheCommit()
     {
-        var released = Strip().Method("OnDragPointerReleased");
+        var released = Strip().Method("DragRelease");
         var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_pinPreview is not null");
         var setPinned = gate.Calls("_manager.SetPinned").Single();
@@ -116,7 +116,7 @@ public class TabPinFlightWiringTests
         // The single caller runs after EndDrag: the row is already in
         // the manager and the drag is already torn down when the ghost
         // lifts off.
-        var released = strip.Method("OnDragPointerReleased");
+        var released = strip.Method("DragRelease");
         var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_pinPreview is not null");
         var call = gate.Calls("StartPinFlight").Single();
@@ -172,7 +172,7 @@ public class TabPinFlightWiringTests
     public void TheFlight_IsProgrammatic_AtVelocityZero()
     {
         var strip = Strip();
-        var gate = strip.Method("OnDragPointerReleased")
+        var gate = strip.Method("DragRelease")
             .DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_pinPreview is not null");
         var end = gate.Calls("EndDrag").Single();

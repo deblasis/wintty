@@ -100,8 +100,35 @@ public class TestSeamWiringTests
             serve.Calls("pipe.WaitForConnectionAsync").Count == 1,
             "the server loop no longer waits for exactly one connection per pipe");
         Assert.True(
-            serve.Calls("pipe?.Dispose").Count >= 1,
+            serve.Calls("pipe.Dispose").Count == 1,
             "the server no longer disposes the pipe between connections");
+
+        // A name owned by another opted-in instance STOPS the server: one
+        // seam per machine. The creation-failure catch must return -- a
+        // continue here recreates the same refused pipe as fast as the
+        // loop can spin -- and the connection-level catch must NOT return,
+        // because a client hanging up is not the server's death. Both
+        // catches declare Exception and discriminate in the filter.
+        var catches = serve.DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.CatchClauseSyntax>()
+            .Where(c => c.Filter is not null
+                        && c.Filter!.FilterExpression.ToString().Contains("IOException"))
+            .ToList();
+        var creation = catches.Single(c => c.Filter!.FilterExpression.ToString()
+            .Contains("UnauthorizedAccessException"));
+        Assert.Contains(
+            creation.Block.Statements,
+            s => s is Microsoft.CodeAnalysis.CSharp.Syntax.ReturnStatementSyntax);
+        var wait = serve.Calls("pipe.WaitForConnectionAsync").Single();
+        Assert.True(
+            creation.Span.End <= wait.Span.Start,
+            "the name-taken refusal must guard the pipe creation, before the "
+            + "connection wait it must never reach");
+        var serving = catches.Single(c => c.Filter!.FilterExpression.ToString()
+            .Contains("ObjectDisposedException"));
+        Assert.DoesNotContain(
+            serving.Block.Statements,
+            s => s is Microsoft.CodeAnalysis.CSharp.Syntax.ReturnStatementSyntax);
 
         // Start subscribes the window's close to the server's cancellation,
         // so a closed window cannot leave a listening pipe behind.
