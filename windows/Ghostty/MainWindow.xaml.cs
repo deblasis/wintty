@@ -2254,26 +2254,60 @@ public sealed partial class MainWindow : Window
     // order, wrapping at the ends, then flash the preview popup. Each press
     // commits and restarts the popup's auto-dismiss timer, so repeated presses
     // cycle through tabs with the preview visible and it fades after a pause.
+    //
+    // The cycle walks the strip projection's rows, not the raw tab list: a
+    // collapsed group is ONE chip row and its hidden members are not stops,
+    // so the switcher agrees with what the strips render.
     private void CycleTab(bool forward)
     {
-        var tabs = _tabManager.Tabs;
-        if (tabs.Count < 2) return;
+        var rows = TabStripProjection.HorizontalRows(_tabManager);
+        if (rows.Count < 2) return;
 
-        var idx = tabs.IndexOf(_tabManager.ActiveTab);
+        var idx = CycleRowsIndexOf(rows, _tabManager.ActiveTab);
         if (idx < 0) idx = 0;
         var next = forward
-            ? (idx + 1) % tabs.Count
-            : (idx - 1 + tabs.Count) % tabs.Count;
-        var target = tabs[next];
+            ? (idx + 1) % rows.Count
+            : (idx - 1 + rows.Count) % rows.Count;
 
-        _tabManager.Activate(target);
+        switch (rows[next])
+        {
+            case TabStripProjection.HorizontalRow.Item { Tab: { } tab }:
+                _tabManager.Activate(tab);
+                break;
+            case TabStripProjection.HorizontalRow.Chip { Group: { } group }:
+                // The strip's chip grammar: a chip is the expand gesture,
+                // through the same command path the chip's own selection
+                // uses -- never an Activate onto a group that has no single
+                // tab to name. The command never moves activation, so the
+                // step below lands on manager truth (the active tab), and
+                // Show() re-reads the rows the expansion just widened.
+                _router.RequestCollapseGroup(group, collapsed: false);
+                break;
+        }
         FocusActiveLeaf();
 
         SizeTabSwitcherPopup();
-        TabSwitcherPopupUI.Show(tabs, target, _configService.FontFamily);
+        TabSwitcherPopupUI.Show(_tabManager, _tabManager.ActiveTab, _configService.FontFamily);
         TabSwitcherPopupHost.IsOpen = true;
         _cyclePopupTimer?.Stop();
         _cyclePopupTimer?.Start();
+    }
+
+    /// <summary>
+    /// Row slot of <paramref name="tab"/> among the cycle's rows. The
+    /// Edge-135 walk always projects the active tab as an item -- chips are
+    /// slots, never the active row -- so -1 only means an empty strip.
+    /// </summary>
+    private static int CycleRowsIndexOf(
+        IReadOnlyList<TabStripProjection.HorizontalRow> rows, TabModel tab)
+    {
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i] is TabStripProjection.HorizontalRow.Item { Tab: { } candidate }
+                && ReferenceEquals(candidate, tab))
+                return i;
+        }
+        return -1;
     }
 
     // Stretch the full-window cycle popup to the current window size so its

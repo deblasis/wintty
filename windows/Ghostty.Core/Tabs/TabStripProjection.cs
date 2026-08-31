@@ -163,6 +163,10 @@ internal static class TabStripProjection
     /// beside it would draw the same run twice, so the chip is suppressed
     /// and the run reads as its member.
     ///
+    /// The Ctrl+Tab switcher popup reads these rows too, so the cycle
+    /// stops on exactly what a strip renders: the chip row stands for the
+    /// collapsed run and the hidden members are not cycle stops.
+    ///
     /// The suppression is the reading's one deliberate loss: the other
     /// members of an active-holding collapsed run appear nowhere in these
     /// rows. That is why <see cref="ModelIndexToVisibleIndex"/> answers
