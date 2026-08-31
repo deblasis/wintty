@@ -102,7 +102,12 @@ function Wait-SeamReady($proc) {
 function Start-SeamSession(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$ConfigText,
-    [string]$TraceFile = ''
+    [string]$TraceFile = '',
+    # Extra command line for the launch, e.g. --no-config. Kept separate
+    # from $ConfigText because the two are not interchangeable: a leg that
+    # measures the unconfigured build has to pass the flag AND still get an
+    # isolated XDG dir, so nothing the developer has on disk leaks in.
+    [string[]]$Arguments = @()
 ) {
     $tempXdg = Join-Path $env:TEMP "wintty-seam-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
@@ -131,8 +136,13 @@ function Start-SeamSession(
     if ($TraceFile) { $env:WINTTY_TABDRAG_TRACE = $TraceFile }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
 
-    $proc = Start-Process -FilePath $session.ExePath -PassThru `
-        -WorkingDirectory (Split-Path -Parent $session.ExePath)
+    $startArgs = @{
+        FilePath         = $session.ExePath
+        PassThru         = $true
+        WorkingDirectory = (Split-Path -Parent $session.ExePath)
+    }
+    if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
+    $proc = Start-Process @startArgs
     $session.Proc = $proc
     $main = Wait-SeamReady $proc
     $session.Hwnd64 = [int64]$main.Hwnd64
