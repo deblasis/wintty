@@ -187,11 +187,24 @@ public class TabPinZoneWiringTests
         // is live. Inverting it darkens the boundary exactly when the
         // gesture needs it.
         var brush = strip.Method("BoundaryStrokeBrush");
-        var alpha = brush.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
-            .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "alpha"));
-        Assert.Equal(
-            "_drag is null ? (byte)0x59 : (byte)0xE6",
-            alpha.Declaration.Variables.Single().Initializer!.Value.ToString());
+        var alpha = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "alpha");
+        var gate = Assert.IsType<ConditionalExpressionSyntax>(
+            alpha.Initializer!.Value);
+        Assert.Equal("_drag is null", gate.Condition.ToString());
+        // Dim while idle, bright while a drag is live -- and High Contrast
+        // takes opaque in both states, so the line never leans on alpha.
+        Assert.Equal("idle", gate.WhenTrue.ToString());
+        Assert.Equal("live", gate.WhenFalse.ToString());
+        var arms = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>().ToList();
+        byte IdleAlpha() => byte.Parse(arms.Single(v => v.Identifier.ValueText == "idle")
+            .Initializer!.Value.ToString().Split(':').Last().Trim()
+            .Replace("(byte)0x", string.Empty), System.Globalization.NumberStyles.HexNumber);
+        byte LiveAlpha() => byte.Parse(arms.Single(v => v.Identifier.ValueText == "live")
+            .Initializer!.Value.ToString().Split(':').Last().Trim()
+            .Replace("(byte)0x", string.Empty), System.Globalization.NumberStyles.HexNumber);
+        Assert.True(IdleAlpha() < LiveAlpha(),
+            "the boundary must brighten while a drag aims at it, not dim");
     }
 
     /// <summary>
