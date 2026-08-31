@@ -633,4 +633,109 @@ public class VerticalTabGroupDragWiringTests
         Assert.DoesNotContain("SetPinned(drag.Tab, false)", crossingGate.ToFullString(),
             StringComparison.Ordinal);
     }
+
+    // --- The churn crash's named root (dump 2026-08-31, artifacts) ------
+    // The fail-fast's stowed COMException (800F1000, "Cannot apply a Style
+    // with TargetType NavigationViewItem to an object of type
+    // ContentControl") was raised from set_SelectedItem reached through
+    // SyncSelectionFromManager <- ReconcileRetry.Rebuild <- ReconcileRowOrder
+    // <- ScheduleReconcile: a rebuild writes MenuItems, MUXC realizes the
+    // containers on the NEXT layout pass, and the selection assignment in
+    // that window resolves a base-class ContentControl container for the
+    // selected item. The fix makes the assignment wait out realization.
+
+    /// <summary>
+    /// The selection assignment may not run while the selected item's
+    /// container is still unrealized. The guard is polarity-sensitive in
+    /// exactly the way a flip survives compilation: inverted, the sync
+    /// runs only in the crashing window and defers once the strip is
+    /// healthy -- the strip renders and every churn still throws. The
+    /// landed path clears the defer flag before it assigns, so the
+    /// realization latch knows the sync landed.
+    /// </summary>
+    [Fact]
+    public void TheSelectionSync_WaitsOutContainerRealization()
+    {
+        var sync = Strip().Method("SyncSelectionFromManager");
+
+        var gate = sync.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "item is not null && !item.IsLoaded");
+        Assert.NotEmpty(gate.Statement.DescendantNodesAndSelf()
+            .OfType<InvocationExpressionSyntax>().Where(c => c.CalleeText() == "DeferSelectionSync"));
+
+        var assignment = sync.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "NavView.SelectedItem");
+        Assert.Equal("item", assignment.Right.ToString());
+        Assert.True(
+            gate.Span.End < assignment.Span.Start,
+            "the realization guard must precede the selection assignment");
+
+        // The flag clears only on the path that assigns: a sync that
+        // deferred again leaves the latch armed.
+        var cleared = sync.AssignsTo("_selectionSyncDeferred")
+            .Single(a => a.Right.ToString() == "false");
+        Assert.True(
+            gate.Span.End < cleared.Span.Start,
+            "the defer flag must not clear before the realization gate");
+
+        // And the never-loaded fence still defers through the same flag:
+        // the pre-template hazard that predates this fix keeps its guard.
+        var unloaded = sync.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "!IsLoaded");
+        Assert.Contains("true", unloaded.Statement.AssignsTo("_selectionSyncDeferred")
+            .Single().Right.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The latch is one subscription, re-armed by deferring again: the
+    /// defer subscribes the pass handler under the not-already-latched
+    /// guard, every pass attempts the sync once, and the handler detaches
+    /// on the first pass after the sync landed -- including teardown, so a
+    /// strip that is going away does not keep a handler for passes it
+    /// will never attend.
+    /// </summary>
+    [Fact]
+    public void TheRealizationLatch_AttemptsPerPass_AndDetachesWhenLanded()
+    {
+        var defer = Strip().Method("DeferSelectionSync");
+        var guard = defer.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "_selectionRealizationLatch");
+        Assert.True(guard.Statement is ReturnStatementSyntax);
+        // Event subscriptions parse as assignments, not invocations.
+        var subscribe = defer.AssignsTo("LayoutUpdated").Single();
+        Assert.True(
+            guard.Span.End < subscribe.Span.Start,
+            "the not-latched guard must precede the subscription");
+        Assert.Equal("OnSelectionRealizationPass", subscribe.Right.ToString());
+
+        var pass = Strip().Method("OnSelectionRealizationPass");
+        var landed = pass.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "!_selectionSyncDeferred");
+        var detach = landed.Statement.AssignsTo("LayoutUpdated").Single();
+        Assert.Equal("OnSelectionRealizationPass", detach.Right.ToString());
+        Assert.Contains(landed.Statement.AssignsTo("_selectionRealizationLatch").ToList(),
+            a => a.Right.ToString() == "false");
+        // Every pass attempts the sync once: the flag clears, the sync
+        // runs, and a still-unrealized strip re-defers from inside it.
+        var retry = Assert.IsType<ExpressionStatementSyntax>(pass.Body!.Statements.Last());
+        Assert.Equal("SyncSelectionFromManager",
+            Assert.IsType<InvocationExpressionSyntax>(retry.Expression).CalleeText());
+        var passClear = pass.AssignsTo("_selectionSyncDeferred")
+            .Single(a => a.Right.ToString() == "false");
+        Assert.True(passClear.Span.End < retry.Span.Start,
+            "the pass must clear the flag before the attempt, or the landed "
+            + "detach can never fire");
+
+        // Teardown detaches: the Unloaded handler the ctor wires must name
+        // the same detach, or a closed strip latches a handler forever.
+        var ctor = Strip().Root.DescendantNodes()
+            .OfType<ConstructorDeclarationSyntax>()
+            .First(c => c.Identifier.ValueText == "VerticalTabStrip");
+        var unloaded = ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "Unloaded");
+        Assert.NotEmpty(unloaded.Right.DescendantNodesAndSelf()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "LayoutUpdated"
+                        && a.Right.ToString() == "OnSelectionRealizationPass"));
+    }
 }

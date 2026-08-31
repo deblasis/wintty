@@ -1178,6 +1178,26 @@ try {
         }
     }
 
+    # Task #33: the layout-toggle crash battery. The owner's hand test
+    # hit a UI-thread COMException (0x800F1000 -- a NavigationViewItem-
+    # targeted style applied to a ContentControl) toggling the layout on
+    # a strip that carried pins, a group, and the collapsed chip. That
+    # state is exactly what exists here (pins from the boundary legs, the
+    # group collapsed by the chip roundtrip), so this leg toggles through
+    # the pane re-measure in both directions and requires the process to
+    # survive with the strip still rendering.
+    Add-Phase 'layout-toggle-crash' {
+        Toggle-Layout $hwnd64 $pid32
+        $proc.Refresh()
+        if ($proc.HasExited) { throw "PRODUCT_FAIL: the layout toggle killed the process (to vertical)" }
+        $null = Get-StripRows $V
+        Toggle-Layout $hwnd64 $pid32
+        $proc.Refresh()
+        if ($proc.HasExited) { throw "PRODUCT_FAIL: the layout toggle killed the process (to horizontal)" }
+        $null = Get-StripRows $H
+        $script:Orders.layoutToggle = 'survived'
+    }
+
     # The trace oracle, over the whole run's sessions. Six vertical-machine
     # drags: the two motion-on reorders, the motion-off reorder, the
     # boundary out-and-back, the pin drop, the drop-on-chip join. The
