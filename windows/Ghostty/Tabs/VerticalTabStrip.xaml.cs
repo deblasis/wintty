@@ -4218,6 +4218,45 @@ internal sealed partial class VerticalTabStrip : UserControl
     internal double TestSeamPaneWidth => _paneWidth;
 
     /// <summary>
+    /// The rail's inventory, top to bottom: the pinned shelf, then the
+    /// list. Reported in tree order rather than projection order because
+    /// the projection is the intent and this is the evidence -- a member
+    /// the collapse pass has not yet hidden is exactly the row a filmstrip
+    /// needs to catch, and the projection would never name it.
+    /// </summary>
+    internal IReadOnlyList<Testing.TestSeamStripRow> TestSeamRows(FrameworkElement root)
+    {
+        var rows = new List<Testing.TestSeamStripRow>(
+            _pinnedPanel.Children.Count + NavView.MenuItems.Count);
+
+        foreach (var child in _pinnedPanel.Children)
+        {
+            if (child is not VerticalTabPinnedRow row || row.Tag is not TabModel tab)
+                continue;
+            rows.Add(Describe(root, row, "pinned", tab));
+        }
+
+        foreach (var entry in NavView.MenuItems)
+        {
+            if (entry is not NavigationViewItem item) continue;
+            if (item.Tag is TabGroup group)
+            {
+                rows.Add(Testing.TestSeamStripRowMeasure.Row(
+                    root, item, "header", group.Title, group.Title, active: false));
+                continue;
+            }
+            if (item.Tag is TabModel tab) rows.Add(Describe(root, item, "tab", tab));
+        }
+        return rows;
+
+        Testing.TestSeamStripRow Describe(
+            FrameworkElement r, FrameworkElement el, string kind, TabModel tab)
+            => Testing.TestSeamStripRowMeasure.Row(
+                r, el, kind, tab.EffectiveTitle, tab.Group?.Title,
+                ReferenceEquals(tab, _manager.ActiveTab));
+    }
+
+    /// <summary>
     /// One seam drag: press the row of manager index <paramref name="from"/>,
     /// walk the pointer to the slot of manager index <paramref name="to"/>,
     /// release. The outcome carries the manager order after the settle so the
