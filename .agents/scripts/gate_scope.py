@@ -195,8 +195,15 @@ LEDGER_NAME = "deferred.json"
 # 28 leaves that margin. The age window moves with it so the arc's own
 # deferrals stay inside the window until the ladder settles and they are
 # paid down together.
-DEFER_MAX_OUTSTANDING = 28
-DEFER_MAX_AGE_DAYS = 28
+# 30 is the fifth raise (owner standing authorization, 2026-08-31): the
+# keybind tail landed and took the ledger to 27, and the arc's second tail
+# prices at 28 -- AT the cap, so its own merge would be refused with the
+# settle still owed. 30 leaves the settle margin plus room for one fix PR
+# before the ladder pays the ledger down. The age window moves with it so
+# the arc's own deferrals stay inside the window until the ladder settles
+# and they are paid down together.
+DEFER_MAX_OUTSTANDING = 30
+DEFER_MAX_AGE_DAYS = 30
 DEFER_MIN_REASON_CHARS = 25
 
 
