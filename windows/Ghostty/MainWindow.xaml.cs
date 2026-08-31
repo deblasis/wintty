@@ -176,6 +176,21 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Both hosts, whichever is live. A layout switch is the one moment
+    /// they are BOTH on screen, so a frame that reported only the active
+    /// one would be blind to exactly the overlap the transition is made
+    /// of.
+    /// </summary>
+    internal (Tabs.ITabHost Horizontal, Tabs.ITabHost Vertical) TestSeamHosts
+        => (_horizontalTabHost, _verticalTabHost);
+
+    /// <summary>The element every filmstrip rect is measured against.</summary>
+    internal FrameworkElement? TestSeamRoot => Content as FrameworkElement;
+
+    /// <summary>What the layout coordinator has parked on the morph layer.</summary>
+    internal int TestSeamMorphLayerCount => _layout.TestSeamMorphLayerCount;
+
+    /// <summary>
     /// A synchronous layout pass before a seam ack: the command's C# state
     /// AND the XAML layout it caused are both settled when the driver hears
     /// back, so the next command can never run mid-arrange.
@@ -927,7 +942,13 @@ public sealed partial class MainWindow : Window
             RootGrid,
             PaneHostContainer,
             activeTab: () => _tabManager.Tabs.Count > 0 ? _tabManager.ActiveTab : null,
-            impact: NudgeWindowForImpact);
+            impact: NudgeWindowForImpact,
+            // The same gate the run label and both drag engines read, asked
+            // at the switch rather than cached: UISettings can throw in
+            // packaged contexts and the answer can change under the user
+            // mid-session.
+            motionEnabled: () => TabStripMotion.Enabled(
+                SystemAnimationsEnabled(), HighContrastChromeActive));
         _layout.Snap(_verticalTabsVisible);
 
         // The horizontal strip's group run label lives here, on the morph
@@ -1332,6 +1353,19 @@ public sealed partial class MainWindow : Window
 
         var vertical = cfg.VerticalTabs;
         if (_verticalTabsVisible == vertical) return;
+
+        // The file's opinion only counts when the file has one. Under
+        // --no-config the parsed-line cache is empty by design, so
+        // cfg.VerticalTabs answers the default on every reload -- and
+        // ToggleTabLayout schedules a write plus a reload, so the reload
+        // it triggers lands 150ms later, inside the 340ms switch, and
+        // walks the layout straight back. The toggle then acks (the seam
+        // waits out both flights) while the window never leaves
+        // horizontal. The same shape bites any config that never wrote
+        // the key: an unrelated edit must not reset a runtime switch to
+        // the default.
+        if (!_configService.IsConfiguredInFile("vertical-tabs")) return;
+
         AnimateTabLayoutTo(vertical);
     }
 
@@ -2139,8 +2173,26 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal void ToggleTabLayout()
     {
-        if (_layout.IsSwitching) return;
-        var toVertical = !_verticalTabsVisible;
+        // A toggle arriving mid-flight is QUEUED, never dropped. Dropping
+        // it is what the early return here used to do, and it is the worst
+        // of the three options a user can tell apart: the second press of
+        // a double-tap did nothing at all, so the chord read as unreliable
+        // rather than as busy.
+        //
+        // Queueing is bounded, which is what makes it the choice over
+        // cutting the running switch short. AnimateTabLayoutTo parks only
+        // the LATEST target and drops it when it already matches, so any
+        // number of presses during one flight resolve to at most one more
+        // switch: five taps cost two flights, not five. Cutting would be
+        // ~200ms quicker on a double-tap and buys a visible discontinuity
+        // mid-morph for it, which is the "broken frame" this is supposed
+        // to avoid.
+        //
+        // The current layout is the pending target when one is parked --
+        // reading _verticalTabsVisible there would compute the direction
+        // from a switch that is already superseded, and a double-tap would
+        // come out as a no-op instead of a return trip.
+        var toVertical = !(_pendingLayoutTarget ?? _verticalTabsVisible);
 
         // The run label is anchored to the outgoing strip's arrangement
         // and reads pointer state the switch invalidates: it hides by

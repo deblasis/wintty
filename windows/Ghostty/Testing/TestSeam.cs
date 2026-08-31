@@ -158,7 +158,9 @@ internal static class TestSeam
             try
             {
                 return await RunOnUiThreadAsync(
-                    window, () => ExecuteOnUiThreadAsync(window, opName, root));
+                    window,
+                    () => ExecuteOnUiThreadAsync(window, opName, root),
+                    settle: !IsObserver(opName));
             }
             catch (Exception ex)
             {
@@ -170,11 +172,28 @@ internal static class TestSeam
     }
 
     /// <summary>
+    /// Ops that only look. They skip the settling layout pass, which for a
+    /// command that changed nothing has nothing to settle -- and during a
+    /// layout switch is ruinous: the morph ghost's Width and Height are
+    /// dependent animations, so every frame already has a layout pass
+    /// pending, and forcing a synchronous one per sample dragged the
+    /// sampling interval from a few milliseconds to about 300 and stretched
+    /// the 340ms switch past 900ms. A filmstrip that changes the motion it
+    /// is filming is not evidence.
+    /// </summary>
+    /// <remarks>
+    /// get-state is deliberately NOT here. It settles today and the drag
+    /// harnesses read their assertions off it, so the pass is part of its
+    /// contract; layout-frame is new and owes no one that.
+    /// </remarks>
+    private static bool IsObserver(string op) => op is "layout-frame";
+
+    /// <summary>
     /// The one marshal: every command, whatever it touches, runs on the
     /// window's UI thread and the response awaits the work.
     /// </summary>
     private static Task<string> RunOnUiThreadAsync(
-        MainWindow window, Func<Task<string>> action)
+        MainWindow window, Func<Task<string>> action, bool settle = true)
     {
         var done = new TaskCompletionSource<string>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -184,7 +203,7 @@ internal static class TestSeam
                 {
                     var result = await action();
                     // Settled means settled: layout, not just the manager.
-                    window.TestSeamSettleLayout();
+                    if (settle) window.TestSeamSettleLayout();
                     done.SetResult(result);
                 }
                 catch (Exception ex) { done.SetResult(Error("ui", ex.Message)); }
@@ -314,12 +333,28 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "layout-frame":
+                // One filmstrip frame's worth of truth, and the reason the
+                // op exists at all: manager state is identical across a
+                // switch that flashes and one that does not, so a frame has
+                // to carry what the strips were HOLDING.
+                return LayoutFrameJson(window, manager);
+
             case "toggle-layout":
             {
                 // The keyboard path's own dispatch: the router event the
                 // chord raises, so the seam cannot drift from the real
                 // action.
                 window.TestSeamRouter.RequestToggleTabLayout();
+
+                // "await":false answers the moment the switch is under way,
+                // leaving the driver free to film it. The pipe serves one
+                // command at a time, so a blocking toggle would hold the
+                // only channel a sampler could use for the whole flight --
+                // the transition would be unobservable through the seam
+                // that started it.
+                if (!ArgBool(args, "await", true))
+                    return OkWithState(window, manager, op);
 
                 // The ack waits out the morph. ToggleTabLayout no-ops while
                 // LayoutCoordinator is mid-switch, so a driver that did not
@@ -714,6 +749,84 @@ internal static class TestSeam
             json.WriteEndObject();
         });
 
+    /// <summary>
+    /// One frame of the layout-switch filmstrip: the manager state every
+    /// op reports, plus the rendered inventory of BOTH hosts and what the
+    /// morph layer is carrying.
+    ///
+    /// Both hosts always, never just the live one: a switch is exactly the
+    /// stretch where both are on screen at once, and the defects worth
+    /// catching (a collapsed run rendering its members, a row flying
+    /// outside its strip, a selected tab that is briefly nowhere) live in
+    /// that overlap.
+    /// </summary>
+    private static string LayoutFrameJson(MainWindow window, TabManager manager)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", "layout-frame");
+            // The app's own clock, so frames order by something the driver
+            // did not have to guess from its own send time.
+            json.WriteNumber("appMs", Environment.TickCount64);
+            WriteState(json, window, manager);
+
+            json.WriteStartObject("render");
+            json.WriteNumber("morphLayer", window.TestSeamMorphLayerCount);
+            var root = window.TestSeamRoot;
+            var (horizontal, vertical) = window.TestSeamHosts;
+            WriteHost(json, "horizontal", root, horizontal);
+            WriteHost(json, "vertical", root, vertical);
+            json.WriteEndObject();
+
+            json.WriteEndObject();
+        });
+
+    private static void WriteHost(
+        Utf8JsonWriter json, string name,
+        Microsoft.UI.Xaml.FrameworkElement? root, Ghostty.Tabs.ITabHost host)
+    {
+        json.WriteStartObject(name);
+        var element = host.HostElement;
+        json.WriteBoolean(
+            "visible",
+            element.Visibility == Microsoft.UI.Xaml.Visibility.Visible);
+        json.WriteNumber("opacity", element.Opacity);
+        // The host's own rect, so "is this row inside its strip?" is
+        // answerable from the frame alone rather than from a lane width
+        // the driver would have to reconstruct.
+        var lane = root is null
+            ? default
+            : Ghostty.Testing.TestSeamStripRowMeasure.Row(
+                root, element, "host", name, null, false);
+        json.WriteNumber("hx", Math.Round(lane.Bounds.X, 1));
+        json.WriteNumber("hy", Math.Round(lane.Bounds.Y, 1));
+        json.WriteNumber("hw", Math.Round(lane.Bounds.Width, 1));
+        json.WriteNumber("hh", Math.Round(lane.Bounds.Height, 1));
+        json.WriteStartArray("rows");
+        // No root means no window content, which only happens mid-teardown.
+        // An empty inventory is the honest answer, not a throw.
+        if (root is not null)
+        {
+            foreach (var row in host.TestSeamRows(root))
+            {
+                json.WriteStartObject();
+                json.WriteString("kind", row.Kind);
+                json.WriteString("label", row.Label);
+                if (row.Group is { } group) json.WriteString("group", group);
+                json.WriteBoolean("active", row.Active);
+                json.WriteBoolean("shown", row.Shown);
+                json.WriteNumber("alpha", Math.Round(row.Alpha, 4));
+                json.WriteNumber("x", Math.Round(row.Bounds.X, 1));
+                json.WriteNumber("y", Math.Round(row.Bounds.Y, 1));
+                json.WriteNumber("w", Math.Round(row.Bounds.Width, 1));
+                json.WriteNumber("h", Math.Round(row.Bounds.Height, 1));
+                json.WriteEndObject();
+            }
+        }
+        json.WriteEndArray();
+        json.WriteEndObject();
+    }
 
     private static string OkWithState(MainWindow window, TabManager manager, string op)
         => Json(json =>
