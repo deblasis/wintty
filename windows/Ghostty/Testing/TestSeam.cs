@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghostty.Core.Tabs;
+using Ghostty.Panes;
 using Microsoft.UI.Dispatching;
 
 namespace Ghostty.Testing;
@@ -436,6 +437,57 @@ internal static class TestSeam
                 });
             }
 
+            case "send-text":
+            {
+                var text = ArgString(args, "text");
+                if (string.IsNullOrEmpty(text)) return Error(op, "send-text needs text");
+                var index = ArgInt(args, "index", manager.IndexOf(manager.ActiveTab));
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                // The shell's own input path: one ghostty_surface_text on the
+                // pane the tab is focused on. "\n" is spelled out by the
+                // driver as "\r" -- a submitted line is the caller's decision,
+                // not this op's.
+                if (!tab.PaneHost.ActiveLeaf.Terminal().TestSeamSendText(text))
+                    return Error(op, $"tab {index} has no live surface");
+                return OkWithState(window, manager, op);
+            }
+
+            case "tab-labels":
+            {
+                // What the shell reported and what the strip drew, per tab.
+                // The cwd side proves the OSC 7 / OSC 9;9 round trip reached
+                // the app; the rendered side proves the label followed.
+                var strip = window.TestSeamVerticalStrip;
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", true);
+                    json.WriteString("op", op);
+                    json.WriteStartArray("labels");
+                    for (int i = 0; i < manager.Tabs.Count; i++)
+                    {
+                        var tab = manager.Tabs[i];
+                        json.WriteStartObject();
+                        json.WriteNumber("index", i);
+                        json.WriteString("title", tab.EffectiveTitle);
+                        if (tab.PaneHost.ActiveLeaf.LastCwd is { } cwd)
+                            json.WriteString("cwd", cwd);
+                        if (tab.ShellReportedTitle is { } shell)
+                            json.WriteString("shellTitle", shell);
+                        json.WriteString("iconKey", IconKey(tab.TabIcon.Icon));
+                        if (strip?.TestSeamRenderedRow(tab) is { } row)
+                        {
+                            json.WriteString("rendered", row.Title);
+                            json.WriteString("renderedIcon", RenderedIcon(row.Icon));
+                        }
+                        json.WriteEndObject();
+                    }
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+            }
+
             case "switcher-preview-rect":
             {
                 // Where a pixel oracle should point at the pane preview the
@@ -778,6 +830,36 @@ internal static class TestSeam
 
     private static TabModel? TabAt(TabManager manager, int index)
         => index >= 0 && index < manager.Tabs.Count ? manager.Tabs[index] : null;
+
+    /// <summary>
+    /// The spec a tab's icon VM currently names, flattened to one token so a
+    /// driver can assert two shells differ without knowing the record shapes.
+    /// </summary>
+    private static string IconKey(Ghostty.Core.Profiles.IconSpec spec) => spec switch
+    {
+        Ghostty.Core.Profiles.IconSpec.BundledKey b => "bundled:" + b.Key,
+        Ghostty.Core.Profiles.IconSpec.BrandKey b => "brand:" + b.Key,
+        Ghostty.Core.Profiles.IconSpec.Mdl2Token m => "mdl2:" + m.CodePoint,
+        Ghostty.Core.Profiles.IconSpec.Path p => "path:" + p.FilePath,
+        Ghostty.Core.Profiles.IconSpec.AutoForExe e => "exe:" + e.ExePath,
+        Ghostty.Core.Profiles.IconSpec.AutoForWslDistro w => "wsl:" + w.DistroName,
+        _ => "unknown",
+    };
+
+    /// <summary>
+    /// What the nav item is actually wearing. "image" only when the element
+    /// carries a decoded source: an ImageIcon whose bytes never resolved
+    /// renders empty, and a driver asserting "the icon is present" has to be
+    /// able to tell those apart.
+    /// </summary>
+    private static string RenderedIcon(Microsoft.UI.Xaml.Controls.IconElement? icon) => icon switch
+    {
+        Microsoft.UI.Xaml.Controls.ImageIcon { Source: not null } => "image",
+        Microsoft.UI.Xaml.Controls.ImageIcon => "image-empty",
+        Microsoft.UI.Xaml.Controls.FontIcon f => "glyph:" + f.Glyph,
+        null => "none",
+        _ => icon.GetType().Name,
+    };
 }
 
 /// <summary>
