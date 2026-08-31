@@ -201,7 +201,7 @@ public class PinnedPanelWiringTests
     [Fact]
     public void ClickingAShelfRow_ActivatesThroughTheSubThresholdRelease()
     {
-        var released = Strip().Method("OnDragPointerReleased");
+        var released = Strip().Method("DragRelease");
 
         // The guard names the press-time container. Dropping the conjunct
         // activates on every sub-threshold release -- body rows would then
@@ -274,7 +274,7 @@ public class PinnedPanelWiringTests
     [Fact]
     public void TheDrag_ArmsOnARowInEitherContainer()
     {
-        var pressed = Strip().Method("OnDragPointerPressed");
+        var pressed = Strip().Method("DragPress");
 
         // The pinned row ancestry is in the resolution chain.
         Assert.Contains(pressed.DescendantNodes().OfType<InvocationExpressionSyntax>(),
