@@ -213,6 +213,19 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
     private void OnActiveLeafProgressChanged(object? sender, Ghostty.Core.Tabs.TabProgressState state)
         => ProgressChanged?.Invoke(this, state);
 
+    /// <summary>
+    /// Raised when the directory the tab should name changes: the active
+    /// leaf's shell reported a new one, or a focus change handed the tab a
+    /// different leaf. Mirrors <see cref="ProgressChanged"/> in scope --
+    /// background panes record their own cwd but do not retitle the tab.
+    /// Null means "this pane has not reported one".
+    /// </summary>
+    public event EventHandler<string?>? CwdChanged;
+
+    // The cwd lives on the leaf, not the terminal, so a focus change needs
+    // no resubscription -- only a re-emit of the newly active leaf's value.
+    private void EmitActiveLeafCwd() => CwdChanged?.Invoke(this, _activeLeaf.LastCwd);
+
     /// <summary>Raised when the active leaf's terminal rings the bell,
     /// carrying the decoded bell-features. Rewired across leaf-focus
     /// changes, mirroring <see cref="ProgressChanged"/>.</summary>
@@ -686,8 +699,14 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
                     TimeSpan.FromSeconds(1),
                     TimeSpan.FromSeconds(1));
         };
-        // Rebind progress and bell whenever the active leaf changes later.
-        LeafFocused += (_, _) => { BindActiveLeafProgress(); BindActiveLeafBell(); };
+        // Rebind progress and bell whenever the active leaf changes later,
+        // and hand the tab the newly active leaf's directory.
+        LeafFocused += (_, _) =>
+        {
+            BindActiveLeafProgress();
+            BindActiveLeafBell();
+            EmitActiveLeafCwd();
+        };
     }
 
     // Public operations -------------------------------------------------
@@ -1615,6 +1634,7 @@ internal sealed partial class PaneHost : UserControl, IPaneHost
         var leaf = PaneTree.Leaves(_root).FirstOrDefault(l => ReferenceEquals(l.Terminal(), tc));
         if (leaf is null) return;
         leaf.LastCwd = pwd;
+        if (ReferenceEquals(leaf, _activeLeaf)) EmitActiveLeafCwd();
     }
 
     private void OnTerminalContextMenuRequested(object? sender, Windows.Foundation.Point? position)

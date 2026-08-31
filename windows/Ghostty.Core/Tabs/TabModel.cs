@@ -110,6 +110,24 @@ internal sealed class TabModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// The directory the active pane's shell last reported (OSC 7 / OSC 9;9),
+    /// pushed by <see cref="TabManager"/> from
+    /// <c>IPaneHost.CwdChanged</c>. Null until a shell reports one -- a
+    /// profile without shell integration never will.
+    /// </summary>
+    public string? ShellReportedCwd
+    {
+        get;
+        set
+        {
+            if (field == value) return;
+            field = value;
+            Raise();
+            Raise(nameof(EffectiveTitle));
+        }
+    }
+
     public TabProgressState Progress
     {
         get;
@@ -172,8 +190,11 @@ internal sealed class TabModel : INotifyPropertyChanged
 
     // Title precedence: explicit user override beats anything; then
     // the shell's OSC 0/2 reported title (which knows what the user
-    // is actually running, e.g. "vim file.txt"); then the profile's
-    // display name (so a tab opened from the new-tab split
+    // is actually running, e.g. "vim file.txt"), minus the console's
+    // default exe-path title, which names the interpreter the icon
+    // already shows; then the folder the shell reported it is sitting
+    // in, which is what a tab at a prompt is actually about; then the
+    // profile's display name (so a tab opened from the new-tab split
     // button reads its profile Name rather than the generic fallback
     // before the shell sends a title); then the product name for the
     // no-profile / pre-OSC-2 cold-start case.
@@ -185,7 +206,8 @@ internal sealed class TabModel : INotifyPropertyChanged
     // the tab with a blank label and a blank name.
     public string EffectiveTitle =>
         Titled(UserOverrideTitle)
-        ?? Titled(ShellReportedTitle)
+        ?? Titled(TabLabel.Meaningful(ShellReportedTitle))
+        ?? Titled(TabLabel.FolderName(ShellReportedCwd))
         ?? Titled(ProfileSnapshot?.DisplayName)
         ?? AppIdentity.ProductName;
 
