@@ -606,5 +606,22 @@ public class VerticalTabGroupDragWiringTests
                .Single(v => v.Identifier.ValueText == "inZone")
                .Initializer!.Value.ToFullString(),
             StringComparison.Ordinal);
+
+        // The mid-drag crossing arm PINS only: the gate is the Pin
+        // classification, and the Unpin classification hangs off it as an
+        // else that rewinds the machine to the row's still-true slot and
+        // refuses the crossing. Release classification owns the out, so
+        // no unpin may fire mid-drag.
+        var evaluated = Strip().Method("EvaluateDrag");
+        var crossingGate = evaluated.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "zone.Op == TabPinZoneOp.Pin");
+        var refuse = Assert.IsType<IfStatementSyntax>(crossingGate.Else!.Statement);
+        Assert.Equal("zone.Op == TabPinZoneOp.Unpin", refuse.Condition.ToString());
+        Assert.Contains(refuse.Statement.DescendantNodes().OfType<BreakStatementSyntax>().ToList(),
+            b => true);
+        Assert.Contains("drag.Machine.UpdateIndex(crossing.From);",
+            refuse.Statement.ToFullString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("SetPinned(drag.Tab, false)", crossingGate.ToFullString(),
+            StringComparison.Ordinal);
     }
 }

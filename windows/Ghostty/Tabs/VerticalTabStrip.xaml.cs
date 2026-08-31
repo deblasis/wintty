@@ -2408,8 +2408,12 @@ internal sealed partial class VerticalTabStrip : UserControl
             }
             catch (Exception ex) when (IsLayoutReadFailure(ex))
             {
-                // No honest shelf bounds: keep the mid-drag state (the row
-                // stays pinned) rather than guess at the pointer.
+                // No honest shelf bounds: NaN fails the IsNaN gate below,
+                // so the release is treated as OUT of the zone and the
+                // unpin arm runs. That polarity is deliberate -- unpin
+                // unless provably in-zone -- and safe to act on without
+                // the bounds, because BodySlotAtY reads the body pairing
+                // and never the shelf's layout.
             }
             var inZone = !double.IsNaN(shelfTop)
                 && releaseY >= shelfTop && releaseY <= shelfBottom;
@@ -3437,19 +3441,31 @@ internal sealed partial class VerticalTabStrip : UserControl
             // A crossing over the pin boundary is a zone change Move alone
             // would clamp away: SetPinned first relocates the row to the
             // boundary, then the Move places it at the crossing's slot in
-            // the new zone -- the drop position, not append-last.
+            // the new zone -- the drop position, not append-last. The arm
+            // PINS only: pin-out is release-classified, so a mid-drag
+            // Unpin classification is stale centers speaking, and it is
+            // refused below rather than obeyed.
             var zone = TabPinBoundary.Classify(
                 drag.Tab.IsPinned, _manager.PinCount, _manager.Tabs.Count, managerTo);
             _commitChurn = true;
             try
             {
-                if (zone.Op != TabPinZoneOp.None)
+                if (zone.Op == TabPinZoneOp.Pin)
                 {
-                    bool pin = zone.Op == TabPinZoneOp.Pin;
-                    _manager.SetPinned(drag.Tab, pin);
-                    DragTrace($"DRAG {(pin ? "pin" : "unpin")} {crossing.From}->{crossing.To}");
+                    _manager.SetPinned(drag.Tab, true);
+                    DragTrace($"DRAG pin {crossing.From}->{crossing.To}");
                     from = _manager.IndexOf(drag.Tab);
                     if (from < 0) { CancelDrag("closed"); return; }
+                }
+                else if (zone.Op == TabPinZoneOp.Unpin)
+                {
+                    // Mid-drag unpin is noise, never intent: nothing was
+                    // committed, so the row still sits at crossing.From.
+                    // Rewind the machine to it and refuse the crossing --
+                    // no SetPinned, no Move; the release arm owns the out.
+                    drag.Machine.UpdateIndex(crossing.From);
+                    DragTrace($"DRAG refused {crossing.From}->{crossing.To}");
+                    break;
                 }
                 _manager.Move(from, managerTo);
             }
