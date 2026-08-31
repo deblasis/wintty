@@ -10,6 +10,21 @@
 
     <UserControl.Resources>
         <SolidColorBrush x:Key="StripAccentBrush" Color="{ThemeResource SystemAccentColor}" />
+
+        <!-- Never instantiated; the reference is the point. The group header
+             item is constructed only from C#, and a type never named in
+             markup gets no entry in the generated IXamlMetadataProvider.
+             When XAML then meets the first realized instance during a
+             measure pass it caches the type as unknown and degrades it to
+             the nearest built-in DO type, ContentControl (in lifted WinUI 3
+             the whole MUXC control set is not built-in), so the
+             NavigationViewItem style TargetType check rejects the container
+             and the process fail-fasts (0x800F1000). Naming the type here
+             makes the XamlTypeInfo generator emit its metadata entry, which
+             keeps its real type identity at resolve time. -->
+        <DataTemplate x:Key="VerticalTabGroupHeaderItemMetadataAnchor">
+            <tabs:VerticalTabGroupHeaderItem />
+        </DataTemplate>
     </UserControl.Resources>
 
     <!-- NavView is pane-only: terminal lives in MainWindow.PaneHostContainer.

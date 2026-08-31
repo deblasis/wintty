@@ -1,4 +1,6 @@
 using System.Linq;
+using System.Reflection;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Xunit;
@@ -384,5 +386,43 @@ public class VerticalTabGroupHeaderWiringTests
             peer.Method("Expand").ExpressionBody!.ToString());
         Assert.Contains("collapsed: true",
             peer.Method("Collapse").ExpressionBody!.ToString());
+    }
+
+    /// <summary>
+    /// The header item is constructed only from C#, and a type never named
+    /// in markup gets no entry in the generated IXamlMetadataProvider: on
+    /// the first realization the XAML resolver caches it as unknown and
+    /// degrades it to the nearest built-in type (ContentControl -- in
+    /// lifted WinUI 3 the MUXC control set is not built-in), so
+    /// NavigationView's style TargetType check rejects the container and
+    /// the process fail-fasts (0x800F1000). The strip's markup anchor is
+    /// the one thing that makes the XamlTypeInfo generator emit the entry;
+    /// this fact pins the anchor and the comment that explains it.
+    /// </summary>
+    [Fact]
+    public void TheHeaderItem_IsAnchoredInMarkup_SoTheMetadataProviderKeepsItsType()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        const string Resource = "Ghostty.Tests.Tabs.VerticalTabStrip.xaml";
+        using var stream = assembly.GetManifestResourceStream(Resource);
+        Assert.NotNull(stream);
+
+        var doc = XDocument.Load(stream!);
+        XNamespace tabs = "using:Ghostty.Tabs";
+        var anchor = Assert.Single(doc.Descendants(tabs + "VerticalTabGroupHeaderItem"));
+
+        // Inside a keyed, never-instantiated DataTemplate in the control's
+        // own resources: present for the generator, inert at runtime.
+        XNamespace pres = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        var template = anchor.Parent!;
+        Assert.Equal(pres + "DataTemplate", template.Name);
+        Assert.Equal(pres + "UserControl.Resources", template.Parent!.Name);
+
+        // The why-comment rides beside it and names the degradation, so the
+        // anchor cannot be tidied away as an unused resource.
+        var comments = template.Parent!.Nodes().OfType<XComment>()
+            .Select(c => c.Value).ToList();
+        Assert.Contains(comments,
+            c => c.Contains("IXamlMetadataProvider") && c.Contains("ContentControl"));
     }
 }
