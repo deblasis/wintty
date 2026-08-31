@@ -565,8 +565,11 @@ try {
         throw "PRODUCT_FAIL: seeded order is [$($gotNames -join ',')], expected [$($names -join ',')]"
     }
 
-    # Row 3 keeps the selection; row 2 does the dragging. The band to track
-    # is row 3's.
+    # Row 3 is selected, and row 3 IS the dragged row: the differential
+    # matrix proved that grabbing a row other than the selected one gets
+    # the pointer canceled mid-gesture (the press's selection change
+    # churns the arm path -- begin, cancel reason=canceled, end). The
+    # tracked band therefore rides the drag itself, rising past row 2.
     $row3 = $rows | Where-Object { $_.Name -eq 'fuzzfilm-3' }
     $selPat = $row3.El.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     $selPat.Select()
@@ -672,30 +675,34 @@ try {
     # oracle's windows are measured from it. The grab sits at 35% of the
     # row's width: the same actuation point the tab-drag harness's
     # committing legs use, not the row's dead centre.
-    $grabX = [int]($row2.Rect.X + $row2.Rect.Width * 0.35)
-    $grabY = [int]($row2.Rect.Y + $row2.Rect.Height / 2)
+    $grabX = [int]($row3.Rect.X + $row3.Rect.Width * 0.35)
+    $grabY = [int]($row3.Rect.Y + $row3.Rect.Height / 2)
     # The earliest y the crossing can register at: the neighbour's midpoint
-    # plus the machine's crossing hysteresis. Measuring the windows from
-    # here, the first waypoint past it, is the conservative reading - if
-    # the commit actually fired later, the measured gap only looks better
-    # than it is, never worse.
-    $crossY = [int]($row3.Rect.Y + $row3.Rect.Height / 2 + $script:HysteresisPx)
+    # MINUS the machine's crossing hysteresis -- the drag runs UPWARD (row
+    # 3 crosses row 2), so the crossing fires when the dragged center
+    # passes the neighbour's center by hysteresis on the way up.
+    # Measuring the windows from here, the first waypoint past it, is the
+    # conservative reading - if the commit actually fired later, the
+    # measured gap only looks better than it is, never worse.
+    $crossY = [int]($row2.Rect.Y + $row2.Rect.Height / 2 - $script:HysteresisPx)
     # The waypoints must OVERSHOOT that line by real margin - the machine
     # needs the dragged center strictly past it - while stopping short of
-    # row 4's own hysteresis band so the release cannot commit a second
-    # crossing past it.
-    $overshoot = [Math]::Max(12, [int]($rowH * 0.5))
-    $endY = [int]($row3.Rect.Y + $row3.Rect.Height / 2 + $script:HysteresisPx + $overshoot)
+    # row 1's own hysteresis band so the release cannot commit a second
+    # crossing past it. The release follows the crossing closely: a long
+    # hold past the line gives the follow-coupled center time to reach
+    # the NEXT line and commit a second crossing.
+    $overshoot = [Math]::Max(12, [int]($rowH * 0.25))
+    $endY = [int]($row2.Rect.Y + $row2.Rect.Height / 2 - $script:HysteresisPx - $overshoot)
     $schedule = [System.Collections.Generic.List[object]]::new()
     $schedule.Add([pscustomobject]@{ at = 300; act = 'press'; x = $grabX; y = $grabY })
     $moveT = 380; $crossAt = -1
     while ($moveT -le 1660) {
         $y = $grabY + [int](($endY - $grabY) * ($moveT - 380) / (1660 - 380))
         $schedule.Add([pscustomobject]@{ at = $moveT; act = 'move'; x = $grabX; y = $y })
-        if ($crossAt -lt 0 -and $y -ge $crossY) { $crossAt = $moveT }
+        if ($crossAt -lt 0 -and $y -le $crossY) { $crossAt = $moveT }
         $moveT += 70
     }
-    $releaseAt = 1740
+    $releaseAt = $crossAt + 150
     $schedule.Add([pscustomobject]@{ at = $releaseAt; act = 'release' })
     if ($crossAt -lt 0) { throw 'HARVEST_MISS: gesture never schedules a crossing of row 3' }
     Write-Host "gesture: press@300 cross@$crossAt release@$releaseAt"
@@ -726,7 +733,11 @@ try {
     # scan starts one row above the calibrated position: the crop's top
     # chrome (the window border) carries bright pixels that would match a
     # white stroke from y=0 and pin the tracker to the border forever.
-    $scanFrom = [Math]::Max(1, $bandTop0 - $rowH)
+    # The scan origin sits half a row ABOVE one row up: the committed
+    # row's new band top lands almost exactly one row up, and the settle
+    # spring overshoots past it before coming back -- the scan must cover
+    # the overshoot or the glide's most interesting frames read -1.
+    $scanFrom = [Math]::Max(1, $bandTop0 - $rowH - [int]($rowH * 0.5))
     $tops = New-Object int[] $frames.Count
     for ($i = 0; $i -lt $frames.Count; $i++) {
         $px = Get-Pixels $frames[$i].bmp
