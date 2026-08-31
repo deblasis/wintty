@@ -545,4 +545,83 @@ public class VerticalTabGroupDragWiringTests
             + "frame can be MUXC's own container realization.");
         Assert.Equal("RebuildAllItems", retry.Arg(1));
     }
+
+    /// <summary>
+    /// PIN-OUT is RELEASE-CLASSIFIED: a row the drag pinned mid-gesture
+    /// ends where the user let go. Released over the shelf/zone: stay
+    /// pinned (the in-zone landing). Released outside: unpin and place
+    /// at the body slot under the release point. The position is fresh
+    /// pointer truth -- never machine centers, whose staleness after a
+    /// pin is the trap this replaces. The mid-drag crossing arm PINS only:
+    /// an Unpin classification there rewinds and refuses, so the one-
+    /// grammar contract (pin-in by crossing, out by release) is true in
+    /// bytes.
+    /// </summary>
+    [Fact]
+    public void Pin_out_is_release_classified()
+    {
+        var released = Strip().Method("OnDragPointerReleased");
+        var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "drag.Tab.IsPinned");
+        var arm = Assert.IsType<BlockSyntax>(gate.Statement);
+
+        // The branch reads fresh pointer truth and the shelf bounds: the
+        // release Y against the pinned panel, the body slot under the
+        // point from the strip's own pairing.
+        Assert.Contains(arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText().EndsWith("GetCurrentPoint", StringComparison.Ordinal)).ToList(),
+            c => true);
+        Assert.Contains(arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(c => c.CalleeText() == "BodySlotAtY").ToList(),
+            c => true);
+
+        // The out-of-zone arm unpins and places -- never a bare keep.
+        Assert.Contains("SetPinned(drag.Tab, false);", arm.ToFullString(),
+            StringComparison.Ordinal);
+
+        // POLARITY: the SetPinned(false) invocation sits INSIDE the
+        // !inZone gate -- the unpin fires only when the release point is
+        // provably outside the shelf bounds. Hoisted out (always-unpin)
+        // or inverted (unpin only when in-zone), both go red here. The
+        // mutation record must be verified in the same run as the claim.
+        var unpin = arm.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Single(c => c.CalleeText() == "_manager.SetPinned");
+        var polarityGate = unpin.Ancestors().OfType<IfStatementSyntax>()
+            .First(a => a.Condition.ToString() == "!inZone");
+        Assert.True(
+            polarityGate.SpanStart < unpin.SpanStart,
+            "the unpin must sit inside the !inZone gate: the polarity is the "
+            + "fix -- hoisted out it always unpins, inverted it never does.");
+
+        // The inZone initializer is the second prong: the ancestors-pin
+        // cannot catch a VALUE-level flip (swapping >=/<= inside inZone's
+        // initializer still passes everything). The initializer must
+        // compare releaseY against BOTH shelf bounds.
+        Assert.Contains("releaseY >= shelfTop && releaseY <= shelfBottom",
+            arm.DescendantNodes()
+               .OfType<VariableDeclaratorSyntax>()
+               .Single(v => v.Identifier.ValueText == "inZone")
+               .Initializer!.Value.ToFullString(),
+            StringComparison.Ordinal);
+
+        // The mid-drag crossing arm PINS only: the gate is the Pin
+        // classification, and the Unpin classification hangs off it as an
+        // else that rewinds the machine to the row's still-true slot and
+        // refuses the crossing. Release classification owns the out, so
+        // no unpin may fire mid-drag.
+        var evaluated = Strip().Method("EvaluateDrag");
+        var crossingGate = evaluated.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "zone.Op == TabPinZoneOp.Pin");
+        var refuse = Assert.IsType<IfStatementSyntax>(crossingGate.Else!.Statement);
+        Assert.Equal("zone.Op == TabPinZoneOp.Unpin", refuse.Condition.ToString());
+        Assert.Contains(refuse.Statement.DescendantNodes().OfType<BreakStatementSyntax>().ToList(),
+            b => true);
+        Assert.Contains("drag.Machine.UpdateIndex(crossing.From);",
+            refuse.Statement.ToFullString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("SetPinned(drag.Tab, false)", crossingGate.ToFullString(),
+            StringComparison.Ordinal);
+    }
 }

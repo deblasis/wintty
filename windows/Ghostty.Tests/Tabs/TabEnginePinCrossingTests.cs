@@ -180,4 +180,44 @@ public class TabEnginePinCrossingTests
             + "never to provoke.");
         Assert.Equal(new[] { lone, runHead, runMate }, mgr.Tabs.ToArray());
     }
+
+    /// <summary>
+    /// The vertical engine's pin-boundary ROUND TRIP, release-classified:
+    /// the mid-drag crossing into the zone pins (the classify fires Pin,
+    /// the row relocates to the prefix, the commit places it at the zone
+    /// head); the RELEASE then decides by position -- out of the zone
+    /// unpins and places at the body slot under the release point; in the
+    /// zone keeps the pin. The boundary-out leg's contract: the drag ends
+    /// UNPINNED at the row's pre-leg home, never stranded in the prefix.
+    /// </summary>
+    [Fact]
+    public void The_pin_round_trip_unpins_when_the_release_leaves_the_zone()
+    {
+        var mgr = NewManager(4);
+        mgr.SetPinned(mgr.Tabs[0], true);
+        var dragged = mgr.Tabs[2];
+
+        // The mid-drag pin crossing: SetPinned relocates the row into the
+        // prefix; the commit places it at the zone head.
+        mgr.SetPinned(dragged, true);
+        mgr.Move(mgr.IndexOf(dragged), 0);
+        Assert.True(dragged.IsPinned);
+        Assert.Equal(0, mgr.IndexOf(dragged));
+
+        // RELEASE-OUT: the release point left the zone. Unpin relocates
+        // the row to the first body slot; the placement Move carries it
+        // home (the slot it occupied before the leg).
+        mgr.SetPinned(dragged, false);
+        var home = mgr.IndexOf(dragged);
+        mgr.Move(home, 2);
+
+        Assert.False(dragged.IsPinned);
+        Assert.Equal(2, mgr.IndexOf(dragged));
+        Assert.Equal(new[] { mgr.Tabs[0], mgr.Tabs[1], dragged, mgr.Tabs[3] }, mgr.Tabs.ToArray());
+
+        // RELEASE-IN: the release point stays over the shelf/zone -- the
+        // row keeps the pin (the in-zone landing needs no relocation).
+        mgr.SetPinned(dragged, true);
+        Assert.True(dragged.IsPinned);
+    }
 }
