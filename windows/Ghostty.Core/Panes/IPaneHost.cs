@@ -40,6 +40,14 @@ internal interface IPaneHost
     /// tab-level indicator.</summary>
     event EventHandler<TabProgressState>? ProgressChanged;
 
+    /// <summary>Raised when the directory the tab should name changes:
+    /// the active leaf's shell reported a new one (OSC 7 / OSC 9;9), or a
+    /// focus change handed the tab a different leaf. Same scope as
+    /// <see cref="ProgressChanged"/> -- background panes record their own
+    /// cwd on the leaf but do not retitle the tab. Null means the pane has
+    /// not reported one (no shell integration, or not at a prompt yet).</summary>
+    event EventHandler<string?>? CwdChanged;
+
     /// <summary>Raised when the active leaf rings the bell (libghostty
     /// ring-bell action). Only the active leaf is forwarded, matching
     /// <see cref="ProgressChanged"/>; background panes ring audibly but

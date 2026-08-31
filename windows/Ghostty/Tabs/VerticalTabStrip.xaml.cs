@@ -4218,6 +4218,20 @@ internal sealed partial class VerticalTabStrip : UserControl
     internal double TestSeamPaneWidth => _paneWidth;
 
     /// <summary>
+    /// What the strip is actually showing for <paramref name="tab"/>: the
+    /// body row's own TextBlock, and the icon element the factory built for
+    /// the nav item. Both come off the live tree, so a label assertion can
+    /// fail even when the model behind it is right. Null when the tab has no
+    /// body row (it lives in the pinned prefix, or the strip has not built
+    /// its item yet).
+    /// </summary>
+    internal (string Title, IconElement? Icon)? TestSeamRenderedRow(TabModel tab)
+        => _items.TryGetValue(tab, out var item)
+           && item.Content is VerticalTabNavRow row
+            ? (row.TestSeamRenderedTitle, item.Icon)
+            : null;
+
+    /// <summary>
     /// One seam drag: press the row of manager index <paramref name="from"/>,
     /// walk the pointer to the slot of manager index <paramref name="to"/>,
     /// release. The outcome carries the manager order after the settle so the

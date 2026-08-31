@@ -77,6 +77,13 @@ internal sealed partial class VerticalTabNavRow : Grid
         Children.Add(_close);
     }
 
+    /// <summary>
+    /// The text this row is actually showing. Read by the test seam so a
+    /// label assertion sees the rendered TextBlock, not the model property
+    /// that was supposed to reach it.
+    /// </summary>
+    internal string TestSeamRenderedTitle => _title.Text;
+
     internal void Refresh(TabModel tab)
     {
         _title.Text = tab.EffectiveTitle;

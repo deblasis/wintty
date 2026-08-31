@@ -108,6 +108,40 @@ pub fn windowsToWsl(alloc: Allocator, win_path: []const u8) Allocator.Error!?[]u
     return try buf.toOwnedSlice(alloc);
 }
 
+/// Whether `path` is an absolute Windows path in a form no URI can be mistaken
+/// for: a drive root (`C:\`, `c:/`) or a UNC root (`\\server\share`). This is
+/// the shape a Windows-native shell reports its cwd in -- cmd's `PROMPT $p` and
+/// the PowerShell integration's OSC 9;9 both emit it raw, because cmd has no way
+/// to build a URI at all. A `file:`/`kitty-shell-cwd:` URL never matches: its
+/// scheme is longer than one character.
+pub fn isWindowsAbsolute(path: []const u8) bool {
+    if (std.mem.startsWith(u8, path, "\\\\")) return true;
+    if (path.len < 3) return false;
+    if (!std.ascii.isAlphabetic(path[0]) or path[1] != ':') return false;
+    return path[2] == '\\' or path[2] == '/';
+}
+
+/// Translate the path component of an OSC 7 `file://` URL reported by a
+/// Windows-native shell into a plain Windows path:
+///
+///   /c:/Users/alex  -> c:\Users\alex
+///
+/// The leading slash is the URI's own path root, not part of the path. Anything
+/// that is not drive-rooted once it is gone yields error.InvalidPath: a UNC
+/// share arrives here as `//server/share`, which the shells deliberately report
+/// via OSC 9;9 instead, and guessing at it would produce a confidently-wrong
+/// cwd. Caller owns the returned slice.
+pub fn uriPathToWindows(alloc: Allocator, uri_path: []const u8) Error![]u8 {
+    const p = if (uri_path.len > 0 and uri_path[0] == '/') uri_path[1..] else uri_path;
+    if (p.len < 2 or p[1] != ':' or !std.ascii.isAlphabetic(p[0])) return error.InvalidPath;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    try buf.appendSlice(alloc, p[0..2]);
+    try appendBackslashed(alloc, &buf, p[2..]);
+    return buf.toOwnedSlice(alloc);
+}
+
 const Mount = struct { drive: u8, rest: []const u8 };
 
 /// Match `<prefix><drive>(/...)?` where `<drive>` is a single ASCII letter and
@@ -269,6 +303,68 @@ test "posix_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
         const got = try rootedToWindows(aa, path, "C:\\msys64");
         try std.testing.expectEqualStrings("C:\\Users\\alex", got);
     }
+}
+
+test "posix_path: isWindowsAbsolute separates raw paths from URLs" {
+    // What cmd's `PROMPT $p` and the PowerShell integration's OSC 9;9 emit.
+    try std.testing.expect(isWindowsAbsolute("C:\\Users\\alex"));
+    try std.testing.expect(isWindowsAbsolute("c:/Users/alex"));
+    try std.testing.expect(isWindowsAbsolute("C:\\"));
+    try std.testing.expect(isWindowsAbsolute("\\\\server\\share"));
+    try std.testing.expect(isWindowsAbsolute("\\\\wsl.localhost\\Ubuntu\\home"));
+
+    // Every URL form the OSC 7 shells emit stays on the URI path.
+    try std.testing.expect(!isWindowsAbsolute("file://host/c:/Users/alex"));
+    try std.testing.expect(!isWindowsAbsolute("kitty-shell-cwd://wsl/home/alex"));
+    try std.testing.expect(!isWindowsAbsolute(""));
+    try std.testing.expect(!isWindowsAbsolute("C:"));
+    try std.testing.expect(!isWindowsAbsolute("relative\\path"));
+    // A drive-relative path names no directory on its own.
+    try std.testing.expect(!isWindowsAbsolute("C:Users"));
+}
+
+// The native-shell twin of the reportPwd seam test above: the PowerShell
+// integration's OSC 7 URL through the same parse chain, then out the
+// no-translation arm.
+test "posix_path: OSC 7 file:// from a native Windows shell (reportPwd seam)" {
+    const builtin = @import("builtin");
+    const uri = @import("uri.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const u = try uri.parse("file://MYPC/c:/Users/alex", .{
+        .mac_address = comptime builtin.os.tag != .macos,
+        .raw_path = false,
+    });
+    const path = try u.path.toRawMaybeAlloc(aa);
+    const got = try uriPathToWindows(aa, path);
+    try std.testing.expectEqualStrings("c:\\Users\\alex", got);
+}
+
+test "posix_path: uriPathToWindows rejects what it cannot place" {
+    try expectUriPath("c:\\Users\\alex", "/c:/Users/alex");
+    try expectUriPath("D:\\", "/D:/");
+    // UNC arrives as `//server/share`; OSC 9;9 carries that form instead.
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, "//server/share"),
+    );
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, "/home/alex"),
+    );
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, ""),
+    );
+}
+
+fn expectUriPath(expected: []const u8, uri_path: []const u8) !void {
+    const got = try uriPathToWindows(std.testing.allocator, uri_path);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(expected, got);
 }
 
 test "posix_path: rooted drive forms (MSYS2 /c and Cygwin /cygdrive)" {
