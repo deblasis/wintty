@@ -46,6 +46,18 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // (which would drop the 2px progress bar and the tab-color tint).
     private readonly Dictionary<TabModel, TextBlock> _headerTextByModel = new();
 
+    // The horizontal icon row per tab -- pin glyph, profile icon, title,
+    // bell glyph. Held by identity because the row is not the header's
+    // first child and never was guaranteed to be: RecolorTabText used to
+    // reach it as headerPanel.Children[0], which the group rail silently
+    // took over (#833), leaving every colour-tagged tab's pin, bell and
+    // icon on the untagged ink (#883).
+    private readonly Dictionary<TabModel, StackPanel> _iconRowByModel = new();
+
+    // Segoe Fluent / MDL2 "Ringer". Shared with the ink pass, which has to
+    // tell the bell from the pin to know which one goes back to the accent.
+    private const string BellGlyph = "\uEA8F";
+
     // One chip per group the projection renders as collapsed-without-the-
     // active-tab. A chip is a real TabViewItem occupying a strip slot, so
     // every slot count and every slot index now includes chips; the maps
@@ -89,6 +101,67 @@ internal sealed partial class TabHost : UserControl, ITabHost
 
     public FrameworkElement? TabElement(TabModel tab)
         => _itemByModel.TryGetValue(tab, out var item) ? item : null;
+
+    // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
+    // Named TestSeam* like MainWindow's, so the seam's footprint on this
+    // class is greppable and removable as one shape.
+
+    /// <summary>
+    /// One part of a tab's header row, in this control's DIP coordinates:
+    /// what a pixel harness needs to sample the ink of a glyph too small
+    /// and too unnamed for UIA to hand it a rect. Null when the tab has no
+    /// row, the part is not in it, or layout has not given it bounds --
+    /// a rect nobody can vouch for is worse than no rect.
+    ///
+    /// Parts are found by kind, never by index: the same rule the ink pass
+    /// itself now follows.
+    /// </summary>
+    internal Windows.Foundation.Rect? TestSeamHeaderPartRect(TabModel tab, string part)
+    {
+        if (!_iconRowByModel.TryGetValue(tab, out var row)) return null;
+        FrameworkElement? target = part == "row" ? row : null;
+        if (target is null)
+        {
+            foreach (var child in row.Children)
+            {
+                var match = part switch
+                {
+                    "pin" => child is FontIcon pin && pin.Glyph != BellGlyph,
+                    "bell" => child is FontIcon bell && bell.Glyph == BellGlyph,
+                    "icon" => child is TabIconPresenter,
+                    "title" => child is TextBlock,
+                    _ => false,
+                };
+                if (match) { target = child as FrameworkElement; break; }
+            }
+        }
+        if (target is null || target.ActualWidth <= 0 || target.ActualHeight <= 0)
+            return null;
+        try
+        {
+            var origin = target.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0));
+            return new Windows.Foundation.Rect(
+                origin.X, origin.Y, target.ActualWidth, target.ActualHeight);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException or NullReferenceException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The foreground the ink pass hands a colour-tagged tab's header row,
+    /// as 0x00RRGGBB, or null when the tab carries no tag. The expectation
+    /// a pixel harness measures against -- and, on its own, worth nothing:
+    /// a brush is only a claim until something paints with it.
+    /// </summary>
+    internal uint? TestSeamTagForegroundRgb(TabModel tab)
+        => tab.Color == TabColor.None
+            ? null
+            : TabColorPalette.ForegroundRgb(
+                tab.Color, ReferenceEquals(tab, _manager.ActiveTab), _stripBackdropPacked);
 
     /// <summary>
     /// The wintty icon shown at the start of the tab strip. Exposed so
@@ -243,7 +316,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // by default; toggled from TabModel.BellRinging below.
         var bellGlyph = new FontIcon
         {
-            Glyph = "\uEA8F", // Segoe Fluent / MDL2 "Ringer"
+            Glyph = BellGlyph,
             // FontIcon's default FontFamily is not guaranteed to be the symbol
             // font, so pin it explicitly (as the strip's close button does) or
             // the glyph can render as nothing.
@@ -363,6 +436,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         };
         _itemByModel[tab] = item;
         _headerTextByModel[tab] = headerText;
+        _iconRowByModel[tab] = iconRow;
         TabViewControl.TabItems.Add(item);
         ApplyTabChrome(item, headerPanel, tab, selected: false);
     }
@@ -385,6 +459,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         TabViewControl.TabItems.Remove(item);
         _itemByModel.Remove(tab);
         _headerTextByModel.Remove(tab);
+        _iconRowByModel.Remove(tab);
         _railByModel.Remove(tab);
         // PaneHost detach from the shared container is MainWindow's job.
     }
@@ -1583,6 +1658,12 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 case TextBlock tb:
                     tb.ClearValue(TextBlock.ForegroundProperty);
                     break;
+                // The bell is the one glyph whose untagged ink is not the
+                // inherited foreground: it is born accent-tinted, so
+                // clearing it would strand it theme-coloured for life.
+                case FontIcon bell when bell.Glyph == BellGlyph:
+                    bell.Foreground = BellAccentBrush();
+                    break;
                 case FontIcon fi:
                     fi.ClearValue(FontIcon.ForegroundProperty);
                     break;
@@ -2771,12 +2852,7 @@ internal sealed partial class TabHost : UserControl, ITabHost
         foreach (var (model, tb) in _headerTextByModel)
         {
             bool active = ReferenceEquals(model, _manager.ActiveTab);
-            _itemByModel.TryGetValue(model, out var viewItem);
-            var iconRow = viewItem?.Header is StackPanel headerPanel
-                && headerPanel.Children.Count > 0
-                && headerPanel.Children[0] is StackPanel row
-                ? row
-                : null;
+            _iconRowByModel.TryGetValue(model, out var iconRow);
 
             if (model.Color != TabColor.None)
             {

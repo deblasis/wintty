@@ -118,6 +118,41 @@ public sealed partial class MainWindow : Window
         => _tabHost is Tabs.VerticalTabHost vertical ? vertical.StripForTestSeam : null;
 
     /// <summary>
+    /// The horizontal strip when it is this window's active host, else
+    /// null: its header rects describe elements only that host builds.
+    /// </summary>
+    internal Tabs.TabHost? TestSeamTabHost
+        => _tabHost as Tabs.TabHost;
+
+    /// <summary>
+    /// A control-DIP rect from the active host, in physical screen pixels:
+    /// the space a screen capture is taken in. Returns null when the host
+    /// could not vouch for the rect, or before the XamlRoot exists.
+    /// </summary>
+    internal (int X, int Y, int W, int H)? TestSeamToScreenPixels(
+        Windows.Foundation.Rect rect, FrameworkElement source)
+    {
+        if (source.XamlRoot is null) return null;
+        Windows.Foundation.Point origin;
+        try
+        {
+            origin = source.TransformToVisual(null)
+                .TransformPoint(new Windows.Foundation.Point(rect.X, rect.Y));
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException)
+        {
+            return null;
+        }
+        var scale = source.XamlRoot.RasterizationScale;
+        var client = new System.Drawing.Point(
+            (int)(origin.X * scale), (int)(origin.Y * scale));
+        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref client);
+        return (client.X, client.Y,
+            (int)(rect.Width * scale), (int)(rect.Height * scale));
+    }
+
+    /// <summary>
     /// A synchronous layout pass before a seam ack: the command's C# state
     /// AND the XAML layout it caused are both settled when the driver hears
     /// back, so the next command can never run mid-arrange.
