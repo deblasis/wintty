@@ -217,6 +217,7 @@ $NotInSuite = [ordered]@{
     'mouse-smoke-run.ps1'           = 'the operator drives the checklist by hand'
     'vtabs-layout-switch-capture.ps1' = 'produces frames for a human to look at; no verdict to aggregate'
     'vtabs-switcher-capture.ps1'    = 'produces frames for a human to look at; no verdict to aggregate'
+    'dump-uia-state.ps1'            = 'a UIA-loss discrimination battery an operator points at a live window at a HARVEST_MISS moment; emits an evidence block, no verdict to aggregate'
     'vtabs-morph-filmstrip.ps1'     = 'produces frames for a human to look at; no verdict to aggregate'
     'gen-bell.ps1'                  = 'generates a test asset'
     'fuzz-tier-harnesses.ps1'       = 'the tier layer manifest, not a harness; read below'
