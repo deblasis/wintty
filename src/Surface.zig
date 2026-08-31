@@ -5466,6 +5466,26 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .{ .amount = position },
         ),
 
+        // Windows-apprt tab-shell actions: the strip lives apprt-side, so
+        // these forward unchanged and the apprt decides refusals.
+        .pin_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .pin_tab,
+            {},
+        ),
+
+        .unpin_tab => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .unpin_tab,
+            {},
+        ),
+
+        .move_group => |position| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .move_group,
+            .{ .amount = position },
+        ),
+
         .move_tab_to_new_window => return try self.rt_app.performAction(
             .{ .surface = self },
             .move_tab_to_new_window,
