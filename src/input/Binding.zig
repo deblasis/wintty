@@ -594,6 +594,24 @@ pub const Action = union(enum) {
     /// macOS.
     move_tab_to_new_window,
 
+    // Windows-apprt tab-shell actions below. They carry no default keybind;
+    // they exist so a user keybind has a verb to name, and the embedded
+    // apprt owns whatever the action does to its tab strip.
+
+    /// Pin the focused tab into the pinned prefix of its tab strip.
+    pin_tab,
+
+    /// Unpin the focused tab from the pinned prefix of its tab strip.
+    unpin_tab,
+
+    /// Move the group (the contiguous run) the focused tab belongs to by a
+    /// relative offset, keeping the group's internal order.
+    ///
+    /// Positive values move the group forwards, and negative values move it
+    /// backwards, one neighbouring group per step. An ungrouped tab moves
+    /// nothing. A group never lands inside the pinned prefix.
+    move_group: isize,
+
     /// Toggle the tab overview.
     ///
     /// This is only supported on Linux and when the system's libadwaita
@@ -1454,6 +1472,9 @@ pub const Action = union(enum) {
             .goto_tab,
             .move_tab,
             .move_tab_to_new_window,
+            .pin_tab,
+            .unpin_tab,
+            .move_group,
             .toggle_tab_overview,
             .new_split,
             .goto_split,

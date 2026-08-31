@@ -582,6 +582,14 @@ internal sealed partial class GhosttyHost : IDisposable
                 case GhosttyActionTag.FloatWindow:
                     return DispatchPaneAction(owner, tag.Value, Marshal.ReadInt32(actionPtr, 8));
 
+                // Windows tab-shell actions. pin_tab/unpin_tab carry no
+                // payload; they ride the value-free arm and land on the
+                // router's pin handling, the same one the palette and the
+                // per-tab context menu use.
+                case GhosttyActionTag.PinTab:
+                case GhosttyActionTag.UnpinTab:
+                    return DispatchPaneAction(owner, tag.Value, 0);
+
                 case GhosttyActionTag.ResizeSplit:
                 {
                     GhosttyActionResizeSplit rs;
@@ -602,6 +610,17 @@ internal sealed partial class GhosttyHost : IDisposable
                             (void*)(actionPtr + 8));
                     }
                     return DispatchPaneAction(owner, tag.Value, (int)mt.Amount);
+                }
+
+                case GhosttyActionTag.MoveGroup:
+                {
+                    GhosttyActionMoveGroup mg;
+                    unsafe
+                    {
+                        mg = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<GhosttyActionMoveGroup>(
+                            (void*)(actionPtr + 8));
+                    }
+                    return DispatchPaneAction(owner, tag.Value, (int)mg.Amount);
                 }
 
                 case GhosttyActionTag.SetTitle:
