@@ -467,6 +467,17 @@ internal sealed class PaneActionRouter
     public void RequestToggleSidebarCollapse()
         => ToggleVerticalTabsPinnedRequested?.Invoke(this, EventArgs.Empty);
 
+    /// <summary>
+    /// Public dispatch entry for the MRU cycle, the same one-hop shape as
+    /// <see cref="RequestToggleTabLayout"/>. The Ctrl+Tab chord reaches
+    /// <see cref="MruCycleRequested"/> through PaneAction; this lets a
+    /// non-keyboard caller raise the identical event, so the switcher
+    /// popup a driver sees is the popup the chord raises rather than a
+    /// second code path that could drift from it.
+    /// </summary>
+    public void RequestMruCycle(bool forward)
+        => MruCycleRequested?.Invoke(this, forward);
+
     private void HandleProgressiveClose()
     {
         // If the active tab has more than one pane, close one and stop.
