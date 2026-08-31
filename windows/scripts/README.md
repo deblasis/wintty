@@ -174,6 +174,7 @@ Every script here that launches Wintty uses the helper except two:
 |---|---|
 | `splash-single-instance-race.ps1` | its gate is deliberately *narrower* than `Assert-NoWintty`: it refuses only over instances running from the exe under test, because the mutex it is measuring is keyed on that path, and it needs to be able to launch a second instance itself |
 | `mouse-smoke-run.ps1` | the operator drives it by hand and quits the app themselves |
+| `contrast-oracle.ps1` | it is meant to be runnable beside a Wintty somebody else is using: it reads crash.log not at all, launches with `windows-single-instance` off against an isolated `XDG_CONFIG_HOME`, moves only its own window and reaps only what it started. What it cannot share is the seam pipe, whose name belongs to the first opted-in process, so a second `WINTTY_TEST_SEAM=1` instance makes it exit 1 rather than measure the wrong window |
 
 `vtabs-visual-qa.ps1` launches nothing directly - each sub-script gates and
 reaps its own, including `vtabs-layout-switch-capture.ps1`, which it runs
