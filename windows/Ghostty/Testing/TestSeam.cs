@@ -1,0 +1,494 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Ghostty.Core.Tabs;
+using Microsoft.UI.Dispatching;
+
+namespace Ghostty.Testing;
+
+/// <summary>
+/// The opt-in in-process test seam: one named pipe inside Wintty whose
+/// newline-delimited JSON commands drive the REAL input handlers -- the tab
+/// manager ops and the vertical strip's drag engine -- on the UI thread.
+/// No OS input is synthesized, nothing is focused, and the user can be using
+/// the machine while a script drives the app.
+///
+/// The gate is the whole surface: without WINTTY_TEST_SEAM=1 in the app's
+/// environment this class never creates a pipe and costs one env-var read
+/// per window. With it, the pipe is session-local and serves one client at
+/// a time; a second command connection waits for the first to hang up.
+///
+/// Protocol: each request is one line of JSON, {"op": "...", ...args}; each
+/// response is one line, {"ok": true, ...} or {"ok": false, "error": "..."}.
+/// Commands marshal to the UI thread and every ack answers after the work
+/// settled, so a driver never races the app.
+///
+/// One window is served (the first): the spike scenario is a single window.
+/// Multi-window routing is hardening, not architecture.
+/// </summary>
+internal static class TestSeam
+{
+    private const string EnvVar = "WINTTY_TEST_SEAM";
+
+    /// <summary>The pipe the driver connects to, when the seam is on.</summary>
+    internal const string PipeName = "wintty-test-seam";
+
+    private static CancellationTokenSource? _lifetime;
+    private static int _started;
+
+    /// <summary>
+    /// Called once per window from the MainWindow constructor. The first
+    /// window in a seam-enabled process wins; later windows are no-ops. The
+    /// server dies with that window (the app closes with it).
+    /// </summary>
+    internal static void Start(MainWindow window)
+    {
+        if (Environment.GetEnvironmentVariable(EnvVar) != "1") return;
+        if (Interlocked.Exchange(ref _started, 1) == 1) return;
+
+        _lifetime = new CancellationTokenSource();
+        var token = _lifetime.Token;
+        window.Closed += (_, _) =>
+        {
+            try { _lifetime.Cancel(); } catch (ObjectDisposedException) { }
+        };
+        _ = Task.Run(() => ServeAsync(window, token));
+    }
+
+    /// <summary>
+    /// One connection at a time; a client that hangs up (or dies) frees the
+    /// name for the next. Transport-level failures are not findings: the
+    /// loop keeps serving.
+    /// </summary>
+    private static async Task ServeAsync(MainWindow window, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            NamedPipeServerStream? pipe = null;
+            try
+            {
+                pipe = new NamedPipeServerStream(
+                    PipeName, PipeDirection.InOut, maxNumberOfServerInstances: 1,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                await pipe.WaitForConnectionAsync(token);
+                await ServeConnectionAsync(pipe, window, token);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // The client hung up mid-conversation. Fall through to the
+                // finally, then accept the next connection.
+            }
+            finally
+            {
+                try { if (pipe is { IsConnected: true }) pipe.Disconnect(); }
+                catch { /* the name must free up either way */ }
+                pipe?.Dispose();
+            }
+        }
+    }
+
+    private static async Task ServeConnectionAsync(
+        NamedPipeServerStream pipe, MainWindow window, CancellationToken token)
+    {
+        var reader = new StreamReader(pipe, Encoding.UTF8);
+        var writer = new StreamWriter(pipe, new UTF8Encoding(false))
+        {
+            AutoFlush = true,
+            NewLine = "\n",
+        };
+        while (!token.IsCancellationRequested && pipe.IsConnected)
+        {
+            var line = await reader.ReadLineAsync(token);
+            if (line is null) return; // client hung up
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var response = await ExecuteAsync(window, line);
+            await writer.WriteLineAsync(response);
+        }
+    }
+
+    private static async Task<string> ExecuteAsync(MainWindow window, string line)
+    {
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(line);
+        }
+        catch (JsonException ex)
+        {
+            return Error("parse", $"request is not JSON: {ex.Message}");
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("op", out var op)
+                || op.ValueKind != JsonValueKind.String)
+            {
+                return Error("parse", "request needs a string 'op'");
+            }
+
+            var opName = op.GetString()!;
+            try
+            {
+                return await RunOnUiThreadAsync(
+                    window, () => ExecuteOnUiThreadAsync(window, opName, root));
+            }
+            catch (Exception ex)
+            {
+                // A command that throws IS a finding: the response carries
+                // it and the app keeps running.
+                return Error(opName, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The one marshal: every command, whatever it touches, runs on the
+    /// window's UI thread and the response awaits the work.
+    /// </summary>
+    private static Task<string> RunOnUiThreadAsync(
+        MainWindow window, Func<Task<string>> action)
+    {
+        var done = new TaskCompletionSource<string>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!window.DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    var result = await action();
+                    // Settled means settled: layout, not just the manager.
+                    window.TestSeamSettleLayout();
+                    done.SetResult(result);
+                }
+                catch (Exception ex) { done.SetResult(Error("ui", ex.Message)); }
+            }))
+        {
+            done.SetResult(Error("ui", "dispatcher unavailable"));
+        }
+        return done.Task;
+    }
+
+    /// <summary>
+    /// A handoff one priority below the strip's Normal-priority drag tick:
+    /// when the awaited task completes, everything the last synthetic move
+    /// scheduled -- crossings included -- has already run. This is what
+    /// makes a seam drag deterministic without sleeps.
+    /// </summary>
+    internal static Task WaitForLowPriorityAsync(DispatcherQueue queue)
+    {
+        var done = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!queue.TryEnqueue(DispatcherQueuePriority.Low, () => done.SetResult()))
+            done.SetException(new InvalidOperationException("dispatcher unavailable"));
+        return done.Task;
+    }
+
+    private static async Task<string> ExecuteOnUiThreadAsync(
+        MainWindow window, string op, JsonElement args)
+    {
+        var manager = window.TabManager;
+        switch (op)
+        {
+            case "get-state":
+                return OkWithState(window, manager, op);
+
+            case "seed-tabs":
+            {
+                var count = ArgInt(args, "count", -1);
+                if (count < 1 || count > 32)
+                    return Error(op, "count must be 1..32");
+                var titles = ArgStrings(args, "titles");
+
+                // Deterministic start: seed means a clean slate, so leftover
+                // groups and the pinned prefix from a previous scenario go
+                // first -- through the manager's own dissolvers. Then close
+                // down to one tab (closing the last would close the window),
+                // retitle it, and grow the rest. Real tabs through the
+                // manager: NewTab runs the pane factory and spawns real
+                // shells, exactly the state a human builds.
+                while (manager.Groups.Count > 0)
+                    manager.DissolveGroup(manager.Groups[0]);
+                foreach (var tab in manager.Tabs.ToArray())
+                {
+                    if (tab.IsPinned) manager.SetPinned(tab, false);
+                }
+                while (manager.Tabs.Count > 1)
+                {
+                    manager.CloseTab(manager.Tabs[^1]);
+                    // One teardown per dispatcher pass: a synchronous
+                    // four-surface close is denser than any human produces,
+                    // and native surface teardown racing the next churn is
+                    // exactly the interleaving a seam should not invent.
+                    if (manager.Tabs.Count > 1)
+                        await WaitForLowPriorityAsync(window.DispatcherQueue);
+                }
+                for (int i = 0; i < count; i++)
+                {
+                    var tab = i == 0 ? manager.Tabs[0] : manager.NewTab();
+                    tab.UserOverrideTitle = i < titles.Count ? titles[i] : $"tab-{i + 1}";
+                }
+                return OkWithState(window, manager, op);
+            }
+
+            case "pin":
+            case "unpin":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                // "via":"router" sends it the way the context menu does --
+                // through the router command, which announces the change
+                // -- otherwise straight through the manager op the drag
+                // engine commits through.
+                var viaRouter = ArgString(args, "via") == "router";
+                if (viaRouter) window.TestSeamRouter.RequestPin(tab, op == "pin");
+                else manager.SetPinned(tab, op == "pin");
+                return OkWithState(window, manager, op);
+            }
+
+            case "group":
+            {
+                var indices = ArgInts(args, "indices");
+                if (indices.Count == 0) return Error(op, "group needs indices");
+                var members = new List<TabModel>();
+                foreach (var index in indices)
+                {
+                    var tab = TabAt(manager, index);
+                    if (tab is null) return Error(op, $"no tab at index {index}");
+                    members.Add(tab);
+                }
+                // The manager's own ops: one fresh group, then the joins.
+                // Refusals (pinned, unowned) come back from the manager as
+                // a null group, never as broken state.
+                var group = manager.CreateGroup(members[0]);
+                if (group is null)
+                    return Error(op, "the manager refused the group (pinned or unowned)");
+                group.Title = $"group-{manager.Groups.Count}";
+                for (int i = 1; i < members.Count; i++)
+                    manager.JoinGroup(members[i], group);
+                return OkWithState(window, manager, op);
+            }
+
+            case "collapse":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                if (tab.Group is null) return Error(op, $"tab {index} is not in a group");
+                var collapsed = ArgBool(args, "collapsed", true);
+                // "via":"router" sends it the way the header's chevron does:
+                // the router's collapse command stages through the strip
+                // (focus re-home, drag stand-down) before the manager flips
+                // the bit. The default is the bare manager op.
+                if (ArgString(args, "via") == "router")
+                    window.TestSeamRouter.RequestCollapseGroup(tab.Group, collapsed);
+                else
+                    manager.CollapseGroup(tab.Group, collapsed);
+                return OkWithState(window, manager, op);
+            }
+
+            case "toggle-layout":
+            {
+                // The keyboard path's own dispatch: the router event the
+                // chord raises, so the seam cannot drift from the real
+                // action.
+                window.TestSeamRouter.RequestToggleTabLayout();
+
+                // The ack waits out the morph. ToggleTabLayout no-ops while
+                // LayoutCoordinator is mid-switch, so a driver that did not
+                // wait would silently skip every other toggle.
+                var deadline = Environment.TickCount64 + 10_000;
+                while (window.TestSeamLayoutSwitching
+                       && Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(15);
+                }
+                return window.TestSeamLayoutSwitching
+                    ? Error(op, "layout switch did not settle within 10s")
+                    : OkWithState(window, manager, op);
+            }
+
+            case "drag":
+            {
+                var strip = window.TestSeamVerticalStrip;
+                if (strip is null)
+                    return Error(op, "the vertical strip is not the active host");
+                var outcome = await strip.TestSeamDragAsync(
+                    ArgInt(args, "from", -1), ArgInt(args, "to", -1));
+                return Json(json =>
+                {
+                    json.WriteStartObject();
+                    json.WriteBoolean("ok", outcome.Ok);
+                    json.WriteString("op", op);
+                    if (outcome.Error is { } error) json.WriteString("error", error);
+                    json.WriteNumber("landed", outcome.Landed);
+                    json.WriteStartArray("order");
+                    foreach (var title in outcome.Order)
+                        json.WriteStringValue(title);
+                    json.WriteEndArray();
+                    json.WriteEndObject();
+                });
+            }
+
+            default:
+                return Error(op, $"unknown op '{op}'");
+        }
+    }
+
+    // ---- responses ---------------------------------------------------
+
+    private static string OkWithState(MainWindow window, TabManager manager, string op)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            WriteState(json, window, manager);
+            json.WriteEndObject();
+        });
+
+    /// <summary>The one response builder: AOT-safe, reflection-free.</summary>
+    private static string Json(Action<Utf8JsonWriter> write)
+    {
+        using var stream = new MemoryStream();
+        using var json = new Utf8JsonWriter(stream);
+        write(json);
+        // The writer buffers internally; nothing reaches the stream until
+        // this flush. The dispose-time flush is too late for a read.
+        json.Flush();
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string Error(string op, string message)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", false);
+            json.WriteString("op", op);
+            json.WriteString("error", message);
+            json.WriteEndObject();
+        });
+
+    /// <summary>
+    /// The assert surface: manager truth -- order, pin flags, groups and
+    /// their collapse bits -- plus the two layout bits the driver needs to
+    /// know where the window stands.
+    /// </summary>
+    private static void WriteState(
+        Utf8JsonWriter json, MainWindow window, TabManager manager)
+    {
+        json.WriteStartObject("state");
+        json.WriteBoolean("vertical", window.TestSeamVerticalTabs);
+        json.WriteBoolean("switching", window.TestSeamLayoutSwitching);
+        json.WriteStartArray("tabs");
+        for (int i = 0; i < manager.Tabs.Count; i++)
+        {
+            var tab = manager.Tabs[i];
+            json.WriteStartObject();
+            json.WriteNumber("index", i);
+            json.WriteString("title", tab.EffectiveTitle);
+            json.WriteBoolean("pinned", tab.IsPinned);
+            if (tab.Group is { } group)
+            {
+                json.WriteString("group", group.Title);
+                json.WriteBoolean("collapsedGroup", group.IsCollapsed);
+            }
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+        json.WriteStartArray("groups");
+        foreach (var group in manager.Groups)
+        {
+            json.WriteStartObject();
+            json.WriteString("title", group.Title);
+            json.WriteBoolean("collapsed", group.IsCollapsed);
+            json.WriteStartArray("members");
+            foreach (var member in manager.MembersOf(group))
+                json.WriteStringValue(member.EffectiveTitle);
+            json.WriteEndArray();
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+        json.WriteEndObject();
+    }
+
+    // ---- argument readers --------------------------------------------
+
+    private static string? ArgString(JsonElement args, string name)
+        => args.ValueKind == JsonValueKind.Object
+           && args.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int ArgInt(JsonElement args, string name, int fallback)
+        => args.ValueKind == JsonValueKind.Object
+           && args.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.Number
+            ? value.GetInt32()
+            : fallback;
+
+    private static bool ArgBool(JsonElement args, string name, bool fallback)
+        => args.ValueKind == JsonValueKind.Object
+           && args.TryGetProperty(name, out var value)
+           && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : fallback;
+
+    private static List<string> ArgStrings(JsonElement args, string name)
+    {
+        var result = new List<string>();
+        if (args.ValueKind == JsonValueKind.Object
+            && args.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String)
+                    result.Add(item.GetString()!);
+        }
+        return result;
+    }
+
+    private static List<int> ArgInts(JsonElement args, string name)
+    {
+        var result = new List<int>();
+        if (args.ValueKind == JsonValueKind.Object
+            && args.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.Number)
+                    result.Add(item.GetInt32());
+        }
+        return result;
+    }
+
+    private static TabModel? TabAt(TabManager manager, int index)
+        => index >= 0 && index < manager.Tabs.Count ? manager.Tabs[index] : null;
+}
+
+/// <summary>
+/// What one seam drag reports back: whether the engine landed the row where
+/// the driver aimed, and the manager order it left behind.
+/// </summary>
+internal sealed class TestSeamDragOutcome
+{
+    public bool Ok = true;
+    public string? Error;
+    public int Landed = -1;
+    public List<string> Order = new();
+
+    public TestSeamDragOutcome Fail(string reason)
+    {
+        Ok = false;
+        Error = reason;
+        return this;
+    }
+}
