@@ -2236,6 +2236,20 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void OnDragPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        DragPress(e.OriginalSource as DependencyObject, e.Pointer.PointerId,
+            e.GetCurrentPoint(this).Position.Y);
+    }
+
+    /// <summary>
+    /// The press, parameterized on where the values come from. The pointer
+    /// handler resolves the press origin, the pointer id, and the strip-space
+    /// Y out of <see cref="PointerRoutedEventArgs"/> -- which is
+    /// non-constructible, so the test seam cannot synthesize one; the seam
+    /// passes the same three values itself and lands here anyway. Everything
+    /// from the row resolution down is the one gesture body either way.
+    /// </summary>
+    private void DragPress(DependencyObject? source, uint pointerId, double y)
+    {
         if (_drag is not null)
         {
             // Without capture a release the strip never saw -- the button
@@ -2248,7 +2262,6 @@ internal sealed partial class VerticalTabStrip : UserControl
         // drag never starts under one.
         if (_selectionRowSuppressed) return;
 
-        var source = e.OriginalSource as DependencyObject;
         // A row is either a NavigationViewItem in the list or a pinned row
         // in the shelf; both carry the tab on Tag.
         var item = (FrameworkElement?)VisualTreeHelperEx.FindAncestor<NavigationViewItem>(source)
@@ -2264,7 +2277,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         // exactly as before.
         if (item is VerticalTabGroupHeaderItem { Tag: TabGroup group })
         {
-            ArmGroupDrag(group, item, e);
+            ArmGroupDrag(group, item, pointerId, y);
             return;
         }
 
@@ -2272,10 +2285,9 @@ internal sealed partial class VerticalTabStrip : UserControl
         if (RowElementOf(tab) is not { } owned || !ReferenceEquals(owned, item)) return;
         if (_manager.Tabs.Count < 2) return;
 
-        var point = e.GetCurrentPoint(this);
         var (_, managerIndex) = DragSlots();
         var machine = new TabDragReorder(managerIndex.Count, SlotIndexOf(managerIndex, tab));
-        machine.Press(point.Position.Y);
+        machine.Press(y);
         // Each begin..settle pair owns its census: a teardown failure in
         // one drag must not inflate the ghost count of the next.
         _teardownFailures = 0;
@@ -2286,10 +2298,10 @@ internal sealed partial class VerticalTabStrip : UserControl
             PreDragOrder = TabStripProjection.Rows(_manager),
             PreDragPinned = new HashSet<TabModel>(
                 _manager.Tabs.Where(t => t.IsPinned)),
-            PointerId = e.Pointer.PointerId,
+            PointerId = pointerId,
             PressRow = owned,
-            LastPointerY = point.Position.Y,
-            PressY = point.Position.Y,
+            LastPointerY = y,
+            PressY = y,
         };
     }
 
@@ -2302,7 +2314,7 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// prefix contributes no units, so the drag never even offers a
     /// crossing into the zone MoveGroup's clamp would refuse.
     /// </summary>
-    private void ArmGroupDrag(TabGroup group, FrameworkElement header, PointerRoutedEventArgs e)
+    private void ArmGroupDrag(TabGroup group, FrameworkElement header, uint pointerId, double y)
     {
         var run = _manager.MembersOf(group);
         if (run.Count == 0) return;
@@ -2311,9 +2323,8 @@ internal sealed partial class VerticalTabStrip : UserControl
         int grabbed = RunUnitIndex(units, group);
         if (grabbed < 0) return;
 
-        var point = e.GetCurrentPoint(this);
         var machine = new TabDragReorder(units.Count, grabbed);
-        machine.Press(point.Position.Y);
+        machine.Press(y);
         // Each begin..settle pair owns its census: a teardown failure in
         // one drag must not inflate the ghost count of the next.
         _teardownFailures = 0;
@@ -2325,10 +2336,10 @@ internal sealed partial class VerticalTabStrip : UserControl
             PreDragOrder = TabStripProjection.Rows(_manager),
             PreDragPinned = new HashSet<TabModel>(
                 _manager.Tabs.Where(t => t.IsPinned)),
-            PointerId = e.Pointer.PointerId,
+            PointerId = pointerId,
             PressRow = header,
-            LastPointerY = point.Position.Y,
-            PressY = point.Position.Y,
+            LastPointerY = y,
+            PressY = y,
         };
     }
 
@@ -2347,13 +2358,18 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void OnDragPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
-        var y = e.GetCurrentPoint(this).Position.Y;
+        DragMove(e.Pointer.PointerId, e.GetCurrentPoint(this).Position.Y);
+    }
+
+    /// <summary>The move, parameterized the same way as the press.</summary>
+    private void DragMove(uint pointerId, double y)
+    {
+        if (_drag is not { } drag || pointerId != drag.PointerId) return;
 
         if (drag.Machine.Phase == TabDragPhase.Pressed)
         {
             if (!drag.Machine.Begin(y)) return;
-            StartDragVisual(drag, e);
+            StartDragVisual(drag);
             if (_drag is null) return; // start refused; the click falls through
         }
 
@@ -2365,7 +2381,13 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     private void OnDragPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        DragRelease(e.Pointer.PointerId, e.GetCurrentPoint(this).Position.Y);
+    }
+
+    /// <summary>The release, parameterized the same way as the press.</summary>
+    private void DragRelease(uint pointerId, double y)
+    {
+        if (_drag is not { } drag || pointerId != drag.PointerId) return;
         // Velocity first, and signed: Drop clears the sample window, and
         // the remaining travel is slot minus release (AnchorY is the slot
         // the anchor holds), positive = down -- the same axis
@@ -2397,7 +2419,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         // the trap this replaces.
         if (drag.Tab.IsPinned)
         {
-            var releaseY = e.GetCurrentPoint(this).Position.Y;
+            var releaseY = y;
             double shelfTop = double.NaN, shelfBottom = double.NaN;
             try
             {
@@ -2487,8 +2509,11 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     private void OnDragPointerCanceled(object sender, PointerRoutedEventArgs e)
+        => DragCancel(e.Pointer.PointerId);
+
+    private void DragCancel(uint pointerId)
     {
-        if (_drag is not { } drag || e.Pointer.PointerId != drag.PointerId) return;
+        if (_drag is not { } drag || pointerId != drag.PointerId) return;
         CancelDrag("canceled");
     }
 
@@ -2500,7 +2525,7 @@ internal sealed partial class VerticalTabStrip : UserControl
         CancelDrag("escape");
     }
 
-    private void StartDragVisual(DragSession drag, PointerRoutedEventArgs e)
+    private void StartDragVisual(DragSession drag)
     {
         // A fresh gesture outranks a flight still in the air: one flight
         // at a time, and the new drag's churn must not share the shelf
@@ -4119,4 +4144,106 @@ internal sealed partial class VerticalTabStrip : UserControl
     private static bool IsLayoutReadFailure(Exception ex)
         => ex is ArgumentException or InvalidOperationException
             or System.Runtime.InteropServices.COMException or NullReferenceException;
+
+    // -----------------------------------------------------------------
+    // The test seam's drag driver (WINTTY_TEST_SEAM=1). The gesture is
+    // the pointer path's own: DragPress/DragMove/DragRelease above, fed
+    // positions read out of arranged layout and stepped through a
+    // Low-priority dispatcher handoff per tick, so every synthetic move
+    // is evaluated -- crossings committed -- before the next one is fed.
+    // No OS input, no focus, no second implementation of the grammar.
+    // -----------------------------------------------------------------
+
+    /// <summary>True while a gesture (seam-driven or real) holds the strip.</summary>
+    internal bool TestSeamDragLive => _drag is not null;
+
+    /// <summary>
+    /// One seam drag: press the row of manager index <paramref name="from"/>,
+    /// walk the pointer to the slot of manager index <paramref name="to"/>,
+    /// release. The outcome carries the manager order after the settle so the
+    /// driver can assert in one round trip. A gesture that cannot run reports
+    /// ok=false with the reason instead of throwing: the seam reports, it
+    /// does not crash the app under test.
+    /// </summary>
+    internal async Task<Testing.TestSeamDragOutcome> TestSeamDragAsync(int from, int to)
+    {
+        var outcome = new Testing.TestSeamDragOutcome();
+        var tabs = _manager.Tabs;
+        if (from < 0 || from >= tabs.Count || to < 0 || to >= tabs.Count)
+            return outcome.Fail($"drag {from}->{to} out of range (tabs={tabs.Count})");
+        if (from == to)
+            return outcome.Fail("drag from == to; nothing to reorder");
+        if (_drag is not null)
+            return outcome.Fail("another drag is live");
+
+        var tab = tabs[from];
+        if (RowElementOf(tab) is not { } row)
+            return outcome.Fail("drag row has no element; the strip is not realized");
+        double y = RowCenterY(tab);
+        if (double.IsNaN(y))
+            return outcome.Fail("drag row has no arranged center; layout has not run");
+
+        const uint seamPointer = 0x5749_4E54; // 'WINT'; no real pointer carries it
+        DragPress(row, seamPointer, y);
+
+        // Steps of 12px: past the 4px start threshold on the first move,
+        // under the row pitch, so each tick is one honest crossing decision
+        // -- the pacing of a slow human finger, at seam speed.
+        const double stepPx = 12;
+        var reached = false;
+        for (int tick = 0; tick < TestSeamDragTickBudget; tick++)
+        {
+            if (_drag is null) break; // the gesture died under us (layout, close)
+
+            var (rows, managerIndex) = DragSlots();
+            int slot = managerIndex.IndexOf(to);
+            double target = slot >= 0 && slot < rows.Count
+                ? RowCenterY(rows[slot])
+                : double.NaN;
+            // An unreadable target means the strip is mid-arrange (a commit
+            // churned the containers); stand still this tick and re-read
+            // the next, exactly as a hovering pointer would.
+            if (!double.IsNaN(target))
+            {
+                if (Math.Abs(target - y) <= 1)
+                {
+                    reached = true;
+                    break;
+                }
+                y += Math.Clamp(target - y, -stepPx, stepPx);
+                DragMove(seamPointer, y);
+            }
+
+            // One handoff below the drag tick's Normal priority: the
+            // evaluate this move scheduled has run -- crossings included --
+            // by the time control is back.
+            await Testing.TestSeam.WaitForLowPriorityAsync(DispatcherQueue);
+        }
+
+        if (_drag is not { } drag)
+            return outcome.Fail("the gesture ended before the release");
+        if (!reached)
+        {
+            DragCancel(seamPointer);
+            return outcome.Fail(
+                $"drag did not reach its slot within {TestSeamDragTickBudget} ticks " +
+                $"(machine index {drag.Machine.Index}, wanted {to})");
+        }
+
+        DragRelease(seamPointer, y);
+        outcome.Landed = _manager.IndexOf(tab);
+        outcome.Order = TabStripProjection.Rows(_manager)
+            .Select(t => t.EffectiveTitle).ToList();
+        if (outcome.Landed != to)
+            return outcome.Fail($"landed at {outcome.Landed}, wanted {to}");
+        return outcome;
+    }
+
+    /// <summary>
+    /// Generous, because each tick is a dispatcher pass and the strip may
+    /// spend several of them mid-arrange after a commit; a healthy drag
+    /// lands in a handful. Bounded so a wedged layout reports a failure
+    /// instead of hanging the seam.
+    /// </summary>
+    private const int TestSeamDragTickBudget = 600;
 }

@@ -22,6 +22,20 @@ public class PinnedPreviewWiringTests
 {
     private static ShellSource Strip() => ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
 
+    // The raw strip source, for absence pins over things that are not
+    // invocations -- an AddHandler hook is an argument, invisible to a
+    // call scan. Same shape as VerticalTabGroupDragWiringTests.ReadStrip.
+    private static string ReadStrip()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        var name = asm.GetManifestResourceNames()
+            .Single(n => n.EndsWith("VerticalTabStrip.xaml.cs", StringComparison.OrdinalIgnoreCase));
+        using var stream = asm.GetManifestResourceStream(name);
+        Assert.NotNull(stream);
+        using var reader = new System.IO.StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
     /// <summary>
     /// Show means "the drop would pin": the dragged row is still unpinned,
     /// pins exist, and its center is over the shelf. The pinned arm of the
@@ -146,7 +160,7 @@ public class PinnedPreviewWiringTests
     [Fact]
     public void TheDrop_HonoursTheVisibleGhost_ThroughTheZoneGrammar()
     {
-        var released = Strip().Method("OnDragPointerReleased");
+        var released = Strip().Method("DragRelease");
 
         var gate = released.DescendantNodes().OfType<IfStatementSyntax>()
             .Single(i => i.Condition.ToString() == "_pinPreview is not null");
@@ -170,10 +184,21 @@ public class PinnedPreviewWiringTests
     /// <summary>
     /// Every way a drag ends takes the ghost with it. EndDrag is the
     /// shared tail -- the release drops through it, and every cancel
-    /// family (escape, capture loss, row close, layout switch, teardown)
-    /// funnels through CancelDrag into it -- so one hide there covers the
-    /// exit paths, and the fact ties each family to the funnel so a new
-    /// exit path cannot quietly skip it.
+    /// family funnels through CancelDrag into it -- so one hide there
+    /// covers the exit paths, and the fact ties each family to the funnel
+    /// so a new exit path cannot quietly skip it.
+    ///
+    /// There is no capture-loss family, and the absence is pinned, not
+    /// just skipped: the engine holds no capture, so no CaptureLost is
+    /// ours -- the one the strip sees is MUXC's item layer releasing its
+    /// own press capture the moment a drag starts moving, and acting on
+    /// that murdered every real drag (the probe caught a cancel mid-drag,
+    /// then a zombie crossing landing the right order by luck). The
+    /// capture-less engine runs on hover-routed events; a PointerCapture
+    /// Lost hook or a CapturePointer call re-appearing anywhere in the
+    /// strip goes red here. The pointer-cancel family that DOES exist
+    /// reaches the funnel through the wrapper's DragCancel, the hop the
+    /// test-seam parameterization added.
     /// </summary>
     [Fact]
     public void EveryDragExit_ReachesTheHide()
@@ -185,16 +210,32 @@ public class PinnedPreviewWiringTests
         // The cancel funnel ends at EndDrag, which is where the hide sits.
         Assert.NotEmpty(strip.Method("CancelDrag").Calls("EndDrag"));
 
-        // Each exit family: escape, pointer cancel, capture loss, the
-        // mid-drag row close, the layout switch, and teardown.
+        // Each exit family that exists: escape, pointer cancel (through
+        // the parameterized core), the stale press that ends a session the
+        // strip never saw the release of, the mid-drag row close, the
+        // layout switch, and teardown.
         Assert.NotEmpty(strip.Method("OnDragKeyDown").Calls("CancelDrag"));
-        Assert.NotEmpty(strip.Method("OnDragPointerCanceled").Calls("CancelDrag"));
-        Assert.NotEmpty(strip.Method("OnDragPointerCaptureLost").Calls("CancelDrag"));
+        Assert.NotEmpty(strip.Method("OnDragPointerCanceled").Calls("DragCancel"));
+        Assert.NotEmpty(strip.Method("DragCancel").Calls("CancelDrag"));
+        Assert.NotEmpty(strip.Method("DragPress").Calls("CancelDrag"));
         Assert.NotEmpty(strip.Method("RemoveItem").Calls("CancelDrag"));
         Assert.NotEmpty(strip.Method("SetSelectionRowSuppressed").Calls("CancelDrag"));
         var unloaded = strip.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left.ToString() == "Unloaded");
         Assert.NotEmpty(unloaded.Right.Calls("CancelDrag"));
+
+        // And no capture, in either spelling: no PointerCaptureLost hook
+        // for a family that must not come back, and no CapturePointer the
+        // engine could hold. Text-level for the event name -- a hook is an
+        // AddHandler argument, not an invocation -- and suffix-matched for
+        // the call, which is only ever spelled with a receiver.
+        Assert.DoesNotContain(
+            "PointerCaptureLostEvent", ReadStrip(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            strip.Root.DescendantNodes()
+                .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>()
+                .ToList(),
+            c => c.CalleeText().EndsWith("CapturePointer", StringComparison.Ordinal));
 
         // And the show runs only from the coalesced tick: a preview that
         // appeared from a raw pointer event would have no hide ordering
