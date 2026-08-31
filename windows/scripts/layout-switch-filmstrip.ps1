@@ -199,8 +199,14 @@ function Invoke-FilmedSwitch($Session, [int64]$Hwnd, [int]$Ordinal) {
         $shot = if ($NoPictures) { $null } else { Get-WindowShot $Hwnd }
         if ($null -eq $shot) { $shotMs = -1 }
 
+        # The last stretch of the budget always reads state, whatever
+        # $StateEvery says. Without this a thinned state track simply ran
+        # out of reads before the switch landed and reported "never
+        # settled" against a switch that had -- a harness saying the
+        # product is broken because the harness stopped looking.
+        $endgame = $clock.ElapsedMilliseconds -gt ($BudgetMs - 250)
         $before = -1; $after = -1; $fresh = $null
-        if ($NoPictures -or ($i % $StateEvery) -eq 0) {
+        if ($NoPictures -or $endgame -or ($i % $StateEvery) -eq 0) {
             $before = $clock.ElapsedMilliseconds
             Send-SeamCommand $Session @{ op = 'layout-frame' }
             $fresh = Receive-SeamResponse $Session 'layout-frame'
