@@ -97,6 +97,15 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </summary>
     internal void ApplyPaneLayout(bool expanded, double width)
     {
+        // The pinned shelf's anatomy follows the pane's width (full
+        // body-row titles past the title threshold, icon-only below it),
+        // and this is the one pass every width change rides -- cold start,
+        // toggle, and the drag handle's live resize.
+        if (_paneWidth != width)
+        {
+            _paneWidth = width;
+            UpdatePinnedShelfChrome();
+        }
         NavView.Width = width;
         NavView.MaxWidth = width;
         NavView.OpenPaneLength = width;
@@ -167,13 +176,6 @@ internal sealed partial class VerticalTabStrip : UserControl
         {
             CancelDrag("teardown");
             FinishPinFlight("teardown");
-            // A latched selection replay would fire for passes this strip
-            // no longer attends; drop it with the rest of the wiring.
-            if (_selectionRealizationLatch)
-            {
-                LayoutUpdated -= OnSelectionRealizationPass;
-                _selectionRealizationLatch = false;
-            }
         };
     }
 
@@ -464,9 +466,11 @@ internal sealed partial class VerticalTabStrip : UserControl
     // MenuItems -- they must not scroll and must not take part in MUXC
     // selection -- so they get their own container and their own registry.
     private readonly StackPanel _pinnedShelf = new();
-    private readonly TextBlock _pinnedHeader = new();
     private readonly StackPanel _pinnedPanel = new();
     private readonly Border _boundaryStroke = new();
+
+    /// <summary>The pane width the last ApplyPaneLayout named.</summary>
+    private double _paneWidth;
     private readonly Dictionary<TabModel, VerticalTabPinnedRow> _pinnedRows = new();
     private readonly Dictionary<TabModel, TabHooks> _pinnedHooks = new();
 
@@ -602,7 +606,13 @@ internal sealed partial class VerticalTabStrip : UserControl
     private Brush BoundaryStrokeBrush()
     {
         var accent = AccentBrush.Color;
-        byte alpha = _drag is null ? (byte)0x59 : (byte)0xE6;
+        // The zone's one anchor now that the label is gone: present at a
+        // glance while idle, near-full while a drag aims at it. High
+        // Contrast rejects translucency, so there the line is opaque in
+        // both states -- the system's HC accent carries the color.
+        byte idle = _highContrast ? (byte)0xFF : (byte)0x99;
+        byte live = _highContrast ? (byte)0xFF : (byte)0xE6;
+        byte alpha = _drag is null ? idle : live;
         return new SolidColorBrush(Color.FromArgb(alpha, accent.R, accent.G, accent.B));
     }
 
@@ -1085,7 +1095,7 @@ internal sealed partial class VerticalTabStrip : UserControl
             : null;
         if (item is not null && !item.IsLoaded)
         {
-            DeferSelectionSync();
+            DeferSelectionSync(item);
             return;
         }
         _selectionSyncDeferred = false;
@@ -1110,29 +1120,32 @@ internal sealed partial class VerticalTabStrip : UserControl
     }
 
     /// <summary>
-    /// The realization latch for the selection sync: subscribed once, and
-    /// every layout pass gives the deferred sync one attempt -- a pass
-    /// where MUXC has realized the churned containers lands it, and a pass
-    /// where it has not re-arms the latch through the defer. Detached the
-    /// moment the sync lands, and on teardown.
+    /// The realization latch for the selection sync, held on the deferred
+    /// item itself: its Loaded is the realization event -- MUXC raises it
+    /// when the container lands in the tree -- and the handler detaches
+    /// before re-running the sync, so a re-churn that produced a fresh
+    /// unrealized element simply re-defers onto the new one. No standing
+    /// strip-rooted subscription: the handler dies with the element it
+    /// rides, and teardown owes it nothing.
     /// </summary>
-    private bool _selectionRealizationLatch;
+    private NavigationViewItem? _selectionRealizationItem;
 
-    private void DeferSelectionSync()
+    private void DeferSelectionSync(NavigationViewItem item)
     {
         _selectionSyncDeferred = true;
-        if (_selectionRealizationLatch) return;
-        _selectionRealizationLatch = true;
-        LayoutUpdated += OnSelectionRealizationPass;
+        if (ReferenceEquals(_selectionRealizationItem, item)) return;
+        _selectionRealizationItem = item;
+        item.Loaded -= OnSelectionRealized;
+        item.Loaded += OnSelectionRealized;
     }
 
-    private void OnSelectionRealizationPass(object? sender, object e)
+    private void OnSelectionRealized(object sender, RoutedEventArgs e)
     {
-        if (!_selectionSyncDeferred)
+        if (sender is NavigationViewItem item)
         {
-            LayoutUpdated -= OnSelectionRealizationPass;
-            _selectionRealizationLatch = false;
-            return;
+            item.Loaded -= OnSelectionRealized;
+            if (ReferenceEquals(_selectionRealizationItem, item))
+                _selectionRealizationItem = null;
         }
         _selectionSyncDeferred = false;
         SyncSelectionFromManager();
@@ -1332,38 +1345,25 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// </remarks>
     private void BuildPinnedShelf()
     {
-        // "Pinned" reads as a section title, not a row: small caps, fixed
-        // 24px band, offered only while pins exist (UpdatePinnedShelfChrome),
-        // and carrying heading semantics so an assistive client can jump to
-        // the section instead of walking into it.
-        _pinnedHeader.Text = "Pinned";
-        _pinnedHeader.Height = PinnedHeaderHeight;
-        _pinnedHeader.FontSize = 12;
-        _pinnedHeader.CharacterSpacing = 60;
-        _pinnedHeader.Margin = new Thickness(RowInsetLeft + 4, 0, 0, 0);
-        _pinnedHeader.VerticalAlignment = VerticalAlignment.Center;
-        _pinnedHeader.Visibility = Visibility.Collapsed;
-        Microsoft.UI.Xaml.Documents.Typography.SetCapitals(
-            _pinnedHeader, Microsoft.UI.Xaml.FontCapitals.SmallCaps);
-        AutomationProperties.SetName(_pinnedHeader, "Pinned");
-        AutomationProperties.SetHeadingLevel(
-            _pinnedHeader, AutomationHeadingLevel.Level2);
-
+        // No section label: the zone is announced by structure -- the
+        // pinned rows wear full body-row anatomy in the expanded pane, and
+        // the boundary line under the last one is what marks the zone.
+        // (Per-row "Pinned" ItemStatus keeps the zone in the automation
+        // tree; the label's heading role went with it.)
         _boundaryStroke.Height = BoundaryStrokeHeight;
         _boundaryStroke.IsHitTestVisible = false;
-        _boundaryStroke.Margin = new Thickness(RowInsetLeft, 0, 0, 0);
+        // Aligned to the rows' left inset, a breath below the cluster's
+        // own 2px row insets, and off the right edge so the rule reads as
+        // drawn between the zones rather than painted edge to edge.
+        _boundaryStroke.Margin = new Thickness(RowInsetLeft, 3, 4, 0);
         _boundaryStroke.Visibility = Visibility.Collapsed;
 
-        _pinnedShelf.Children.Add(_pinnedHeader);
         _pinnedShelf.Children.Add(_pinnedPanel);
         _pinnedShelf.Children.Add(_boundaryStroke);
         _pinnedShelf.Visibility = Visibility.Collapsed;
 
         NavView.PaneCustomContent = _pinnedShelf;
     }
-
-    /// <summary>Height of the pinned section's header band.</summary>
-    private const double PinnedHeaderHeight = 24;
 
     /// <summary>
     /// The element rendering <paramref name="tab"/>, from whichever
@@ -2017,17 +2017,19 @@ internal sealed partial class VerticalTabStrip : UserControl
     {
         var anyPins = _manager.PinCount > 0;
         _pinnedShelf.Visibility = anyPins ? Visibility.Visible : Visibility.Collapsed;
-        // The header follows the shelf's gate: BuildPinnedShelf only parks
-        // it collapsed as the initial state, so this flip is the one thing
-        // that ever makes the 24px headline -- and its heading semantics --
-        // render.
-        _pinnedHeader.Visibility = anyPins ? Visibility.Visible : Visibility.Collapsed;
 
         var bothZones = anyPins && _manager.PinCount < _manager.Tabs.Count;
         _boundaryStroke.Visibility = bothZones ? Visibility.Visible : Visibility.Collapsed;
         // Brightens while a drag is live, via BoundaryStrokeBrush's drag
         // gate -- the aiming feedback the drag-to-pin gesture reads.
         if (bothZones) _boundaryStroke.Background = BoundaryStrokeBrush();
+
+        // The pinned rows wear full body-row anatomy when the pane is wide
+        // enough to read a title, and degrade to the icon-only slot the
+        // 48px compact pane fits when it is not.
+        var showTitles = _paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold;
+        foreach (var (_, row) in _pinnedRows)
+            row.ShowTitle = showTitles;
     }
 
     private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -4211,6 +4213,9 @@ internal sealed partial class VerticalTabStrip : UserControl
 
     /// <summary>True while a gesture (seam-driven or real) holds the strip.</summary>
     internal bool TestSeamDragLive => _drag is not null;
+
+    /// <summary>The pane width the last ApplyPaneLayout named, for the seam.</summary>
+    internal double TestSeamPaneWidth => _paneWidth;
 
     /// <summary>
     /// One seam drag: press the row of manager index <paramref name="from"/>,

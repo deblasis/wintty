@@ -6,12 +6,14 @@ using Xunit;
 namespace Ghostty.Tests.Wiring;
 
 /// <summary>
-/// The pinned panel's structure (spec 5.1): a fixed, non-scrolling section
-/// above the list, headed by a small-caps header, holding icon-only rows
-/// for the pinned prefix. The strip now has TWO row containers, and the
-/// guards here pin the seams that two containers create: where the shelf
-/// is hosted, who owns order and membership, how a row is measured, and
-/// the one trap a fixed section above the scroller sets for the drag
+/// The pinned panel's structure (spec 5.1, restated by the zone-visual
+/// design): a fixed, non-scrolling section above the list, announced by
+/// structure rather than a label -- body-row anatomy in the expanded
+/// pane, icon-only in the compact pane, and one confident boundary line
+/// under the last pinned row. The guards here pin the seams the two row
+/// containers create: where the shelf is hosted, who owns order and
+/// membership, how a row is measured, the zone's visual anchor, and the
+/// one trap a fixed section above the scroller sets for the drag
 /// machine's autoscroll.
 ///
 /// Wiring guards, not behaviour tests: whether the panel paints on the
@@ -20,6 +22,13 @@ namespace Ghostty.Tests.Wiring;
 public class PinnedPanelWiringTests
 {
     private static ShellSource Strip() => ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+
+    // Assignments spelled through a member (the boundary stroke's chrome)
+    // -- SyntaxQueries.AssignsTo matches bare identifiers only.
+    private static System.Collections.Generic.IEnumerable<AssignmentExpressionSyntax>
+        Assignments(SyntaxNode node, string left)
+        => node.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == left);
 
     /// <summary>
     /// The shelf rides PaneCustomContent, and that placement is the whole
@@ -53,45 +62,145 @@ public class PinnedPanelWiringTests
     }
 
     /// <summary>
-    /// "Pinned" is a section heading, not a row: it carries heading
-    /// semantics, it is named for find-by-name, and it is chrome of the
-    /// shelf rather than an item of the row panel -- a client that walks
-    /// the panel's children must find tabs, never the title.
+    /// The zone is announced by structure, not a label: no header element
+    /// is built, named, or gated anywhere in the shelf's wiring, and the
+    /// shelf's children are exactly the row panel and the boundary stroke.
+    /// The per-row "Pinned" ItemStatus (PinnedRows_KeepTheirNameAndStatus)
+    /// is what keeps the zone in the automation tree after the heading's
+    /// removal.
     /// </summary>
     [Fact]
-    public void TheHeader_IsAHeading_AndNotARowOfThePanel()
+    public void TheZone_IsAnnouncedByStructure_WithNoHeaderLabel()
     {
         var build = Strip().Method("BuildPinnedShelf");
 
-        var named = build.Calls("AutomationProperties.SetName").Single();
-        Assert.Equal("_pinnedHeader", named.Arg(0));
-        Assert.Equal("\"Pinned\"", named.Arg(1));
-
-        var heading = build.Calls("AutomationProperties.SetHeadingLevel").Single();
-        Assert.Equal("_pinnedHeader", heading.Arg(0));
-        Assert.Equal("AutomationHeadingLevel.Level2", heading.Arg(1));
-
-        // The shelf's own children: header, then the row panel, then the
-        // boundary stroke. The header must not land inside the row panel,
-        // where it would read as one of the things it titles.
+        // The shelf's own children: the row panel, then the boundary
+        // stroke. Nothing else -- a label would be a second answer to a
+        // question the anatomy already settles.
         var adds = build.Calls("_pinnedShelf.Children.Add")
             .Select(c => c.Arg(0))
             .ToList();
-        Assert.Equal(new[] { "_pinnedHeader", "_pinnedPanel", "_boundaryStroke" }, adds);
+        Assert.Equal(new[] { "_pinnedPanel", "_boundaryStroke" }, adds);
         Assert.Empty(build.Calls("_pinnedPanel.Children.Add"));
 
-        // BuildPinnedShelf only parks the header collapsed as the initial
-        // state; the anyPins gate in the chrome refresh is the one thing
-        // that ever flips it. Asserted on the ternary's polarity, because a
-        // header that never becomes visible is 24px of chrome and a heading
-        // no client ever finds -- the build-time collapse alone passes a
-        // visibility-blind guard.
+        // And the header is gone from the class, not just from the build:
+        // a field kept "for later" is a label that comes back.
+        var source = Strip().Root.ToString();
+        Assert.DoesNotContain("_pinnedHeader", source, StringComparison.Ordinal);
+
+        // The chrome refresh drives the shelf's two remaining states --
+        // visibility and the boundary -- and nothing header-shaped.
         var shelf = Strip().Method("UpdatePinnedShelfChrome");
-        var headerVisible = shelf.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "_pinnedHeader.Visibility");
+        Assert.DoesNotContain("Header", shelf.ToFullString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The boundary line is the zone's one anchor, so its placement and
+    /// presence are pinned at the parsed call sites: twice an ordinary row
+    /// line, aligned to the rows' left inset with a breath below the
+    /// cluster and a small right inset so it reads as drawn between the
+    /// zones, visible exactly while both zones exist, and painted by the
+    /// brush that carries the drag's aiming feedback and the High
+    /// Contrast opaque override.
+    /// </summary>
+    [Fact]
+    public void TheBoundary_IsTheZoneAnchor()
+    {
+        var build = Strip().Method("BuildPinnedShelf");
+
+        Assert.Equal("BoundaryStrokeHeight",
+            Assignments(build, "_boundaryStroke.Height").Single().Right.ToString());
         Assert.Equal(
-            "anyPins ? Visibility.Visible : Visibility.Collapsed",
-            headerVisible.Right.ToString());
+            "new Thickness(RowInsetLeft, 3, 4, 0)",
+            Assignments(build, "_boundaryStroke.Margin").Single().Right.ToString());
+
+        var shelf = Strip().Method("UpdatePinnedShelfChrome");
+        var visible = Assignments(shelf, "_boundaryStroke.Visibility").Single();
+        Assert.Equal("bothZones ? Visibility.Visible : Visibility.Collapsed",
+            visible.Right.ToString());
+        // The brush is only written under the same gate: a boundary painted
+        // while hidden is chrome nobody sees, and a gate without the paint
+        // is a line that never brightens.
+        var paint = Assignments(shelf, "_boundaryStroke.Background").Single();
+        Assert.True(visible.Span.End < paint.Span.Start,
+            "the boundary's visibility gate must precede its paint");
+
+        var brush = Strip().Method("BoundaryStrokeBrush");
+        // The drag gate rides the alpha declaration: idle presence while
+        // no drag holds the strip, near-full while one aims at it.
+        var alpha = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "alpha");
+        var ternary = Assert.IsType<ConditionalExpressionSyntax>(alpha.Initializer!.Value);
+        Assert.Equal("_drag is null", ternary.Condition.ToString());
+        Assert.Equal("idle", ternary.WhenTrue.ToString());
+        Assert.Equal("live", ternary.WhenFalse.ToString());
+
+        // High Contrast overrides translucency: both states resolve
+        // opaque there, on the system's HC accent.
+        var declarators = brush.DescendantNodes().OfType<VariableDeclaratorSyntax>().ToList();
+        Assert.Contains(declarators, v => v.Identifier.ValueText == "idle"
+            && v.Initializer!.Value.ToString().Contains("_highContrast")
+            && v.Initializer.Value.ToString().Contains("0xFF"));
+        Assert.Contains(declarators, v => v.Identifier.ValueText == "live"
+            && v.Initializer!.Value.ToString().Contains("0xFF"));
+    }
+
+    /// <summary>
+    /// The pinned row's anatomy follows the pane: full body-row anatomy --
+    /// icon, title, bell -- once the pane is wide enough to read a
+    /// trimmed title, and the icon-only slot the compact pane fits below
+    /// that. The strip drives it from ApplyPaneLayout, the one pass every
+    /// width change rides, and the row degrades by collapsing the title
+    /// column, never by re-building the row.
+    /// </summary>
+    [Fact]
+    public void PinnedRows_WearBodyAnatomy_WhenThePaneIsWide()
+    {
+        var shelf = Strip().Method("UpdatePinnedShelfChrome");
+        var flip = Assignments(shelf, "row.ShowTitle").Single();
+        Assert.Equal("showTitles", flip.Right.ToString());
+        var threshold = shelf.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == "showTitles");
+        Assert.Equal("_paneWidth >= VerticalTabPinnedRow.TitlePaneWidthThreshold",
+            threshold.Initializer!.Value.ToString());
+
+        // ApplyPaneLayout is the choke point: the width lands there, the
+        // chrome refresh runs on the change, and the pane stays honest.
+        var layout = Strip().Method("ApplyPaneLayout");
+        var stored = layout.AssignsTo("_paneWidth").Single();
+        Assert.Equal("width", stored.Right.ToString());
+        var refresh = layout.Calls("UpdatePinnedShelfChrome").Single();
+        var gate = layout.DescendantNodes().OfType<IfStatementSyntax>()
+            .Single(i => i.Condition.ToString() == "_paneWidth != width");
+        Assert.True(gate.Span.Contains(refresh.Span),
+            "the shelf refresh must ride the width-changed gate");
+
+        // The row degrades structurally: the title column collapses, and
+        // the bell re-parents between the icon slot's corner and the
+        // title column's trailing edge -- the two states a compact pane
+        // and an expanded one wear.
+        var rowSource = ShellSource.Load("Tabs.VerticalTabPinnedRow.cs");
+        var showTitle = rowSource.Root.DescendantNodes()
+            .OfType<PropertyDeclarationSyntax>()
+            .Single(p => p.Identifier.ValueText == "ShowTitle");
+        var setter = showTitle.AccessorList!.Accessors
+            .Single(a => a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SetAccessorDeclaration));
+        var collapse = setter.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "_textColumn.Visibility");
+        Assert.Contains("value", collapse.Right.ToString(), StringComparison.Ordinal);
+        Assert.Contains("_iconSlot.Children.Remove(_bell)",
+            setter.ToFullString(), StringComparison.Ordinal);
+        Assert.Contains("_textColumn.Children.Add(_bell)",
+            setter.ToFullString(), StringComparison.Ordinal);
+        Assert.Contains("_iconSlot.Children.Add(_bell)",
+            setter.ToFullString(), StringComparison.Ordinal);
+
+        // And the title takes the row's ink -- the same active/inactive
+        // brush the icon follows -- so a pinned row's title matches a body
+        // row's in every state the strip paints.
+        var ink = rowSource.Method("ApplyInk");
+        Assert.Contains(Assignments(ink, "_title.Foreground").ToList(),
+            a => a.Right.ToString() == "foreground");
     }
 
     /// <summary>

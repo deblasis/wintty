@@ -695,47 +695,50 @@ public class VerticalTabGroupDragWiringTests
     /// will never attend.
     /// </summary>
     [Fact]
-    public void TheRealizationLatch_AttemptsPerPass_AndDetachesWhenLanded()
+    public void TheRealizationLatch_RidesTheItem_AndDetachesWhenLanded()
     {
         var defer = Strip().Method("DeferSelectionSync");
         var guard = defer.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "_selectionRealizationLatch");
+            .Single(i => i.Condition.ToString()
+                == "ReferenceEquals(_selectionRealizationItem, item)");
         Assert.True(guard.Statement is ReturnStatementSyntax);
-        // Event subscriptions parse as assignments, not invocations.
-        var subscribe = defer.AssignsTo("LayoutUpdated").Single();
+        // Event subscriptions parse as assignments, not invocations: the
+        // latch rides the deferred item's own Loaded -- the realization
+        // event -- never a strip-rooted per-pass handler.
+        var subscribe = defer.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left.ToString() == "item.Loaded").ToList();
+        Assert.Equal(2, subscribe.Count);
+        Assert.All(subscribe, a => Assert.Equal(
+            "OnSelectionRealized", a.Right.ToString()));
         Assert.True(
-            guard.Span.End < subscribe.Span.Start,
-            "the not-latched guard must precede the subscription");
-        Assert.Equal("OnSelectionRealizationPass", subscribe.Right.ToString());
+            guard.Span.End < subscribe[0].Span.Start,
+            "the not-this-item guard must precede the resubscription");
 
-        var pass = Strip().Method("OnSelectionRealizationPass");
-        var landed = pass.DescendantNodes().OfType<IfStatementSyntax>()
-            .Single(i => i.Condition.ToString() == "!_selectionSyncDeferred");
-        var detach = landed.Statement.AssignsTo("LayoutUpdated").Single();
-        Assert.Equal("OnSelectionRealizationPass", detach.Right.ToString());
-        Assert.Contains(landed.Statement.AssignsTo("_selectionRealizationLatch").ToList(),
-            a => a.Right.ToString() == "false");
-        // Every pass attempts the sync once: the flag clears, the sync
-        // runs, and a still-unrealized strip re-defers from inside it.
-        var retry = Assert.IsType<ExpressionStatementSyntax>(pass.Body!.Statements.Last());
+        var realized = Strip().Method("OnSelectionRealized");
+        var ifRealized = Assert.IsType<IfStatementSyntax>(
+            realized.Body!.Statements.First());
+        var block = Assert.IsType<BlockSyntax>(ifRealized.Statement);
+        var detach = Assert.IsType<AssignmentExpressionSyntax>(
+            Assert.IsType<ExpressionStatementSyntax>(block.Statements.First()).Expression);
+        Assert.Equal("item.Loaded", detach.Left.ToString());
+        Assert.Equal("OnSelectionRealized", detach.Right.ToString());
+        var clear = realized.AssignsTo("_selectionRealizationItem").Single();
+        Assert.Equal("null", clear.Right.ToString());
+        var retry = Assert.IsType<ExpressionStatementSyntax>(realized.Body!.Statements.Last());
         Assert.Equal("SyncSelectionFromManager",
             Assert.IsType<InvocationExpressionSyntax>(retry.Expression).CalleeText());
-        var passClear = pass.AssignsTo("_selectionSyncDeferred")
+        var realizedClear = realized.AssignsTo("_selectionSyncDeferred")
             .Single(a => a.Right.ToString() == "false");
-        Assert.True(passClear.Span.End < retry.Span.Start,
-            "the pass must clear the flag before the attempt, or the landed "
+        Assert.True(realizedClear.Span.End < retry.Span.Start,
+            "the handler must clear the flag before the attempt, or the "
             + "detach can never fire");
 
-        // Teardown detaches: the Unloaded handler the ctor wires must name
-        // the same detach, or a closed strip latches a handler forever.
-        var ctor = Strip().Root.DescendantNodes()
-            .OfType<ConstructorDeclarationSyntax>()
-            .First(c => c.Identifier.ValueText == "VerticalTabStrip");
-        var unloaded = ctor.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left.ToString() == "Unloaded");
-        Assert.NotEmpty(unloaded.Right.DescendantNodesAndSelf()
+        // And the strip stays free of a second standing LayoutUpdated
+        // latch: the realization wait lives on the item, not on every
+        // pass anywhere in the window.
+        Assert.Equal(1, Strip().Root.DescendantNodes()
             .OfType<AssignmentExpressionSyntax>()
-            .Where(a => a.Left.ToString() == "LayoutUpdated"
-                        && a.Right.ToString() == "OnSelectionRealizationPass"));
+            .Count(a => a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.AddAssignmentExpression)
+                && a.Left.ToString() == "LayoutUpdated"));
     }
 }
