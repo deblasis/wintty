@@ -115,9 +115,19 @@ function Start-SeamSession(
         OrigXdg   = if (Test-Path Env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { $null }
         OrigSeam  = if (Test-Path Env:WINTTY_TEST_SEAM) { $env:WINTTY_TEST_SEAM } else { $null }
         OrigTrace = if (Test-Path Env:WINTTY_TABDRAG_TRACE) { $env:WINTTY_TABDRAG_TRACE } else { $null }
+        OrigNoColor = if (Test-Path Env:NO_COLOR) { $env:NO_COLOR } else { $null }
     }
     $env:XDG_CONFIG_HOME = $tempXdg
     $env:WINTTY_TEST_SEAM = '1'
+    # The child inherits this shell's environment block, and NO_COLOR in it is
+    # a harness trap rather than a user setting: Claude Code's PowerShell tool
+    # exports NO_COLOR=1, so every agent-launched instance inherits it. Wintty
+    # answers a set NO_COLOR with an infobar that covers roughly a third of the
+    # window and renders terminal content colourless -- it displaces the very
+    # chrome a capture harness is aiming at, and takes keyboard focus so the
+    # chords that follow are swallowed. Strip it here so no seam consumer has
+    # to remember; the original is restored in Stop-SeamSession.
+    Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
     if ($TraceFile) { $env:WINTTY_TABDRAG_TRACE = $TraceFile }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
 
@@ -202,5 +212,7 @@ function Stop-SeamSession([Parameter(Mandatory)]$Session) {
     else { Remove-Item Env:WINTTY_TEST_SEAM -ErrorAction SilentlyContinue }
     if ($null -ne $Session.OrigTrace) { $env:WINTTY_TABDRAG_TRACE = $Session.OrigTrace }
     else { Remove-Item Env:WINTTY_TABDRAG_TRACE -ErrorAction SilentlyContinue }
+    if ($null -ne $Session.OrigNoColor) { $env:NO_COLOR = $Session.OrigNoColor }
+    else { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
     Remove-Item $Session.TempXdg -Recurse -Force -ErrorAction SilentlyContinue
 }
