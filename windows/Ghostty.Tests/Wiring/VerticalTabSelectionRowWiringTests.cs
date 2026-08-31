@@ -20,12 +20,15 @@ namespace Ghostty.Tests.Wiring;
 /// item's bounds are non-zero, just measured against the old layout.
 ///
 /// These are wiring guards. They prove the one-shot LayoutUpdated pass is
-/// still on the path a refresh takes and is still one-shot; since the
-/// realization latch (#854) the strip carries a second replay beside it,
-/// and Strip_CarriesNoStandingLayoutUpdatedSubscription pins that one to
-/// the same discipline. Whether the fill lands on the right row is only
-/// observable on a live strip, which is what
-/// scripts/mouse-fuzz-tab-close-selection.ps1 is for.
+/// still on the path a refresh takes and is still one-shot. The second
+/// LayoutUpdated replay #854 armed beside it -- the strip-rooted
+/// realization latch -- is gone: the realization wait now rides the
+/// deferred item's own Loaded, and
+/// Strip_CarriesNoStandingLayoutUpdatedSubscription pins the strip back
+/// to the single settle arm plus the item latch's detach discipline.
+/// Whether the fill lands on the right row is only observable on a live
+/// strip, which is what scripts/mouse-fuzz-tab-close-selection.ps1 is
+/// for.
 /// </summary>
 public class VerticalTabSelectionRowWiringTests
 {
@@ -109,16 +112,20 @@ public class VerticalTabSelectionRowWiringTests
     /// <summary>
     /// LayoutUpdated fires for every layout pass anywhere in the window, so
     /// the standing subscription this control refuses to carry is one that
-    /// is attached for the strip's whole life. Since #854 the file arms two
-    /// replays, and the contract is that both stay self-detaching, not that
-    /// the file carries one: the settle arm re-arms per selection refresh,
-    /// and the realization latch subscribes once behind the
-    /// not-already-latched early-return in DeferSelectionSync, gives each
-    /// pass one attempt at landing the deferred sync, and is dropped by its
-    /// own handler on the first pass that arrives with nothing left to
-    /// replay and by the Unloaded teardown with the rest of the wiring.
-    /// The hazard is a latch that never detaches, which a count alone
-    /// cannot see, so the detach statements are pinned where they live.
+    /// is attached for the strip's whole life. #854 armed a second replay
+    /// beside the settle arm -- a strip-rooted realization latch on
+    /// LayoutUpdated -- and #858 evolved this fact to a count of two with
+    /// the latch's detach discipline pinned prong by prong. That latch has
+    /// been replaced: the realization wait now rides the deferred item's
+    /// own Loaded (_selectionRealizationItem), the precise realization
+    /// event, so the strip is back to exactly one `LayoutUpdated +=` --
+    /// the settle arm -- with zero standing subscriptions beyond it, and
+    /// the item latch needs no Unloaded teardown because the subscription
+    /// dies with the element it rides. This supersedes the #858 count-two
+    /// contract; the detach discipline it demanded of the old latch is
+    /// re-pinned here against the item's Loaded handler, and the latch's
+    /// full anatomy is pinned by
+    /// TheRealizationLatch_RidesTheItem_AndDetachesWhenLanded.
     /// </summary>
     [Fact]
     public void Strip_CarriesNoStandingLayoutUpdatedSubscription()
@@ -130,77 +137,52 @@ public class VerticalTabSelectionRowWiringTests
                         && a.Left.ToString() == "LayoutUpdated")
             .ToList();
 
-        Assert.True(
-            adds.Count == 2,
-            $"expected exactly two `LayoutUpdated +=` in VerticalTabStrip (the settle arm and "
-                + $"the realization latch), found {adds.Count}");
+        var settleArm = Assert.Single(adds);
+        Assert.Equal("OnSelectionRowPlacementSettled", settleArm.Right.ToString());
+        Assert.Equal("PlaceSelectionRowAfterLayout", ContainingMethod(settleArm));
 
-        Assert.Contains(
-            adds, a => a.Right.ToString() == "OnSelectionRowPlacementSettled"
-                       && ContainingMethod(a) == "PlaceSelectionRowAfterLayout");
-        Assert.Contains(
-            adds, a => a.Right.ToString() == "OnSelectionRealizationPass"
-                       && ContainingMethod(a) == "DeferSelectionSync");
+        // The realization wait that used to be the second LayoutUpdated arm
+        // rides the item now: DeferSelectionSync subscribes the deferred
+        // item's own Loaded, behind the same-item early-return, so a pass
+        // that re-defers onto the item it already latched re-arms nothing
+        // instead of stacking handlers on one element.
+        var itemArm = Assert.Single(
+            strip.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>(),
+            a => a.IsKind(SyntaxKind.AddAssignmentExpression)
+                 && a.Left.ToString() == "item.Loaded");
+        Assert.Equal("OnSelectionRealized", itemArm.Right.ToString());
+        Assert.Equal("DeferSelectionSync", ContainingMethod(itemArm));
 
-        // The latch subscribes once: the arm sits behind the guard that
-        // bails while a latch is already standing, so a pass that finds the
-        // containers still unrealized re-defers (re-arms the latch) instead
-        // of stacking a second subscription.
-        var deferBody = strip.Method("DeferSelectionSync").Body!.Statements;
-        var latchArm = deferBody.FirstOrDefault(s => IsEventHook(
-            s, SyntaxKind.AddAssignmentExpression,
-            "LayoutUpdated", "OnSelectionRealizationPass"));
-        Assert.True(latchArm is not null, "DeferSelectionSync must arm the realization latch");
-
-        var latchGuard = deferBody
-            .TakeWhile(s => s is not IfStatementSyntax
-            {
-                Condition: IdentifierNameSyntax { Identifier.Text: "_selectionRealizationLatch" }
-            })
-            .Count();
-        Assert.True(
-            latchGuard < deferBody.Count, "expected the _selectionRealizationLatch early-return");
-        Assert.True(
-            deferBody.IndexOf(latchArm!) > latchGuard,
-            "the latch arm must sit behind the _selectionRealizationLatch early-return, or a "
-            + "still-unrealized pass stacks a second subscription instead of re-arming the one "
-            + "already standing");
-
-        // A latch is temporary only while its handler drops it. The detach
-        // lives in the branch a pass takes when nothing is left to replay,
-        // which is both the cleanup after a landed sync and the cleanup for
-        // a defer another path already satisfied; a handler that never
-        // unhooks is the standing LayoutUpdated hook this control refuses
-        // to carry.
-        var idleBranch = strip.Method("OnSelectionRealizationPass").Body!.Statements
-            .Select(s => s as IfStatementSyntax)
-            .FirstOrDefault(guard => guard is not null
-                && guard.Condition is PrefixUnaryExpressionSyntax negation
-                && negation.IsKind(SyntaxKind.LogicalNotExpression)
-                && negation.Operand.ToString() == "_selectionSyncDeferred");
-        Assert.True(
-            idleBranch?.Statement is BlockSyntax idleBlock
-            && idleBlock.Statements.Any(s => IsEventHook(
-                s, SyntaxKind.SubtractAssignmentExpression,
-                "LayoutUpdated", "OnSelectionRealizationPass")),
-            "the latch handler must detach itself on the pass with nothing left to replay: a "
-            + "handler that never unhooks is the standing LayoutUpdated hook this control "
-            + "refuses to carry");
-
-        // Teardown drops the latch with the rest of the wiring, so a strip
-        // unloaded mid-replay does not leave the subscription behind.
-        var unhooks = strip.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+        // Detach-proof, the discipline #858 pinned on the old latch,
+        // carried over to the item latch: the defensive detach ahead of
+        // the arm (so a re-latch of the same element after an external
+        // unload cannot double-subscribe) and the landed detach in the
+        // Loaded handler. Nowhere else -- an Unloaded teardown prong is
+        // absent on purpose, because the handler rides the item, not the
+        // strip, and dies with it.
+        var detaches = strip.Root.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.IsKind(SyntaxKind.SubtractAssignmentExpression)
-                        && a.Left.ToString() == "LayoutUpdated"
-                        && a.Right.ToString() == "OnSelectionRealizationPass")
+                        && a.Left.ToString() == "item.Loaded"
+                        && a.Right.ToString() == "OnSelectionRealized")
             .ToList();
         Assert.True(
-            unhooks.Count == 2,
-            $"the realization latch must detach in exactly two places (its handler and the "
-                + $"Unloaded teardown), found {unhooks.Count}");
-        Assert.Contains(
-            unhooks, u => u.Ancestors().OfType<AssignmentExpressionSyntax>().Any(a =>
-                a.IsKind(SyntaxKind.AddAssignmentExpression) && a.Left.ToString() == "Unloaded"));
+            detaches.Count == 2,
+            $"expected exactly two `item.Loaded -=` detaches (the pre-arm reset and the landed "
+                + $"detach), found {detaches.Count}");
+        Assert.Contains(detaches, d => ContainingMethod(d) == "DeferSelectionSync");
+        var landed = detaches.Single(d => ContainingMethod(d) == "OnSelectionRealized");
+
+        // The landed detach must sit inside the sender-is-item guard: the
+        // handler can only unhook the element that raised it, and a detach
+        // hoisted outside the pattern would not compile against the right
+        // identifier anyway -- pin the shape so a rewrite cannot quietly
+        // detach some other latch.
+        Assert.True(
+            landed.Ancestors().OfType<IfStatementSyntax>().Any(guard =>
+                guard.Condition is IsPatternExpressionSyntax pattern
+                && pattern.Expression.ToString() == "sender"),
+            "the landed detach must live inside the `sender is NavigationViewItem item` guard "
+            + "of the Loaded handler");
     }
 
     /// <summary>

@@ -334,6 +334,35 @@ internal static class TestSeam
                     : OkWithState(window, manager, op);
             }
 
+            case "toggle-sidebar":
+            {
+                // The pane-pinned toggle's own dispatch. The ack waits out
+                // the width tween by watching the strip's pane width stop
+                // moving, so a screenshot taken after this answer shows the
+                // settled width.
+                var before = window.TestSeamVerticalStrip?.TestSeamPaneWidth ?? -1;
+                window.TestSeamRouter.RequestToggleSidebarCollapse();
+                var deadline = Environment.TickCount64 + 5_000;
+                double stable = before;
+                var stableSince = Environment.TickCount64;
+                while (Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(30);
+                    var now = window.TestSeamVerticalStrip?.TestSeamPaneWidth ?? -1;
+                    if (now != stable)
+                    {
+                        stable = now;
+                        stableSince = Environment.TickCount64;
+                    }
+                    else if (Environment.TickCount64 - stableSince > 250)
+                    {
+                        break;
+                    }
+                }
+                window.TestSeamSettleLayout();
+                return OkWithState(window, manager, op);
+            }
+
             case "drag":
             {
                 var strip = window.TestSeamVerticalStrip;
@@ -406,6 +435,8 @@ internal static class TestSeam
         json.WriteStartObject("state");
         json.WriteBoolean("vertical", window.TestSeamVerticalTabs);
         json.WriteBoolean("switching", window.TestSeamLayoutSwitching);
+        json.WriteNumber("paneWidth",
+            window.TestSeamVerticalStrip?.TestSeamPaneWidth ?? 0);
         json.WriteStartArray("tabs");
         for (int i = 0; i < manager.Tabs.Count; i++)
         {
