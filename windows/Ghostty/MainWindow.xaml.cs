@@ -117,6 +117,29 @@ public sealed partial class MainWindow : Window
     internal Tabs.VerticalTabStrip? TestSeamVerticalStrip
         => _tabHost is Tabs.VerticalTabHost vertical ? vertical.StripForTestSeam : null;
 
+    /// <summary>The active tab's pane host: the seam's pane ops target it.</summary>
+    internal Panes.PaneHost TestSeamActivePaneHost
+        => (Panes.PaneHost)_tabManager.ActiveTab.PaneHost;
+
+    /// <summary>
+    /// DIPs-to-pixels for this window, so a capture harness can land the
+    /// seam's DIP rects on a screenshot.
+    /// </summary>
+    internal double TestSeamRasterizationScale
+        => Content?.XamlRoot?.RasterizationScale ?? 1.0;
+
+    /// <summary>
+    /// Whatever WinUI currently gives keyboard focus. Read through
+    /// FocusManager rather than off a pane field on purpose: "the tab
+    /// remembers its last pane" and "you can type into it" are separate
+    /// claims, and a seam oracle that cannot tell them apart would pass
+    /// while the user still has to click.
+    /// </summary>
+    internal FrameworkElement? TestSeamFocusedElement
+        => Content?.XamlRoot is { } root
+            ? FocusManager.GetFocusedElement(root) as FrameworkElement
+            : null;
+
     /// <summary>
     /// The horizontal strip when it is this window's active host, else
     /// null: its header rects describe elements only that host builds.
@@ -858,6 +881,15 @@ public sealed partial class MainWindow : Window
             SwapActivePane();
             ApplyPerTabChrome();
             RefreshBackdropChrome();
+            // The per-tab last-focused pane is already remembered
+            // (PaneHost.ActiveLeaf); nothing was handing keyboard focus
+            // back to it. Without this, activating a tab by clicking its
+            // row leaves focus on the strip and the user has to click a
+            // pane before they can type. Ordered after SwapActivePane
+            // because Focus on a collapsed host is a silent no-op, and
+            // deferred through the dispatcher by FocusActiveLeaf so the
+            // visibility swap has been laid out by the time it runs.
+            FocusActiveLeaf();
         };
 
         foreach (var tab in _tabManager.Tabs)
