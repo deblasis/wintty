@@ -10,10 +10,17 @@ using Windows.UI;
 namespace Ghostty.Tabs;
 
 /// <summary>
-/// The transient Ctrl+Tab cycle popup. <see cref="Show"/> builds a row of tab
-/// tiles -- icon + title over a small colored preview -- and highlights the
-/// active one with an accent ring. MainWindow flashes it on each Ctrl+Tab press
+/// The transient Ctrl+Tab cycle popup. <see cref="Show"/> builds one card
+/// per row of the cycle -- tab tiles (icon + title over a small colored
+/// preview) and chip rows for collapsed groups -- and highlights the active
+/// one with an accent ring. MainWindow flashes it on each Ctrl+Tab press
 /// and auto-dismisses it shortly after.
+///
+/// The rows come from <see cref="TabStripProjection.HorizontalRows"/>, the
+/// same reading the horizontal strip renders: a collapsed group is ONE chip
+/// row (color dot + title + member count + chevron), its members suppressed
+/// except the active one, which the Edge-135 walk projects as an ordinary
+/// tile. The popup never decides visibility itself.
 /// </summary>
 internal sealed partial class TabSwitcherPopup : UserControl
 {
@@ -46,7 +53,8 @@ internal sealed partial class TabSwitcherPopup : UserControl
     /// <summary>
     /// Outer width of one tile: the preview plus the cell's padding, border
     /// and margin. Drives the column count, so it has to track the values
-    /// the build loop actually applies.
+    /// the build loop actually applies. Chip cells take the same width so
+    /// both row kinds share one column math.
     /// </summary>
     private const double CellOuterWidth =
         PreviewWidth + (CellPadding * 2) + (CellBorder * 2) + (CellMargin * 2);
@@ -63,7 +71,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
 
     public TabSwitcherPopup() => InitializeComponent();
 
-    public void Show(IReadOnlyList<TabModel> tabs, TabModel active, string? fontFamily)
+    public void Show(TabManager manager, TabModel active, string? fontFamily)
     {
         CandidateRow.Children.Clear();
         _cellByTab.Clear();
@@ -74,7 +82,10 @@ internal sealed partial class TabSwitcherPopup : UserControl
         // time). Prefer the explicit size.
         var hostWidth = double.IsNaN(Width) ? ActualWidth : Width;
         var hostHeight = double.IsNaN(Height) ? ActualHeight : Height;
-        CandidateRow.MaximumRowsOrColumns = ColumnsFor(tabs.Count, hostWidth);
+        // Read at call time: a cycle step that expanded a group (a chip
+        // activation) is rendered expanded, in step with the strip.
+        var rows = TabStripProjection.HorizontalRows(manager);
+        CandidateRow.MaximumRowsOrColumns = ColumnsFor(rows.Count, hostWidth);
         if (hostHeight > 0)
             CandidateScroll.MaxHeight = hostHeight * MaxGridHeightRatio;
         // A scroll offset left over from the previous open would show the
@@ -82,73 +93,172 @@ internal sealed partial class TabSwitcherPopup : UserControl
         CandidateScroll.ChangeView(null, 0, null, disableAnimation: true);
 
         var renderer = new PanePreviewRenderer(PreviewFont.Resolve(fontFamily));
-        foreach (var tab in tabs)
+        foreach (var row in rows)
         {
-            var icon = new TabIconPresenter
+            switch (row)
             {
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 6, 0),
-            };
-            icon.Attach(tab.TabIcon);
-
-            var title = new TextBlock
-            {
-                Text = tab.EffectiveTitle,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxWidth = TitleMaxWidth,
-                FontSize = _theme.CaptionFontSize,
-            };
-
-            var header = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Margin = new Thickness(2, 0, 2, 6),
-            };
-            header.Children.Add(icon);
-            header.Children.Add(title);
-
-            // Shared slate fill so the 1px per-pane inset reads as dividers
-            // between splits (matches the overview); panes paint near-black over it.
-            var body = new Canvas
-            {
-                Width = PreviewWidth,
-                Height = PreviewHeight,
-                Background = PanePreviewRenderer.DividerFill,
-            };
-            renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
-
-            var content = new StackPanel { Orientation = Orientation.Vertical };
-            content.Children.Add(header);
-            content.Children.Add(new Border { CornerRadius = new CornerRadius(4), Child = body });
-
-            // A tab's preset color reaches the preview the same way it
-            // reaches the strip: the tint composites over the card fill
-            // rather than replacing it, so a colored tile still reads as the
-            // same surface as an uncolored one.
-            var colored = tab.Color != TabColor.None;
-            var idleBorder = colored
-                ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
-                : _theme.BorderIdle;
-            _idleBorderByTab[tab] = idleBorder;
-
-            var cell = new Border
-            {
-                CornerRadius = new CornerRadius(8),
-                BorderThickness = new Thickness(CellBorder),
-                BorderBrush = idleBorder,
-                Background = colored
-                    ? TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: false))
-                    : _theme.CardBackground,
-                Padding = new Thickness(CellPadding),
-                Margin = new Thickness(CellMargin),
-                Child = content,
-            };
-            _cellByTab[tab] = cell;
-            CandidateRow.Children.Add(cell);
+                case TabStripProjection.HorizontalRow.Chip { Group: { } group }:
+                    CandidateRow.Children.Add(BuildGroupChip(manager, group));
+                    break;
+                case TabStripProjection.HorizontalRow.Item { Tab: { } tab }:
+                    CandidateRow.Children.Add(BuildTabTile(tab, renderer));
+                    break;
+            }
         }
 
         Highlight(active);
+    }
+
+    /// <summary>
+    /// One tab tile: icon + title over the pane preview, ringed by the
+    /// active accent when it is the cycle's target.
+    /// </summary>
+    private Border BuildTabTile(TabModel tab, PanePreviewRenderer renderer)
+    {
+        var icon = new TabIconPresenter
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        };
+        icon.Attach(tab.TabIcon);
+
+        var title = new TextBlock
+        {
+            Text = tab.EffectiveTitle,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = TitleMaxWidth,
+            FontSize = _theme.CaptionFontSize,
+        };
+
+        var header = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(2, 0, 2, 6),
+        };
+        header.Children.Add(icon);
+        header.Children.Add(title);
+
+        // Shared slate fill so the 1px per-pane inset reads as dividers
+        // between splits (matches the overview); panes paint near-black over it.
+        var body = new Canvas
+        {
+            Width = PreviewWidth,
+            Height = PreviewHeight,
+            Background = PanePreviewRenderer.DividerFill,
+        };
+        renderer.BuildMiniLayout(tab.PaneHost.RootNode, body, PreviewFontSize);
+
+        var content = new StackPanel { Orientation = Orientation.Vertical };
+        content.Children.Add(header);
+        content.Children.Add(new Border { CornerRadius = new CornerRadius(4), Child = body });
+
+        // A tab's preset color reaches the preview the same way it
+        // reaches the strip: the tint composites over the card fill
+        // rather than replacing it, so a colored tile still reads as the
+        // same surface as an uncolored one.
+        var colored = tab.Color != TabColor.None;
+        var idleBorder = colored
+            ? TabColorBrush.From(TabColorPalette.Border(tab.Color))
+            : _theme.BorderIdle;
+        _idleBorderByTab[tab] = idleBorder;
+
+        var cell = new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(CellBorder),
+            BorderBrush = idleBorder,
+            Background = colored
+                ? TabColorBrush.From(TabColorPalette.Background(tab.Color, selected: false))
+                : _theme.CardBackground,
+            Padding = new Thickness(CellPadding),
+            Margin = new Thickness(CellMargin),
+            Child = content,
+        };
+        _cellByTab[tab] = cell;
+        return cell;
+    }
+
+    /// <summary>
+    /// One collapsed group as ONE chip row: the strip chip's four-part
+    /// anatomy (color dot, title, member count, chevron) on a card of the
+    /// tile's outer width, so both row kinds share the wrap grid's column
+    /// math. The members render nowhere -- the projection suppressed them
+    /// -- and the card is never the highlighted cell: a chip activation
+    /// lands on manager truth, never on the chip.
+    /// </summary>
+    private Border BuildGroupChip(TabManager manager, TabGroup group)
+    {
+        // The dot paints the opaque preset: the card wash below is the
+        // translucent one a tinted tile uses, so a translucent dot would
+        // disappear into its own card.
+        var dot = new Border
+        {
+            Width = 10,
+            Height = 10,
+            CornerRadius = new CornerRadius(2),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+            Background = TabColorBrush.From(TabColorPalette.Border(group.Color)),
+        };
+        var title = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = TitleMaxWidth,
+            Margin = new Thickness(0, 0, 4, 0),
+            Text = group.Title,
+        };
+        var count = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            Opacity = 0.7,
+            Text = manager.MembersOf(group).Count.ToString(),
+        };
+        var chevron = new FontIcon
+        {
+            // FontIcon's default FontFamily is not guaranteed to be the
+            // symbol font, so pin it explicitly or the glyph can render
+            // as nothing.
+            FontFamily = Application.Current.Resources.TryGetValue(
+                "SymbolThemeFontFamily", out var ff) && ff is FontFamily fam
+                ? fam
+                : null,
+            Glyph = "\uE76C", // Segoe Fluent / MDL2 "ChevronRight"
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var anatomy = new StackPanel { Orientation = Orientation.Horizontal };
+        anatomy.Children.Add(dot);
+        anatomy.Children.Add(title);
+        anatomy.Children.Add(count);
+        anatomy.Children.Add(chevron);
+
+        // Centered in the cell so a short row does not hug the top of a
+        // slot the tiles size.
+        var content = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        content.Children.Add(anatomy);
+
+        // The group always has a color, so the card always takes the tint:
+        // the same translucent wash a tinted tile gets, ringed by the
+        // preset's border color as its idle border.
+        return new Border
+        {
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(CellBorder),
+            BorderBrush = TabColorBrush.From(TabColorPalette.Border(group.Color)),
+            Background = TabColorBrush.From(
+                TabColorPalette.Background(group.Color, selected: false)),
+            Padding = new Thickness(CellPadding),
+            Margin = new Thickness(CellMargin),
+            Width = CellOuterWidth,
+            Child = content,
+        };
     }
 
     // Fallbacks mirror the Fluent dark-theme token values; they only apply if a
@@ -166,7 +276,7 @@ internal sealed partial class TabSwitcherPopup : UserControl
             new SolidColorBrush(Color.FromArgb(0xFF, 0x60, 0xCD, 0xFF))));
 
     /// <summary>
-    /// Column count for <paramref name="count"/> tiles: square-ish, so a
+    /// Column count for <paramref name="count"/> rows: square-ish, so a
     /// handful of tabs still make a compact card, but never wider than the
     /// window can show.
     /// </summary>
