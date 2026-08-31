@@ -463,6 +463,67 @@ internal static class TestSeam
                 });
             }
 
+            case "focus":
+            {
+                // Real focus, set the way a click sets it. "frame" lands on
+                // the first focusable element of the active tab host (a tab
+                // row); "pane" on the active leaf's terminal.
+                var target = ArgString(args, "target");
+                var moved = target switch
+                {
+                    "frame" => window.TestSeamFocusFrame(),
+                    "pane" => window.TestSeamFocusPane(),
+                    _ => false,
+                };
+                return moved
+                    ? OkWithFocus(window, manager, op, window.TestSeamFocusLocation, null)
+                    : Error(op, $"focus is '{window.TestSeamFocusLocation}', not '{target}'");
+            }
+
+            case "chord":
+            {
+                var key = ArgInt(args, "key", -1);
+                if (key is < 0 or > 0xFF)
+                    return Error(op, "key must be a virtual-key code 0..255");
+                var mods = Windows.System.VirtualKeyModifiers.None;
+                if (ArgBool(args, "ctrl", false))
+                    mods |= Windows.System.VirtualKeyModifiers.Control;
+                if (ArgBool(args, "shift", false))
+                    mods |= Windows.System.VirtualKeyModifiers.Shift;
+                if (ArgBool(args, "alt", false))
+                    mods |= Windows.System.VirtualKeyModifiers.Menu;
+                if (ArgBool(args, "win", false))
+                    mods |= Windows.System.VirtualKeyModifiers.Windows;
+
+                // Read focus BEFORE dispatching: the answer must name where
+                // the router made its decision, and several actions re-home
+                // focus into a pane on their way (a layout switch, a new
+                // tab), which would otherwise erase the very thing the
+                // scenario is asserting about.
+                var focus = window.TestSeamFocusLocation;
+
+                // The window's real routing function -- focus gate, residual
+                // table, libghostty match, dispatch -- one call below the
+                // framework. Modifiers are passed because no key is actually
+                // held; everything else is the shipped path.
+                var dispatched = window.TestSeamFrameChord(key, mods);
+
+                // A libghostty-matched chord lands as an apprt action the
+                // host re-posts to this thread, so the tab op it performs
+                // runs a tick later than the call above returns.
+                await WaitForLowPriorityAsync(window.DispatcherQueue);
+
+                // A layout toggle animates, so the ack waits it out and the
+                // state this answers with is the settled one.
+                var deadline = Environment.TickCount64 + 10_000;
+                while (window.TestSeamLayoutSwitching
+                       && Environment.TickCount64 < deadline)
+                {
+                    await Task.Delay(15);
+                }
+                return OkWithFocus(window, manager, op, focus, dispatched);
+            }
+
             default:
                 return Error(op, $"unknown op '{op}'");
         }
@@ -491,6 +552,24 @@ internal static class TestSeam
             foreach (var title in outcome.Order)
                 json.WriteStringValue(title);
             json.WriteEndArray();
+            json.WriteEndObject();
+        });
+
+    /// <summary>
+    /// The focus/chord response: where the router read focus, whether the
+    /// chord was dispatched (absent when the op only moved focus), and the
+    /// state it left behind.
+    /// </summary>
+    private static string OkWithFocus(
+        MainWindow window, TabManager manager, string op, string focus, bool? dispatched)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", true);
+            json.WriteString("op", op);
+            json.WriteString("focus", focus);
+            if (dispatched is { } settled) json.WriteBoolean("dispatched", settled);
+            WriteState(json, window, manager);
             json.WriteEndObject();
         });
 
