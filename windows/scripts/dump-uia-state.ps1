@@ -105,6 +105,7 @@ if ($null -ne $nav) {
 # appended after.
 $out = if ($OutFile) { $OutFile } else { '' }
 if ($out) { [System.IO.File]::WriteAllLines($out, $lines) }
+else { $lines | ForEach-Object { Write-Host $_ } }
 $lines.Clear()
 
 # (b) FRESH-PROCESS UIA query: this process IS the fresh client (spawned
