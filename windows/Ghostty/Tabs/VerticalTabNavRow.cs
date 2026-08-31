@@ -77,6 +77,23 @@ internal sealed partial class VerticalTabNavRow : Grid
         Children.Add(_close);
     }
 
+    /// <summary>The close glyph's button, for the seam's geometry readout.</summary>
+    internal FrameworkElement TestSeamCloseButton => _close;
+
+    /// <summary>
+    /// Whether the row carries its close button. The compact rail is
+    /// icon-only, and MUXC's item template arranges this row's content
+    /// past the rail's right edge there, so a close button kept at that
+    /// width is laid out outside the pane it belongs to -- invisible
+    /// behind the pane's clip, and paying for a button's measure, arrange
+    /// and hit-test on every row.
+    /// </summary>
+    internal bool ShowClose
+    {
+        get => _close.Visibility == Visibility.Visible;
+        set => _close.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     internal void Refresh(TabModel tab)
     {
         _title.Text = tab.EffectiveTitle;
