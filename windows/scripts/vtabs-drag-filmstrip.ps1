@@ -117,6 +117,7 @@ public static class VtDF {
     [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
@@ -256,6 +257,14 @@ public static class VtDF {
 }
 '@
 
+# The desktop runs mixed-DPI monitors and the product's restored window
+# geometry can span them: a DPI-unaware harness reads virtualized rects
+# while SendInput and WindowFromPoint answer in other spaces, and the arm
+# point lands where no window of ours is. Opt in to per-monitor physical
+# coordinates (-4 = PER_MONITOR_AWARE_V2) so every read and every
+# injection share one space.
+[void][VtDF]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
 $UIA = [System.Windows.Automation.AutomationElement]
 $TREE = [System.Windows.Automation.TreeScope]::Descendants
 $CTRL = [System.Windows.Automation.ControlType]
@@ -339,9 +348,28 @@ function Get-StripRows {
 function Enable-Chords([uint32]$ProcId) {
     $rc = [VtDF]::RectOf($script:MainHwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: window rect for arming' }
-    $x = [int]($rc.L + $rc.W * 0.62)
-    $y = [int]($rc.T + $rc.Hh * 0.55)
-    if (-not [VtDF]::Click($ProcId, $x, $y)) {
+    # The arm click is refused while another window sits on top of the
+    # point (Owned reads the window under the cursor), so try to take the
+    # foreground first -- best-effort: the click's own z-order check is
+    # the gate that matters -- and then walk inward from the offsets that
+    # have historically been clear of chrome, taking the first point the
+    # window owns. The center is the last point rect skew can take from
+    # us.
+    [void][VtDF]::Focus([VtDF]::P($script:MainHwnd64))
+    $candidates = @(
+        @{ fx = 0.50; fy = 0.50 },
+        @{ fx = 0.62; fy = 0.55 },
+        @{ fx = 0.35; fy = 0.50 },
+        @{ fx = 0.50; fy = 0.30 }
+    )
+    $armed = $false
+    foreach ($c in $candidates) {
+        $x = [int]($rc.L + $rc.W * $c.fx)
+        $y = [int]($rc.T + $rc.Hh * $c.fy)
+        if ([VtDF]::Click($ProcId, $x, $y)) { $armed = $true; break }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $armed) {
         throw 'HARVEST_MISS: could not click the terminal to arm input'
     }
     Start-Sleep -Milliseconds 200
@@ -418,14 +446,20 @@ function Get-Pixel([hashtable]$Px, [int]$X, [int]$Y) {
 }
 
 # Topmost y in the crop whose pixel is within $Tol of $Ref on every
-# channel. -1 when there is none. Inlined byte access rather than a
-# per-pixel helper call: this runs over every frame's crop.
-function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0) {
+# channel, over the column band [x - HalfW, x + HalfW] when $X is given,
+# the full width otherwise. -1 when there is none. Column-scoped is what
+# the band tracking wants: the calibrated colour is only known
+# discriminating at the column it was sampled at, and a full-width scan
+# happily matches ink or chrome on other rows first. Inlined byte access
+# rather than a per-pixel helper call: this runs over every frame's crop.
+function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [int]$X = -1, [int]$HalfW = -1) {
     $bytes = $Px.bytes
     $stride = $Px.stride
+    $x0 = if ($X -ge 0 -and $HalfW -ge 0) { [Math]::Max(0, $X - $HalfW) } else { 0 }
+    $x1 = if ($X -ge 0 -and $HalfW -ge 0) { [Math]::Min($Px.w - 1, $X + $HalfW) } else { $Px.w - 1 }
     for ($y = $From; $y -lt $Px.h; $y++) {
         $rowOff = $y * $stride
-        for ($x = 0; $x -lt $Px.w; $x++) {
+        for ($x = $x0; $x -le $x1; $x++) {
             $o = $rowOff + $x * 4
             if ([math]::Abs($bytes[$o + 2] - $Ref[0]) -le $Tol -and
                 [math]::Abs($bytes[$o + 1] - $Ref[1]) -le $Tol -and
@@ -438,6 +472,22 @@ function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0) {
 }
 
 # ---- run -------------------------------------------------------------------
+
+# The machine commits a crossing only when the dragged center passes the
+# neighbour's center PLUS this token (TabDragReorder.Evaluate's strict
+# inequality). The gesture's waypoints must overshoot that line by real
+# margin or the commit never fires and the oracle measures a gesture that
+# ordered nothing. Read from the product's own source, never hard-coded:
+# a token change must move this script with it.
+$script:HysteresisPx = -1
+$motionCs = Join-Path $PSScriptRoot '../Ghostty.Core/Tabs/TabStripMotion.cs'
+$motionSrc = Get-Content $motionCs -Raw
+if ($motionSrc -match 'CrossingHysteresisPx\s*=\s*(\d+)') {
+    $script:HysteresisPx = [int]$Matches[1]
+}
+if ($script:HysteresisPx -le 0) {
+    throw 'HARVEST_MISS: could not read CrossingHysteresisPx from TabStripMotion.cs'
+}
 
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
@@ -579,25 +629,63 @@ try {
         throw 'HARVEST_MISS: could not calibrate the selection edge in frame 0 - the selected row is not pixel-distinct in this theme'
     }
     $bandRef = Get-Pixel $px0 $colX $bestY
-    $bandTop0 = $bestY
+    # The sampled colour must not be the strip's UNSELECTED background:
+    # whether the selection chrome is a ring or a fill, the tracked colour
+    # has to differ from what the other rows show, or the per-frame scan
+    # matches every row and tracks nothing. (The row's OWN interior is the
+    # wrong yardstick -- a fill chrome agrees with itself by design.)
+    # Fail here, with the sampled RGB in the message, rather than film a
+    # run the tracker cannot see.
+    $bgRef = Get-Pixel $px0 $colX ($r2Top + [int]($rowH * 0.5))
+    if (([math]::Abs($bandRef[0] - $bgRef[0]) -le 12) -and
+        ([math]::Abs($bandRef[1] - $bgRef[1]) -le 12) -and
+        ([math]::Abs($bandRef[2] - $bgRef[2]) -le 12)) {
+        Write-Host ("calibration: band sample rgb({0}) matches the unselected background rgb({1}) at x={2}" -f ($bandRef -join ','), ($bgRef -join ','), $colX)
+        $diag = Join-Path $OutDir 'calibration-frame0.png'
+        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "calibration: frame 0 saved to $diag"
+        throw 'HARVEST_MISS: the sampled selection colour is the background colour - the tracker would have nothing to follow'
+    }
+
+    # bandTop0 and the scan origin come from the SAME pass the per-frame
+    # tracker uses, cross-checked against the diff edge above: if the
+    # tracker's frame-0 reading disagrees with the feature the diff found,
+    # the colour is not discriminating (text ink or chrome elsewhere
+    # matches it first) and the run would measure the wrong feature. The
+    # scan is column-scoped for the same reason -- the colour is only
+    # known discriminating at the column it was sampled at.
+    $trackerTop0 = Find-BandTop $px0 $bandRef 24 ([Math]::Max(1, $bestY - $rowH)) $colX 8
+    if ($trackerTop0 -lt 0 -or [math]::Abs($trackerTop0 - $bestY) -gt 4) {
+        Write-Host ("calibration: tracker found band at y={0} but the diff edge is y={1} (band rgb({2}) at x={3})" -f $trackerTop0, $bestY, ($bandRef -join ','), $colX)
+        $diag = Join-Path $OutDir 'calibration-frame0.png'
+        $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "calibration: frame 0 saved to $diag"
+        throw 'HARVEST_MISS: the tracker cannot reproduce the calibrated edge in frame 0 - the band colour matches something else first'
+    }
+    $bandTop0 = $trackerTop0
     $expectedTop = $r3Top
     Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
 
     # The scripted gesture, on one clock with the capture. The press, the
     # waypoints and the release are scheduled at fixed times; the crossing
     # time is the first waypoint whose y passes row 3's centre, and the
-    # oracle's windows are measured from it.
-    $grabX = [int]($row2.Rect.X + $row2.Rect.Width * 0.5)
+    # oracle's windows are measured from it. The grab sits at 35% of the
+    # row's width: the same actuation point the tab-drag harness's
+    # committing legs use, not the row's dead centre.
+    $grabX = [int]($row2.Rect.X + $row2.Rect.Width * 0.35)
     $grabY = [int]($row2.Rect.Y + $row2.Rect.Height / 2)
     # The earliest y the crossing can register at: the neighbour's midpoint
     # plus the machine's crossing hysteresis. Measuring the windows from
     # here, the first waypoint past it, is the conservative reading - if
     # the commit actually fired later, the measured gap only looks better
     # than it is, never worse.
-    $crossY = [int]($row3.Rect.Y + $row3.Rect.Height / 2 + 8)
-    # Stop short of row 4's own hysteresis band so the release cannot
-    # commit a second crossing past it.
-    $endY = [int]($row3.Rect.Y + $row3.Rect.Height + 8)
+    $crossY = [int]($row3.Rect.Y + $row3.Rect.Height / 2 + $script:HysteresisPx)
+    # The waypoints must OVERSHOOT that line by real margin - the machine
+    # needs the dragged center strictly past it - while stopping short of
+    # row 4's own hysteresis band so the release cannot commit a second
+    # crossing past it.
+    $overshoot = [Math]::Max(12, [int]($rowH * 0.5))
+    $endY = [int]($row3.Rect.Y + $row3.Rect.Height / 2 + $script:HysteresisPx + $overshoot)
     $schedule = [System.Collections.Generic.List[object]]::new()
     $schedule.Add([pscustomobject]@{ at = 300; act = 'press'; x = $grabX; y = $grabY })
     $moveT = 380; $crossAt = -1
@@ -642,7 +730,7 @@ try {
     $tops = New-Object int[] $frames.Count
     for ($i = 0; $i -lt $frames.Count; $i++) {
         $px = Get-Pixels $frames[$i].bmp
-        $tops[$i] = Find-BandTop $px $bandRef 24 $scanFrom
+        $tops[$i] = Find-BandTop $px $bandRef 24 $scanFrom $colX 8
         $frames[$i].bmp.Save((Join-Path $OutDir ("frames\frame-{0:d3}-{1:d4}ms.png" -f $i, $frames[$i].t)))
     }
     for ($i = 0; $i -lt $frames.Count; $i++) {

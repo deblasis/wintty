@@ -119,6 +119,7 @@ public static class MzTD {
     [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
 
     public delegate bool EnumProc(IntPtr h, IntPtr lp);
@@ -325,9 +326,33 @@ public static class MzTD {
 }
 '@
 
+# The desktop runs mixed-DPI monitors and the product's restored window
+# geometry can span them: a DPI-unaware harness reads virtualized rects
+# while SendInput and WindowFromPoint answer in other spaces, and the arm
+# point lands where no window of ours is. Opt in to per-monitor physical
+# coordinates (-4 = PER_MONITOR_AWARE_V2) so every read and every
+# injection share one space.
+[void][MzTD]::SetProcessDpiAwarenessContext([IntPtr](-4))
+
 $UIA = [System.Windows.Automation.AutomationElement]
 $TREE = [System.Windows.Automation.TreeScope]::Descendants
 $CTRL = [System.Windows.Automation.ControlType]
+
+# The machine commits a crossing only when the dragged center passes the
+# neighbour's center PLUS this token (TabDragReorder.Evaluate's strict
+# inequality), so a scripted drag that stops AT the boundary row's center
+# never arms a pin. Read from the product's own source rather than
+# hard-coded: the boundary legs overshoot by it, and a token change must
+# move the legs with it, not silently fall behind.
+$script:HysteresisPx = -1
+$motionCs = Join-Path $PSScriptRoot '../Ghostty.Core/Tabs/TabStripMotion.cs'
+$motionSrc = Get-Content $motionCs -Raw
+if ($motionSrc -match 'CrossingHysteresisPx\s*=\s*(\d+)') {
+    $script:HysteresisPx = [int]$Matches[1]
+}
+if ($script:HysteresisPx -le 0) {
+    throw 'HARVEST_MISS: could not read CrossingHysteresisPx from TabStripMotion.cs'
+}
 
 # The seeded RNG. The run is a scripted set of drags, not a random walk -
 # the seed perturbs the grab point, the step count and the dwells inside
@@ -519,9 +544,28 @@ function Select-Row([object]$Row, [uint32]$ProcId) {
 function Enable-Chords([uint32]$ProcId) {
     $rc = [MzTD]::RectOf($script:MainHwnd64)
     if ($null -eq $rc) { throw 'HARVEST_MISS: window rect for arming' }
-    $x = [int]($rc.L + $rc.W * 0.62)
-    $y = [int]($rc.T + $rc.Hh * 0.55)
-    if (-not [MzTD]::Click($ProcId, $x, $y)) {
+    # The launch leaves the window wherever the desktop's z-order put it,
+    # and Owned reads the window under the cursor -- so take the
+    # foreground first (best-effort; a refused steal must not veto a
+    # click that would land), then walk inward from the offsets that have
+    # historically been clear of chrome, taking the first point the
+    # window owns. The center is the last point rect skew can take from
+    # us.
+    [void][MzTD]::Focus([MzTD]::P($script:MainHwnd64))
+    $candidates = @(
+        @{ fx = 0.50; fy = 0.50 },
+        @{ fx = 0.62; fy = 0.55 },
+        @{ fx = 0.35; fy = 0.50 },
+        @{ fx = 0.50; fy = 0.30 }
+    )
+    $armed = $false
+    foreach ($c in $candidates) {
+        $x = [int]($rc.L + $rc.W * $c.fx)
+        $y = [int]($rc.T + $rc.Hh * $c.fy)
+        if ([MzTD]::Click($ProcId, $x, $y)) { $armed = $true; break }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $armed) {
         throw 'HARVEST_MISS: could not click the terminal to arm input'
     }
     Start-Sleep -Milliseconds 200
@@ -956,16 +1000,22 @@ try {
         $fromX = [int]($row.Rect.X + $row.Rect.Width * 0.35)
         $fromY = [int]($row.Rect.Y + $row.Rect.Height / 2)
         $zoneY = [int]($zone.Rect.Y + $zone.Rect.Height / 2)
+        # The up-path must OVERSHOOT the zone row's center by the
+        # hysteresis token plus margin: the machine's crossing fires only
+        # when the dragged center passes the neighbour's center PLUS
+        # CrossingHysteresisPx, so stopping AT the center never arms the
+        # pin and the leg would exercise nothing.
+        $overshootY = $zoneY - ($script:HysteresisPx + 12)
         if (-not [MzTD]::DragPress($pid32, $fromX, $fromY)) { throw 'HARVEST_MISS: drag press refused (boundary leg)' }
         for ($i = 1; $i -le 8; $i++) {
-            [void][MzTD]::DragMove($fromX, $fromY + [int](($zoneY - $fromY) * $i / 8))
+            [void][MzTD]::DragMove($fromX, $fromY + [int](($overshootY - $fromY) * $i / 8))
             Start-Sleep -Milliseconds 30
         }
         # In the zone long enough for the pin preview to be live before the
         # pointer leaves it again.
         Start-Sleep -Milliseconds 500
         for ($i = 1; $i -le 8; $i++) {
-            [void][MzTD]::DragMove($fromX, $zoneY + [int](($homeY - $zoneY) * $i / 8))
+            [void][MzTD]::DragMove($fromX, $overshootY + [int](($homeY - $overshootY) * $i / 8))
             Start-Sleep -Milliseconds 30
         }
         # Carry one full row BELOW the zone edge: the release must be
@@ -990,9 +1040,34 @@ try {
     Add-Phase 'pin-boundary-drop' {
         $row = Get-Row $V 'fuzzdrag-3'
         $zone = Get-Row $V 'fuzzdrag-1'
+        $fromX = [int]($row.Rect.X + $row.Rect.Width * 0.35)
+        $fromY = [int]($row.Rect.Y + $row.Rect.Height / 2)
         $toY = [int]($zone.Rect.Y + $zone.Rect.Height / 2)
-        Invoke-Drag $pid32 $row.Rect 0.35 $row.Rect.X $toY 300
-        Wait-Order $V @('fuzzdrag-1', 'fuzzdrag-3', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5')
+        # Same overshoot discipline as boundary-out: arm the crossing past
+        # the zone row's center by hysteresis plus margin, then come back
+        # to the zone center so the RELEASE lands provably inside the
+        # shelf bounds (the in-zone landing keeps the pin).
+        $overshootY = $toY - ($script:HysteresisPx + 12)
+        if (-not [MzTD]::DragPress($pid32, $fromX, $fromY)) { throw 'HARVEST_MISS: drag press refused (boundary drop leg)' }
+        for ($i = 1; $i -le 8; $i++) {
+            [void][MzTD]::DragMove($fromX, $fromY + [int](($overshootY - $fromY) * $i / 8))
+            Start-Sleep -Milliseconds 30
+        }
+        Start-Sleep -Milliseconds 400
+        for ($i = 1; $i -le 4; $i++) {
+            [void][MzTD]::DragMove($fromX, $overshootY + [int](($toY - $overshootY) * $i / 4))
+            Start-Sleep -Milliseconds 30
+        }
+        Start-Sleep -Milliseconds 300
+        [void][MzTD]::DragRelease()
+        Start-Sleep -Milliseconds 750
+        # The crossing's slot IS the drop position: the overshoot drags the
+        # row's center past the zone row's, so the row takes the slot it
+        # crossed into -- above the neighbour. Append-after-the-pinned was
+        # the pre-rung release-pin grammar's answer; the one-grammar
+        # contract (pin-in by crossing, at the crossing's slot) puts the
+        # crossed row first.
+        Wait-Order $V @('fuzzdrag-3', 'fuzzdrag-1', 'fuzzdrag-2', 'fuzzdrag-4', 'fuzzdrag-5')
         Assert-RowStatus $V 'fuzzdrag-3' { param($s) $s -match 'Pinned' } 'was dropped in the pin zone'
         $script:Orders.boundaryDrop = (Get-Order $V) -join ','
     }
