@@ -25,12 +25,15 @@ public class TabPinZoneWiringTests
     private static ShellSource Strip() => ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
 
     /// <summary>
-    /// The commit classifies the crossing first, pins (or unpins) before
-    /// it moves, and re-reads the row's index in between: SetPinned
-    /// relocates the row, so a Move fired with the pre-pin index would
-    /// land the row a slot off -- or get clamped into the zone it just
-    /// left, which the refused-crossing break then turns into a dropped
-    /// crossing for the rest of the gesture.
+    /// The commit classifies the crossing first, pins before it moves,
+    /// and re-reads the row's index in between: SetPinned relocates the
+    /// row, so a Move fired with the pre-pin index would land the row a
+    /// slot off -- or get clamped into the zone it just left, which the
+    /// refused-crossing break then turns into a dropped crossing for the
+    /// rest of the gesture. The arm PINS only: an Unpin classification
+    /// mid-drag rewinds and refuses (the drag wiring fact pins that
+    /// refusal), so the only flag this commit can pass is the literal
+    /// true.
     /// </summary>
     [Fact]
     public void ZoneCrossing_CommitsAsSetPinnedThenMove_WithTheIndexReRead()
@@ -52,16 +55,11 @@ public class TabPinZoneWiringTests
                         && call.Span.End < move.Span.Start),
             "the row's index must be re-read between SetPinned and Move");
 
-        // The flag's polarity is the crossing's direction. The argument
-        // alone is only a variable name, so the initializer is what
-        // actually goes red when the comparison inverts -- SetPinned(false)
-        // on a crossing up would unpin the row mid-gesture.
-        Assert.Equal("pin", setPinned.Arg(1));
-        var flag = commit.DescendantNodes().OfType<LocalDeclarationStatementSyntax>()
-            .Single(l => l.Declaration.Variables.Any(v => v.Identifier.ValueText == "pin"));
-        Assert.Equal(
-            "zone.Op == TabPinZoneOp.Pin",
-            flag.Declaration.Variables.Single().Initializer!.Value.ToString());
+        // The arm pins, literally. An argument that still names a computed
+        // pin boolean would mean the gate widened back to "any zone
+        // change" -- the shape that obeyed a mid-drag Unpin off stale
+        // centers. The gate text itself is the drag wiring fact's pin.
+        Assert.Equal("true", setPinned.Arg(1));
 
         // The zone commit repaints the boundary in the same tick: the
         // stroke is the gesture's aiming feedback and it just moved.
