@@ -131,6 +131,15 @@
                       Link="Cli\Shim\main.zig"
                       LogicalName="Ghostty.Tests.Cli.Shim.main.zig" />
     <!--
+      The curated default keybinds, for GroupPinKeybindWiringTests' fact
+      that the tab-shell verbs (pin_tab/unpin_tab/move_group) ship with no
+      default chord. The defaults live compiled in this file, so the file
+      is the thing that could contradict the ruling.
+    -->
+    <EmbeddedResource Include="..\..\src\config\Config.zig"
+                      Link="Config\Defaults\Config.zig"
+                      LogicalName="Ghostty.Tests.Config.Defaults.Config.zig" />
+    <!--
       Every settings page, for SettingsCardConfigKeyParityTests. A wildcard
       rather than a file list: a page added later is picked up without anyone
       remembering this entry, which is the failure mode the other blocks above

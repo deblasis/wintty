@@ -32,6 +32,9 @@ public static class KeybindActionCatalog
         ["goto_tab"] = ("Tabs", "Go To Tab"),
         ["move_tab"] = ("Tabs", "Move Tab"),
         ["last_tab"] = ("Tabs", "Last Tab"),
+        ["pin_tab"] = ("Tabs", "Pin Tab"),
+        ["unpin_tab"] = ("Tabs", "Unpin Tab"),
+        ["move_group"] = ("Groups", "Move Group"),
         ["scroll_page_up"] = ("Scroll", "Scroll Page Up"),
         ["scroll_page_down"] = ("Scroll", "Scroll Page Down"),
         ["scroll_to_top"] = ("Scroll", "Scroll To Top"),
@@ -74,9 +77,11 @@ public static class KeybindActionCatalog
             return new ActionDescription("Other", action);
 
         var friendly = hit.Friendly;
-        // Append a direction word for split/focus/resize so each row is distinct.
+        // Append a direction word for split/focus/resize/group-move so each
+        // row is distinct.
         if (arg is not null && ArgLabel.TryGetValue(arg, out var dir)
-            && (verb == "new_split" || verb == "goto_split" || verb == "resize_split"))
+            && (verb == "new_split" || verb == "goto_split" || verb == "resize_split"
+                || verb == "move_group"))
         {
             friendly = $"{hit.Friendly} {dir}";
         }

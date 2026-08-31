@@ -37,4 +37,15 @@ public class PaneActionTests
         // Pinned so a future enum reorder is a deliberate, visible change.
         Assert.Equal(52, (int)PaneAction.ShowAbout);
     }
+
+    [Fact]
+    public void MoveGroupLR_AreAppendedPastColorGroup()
+    {
+        // The group-move pair is the enum's tail: appended rather than
+        // inserted, so every earlier member keeps its value (these are
+        // ordinals in code nobody recompiles together with this).
+        Assert.Equal(76, (int)PaneAction.MoveGroupLeft);
+        Assert.Equal(77, (int)PaneAction.MoveGroupRight);
+        Assert.Equal((int)PaneAction.ColorGroup + 1, (int)PaneAction.MoveGroupLeft);
+    }
 }
