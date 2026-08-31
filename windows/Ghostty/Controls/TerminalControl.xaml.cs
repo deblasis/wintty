@@ -1850,7 +1850,9 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
         SendKey(e, GhosttyInputAction.Release);
     }
 
-    private static Windows.System.VirtualKeyModifiers CurrentChordModifiers()
+    // Internal so the window's frame-chord router reads the modifier state
+    // the same way the pane path does, rather than growing a second copy.
+    internal static Windows.System.VirtualKeyModifiers CurrentChordModifiers()
     {
         var mods = Windows.System.VirtualKeyModifiers.None;
         if ((Microsoft.UI.Input.InputKeyboardSource

@@ -1149,6 +1149,10 @@ public sealed partial class MainWindow : Window
 
         WirePaneActionEvents();
 
+        // Chords pressed with focus on the frame reach no pane, so the
+        // window content routes them itself. See MainWindow.FrameChords.cs.
+        WireFrameChordRouting();
+
         _commandPaletteVm = CreateCommandPaletteViewModel();
         CommandPaletteUI.Configure(_configService);
         CommandPaletteUI.Bind(_commandPaletteVm);
