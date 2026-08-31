@@ -363,26 +363,43 @@ internal static class TestSeam
                 return OkWithState(window, manager, op);
             }
 
+            case "select":
+            {
+                var index = ArgInt(args, "index", -1);
+                var tab = TabAt(manager, index);
+                if (tab is null) return Error(op, $"no tab at index {index}");
+                // The manager's own activation: the same op every click and
+                // jump chord funnels into, so the selection sync runs.
+                manager.Activate(tab);
+                return OkWithState(window, manager, op);
+            }
+
             case "drag":
+            case "drag-paced":
+            case "drag-zone":
+            case "drag-header":
             {
                 var strip = window.TestSeamVerticalStrip;
                 if (strip is null)
                     return Error(op, "the vertical strip is not the active host");
-                var outcome = await strip.TestSeamDragAsync(
-                    ArgInt(args, "from", -1), ArgInt(args, "to", -1));
-                return Json(json =>
+                var outcome = op switch
                 {
-                    json.WriteStartObject();
-                    json.WriteBoolean("ok", outcome.Ok);
-                    json.WriteString("op", op);
-                    if (outcome.Error is { } error) json.WriteString("error", error);
-                    json.WriteNumber("landed", outcome.Landed);
-                    json.WriteStartArray("order");
-                    foreach (var title in outcome.Order)
-                        json.WriteStringValue(title);
-                    json.WriteEndArray();
-                    json.WriteEndObject();
-                });
+                    // The paced walk films: fine steps on a wall clock so a
+                    // capture harness has frames between the moves.
+                    "drag-paced" => await strip.TestSeamDragPacedAsync(
+                        ArgInt(args, "from", -1), ArgInt(args, "to", -1),
+                        ArgInt(args, "tickMs", 45)),
+                    // Both halves of the release-classified pin contract.
+                    "drag-zone" => await strip.TestSeamDragZoneAsync(
+                        ArgInt(args, "from", -1), ArgString(args, "release") == "in"),
+                    // The drop on a group header; the product's own drop
+                    // grammar decides what the landing means.
+                    "drag-header" => await strip.TestSeamDragToHeaderAsync(
+                        ArgInt(args, "from", -1), ArgString(args, "group") ?? ""),
+                    _ => await strip.TestSeamDragAsync(
+                        ArgInt(args, "from", -1), ArgInt(args, "to", -1)),
+                };
+                return DragJson(op, outcome);
             }
 
             default:
@@ -391,6 +408,30 @@ internal static class TestSeam
     }
 
     // ---- responses ---------------------------------------------------
+
+    /// <summary>
+    /// The one drag response: every gesture command answers with where the
+    /// row landed and the manager order it left, plus the gesture-clock
+    /// timestamps when the walker recorded them (the paced drag's commit
+    /// and release, for a filming driver to align frames against).
+    /// </summary>
+    private static string DragJson(string op, TestSeamDragOutcome outcome)
+        => Json(json =>
+        {
+            json.WriteStartObject();
+            json.WriteBoolean("ok", outcome.Ok);
+            json.WriteString("op", op);
+            if (outcome.Error is { } error) json.WriteString("error", error);
+            json.WriteNumber("landed", outcome.Landed);
+            json.WriteBoolean("pinned", outcome.Pinned);
+            if (outcome.CommitMs >= 0) json.WriteNumber("commitMs", outcome.CommitMs);
+            if (outcome.ReleaseMs >= 0) json.WriteNumber("releaseMs", outcome.ReleaseMs);
+            json.WriteStartArray("order");
+            foreach (var title in outcome.Order)
+                json.WriteStringValue(title);
+            json.WriteEndArray();
+            json.WriteEndObject();
+        });
 
     private static string OkWithState(MainWindow window, TabManager manager, string op)
         => Json(json =>
@@ -435,6 +476,7 @@ internal static class TestSeam
         json.WriteStartObject("state");
         json.WriteBoolean("vertical", window.TestSeamVerticalTabs);
         json.WriteBoolean("switching", window.TestSeamLayoutSwitching);
+        json.WriteNumber("active", manager.IndexOf(manager.ActiveTab));
         json.WriteNumber("paneWidth",
             window.TestSeamVerticalStrip?.TestSeamPaneWidth ?? 0);
         json.WriteStartArray("tabs");
@@ -533,6 +575,9 @@ internal sealed class TestSeamDragOutcome
     public bool Ok = true;
     public string? Error;
     public int Landed = -1;
+    public bool Pinned;
+    public long CommitMs = -1;
+    public long ReleaseMs = -1;
     public List<string> Order = new();
 
     public TestSeamDragOutcome Fail(string reason)

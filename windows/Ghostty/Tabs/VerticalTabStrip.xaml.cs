@@ -4265,12 +4265,26 @@ internal sealed partial class VerticalTabStrip : UserControl
             // the next, exactly as a hovering pointer would.
             if (!double.IsNaN(target))
             {
-                if (Math.Abs(target - y) <= 1)
+                // A crossing commits only once the dragged center passes
+                // the neighbour's center PLUS the hysteresis token
+                // (TabDragReorder.Evaluate's strict inequality), so a walk
+                // that aims AT the slot's center stalls one token short of
+                // the final commit. Until the manager has moved the row to
+                // its slot, the walk aims past the center by the machine's
+                // own token; once the commit lands it comes back to the
+                // center and settles there -- the overshoot-and-return a
+                // human finger performs.
+                bool committed = _manager.IndexOf(tab) == to;
+                if (committed && Math.Abs(target - y) <= 1)
                 {
                     reached = true;
                     break;
                 }
-                y += Math.Clamp(target - y, -stepPx, stepPx);
+                double aim = committed
+                    ? target
+                    : target + Math.Sign(to - from)
+                        * (TabStripMotion.CrossingHysteresisPx + 4);
+                y += Math.Clamp(aim - y, -stepPx, stepPx);
                 DragMove(seamPointer, y);
             }
 
@@ -4306,4 +4320,266 @@ internal sealed partial class VerticalTabStrip : UserControl
     /// instead of hanging the seam.
     /// </summary>
     private const int TestSeamDragTickBudget = 600;
+
+    /// <summary>The synthetic pointer id every seam gesture rides; no real pointer carries it.</summary>
+    private const uint TestSeamPointerId = 0x5749_4E54; // 'WINT'
+
+    /// <summary>
+    /// The shared walk under a held seam pointer: step toward
+    /// <paramref name="target"/> (re-read per tick, NaN = mid-arrange,
+    /// stand still) in <paramref name="stepPx"/> steps, one Low-priority
+    /// handoff per tick so every move's evaluate -- crossings included --
+    /// has run before the next. <paramref name="tickDelayMs"/> &gt; 0 adds
+    /// wall-clock pacing per tick, for a capture harness that needs frames
+    /// between moves. Returns the settled y, or NaN when the gesture died
+    /// or the budget ran out.
+    /// </summary>
+    private async Task<double> SeamWalkAsync(
+        double y, Func<double> target, double stepPx = 12, int tickDelayMs = 0)
+    {
+        for (int tick = 0; tick < TestSeamDragTickBudget; tick++)
+        {
+            if (_drag is null) return double.NaN;
+            var t = target();
+            if (!double.IsNaN(t))
+            {
+                if (Math.Abs(t - y) <= 1) return y;
+                y += Math.Clamp(t - y, -stepPx, stepPx);
+                DragMove(TestSeamPointerId, y);
+            }
+            await Testing.TestSeam.WaitForLowPriorityAsync(DispatcherQueue);
+            if (tickDelayMs > 0) await Task.Delay(tickDelayMs);
+        }
+        return double.NaN;
+    }
+
+    /// <summary>A few settled dispatcher passes: the dwell a hovering pointer spends over a slot.</summary>
+    private async Task SeamDwellAsync(int ticks)
+    {
+        for (int i = 0; i < ticks && _drag is not null; i++)
+            await Testing.TestSeam.WaitForLowPriorityAsync(DispatcherQueue);
+    }
+
+    /// <summary>
+    /// The row's arranged center, waited for: a command acked mid-churn
+    /// (a collapse's reconcile, a pin's relocation) can leave the row's
+    /// replacement element unmeasured for a few dispatcher passes, and a
+    /// gesture must not refuse over a rect that is merely late.
+    /// </summary>
+    private async Task<double> SeamArrangedCenterAsync(TabModel tab)
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            var y = RowCenterY(tab);
+            if (!double.IsNaN(y)) return y;
+            await Testing.TestSeam.WaitForLowPriorityAsync(DispatcherQueue);
+        }
+        return double.NaN;
+    }
+
+    /// <summary>The header row's arranged center, NaN while unarranged; RowCenterY's twin for groups.</summary>
+    private double HeaderCenterY(TabGroup group)
+    {
+        if (!_headers.TryGetValue(group, out var item) || item.ActualHeight <= 0)
+            return double.NaN;
+        try
+        {
+            return item.TransformToVisual(this)
+                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y + item.ActualHeight / 2;
+        }
+        catch (Exception ex) when (IsLayoutReadFailure(ex))
+        {
+            return double.NaN;
+        }
+    }
+
+    /// <summary>
+    /// The paced seam drag: the same gesture as <see cref="TestSeamDragAsync"/>,
+    /// walked in fine steps with real wall-clock ticks so a filming harness
+    /// has frames to measure the glide against. The outcome timestamps the
+    /// commit (first tick the manager index moved) and the release on the
+    /// gesture's own clock, so the driver can align its frame times to the
+    /// moments the oracle measures from.
+    /// </summary>
+    internal async Task<Testing.TestSeamDragOutcome> TestSeamDragPacedAsync(
+        int from, int to, int tickMs)
+    {
+        var outcome = new Testing.TestSeamDragOutcome();
+        var tabs = _manager.Tabs;
+        if (from < 0 || from >= tabs.Count || to < 0 || to >= tabs.Count)
+            return outcome.Fail($"drag {from}->{to} out of range (tabs={tabs.Count})");
+        if (from == to)
+            return outcome.Fail("drag from == to; nothing to reorder");
+        if (_drag is not null)
+            return outcome.Fail("another drag is live");
+        if (tickMs < 1 || tickMs > 500)
+            return outcome.Fail("tickMs must be 1..500");
+
+        var tab = tabs[from];
+        if (RowElementOf(tab) is not { } row)
+            return outcome.Fail("drag row has no element; the strip is not realized");
+        double y = RowCenterY(tab);
+        if (double.IsNaN(y))
+            return outcome.Fail("drag row has no arranged center; layout has not run");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        DragPress(row, TestSeamPointerId, y);
+
+        // 4px steps: a slow finger's pace, so at tickMs per step the walk
+        // spans real frames instead of committing inside one. The aim
+        // carries the same overshoot discipline as TestSeamDragAsync: past
+        // the target center by the machine's own token until the commit
+        // lands, then back to the center.
+        double Walked()
+        {
+            if (outcome.CommitMs < 0 && _manager.IndexOf(tab) != from)
+                outcome.CommitMs = clock.ElapsedMilliseconds;
+            var (rows, managerIndex) = DragSlots();
+            int slot = managerIndex.IndexOf(to);
+            double target = slot >= 0 && slot < rows.Count
+                ? RowCenterY(rows[slot])
+                : double.NaN;
+            if (double.IsNaN(target) || _manager.IndexOf(tab) == to)
+                return target;
+            return target + Math.Sign(to - from)
+                * (TabStripMotion.CrossingHysteresisPx + 4);
+        }
+        y = await SeamWalkAsync(y, Walked, stepPx: 4, tickDelayMs: tickMs);
+        if (outcome.CommitMs < 0 && _manager.IndexOf(tab) != from)
+            outcome.CommitMs = clock.ElapsedMilliseconds;
+
+        if (_drag is not { } drag)
+            return outcome.Fail("the gesture ended before the release");
+        if (double.IsNaN(y))
+        {
+            DragCancel(TestSeamPointerId);
+            return outcome.Fail(
+                $"paced drag did not reach its slot within {TestSeamDragTickBudget} ticks " +
+                $"(machine index {drag.Machine.Index}, wanted {to})");
+        }
+
+        DragRelease(TestSeamPointerId, y);
+        outcome.ReleaseMs = clock.ElapsedMilliseconds;
+        outcome.Landed = _manager.IndexOf(tab);
+        outcome.Pinned = tab.IsPinned;
+        outcome.Order = TabStripProjection.Rows(_manager)
+            .Select(t => t.EffectiveTitle).ToList();
+        if (outcome.Landed != to)
+            return outcome.Fail($"landed at {outcome.Landed}, wanted {to}");
+        return outcome;
+    }
+
+    /// <summary>
+    /// The pin-boundary gesture, both halves of the release-classified
+    /// contract: press a body row, carry it up past the pinned zone's last
+    /// row by the machine's own crossing hysteresis plus margin (the
+    /// crossing pins it mid-gesture), dwell with the preview live, then
+    /// either release inside the shelf (the pin holds) or carry it a full
+    /// row back below the boundary and release (the release unpins). The
+    /// zone target is read from the same constants the machine evaluates
+    /// with, never re-derived, so a token change moves this gesture too.
+    /// </summary>
+    internal async Task<Testing.TestSeamDragOutcome> TestSeamDragZoneAsync(
+        int from, bool releaseInZone)
+    {
+        var outcome = new Testing.TestSeamDragOutcome();
+        var tabs = _manager.Tabs;
+        if (from < 0 || from >= tabs.Count)
+            return outcome.Fail($"drag-zone from {from} out of range (tabs={tabs.Count})");
+        var tab = tabs[from];
+        if (tab.IsPinned)
+            return outcome.Fail("drag-zone needs an unpinned row");
+        if (_manager.PinCount == 0)
+            return outcome.Fail("no pinned zone to cross into");
+        if (_drag is not null)
+            return outcome.Fail("another drag is live");
+        if (RowElementOf(tab) is not { } row)
+            return outcome.Fail("drag row has no element; the strip is not realized");
+        double homeY = await SeamArrangedCenterAsync(tab);
+        var zoneY = await SeamArrangedCenterAsync(tabs[_manager.PinCount - 1]);
+        if (double.IsNaN(homeY) || double.IsNaN(zoneY))
+            return outcome.Fail("layout has not arranged the boundary rows");
+        double rowPitch = row.ActualHeight > 0 ? row.ActualHeight : VerticalTabPinnedRow.RowHeight;
+        double overshootY = zoneY - (TabStripMotion.CrossingHysteresisPx + 12);
+
+        DragPress(row, TestSeamPointerId, homeY);
+        var y = await SeamWalkAsync(homeY, () => overshootY);
+        if (double.IsNaN(y))
+        {
+            DragCancel(TestSeamPointerId);
+            return outcome.Fail("the zone crossing never completed");
+        }
+        // In the zone long enough for the pin preview to be live before
+        // the pointer settles on where it lets go.
+        await SeamDwellAsync(3);
+
+        y = await SeamWalkAsync(y, () => releaseInZone ? zoneY : homeY + rowPitch);
+        if (_drag is null || double.IsNaN(y))
+        {
+            DragCancel(TestSeamPointerId);
+            return outcome.Fail("the return walk never completed");
+        }
+        // Let the arrange catch up before letting go: the release
+        // classifies by the body slot under the pointer, and a release
+        // into a mid-flight arrange resolves the slot boundary by timing
+        // instead of geometry.
+        await SeamDwellAsync(3);
+        DragRelease(TestSeamPointerId, y);
+        outcome.Landed = _manager.IndexOf(tab);
+        outcome.Pinned = tab.IsPinned;
+        outcome.Order = TabStripProjection.Rows(_manager)
+            .Select(t => t.EffectiveTitle).ToList();
+        return outcome;
+    }
+
+    /// <summary>
+    /// The drop-on-header gesture: press a body row, walk it onto the
+    /// named group's header row (re-read per tick; the header moves as
+    /// crossings churn the list), dwell, and release there. What the
+    /// release does with that landing -- the join, the auto-expand -- is
+    /// the product's own drop grammar; the outcome only reports where the
+    /// row ended, and the driver asserts membership through get-state.
+    /// </summary>
+    internal async Task<Testing.TestSeamDragOutcome> TestSeamDragToHeaderAsync(
+        int from, string groupTitle)
+    {
+        var outcome = new Testing.TestSeamDragOutcome();
+        var tabs = _manager.Tabs;
+        if (from < 0 || from >= tabs.Count)
+            return outcome.Fail($"drag-header from {from} out of range (tabs={tabs.Count})");
+        var tab = tabs[from];
+        TabGroup? group = null;
+        foreach (var candidate in _manager.Groups)
+            if (candidate.Title == groupTitle) { group = candidate; break; }
+        if (group is null)
+            return outcome.Fail($"no group titled '{groupTitle}'");
+        if (_drag is not null)
+            return outcome.Fail("another drag is live");
+        if (RowElementOf(tab) is not { } row)
+            return outcome.Fail("drag row has no element; the strip is not realized");
+        double y = await SeamArrangedCenterAsync(tab);
+        if (double.IsNaN(y))
+            return outcome.Fail("layout has not arranged the dragged row");
+
+        // No arranged-header precheck: a collapse ack can land while the
+        // header's replacement element is still unmeasured, and the walk
+        // already stands still on a NaN target until the arrange catches
+        // up (budget-bounded).
+        DragPress(row, TestSeamPointerId, y);
+        y = await SeamWalkAsync(y, () => HeaderCenterY(group));
+        if (_drag is null || double.IsNaN(y))
+        {
+            DragCancel(TestSeamPointerId);
+            return outcome.Fail("the walk to the header never completed");
+        }
+        // The hold over the header the pointer gesture spends before it
+        // lets go.
+        await SeamDwellAsync(4);
+        DragRelease(TestSeamPointerId, y);
+        outcome.Landed = _manager.IndexOf(tab);
+        outcome.Pinned = tab.IsPinned;
+        outcome.Order = TabStripProjection.Rows(_manager)
+            .Select(t => t.EffectiveTitle).ToList();
+        return outcome;
+    }
 }

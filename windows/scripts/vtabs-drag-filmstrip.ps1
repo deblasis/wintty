@@ -6,23 +6,34 @@
     commits, the gap must open within 2 frames, and the displaced rows'
     offsets must converge within 500ms. A UIA read cannot see either --
     the accessibility tree reports the settled layout, never the glide --
-    so this harness films the strip while a scripted drag crosses one
-    neighbour, and measures the frames.
+    so this harness films the strip while a drag crosses one neighbour,
+    and measures the frames.
 
-    The tracked pixel is the SELECTED row's accent band, chosen on purpose.
-    The row being dragged is deliberately an unselected one: in any theme
-    the unselected rows sit nearly transparent on the strip background and
-    cannot be told apart in pixels, but the selected row is filled with the
-    accent and is unmistakable. So row 3 keeps the selection and row 2 does
-    the dragging, and when the drag crosses row 3 the product's answer is
-    to slide row 3's band up one slot to open the gap. The band's Y over
+    Actuation is the in-process test seam's PACED drag (drag-paced): the
+    strip's own drag handlers walked in fine steps on a wall clock, so the
+    capture has frames between the moves and zero OS input is synthesized.
+    The seam's response timestamps the commit and the release on the
+    gesture's own clock; the harness stamps the moment it sent the command
+    on the same stopwatch the frames ride, and the crossing time is the
+    send stamp plus the reported commit offset. The send stamp can only be
+    EARLY relative to the gesture's true start (pipe and marshal latency
+    land after it), so a measured gap can only read worse than reality,
+    never better -- the same conservative polarity the SendInput schedule
+    had.
+
+    The tracked pixel is the SELECTED row's fill, and the selected row is
+    the DISPLACED one, not the dragged one: the dragged row's chrome dims
+    while the gesture holds it, and unselected rows sit nearly transparent
+    on the strip background and cannot be told apart in pixels. Row 3 is
+    selected through the seam, row 2 is dragged down past it, and row 3's
+    band slides up one slot when the crossing commits; the band's Y over
     time IS the offset animation the oracle is about:
 
-      - gap open: the first frame after the scheduled crossing whose band
-        top has risen at least 5px, minus the crossing time, must be
-        within 2 frames.
+      - gap open: the first frame after the commit whose band top has
+        risen at least 5px, minus the commit time, must be within 2
+        frames.
       - convergence: the band must be within 2px of its final position
-        for 6 consecutive frames within 500ms of the crossing.
+        for 6 consecutive frames within 500ms of the commit.
       - travel: the band must end at least 60% of a row height above
         where it started, so a no-op drag cannot pass.
       - and the layout must really have swapped: the final UIA order is
@@ -33,293 +44,45 @@
     show the band where row 3 says it is, the harness refuses rather than
     track a guess.
 
-    The frame capture and the input share one thread and one stopwatch --
-    SendInput waypoints and CopyFromScreen frames interleaved on the same
-    clock -- so a frame's timestamp is honest relative to the input it
-    was taken between.
-
     This harness needs a machine whose client-area animations are ON: with
     them off the product cuts every glide, the offsets converge in one
     frame, and the timings above measure nothing. That is exit 1, not a
-    product finding. The motion-on/motion-off identity pair lives in the
-    drag harness, which asserts order; this one asserts motion.
+    product finding. The window must also stay visible on screen while the
+    film runs -- the capture is CopyFromScreen -- which is the one way this
+    harness still borrows the desktop.
 
     Exits 0 on pass, 2 on a product finding, 1 when the harness could not
-    run -- a refused click, a calibration that found no band, animations
-    disabled on this machine.
+    run -- a calibration that found no band, animations disabled on this
+    machine.
 #>
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
     [int]$IntervalMs = 60,
-    [int]$MaxFrames = 52
+    [int]$MaxFrames = 52,
+    # Wall-clock pacing per 4px walker tick; 70ms spreads one row pitch
+    # over ~10 frames at the default interval.
+    [int]$TickMs = 70
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 $ErrorActionPreference = 'Stop'
 
-New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'frames') | Out-Null
+New-Item -ItemType Directory -Force -Path $OutDir, (Join-Path $OutDir 'frames'), (Join-Path $OutDir 'shots') | Out-Null
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
 
-public static class VtDF {
-    public const uint KEYEVENTF_KEYUP  = 0x0002;
-    public const uint KEYEVENTF_UNICODE = 0x0004;
-    public const uint MOUSEEVENTF_MOVE     = 0x0001;
-    public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
-    public const ushort VK_CONTROL   = 0x11;
-    public const ushort VK_SHIFT     = 0x10;
-    public const ushort VK_RETURN    = 0x0D;
-    public const ushort VK_T         = 0x54;
-    public const ushort VK_OEM_COMMA = 0xBC;
-
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
-    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
-        public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
-        public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct HARDWAREINPUT {
-        public uint uMsg; public ushort wParamL; public ushort wParamH;
-    }
-    [StructLayout(LayoutKind.Explicit)] public struct InputUnion {
-        [FieldOffset(0)] public MOUSEINPUT mi;
-        [FieldOffset(0)] public KEYBDINPUT ki;
-        [FieldOffset(0)] public HARDWAREINPUT hi;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion U; }
-
-    [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint n, INPUT[] inputs, int cb);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int h2, bool repaint);
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
-    [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr h);
-    [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
-    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-
-    public delegate bool EnumProc(IntPtr h, IntPtr lp);
-    public class WinRect { public int L,T,R,B; public int W { get { return R-L; } } public int Hh { get { return B-T; } } }
-
-    public static IntPtr P(long hwnd) { return new IntPtr(hwnd); }
-    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
-    public static string TitleOf(IntPtr h) { var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString(); }
-    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-
-    public static WinRect RectOf(long hwnd) {
-        var h = P(hwnd); RECT r;
-        if (!IsWindow(h) || !GetWindowRect(h, out r)) return null;
-        var wr = new WinRect { L=r.L,T=r.T,R=r.R,B=r.B };
-        return (wr.W < 80 || wr.Hh < 80) ? null : wr;
-    }
-
-    static void Send(INPUT[] inputs) {
-        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
-        if (sent != inputs.Length) {
-            throw new InvalidOperationException(
-                "HARVEST_MISS: SendInput delivered " + sent + " of " + inputs.Length +
-                " event(s), win32 error " + Marshal.GetLastWin32Error() +
-                "; the input never reached the app, so nothing the app did next is evidence");
-        }
-    }
-
-    static INPUT Key(ushort vk, bool up) {
-        var i = new INPUT { type = 1 };
-        i.U.ki = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = up ? KEYEVENTF_KEYUP : 0, time = 0, dwExtraInfo = IntPtr.Zero };
-        return i;
-    }
-
-    static INPUT Unicode(char c, bool up) {
-        var i = new INPUT { type = 1 };
-        i.U.ki = new KEYBDINPUT { wVk = 0, wScan = c, dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0), time = 0, dwExtraInfo = IntPtr.Zero };
-        return i;
-    }
-
-    public static bool TypeLine(IntPtr expected, string text) {
-        foreach (char c in text) {
-            if (!Focus(expected)) return false;
-            Send(new INPUT[] { Unicode(c, false), Unicode(c, true) });
-            Thread.Sleep(12);
-        }
-        if (!Focus(expected)) return false;
-        Send(new INPUT[] { Key(VK_RETURN, false), Key(VK_RETURN, true) });
-        return true;
-    }
-
-    public static bool Chord(IntPtr expected, ushort[] mods, ushort key) {
-        if (!Focus(expected)) return false;
-        var seq = new System.Collections.Generic.List<INPUT>();
-        foreach (var m in mods) seq.Add(Key(m, false));
-        seq.Add(Key(key, false));
-        seq.Add(Key(key, true));
-        for (int i = mods.Length - 1; i >= 0; i--) seq.Add(Key(mods[i], true));
-        Send(seq.ToArray());
-        return true;
-    }
-
-    public static bool Focus(IntPtr expected) {
-        if (expected == IntPtr.Zero) return false;
-        for (int i = 0; i < 40; i++) {
-            if (GetForegroundWindow() == expected) return true;
-            var fg = GetForegroundWindow();
-            uint fgThread = fg == IntPtr.Zero ? 0 : ThreadOf(fg);
-            uint me = GetCurrentThreadId();
-            bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
-            try {
-                SetForegroundWindow(expected);
-                BringWindowToTop(expected);
-                SetFocus(expected);
-            } finally {
-                if (attached) AttachThreadInput(me, fgThread, false);
-            }
-            Thread.Sleep(60);
-        }
-        return GetForegroundWindow() == expected;
-    }
-
-    static uint ThreadOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-
-    static bool Owned(uint pid, int x, int y) {
-        var hit = WindowFromPoint(new POINT { X=x, Y=y });
-        if (ClassOf(hit) == "WinttySplash") return false;
-        return PidOf(hit) == pid;
-    }
-
-    public static bool Click(uint pid, int x, int y) {
-        if (!Owned(pid, x, y)) return false;
-        if (!SetCursorPos(x, y)) return false;
-        Thread.Sleep(60);
-        if (!Owned(pid, x, y)) return false;
-        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-        Thread.Sleep(200);
-        return true;
-    }
-
-    static INPUT MoveInput(int x, int y) {
-        int sw = Math.Max(1, GetSystemMetrics(0));
-        int sh = Math.Max(1, GetSystemMetrics(1));
-        var i = new INPUT { type = 0 };
-        i.U.mi = new MOUSEINPUT {
-            dx = (int)(x * 65535.0 / Math.Max(1, sw - 1)),
-            dy = (int)(y * 65535.0 / Math.Max(1, sh - 1)),
-            dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
-        };
-        return i;
-    }
-
-    public static bool DragPress(uint pid, int x, int y) {
-        if (!Owned(pid, x, y)) return false;
-        if (!SetCursorPos(x, y)) return false;
-        Thread.Sleep(50);
-        if (!Owned(pid, x, y)) return false;
-        Send(new INPUT[] { MoveInput(x, y) });
-        Thread.Sleep(40);
-        Send(new INPUT[] {
-            new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_LEFTDOWN } } }
-        });
-        return true;
-    }
-
-    public static bool DragMove(int x, int y) {
-        Send(new INPUT[] { MoveInput(x, y) });
-        return true;
-    }
-
-    public static bool DragRelease() {
-        Send(new INPUT[] {
-            new INPUT { type = 0, U = new InputUnion { mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_LEFTUP } } }
-        });
-        return true;
-    }
-}
-'@
-
-# The desktop runs mixed-DPI monitors and the product's restored window
-# geometry can span them: a DPI-unaware harness reads virtualized rects
-# while SendInput and WindowFromPoint answer in other spaces, and the arm
-# point lands where no window of ours is. Opt in to per-monitor physical
-# coordinates (-4 = PER_MONITOR_AWARE_V2) so every read and every
-# injection share one space.
-[void][VtDF]::SetProcessDpiAwarenessContext([IntPtr](-4))
+# Mixed-DPI discipline: rects and CopyFromScreen must share one space
+# (-4 = PER_MONITOR_AWARE_V2).
+[void][SeamWin]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 $UIA = [System.Windows.Automation.AutomationElement]
 $TREE = [System.Windows.Automation.TreeScope]::Descendants
 $CTRL = [System.Windows.Automation.ControlType]
 
-function Get-WinUiWindows([uint32]$ProcId) {
-    $hits = [System.Collections.Generic.List[object]]::new()
-    $cb = [VtDF+EnumProc]{
-        param($h, $lp)
-        [uint32]$o = 0; [void][VtDF]::GetWindowThreadProcessId($h, [ref]$o)
-        if ($o -ne $ProcId -or -not [VtDF]::IsWindowVisible($h)) { return $true }
-        if ([VtDF]::ClassOf($h) -ne 'WinUIDesktopWin32WindowClass') { return $true }
-        $hwnd64 = $h.ToInt64()
-        $rc = [VtDF]::RectOf($hwnd64)
-        if ($null -eq $rc) { return $true }
-        $hits.Add([pscustomobject]@{ Hwnd64 = $hwnd64; Title = [VtDF]::TitleOf($h); Area = ($rc.W * $rc.Hh) })
-        return $true
-    }
-    [void][VtDF]::EnumWindows($cb, [IntPtr]::Zero)
-    return $hits | Sort-Object Area -Descending
-}
-
-function Test-SplashVisible([int]$ProcId) {
-    $script:splashSeen = $false
-    $cb = [VtDF+EnumProc]{
-        param($hwnd, $lp)
-        [uint32]$owner = 0; [void][VtDF]::GetWindowThreadProcessId($hwnd, [ref]$owner)
-        if ($owner -ne $ProcId) { return $true }
-        if ([VtDF]::ClassOf($hwnd) -eq 'WinttySplash' -and [VtDF]::IsWindowVisible($hwnd)) { $script:splashSeen = $true }
-        return $true
-    }
-    [void][VtDF]::EnumWindows($cb, [IntPtr]::Zero)
-    return $script:splashSeen
-}
-
-function Wait-Ready($proc) {
-    $dl = (Get-Date).AddSeconds(40)
-    $got = $null
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $proc.Refresh(); if ($proc.HasExited) { throw "PRODUCT_FAIL startup exit=$($proc.ExitCode)" }
-        $got = @(Get-WinUiWindows ([uint32]$proc.Id)) | Select-Object -First 1
-        if ($got) { break }
-    }
-    if (-not $got) { throw 'HARVEST_MISS: no WinUI hwnd' }
-    $dl = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $dl) {
-        $proc.Refresh(); if ($proc.HasExited) { throw 'PRODUCT_FAIL during splash' }
-        if (Test-SplashVisible $proc.Id) { Start-Sleep -Milliseconds 200; continue }
-        Start-Sleep -Milliseconds 900
-        if (-not (Test-SplashVisible $proc.Id)) { return $got }
-    }
-    throw 'HARVEST_MISS: splash never dropped'
-}
-
-function Get-UiaRoot([int64]$Hwnd64) { return $UIA::FromHandle([VtDF]::P($Hwnd64)) }
+function Get-UiaRoot([int64]$Hwnd64) { return $UIA::FromHandle([SeamWin]::P($Hwnd64)) }
 
 function Find-ById($root, [string]$Id) {
     if ($null -eq $root) { return $null }
@@ -339,97 +102,14 @@ function Get-StripRows {
     foreach ($el in $found) {
         $r = $el.Current.BoundingRectangle
         if ($r.Width -le 0 -or $r.Height -le 0) { continue }
-        $rows.Add([pscustomobject]@{ El = $el; Name = $el.Current.Name; Rect = $r })
+        $rows.Add([pscustomobject]@{ Name = $el.Current.Name; Rect = $r })
     }
     if ($rows.Count -eq 0) { throw 'HARVEST_MISS: no rows under NavView' }
     return @($rows | Sort-Object { $_.Rect.Y })
 }
 
-function Enable-Chords([uint32]$ProcId) {
-    $rc = [VtDF]::RectOf($script:MainHwnd64)
-    if ($null -eq $rc) { throw 'HARVEST_MISS: window rect for arming' }
-    # The arm click is refused while another window sits on top of the
-    # point (Owned reads the window under the cursor), so try to take the
-    # foreground first -- best-effort: the click's own z-order check is
-    # the gate that matters -- and then walk inward from the offsets that
-    # have historically been clear of chrome, taking the first point the
-    # window owns. The center is the last point rect skew can take from
-    # us.
-    [void][VtDF]::Focus([VtDF]::P($script:MainHwnd64))
-    $candidates = @(
-        @{ fx = 0.50; fy = 0.50 },
-        @{ fx = 0.62; fy = 0.55 },
-        @{ fx = 0.35; fy = 0.50 },
-        @{ fx = 0.50; fy = 0.30 }
-    )
-    $armed = $false
-    foreach ($c in $candidates) {
-        $x = [int]($rc.L + $rc.W * $c.fx)
-        $y = [int]($rc.T + $rc.Hh * $c.fy)
-        if ([VtDF]::Click($ProcId, $x, $y)) { $armed = $true; break }
-        Start-Sleep -Milliseconds 200
-    }
-    if (-not $armed) {
-        throw 'HARVEST_MISS: could not click the terminal to arm input'
-    }
-    Start-Sleep -Milliseconds 200
-}
-
-function Add-Tab([int64]$Hwnd64, [uint32]$ProcId) {
-    Enable-Chords $ProcId
-    if (-not [VtDF]::Chord([VtDF]::P($Hwnd64), @([VtDF]::VK_CONTROL), [VtDF]::VK_T)) {
-        throw 'FOREGROUND_MISS: could not take the foreground to open a tab'
-    }
-    Start-Sleep -Milliseconds 800
-}
-
-function Set-RowTitle([object]$Row, [string]$Want, [uint32]$ProcId, [int64]$Hwnd64) {
-    try {
-        $pat = $Row.El.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-        $pat.Select()
-        Start-Sleep -Milliseconds 300
-    } catch {
-        throw "HARVEST_MISS: row '$($Row.Name)' has no selection pattern"
-    }
-    Enable-Chords $ProcId
-    if (-not [VtDF]::TypeLine([VtDF]::P($Hwnd64), "title $Want")) {
-        throw 'FOREGROUND_MISS: could not take the foreground to title a tab'
-    }
-    $dl = (Get-Date).AddSeconds(6)
-    while ((Get-Date) -lt $dl) {
-        Start-Sleep -Milliseconds 250
-        $named = @(Get-StripRows | Where-Object { $_.Name -eq $Want })
-        if ($named.Count -eq 1) { return }
-    }
-    throw "HARVEST_MISS: '$Want' never showed up as a tab title"
-}
-
-function Expand-Sidebar([uint32]$ProcId) {
-    $root = Get-UiaRoot $script:MainHwnd64
-    $nav = Find-ById $root 'NavView'
-    if ($null -ne $nav) {
-        $w = $nav.Current.BoundingRectangle.Width
-        if (-not [double]::IsNaN($w) -and $w -ge 200) { return }
-    }
-    $el = Find-ById $root 'PaneToggleButton'
-    if ($null -eq $el) { throw 'HARVEST_MISS: PaneToggleButton' }
-    try {
-        $pat = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-        $pat.Invoke()
-    } catch {
-        $r = $el.Current.BoundingRectangle
-        if (-not [VtDF]::Click($ProcId, [int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))) {
-            throw 'HARVEST_MISS: pane toggle click'
-        }
-    }
-    Start-Sleep -Milliseconds 700
-}
-
 # ---- the pixel oracle -------------------------------------------------------
 
-# Nearest-reference classification over one cropped column strip. $Refs is
-# an ordered map of label -> [r,g,b]; every pixel in the crop is labelled by
-# its nearest reference within $Tol per channel, or 'none'.
 function Get-Pixels([System.Drawing.Bitmap]$bmp) {
     $w = $bmp.Width; $h = $bmp.Height
     $rect = [System.Drawing.Rectangle]::new(0, 0, $w, $h)
@@ -453,9 +133,7 @@ function Get-Pixel([hashtable]$Px, [int]$X, [int]$Y) {
 # it was sampled at, and a full-width scan happily matches ink or chrome
 # on other rows first. The $To ceiling is the other half: the tracked
 # band physically cannot leave the measured span, so rows outside it
-# (another row's title ink) must not be readable at all. Inlined byte
-# access rather than a per-pixel helper call: this runs over every
-# frame's crop.
+# (another row's title ink) must not be readable at all.
 function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [int]$X = -1, [int]$HalfW = -1, [int]$To = -1) {
     $bytes = $Px.bytes
     $stride = $Px.stride
@@ -478,28 +156,10 @@ function Find-BandTop([hashtable]$Px, [array]$Ref, [int]$Tol, [int]$From = 0, [i
 
 # ---- run -------------------------------------------------------------------
 
-# The machine commits a crossing only when the dragged center passes the
-# neighbour's center PLUS this token (TabDragReorder.Evaluate's strict
-# inequality). The gesture's waypoints must overshoot that line by real
-# margin or the commit never fires and the oracle measures a gesture that
-# ordered nothing. Read from the product's own source, never hard-coded:
-# a token change must move this script with it.
-$script:HysteresisPx = -1
-$motionCs = Join-Path $PSScriptRoot '../Ghostty.Core/Tabs/TabStripMotion.cs'
-$motionSrc = Get-Content $motionCs -Raw
-if ($motionSrc -match 'CrossingHysteresisPx\s*=\s*(\d+)') {
-    $script:HysteresisPx = [int]$Matches[1]
-}
-if ($script:HysteresisPx -le 0) {
-    throw 'HARVEST_MISS: could not read CrossingHysteresisPx from TabStripMotion.cs'
-}
-
 $crashPath = Join-Path $env:LOCALAPPDATA 'Wintty\crash.log'
 $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
 
-$tempXdg = Join-Path $env:TEMP "wintty-fuzz-dragfilm-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path (Join-Path $tempXdg 'wintty') | Out-Null
-@'
+$Config = @'
 windows-single-instance = true
 window-save-state = never
 windows-settings-ui = true
@@ -507,18 +167,15 @@ vertical-tabs = true
 window-theme = wintty
 theme = Catppuccin Mocha
 vertical-tabs-hover-expand = false
-'@ | Set-Content (Join-Path $tempXdg 'wintty\config.wintty') -Encoding utf8
+'@
 
 $script:MainHwnd64 = 0
-$origXdgSet = Test-Path Env:XDG_CONFIG_HOME
-$origXdg = if ($origXdgSet) { $env:XDG_CONFIG_HOME } else { $null }
-$proc = $null
+$session = $null
 $script:FatalWasProduct = $null
 
 # Above the try, so the refusal survives a finally that would otherwise bind
 # a null stamp to a mandatory parameter.
 Assert-NoWintty -Context 'The drag filmstrip'
-$script:WinttyStamp = Get-WinttyLaunchStamp
 
 # The machine's animation gate, read directly: this oracle measures the
 # glide, and a machine running with animations off would make every timing
@@ -535,7 +192,6 @@ public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref 
 [void][WinttyDragFilm.Spi]::SystemParametersInfo($SPI_GETCLIENTAREAANIMATION, 0, [ref]$anim, 0)
 if ($anim -eq 0) {
     Write-Host 'HARVEST_MISS: client-area animations are off on this machine; the glide oracle measures nothing. Turn "animate controls and elements" back on to run this harness.'
-    if ($origXdgSet) { $env:XDG_CONFIG_HOME = $origXdg }
     exit 1
 }
 
@@ -543,46 +199,45 @@ $frames = [System.Collections.Generic.List[object]]::new()
 
 try {
     if (-not (Test-Path $ExePath)) { throw "missing exe: $ExePath" }
-    $env:XDG_CONFIG_HOME = $tempXdg
-    $proc = Start-Process -FilePath $ExePath -PassThru -WorkingDirectory (Split-Path -Parent (Resolve-Path $ExePath))
-    $pid32 = [uint32]$proc.Id
-    $main = Wait-Ready $proc
-    $script:MainHwnd64 = [int64]$main.Hwnd64
-    $hwnd64 = $script:MainHwnd64
-    [void][VtDF]::MoveWindow([VtDF]::P($hwnd64), 60, 60, 1280, 820, $true)
+    $session = Start-SeamSession -ExePath $ExePath -ConfigText $Config
+    $script:MainHwnd64 = $session.Hwnd64
+    [void][SeamWin]::MoveWindow([SeamWin]::P($script:MainHwnd64), 60, 60, 1280, 820, $true)
     Start-Sleep -Milliseconds 600
-    Write-Host "hwnd=$hwnd64 pid=$pid32 interval=${IntervalMs}ms frames=$MaxFrames"
+    Write-Host "hwnd=$($script:MainHwnd64) pid=$($session.Proc.Id) interval=${IntervalMs}ms frames=$MaxFrames tick=${TickMs}ms"
 
-    Enable-Chords $pid32
-    for ($n = 1; $n -le 3; $n++) { Add-Tab $hwnd64 $pid32 }
     $names = @('fuzzfilm-1', 'fuzzfilm-2', 'fuzzfilm-3', 'fuzzfilm-4')
-    foreach ($want in $names) {
-        $row = @(Get-StripRows | Where-Object { $_.Name -notlike 'fuzzfilm-*' } | Select-Object -First 1)
-        if ($row.Count -eq 0) { break }
-        Set-RowTitle $row[0] $want $pid32 $hwnd64
+    $seeded = Invoke-SeamCommand $session @{ op = 'seed-tabs'; count = 4; titles = $names }
+    $gotTitles = @($seeded.state.tabs | ForEach-Object { $_.title })
+    if (($gotTitles -join ',') -ne ($names -join ',')) {
+        throw "PRODUCT_FAIL: seeded order is [$($gotTitles -join ',')], expected [$($names -join ',')]"
+    }
+
+    # The pane opens through the seam's own sidebar toggle: a compact
+    # 48px pane films icon slots whose selection chrome cannot be told
+    # from the background at the sample column.
+    if ($seeded.state.paneWidth -lt 200) {
+        $widened = Invoke-SeamCommand $session @{ op = 'toggle-sidebar' }
+        if ($widened.state.paneWidth -lt 200) {
+            throw "HARVEST_MISS: the sidebar did not open (paneWidth $($widened.state.paneWidth))"
+        }
     }
     $rows = Get-StripRows
-    if (@($rows | Where-Object { $_.Name -notlike 'fuzzfilm-*' }).Count -gt 0) {
-        throw 'HARVEST_MISS: tabs kept arriving untitled'
-    }
     $gotNames = @($rows | ForEach-Object { $_.Name })
     if (($gotNames -join ',') -ne ($names -join ',')) {
-        throw "PRODUCT_FAIL: seeded order is [$($gotNames -join ',')], expected [$($names -join ',')]"
+        throw "PRODUCT_FAIL: UIA order is [$($gotNames -join ',')], expected [$($names -join ',')]"
     }
 
-    # Row 3 is selected, and row 3 IS the dragged row: the differential
-    # matrix proved that grabbing a row other than the selected one gets
-    # the pointer canceled mid-gesture (the press's selection change
-    # churns the arm path -- begin, cancel reason=canceled, end). The
-    # tracked band therefore rides the drag itself, rising past row 2.
-    # The programmatic Select() can silently not land (the ring stays on
-    # whatever row held it), and the ring is the selection's only
-    # observable -- so the selection retry lives inside the calibration:
-    # each attempt selects, re-captures frame 0, and re-runs the edge
-    # diff. Three strikes and the run refuses with the evidence frame.
-    $row3 = $rows | Where-Object { $_.Name -eq 'fuzzfilm-3' }
-    $selPat = $row3.El.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-    $selPat.Select()
+    # Row 3 is selected and row 2 does the dragging: the tracked band is
+    # the DISPLACED selected row's fill, sliding up one slot when the
+    # crossing commits -- the offset animation the oracle is about. The
+    # dragged row itself is useless to track (its chrome dims while the
+    # gesture holds it), and unselected rows cannot be told apart in
+    # pixels. A seam press selects nothing, so dragging the unselected
+    # neighbour no longer cancels the gesture the way a SendInput click
+    # did. Selection goes through the seam -- the manager's own
+    # activation, so the strip's selection sync paints the fill the
+    # calibration samples.
+    [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
     Start-Sleep -Milliseconds 500
 
     $rows = Get-StripRows
@@ -602,22 +257,27 @@ try {
     # Sampled right of centre: the title text ends well before that, and a
     # sample on the text ink would calibrate to the wrong colour.
     #
-    # The selected row's chrome in the current theme is a RING (a rounded
-    # bright stroke around the row), not a filled band, so its colour
-    # cannot be sampled from the row's interior -- the interior is the
-    # strip background, and scanning for it finds the whole strip. The
-    # edge is found instead by diffing the selected row's column against
-    # the UNSELECTED row directly above it (same geometry, same fill):
-    # their colours agree everywhere except where the selection chrome
-    # draws. The stroke's colour is then sampled AT that edge, in frame 0
-    # -- the calibration still comes from frame 0, not hard-coded colours.
+    # The selected row's chrome in the current shell is a FILL (a bright
+    # band across the whole row), so its colour is sampled from the row's
+    # own interior and required to differ per-channel from the unselected
+    # row directly above -- the discriminating condition the per-frame
+    # scan rides. The tracker's frame-0 read then has to land on the
+    # fill's own top edge, or the colour is not discriminating at this
+    # column (text ink or a separator matches it first) and the run would
+    # measure the wrong feature. The programmatic selection can silently
+    # not land, so the retry lives inside the calibration: each attempt
+    # re-selects through the seam, re-captures frame 0, and re-samples.
+    # Three strikes and the run refuses with the evidence frame.
     $colX = [int]($cropW * 0.72)
     $calibrated = $false
-    $bestY = -1; $bestD = -1; $bandRef = $null; $trackerTop0 = -1
+    $bandRef = $null; $trackerTop0 = -1
     $full = $null; $px0 = $null
+    $releaseTop = -1
+    $r3Top = [int]($row3.Rect.Y - $cropY)
+    $r2Top = $r3Top - $rowH
     for ($calAttempt = 1; $calAttempt -le 3 -and -not $calibrated; $calAttempt++) {
         if ($calAttempt -gt 1) {
-            $selPat.Select()
+            [void](Invoke-SeamCommand $session @{ op = 'select'; index = 2 })
             Start-Sleep -Milliseconds 500
         }
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
@@ -625,47 +285,21 @@ try {
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
         $g.Dispose()
         $px0 = Get-Pixels $full
-        $r3Top = [int]($row3.Rect.Y - $cropY)
-        $r2Top = $r3Top - $rowH
-        $bestY = -1
-        $bestD = -1
-        for ($y = $r2Top; $y -lt $r3Top + $rowH; $y++) {
-            if ($y -lt 0 -or ($y + $rowH) -ge $full.Height) { continue }
-            $a = Get-Pixel $px0 $colX $y
-            $b = Get-Pixel $px0 $colX ($y - $rowH)
-            $d = [math]::Abs($a[0] - $b[0]) + [math]::Abs($a[1] - $b[1]) + [math]::Abs($a[2] - $b[2])
-            if ($d -gt $bestD) { $bestD = $d; $bestY = $y }
-        }
-        if ($bestY -lt 0 -or $bestD -lt 60 -or [math]::Abs($bestY - $r3Top) -gt 10) {
-            Write-Host ("calibration attempt {0}: selection edge not distinct at x={1} (best delta {2} at y={3}, row 3 top {4})" -f $calAttempt, $colX, $bestD, $bestY, $r3Top)
-            continue
-        }
-        $bandRef = Get-Pixel $px0 $colX $bestY
-        # The sampled colour must not be the strip's UNSELECTED background:
-        # whether the selection chrome is a ring or a fill, the tracked
-        # colour has to differ from what the other rows show, or the
-        # per-frame scan matches every row and tracks nothing. (The row's
-        # OWN interior is the wrong yardstick -- a fill chrome agrees with
-        # itself by design.)
+        $bandRef = Get-Pixel $px0 $colX ($r3Top + [int]($rowH * 0.5))
         $bgRef = Get-Pixel $px0 $colX ($r2Top + [int]($rowH * 0.5))
         if (([math]::Abs($bandRef[0] - $bgRef[0]) -le 12) -and
             ([math]::Abs($bandRef[1] - $bgRef[1]) -le 12) -and
             ([math]::Abs($bandRef[2] - $bgRef[2]) -le 12)) {
-            Write-Host ("calibration attempt {0}: band sample rgb({1}) matches the unselected background rgb({2}) at x={3}" -f $calAttempt, ($bandRef -join ','), ($bgRef -join ','), $colX)
+            Write-Host ("calibration attempt {0}: selected fill rgb({1}) matches the unselected background rgb({2}) at x={3} - the selection did not paint" -f $calAttempt, ($bandRef -join ','), ($bgRef -join ','), $colX)
             continue
         }
-        # bandTop0 and the scan origin come from the SAME pass the per-frame
-        # tracker uses, cross-checked against the diff edge above: if the
-        # tracker's frame-0 reading disagrees with the feature the diff
-        # found, the colour is not discriminating (text ink or chrome
-        # elsewhere matches it first) and the run would measure the wrong
-        # feature. The scan is column-scoped for the same reason -- the
-        # colour is only known discriminating at the column it was sampled
-        # at.
-        $releaseTop = $bestY - $rowH
-        $trackerTop0 = Find-BandTop $px0 $bandRef 24 ([Math]::Max(1, $releaseTop - [int]($rowH * 0.4))) $colX 8 ([Math]::Min($px0.h - 1, $bestY + [int]($rowH * 0.25)))
-        if ($trackerTop0 -lt 0 -or [math]::Abs($trackerTop0 - $bestY) -gt 4) {
-            Write-Host ("calibration attempt {0}: tracker found band at y={1} but the diff edge is y={2} (band rgb({3}) at x={4})" -f $calAttempt, $trackerTop0, $bestY, ($bandRef -join ','), $colX)
+        # The tracker's own frame-0 read must land on the fill's top edge:
+        # scanning downward from just above the row, the first colour
+        # match IS the band top the per-frame loop will keep re-finding.
+        $releaseTop = $r3Top - $rowH
+        $trackerTop0 = Find-BandTop $px0 $bandRef 24 ([Math]::Max(1, $releaseTop - [int]($rowH * 0.4))) $colX 8 ([Math]::Min($px0.h - 1, $r3Top + [int]($rowH * 0.25)))
+        if ($trackerTop0 -lt 0 -or [math]::Abs($trackerTop0 - $r3Top) -gt 6) {
+            Write-Host ("calibration attempt {0}: tracker found band at y={1} but row 3's top is y={2} (band rgb({3}) at x={4})" -f $calAttempt, $trackerTop0, $r3Top, ($bandRef -join ','), $colX)
             continue
         }
         $calibrated = $true
@@ -674,69 +308,21 @@ try {
         $diag = Join-Path $OutDir 'calibration-frame0.png'
         if ($null -ne $full) { $full.Save($diag, [System.Drawing.Imaging.ImageFormat]::Png) }
         Write-Host "calibration: frame 0 saved to $diag"
-        throw 'HARVEST_MISS: could not calibrate the tracked band on the selected row (3 attempts) - the selection never landed where the diff could see it'
+        throw 'HARVEST_MISS: could not calibrate the tracked band on the selected row (3 attempts) - the selection never painted where the sampler could see it'
     }
     $bandTop0 = $trackerTop0
-    $expectedTop = $r3Top
-    Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
-    Write-Host "calibrated: selection stroke rgb($($bandRef -join ',')) at y=$bandTop0 (delta $bestD)"
+    Write-Host "calibrated: selection fill rgb($($bandRef -join ',')) at y=$bandTop0 (bg rgb($($bgRef -join ',')))"
 
-    # The scripted gesture, on one clock with the capture. The press, the
-    # waypoints and the release are scheduled at fixed times; the crossing
-    # time is the first waypoint whose y passes row 3's centre, and the
-    # oracle's windows are measured from it. The grab sits at 35% of the
-    # row's width: the same actuation point the tab-drag harness's
-    # committing legs use, not the row's dead centre.
-    $grabX = [int]($row3.Rect.X + $row3.Rect.Width * 0.35)
-    $grabY = [int]($row3.Rect.Y + $row3.Rect.Height / 2)
-    # The earliest y the crossing can register at: the neighbour's midpoint
-    # MINUS the machine's crossing hysteresis -- the drag runs UPWARD (row
-    # 3 crosses row 2), so the crossing fires when the dragged center
-    # passes the neighbour's center by hysteresis on the way up.
-    # Measuring the windows from here, the first waypoint past it, is the
-    # conservative reading - if the commit actually fired later, the
-    # measured gap only looks better than it is, never worse.
-    $crossY = [int]($row2.Rect.Y + $row2.Rect.Height / 2 - $script:HysteresisPx)
-    # The waypoints must OVERSHOOT that line by real margin - the machine
-    # needs the dragged center strictly past it - while stopping short of
-    # row 1's own hysteresis band so the release cannot commit a second
-    # crossing past it. The release follows the crossing closely: a long
-    # hold past the line gives the follow-coupled center time to reach
-    # the NEXT line and commit a second crossing.
-    $overshoot = [Math]::Max(12, [int]($rowH * 0.25))
-    $endY = [int]($row2.Rect.Y + $row2.Rect.Height / 2 - $script:HysteresisPx - $overshoot)
-    $schedule = [System.Collections.Generic.List[object]]::new()
-    $schedule.Add([pscustomobject]@{ at = 300; act = 'press'; x = $grabX; y = $grabY })
-    $moveT = 380; $crossAt = -1
-    while ($moveT -le 1660) {
-        $y = $grabY + [int](($endY - $grabY) * ($moveT - 380) / (1660 - 380))
-        $schedule.Add([pscustomobject]@{ at = $moveT; act = 'move'; x = $grabX; y = $y })
-        if ($crossAt -lt 0 -and $y -le $crossY) { $crossAt = $moveT }
-        $moveT += 70
-    }
-    # The release happens INSIDE the dragged row's new slot: the release
-    # selects the row under the pointer, and releasing over the wrong slot
-    # moves the selection off the tracked band mid-measurement.
-    $returnAt = $crossAt + 80
-    $settleY = $grabY - $rowH
-    $schedule.Add([pscustomobject]@{ at = $returnAt; act = 'move'; x = $grabX; y = $settleY })
-    $releaseAt = $crossAt + 150
-    $schedule.Add([pscustomobject]@{ at = $releaseAt; act = 'release' })
-    if ($crossAt -lt 0) { throw 'HARVEST_MISS: gesture never schedules a crossing of row 3' }
-    Write-Host "gesture: press@300 cross@$crossAt release@$releaseAt"
-
+    # The gesture and the capture share one stopwatch: the send stamp is
+    # taken on it just before the command goes down the pipe, the frames
+    # are stamped on it as they are grabbed, and the seam's own commit and
+    # release offsets are added to the send stamp afterwards. The response
+    # is deliberately collected AFTER the film: the paced walk is in
+    # flight while the frames accumulate.
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $schedIdx = 0
+    $sendAt = $sw.ElapsedMilliseconds
+    Send-SeamCommand $session @{ op = 'drag-paced'; from = 1; to = 2; tickMs = $TickMs }
     for ($i = 0; $i -lt $MaxFrames; $i++) {
-        while ($schedIdx -lt $schedule.Count -and $sw.ElapsedMilliseconds -ge $schedule[$schedIdx].at) {
-            $s = $schedule[$schedIdx]
-            switch ($s.act) {
-                'press'   { if (-not [VtDF]::DragPress($pid32, $s.x, $s.y)) { throw "HARVEST_MISS: drag press refused at $($s.x),$($s.y)" } }
-                'move'    { [void][VtDF]::DragMove($s.x, $s.y) }
-                'release' { [void][VtDF]::DragRelease() }
-            }
-            $schedIdx++
-        }
         $full = [System.Drawing.Bitmap]::new($cropW, $cropH)
         $g = [System.Drawing.Graphics]::FromImage($full)
         $g.CopyFromScreen($cropX, $cropY, 0, 0, $full.Size)
@@ -745,15 +331,19 @@ try {
         $remain = (($i + 1) * $IntervalMs) - $sw.ElapsedMilliseconds
         if ($remain -gt 0) { Start-Sleep -Milliseconds $remain }
     }
-    Write-Host ("captured {0} frames over {1}ms" -f $frames.Count, $sw.ElapsedMilliseconds)
+    $drag = Receive-SeamResponse $session 'drag-paced'
+    if ($null -eq $drag.commitMs) { throw 'PRODUCT_FAIL: the paced drag reported no commit - the crossing never fired' }
+    $crossAt = $sendAt + [int]$drag.commitMs
+    $releaseAt = if ($null -ne $drag.releaseMs) { $sendAt + [int]$drag.releaseMs } else { -1 }
+    Write-Host ("captured {0} frames over {1}ms; commit@{2} release@{3} landed={4}" -f
+        $frames.Count, $sw.ElapsedMilliseconds, $crossAt, $releaseAt, $drag.landed)
 
     # Analysis: band top per frame, saved as PNGs for the transcript. The
     # scan is SPAN-SCOPED: the tracked band physically cannot leave the
     # span between the release row's band top (minus the settle spring's
     # overshoot headroom) and a little below the grab row's band top, so
     # rows outside that span -- notably another row's title ink -- are not
-    # readable at all, and a reading inside the span is the band by
-    # construction (colour match at the calibrated column, span-checked).
+    # readable at all.
     $scanFrom = [Math]::Max(1, $releaseTop - [int]($rowH * 0.4))
     $scanTo = [Math]::Min($frames[0].bmp.Height - 1, $bandTop0 + [int]($rowH * 0.25))
     $tops = New-Object int[] $frames.Count
@@ -768,10 +358,8 @@ try {
 
     # A lost band inside the measured window is the tracker saying
     # "unreadable" -- the fast glide motion-blurs the stroke below the
-    # colour match. That is tolerable (the freeze-and-resume contract) as
-    # long as the window stays mostly readable and both measurements land
-    # on real, uncarried readings; it is not tolerable when the tracker
-    # loses the drag outright.
+    # colour match. That is tolerable as long as the window stays mostly
+    # readable and both measurements land on real, uncarried readings.
     $measureEndMs = $crossAt + 500
     $windowFrames = @(0..($frames.Count - 1) | Where-Object { $frames[$_].t -le $measureEndMs })
     $bad = @($windowFrames | Where-Object { $tops[$_] -lt 0 })
@@ -781,10 +369,10 @@ try {
 
     # Gap open: the first REAL reading (never a carried or blurred frame)
     # whose band top has risen 5px or more off its pre-crossing position,
-    # measured from the scheduled crossing.
+    # measured from the commit the seam reported.
     $commitFrame = -1
     for ($i = 0; $i -lt $frames.Count; $i++) { if ($frames[$i].t -ge $crossAt) { $commitFrame = $i; break } }
-    if ($commitFrame -lt 0) { throw 'HARVEST_MISS: no frame at or after the crossing' }
+    if ($commitFrame -lt 0) { throw 'HARVEST_MISS: no frame at or after the commit' }
     $gapFrame = -1
     for ($i = $commitFrame; $i -lt $frames.Count; $i++) {
         if ($tops[$i] -ge 0 -and $tops[$i] -le ($bandTop0 - 5)) { $gapFrame = $i; break }
@@ -794,11 +382,7 @@ try {
 
     # Convergence: the band STOPS -- six consecutive real readings within
     # 2px of each other, at a position within one row of the release
-    # row's band top, within 500ms of the crossing. The stop position is
-    # verified against the release geometry only loosely (the ring's
-    # inset shifts it a few px); WHERE the row landed is the order
-    # assertion's job, and the colour match inside the span is the
-    # re-lock's identity proof.
+    # row's band top, within 500ms of the commit.
     $settledMs = -1
     $settledTop = -1
     for ($i = $commitFrame; $i -lt $frames.Count; $i++) {
@@ -815,12 +399,10 @@ try {
             break
         }
     }
-    $finalTop = $settledTop
     Write-Host "converge: releaseTop=$releaseTop settledTop=$settledTop settledMs=$settledMs"
 
     # The travel reads the last REAL reading: a trailing blur frame says
-    # nothing about where the band went, and treating it as -1 would
-    # inflate the travel and fake the displacement gate.
+    # nothing about where the band went.
     $lastReal = $bandTop0
     for ($i = $frames.Count - 1; $i -ge 0; $i--) { if ($tops[$i] -ge 0) { $lastReal = $tops[$i]; break } }
     $travel = $bandTop0 - $lastReal
@@ -833,7 +415,9 @@ try {
     Write-Host "order after: $($after -join ',')"
 
     $result = [ordered]@{
+        actuation = 'seam drag-paced; zero synthesized OS input'
         intervalMs = $IntervalMs
+        tickMs = $TickMs
         frames = $frames.Count
         bandRef = $bandRef
         bandTop0 = $bandTop0
@@ -855,23 +439,23 @@ try {
         throw "PRODUCT_FAIL: the band travelled only ${travel}px over a $rowH px row - the drag never displaced row 3, so the timings measure nothing"
     }
     if ($gapFrame -lt 0) {
-        throw "PRODUCT_FAIL: the gap never opened - row 3's band never left its slot after the crossing"
+        throw "PRODUCT_FAIL: the gap never opened - row 3's band never left its slot after the commit"
     }
     if ($gapMs -gt (2 * $IntervalMs + 40)) {
-        throw "PRODUCT_FAIL: the gap opened ${gapMs}ms after the crossing; the oracle allows 2 frames ($((2 * $IntervalMs + 40))ms)"
+        throw "PRODUCT_FAIL: the gap opened ${gapMs}ms after the commit; the oracle allows 2 frames ($((2 * $IntervalMs + 40))ms)"
     }
     if ($settledMs -lt 0) {
         throw 'PRODUCT_FAIL: the band never settled within the film - offsets did not converge'
     }
     if ($settledMs -gt 500) {
-        throw "PRODUCT_FAIL: offsets converged ${settledMs}ms after the crossing; the oracle allows 500ms"
+        throw "PRODUCT_FAIL: offsets converged ${settledMs}ms after the commit; the oracle allows 500ms"
     }
     Write-Host "PASS gap=${gapMs}ms settled=${settledMs}ms travel=${travel}px order=$($after -join ',')"
 }
 catch {
-    if ($null -ne $proc -and -not $proc.HasExited) {
+    if ($null -ne $session -and $null -ne $session.Proc -and -not $session.Proc.HasExited) {
         try {
-            $rc = [VtDF]::RectOf($script:MainHwnd64)
+            $rc = [SeamWin]::RectOf($script:MainHwnd64)
             if ($null -ne $rc) {
                 $bmp = New-Object System.Drawing.Bitmap $rc.W, $rc.Hh
                 $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -881,19 +465,11 @@ catch {
             }
         } catch { }
     }
-    $script:FatalWasProduct = ("$_" -like 'PRODUCT_FAIL*')
+    $script:FatalWasProduct = ("$_" -like 'PRODUCT_FAIL*' -or "$_" -like 'PRODUCT_EXIT*')
     Write-Host "$_" -ForegroundColor Red
 }
 finally {
-    if ($null -ne $proc -and -not $proc.HasExited) {
-        try { $proc.Kill($true); [void]$proc.WaitForExit(3000) } catch { }
-    }
-    if ($origXdgSet) { $env:XDG_CONFIG_HOME = $origXdg }
-    else { Remove-Item Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue }
-    if ((Test-Path $tempXdg)) {
-        Remove-Item -Recurse -Force $tempXdg -ErrorAction SilentlyContinue
-    }
-    Stop-WinttyStartedAfter -Since $script:WinttyStamp -ExePath $ExePath
+    if ($null -ne $session) { Stop-SeamSession $session }
 }
 
 $crashGrew = (Test-Path $crashPath) -and ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp)

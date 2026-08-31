@@ -154,4 +154,115 @@ public class TestSeamWiringTests
             execute.Calls("RunOnUiThreadAsync").Count == 1,
             "commands no longer funnel through the single UI marshal");
     }
+
+    /// <summary>
+    /// The fuzz suite's gesture commands are only honest while they drive
+    /// the strip's REAL pointer handlers: each op routes to its one strip
+    /// walker, select goes through the manager's own activation, and the
+    /// shared walk feeds DragMove under the seam's pointer id with the
+    /// Low-priority handoff per tick -- never a second implementation of
+    /// the grammar.
+    /// </summary>
+    [Fact]
+    public void TheGestureOps_DriveTheStripsRealHandlers()
+    {
+        var seam = ShellSource.Load("Testing.TestSeam.cs");
+        var dispatch = seam.Method("ExecuteOnUiThreadAsync");
+        Assert.Single(dispatch.Calls("strip.TestSeamDragPacedAsync"));
+        Assert.Single(dispatch.Calls("strip.TestSeamDragZoneAsync"));
+        Assert.Single(dispatch.Calls("strip.TestSeamDragToHeaderAsync"));
+        Assert.Single(dispatch.Calls("manager.Activate"));
+
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+        var walk = strip.Method("SeamWalkAsync");
+        var move = walk.Calls("DragMove").Single();
+        Assert.Contains("TestSeamPointerId", move.ToString());
+        Assert.Single(walk.Calls("Testing.TestSeam.WaitForLowPriorityAsync"));
+        // Wall-clock pacing is the walker's own optional tick, for the
+        // filming driver; the settle handoff above stays unconditional.
+        Assert.Contains("Task.Delay(tickDelayMs)", walk.ToString());
+        foreach (var name in new[]
+        {
+            "TestSeamDragPacedAsync", "TestSeamDragZoneAsync", "TestSeamDragToHeaderAsync",
+        })
+        {
+            var walker = strip.Method(name);
+            Assert.Single(walker.Calls("DragPress"));
+            Assert.Single(walker.Calls("DragRelease"));
+        }
+    }
+
+    /// <summary>
+    /// Every walker that must cross aims with the machine's own numbers,
+    /// at every site: Evaluate's inequality is strict (center PLUS the
+    /// token), so a walker aiming AT a slot center stalls one token short
+    /// of its final commit -- the exact regression the base walker
+    /// shipped. The base and paced walkers must overshoot past the center
+    /// in the travel direction by TabStripMotion.CrossingHysteresisPx (a
+    /// literal would fall silently behind a token change), the zone walk
+    /// overshoots by the same token, and the header walk re-reads the
+    /// header's live center every tick, because crossings churn the list
+    /// under the walk.
+    /// </summary>
+    [Fact]
+    public void TheBoundaryAndHeaderWalks_AimWithTheMachinesOwnNumbers()
+    {
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+        foreach (var name in new[]
+        {
+            "TestSeamDragAsync", "TestSeamDragPacedAsync", "TestSeamDragZoneAsync",
+        })
+        {
+            Assert.Contains(
+                "TabStripMotion.CrossingHysteresisPx",
+                strip.Method(name).ToString());
+        }
+        // The slot walkers must aim PAST the center in the travel
+        // direction, not merely mention the token somewhere.
+        foreach (var name in new[] { "TestSeamDragAsync", "TestSeamDragPacedAsync" })
+        {
+            Assert.Contains("Math.Sign(to - from)", strip.Method(name).ToString());
+        }
+
+        var header = strip.Method("TestSeamDragToHeaderAsync");
+        var headerWalk = header.Calls("SeamWalkAsync").Single();
+        Assert.Contains("HeaderCenterY(group)", headerWalk.ToString());
+    }
+
+    /// <summary>
+    /// The filming driver aligns frames to the paced walk's own clock, so
+    /// the commit timestamp must come from the manager index moving --
+    /// gesture truth, not a schedule -- and the drag response must carry
+    /// it out, along with the release stamp.
+    /// </summary>
+    [Fact]
+    public void ThePacedWalk_TimestampsTheCommit_AndTheResponseCarriesIt()
+    {
+        var strip = ShellSource.Load("Tabs.VerticalTabStrip.xaml.cs");
+        var paced = strip.Method("TestSeamDragPacedAsync").ToString();
+        Assert.Contains("outcome.ReleaseMs = clock.ElapsedMilliseconds", paced);
+
+        // The commit stamp must be taken INSIDE the walk closure, where
+        // it lands on the tick the manager index moved -- the earliest
+        // honest reading. The post-walk fallback alone stamps LATE,
+        // which SHRINKS the measured gap and breaks the oracle's
+        // "a flattering gap is impossible" polarity.
+        var walked = strip.Method("TestSeamDragPacedAsync").DescendantNodes()
+            .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax>()
+            .Single(f => f.Identifier.ValueText == "Walked").ToString();
+        Assert.Contains("_manager.IndexOf(tab) != from", walked);
+        Assert.Contains("outcome.CommitMs = clock.ElapsedMilliseconds", walked);
+
+        var seam = ShellSource.Load("Testing.TestSeam.cs");
+        var response = seam.Method("DragJson").ToString();
+        Assert.Contains("\"commitMs\"", response);
+        Assert.Contains("\"releaseMs\"", response);
+
+        // And the state block names the active tab through the manager's
+        // own index, for the guard scenario that asserts the fold moved
+        // nothing.
+        var state = seam.Method("WriteState");
+        var active = state.Calls("manager.IndexOf").Single();
+        Assert.Equal("manager.ActiveTab", active.ArgumentList.Arguments[0].ToString());
+    }
 }
