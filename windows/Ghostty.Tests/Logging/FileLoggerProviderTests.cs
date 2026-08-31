@@ -196,7 +196,15 @@ public class FileLoggerProviderTests : IDisposable
         await DrainAsync(sink);
 
         var files = Directory.EnumerateFiles(_tempDir, "ghostty-*.log").ToArray();
-        long total = files.Sum(f => new FileInfo(f).Length);
+        // The sink is still live here (await using disposes after these
+        // asserts), so its pruner can delete a file we just listed before we
+        // read its length. That vanish is the budget working, not a failure;
+        // a file lost to the race contributes zero bytes.
+        long total = files.Sum(f =>
+        {
+            try { return new FileInfo(f).Length; }
+            catch (FileNotFoundException) { return 0L; }
+        });
 
         // The budget is enforced before each new roll file opens, so the
         // on-disk total may transiently exceed it by at most one full file.
