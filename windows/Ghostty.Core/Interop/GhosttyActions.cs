@@ -78,6 +78,12 @@ internal enum GhosttyActionTag
     PromptReady    = 69,
     FirstRender    = 70,
     CustomShaderFailed = 71,
+    // Fork-appended tail tags (Windows-apprt tab-shell actions). Appended
+    // rather than inserted so every upstream ordinal stays stable; the
+    // parity test against include/ghostty.h holds the positions.
+    PinTab = 72,
+    UnpinTab = 73,
+    MoveGroup = 74,
 }
 
 // ghostty_target_tag_e: which half of OnAction the action is addressed to.
@@ -183,6 +189,18 @@ internal struct GhosttyActionResizeSplit
 // 64-bit builds. Negative moves left, positive moves right.
 [StructLayout(LayoutKind.Sequential)]
 internal struct GhosttyActionMoveTab
+{
+    public nint Amount;
+}
+
+// ghostty_action_move_group_s:
+//   { ssize_t amount; }
+// Same shape as MoveTab for the group-as-unit move: the signed offset is
+// one neighbouring group per step, negative left, positive right. A
+// separate mirror (rather than reusing GhosttyActionMoveTab) so the
+// struct parity test pins this header typedef by name.
+[StructLayout(LayoutKind.Sequential)]
+internal struct GhosttyActionMoveGroup
 {
     public nint Amount;
 }

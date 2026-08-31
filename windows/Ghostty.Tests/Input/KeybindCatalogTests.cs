@@ -129,4 +129,24 @@ public class KeybindCatalogTests
         Assert.Equal(KeybindSource.Default, items.Single(i => i.RawAction == "new_tab").Source);
         Assert.Equal(KeybindSource.User, items.Single(i => i.RawAction == "new_window").Source);
     }
+
+    // The cheat sheet renders exactly what Build produces, so a user-bound
+    // pin/group verb must land as a named row in its own category rather
+    // than fall into "Other" with the raw action as its text.
+    [Fact]
+    public void Build_TabShellVerbs_RenderAsNamedRows()
+    {
+        var binds = new System.Collections.Generic.List<EnumeratedKeybind>
+        {
+            Kb("pin_tab", 39, 1u | 2u),        // Ctrl+Shift+T
+            Kb("move_group:left", 20, 1u << 1) // Ctrl+key_u(20)
+        };
+        var cat = KeybindCatalog.Build(binds);
+
+        var pin = cat.Categories.Single(c => c.Name == "Tabs").Items.Single(i => i.RawAction == "pin_tab");
+        Assert.Equal("Pin Tab", pin.Friendly);
+
+        var move = cat.Categories.Single(c => c.Name == "Groups").Items.Single(i => i.RawAction == "move_group:left");
+        Assert.Equal("Move Group Left", move.Friendly);
+    }
 }

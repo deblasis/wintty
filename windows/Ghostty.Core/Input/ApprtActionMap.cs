@@ -64,6 +64,19 @@ internal static class ApprtActionMap
             _ => null,
         },
 
+        // Windows tab-shell actions. pin_tab/unpin_tab are payload-free;
+        // move_group reads its signed offset by sign like move_tab, and a
+        // zero amount names no direction so it falls through unhandled.
+        GhosttyActionTag.PinTab => PaneAction.PinTab,
+        GhosttyActionTag.UnpinTab => PaneAction.UnpinTab,
+
+        GhosttyActionTag.MoveGroup => value switch
+        {
+            > 0 => PaneAction.MoveGroupRight,
+            < 0 => PaneAction.MoveGroupLeft,
+            _ => null,
+        },
+
         GhosttyActionTag.GotoWindow => (GhosttyGotoWindow)value switch
         {
             GhosttyGotoWindow.Previous => PaneAction.GotoWindowPrevious,

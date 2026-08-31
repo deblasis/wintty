@@ -327,6 +327,35 @@ internal sealed class PaneActionRouter
                 if (i > 0) _tabs.Move(i, i - 1);
                 break;
             }
+            // Group-as-unit moves for the ACTIVE tab's group, one
+            // neighbouring group per step. An ungrouped active tab falls
+            // out silently -- and so does a pinned one, because a pinned
+            // tab can never be in a group. Where the run can land is
+            // MoveGroup's own clamp (clear of the pinned prefix), the
+            // same commit the drag surfaces hand over, so this adds no
+            // boundary policy of its own.
+            case PaneAction.MoveGroupRight:
+            case PaneAction.MoveGroupLeft:
+            {
+                var group = _tabs.ActiveTab?.Group;
+                if (group is null) break;
+                var run = _tabs.MembersOf(group);
+                var start = _tabs.IndexOf(run[0]);
+                if (action == PaneAction.MoveGroupLeft)
+                {
+                    // The pinned prefix is not a neighbour to swap with:
+                    // nothing unpinned to the left is a no-op, matching
+                    // MoveTabLeft's `i > 0` guard.
+                    if (start <= _tabs.PinCount) break;
+                    _tabs.MoveGroup(group, start - _tabs.RunOf(_tabs.Tabs[start - 1]).Count);
+                }
+                else
+                {
+                    if (start + run.Count >= _tabs.Tabs.Count) break;
+                    _tabs.MoveGroup(group, start + _tabs.RunOf(_tabs.Tabs[start + run.Count]).Count);
+                }
+                break;
+            }
             case PaneAction.PinTab:
             case PaneAction.UnpinTab:
             {

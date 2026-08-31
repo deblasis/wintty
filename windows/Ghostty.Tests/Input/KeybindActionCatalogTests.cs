@@ -46,6 +46,45 @@ public class KeybindActionCatalogTests
         Assert.Contains(actions, a => a.RawAction == "new_split:right" && a.Friendly == "Split Right");
     }
 
+    // The pin/group verbs are bindable (a user keybind line can name them)
+    // but ship no default chord, so the only rows they can ever produce are
+    // ones the user bound. Describe is the whole cheat-sheet wiring: it is
+    // what turns the raw verb into the row the dialog renders.
+    [Theory]
+    [InlineData("pin_tab", "Tabs", "Pin Tab")]
+    [InlineData("unpin_tab", "Tabs", "Unpin Tab")]
+    [InlineData("move_group:left", "Groups", "Move Group Left")]
+    [InlineData("move_group:right", "Groups", "Move Group Right")]
+    public void TabShellVerbs_RenderWithCategoryAndFriendly(string action, string category, string friendly)
+    {
+        var entry = KeybindActionCatalog.Describe(action);
+        Assert.Equal(category, entry.Category);
+        Assert.Equal(friendly, entry.Friendly);
+    }
+
+    // Directionless move_group keeps its bare friendly, like move_tab.
+    [Fact]
+    public void MoveGroup_WithoutArgument_RendersBare()
+    {
+        var entry = KeybindActionCatalog.Describe("move_group");
+        Assert.Equal("Groups", entry.Category);
+        Assert.Equal("Move Group", entry.Friendly);
+    }
+
+    [Fact]
+    public void TabShellVerbs_AreOfferedOnceBound()
+    {
+        var binds = new[]
+        {
+            MakeBind("pin_tab"),
+            MakeBind("move_group:left"),
+        };
+        var actions = KeybindActionCatalog.AllActions(binds);
+
+        Assert.Contains(actions, a => a.RawAction == "pin_tab" && a.Friendly == "Pin Tab");
+        Assert.Contains(actions, a => a.RawAction == "move_group:left" && a.Friendly == "Move Group Left");
+    }
+
     private static EnumeratedKeybind MakeBind(string action) =>
         new(new[] { new KeybindTrigger(0, (uint)KeyNames.OrdinalOf("key_a")!.Value, 1u << 1) },
             action, GhosttyBindingFlags.Consumed);

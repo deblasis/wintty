@@ -373,6 +373,19 @@ pub const Action = union(Key) {
     /// the only signal that the setting silently did nothing.
     custom_shader_failed: renderer.CustomShaderFailure,
 
+    // Windows-apprt tab-shell actions. Appended so the union field order
+    // keeps matching the Key enum below, whose tail mirrors this block.
+
+    /// Pin the focused tab into the pinned prefix of its tab strip.
+    pin_tab,
+
+    /// Unpin the focused tab from the pinned prefix of its tab strip.
+    unpin_tab,
+
+    /// Move the group (contiguous run) the focused tab belongs to by a
+    /// relative offset: -1 for one group left, +1 for one group right.
+    move_group: MoveGroup,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -447,6 +460,12 @@ pub const Action = union(Key) {
         prompt_ready,
         first_render,
         custom_shader_failed,
+
+        // Windows-apprt tab-shell actions. Appended so every upstream
+        // ordinal stays stable; keep in sync with ghostty_action_tag_e.
+        pin_tab,
+        unpin_tab,
+        move_group,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -579,6 +598,13 @@ pub const ResizeSplit = extern struct {
 };
 
 pub const MoveTab = extern struct {
+    amount: isize,
+};
+
+/// The group (contiguous run) the focused tab belongs to, moved by a
+/// relative offset. Same shape as `MoveTab`; a separate type so the C
+/// header can name the member per action.
+pub const MoveGroup = extern struct {
     amount: isize,
 };
 

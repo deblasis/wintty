@@ -704,6 +704,11 @@ typedef struct {
   ssize_t amount;
 } ghostty_action_move_tab_s;
 
+// apprt.action.MoveGroup
+typedef struct {
+  ssize_t amount;
+} ghostty_action_move_group_s;
+
 // apprt.action.GotoTab
 typedef enum {
   GHOSTTY_GOTO_TAB_PREVIOUS = -1,
@@ -1074,12 +1079,18 @@ typedef enum {
   GHOSTTY_ACTION_PROMPT_READY,
   GHOSTTY_ACTION_FIRST_RENDER,
   GHOSTTY_ACTION_CUSTOM_SHADER_FAILED,
+  // Windows-apprt tab-shell actions. Appended so every upstream
+  // ordinal stays stable; keep in sync with apprt.action.Action.Key.
+  GHOSTTY_ACTION_PIN_TAB,
+  GHOSTTY_ACTION_UNPIN_TAB,
+  GHOSTTY_ACTION_MOVE_GROUP,
 } ghostty_action_tag_e;
 
 typedef union {
   ghostty_action_split_direction_e new_split;
   ghostty_action_fullscreen_e toggle_fullscreen;
   ghostty_action_move_tab_s move_tab;
+  ghostty_action_move_group_s move_group;
   ghostty_action_goto_tab_e goto_tab;
   ghostty_action_goto_split_e goto_split;
   ghostty_action_goto_window_e goto_window;

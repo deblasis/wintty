@@ -737,6 +737,14 @@ fn actionCommands(action: Action.Key) []const Command {
         .crash,
         => comptime &.{},
 
+        // No commands because the action only does something in the
+        // Windows apprt: the GTK shell has no pinned prefix or grouped
+        // runs for these to act on.
+        .pin_tab,
+        .unpin_tab,
+        .move_group,
+        => comptime &.{},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,

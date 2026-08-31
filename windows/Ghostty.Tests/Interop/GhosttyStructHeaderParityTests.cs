@@ -83,6 +83,10 @@ public class GhosttyStructHeaderParityTests
         AssertLayoutMatchesHeader<GhosttyActionMoveTab>("ghostty_action_move_tab_s");
 
     [Fact]
+    public void MoveGroup_Layout_Matches_Header() =>
+        AssertLayoutMatchesHeader<GhosttyActionMoveGroup>("ghostty_action_move_group_s");
+
+    [Fact]
     public void ProgressReport_Layout_Matches_Header() =>
         AssertLayoutMatchesHeader<GhosttyActionProgressReport>("ghostty_action_progress_report_s");
 

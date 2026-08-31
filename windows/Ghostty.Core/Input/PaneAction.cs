@@ -138,22 +138,22 @@ public enum PaneAction
     MruCyclePrev = 64,
     ShowTabOverview = 65,
 
-    // Pin the active tab into / out of the pinned prefix. Palette and
-    // context menu only: no default chord ships (owner decided: no
-    // defaults in v1), so these are not matched in KeyBindings and have
-    // no keybind-catalog verb -- the palette entry is the keyboard path.
+    // Pin the active tab into / out of the pinned prefix. Reachable from
+    // the palette, the per-tab context menu, and (since pin_tab/unpin_tab
+    // became libghostty verbs) any chord the user binds in config; no
+    // default chord ships (owner decided: no defaults in v1), so nothing
+    // in KeyBindings matches them.
     PinTab = 66,
     UnpinTab = 67,
 
     // Group operations on the ACTIVE TAB'S GROUP (ungrouped active tab is
-    // a silent no-op; the router's refusal guards decide the rest). Same
-    // palette-and-menu-only ruling as PinTab/UnpinTab: no KeyBindings
-    // match and no keybind-catalog verb -- catalog verbs for these are a
-    // separately approved follow-up. AddToGroup is deliberately absent:
-    // the palette has no group chooser, so joining stays a context-menu
-    // op until one exists. RenameGroup/ColorGroup are dialog ops: the
-    // router forwards them to the window, which owns the XamlRoot the
-    // dialog and the picker need.
+    // a silent no-op; the router's refusal guards decide the rest). No
+    // default chord ships either; move_group is a bindable libghostty
+    // verb, the rest stay palette-and-menu-only. AddToGroup is
+    // deliberately absent: the palette has no group chooser, so joining
+    // stays a context-menu op until one exists. RenameGroup/ColorGroup
+    // are dialog ops: the router forwards them to the window, which owns
+    // the XamlRoot the dialog and the picker need.
     NewGroupWithTab = 68,
     RemoveFromGroup = 69,
     CollapseGroup = 70,
@@ -162,4 +162,11 @@ public enum PaneAction
     CloseGroup = 73,
     RenameGroup = 74,
     ColorGroup = 75,
+
+    // Move the ACTIVE TAB'S GROUP one neighbouring group left/right, the
+    // group-as-unit counterpart of MoveTabLeft/Right. Apprt-matched via
+    // the move_group libghostty verb (signed offset, like move_tab);
+    // appended past ColorGroup so every earlier value stays stable.
+    MoveGroupLeft = 76,
+    MoveGroupRight = 77,
 }

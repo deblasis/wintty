@@ -58,6 +58,17 @@ public class ApprtActionMapTests
         Assert.Equal(expected, ApprtActionMap.Map(GhosttyActionTag.MoveTab, amount));
 
     [Theory]
+    [InlineData(1,   PaneAction.MoveGroupRight)]
+    [InlineData(-1,  PaneAction.MoveGroupLeft)]
+    public void MoveGroup_MapsBySign(int amount, PaneAction expected) =>
+        Assert.Equal(expected, ApprtActionMap.Map(GhosttyActionTag.MoveGroup, amount));
+
+    [Fact] public void PinTab_Maps() =>
+        Assert.Equal(PaneAction.PinTab, ApprtActionMap.Map(GhosttyActionTag.PinTab, 0));
+    [Fact] public void UnpinTab_Maps() =>
+        Assert.Equal(PaneAction.UnpinTab, ApprtActionMap.Map(GhosttyActionTag.UnpinTab, 0));
+
+    [Theory]
     [InlineData(0, PaneAction.GotoWindowPrevious)]
     [InlineData(1, PaneAction.GotoWindowNext)]
     public void GotoWindow_Maps_By_Direction(int value, PaneAction expected)
@@ -94,6 +105,7 @@ public class ApprtActionMapTests
     [InlineData((int)GhosttyActionTag.GotoTab, 0)]   // below the 1..8 index range
     [InlineData((int)GhosttyActionTag.GotoTab, 9)]   // above the 1..8 index range
     [InlineData((int)GhosttyActionTag.MoveTab, 0)]   // zero amount has no direction
+    [InlineData((int)GhosttyActionTag.MoveGroup, 0)] // zero amount has no direction
     [InlineData((int)GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Left)] // not in PaneAction
     [InlineData((int)GhosttyActionTag.NewSplit, (int)GhosttySplitDirection.Up)]   // not in PaneAction
     public void UnrepresentedValue_ReturnsNull(int tag, int value) =>
