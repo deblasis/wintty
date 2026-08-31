@@ -183,6 +183,32 @@ public sealed partial class MainWindow : Window
     internal void TestSeamSettleLayout() => (Content as UIElement)?.UpdateLayout();
 
     /// <summary>
+    /// The first switcher tile's pane-preview rect in screen pixels, or null
+    /// when the cycle popup is not up. A pixel oracle cannot locate this
+    /// surface the way it locates the tile's title: the preview body is a
+    /// bare Canvas, which gets no automation peer and so never appears in
+    /// the UIA tree. Screen pixels because that is the space a window
+    /// capture is indexed in.
+    /// </summary>
+    internal (int X, int Y, int W, int H)? TestSeamSwitcherPreviewRect()
+    {
+        if (!TabSwitcherPopupHost.IsOpen) return null;
+        if (TabSwitcherPopupUI.TestSeamFirstPreviewBody is not { } body) return null;
+        if (body.XamlRoot is not { } root) return null;
+
+        // DIP -> physical pixels via RasterizationScale, then client ->
+        // screen: the same two hops SystemMenuPopup makes to place a menu.
+        var scale = root.RasterizationScale;
+        var topLeft = body.TransformToVisual(null)
+            .TransformPoint(new Windows.Foundation.Point(0, 0));
+        var origin = new System.Drawing.Point(
+            (int)(topLeft.X * scale), (int)(topLeft.Y * scale));
+        PInvoke.ClientToScreen(new HWND(WindowNative.GetWindowHandle(this)), ref origin);
+        return (origin.X, origin.Y,
+            (int)(body.ActualWidth * scale), (int)(body.ActualHeight * scale));
+    }
+
+    /// <summary>
     /// The closed-tab store this window feeds. The quake window is excluded so
     /// its drop-down tabs never leak into the regular reopen-closed-tab history
     /// (mirrors CaptureSession's window-level quake exclusion).
