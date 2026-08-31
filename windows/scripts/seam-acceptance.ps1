@@ -28,7 +28,11 @@
 param(
     [Parameter(Mandatory)][string]$ExePath,
     [Parameter(Mandatory)][string]$OutDir,
-    [ValidateRange(1, 100)][int]$Iterations = 5
+    [ValidateRange(1, 100)][int]$Iterations = 5,
+    # Milliseconds between commands. 0 is the tight train; 400 is the
+    # pacing that let ordinary layout frames pass through freshly churned
+    # strip items and died 6/6 before the realization guard.
+    [ValidateRange(0, 5000)][int]$GapMs = 0
 )
 . (Join-Path $PSScriptRoot 'lib/wintty-process.ps1')
 $ErrorActionPreference = 'Stop'
@@ -71,6 +75,7 @@ $stamp = Get-WinttyLaunchStamp
 
 function Invoke-Seam {
     param([Parameter(Mandatory)][hashtable]$Command)
+    if ($GapMs -gt 0) { Start-Sleep -Milliseconds $GapMs }
     if ($script:Proc.HasExited) {
         throw ("PRODUCT_EXIT: the app exited (code {0}) before '{1}'" -f
             $script:Proc.ExitCode, $Command['op'])
