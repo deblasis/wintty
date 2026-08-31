@@ -463,6 +463,13 @@ internal static class TestSeam
                 });
             }
 
+            case "probe":
+                // Reads only: where focus sits and how many KeyDown events
+                // the window content has seen. The one op that answers
+                // "did the framework deliver that key?" for a press this
+                // seam did not itself make.
+                return OkWithFocus(window, manager, op, window.TestSeamFocusLocation, null);
+
             case "focus":
             {
                 // Real focus, set the way a click sets it. "frame" lands on
@@ -568,6 +575,7 @@ internal static class TestSeam
             json.WriteBoolean("ok", true);
             json.WriteString("op", op);
             json.WriteString("focus", focus);
+            json.WriteNumber("routedKeyDowns", window.TestSeamRoutedKeyDowns);
             if (dispatched is { } settled) json.WriteBoolean("dispatched", settled);
             WriteState(json, window, manager);
             json.WriteEndObject();

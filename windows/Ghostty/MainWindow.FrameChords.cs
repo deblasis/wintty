@@ -40,6 +40,8 @@ public sealed partial class MainWindow
         Frame,
     }
 
+    private int _frameRoutedKeyDowns;
+
     private void WireFrameChordRouting()
     {
         if (Content is UIElement root) root.KeyDown += OnFrameChordKeyDown;
@@ -47,6 +49,10 @@ public sealed partial class MainWindow
 
     private void OnFrameChordKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // Counted before any gate, and before the Handled check: the seam's
+        // probe asks whether the framework delivered the key here at all,
+        // which is a different question from whether we acted on it.
+        _frameRoutedKeyDowns++;
         if (e.Handled) return;
         if (TryDispatchFrameChord(
                 (int)e.Key, Controls.TerminalControl.CurrentChordModifiers()))
@@ -57,9 +63,9 @@ public sealed partial class MainWindow
 
     /// <summary>
     /// Dispatch one chord on behalf of the frame, reporting whether anything
-    /// was invoked. Refuses unless focus is on the frame and the key is one
-    /// the frame may claim, so a key the focused element wanted is never
-    /// taken from it.
+    /// was invoked. Refuses when the focused element owns the key, and when
+    /// the key is not one the frame may claim, so a key something else
+    /// wanted is never taken from it.
     ///
     /// Modifiers are a parameter rather than a live keyboard read so the
     /// test seam can drive this exact function without synthesizing OS
@@ -67,7 +73,21 @@ public sealed partial class MainWindow
     /// </summary>
     internal bool TryDispatchFrameChord(int virtualKey, VirtualKeyModifiers mods)
     {
-        if (CurrentFrameChordFocus() != FrameChordFocus.Frame) return false;
+        // Refuse whenever something OWNS the key. That is the rule; "focus
+        // is on the frame" is only its common case, and None is claimable
+        // for the same reason Frame is: nothing is there to take it from.
+        // (No click probed here ever produced None -- a click on the bare
+        // caption leaves focus exactly where it was, and a click on empty
+        // strip chrome hands it to the strip.)
+        //
+        // This gate is also what keeps a key from being answered TWICE.
+        // libghostty leaves some bindings unhandled on the way back, so the
+        // key still bubbles out of the pane to this handler; without the
+        // gate, the pane path and this one both fire and one press makes
+        // two tabs -- the double-dispatch that got KeyboardAccelerators
+        // removed in issue #165.
+        if (CurrentFrameChordFocus() is FrameChordFocus.Pane or FrameChordFocus.TextEntry)
+            return false;
         if (!IsFrameChordShape(virtualKey, mods)) return false;
 
         // Residual table first, the same order TerminalControl uses. Two
@@ -138,6 +158,13 @@ public sealed partial class MainWindow
     }
 
     // ---- test seam accessors (WINTTY_TEST_SEAM=1) --------------------
+
+    /// <summary>
+    /// How many KeyDown events the window content has raised since launch.
+    /// The probe's evidence that the framework hop happened, independent of
+    /// whether the router claimed anything.
+    /// </summary>
+    internal int TestSeamRoutedKeyDowns => _frameRoutedKeyDowns;
 
     internal string TestSeamFocusLocation => CurrentFrameChordFocus() switch
     {
