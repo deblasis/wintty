@@ -34,6 +34,11 @@
                          subkey's Pre-High Contrast Scheme, Preload's
                          default value when that key exists on older
                          layouts)
+      animation          SPI_GETCLIENTAREAANIMATION - the "animate controls
+                         and elements" ease-of-access setting the tab
+                         strips' motion gate reads through UISettings.
+                         The drag harness turns it off for its motion-off
+                         leg and must give it back exactly.
       window tracking    SPI_GETACTIVEWINDOWTRACKING, SPI_GETACTIVEWNDTRKZORDER,
                          SPI_GETACTIVEWNDTRKTIMEOUT
       desktop            Control Panel\Colors -> Background;
@@ -116,6 +121,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 # than only fixing the live query.
 $script:SPI_GETHIGHCONTRAST        = 0x0042
 $script:SPI_SETHIGHCONTRAST        = 0x0043
+$script:SPI_GETCLIENTAREAANIMATION = 0x1042
+$script:SPI_SETCLIENTAREAANIMATION = 0x1043
 $script:SPI_GETACTIVEWINDOWTRACKING = 0x1000
 $script:SPI_SETACTIVEWINDOWTRACKING = 0x1001
 $script:SPI_GETACTIVEWNDTRKZORDER  = 0x100C
@@ -229,6 +236,16 @@ function Send-SettingChange([string]$Section) {
 function Read-EnvCurrent {
     return [ordered]@{
         highContrast = [ordered]@{ flags = Get-HighContrastFlags }
+        # The ease-of-access animation toggle the tab strips' motion gate
+        # reads. Its SET carries the value in pvParam exactly like the
+        # tracking booleans below, so the same flat helpers apply; it sits
+        # in its own group rather than inside "tracking" because the two
+        # answer different questions and a restore message that named one
+        # while meaning the other would send an operator to the wrong
+        # Settings page.
+        animation  = [ordered]@{
+            clientArea = Get-SpiUint $script:SPI_GETCLIENTAREAANIMATION
+        }
         tracking  = [ordered]@{
             enabled = Get-SpiUint $script:SPI_GETACTIVEWINDOWTRACKING
             zOrder  = Get-SpiUint $script:SPI_GETACTIVEWNDTRKZORDER
@@ -372,6 +389,16 @@ function Restore-EnvSnapshot {
     # --- the SPI half of the same state, after the registry writes above.
     Set-HighContrastFlags ([uint32]($snap['highContrast']['flags']))
 
+    # --- the animation toggle, SPI-backed like tracking, restored before the
+    # tracking block only because the drag harness's finally reaches here on
+    # every exit path and the strips' motion gate reads this one live: a
+    # restore that left animations off would make every later harness's
+    # motion-on verdict describe a cut. Order between the SPI groups is
+    # otherwise arbitrary.
+    if ($null -ne $snap['animation'] -and $null -ne $snap['animation']['clientArea']) {
+        Set-SpiUint $script:SPI_SETCLIENTAREAANIMATION ([uint32]($snap['animation']['clientArea']))
+    }
+
     # --- window tracking, SPI-backed, value in pvParam (see the overload
     # comment): flat SETs with the persisted-and-broadcast flags.
     Set-SpiUint $script:SPI_SETACTIVEWINDOWTRACKING ([uint32]($snap['tracking']['enabled']))
@@ -454,7 +481,7 @@ function Compare-EnvToSnapshot {
     $current = Read-EnvCurrent
     $failures = @()
 
-    foreach ($group in 'highContrast', 'tracking', 'themes', 'desktop', 'personalize', 'accent', 'dwm') {
+    foreach ($group in 'highContrast', 'animation', 'tracking', 'themes', 'desktop', 'personalize', 'accent', 'dwm') {
         # A group the snapshot does not have (a pre-frame-colour snapshot
         # found by `just env-restore` after a later crash) must not read as a
         # clean restore: an old snapshot silently skips what it never
