@@ -346,7 +346,7 @@ Invoke-Scenario 'right-pane-survives-tab-switch' {
 # ---- verdict ---------------------------------------------------------------
 
 $result = [ordered]@{
-    actuation = 'seam (WINTTY_TEST_SEAM=1); zero synthesized OS input'
+    actuation = 'seam (WINTTY_TEST_SEAM=<session token>); zero synthesized OS input'
     scenarios = $script:Scenarios
 }
 $result | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutDir 'result.json') -Encoding utf8

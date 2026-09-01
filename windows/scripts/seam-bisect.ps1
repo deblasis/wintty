@@ -7,11 +7,13 @@ param(
     [int]$GapMs = 0
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib/seam-client.ps1')
 
 $exe = $ExePath
 $xdg = Join-Path $env:TEMP ("wintty-seam-bisect-" + [guid]::NewGuid().ToString('N'))
 $env:XDG_CONFIG_HOME = $xdg
-$env:WINTTY_TEST_SEAM = '1'
+$token = New-SeamToken
+$env:WINTTY_TEST_SEAM = $token
 New-Item -ItemType Directory -Force -Path (Join-Path $xdg 'wintty') | Out-Null
 @'
 windows-single-instance = true
@@ -19,24 +21,20 @@ window-save-state = never
 vertical-tabs = true
 '@ | Set-Content (Join-Path $xdg 'wintty\config.wintty') -Encoding utf8
 
-# Wait out the previous scenario's instance: its pipe server may outlive
-# the client by a beat, and connecting to a dying process looks like a
-# broken pipe, not a crash.
+# Wait out the previous scenario's instance: connecting while the last one is
+# still dying looks like a broken pipe, not a crash. This used to watch the
+# fixed pipe name disappear, which no longer says anything -- every run now has
+# its own name -- so it watches the process instead, which is what the pipe was
+# standing in for.
 $goneBy = [datetime]::UtcNow.AddSeconds(15)
 while ([datetime]::UtcNow -lt $goneBy) {
-    if (-not ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam')) { break }
+    if (-not (Get-Process -Name 'Wintty' -ErrorAction SilentlyContinue)) { break }
     Start-Sleep -Milliseconds 200
 }
 
 $proc = Start-Process -FilePath $exe -PassThru -WorkingDirectory (Split-Path -Parent $exe)
-$deadline = [datetime]::UtcNow.AddSeconds(60)
-while ([datetime]::UtcNow -lt $deadline) {
-    if ($proc.HasExited) { throw "app exited before the pipe appeared" }
-    if ([System.IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\wintty-test-seam') { break }
-    Start-Sleep -Milliseconds 200
-}
-$pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'wintty-test-seam', [System.IO.Pipes.PipeDirection]::InOut)
-$pipe.Connect(10000)
+[void](Wait-SeamPipe -Token $token -Proc $proc -TimeoutSeconds 60)
+$pipe = Connect-SeamPipe -Token $token -TimeoutMs 10000
 $r = [System.IO.StreamReader]::new($pipe)
 $w = [System.IO.StreamWriter]::new($pipe, [System.Text.UTF8Encoding]::new($false)); $w.AutoFlush = $true
 $w.NewLine = "`n"
