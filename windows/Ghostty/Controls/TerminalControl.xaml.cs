@@ -1172,6 +1172,31 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
     private static readonly TimeSpan ResizeOverlayFocusGuard =
         TimeSpan.FromMilliseconds(500);
 
+    // Suppress the overlay around a tab-layout switch, for the same reason
+    // as the focus guard above: the switch changes the strip column, which
+    // resizes every surface in the window, and none of that is a resize the
+    // user asked for. Filmed at 30fps the pill sat in the middle of the
+    // terminal through the whole transition and stayed after it -- the
+    // loudest thing on screen during a motion nobody wants a caption on.
+    //
+    // Measured from the LAST note rather than the first, and MainWindow
+    // notes both the start of a switch and its landing, so this only has to
+    // cover the trailing resize that the landing's column collapse causes.
+    // Short on purpose: a guard wide enough to span a whole switch from one
+    // note would also swallow a real drag-resize that followed it.
+    private static readonly TimeSpan ResizeOverlayLayoutSwitchGuard =
+        TimeSpan.FromMilliseconds(250);
+
+    // Monotonic, like _lastFocusGainedTick, and 0 means "no switch yet".
+    private long _lastLayoutSwitchTick;
+
+    /// <summary>
+    /// Told by <see cref="MainWindow"/> that a tab-layout switch is
+    /// starting or has just landed. Both ends are notified; see the guard
+    /// above for why it is the last one that counts.
+    /// </summary>
+    internal void NoteLayoutSwitch() => _lastLayoutSwitchTick = Environment.TickCount64;
+
     private bool _resizeOverlayReady;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resizeOverlayGraceTimer;
     // Monotonic (TickCount64) so an NTP/DST wall-clock jump cannot widen or
@@ -1221,7 +1246,12 @@ public sealed partial class TerminalControl : UserControl, ISearchHost
             _lastFocusGainedTick != 0 &&
             Environment.TickCount64 - _lastFocusGainedTick
                 < ResizeOverlayFocusGuard.TotalMilliseconds;
-        var allowShow = _resizeOverlayReady && !withinFocusGuard;
+        var withinLayoutSwitchGuard =
+            _lastLayoutSwitchTick != 0 &&
+            Environment.TickCount64 - _lastLayoutSwitchTick
+                < ResizeOverlayLayoutSwitchGuard.TotalMilliseconds;
+        var allowShow =
+            _resizeOverlayReady && !withinFocusGuard && !withinLayoutSwitchGuard;
 
         ResizeOverlay.NotifyResize(
             size.Columns,

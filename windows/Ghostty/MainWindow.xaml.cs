@@ -1298,6 +1298,11 @@ public sealed partial class MainWindow : Window
         ApplyVerticalTitleBarChrome();
         ApplyCaptionButtonChrome();
         _titleBar.ApplyForCurrentMode();
+        // The switch is about to resize every surface in the window. That
+        // is not a resize anyone asked for, so the cols-by-rows pill stays
+        // down for it; see TerminalControl's guard for why both ends of the
+        // switch are notified.
+        NoteLayoutSwitchToSurfaces();
         _layout.Animate(vertical, onCompleted: () =>
         {
             // Belt to CancelSwitch's braces. OnClosedAsync cancels the
@@ -1320,6 +1325,11 @@ public sealed partial class MainWindow : Window
             // DisposeAllLeaves may already have freed. AppWindow going null is
             // only the loudest symptom, not the earliest.
             if (_isClosed) return;
+
+            // The landing collapses the strip column, which is the switch's
+            // second resize and the one that would otherwise pulse the pill
+            // just as the motion finishes.
+            NoteLayoutSwitchToSurfaces();
 
             RefreshTabHostChrome();
 
@@ -1350,6 +1360,25 @@ public sealed partial class MainWindow : Window
     }
 
     private bool? _pendingLayoutTarget;
+
+    /// <summary>
+    /// Tell every surface in this window that a layout switch is happening,
+    /// so none of them flashes the resize pill for it.
+    ///
+    /// Every tab, not just the active one: the strip column spans the whole
+    /// grid, so a switch re-arranges the panes of every tab that is in the
+    /// tree, and a background tab that pulsed would show its pill the next
+    /// time it was selected.
+    /// </summary>
+    private void NoteLayoutSwitchToSurfaces()
+    {
+        foreach (var tab in _tabManager.Tabs)
+        {
+            if (tab.PaneHost is not Panes.PaneHost host) continue;
+            foreach (var leaf in PaneTree.Leaves(host.RootNode))
+                leaf.Terminal().NoteLayoutSwitch();
+        }
+    }
 
     /// <summary>
     /// Build a <see cref="MainWindow"/> that adopts an existing
