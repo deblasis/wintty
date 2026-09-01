@@ -47,9 +47,23 @@ public class ShippingBuildGateTests
         // and a build that defined neither but compiled them anyway would
         // still ship demo code. Ghostty.Core is the half these tests can
         // reach, and it is where the demo logic lives.
+        //
+        // The whole namespace, not a list of names. A hand-maintained list is
+        // how the eighth demo type ships while the scan reports clean, which
+        // is the warning Ghostty.Tests.csproj already gives twice about its
+        // own source globs. GetTypes() rather than GetType(name) because the
+        // claim is "nothing here", which a lookup cannot make; Ghostty.Core is
+        // plain net10.0 with no optional dependencies for it to trip over.
         var core = typeof(Ghostty.Core.Tabs.TabModel).Assembly;
-        Assert.Null(core.GetType("Ghostty.Core.Demo.DemoScriptParser", throwOnError: false));
-        Assert.Null(core.GetType("Ghostty.Core.Demo.DemoActions", throwOnError: false));
+        var demoTypes = core.GetTypes()
+            .Where(t => t.Namespace?.StartsWith("Ghostty.Core.Demo", StringComparison.Ordinal) == true)
+            .Select(t => t.FullName)
+            .ToList();
+
+        Assert.True(
+            demoTypes.Count == 0,
+            "a shipping build carries Ghostty.Core.Demo types: "
+            + string.Join(", ", demoTypes));
     }
 #endif
 
@@ -87,17 +101,79 @@ public class ShippingBuildGateTests
     /// for the same reason the primary gate guard is: a `#if DEMO_OPTIN`
     /// assertion cannot see a misspelling, because a misspelled constant is
     /// simply never defined and the assertion compiles to nothing.
+    ///
+    /// It catches a rename in the BUILD FILE, which is the likely direction.
+    /// It cannot cross-check the literal in this file's own `#if !DEMO_OPTIN`
+    /// wrappers; nothing can, short of a run with the opt-in taken.
     /// </summary>
     [Fact]
     public void Each_gate_has_an_opt_in_constant_keyed_to_its_own_opt_in()
     {
+        var doc = BuildTargets();
+        AssertOptIn(doc, "'$(Demo)' == 'true'", "DEMO_OPTIN");
+        AssertOptIn(doc, "'$(TestSeam)' == 'true'", "TESTSEAM_OPTIN");
+    }
+
+    /// <summary>
+    /// The build-time refusal, read as text so it is checkable from a DEBUG
+    /// run.
+    ///
+    /// It has to be. The target only evaluates its conditions when
+    /// Configuration is not Debug, and the signoff ladder's windows-tests leg
+    /// is `just test-win`, which passes no -c and is therefore Debug. Without
+    /// this, an inverted condition in either Error would reach `windows`
+    /// green and only surface in the tiered build's Release cells, which run
+    /// against a pin that lags. That is the guard-that-does-not-run shape
+    /// this whole change is about, one level up from where it started.
+    /// </summary>
+    [Fact]
+    public void The_build_time_refusal_still_refuses_both_gates()
+    {
+        var doc = BuildTargets();
+
+        var target = Assert.Single(
+            doc.Descendants(),
+            e => e.Name.LocalName == "Target"
+                 && (string?)e.Attribute("Name") == "RefuseAGateLeakIntoARelease");
+
+        // Runs at all, and on a hook that is not skipped for an up-to-date
+        // project. CoreCompile alone was exactly that bug.
+        var before = (string?)target.Attribute("BeforeTargets") ?? string.Empty;
+        Assert.Contains("BeforeBuild", before, StringComparison.Ordinal);
+
+        // Guards every configuration that is not Debug, rather than naming
+        // Release, so a configuration nobody has added yet is on the guarded
+        // side.
+        Assert.Equal("'$(Configuration)' != 'Debug'", (string?)target.Attribute("Condition"));
+
+        AssertRefusal(target, "WINTTY0001", "TestSeamEnabled", "_TestSeamOptInIsGlobal");
+        AssertRefusal(target, "WINTTY0002", "DemoEnabled", "_DemoOptInIsGlobal");
+    }
+
+    /// <summary>
+    /// One Error, asserted on its polarity. `'$(X)' != 'true'` inverted to
+    /// `== 'true'` turns the refusal into a rubber stamp, and the two halves
+    /// have opposite senses, so both are spelled out rather than matched
+    /// loosely.
+    /// </summary>
+    private static void AssertRefusal(
+        System.Xml.Linq.XElement target, string code, string gate, string optInFlag)
+    {
+        var error = Assert.Single(
+            target.Descendants(),
+            e => e.Name.LocalName == "Error" && (string?)e.Attribute("Code") == code);
+
+        Assert.Equal(
+            $"'$({gate})' == 'true' and '$({optInFlag})' != 'true'",
+            (string?)error.Attribute("Condition"));
+    }
+
+    private static System.Xml.Linq.XDocument BuildTargets()
+    {
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         using var stream = asm.GetManifestResourceStream(
             "Ghostty.Tests.Build.Directory.Build.targets")!;
-        var doc = System.Xml.Linq.XDocument.Load(stream);
-
-        AssertOptIn(doc, "'$(Demo)' == 'true'", "DEMO_OPTIN");
-        AssertOptIn(doc, "'$(TestSeam)' == 'true'", "TESTSEAM_OPTIN");
+        return System.Xml.Linq.XDocument.Load(stream);
     }
 
     private static void AssertOptIn(
