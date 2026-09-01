@@ -26,4 +26,28 @@
     <TestSeamEnabled Condition="'$(TestSeam)' == 'true' or '$(Configuration)' == 'Debug'">true</TestSeamEnabled>
     <DefineConstants Condition="'$(TestSeamEnabled)' == 'true'">$(DefineConstants);TESTSEAM</DefineConstants>
   </PropertyGroup>
+
+  <!--
+    The demo-mode gate, here for the same reason and in the same shape.
+
+    It used to live in Directory.Build.props, where Configuration is still
+    empty, so it matched only when the value arrived as a global property.
+    Visual Studio and anything passing `-c` supplied one; `just build-win` and
+    `just test-win` pass only /p:Platform=x64, so DEMO went undefined for every
+    just recipe and therefore for the signoff ladder's windows-tests leg.
+    Three test classes compiled to nothing and the ladder called that green.
+
+    One source of truth for "is demo mode on?" so the DEMO constant and the
+    csproj Page/Compile/None conditions cannot drift, and so a future constant
+    that merely contains the substring "DEMO" cannot false-match.
+
+    Ghostty.csproj reads DemoEnabled from static ItemGroup conditions (they
+    strip Demo\**\*.cs and DemoOverlay.xaml from a non-demo build) and sees it
+    from here: MSBuild evaluates every property, trailing imports included,
+    before it evaluates any item.
+  -->
+  <PropertyGroup>
+    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
+    <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
+  </PropertyGroup>
 </Project>
