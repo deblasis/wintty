@@ -9,21 +9,31 @@
     <!-- One source of truth for "is demo mode on?" so the DEMO constant and the
          csproj Page/Compile/None conditions can't drift, and so a future
          constant that merely contains the substring "DEMO" can't false-match. -->
-    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
+    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug' or '$(Configuration)' == ''">true</DemoEnabled>
     <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
 
     <!--
-      NOTE: Configuration is still empty here. Microsoft.Common.props imports
-      this file before it defaults Configuration to Debug, so the condition
-      above only matches when Configuration arrives as a global property
-      (`-c Debug`, or Visual Studio). A bare `dotnet build` leaves DemoEnabled
-      unset and defines no DEMO, which is not what the comment above expects.
-      Left alone here: changing it changes what a Debug build contains, which
-      is a decision of its own rather than part of the seam work.
+      The empty test is the whole fix, and it is not a belt-and-braces extra.
+      Microsoft.Common.props imports this file BEFORE it defaults Configuration
+      to Debug, so Configuration is empty here unless it arrived as a global
+      property (`-c Debug`, or Visual Studio). Without the empty case a bare
+      `dotnet build` left DemoEnabled unset and defined no DEMO, so whether
+      demo code was compiled at all depended on how a developer happened to
+      invoke the build, and it could rot behind a gate nothing was opening.
+      Empty here means Debug: it is the value Microsoft.Common.props is about
+      to assign, so this reads the configuration the build will actually use.
 
-      The test seam's own gate is the same shape but cannot afford that
-      ambiguity, so it lives in Directory.Build.targets, which is imported
-      after Configuration is settled. See the comment there.
+      Deliberately NOT moved to Directory.Build.targets, which is where the
+      test seam's identically shaped gate lives. TESTSEAM is only a compiler
+      constant, and property evaluation still precedes CoreCompile, so a
+      .targets file is early enough for it. DemoEnabled is read by ItemGroup
+      conditions in Ghostty.csproj (they strip Demo\**\*.cs and
+      DemoOverlay.xaml from a non-demo build), and those evaluate with the
+      csproj body, long before Microsoft.Common.targets imports
+      Directory.Build.targets at the end. Setting it there would leave those
+      conditions reading an empty value: the constant would be defined while
+      the files it guards were excluded, which is a build error rather than a
+      silent gate, but a confusing one.
     -->
   </PropertyGroup>
   <!--
