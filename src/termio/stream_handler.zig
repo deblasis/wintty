@@ -1570,11 +1570,27 @@ pub const StreamHandler = struct {
 
         // A Windows-native shell reports a raw path, not a URL: cmd has no way
         // to build one (its `PROMPT $p` token expands to `C:\dir` and nothing
-        // else), and the PowerShell integration follows suit on OSC 9;9. Take
-        // that form verbatim -- there is no scheme to check and no host to
-        // validate against, and no POSIX translation applies.
+        // else), and the PowerShell integration follows suit on OSC 9;9. There
+        // is no scheme to check and no POSIX translation applies -- but a raw
+        // path can still name a host, in the `\\server\` prefix, and that host
+        // gets the same locality check the URL arm gives its own. A reported
+        // cwd is spawned into, and Windows authenticates to whatever server a
+        // UNC directory names, so adopting a remote one on the strength of
+        // bytes alone would let anything writing to the pty pick who receives
+        // the user's credentials.
         if (comptime builtin.os.tag == .windows) {
             if (internal_os.posix_path.isWindowsAbsolute(url)) {
+                const host = internal_os.posix_path.pathHost(url) catch {
+                    log.warn("OSC 7/9;9 path names no directory we can use", .{});
+                    return;
+                };
+                switch (host) {
+                    .local => {},
+                    .server => |name| if (!uncHostIsLocal(name)) {
+                        log.warn("OSC 7/9;9 UNC host ({s}) must be local", .{name});
+                        return;
+                    },
+                }
                 return self.setPwdReported(url);
             }
         }
@@ -1658,6 +1674,24 @@ pub const StreamHandler = struct {
             path;
 
         return self.setPwdReported(reported);
+    }
+
+    /// Whether a UNC path's server is this machine. The share pseudo-hosts
+    /// (`wsl.localhost`, loopback) are decided by name alone; the real
+    /// computer name needs the OS, and gets the same `hostname.isLocal` the
+    /// URL arm uses.
+    ///
+    /// `isLocal` compares the computer name exactly, so a share written in a
+    /// case the OS does not report it in -- `\\mypc\x` against a `MYPC` --
+    /// reads as remote and the cwd is simply not adopted. That is the safe
+    /// direction to be wrong in; a spawn at the profile's directory is a
+    /// nuisance, and one at an attacker's is a credential.
+    fn uncHostIsLocal(host: []const u8) bool {
+        if (internal_os.posix_path.isLocalShareHost(host)) return true;
+        return internal_os.hostname.isLocal(host) catch |err| {
+            log.warn("failed to get hostname for UNC validation: {}", .{err});
+            return false;
+        };
     }
 
     /// Commit a fully-resolved pwd: the terminal's own state, the surface

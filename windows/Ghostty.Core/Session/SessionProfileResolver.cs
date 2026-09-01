@@ -62,6 +62,12 @@ internal static class SessionProfileResolver
     /// treats an empty working-directory as unset, so an empty string must
     /// not replace the profile's value either.
     /// </summary>
+    /// <remarks>
+    /// A reported directory the shell cannot be trusted to have named is
+    /// dropped rather than spawned into, and the profile's own directory
+    /// stands -- see <see cref="SpawnCwdPolicy"/> for what that means and
+    /// why this is the funnel it guards.
+    /// </remarks>
     private static ProfileSnapshot SpawnAtReportedCwd(ProfileSnapshot snap, string? cwd)
-        => string.IsNullOrEmpty(cwd) ? snap : snap with { WorkingDirectory = cwd };
+        => SpawnCwdPolicy.MaySpawnAt(cwd) ? snap with { WorkingDirectory = cwd } : snap;
 }

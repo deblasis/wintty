@@ -19,6 +19,12 @@
     image (not an empty ImageIcon), and a final check says pwsh's must not be
     cmd's.
 
+    A third scenario asks the security question the first two cannot: a
+    reported cwd is a spawn directory, so a UNC one names a server Windows
+    authenticates to. It injects the raw OSC 9;9 form directly -- a local
+    path and a remote one, in that order -- and requires the local report to
+    be the one still standing.
+
     Zero OS input is synthesized: what the shells run arrives as one
     ghostty_surface_text on the focused pane, exactly the call committed IME
     text makes. The machine stays usable for the whole run.
@@ -242,6 +248,103 @@ default-profile = $Profile
     $script:Scenarios.Add([pscustomobject]$entry)
 }
 
+# A reported cwd is a SPAWN directory: Duplicate Tab, Reopen Closed Tab and
+# session restore all hand it to CreateProcess. A UNC directory therefore
+# makes Windows open an SMB connection to the server the path names, and
+# authenticate to it -- so adopting a UNC cwd on the strength of bytes alone
+# would let anything that can write to the pty pick who receives the user's
+# credentials. `cat` of a hostile file is enough; so is any remote session.
+#
+# The injected OSC 9;9 is byte-for-byte what the PowerShell integration emits
+# at line 76 of powershell/ghostty-integration.ps1, so this drives the real
+# arm and not a lookalike.
+#
+# Two reports go out in ONE command, a local path then the remote one, and
+# the assert is on the SETTLED value. That is what makes the scenario
+# non-vacuous: if the check were deleted, the cwd ends on the UNC path; if
+# the whole raw arm were dead, it never reaches the local probe at all and
+# the scenario fails as a miss rather than passing on silence.
+#
+# The host is `.invalid` (RFC 2606), which never resolves -- if this harness
+# ever does provoke a lookup, it provokes it against nothing.
+$UncHostile = '\\wintty-unc-refused.invalid\share'
+
+function Invoke-UncRefusedScenario {
+    $name = 'unc-refused'
+    $local = New-ProbeDir 'unc-local'
+    $config = @"
+windows-single-instance = true
+window-save-state = never
+vertical-tabs = true
+vertical-tabs-hover-expand = false
+default-profile = pwsh-7
+"@
+    $crashStamp = if (Test-Path $crashPath) { (Get-Item $crashPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+    $entry = [ordered]@{ name = $name; ok = $false; class = ''; error = ''; cwd = ''; rendered = ''; icon = '' }
+    $s = $null
+    Write-Host "=== scenario $name ==="
+    try {
+        Assert-NoWintty -Context "The cwd label scenario '$name'"
+        $s = Start-SeamSession -ExePath $ExePath -ConfigText $config
+        $script:MainHwnd64 = $s.Hwnd64
+
+        $first = Wait-Label $s { param($l) $null -ne $l.cwd } `
+            "$name never reported a directory at its first prompt"
+
+        # The integration reports from its own `global:prompt`, which fires
+        # after every command and would overwrite an injected value before it
+        # could be read. Replacing the function stops the reports, so what the
+        # injection sets is what stays set.
+        [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "function global:prompt { 'X> ' }`r" })
+        Start-Sleep -Milliseconds 800
+
+        $osc = "[Console]::Write(`"``e]9;9;$local``a`"); [Console]::Write(`"``e]9;9;$UncHostile``a`")"
+        [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "$osc`r" })
+
+        # Wait for the pair to land, then let the app settle before reading:
+        # polling for the local probe alone would sample between the two
+        # writes and call an adopted UNC path a pass.
+        [void](Wait-Label $s { param($l) $l.cwd -ne $first.cwd } `
+            "$name: neither injected report reached the app (the raw OSC 9;9 arm is dead)")
+        Start-Sleep -Seconds 2
+        $settled = (Invoke-SeamCommandQuiet $s @{ op = 'tab-labels' }).labels[0]
+        $entry.cwd = $settled.cwd
+
+        if ($settled.cwd -eq $UncHostile) {
+            throw ("PRODUCT_FAIL: {0}: the pane adopted '{1}' as its cwd; a spawn there authenticates to a host the pty named" -f
+                $name, $settled.cwd)
+        }
+        if ($settled.cwd -ne $local) {
+            throw ("PRODUCT_FAIL: {0}: expected the local report '{1}' to stand, saw '{2}'" -f
+                $name, $local, $settled.cwd)
+        }
+        $entry.rendered = $settled.rendered
+
+        if ($s.Proc.HasExited) {
+            throw ("APP_EXIT: the app exited during '{0}' (code {1})" -f $name, $s.Proc.ExitCode)
+        }
+        $entry.ok = $true
+        Write-Host ("PASS {0}: refused '{1}', kept '{2}'" -f $name, $UncHostile, $entry.cwd) -ForegroundColor Green
+    } catch {
+        $msg = "$($_.Exception.Message)"
+        $entry.error = $msg
+        $entry.class = if ($msg -like 'PRODUCT_*' -or $msg -like 'APP_EXIT*') { 'product' } else { 'harness' }
+        Write-Host "FAIL $name [$($entry.class)]: $msg" -ForegroundColor Red
+    } finally {
+        if ($null -ne $s) { Stop-SeamSession $s }
+        Remove-Item $local -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $crashPath) {
+        if ((Get-Item $crashPath).LastWriteTimeUtc -gt $crashStamp) {
+            $entry.ok = $false
+            $entry.class = 'product'
+            $entry.error += ' | crash.log grew during the scenario'
+            Write-Host "FAIL $name [product]: crash.log grew" -ForegroundColor Red
+        }
+    }
+    $script:Scenarios.Add([pscustomobject]$entry)
+}
+
 # cmd drives the OSC 9;9 arm -- `PROMPT $p` is the only cwd report it has,
 # and it is a raw Windows path. `cd /d` because TEMP may be on another drive,
 # quoted because it may hold a space.
@@ -258,6 +361,7 @@ try {
         param($s, $probe)
         [void](Invoke-SeamCommand $s @{ op = 'send-text'; text = "cd `"$probe`"`r" })
     }
+    Invoke-UncRefusedScenario
 } finally { Exit-StagedResources $staged }
 
 # The icon has to name the interpreter, which means two shells must not wear
