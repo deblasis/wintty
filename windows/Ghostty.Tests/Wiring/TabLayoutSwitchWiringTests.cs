@@ -325,6 +325,15 @@ public class TabLayoutSwitchWiringTests
             // an allow-list entry on its own only stops the guard
             // complaining -- it does not make the release happen.
             "morph.Ghost.StopBoxAnimations",
+            // SPIKE (see LayoutTransitionSpike): expression animations the
+            // env-gated spike started, stopped on the same reasoning as the
+            // pane reveal's sweep -- the compositor keeps driving them
+            // against a tree the close is disposing, and nothing else
+            // reaches them. Release stops what the spike started and drops
+            // its state; it walks no tab host and writes no element. Null
+            // in every shipped configuration. Goes with the spike when the
+            // spike goes.
+            "_spike?.Release",
         };
         var unexpected = cancel.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()

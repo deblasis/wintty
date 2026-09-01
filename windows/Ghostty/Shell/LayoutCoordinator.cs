@@ -164,6 +164,13 @@ internal sealed class LayoutCoordinator
     /// </summary>
     private readonly Func<bool>? _motionEnabled;
 
+    // SPIKE (see LayoutTransitionSpike): null unless WINTTY_TMODEL_SPIKE is
+    // set, in which case one switch's cross-fade and ghost travel are driven
+    // by a single animated scalar instead of the storyboards, to answer the
+    // platform questions the one-clock redesign is gated on. Every touch
+    // point below fails toward the storyboard path.
+    private readonly LayoutTransitionSpike? _spike = LayoutTransitionSpike.CreateIfEnabled();
+
     private bool _switching;
     // The Storyboard staged by the most recent switch, non-null exactly while
     // that switch is in flight: Animate stages it, and the Completed handler
@@ -425,6 +432,11 @@ internal sealed class LayoutCoordinator
             : new Point(0, -1);
         _impactTarget = incoming;
 
+        // SPIKE: started before the morph is staged so the ghost's staging
+        // site can hand its travel to the same scalar. Inert (null or
+        // false) in every shipped configuration.
+        var spikeActive = _spike?.TryStartSwitch(incoming, outgoing, SwitchDuration) == true;
+
         // Staged before any transform is applied below. TransformToVisual
         // reads whatever offset the strip is already carrying, so measuring
         // after the incoming translate would aim the ghost at the strip's
@@ -440,8 +452,11 @@ internal sealed class LayoutCoordinator
         incoming.Opacity = 0;
 
         var sb = new Storyboard();
-        sb.Children.Add(MakeStaggeredFadeIn(incoming));
-        sb.Children.Add(MakeStaggeredFadeOut(outgoing, outgoing.Opacity));
+        if (!spikeActive)
+        {
+            sb.Children.Add(MakeStaggeredFadeIn(incoming));
+            sb.Children.Add(MakeStaggeredFadeOut(outgoing, outgoing.Opacity));
+        }
 
         if (!_verticalTitleBarSuppressed)
             AddTitleBarAnimations(sb, verticalTabs);
@@ -770,6 +785,10 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void CancelSwitch()
     {
+        // SPIKE: a spike may not leave animations on a closing window any
+        // more than the product may; Release is idempotent and stops only
+        // what it started.
+        _spike?.Release();
         if (_switchStoryboard is not null)
         {
             // Pairs with the SWITCH begin line this switch emitted: the fuzz
@@ -1061,8 +1080,15 @@ internal sealed class LayoutCoordinator
         var travel = duration * PositionSettleFraction;
         var labelSpan = duration * LabelSettleFraction;
         var sb = new Storyboard();
-        Add(morph.Ghost.Translate, "X", from.X, to.X, span: travel, arriving: true);
-        Add(morph.Ghost.Translate, "Y", from.Y, to.Y, span: travel, arriving: true);
+        // SPIKE: the ghost's travel joins the scalar when one is live for
+        // this switch; the XAML translate then keeps holding the FROM
+        // position and the expression contributes the delta additively.
+        if (_spike?.TryAttachGhost(
+                morph.Ghost, from, to, duration, SwitchDuration, PositionSettleFraction) != true)
+        {
+            Add(morph.Ghost.Translate, "X", from.X, to.X, span: travel, arriving: true);
+            Add(morph.Ghost.Translate, "Y", from.Y, to.Y, span: travel, arriving: true);
+        }
         if (!morph.Ghost.TryComposeBox(
                 new Windows.Foundation.Size(from.Width, from.Height),
                 new Windows.Foundation.Size(to.Width, to.Height),
@@ -1156,9 +1182,14 @@ internal sealed class LayoutCoordinator
     private void FinishSwitch(bool verticalTabs, Action? onCompleted)
     {
         if (!_switching) return;
+        // SPIKE: expressions are stopped BEFORE Snap writes the element
+        // opacities and probed after, because that ordering is one of the
+        // questions the spike exists to answer.
+        _spike?.StopExpressions();
         // Snap tears down the in-flight morph, icon ghost, and pane reveal
         // itself, so the direct-interrupt callers get the same cleanup.
         Snap(verticalTabs);
+        _spike?.ProbeAfterSnap();
         MorphTrace(
             $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")} uiFrames={StopFrameCount()}");
         _switching = false;
