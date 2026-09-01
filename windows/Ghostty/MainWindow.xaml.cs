@@ -2698,7 +2698,18 @@ public sealed partial class MainWindow : Window
 
             var batch = compositor.CreateScopedBatch(
                 Microsoft.UI.Composition.CompositionBatchTypes.Animation);
-            batch.Completed += (_, _) => StopImpactNudge();
+            batch.Completed += (_, _) =>
+            {
+                // The batch completes on a later turn, and the window can
+                // close in between. Gated rather than unsubscribed because
+                // the scoped batch is the compositor's object, not this
+                // window's, and it outlives the close: the teardown census
+                // is right to insist one or the other. By the time a close
+                // has happened the close path has already run
+                // StopImpactNudge, so there is nothing left here to do.
+                if (_isClosed) return;
+                StopImpactNudge();
+            };
             visual.StartAnimation("Offset", shake);
             batch.End();
             _impactVisual = visual;
