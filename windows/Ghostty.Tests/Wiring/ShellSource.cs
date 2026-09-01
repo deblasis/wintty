@@ -40,13 +40,20 @@ internal sealed class ShellSource
     /// destructive developer actions live: those are precisely the ones a
     /// gating guard has to be able to see.
     ///
-    /// Both symbols hide their opposite branch, and <see cref="Load"/>'s
+    /// TESTSEAM, because the in-process test seam is compiled out of shipping
+    /// builds (windows/Directory.Build.props) and a scan that could not see it
+    /// would report the seam's wiring guards green while reading an empty
+    /// file. The seam's own gating -- that it is absent from a build a user
+    /// installs -- is not a claim this parse can make; it belongs to the build,
+    /// and <c>TestSeamWiringTests</c> checks the props file for it directly.
+    ///
+    /// All three symbols hide their opposite branch, and <see cref="Load"/>'s
     /// refusal of any remaining disabled text is what keeps that from
     /// widening silently. A file whose Release half needs checking needs a
     /// text-level rule, the way <c>ParseForCorpusScan</c> describes.
     /// </summary>
     private static readonly CSharpParseOptions ParseOptions =
-        new(preprocessorSymbols: new[] { "DEMO", "DEBUG" });
+        new(preprocessorSymbols: new[] { "DEMO", "DEBUG", "TESTSEAM" });
 
     /// <summary>
     /// Load an embedded shell source by its dotted path tail, e.g.
