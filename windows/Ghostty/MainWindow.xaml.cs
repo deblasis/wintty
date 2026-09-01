@@ -129,6 +129,16 @@ public sealed partial class MainWindow : Window
     /// <summary>The element every filmstrip rect is measured against.</summary>
     internal FrameworkElement? TestSeamRoot => Content as FrameworkElement;
 
+    /// <summary>
+    /// The caption lane's fill, for the filmstrip.
+    ///
+    /// There used to be a second rectangle beside it that had to agree
+    /// with it, and the filmstrip asserted they did. The pair is gone
+    /// (#892); what is left is reported so a film can still be lined up
+    /// against where the lane actually was in each frame.
+    /// </summary>
+    internal FrameworkElement TestSeamCaptionFill => VerticalTitleCaptionFill;
+
     /// <summary>What the layout coordinator has parked on the morph layer.</summary>
     internal int TestSeamMorphLayerCount => _layout.TestSeamMorphLayerCount;
 
@@ -828,17 +838,6 @@ public sealed partial class MainWindow : Window
         // match the constant is exactly how the two drift apart.
         VerticalTitleBar.Height = Shell.TabChromeMetrics.TitleRowHeight;
 
-        // Same for the caption seam cover. Placed in the grid's own space
-        // rather than in a cell, it has to be told both where the pane row
-        // starts and how deep the stroke it hides runs. Deriving those from
-        // the values that place the stroke is what keeps the cover from
-        // ending short of it, which a hand-tuned top-and-height pair did by
-        // half a DIP.
-        VerticalCaptionSeamCover.Margin = new Thickness(
-            0, Shell.TabChromeMetrics.TitleRowHeight - CaptionSeamOverlap, 0, 0);
-        VerticalCaptionSeamCover.Height = CaptionSeamOverlap
-            + Math.Ceiling(Core.Panes.PaneChrome.ActiveBorderThickness) + 1;
-
         _layout = new LayoutCoordinator(
             StripColumn,
             TitleBarStripMirror,
@@ -918,7 +917,6 @@ public sealed partial class MainWindow : Window
             VerticalTitleDragRegion,
             VerticalTitleText,
             VerticalCaptionInset,
-            VerticalCaptionSeamCover,
             isVerticalMode: () => _tabHost is VerticalTabHost);
         _titleBar.ApplyForCurrentMode();
         _titleBar.SyncCaptionInset();
@@ -2846,23 +2844,11 @@ public sealed partial class MainWindow : Window
             VerticalTitleStripMirrorFill.Background = new SolidColorBrush(stripMirrorBg);
         }
 
-        // The seam cover extends the row down over the caption lane, so it
-        // takes the row's fill. Transparent on the default path is the
-        // right answer and not a lost cover: measured on both builds, the
-        // pane's top stroke shows through it either way, because the pane
-        // host is declared after it and draws over it.
         if (_lastVerticalTitleCaptionBg != dragBg)
         {
             _lastVerticalTitleCaptionBg = dragBg;
-            var captionBrush = new SolidColorBrush(dragBg);
-            VerticalTitleCaptionFill.Background = captionBrush;
-            VerticalCaptionSeamCover.Background = captionBrush;
+            VerticalTitleCaptionFill.Background = new SolidColorBrush(dragBg);
         }
-
-        VerticalCaptionSeamCover.Visibility =
-            VerticalTitleBar.Visibility == Visibility.Visible
-                ? Visibility.Visible
-                : Visibility.Collapsed;
 
         ApplyChromeSeparators();
         // After the separators, not before: that call is what tells the strips
@@ -3216,12 +3202,6 @@ public sealed partial class MainWindow : Window
     /// How far back into the selected row the vertical seam cover starts.
     /// </summary>
     private const double VerticalSeamOverlap = 4.0;
-
-    /// <summary>
-    /// How far up into the title row the caption seam cover starts, so it
-    /// also hides the hairline the strip draws against the pane.
-    /// </summary>
-    private const double CaptionSeamOverlap = 2.0;
 
     /// <summary>
     /// Place the vertical strip's seam cover over the pane's left border,
