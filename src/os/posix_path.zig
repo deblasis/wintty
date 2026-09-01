@@ -1,5 +1,7 @@
 //! Translate POSIX paths reported by Windows POSIX-emulation shells (WSL,
-//! MSYS2/MinGW/Git-Bash, Cygwin) via OSC 7 into the equivalent Windows paths.
+//! MSYS2/MinGW/Git-Bash, Cygwin) via OSC 7 into the equivalent Windows paths,
+//! and answer the shape questions a reported path raises before it is adopted:
+//! whether it is a raw path or a URL, and which machine it names.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -106,6 +108,128 @@ pub fn windowsToWsl(alloc: Allocator, win_path: []const u8) Allocator.Error!?[]u
     try buf.append(alloc, std.ascii.toLower(p[0]));
     for (rest) |c| try buf.append(alloc, if (c == '\\') '/' else c);
     return try buf.toOwnedSlice(alloc);
+}
+
+/// Whether `path` is an absolute Windows path in a form no URI can be mistaken
+/// for: a drive root (`C:\`, `c:/`) or a UNC root (`\\server\share`). This is
+/// the shape a Windows-native shell reports its cwd in -- cmd's `PROMPT $p` and
+/// the PowerShell integration's OSC 9;9 both emit it raw, because cmd has no way
+/// to build a URI at all. A `file:`/`kitty-shell-cwd:` URL never matches: its
+/// scheme is longer than one character.
+///
+/// This answers shape only: raw path or URL. It says nothing about whether the
+/// path is one we may adopt -- a UNC path names a host, and `pathHost` is what
+/// asks which.
+pub fn isWindowsAbsolute(path: []const u8) bool {
+    if (std.mem.startsWith(u8, path, "\\\\")) return true;
+    if (path.len < 3) return false;
+    if (!std.ascii.isAlphabetic(path[0]) or path[1] != ':') return false;
+    return path[2] == '\\' or path[2] == '/';
+}
+
+/// Which machine a raw Windows path names.
+pub const PathHost = union(enum) {
+    /// Drive-rooted. Names this machine, implicitly and unforgeably.
+    local,
+
+    /// UNC. Names this server, which Windows contacts -- and authenticates
+    /// to -- the moment anything resolves the path. The caller decides
+    /// whether that server may be contacted.
+    server: []const u8,
+};
+
+/// The machine `path` names, for a path `isWindowsAbsolute` accepted.
+///
+/// This exists because a reported cwd becomes a *spawn* directory: Duplicate
+/// Tab, Reopen Closed Tab and session restore all hand it to CreateProcess. A
+/// UNC directory therefore makes Windows open an SMB connection to whatever
+/// server the path names, and authenticate to it -- so a terminal that adopts
+/// a UNC cwd on the strength of bytes alone lets anything that can write to
+/// the pty choose who receives the user's credentials. OSC 7 has always
+/// guarded this by validating its URL's hostname; a raw path carries its host
+/// in the `\\server\` prefix instead, and this is where it is recovered so the
+/// same rule can be applied to both.
+///
+/// `error.InvalidPath` for a `\\` form that names no directory we will place:
+/// the device namespace (`\\.\COM1`), a bare `\\`, or an extended-length
+/// prefix (`\\?\`) introducing neither `UNC\` nor a drive. Extended-length is
+/// parsed rather than waved through precisely because `\\?\UNC\server\share`
+/// is a second spelling of the same reach, and a check that missed it would
+/// name the hole it was closing.
+///
+/// What this does NOT see: a drive letter mapped to a network share. `Z:\` is
+/// `.local` here and can still resolve to another machine. That is a weaker
+/// vector -- the mapping is one the user made, to a server they already
+/// authenticated to, and a reported `Z:\` reaches nothing unless such a
+/// mapping exists -- and finding out would mean a per-drive query on a path
+/// that arrives on every prompt. The rule enforced here is about paths that
+/// NAME a host, not about every path that can reach one.
+pub fn pathHost(path: []const u8) error{InvalidPath}!PathHost {
+    if (!std.mem.startsWith(u8, path, "\\\\")) return .local;
+    const rest = path[2..];
+
+    // `\\?\` (extended-length) and `\\.\` (device) share a shape and a
+    // meaning: what follows is not a server name.
+    if (rest.len >= 2 and (rest[0] == '?' or rest[0] == '.') and rest[1] == '\\') {
+        const tail = rest[2..];
+        if (std.ascii.startsWithIgnoreCase(tail, "UNC\\")) return hostOf(tail[4..]);
+        // `\\?\C:\dir` is the long-path spelling of a drive root.
+        if (tail.len >= 2 and std.ascii.isAlphabetic(tail[0]) and tail[1] == ':') return .local;
+        return error.InvalidPath;
+    }
+
+    return hostOf(rest);
+}
+
+/// The server name at the head of `s`, where `s` is a UNC path with its `\\`
+/// (or `\\?\UNC\`) prefix already removed.
+fn hostOf(s: []const u8) error{InvalidPath}!PathHost {
+    const end = std.mem.indexOfAny(u8, s, "\\/") orelse s.len;
+    if (end == 0) return error.InvalidPath;
+    return .{ .server = s[0..end] };
+}
+
+/// Whether `host` is a Windows share host that resolves without leaving this
+/// machine, and so can never carry a credential off it.
+///
+/// `wsl.localhost` and its legacy spelling `wsl$` are served by the local WSL
+/// service, not by SMB over the wire. `localhost` and the loopback literals
+/// reach this machine's own SMB server. The real computer name is local too,
+/// but only `hostname.isLocal` can know it; callers compose the two.
+///
+/// Windows host names are case-insensitive, so this compare is too.
+pub fn isLocalShareHost(host: []const u8) bool {
+    for ([_][]const u8{
+        "wsl.localhost",
+        "wsl$",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }) |local| {
+        if (std.ascii.eqlIgnoreCase(host, local)) return true;
+    }
+    return false;
+}
+
+/// Translate the path component of an OSC 7 `file://` URL reported by a
+/// Windows-native shell into a plain Windows path:
+///
+///   /c:/Users/alex  -> c:\Users\alex
+///
+/// The leading slash is the URI's own path root, not part of the path. Anything
+/// that is not drive-rooted once it is gone yields error.InvalidPath: a UNC
+/// share arrives here as `//server/share`, which the shells deliberately report
+/// via OSC 9;9 instead, and guessing at it would produce a confidently-wrong
+/// cwd. Caller owns the returned slice.
+pub fn uriPathToWindows(alloc: Allocator, uri_path: []const u8) Error![]u8 {
+    const p = if (uri_path.len > 0 and uri_path[0] == '/') uri_path[1..] else uri_path;
+    if (p.len < 2 or p[1] != ':' or !std.ascii.isAlphabetic(p[0])) return error.InvalidPath;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    try buf.appendSlice(alloc, p[0..2]);
+    try appendBackslashed(alloc, &buf, p[2..]);
+    return buf.toOwnedSlice(alloc);
 }
 
 const Mount = struct { drive: u8, rest: []const u8 };
@@ -269,6 +393,120 @@ test "posix_path: OSC 7 URL forms extract and translate (reportPwd seam)" {
         const got = try rootedToWindows(aa, path, "C:\\msys64");
         try std.testing.expectEqualStrings("C:\\Users\\alex", got);
     }
+}
+
+test "posix_path: isWindowsAbsolute separates raw paths from URLs" {
+    // What cmd's `PROMPT $p` and the PowerShell integration's OSC 9;9 emit.
+    try std.testing.expect(isWindowsAbsolute("C:\\Users\\alex"));
+    try std.testing.expect(isWindowsAbsolute("c:/Users/alex"));
+    try std.testing.expect(isWindowsAbsolute("C:\\"));
+    try std.testing.expect(isWindowsAbsolute("\\\\server\\share"));
+    try std.testing.expect(isWindowsAbsolute("\\\\wsl.localhost\\Ubuntu\\home"));
+
+    // Every URL form the OSC 7 shells emit stays on the URI path.
+    try std.testing.expect(!isWindowsAbsolute("file://host/c:/Users/alex"));
+    try std.testing.expect(!isWindowsAbsolute("kitty-shell-cwd://wsl/home/alex"));
+    try std.testing.expect(!isWindowsAbsolute(""));
+    try std.testing.expect(!isWindowsAbsolute("C:"));
+    try std.testing.expect(!isWindowsAbsolute("relative\\path"));
+    // A drive-relative path names no directory on its own.
+    try std.testing.expect(!isWindowsAbsolute("C:Users"));
+}
+
+test "posix_path: pathHost recovers the server a raw path names" {
+    // Drive roots name this machine and nothing else.
+    try expectLocal("C:\\Users\\alex");
+    try expectLocal("c:/Users/alex");
+    // ...including in their extended-length spelling.
+    try expectLocal("\\\\?\\C:\\Users\\alex");
+
+    try expectServer("server", "\\\\server\\share");
+    try expectServer("server", "\\\\server\\share\\deep\\dir");
+    try expectServer("server", "\\\\server");
+    try expectServer("wsl.localhost", "\\\\wsl.localhost\\Ubuntu\\home\\alex");
+    // The second spelling of the same reach. Missing it would leave the hole
+    // this check exists to close.
+    try expectServer("evil.example.com", "\\\\?\\UNC\\evil.example.com\\share");
+    try expectServer("evil.example.com", "\\\\?\\unc\\evil.example.com\\share");
+
+    // Shapes that name no directory we will place.
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\"));
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\\\share"));
+    // The device namespace is not a directory.
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\.\\COM1"));
+    try std.testing.expectError(error.InvalidPath, pathHost("\\\\?\\GLOBALROOT\\Device\\X"));
+}
+
+test "posix_path: isLocalShareHost admits only hosts that never reach the wire" {
+    try std.testing.expect(isLocalShareHost("wsl.localhost"));
+    try std.testing.expect(isLocalShareHost("WSL.localhost"));
+    try std.testing.expect(isLocalShareHost("wsl$"));
+    try std.testing.expect(isLocalShareHost("localhost"));
+    try std.testing.expect(isLocalShareHost("127.0.0.1"));
+
+    try std.testing.expect(!isLocalShareHost("evil.example.com"));
+    try std.testing.expect(!isLocalShareHost("fileserver"));
+    try std.testing.expect(!isLocalShareHost(""));
+    // A prefix of a local name is not a local name.
+    try std.testing.expect(!isLocalShareHost("wsl.localhost.evil.example.com"));
+}
+
+fn expectLocal(path: []const u8) !void {
+    switch (try pathHost(path)) {
+        .local => {},
+        .server => return error.TestExpectedLocal,
+    }
+}
+
+fn expectServer(expected: []const u8, path: []const u8) !void {
+    switch (try pathHost(path)) {
+        .local => return error.TestExpectedServer,
+        .server => |host| try std.testing.expectEqualStrings(expected, host),
+    }
+}
+
+// The native-shell twin of the reportPwd seam test above: the PowerShell
+// integration's OSC 7 URL through the same parse chain, then out the
+// no-translation arm.
+test "posix_path: OSC 7 file:// from a native Windows shell (reportPwd seam)" {
+    const builtin = @import("builtin");
+    const uri = @import("uri.zig");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const u = try uri.parse("file://MYPC/c:/Users/alex", .{
+        .mac_address = comptime builtin.os.tag != .macos,
+        .raw_path = false,
+    });
+    const path = try u.path.toRawMaybeAlloc(aa);
+    const got = try uriPathToWindows(aa, path);
+    try std.testing.expectEqualStrings("c:\\Users\\alex", got);
+}
+
+test "posix_path: uriPathToWindows rejects what it cannot place" {
+    try expectUriPath("c:\\Users\\alex", "/c:/Users/alex");
+    try expectUriPath("D:\\", "/D:/");
+    // UNC arrives as `//server/share`; OSC 9;9 carries that form instead.
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, "//server/share"),
+    );
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, "/home/alex"),
+    );
+    try std.testing.expectError(
+        error.InvalidPath,
+        uriPathToWindows(std.testing.allocator, ""),
+    );
+}
+
+fn expectUriPath(expected: []const u8, uri_path: []const u8) !void {
+    const got = try uriPathToWindows(std.testing.allocator, uri_path);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(expected, got);
 }
 
 test "posix_path: rooted drive forms (MSYS2 /c and Cygwin /cygdrive)" {
