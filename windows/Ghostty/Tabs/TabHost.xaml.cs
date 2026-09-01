@@ -64,6 +64,11 @@ internal sealed partial class TabHost : UserControl, ITabHost
     // above alone no longer describe what TabItems holds.
     private readonly Dictionary<TabGroup, ChipVisuals> _chipByGroup = new();
 
+    // Groups this strip is listening to. Deliberately not keyed off
+    // _chipByGroup: see ReconcileGroupHooks for why the two must not
+    // share a lifetime.
+    private readonly HashSet<TabGroup> _hookedGroups = new();
+
     // The 2px group rail per tab, in the header's top slot. Kept like the
     // header TextBlock so a group change repaints the live element instead
     // of rebuilding the header.
@@ -204,12 +209,24 @@ internal sealed partial class TabHost : UserControl, ITabHost
         // and the bridge is placed from the selected item's layout slot, so
         // it needs a pass once bounds exist. Width changes move every tab
         // under Equal sizing, so the strip resizing moves it too.
-        Loaded += (_, _) => QueueBridgeUpdate();
+        // Symmetric with the Unloaded unhook below. WinUI raises the pair
+        // on reparenting as well as teardown, and a strip that came back
+        // deaf to its groups is the #871 shape again by a second door.
+        Loaded += (_, _) =>
+        {
+            ReconcileGroupHooks();
+            QueueBridgeUpdate();
+        };
         TabViewControl.SizeChanged += (_, _) => UpdateSelectedTabBridge();
 
         // A lift cannot outlive the strip: teardown finishes it, the same
-        // door the vertical's drag and its pin flight go out through.
-        Unloaded += (_, _) => FinishLift("teardown");
+        // door the vertical's drag and its pin flight go out through. The
+        // group hooks go out the same door, for the same reason.
+        Unloaded += (_, _) =>
+        {
+            FinishLift("teardown");
+            UnhookAllGroups();
+        };
 
         // The drag lifecycle gates the seam cover below: mid-drag the
         // strip's slots are the engine's crossing preview, not the
@@ -658,7 +675,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
                 requestColorGroup: _router.RequestColorGroup),
         };
         _chipByGroup[group] = new ChipVisuals(chip, title, count, swatch, chevron);
-        group.PropertyChanged += OnGroupPropertyChanged;
         TabViewControl.TabItems.Add(chip);
         RefreshChip(group);
         // The mint is the swap's appear-hand: the chip takes the slots
@@ -670,7 +686,6 @@ internal sealed partial class TabHost : UserControl, ITabHost
     private void RemoveGroupChip(TabGroup group)
     {
         if (!_chipByGroup.Remove(group, out var chip)) return;
-        group.PropertyChanged -= OnGroupPropertyChanged;
         // The retirement is the swap's other half: the run's members
         // re-enter through the rebuild that follows, and that pass fades
         // them in. The removal itself stays immediate -- TabView has no
@@ -686,8 +701,57 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// event; it stays a pass so a rebuild and the switch-on seam refresh
     /// can re-derive presence outright instead of trusting the events.
     /// </summary>
+    /// <summary>
+    /// Listen to every group the manager holds, collapsed or not, and drop
+    /// the ones it no longer does.
+    ///
+    /// The hook used to be minted with the chip, which made it circular:
+    /// an expanded run has no chip, so nothing was listening when its
+    /// collapse bit flipped, so no chip was ever minted for it. The strip
+    /// went on rendering the run's members until some unrelated tab event
+    /// or a layout switch's <see cref="RefreshSeam"/> re-derived presence
+    /// -- which is why a collapse looked like it only took hold on the way
+    /// INTO horizontal, showing the run expanded for the length of the
+    /// switch and folding it at the landing (issue #871). Chip presence is
+    /// a projection of the collapse bit, so the listener has to outlive
+    /// the chip rather than be minted by it.
+    ///
+    /// Idempotent, and cheap enough to ride the presence pass: the set is
+    /// as long as the window has groups.
+    /// </summary>
+    private void ReconcileGroupHooks()
+    {
+        foreach (var group in _hookedGroups.ToArray())
+        {
+            if (_manager.Groups.Contains(group)) continue;
+            group.PropertyChanged -= OnGroupPropertyChanged;
+            _hookedGroups.Remove(group);
+        }
+        foreach (var group in _manager.Groups)
+            if (_hookedGroups.Add(group))
+                group.PropertyChanged += OnGroupPropertyChanged;
+    }
+
+    /// <summary>
+    /// Stop listening to every group on the way out. The manager outlives
+    /// this strip (a layout switch keeps both hosts, and a window teardown
+    /// disposes them in an order this control does not own), so a live
+    /// subscription would hold the whole strip alive through the group.
+    /// </summary>
+    private void UnhookAllGroups()
+    {
+        foreach (var group in _hookedGroups)
+            group.PropertyChanged -= OnGroupPropertyChanged;
+        _hookedGroups.Clear();
+    }
+
     private void ReconcileChips()
     {
+        // Presence first needs to be able to HEAR: hooking here means the
+        // pass that reads the collapse bit is also the pass that arms the
+        // listener for the next change to it.
+        ReconcileGroupHooks();
+
         var desired = new HashSet<TabGroup>();
         foreach (var row in TabStripProjection.HorizontalRows(_manager))
             if (row is TabStripProjection.HorizontalRow.Chip { Group: { } group })
@@ -1202,6 +1266,39 @@ internal sealed partial class TabHost : UserControl, ITabHost
     /// are non-zero, so the placement looks valid and would never be
     /// revisited.
     /// </remarks>
+    /// <summary>
+    /// The strip's own inventory, in slot order: what TabItems holds, not
+    /// what the projection says it should. The difference is the whole
+    /// point -- a switch that flashes a collapsed run expanded holds the
+    /// members here for a few frames while the projection has said "chip"
+    /// throughout.
+    /// </summary>
+    public IReadOnlyList<Testing.TestSeamStripRow> TestSeamRows(FrameworkElement root)
+    {
+        var modelByItem = new Dictionary<TabViewItem, TabModel>(_itemByModel.Count);
+        foreach (var (tab, item) in _itemByModel) modelByItem[item] = tab;
+
+        var rows = new List<Testing.TestSeamStripRow>(TabViewControl.TabItems.Count);
+        foreach (var entry in TabViewControl.TabItems)
+        {
+            if (entry is not TabViewItem item) continue;
+            if (item.Tag is TabGroup group)
+            {
+                rows.Add(Testing.TestSeamStripRowMeasure.Row(
+                    root, item, "chip", group.Title, group.Title, active: false));
+                continue;
+            }
+            if (!modelByItem.TryGetValue(item, out var tab)) continue;
+            rows.Add(Testing.TestSeamStripRowMeasure.Row(
+                root, item,
+                tab.IsPinned ? "pinned" : "tab",
+                tab.EffectiveTitle,
+                tab.Group?.Title,
+                ReferenceEquals(tab, _manager.ActiveTab)));
+        }
+        return rows;
+    }
+
     internal void RefreshSeam()
     {
         // Belt and braces. The standing subscriptions hold the strip in

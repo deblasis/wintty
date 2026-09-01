@@ -48,10 +48,38 @@ internal sealed class LayoutCoordinator
     private static readonly TimeSpan SwitchDuration =
         TimeSpan.FromMilliseconds(SwitchDurationMs);
 
-    // Stagger: outgoing fades first, incoming follows so the morph reads
-    // as one continuous motion instead of a flat dissolve.
-    private const double IncomingFadeDelay = 0.16;
-    private const double OutgoingFadeEnd = 0.78;
+    // The cross-fade's hand-over. Both numbers, and the easing each end
+    // carries, exist to give the switch a LEADER: at no point should two
+    // tab strips both be most of the way present, which is what the eye
+    // reads as "something is wrong" rather than "this is changing".
+    //
+    // They used to say the opposite. The outgoing end eased IN -- slow to
+    // leave, so it sat near full opacity through the first half -- while
+    // the incoming end eased OUT, rushing to near full early. Sampled
+    // mid-flight the two hosts measured 0.89/0.58 and 0.65/0.86: a
+    // complete sidebar and a complete header on screen together, in
+    // different lanes, with the pane reveal already slicing the departing
+    // one into unreadable fragments.
+    //
+    // Flipped, the departing strip is under a tenth by a third of the way
+    // in and the arriving one does not pass half until well past that.
+    //
+    // The delay was 0.22 and is now 0.12, because the first version bought
+    // the leader at too high a price going TO vertical. Filmed at 30fps
+    // and read against the state track: a third of the way in the outgoing
+    // header was down to 0.22 and the incoming rail was still at 0.075, so
+    // the sidebar lane was a dark empty column while the active tab was
+    // visibly flying towards it. The tab had nowhere to be going. At 0.12
+    // the same instant reads about 0.14 against 0.47 -- the departing strip
+    // is still plainly the one leaving, and the lane it is leaving for
+    // exists.
+    //
+    // The margin that keeps the leader is worth stating because it is what
+    // these two numbers are for. Outgoing passes below half at 0.12 of the
+    // flight; incoming passes above half at 0.30. Nothing may close that
+    // gap: the layout-switch filmstrip asserts on it directly.
+    private const double IncomingFadeDelay = 0.12;
+    private const double OutgoingFadeEnd = 0.60;
     private const double TitleBarSlideDistance = 10;
 
     // Distance a strip travels between the terminal surface and its lane.
@@ -102,13 +130,30 @@ internal sealed class LayoutCoordinator
     private readonly FrameworkElement _paneHost;
 
     /// <summary>
-    /// Fired when the active-tab ghost lands at the end of an uninterrupted
-    /// switch, with the unit direction it was travelling. The window uses
+    /// Staged when the active-tab ghost's flight is staged, with the unit
+    /// direction it travels and how long until it lands. The window uses
     /// it for a small inertia nudge.
+    ///
+    /// The DELAY is the point. This used to fire from the switch
+    /// Storyboard's Completed handler, which is raised on the UI thread and
+    /// therefore queues behind whatever the terminal's own resize is doing:
+    /// measured, the nudge started at about 560ms on a switch whose visual
+    /// motion ended at 340ms. A punctuation mark that lands after the
+    /// sentence ends is not punctuation. Handing the delay over instead
+    /// lets the window schedule the nudge on the compositor, which runs it
+    /// at the landing whatever the UI thread is doing.
     /// </summary>
-    private readonly Action<double, double>? _impact;
+    private readonly Action<double, double, TimeSpan>? _impact;
     private readonly ITabHost _horizontalTabHost;
     private readonly Func<TabModel?> _activeTab;
+
+    /// <summary>
+    /// Whether this switch may move. Asked per switch, never cached: the
+    /// preference can change under a running window, and reading it can
+    /// throw in packaged contexts, so the window's own reader owns the
+    /// fail-open.
+    /// </summary>
+    private readonly Func<bool>? _motionEnabled;
 
     private bool _switching;
     // The Storyboard staged by the most recent switch, non-null exactly while
@@ -138,8 +183,10 @@ internal sealed class LayoutCoordinator
         FrameworkElement morphRoot,
         FrameworkElement paneHost,
         Func<TabModel?> activeTab,
-        Action<double, double>? impact = null)
+        Action<double, double, TimeSpan>? impact = null,
+        Func<bool>? motionEnabled = null)
     {
+        _motionEnabled = motionEnabled;
         _impact = impact;
         _horizontalTabHost = horizontalTabHost;
         _morphLayer = morphLayer;
@@ -162,6 +209,14 @@ internal sealed class LayoutCoordinator
     }
 
     public bool IsSwitching => _switching;
+
+    /// <summary>
+    /// What is parked on the morph layer right now: the active-tab ghost,
+    /// the icon stand-in, and the run label the strips share it with. The
+    /// same count MorphTrace prints as <c>ghosts=</c>, exposed so the
+    /// filmstrip can assert per frame rather than only at the end.
+    /// </summary>
+    public int TestSeamMorphLayerCount => _morphLayer.Children.Count;
 
     /// <summary>
     /// Snap both hosts and the vertical title bar to the end state
@@ -270,7 +325,16 @@ internal sealed class LayoutCoordinator
     /// </summary>
     public void Animate(bool verticalTabs, Action? onCompleted = null)
     {
-        if (_stripHidden)
+        // Two reasons to land without moving, and they share an exit
+        // because the answer is the same: the end state, now, correct.
+        //
+        // The quake window has no strip to fly. And a user who has turned
+        // Windows animation effects off, or is in High Contrast, has asked
+        // for no motion -- which means none, not a shorter version of it.
+        // The morph, the icon spin, the pane reveal and the window nudge
+        // are all motion; Snap is the end-state authority and runs every
+        // teardown the flourishes would have needed.
+        if (_stripHidden || _motionEnabled?.Invoke() == false)
         {
             Snap(verticalTabs);
             onCompleted?.Invoke();
@@ -278,6 +342,9 @@ internal sealed class LayoutCoordinator
         }
         if (_switching) return;
         _switching = true;
+        // Every trace line this switch emits is stamped off one clock, so
+        // the log reads as a budget rather than a list of events.
+        _switchClock = Stopwatch.StartNew();
         MorphTrace($"SWITCH begin vertical={verticalTabs}");
 
         var targetColWidth = verticalTabs ? _verticalTabHost.CurrentStripTarget : 0;
@@ -337,12 +404,22 @@ internal sealed class LayoutCoordinator
         {
             StartPaneReveal(fromColWidth);
         }
+        MorphTrace("SWITCH lane");
+
+        // The direction the ghost will travel, remembered for whichever
+        // path ends up staging the flight: the morph may be staged now or
+        // a frame or two later, and only the staging site knows how much
+        // of the switch is left to delay the landing by.
+        _impactDirection = verticalTabs
+            ? new Point(-1, 0)
+            : new Point(0, -1);
 
         // Staged before any transform is applied below. TransformToVisual
         // reads whatever offset the strip is already carrying, so measuring
         // after the incoming translate would aim the ghost at the strip's
         // pre-animation position and leave it EmergeTravel short of home.
         PrepareActiveTabMorph(verticalTabs, incomingOffset);
+        MorphTrace("SWITCH staged");
 
         incoming.IsHitTestVisible = true;
         outgoing.IsHitTestVisible = false;
@@ -393,14 +470,11 @@ internal sealed class LayoutCoordinator
             // which is the one thing that method exists to avoid.
             _switchStoryboard = null;
 
-            // Only a staged flight has anything to slam into: a waiting
-            // morph whose destination never realized parks the ghost and
-            // stages no storyboard, and the fallback paths below
-            // fast-forward without motion.
-            var landed = _morphStoryboard is not null;
+            // The impact is not raised here any more. It is scheduled when
+            // the ghost's flight is staged, so the compositor can land it
+            // with the motion instead of whenever this handler is finally
+            // pumped; see the _impact field.
             FinishSwitch(verticalTabs, onCompleted);
-            if (landed)
-                _impact?.Invoke(verticalTabs ? -1 : 0, verticalTabs ? 0 : -1);
         };
 
         // If Begin throws, Completed never fires and _switching stays
@@ -410,6 +484,8 @@ internal sealed class LayoutCoordinator
         try
         {
             sb.Begin();
+            MorphTrace("SWITCH running");
+            StartFrameCount();
         }
         catch (Exception)
         {
@@ -424,7 +500,7 @@ internal sealed class LayoutCoordinator
         // not the whole switch. Dropping it here leaves the plain cross-fade.
         try
         {
-            _morphStoryboard?.Begin();
+            BeginFlight();
         }
         catch (Exception)
         {
@@ -451,6 +527,43 @@ internal sealed class LayoutCoordinator
     private ActiveTabMorph? _morph;
     private Storyboard? _morphStoryboard;
 
+    /// <summary>Unit direction of the flight being staged.</summary>
+    private Point _impactDirection;
+
+    /// <summary>
+    /// How long after the flight starts the impact should land, or null
+    /// when no flight is staged. Set at staging, spent by BeginFlight.
+    /// </summary>
+    private TimeSpan? _pendingImpactDelay;
+
+    /// <summary>
+    /// A beat between the motion ending and the accent landing.
+    ///
+    /// Scheduling the impact to coincide exactly with the last frame of the
+    /// cross-fade was too early rather than too late: the strip is still
+    /// resolving its final opacity while a translate starts on the whole
+    /// tree above it, and the two compose into something the eye reads as a
+    /// stutter rather than as a landing. About three frames at 60Hz, which
+    /// is enough for the switch to visibly finish and short enough that the
+    /// accent still belongs to it.
+    /// </summary>
+    private static readonly TimeSpan ImpactLeadOut = TimeSpan.FromMilliseconds(60);
+
+    /// <summary>
+    /// Start the ghost's flight and schedule the impact against the same
+    /// instant, which is the whole point of doing both here: the compositor
+    /// gets one clock for the motion and the accent that punctuates it,
+    /// rather than one clock for the motion and a prediction for the accent.
+    /// </summary>
+    private void BeginFlight()
+    {
+        _morphStoryboard?.Begin();
+        if (_pendingImpactDelay is not { } delay) return;
+        _pendingImpactDelay = null;
+        _impact?.Invoke(
+            _impactDirection.X, _impactDirection.Y, delay + ImpactLeadOut);
+    }
+
     /// <summary>
     /// Oracle for the morph fuzz harness: every switch must end with zero
     /// ghosts on the overlay. Emitting the trace from the product keeps the
@@ -461,13 +574,47 @@ internal sealed class LayoutCoordinator
     private static readonly string? MorphTracePath =
         Environment.GetEnvironmentVariable("WINTTY_MORPH_TRACE");
 
-    private static void MorphTrace(string message)
+    /// <summary>
+    /// Elapsed since the running switch began, for the trace stamps. Null
+    /// outside a switch, which is why the stamp reads "--" there.
+    /// </summary>
+    private Stopwatch? _switchClock;
+
+    // Rendered frames the UI thread produced during the last flight. A
+    // 340ms switch that lands at 600ms is either a long animation or a
+    // starved thread, and only the frame count tells the two apart.
+    private int _uiFrames;
+    private EventHandler<object>? _frameCounter;
+
+    private void StartFrameCount()
+    {
+        if (MorphTracePath is null) return;
+        StopFrameCount();
+        _uiFrames = 0;
+        _frameCounter = (_, _) => _uiFrames++;
+        CompositionTarget.Rendering += _frameCounter;
+    }
+
+    private int StopFrameCount()
+    {
+        if (_frameCounter is not null)
+        {
+            CompositionTarget.Rendering -= _frameCounter;
+            _frameCounter = null;
+        }
+        return _uiFrames;
+    }
+
+    private void MorphTrace(string message)
     {
         if (MorphTracePath is null) return;
         try
         {
+            var at = _switchClock is { } clock
+                ? clock.ElapsedMilliseconds.ToString() + "ms"
+                : "--";
             System.IO.File.AppendAllText(
-                MorphTracePath, message + Environment.NewLine);
+                MorphTracePath, at + " " + message + Environment.NewLine);
         }
         catch
         {
@@ -624,6 +771,10 @@ internal sealed class LayoutCoordinator
         _morphStoryboard?.Stop();
         _morphStoryboard = null;
         if (_morph is not { } morph) return;
+        // The ghost's box rides the compositor, which no Storyboard.Stop
+        // reaches -- the same shape as the pane reveal's sweep, and
+        // released here for the same reason.
+        morph.Ghost.StopBoxAnimations();
         if (morph.Waiting is not null)
         {
             _morphRoot.LayoutUpdated -= morph.Waiting;
@@ -702,11 +853,12 @@ internal sealed class LayoutCoordinator
         var destinationShape = verticalTabs
             ? new CornerRadius(0)
             : new CornerRadius(4, 4, 0, 0);
-        var ghost = new TabMorphGhost(tab, chrome.Fill, chrome.Foreground, destinationShape)
-        {
-            Width = fromRect.Width,
-            Height = fromRect.Height,
-        };
+        var ghost = new TabMorphGhost(tab, chrome.Fill, chrome.Foreground, destinationShape);
+        // Sized by TryComposeBox when the destination is known, and by the
+        // caller's fallback when it is not: a ghost that is still waiting
+        // for its landing rect (see below) has nowhere to aim yet, so it
+        // holds the source box until one arrives.
+        ghost.ResizeForFallback(fromRect.Width, fromRect.Height);
         ghost.Translate.X = fromRect.X;
         ghost.Translate.Y = fromRect.Y;
         _morphLayer.Children.Add(ghost);
@@ -777,7 +929,7 @@ internal sealed class LayoutCoordinator
                 morph, fromRect, rect, SwitchDuration - clock.Elapsed);
             try
             {
-                _morphStoryboard?.Begin();
+                BeginFlight();
             }
             catch (Exception)
             {
@@ -832,29 +984,75 @@ internal sealed class LayoutCoordinator
     }
 
     /// <summary>
-    /// Share of the flight the ghost spends changing size. Position runs
-    /// the full duration; size and label settle at this fraction, so the
-    /// ghost covers the last stretch already in its destination shape and
-    /// the landing is a pure glide instead of arrive-then-resize.
+    /// Share of the flight the ghost spends changing size, so it covers
+    /// the last stretch already in its destination shape and the landing
+    /// is a pure glide instead of arrive-then-resize.
     /// </summary>
     private const double ShapeSettleFraction = 0.75;
 
     /// <summary>
-    /// Drive the ghost from one rect to the other. Width and Height are
-    /// dependent animations because the label must re-lay-out rather than
-    /// scale: squashing a 240px header tab into a 48px rail smears the
-    /// text, which is the artifact in a different costume. One small
-    /// element for the length of a switch is a cheap layout pass.
+    /// Share of the flight the ghost spends TRAVELLING, and it is short
+    /// on purpose: the incoming strip arrives with a hole where the
+    /// active tab belongs, and the ghost is what fills it. Filmed against
+    /// the old timing -- full duration, eased in AND out -- the ghost was
+    /// a quarter of the way home a third of the way through, so the hole
+    /// stood open for most of the switch with a small chip floating in the
+    /// terminal a hundred pixels below it. Settling early, on a curve that
+    /// spends its speed at the start, puts the tab in its slot at about
+    /// the moment the strip around it becomes readable.
+    ///
+    /// Trimmed from 0.85 when the incoming fade was pulled forward: the
+    /// two have to arrive together, and moving one without the other just
+    /// relocates the mismatch.
+    /// </summary>
+    private const double PositionSettleFraction = 0.78;
+
+    /// <summary>
+    /// Share of the flight the ghost's LABEL has to get out of the way in.
+    ///
+    /// Separate from the shape settle, and shorter, because the label is
+    /// the thing that makes a ghost read as a tab rather than as a moving
+    /// shape. Filmed crossing the terminal towards an empty rail, a fully
+    /// legible tab reads as something being dragged; the same rectangle
+    /// with its text gone reads as chrome rearranging itself, which is
+    /// what is actually happening. It leaves on the same curve the
+    /// outgoing strip does, and for the same reason.
+    /// </summary>
+    private const double LabelSettleFraction = 0.45;
+
+    /// <summary>
+    /// Drive the ghost from one rect to the other.
+    ///
+    /// Position is a Storyboard on the ghost's TranslateTransform, which
+    /// XAML runs independently -- the compositor carries it whatever the
+    /// UI thread is doing, and it is the half of the motion the eye reads
+    /// as travel.
+    ///
+    /// The BOX is handed to the compositor outright (see
+    /// <see cref="TabMorphGhost.TryComposeBox"/>). It used to be a pair of
+    /// dependent Width/Height animations, which is to say a relayout per
+    /// frame on the UI thread -- the one thread a terminal's own render
+    /// owns, and which was measured producing three to thirteen frames
+    /// across a whole switch. Only when composition refuses does the old
+    /// tween run, at whatever frame rate the thread can spare.
     /// </summary>
     private void StageMorphAnimations(
         ActiveTabMorph morph, Rect from, Rect to, TimeSpan duration)
     {
         var settle = duration * ShapeSettleFraction;
+        var travel = duration * PositionSettleFraction;
+        var labelSpan = duration * LabelSettleFraction;
         var sb = new Storyboard();
-        Add(morph.Ghost.Translate, "X", from.X, to.X);
-        Add(morph.Ghost.Translate, "Y", from.Y, to.Y);
-        Add(morph.Ghost, "Width", from.Width, to.Width, dependent: true, settle);
-        Add(morph.Ghost, "Height", from.Height, to.Height, dependent: true, settle);
+        Add(morph.Ghost.Translate, "X", from.X, to.X, span: travel, arriving: true);
+        Add(morph.Ghost.Translate, "Y", from.Y, to.Y, span: travel, arriving: true);
+        if (!morph.Ghost.TryComposeBox(
+                new Windows.Foundation.Size(from.Width, from.Height),
+                new Windows.Foundation.Size(to.Width, to.Height),
+                settle))
+        {
+            Add(morph.Ghost, "Width", from.Width, to.Width, dependent: true, settle);
+            Add(morph.Ghost, "Height", from.Height, to.Height, dependent: true, settle);
+        }
 
         // The label survives a modest width change but not the collapse to
         // a 48px rail, so it fades on the leg that loses most of its room
@@ -864,15 +1062,30 @@ internal sealed class LayoutCoordinator
         if (shrinking || growing)
         {
             morph.Ghost.Label.Opacity = shrinking ? 1 : 0;
+            // Leaving is arriving's mirror here: a label on its way out
+            // spends its speed at the start so the ghost stops being a
+            // legible tab early, and one on its way in takes the same
+            // curve so it is readable before the landing rather than at
+            // it.
             Add(morph.Ghost.Label, "Opacity",
-                shrinking ? 1 : 0, shrinking ? 0 : 1, dependent: false, settle);
+                shrinking ? 1 : 0, shrinking ? 0 : 1,
+                dependent: false, labelSpan, arriving: true);
         }
 
         _morphStoryboard = sb;
 
+        // Remembered, not fired. Staging happens during the pre-roll, and
+        // the storyboards do not start until Begin a few statements later
+        // -- measured 9 to 26ms further on. A delay counted from here
+        // therefore expires that much BEFORE the motion ends, which put the
+        // impact inside the cross-fade's last frames instead of after them.
+        // BeginFlight fires it, from the turn the clocks actually start.
+        _pendingImpactDelay = duration;
+
         void Add(
             DependencyObject target, string path,
-            double f, double t, bool dependent = false, TimeSpan? span = null)
+            double f, double t, bool dependent = false, TimeSpan? span = null,
+            bool arriving = false)
         {
             var anim = new DoubleAnimation
             {
@@ -880,7 +1093,14 @@ internal sealed class LayoutCoordinator
                 To = t,
                 Duration = new Duration(span ?? duration),
                 EnableDependentAnimation = dependent,
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
+                // Travel eases OUT: the ghost is arriving somewhere, and
+                // arrivals spend their speed at the start and settle. The
+                // rest (size, label) keeps the symmetric curve, which is
+                // right for a property that is only changing shape rather
+                // than going anywhere.
+                EasingFunction = arriving
+                    ? new CubicEase { EasingMode = EasingMode.EaseOut }
+                    : new CubicEase { EasingMode = EasingMode.EaseInOut },
             };
             Storyboard.SetTarget(anim, target);
             Storyboard.SetTargetProperty(anim, path);
@@ -907,6 +1127,7 @@ internal sealed class LayoutCoordinator
             CompositionTarget.Rendering -= _morph.WaitingDeadline;
             _morph.WaitingDeadline = null;
         }
+        _morph.Ghost.StopBoxAnimations();
         _morphLayer.Children.Remove(_morph.Ghost);
         if (_morph.From is not null) _morph.From.Opacity = 1;
         if (_morph.To is not null) _morph.To.Opacity = 1;
@@ -921,7 +1142,7 @@ internal sealed class LayoutCoordinator
         // itself, so the direct-interrupt callers get the same cleanup.
         Snap(verticalTabs);
         MorphTrace(
-            $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")}");
+            $"SWITCH end ghosts={_morphLayer.Children.Count} morph={(_morph is null ? "null" : "LEAKED")} uiFrames={StopFrameCount()}");
         _switching = false;
         onCompleted?.Invoke();
     }
@@ -1240,7 +1461,12 @@ internal sealed class LayoutCoordinator
             KeyTime = KeyTime.FromTimeSpan(
                 TimeSpan.FromMilliseconds(SwitchDurationMs * OutgoingFadeEnd)),
             Value = 0,
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn },
+            // EaseOut on a value falling to zero means it drops hardest
+            // first and tails off -- the strip commits to leaving in the
+            // opening frames instead of loitering. See the fade constants
+            // above for the measurements that made this the wrong way
+            // round before.
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
         });
         anim.KeyFrames.Add(new LinearDoubleKeyFrame
         {

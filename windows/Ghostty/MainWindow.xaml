@@ -116,20 +116,35 @@
             <Border x:Name="VerticalTitleCaptionFill"
                     Grid.Column="2"
                     IsHitTestVisible="False"/>
-        </Grid>
 
-        <!-- Masks the tab content frame's top stroke under the OS caption
-             buttons only. Height and Margin are set in code from the same
-             metrics the stroke itself is placed by; a hand-tuned pair here
-             is how the two drift apart and leave a sliver showing. -->
-        <Border x:Name="VerticalCaptionSeamCover"
-                Grid.Row="0" Grid.RowSpan="2"
-                Grid.Column="0" Grid.ColumnSpan="2"
-                Width="146"
-                VerticalAlignment="Top"
-                HorizontalAlignment="Right"
-                IsHitTestVisible="False"
-                Visibility="Collapsed"/>
+            <!-- There is no caption seam cover here any more, and that is
+                 the fix rather than an omission (#892).
+
+                 A Border called VerticalCaptionSeamCover used to sit on
+                 RootGrid, spanning both rows, carrying its own Width, its
+                 own Margin derived from TabChromeMetrics and its own
+                 Visibility assignment: copies of facts this row already
+                 knew, kept in step by hand. At rest they agreed. During a
+                 layout switch the row slides and fades and the copies did
+                 neither, so it sat up to 10 DIP off the fill it was meant
+                 to continue, at opacity 1.0 over a row at 0.74, and was
+                 Collapsed for the whole flight before appearing at the
+                 landing.
+
+                 It was removed rather than pinned to the row because it
+                 was measured doing no work: it is declared before
+                 PaneHostContainer, so the pane draws over it, and the
+                 stroke it claimed to mask is visible through it. Captured
+                 at rest with and without it, on the default and the wintty
+                 window themes, the caption band is IDENTICAL to the pixel:
+                 worst channel difference 0. Its only observable effect was
+                 the artifact above.
+
+                 The stroke does still run under the caption buttons. Not
+                 masking it is the status quo this element failed to change;
+                 hiding it properly means not drawing it there, which is a
+                 pane-chrome change and not this element's job. -->
+        </Grid>
 
         <!--
             Shared PaneHostContainer: every PaneHost lives here as a
