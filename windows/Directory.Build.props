@@ -4,28 +4,27 @@
     the Core demo logic) and for Release only when explicitly opted in with
     `-p:Demo=true`. Public Release builds define no DEMO symbol, so every file
     wrapped in `#if DEMO` compiles to nothing and ships zero demo bytes.
+
+    DO NOT EDIT THE FIRST FOUR LINES OF THIS FILE. The tiered build's
+    0011-windows__Directory.Build.props.patch anchors its hunk on `<Project>`
+    plus the three comment lines above, and materialize applies it with no
+    fuzz, so rewording them breaks every tier that carries the patch. This
+    paragraph and everything below it are safe to change.
+
+    The gate itself is NOT here. It lives in Directory.Build.targets, beside
+    the test seam's identically shaped one, because Configuration is still
+    empty in this file: Microsoft.Common.props imports it before defaulting
+    Configuration to Debug, so a condition on '$(Configuration)' here matched
+    only when the value arrived as a global property. Visual Studio and
+    anything passing `-c` supplied one; `just build-win` and `just test-win`
+    do not, so DEMO went undefined for every just recipe and for the signoff
+    ladder, and three test classes compiled to nothing while the ladder
+    reported green.
+
+    Ghostty.csproj reads DemoEnabled from ItemGroup conditions and still sees
+    it from there: MSBuild evaluates every property, trailing imports
+    included, before it evaluates any item.
   -->
-  <PropertyGroup>
-    <!-- One source of truth for "is demo mode on?" so the DEMO constant and the
-         csproj Page/Compile/None conditions can't drift, and so a future
-         constant that merely contains the substring "DEMO" can't false-match. -->
-    <DemoEnabled Condition="'$(Demo)' == 'true' or '$(Configuration)' == 'Debug'">true</DemoEnabled>
-    <DefineConstants Condition="'$(DemoEnabled)' == 'true'">$(DefineConstants);DEMO</DefineConstants>
-
-    <!--
-      NOTE: Configuration is still empty here. Microsoft.Common.props imports
-      this file before it defaults Configuration to Debug, so the condition
-      above only matches when Configuration arrives as a global property
-      (`-c Debug`, or Visual Studio). A bare `dotnet build` leaves DemoEnabled
-      unset and defines no DEMO, which is not what the comment above expects.
-      Left alone here: changing it changes what a Debug build contains, which
-      is a decision of its own rather than part of the seam work.
-
-      The test seam's own gate is the same shape but cannot afford that
-      ambiguity, so it lives in Directory.Build.targets, which is imported
-      after Configuration is settled. See the comment there.
-    -->
-  </PropertyGroup>
   <!--
     'dotnet build' resolves AppxMSBuildToolsPath to the SDK directory which
     lacks the PRI/Appx task DLLs. These ship with Visual Studio Build Tools.
@@ -58,8 +57,10 @@
     from anywhere, which is why KeybindListWinUiAbiTests scans source instead.
 
     Kept last in the file on purpose: the tiered build patches this props file
-    with a hunk anchored on the opening tag, and materialize applies it with
-    no fuzz, so anything inserted at the top breaks every tier that uses it.
+    with a hunk anchored on the first FOUR lines (the opening tag plus the
+    three comment lines under it, not the tag alone), and materialize applies
+    it with no fuzz, so anything inserted at the top, or any rewording of
+    those lines, breaks every tier that uses it.
   -->
   <PropertyGroup>
     <WarningsAsErrors>$(WarningsAsErrors);CsWinRT1028</WarningsAsErrors>
