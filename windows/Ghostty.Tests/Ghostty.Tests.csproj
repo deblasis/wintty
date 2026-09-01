@@ -140,6 +140,18 @@
                       Link="Config\Defaults\Config.zig"
                       LogicalName="Ghostty.Tests.Config.Defaults.Config.zig" />
     <!--
+      The built-in theme pair an unconfigured install gets, for
+      BuiltinThemeChromeContrastTests. The zig side already holds the
+      palette to WCAG in wintty_theme_test.zig; this is the same source
+      read from the C# side, so the chrome ink the shell derives from
+      those colours is scored against the same background they set.
+      Without this the C# test would have to carry a copy of the palette,
+      and a copy is a thing somebody has to remember to update.
+    -->
+    <EmbeddedResource Include="..\..\src\config\wintty_theme.zig"
+                      Link="Config\Defaults\wintty_theme.zig"
+                      LogicalName="Ghostty.Tests.Config.Defaults.wintty_theme.zig" />
+    <!--
       Every settings page, for SettingsCardConfigKeyParityTests. A wildcard
       rather than a file list: a page added later is picked up without anyone
       remembering this entry, which is the failure mode the other blocks above
