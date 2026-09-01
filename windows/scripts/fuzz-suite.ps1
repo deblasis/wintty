@@ -236,6 +236,7 @@ $NotInSuite = [ordered]@{
     # a harness that could not run even if the build were right.
     'crash-matrix.ps1'              = 'gates a published NativeAOT build against the crash coverage map; pointed at the Debug build this suite stages, CoreCLR answers differently and every row fails for the build rather than the product. Its exits are 0 for the map holding, 1 for it not holding or for a launch that could not happen, and nothing for findings'
     'crash-canary.ps1'              = 'a measurement, not a gate: it exits 0 whether canaries are found or not, so a pass rules nothing out and would read as more than it is here. It also needs a crash the Debug build this suite stages does not produce, since CoreCLR swallows native-seh; no envelope means exit 1, and there is no findings exit'
+    'first-toggle-crash-repro.ps1'  = 'an investigation driver for #893, and a RATE measurement rather than a gate. Its arms (-Arm toggle/idle/bare/resize/storm) exist to answer whether the toggle is what does it, which needs the arms compared against each other rather than any one of them passing. Its exits are inverted for this suite: 1 means it DID reproduce the crash, which the runner would read as a harness that could not run. The crash also needs the D3D12 debug layer, which is Debug-only, and the rate has been observed collapsing to zero across four levers on unchanged bits -- so a green run rules nothing out'
 }
 
 # The one form every check compares a script path in: the path relative to this
