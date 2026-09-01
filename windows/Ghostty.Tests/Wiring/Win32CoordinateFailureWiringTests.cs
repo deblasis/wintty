@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -50,7 +51,11 @@ public class Win32CoordinateFailureWiringTests
         "GetCursorPos",
         "GetWindowPlacement",
         "GetMonitorInfo",
-        "GetMonitorInfoW",
+        // Fills a caller-supplied buffer and reports only through the return.
+        // A discarded failure reads as "high contrast off" / "no screen
+        // reader", which is the confidently-wrong answer in the one subsystem
+        // where being wrong is an accessibility defect.
+        "SystemParametersInfo",
     };
 
     /// <summary>
@@ -68,13 +73,30 @@ public class Win32CoordinateFailureWiringTests
     /// <summary>
     /// The callee's simple name, receiver ignored: <c>PInvoke.GetCursorPos</c>
     /// and a bare <c>GetCursorPos</c> are the same API and the same hazard.
+    /// The member-binding arm is the <c>x?.Call()</c> form -- unreachable for
+    /// static P/Invokes today, but <c>SyntaxQueries.CalleeText</c> in this same
+    /// assembly already handles it, so forgetting it here would be this file
+    /// re-learning the lesson it exists to teach.
+    ///
+    /// A trailing W or A is dropped, so a hand-rolled <c>GetMonitorInfoW</c>
+    /// and CsWin32's <c>GetMonitorInfo</c> are one API rather than two entries
+    /// that both have to keep matching. Nothing watched here legitimately ends
+    /// in W or A.
     /// </summary>
-    private static string? SimpleName(InvocationExpressionSyntax call) => call.Expression switch
+    private static string? SimpleName(InvocationExpressionSyntax call)
     {
-        IdentifierNameSyntax id => id.Identifier.ValueText,
-        MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
-        _ => null,
-    };
+        var raw = call.Expression switch
+        {
+            IdentifierNameSyntax id => id.Identifier.ValueText,
+            MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+            MemberBindingExpressionSyntax bind => bind.Name.Identifier.ValueText,
+            _ => null,
+        };
+        if (raw is null) return null;
+        return raw.Length > 1 && (raw[^1] == 'W' || raw[^1] == 'A')
+            ? raw[..^1]
+            : raw;
+    }
 
     /// <summary>
     /// Whether the result is thrown away. Three unambiguous forms; a fourth
@@ -94,11 +116,27 @@ public class Win32CoordinateFailureWiringTests
             when assign.IsKind(SyntaxKind.SimpleAssignmentExpression)
                  && assign.Left is IdentifierNameSyntax { Identifier.ValueText: "_" } => true,
 
-        // void Member() => Call();  -- an expression body on a void-returning
-        // member consumes nothing. A non-void one returns it to its caller.
-        ArrowExpressionClauseSyntax arrow
-            when arrow.Parent is MethodDeclarationSyntax { ReturnType: PredefinedTypeSyntax rt }
-                 && rt.Keyword.IsKind(SyntaxKind.VoidKeyword) => true,
+        // var _ = Call();  -- syntactically unambiguous intent to discard.
+        // `var ok = Call();` with ok never read is the case that genuinely
+        // needs a semantic model; this one does not.
+        EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax { Identifier.ValueText: "_" } } => true,
+
+        // Member() => Call();  on anything void-returning consumes nothing.
+        // A non-void member returns it to its caller, so only void counts.
+        // Methods, local functions and property/indexer setters all have this
+        // shape; an accessor has no return type of its own, and a set/init
+        // accessor is void by definition.
+        ArrowExpressionClauseSyntax arrow => arrow.Parent switch
+        {
+            MethodDeclarationSyntax { ReturnType: PredefinedTypeSyntax m }
+                when m.Keyword.IsKind(SyntaxKind.VoidKeyword) => true,
+            LocalFunctionStatementSyntax { ReturnType: PredefinedTypeSyntax l }
+                when l.Keyword.IsKind(SyntaxKind.VoidKeyword) => true,
+            AccessorDeclarationSyntax acc
+                when acc.IsKind(SyntaxKind.SetAccessorDeclaration)
+                     || acc.IsKind(SyntaxKind.InitAccessorDeclaration) => true,
+            _ => false,
+        },
 
         _ => false,
     };
@@ -138,5 +176,51 @@ public class Win32CoordinateFailureWiringTests
                 + "leave their point/rect untouched when they fail -- so a discarded "
                 + "result is unconverted coordinates reported as converted:\n  "
                 + string.Join("\n  ", discarded));
+    }
+
+    /// <summary>
+    /// The tripwire for the blind spot named above.
+    ///
+    /// <see cref="ShellSource.AllShellSources"/> parses with DEMO, DEBUG and
+    /// TESTSEAM defined, so an <c>#else</c>, <c>#elif</c> or <c>#if !</c>
+    /// region is invisible to the sweep and a call inside one would be
+    /// reported as covered. Recording that in a doc comment is not a guard --
+    /// nothing announces the day it stops being hypothetical, which is round
+    /// one's finding (a site nobody was looking for) wearing different
+    /// clothes. This is the text-level companion
+    /// <see cref="ShellSource.ParseForCorpusScan"/> says such a caller owes.
+    /// </summary>
+    [Fact]
+    public void NoShellSource_HidesCodeFromTheCorpusSweep()
+    {
+        var hidden = new List<string>();
+        var scanned = 0;
+
+        foreach (var (tail, text) in ShellSource.AllUnder("Ghostty.Tests.Interop.Sources.Ghostty."))
+        {
+            scanned++;
+            var lines = text.Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i].TrimStart();
+                if (line.StartsWith("#else", StringComparison.Ordinal)
+                    || line.StartsWith("#elif", StringComparison.Ordinal)
+                    || line.StartsWith("#if !", StringComparison.Ordinal))
+                {
+                    hidden.Add($"{tail}:{i + 1}: {line.TrimEnd()}");
+                }
+            }
+        }
+
+        Assert.True(scanned > 0, "the shell-source sweep found no files to read");
+        Assert.True(
+            hidden.Count == 0,
+            "these conditional regions are invisible to every scan built on "
+                + "AllShellSources, which parses with DEMO, DEBUG and TESTSEAM defined "
+                + "and keeps the opposite branch as disabled trivia. A Win32 call "
+                + "discarded inside one would be reported as covered. Either restructure "
+                + "so the code is not hidden, or give the affected rules a text-level "
+                + "companion and exempt the file here deliberately:\n  "
+                + string.Join("\n  ", hidden));
     }
 }
